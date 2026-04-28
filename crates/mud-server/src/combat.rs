@@ -7,8 +7,9 @@ use tracing::info;
 
 use crate::TickCount;
 use crate::commands::{
-    apply_damage, broadcast_room_except, cmd_flee, disengage_attackers_of, drain_stamina, name_of,
-    send_to, try_insert, try_remove,
+    apply_damage, broadcast_room_except_rendered, cmd_flee, color_mode_for,
+    disengage_attackers_of, drain_stamina, name_of, render_color_tags, send_to, try_insert,
+    try_remove,
 };
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
@@ -174,23 +175,30 @@ fn apply_swing(world: &mut World, s: &Swing) {
         world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
     let (dead, threshold_msg) = apply_damage(world, s.target, s.damage);
 
+    // Names may carry XML-Lite tags; render per-recipient so each player
+    // gets ANSI or stripped output according to their own COLOR_BLIND flag.
+    let attacker_mode = color_mode_for(world, s.attacker);
+    let target_mode = color_mode_for(world, s.target);
     send_to(
         world,
         s.attacker,
-        format!("You hit {target_name} for {} damage.\r\n", s.damage),
+        render_color_tags(
+            &format!("You hit {target_name} for {} damage.\r\n", s.damage),
+            attacker_mode,
+        ),
     );
     send_to(
         world,
         s.target,
-        format!(
-            "{} hits you for {} damage.\r\n",
-            s.attacker_name, s.damage
+        render_color_tags(
+            &format!("{} hits you for {} damage.\r\n", s.attacker_name, s.damage),
+            target_mode,
         ),
     );
     if was_sleeping && !dead {
         try_insert(world, s.target, Posture(PostureKind::Standing));
         send_to(world, s.target, "You jolt awake!\r\n");
-        broadcast_room_except(
+        broadcast_room_except_rendered(
             world,
             room,
             &[s.attacker, s.target],
@@ -200,7 +208,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     if let Some(m) = threshold_msg {
         send_to(world, s.target, m);
     }
-    broadcast_room_except(
+    broadcast_room_except_rendered(
         world,
         room,
         &[s.attacker, s.target],
@@ -291,7 +299,7 @@ pub(crate) fn handle_death(
             victim,
             "You collapse, then gasp back to life with full health.\r\n",
         );
-        broadcast_room_except(
+        broadcast_room_except_rendered(
             world,
             room,
             &[victim],
@@ -300,7 +308,12 @@ pub(crate) fn handle_death(
         info!(?victim, name = %victim_name, "player auto-revived");
     } else {
         // Mob death: notify, despawn, stop attackers (with "target falls" line).
-        broadcast_room_except(world, room, &[], &format!("{victim_name} dies.\r\n"));
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[],
+            &format!("{victim_name} dies.\r\n"),
+        );
         disengage_attackers_of(world, victim);
         if let Ok(e) = world.get_entity_mut(victim) {
             e.despawn();

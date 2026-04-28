@@ -3406,6 +3406,31 @@ pub(crate) fn broadcast_room_except_players(
     }
 }
 
+/// Like `broadcast_room_except`, but renders `raw_msg`'s color tags
+/// per-recipient — each player gets ANSI or stripped output based on
+/// their own `COLOR_BLIND` flag. Use this when the broadcast text
+/// embeds entity names that may carry XML-Lite tags (mob/object names
+/// from the seeded world). Pre-rendering once would lock all recipients
+/// into the same mode; this helper does the right thing per player.
+pub(crate) fn broadcast_room_except_rendered(
+    world: &mut World,
+    room: Entity,
+    except: &[Entity],
+    raw_msg: &str,
+) {
+    let targets: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == room && !except.contains(e))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        let mode = color_mode_for(world, t);
+        send_to(world, t, render_color_tags(raw_msg, mode));
+    }
+}
+
 fn cmd_tell(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.len() != 2 || parts[1].trim().is_empty() {
