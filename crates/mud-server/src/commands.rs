@@ -347,6 +347,46 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_say,
     },
+    Command {
+        names: &["tell", "t"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "tell <player> <message>",
+            summary: "Send a private message to an online player.",
+            long: "The target must be online. Match is case-insensitive and \
+                   exact (no substring) to avoid ambiguity.",
+        },
+        run: cmd_tell,
+    },
+    Command {
+        names: &["emote", ":"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "emote <action>",
+            summary: "Perform a third-person action visible to the room.",
+            long: "Your name is prepended to the text. \
+                   `emote smiles broadly.` shows everyone (including you): \
+                   `Strider smiles broadly.`",
+        },
+        run: cmd_emote,
+    },
+    Command {
+        names: &["shout"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "shout <message>",
+            summary: "Yell to every online player.",
+            long: "Reaches across rooms and zones; everyone connected sees \
+                   it. Use sparingly.",
+        },
+        run: cmd_shout,
+    },
     // ----- Combat -----
     Command {
         names: &["attack", "kill", "k"],
@@ -1317,6 +1357,93 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
             format!("{speaker} says, \"{message}\"\r\n")
         };
         send_to(world, target, line);
+    }
+}
+
+fn cmd_tell(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 || parts[1].trim().is_empty() {
+        send_to(world, player, "Usage: tell <player> <message>\r\n");
+        return;
+    }
+    let target_name = parts[0].trim();
+    let message = parts[1].trim();
+    let target_lower = target_name.to_ascii_lowercase();
+
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(target_name)
+                || n.name.to_ascii_lowercase() == target_lower)
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{target_name}' isn't online.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "You mutter quietly to yourself.\r\n");
+        return;
+    }
+
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    send_to(world, player, format!("You tell {target_name}, \"{message}\"\r\n"));
+    send_to(world, target, format!("{player_name} tells you, \"{message}\"\r\n"));
+}
+
+fn cmd_emote(world: &mut World, player: Entity, args: &str) {
+    let action = args.trim();
+    if action.is_empty() {
+        send_to(world, player, "Emote what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let line = format!("{player_name} {action}\r\n");
+
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(_, l)| l.0 == located.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        send_to(world, t, line.clone());
+    }
+}
+
+fn cmd_shout(world: &mut World, player: Entity, args: &str) {
+    let message = args.trim();
+    if message.is_empty() {
+        send_to(world, player, "Shout what?\r\n");
+        return;
+    }
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
+        q.iter(world).collect()
+    };
+    for t in targets {
+        let line = if t == player {
+            format!("You shout, \"{message}\"\r\n")
+        } else {
+            format!("{player_name} shouts, \"{message}\"\r\n")
+        };
+        send_to(world, t, line);
     }
 }
 
