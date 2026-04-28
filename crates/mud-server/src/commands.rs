@@ -15,7 +15,7 @@ use mud_db::enums::{Direction, ExitState, Permission, UserRole};
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
-    Exits, Fighting, Follower, Health, Item, Keywords, Located, Named, Online, Player, Slot,
+    Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Named, Online, Player, Slot,
     SocialDef, SocialRegistry, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
@@ -400,6 +400,32 @@ const COMMANDS: &[Command] = &[
                    it. Use sparingly.",
         },
         run: cmd_shout,
+    },
+    Command {
+        names: &["reply", "r"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "reply <message>",
+            summary: "Reply to the last person who told you.",
+            long: "Sends a tell to whoever last sent you a private message. \
+                   If they've gone offline, you'll get a useful error.",
+        },
+        run: cmd_reply,
+    },
+    Command {
+        names: &["gossip", "/"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "gossip <message>",
+            summary: "Chat on the global gossip channel.",
+            long: "Reaches every online player. Lower-volume than `shout` \
+                   but with the same global scope.",
+        },
+        run: cmd_gossip,
     },
     // ----- Combat -----
     Command {
@@ -1632,6 +1658,56 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
 
     send_to(world, player, format!("You tell {target_name}, \"{message}\"\r\n"));
     send_to(world, target, format!("{player_name} tells you, \"{message}\"\r\n"));
+
+    // Stamp the receiver so they can `reply`.
+    if let Ok(mut e) = world.get_entity_mut(target) {
+        e.insert(LastTeller(player));
+    }
+}
+
+fn cmd_reply(world: &mut World, player: Entity, args: &str) {
+    let message = args.trim();
+    if message.is_empty() {
+        send_to(world, player, "Reply with what?\r\n");
+        return;
+    }
+    let Some(LastTeller(last)) = world.get::<LastTeller>(player).copied() else {
+        send_to(world, player, "Nobody has tell'd you recently.\r\n");
+        return;
+    };
+    if world.get_entity(last).is_err() || world.get::<Online>(last).is_none() {
+        send_to(world, player, "They're no longer online.\r\n");
+        return;
+    }
+    let last_name = world
+        .get::<Named>(last)
+        .map_or_else(String::new, |n| n.name.clone());
+    // Forward through cmd_tell so we get the LastTeller stamping for free.
+    cmd_tell(world, player, &format!("{last_name} {message}"));
+}
+
+fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
+    let message = args.trim();
+    if message.is_empty() {
+        send_to(world, player, "Gossip what?\r\n");
+        return;
+    }
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
+        q.iter(world).collect()
+    };
+    for t in targets {
+        let line = if t == player {
+            format!("You gossip, \"{message}\"\r\n")
+        } else {
+            format!("{player_name} gossips, \"{message}\"\r\n")
+        };
+        send_to(world, t, line);
+    }
 }
 
 fn cmd_emote(world: &mut World, player: Entity, args: &str) {

@@ -131,6 +131,12 @@ pub struct Fighting(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Follower(pub Entity);
 
+/// Most recent sender of a `tell` to this entity. Used by `reply` to find
+/// the previous correspondent. Cleared (or stale-checked) on the receiver
+/// side, not the sender side.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LastTeller(pub Entity);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectSource {
     Spell,
