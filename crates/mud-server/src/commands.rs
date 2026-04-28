@@ -1067,9 +1067,7 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     mark_for_prompt(player);
     // Stamp activity even for empty input — pressing return to "wake up" a
     // session counts as activity for idle-timer purposes.
-    if let Ok(mut e) = world.get_entity_mut(player) {
-        e.insert(LastInputAt(std::time::Instant::now()));
-    }
+    try_insert(world, player, LastInputAt(std::time::Instant::now()));
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;
@@ -1943,9 +1941,7 @@ fn cmd_wake(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("{target_name} is already awake.\r\n"));
         return;
     }
-    if let Ok(mut e) = world.get_entity_mut(target) {
-        e.insert(Posture(PostureKind::Standing));
-    }
+    try_insert(world, target, Posture(PostureKind::Standing));
     let player_name = name_of(world, player);
     send_to(world, player, format!("You wake {target_name}.\r\n"));
     send_to(
@@ -1971,9 +1967,7 @@ fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
         );
         return;
     }
-    if let Ok(mut e) = world.get_entity_mut(player) {
-        e.insert(Posture(new));
-    }
+    try_insert(world, player, Posture(new));
     let verb = match new {
         PostureKind::Standing => "stand up",
         PostureKind::Sitting => "sit down",
@@ -2040,9 +2034,7 @@ fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    if let Ok(mut e) = world.get_entity_mut(player) {
-        e.insert(Prompt(template.to_string()));
-    }
+    try_insert(world, player, Prompt(template.to_string()));
     send_to(world, player, format!("Prompt set to: {template}\r\n"));
 }
 
@@ -2458,9 +2450,7 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
         return;
     }
 
-    if let Ok(mut e) = world.get_entity_mut(item) {
-        e.insert(EquippedSlot(slot));
-    }
+    try_insert(world, item, EquippedSlot(slot));
 
     let verb = if slot == Slot::Wield { "wield" } else { "wear" };
     send_to(world, player, format!("You {verb} {item_name}.\r\n"));
@@ -2482,9 +2472,7 @@ fn cmd_remove(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let item_name = name_of(world, item);
-    if let Ok(mut e) = world.get_entity_mut(item) {
-        e.remove::<EquippedSlot>();
-    }
+    try_remove::<EquippedSlot>(world, item);
     send_to(world, player, format!("You remove {item_name}.\r\n"));
 }
 
@@ -2894,6 +2882,28 @@ pub(crate) fn name_or(world: &World, e: Entity, fallback: &str) -> String {
         .map_or_else(|| fallback.to_string(), |n| n.name.clone())
 }
 
+/// Insert (or replace) a component on an entity, silently no-op'ing if
+/// the entity has been despawned. Mid-tick mutations frequently target
+/// an entity that may have been removed earlier in the same tick — this
+/// is the safe-by-default version of `world.entity_mut(e).insert(c)`.
+pub(crate) fn try_insert<C: bevy_ecs::component::Component>(
+    world: &mut World,
+    e: Entity,
+    c: C,
+) {
+    if let Ok(mut em) = world.get_entity_mut(e) {
+        em.insert(c);
+    }
+}
+
+/// Remove a component from an entity, silently no-op'ing if the entity
+/// is gone. Companion to `try_insert`.
+pub(crate) fn try_remove<C: bevy_ecs::component::Component>(world: &mut World, e: Entity) {
+    if let Ok(mut em) = world.get_entity_mut(e) {
+        em.remove::<C>();
+    }
+}
+
 /// Like `broadcast_room_except`, but only fans out to entities that have
 /// the `Player` marker. Used for messages that semantically don't apply
 /// to mobs (whisper bystanders, posture announcements, social emotes, etc.)
@@ -2966,9 +2976,7 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
     send_to(world, target, format!("{player_name} tells you, \"{message}\"\r\n"));
 
     // Stamp the receiver so they can `reply`.
-    if let Ok(mut e) = world.get_entity_mut(target) {
-        e.insert(LastTeller(player));
-    }
+    try_insert(world, target, LastTeller(player));
 }
 
 fn cmd_reply(world: &mut World, player: Entity, args: &str) {
@@ -3143,9 +3151,7 @@ pub(crate) fn disengage_attackers_of(world: &mut World, target: Entity) {
             .collect()
     };
     for a in attackers {
-        if let Ok(mut e) = world.get_entity_mut(a) {
-            e.remove::<Fighting>();
-        }
+        try_remove::<Fighting>(world, a);
         send_to(world, a, "Your target falls.\r\n");
     }
 }
@@ -3182,9 +3188,7 @@ fn require_alert_posture(world: &mut World, player: Entity, action: &str) -> boo
         }
         Some(PostureKind::Sitting | PostureKind::Resting) => {
             // Auto-stand.
-            if let Ok(mut e) = world.get_entity_mut(player) {
-                e.insert(Posture(PostureKind::Standing));
-            }
+            try_insert(world, player, Posture(PostureKind::Standing));
             send_to(world, player, "You stand up.\r\n");
             if let Some(located) = world.get::<Located>(player).copied() {
                 let mover_name = name_of(world, player);
@@ -3241,9 +3245,7 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     let actual_name = name_of(world, target);
     let player_name = name_of(world, player);
 
-    if let Ok(mut e) = world.get_entity_mut(player) {
-        e.insert(Fighting(target));
-    }
+    try_insert(world, player, Fighting(target));
     if world.get::<CombatStats>(target).is_some()
         && let Ok(mut e) = world.get_entity_mut(target)
     {
@@ -3363,9 +3365,7 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
 
     // Drop our own Fighting; combat_tick auto-disengages attackers on
     // the next 1Hz pass via the room-mismatch check.
-    if let Ok(mut e) = world.get_entity_mut(player) {
-        e.remove::<Fighting>();
-    }
+    try_remove::<Fighting>(world, player);
 
     // Move + announce arrival + auto-look.
     if let Some(mut l) = world.get_mut::<Located>(player) {
@@ -3406,9 +3406,7 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     let target = fighting.0;
     if world.get_entity(target).is_err() {
         // Target has been despawned; clean up our stale Fighting.
-        if let Ok(mut e) = world.get_entity_mut(player) {
-            e.remove::<Fighting>();
-        }
+        try_remove::<Fighting>(world, player);
         send_to(world, player, "Your target is gone.\r\n");
         return;
     }
@@ -3456,9 +3454,7 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
             if let Some(mut hp) = world.get_mut::<Health>(target) {
                 hp.hp = hp.max;
             }
-            if let Ok(mut e) = world.get_entity_mut(target) {
-                e.remove::<Fighting>();
-            }
+            try_remove::<Fighting>(world, target);
             send_to(world, target, "You collapse, then gasp back to life with full health.\r\n");
         } else {
             send_to(world, player, "Your target falls.\r\n");
@@ -3467,9 +3463,7 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
                 e.despawn();
             }
             // Clear our own Fighting so combat doesn't re-target a despawned entity.
-            if let Ok(mut e) = world.get_entity_mut(player) {
-                e.remove::<Fighting>();
-            }
+            try_remove::<Fighting>(world, player);
         }
     }
 }
@@ -3504,9 +3498,7 @@ fn cmd_follow(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    if let Ok(mut e) = world.get_entity_mut(player) {
-        e.insert(Follower(target));
-    }
+    try_insert(world, player, Follower(target));
     let target_name = name_of(world, target);
     let player_name = name_of(world, player);
     send_to(world, player, format!("You start following {target_name}.\r\n"));
@@ -3515,9 +3507,7 @@ fn cmd_follow(world: &mut World, player: Entity, args: &str) {
 
 fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
     let prev = world.get::<Follower>(player).copied();
-    if let Ok(mut e) = world.get_entity_mut(player) {
-        e.remove::<Follower>();
-    }
+    try_remove::<Follower>(world, player);
     if let Some(Follower(prev_target)) = prev {
         let target_name = name_of(world, prev_target);
         send_to(world, player, format!("You stop following {target_name}.\r\n"));
@@ -3623,18 +3613,14 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
             if let Some(mut hp) = world.get_mut::<Health>(target) {
                 hp.hp = hp.max;
             }
-            if let Ok(mut e) = world.get_entity_mut(target) {
-                e.remove::<Fighting>();
-            }
+            try_remove::<Fighting>(world, target);
             send_to(world, target, "You collapse, then gasp back to life with full health.\r\n");
         } else {
             send_to(world, player, "Your target falls.\r\n");
             if let Ok(e) = world.get_entity_mut(target) {
                 e.despawn();
             }
-            if let Ok(mut e) = world.get_entity_mut(player) {
-                e.remove::<Fighting>();
-            }
+            try_remove::<Fighting>(world, player);
         }
     }
 }
@@ -3644,9 +3630,7 @@ fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "You aren't fighting anyone.\r\n");
         return;
     }
-    if let Ok(mut e) = world.get_entity_mut(player) {
-        e.remove::<Fighting>();
-    }
+    try_remove::<Fighting>(world, player);
     send_to(world, player, "You stop fighting.\r\n");
 }
 
@@ -4091,9 +4075,7 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
     };
     if world.get_entity(target).is_err() {
         send_to(world, player, "Your recall point has vanished.\r\n");
-        if let Ok(mut e) = world.get_entity_mut(player) {
-            e.remove::<RecallPoint>();
-        }
+        try_remove::<RecallPoint>(world, player);
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {
@@ -4149,9 +4131,7 @@ fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "You are nowhere; can't bind a recall point.\r\n");
         return;
     };
-    if let Ok(mut e) = world.get_entity_mut(player) {
-        e.insert(RecallPoint(located.0));
-    }
+    try_insert(world, player, RecallPoint(located.0));
     let room_name = name_or(world, located.0, "<unknown>");
     send_to(
         world,
@@ -4184,16 +4164,12 @@ fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
     let target_name = name_of(world, target);
     let was_frozen = world.get::<Frozen>(target).is_some();
     if was_frozen {
-        if let Ok(mut e) = world.get_entity_mut(target) {
-            e.remove::<Frozen>();
-        }
+        try_remove::<Frozen>(world, target);
         send_to(world, player, format!("You thaw {target_name}.\r\n"));
         send_to(world, target, format!("{admin_name} thaws you. You can move again.\r\n"));
         info!(admin = %admin_name, target = %target_name, action = "thaw", "freeze toggle");
     } else {
-        if let Ok(mut e) = world.get_entity_mut(target) {
-            e.insert(Frozen);
-        }
+        try_insert(world, target, Frozen);
         send_to(world, player, format!("You freeze {target_name}.\r\n"));
         send_to(
             world,

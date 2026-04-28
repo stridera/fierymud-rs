@@ -8,7 +8,7 @@ use tracing::info;
 use crate::TickCount;
 use crate::commands::{
     apply_damage, broadcast_room_except, cmd_flee, disengage_attackers_of, drain_stamina, name_of,
-    send_to,
+    send_to, try_insert, try_remove,
 };
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
@@ -148,9 +148,7 @@ struct Swing {
 fn apply_swing(world: &mut World, s: &Swing) {
     // Target may have been despawned earlier in this same tick.
     if world.get_entity(s.target).is_err() {
-        if let Ok(mut e) = world.get_entity_mut(s.attacker) {
-            e.remove::<Fighting>();
-        }
+        try_remove::<Fighting>(world, s.attacker);
         return;
     }
 
@@ -158,12 +156,8 @@ fn apply_swing(world: &mut World, s: &Swing) {
     let attacker_room = world.get::<Located>(s.attacker).map(|l| l.0);
     let target_room = world.get::<Located>(s.target).map(|l| l.0);
     if attacker_room != target_room || attacker_room.is_none() {
-        if let Ok(mut e) = world.get_entity_mut(s.attacker) {
-            e.remove::<Fighting>();
-        }
-        if let Ok(mut e) = world.get_entity_mut(s.target) {
-            e.remove::<Fighting>();
-        }
+        try_remove::<Fighting>(world, s.attacker);
+        try_remove::<Fighting>(world, s.target);
         send_to(world, s.attacker, "Your target has slipped away.\r\n");
         return;
     }
@@ -173,9 +167,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
 
     if world.get::<Health>(s.target).is_none() {
         // No Health component: nothing to damage. End combat from this side.
-        if let Ok(mut e) = world.get_entity_mut(s.attacker) {
-            e.remove::<Fighting>();
-        }
+        try_remove::<Fighting>(world, s.attacker);
         return;
     }
     let was_sleeping =
@@ -196,9 +188,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         ),
     );
     if was_sleeping && !dead {
-        if let Ok(mut e) = world.get_entity_mut(s.target) {
-            e.insert(Posture(PostureKind::Standing));
-        }
+        try_insert(world, s.target, Posture(PostureKind::Standing));
         send_to(world, s.target, "You jolt awake!\r\n");
         broadcast_room_except(
             world,
@@ -287,13 +277,9 @@ fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Enti
         if let Some(mut hp) = world.get_mut::<Health>(victim) {
             hp.hp = hp.max;
         }
-        if let Ok(mut e) = world.get_entity_mut(victim) {
-            e.remove::<Fighting>();
-        }
+        try_remove::<Fighting>(world, victim);
         for a in attackers {
-            if let Ok(mut e) = world.get_entity_mut(a) {
-                e.remove::<Fighting>();
-            }
+            try_remove::<Fighting>(world, a);
         }
         send_to(
             world,
