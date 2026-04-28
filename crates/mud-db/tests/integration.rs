@@ -2,7 +2,9 @@ use mud_db::{
     character_items::{list_for, save_for, NewCharacterItem},
     connect,
     effects::list_effects,
+    mob_resets::list_all as list_mob_resets,
     mobs::list_mobs,
+    object_resets::list_all as list_object_resets,
     objects::list_objects,
     room_exits::list_exits,
     rooms::list_rooms,
@@ -58,6 +60,30 @@ async fn lists_objects() {
 async fn lists_effects() {
     let effects = list_effects(&pool().await).await.expect("list effects");
     assert!(!effects.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn lists_mob_resets() {
+    let resets = list_mob_resets(&pool().await).await.expect("list mob resets");
+    // Imported world has thousands of mob resets.
+    assert!(resets.len() > 1000, "expected many mob resets, got {}", resets.len());
+    // Probability is a fraction in [0, 1].
+    for r in &resets {
+        assert!(r.probability >= 0.0 && r.probability <= 1.0, "probability oob: {r:?}");
+        assert!(r.max_instances >= 1, "max_instances < 1: {r:?}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn lists_object_resets() {
+    let resets = list_object_resets(&pool().await).await.expect("list object resets");
+    assert!(!resets.is_empty(), "expected some object resets");
+    for r in &resets {
+        assert!(r.probability >= 0.0 && r.probability <= 1.0);
+        assert!(r.max_instances >= 1);
+    }
 }
 
 /// Round-trip a small inventory through `CharacterItems`. Uses the seeded
