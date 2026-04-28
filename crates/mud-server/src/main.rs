@@ -16,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::login::ConnRouter;
 
-const TICK_HZ: u64 = 10;
+pub(crate) const TICK_HZ: u64 = 10;
 
 #[derive(Resource, Default)]
 pub(crate) struct TickCount(pub(crate) u64);

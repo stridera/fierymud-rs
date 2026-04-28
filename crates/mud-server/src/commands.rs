@@ -310,6 +310,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_time,
     },
     Command {
+        names: &["version"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "version",
+            summary: "Show server build identity.",
+            long: "Crate name, version, and the rustc/profile combo the \
+                   binary was built with. For ops/debug; players will \
+                   rarely care.",
+        },
+        run: cmd_version,
+    },
+    Command {
         names: &["where"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -2124,6 +2138,18 @@ fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     out.push_str(&format!("  Server time: {}\r\n", now.format("%Y-%m-%d %H:%M:%S UTC")));
     out.push_str(&format!("  Uptime:      {h}h {m}m {s}s\r\n"));
     out.push_str(&format!("  World tick:  {tick}\r\n"));
+    send_to(world, player, out);
+}
+
+fn cmd_version(world: &mut World, player: Entity, _args: &str) {
+    let mut out = String::from("\r\n");
+    out.push_str(&format!(
+        "  {} {}\r\n",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+    ));
+    out.push_str(&format!("  Profile: {}\r\n", if cfg!(debug_assertions) { "debug" } else { "release" }));
+    out.push_str(&format!("  Tick rate: {} Hz\r\n", crate::TICK_HZ));
     send_to(world, player, out);
 }
 
