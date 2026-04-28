@@ -1,12 +1,12 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     CombatStats, Description, Fighting, Health, Item, Keywords, Located, Mob, Named, Player,
-    Posture, PostureKind, Slot, WearableIn, WorldKeyIndex,
+    PlayerFlags, Posture, PostureKind, Slot, WearableIn, WorldKeyIndex,
 };
 use tracing::info;
 
 use crate::TickCount;
-use crate::commands::{apply_damage, drain_stamina, send_to};
+use crate::commands::{apply_damage, cmd_flee, drain_stamina, send_to};
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
 
@@ -227,6 +227,29 @@ fn apply_swing(world: &mut World, s: &Swing) {
 
     if dead {
         handle_death(world, s.target, &target_name, room);
+        return;
+    }
+
+    // Wimpy auto-flee: if the defender is a player with the WIMPY flag and
+    // their HP just dropped below 25% of max, attempt to flee. Done after
+    // the threshold message so the dramatic order reads:
+    //
+    //   X hits you for 12 damage.
+    //   You are badly hurt!
+    //   You panic and flee east!
+    //
+    // cmd_flee handles "no exits" and the room-broadcast itself.
+    let target_is_player = world.get::<Player>(s.target).is_some();
+    let wimpy_set = world
+        .get::<PlayerFlags>(s.target)
+        .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::Wimpy));
+    if target_is_player && wimpy_set
+        && let Some(hp) = world.get::<Health>(s.target).copied()
+        && hp.hp > 0
+        && hp.hp * 4 < hp.max
+    {
+        send_to(world, s.target, "You panic!\r\n");
+        cmd_flee(world, s.target, "");
     }
 }
 

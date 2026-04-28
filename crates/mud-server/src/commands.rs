@@ -3259,7 +3259,7 @@ fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
     send_to(world, player, format!("{target_name} {verdict}\r\n"));
 }
 
-fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
