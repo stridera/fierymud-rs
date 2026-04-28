@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    CombatStats, Description, Fighting, Health, Item, Keywords, Located, Mob, Named, Online,
-    Player, Posture, PostureKind, Slot, WearableIn, WorldKeyIndex,
+    CombatStats, Description, Fighting, Health, Item, Keywords, Located, Mob, Named, Player,
+    Posture, PostureKind, Slot, WearableIn, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -130,37 +130,9 @@ pub fn combat_tick(world: &mut World) {
     for s in &swings {
         apply_swing(world, s);
     }
-
-    // Refresh the prompt for everyone who saw output from this tick: the
-    // direct combatants AND every Online Player in a room where combat
-    // happened (bystanders saw "X hits Y" lines and should also see the
-    // prompt update). Mobs have no Connection so it's a no-op for them.
-    let mut prompted = std::collections::HashSet::new();
-    let mut combat_rooms = std::collections::HashSet::new();
-    for s in &swings {
-        if let Some(l) = world.get::<Located>(s.attacker) {
-            combat_rooms.insert(l.0);
-        }
-        for &entity in &[s.attacker, s.target] {
-            if prompted.insert(entity) && world.get_entity(entity).is_ok() {
-                crate::commands::send_prompt(world, entity);
-            }
-        }
-    }
-    if !combat_rooms.is_empty() {
-        let bystanders: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Located), (With<Player>, With<Online>)>();
-            q.iter(world)
-                .filter(|(e, l)| combat_rooms.contains(&l.0) && !prompted.contains(e))
-                .map(|(e, _)| e)
-                .collect()
-        };
-        for b in bystanders {
-            if prompted.insert(b) {
-                crate::commands::send_prompt(world, b);
-            }
-        }
-    }
+    // Prompts for combatants and bystanders are handled centrally by
+    // commands::flush_prompts after schedule.run — every send_to here
+    // already registers the recipient.
 }
 
 struct Swing {

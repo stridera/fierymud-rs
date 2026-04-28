@@ -870,6 +870,10 @@ static REGISTRY: LazyLock<HashMap<&'static str, &'static Command>> = LazyLock::n
 // ---------------------------------------------------------------------------
 
 pub fn dispatch(world: &mut World, player: Entity, line: &str) {
+    // Whatever happens (success, error, unknown command, empty input), the
+    // typing player gets a prompt at end-of-turn via flush_prompts. Marking
+    // here also dedupes against any send_to(player, …) inside the handler.
+    mark_for_prompt(player);
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;
@@ -945,6 +949,44 @@ fn skip_n_tokens(s: &str, n: usize) -> &str {
 pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
     if let Some(conn) = world.get::<Connection>(target) {
         let _ = conn.0.send(text.into());
+    }
+    // Track for end-of-batch prompt refresh. Tracking mobs (no Connection)
+    // is harmless; `flush_prompts` is a no-op for them via `send_prompt`'s
+    // Connection lookup.
+    PROMPT_RECIPIENTS.with(|r| {
+        r.borrow_mut().insert(target);
+    });
+}
+
+thread_local! {
+    /// Recipients of any `send_to` call since the last flush. Drained by
+    /// `flush_prompts` after each command-dispatch turn (`login::on_line`)
+    /// and after each `schedule.run` (`main`). Single-threaded by the
+    /// `current_thread` tokio runtime; `RefCell` is sound here.
+    static PROMPT_RECIPIENTS: std::cell::RefCell<std::collections::HashSet<Entity>>
+        = std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Add an entity to the pending-prompt set without sending output. Used by
+/// `dispatch` so the typing player always gets a prompt — even when the
+/// command produced no output (e.g., empty input, silent commands).
+pub(crate) fn mark_for_prompt(target: Entity) {
+    PROMPT_RECIPIENTS.with(|r| {
+        r.borrow_mut().insert(target);
+    });
+}
+
+/// Send a fresh prompt to everyone who's received output via `send_to` since
+/// the last flush. Idempotent — calling on an empty set is free. Despawned
+/// entities are skipped via `get_entity`; entities without a Connection are
+/// no-ops via `send_prompt`.
+pub(crate) fn flush_prompts(world: &World) {
+    let recipients =
+        PROMPT_RECIPIENTS.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    for entity in recipients {
+        if world.get_entity(entity).is_ok() {
+            send_prompt(world, entity);
+        }
     }
 }
 

@@ -78,7 +78,10 @@ impl ConnRouter {
             self.advance_login(conn_id, text, pool, world).await;
         } else if let Some(&entity) = self.playing.get(&conn_id) {
             commands::dispatch(world, entity, &text);
-            commands::send_prompt(world, entity);
+            // dispatch marks the player for prompt at its start; flush
+            // sends one prompt each to the player and to everyone else
+            // who received output during the turn.
+            commands::flush_prompts(world);
         }
     }
 

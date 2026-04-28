@@ -3,7 +3,7 @@ use mud_world::{AppliedTo, EffectInstance};
 use tracing::info;
 
 use crate::TickCount;
-use crate::commands::{send_prompt, send_to};
+use crate::commands::send_to;
 
 /// One effect tick = one second.
 const EFFECT_PERIOD_TICKS: u64 = 10;
@@ -28,7 +28,6 @@ pub fn effects_tick(world: &mut World) {
 
     let mut expired = 0usize;
     let mut orphaned = 0usize;
-    let mut prompted = std::collections::HashSet::new();
     for (eff_entity, target, ticks, name) in snapshots {
         if world.get_entity(target).is_err() {
             // Target gone — orphaned effect.
@@ -47,14 +46,11 @@ pub fn effects_tick(world: &mut World) {
             inst.remaining_secs = new_ticks;
         }
         if new_ticks <= 0 {
+            // Send_to registers the target for end-of-tick prompt refresh
+            // via commands::flush_prompts; no per-system tracking here.
             send_to(world, target, format!("Your {name} fades.\r\n"));
             if let Ok(e) = world.get_entity_mut(eff_entity) {
                 e.despawn();
-            }
-            // Refresh prompt for the affected target (mobs without
-            // Connection are a no-op, despawned targets already skipped).
-            if prompted.insert(target) {
-                send_prompt(world, target);
             }
             expired += 1;
         }
