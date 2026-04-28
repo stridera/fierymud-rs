@@ -340,6 +340,23 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_apply,
     },
+    Command {
+        names: &["lua"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "lua <code>",
+            summary: "Run a snippet of Lua code.",
+            long: "Runs `code` with `actor` bound to your character. \
+                   Captured `print` output is sent back to you. Useful for \
+                   inspecting entity state and prototyping triggers. \
+                   Examples: \
+                     lua print(actor:name()) \
+                     lua print(actor:hp() .. '/' .. actor:max_hp())",
+        },
+        run: cmd_lua,
+    },
 ];
 
 const MOVE_HELP: Help = Help {
@@ -914,6 +931,31 @@ fn cmd_apply(world: &mut World, player: Entity, args: &str) {
             target,
             format!("You feel the effect of {}.\r\n", effect_def.name),
         );
+    }
+}
+
+fn cmd_lua(world: &mut World, player: Entity, args: &str) {
+    let code = args.trim();
+    if code.is_empty() {
+        send_to(world, player, "Usage: lua <code>\r\n");
+        return;
+    }
+    // Take the LuaHost out of the world temporarily so we can borrow
+    // both &LuaHost and &mut World at once.
+    let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+        host.exec_for_actor(world, player, code)
+    });
+    match result {
+        Ok(out) => {
+            if out.is_empty() {
+                send_to(world, player, "(no output)\r\n");
+            } else {
+                send_to(world, player, out);
+            }
+        }
+        Err(e) => {
+            send_to(world, player, format!("{e}\r\n"));
+        }
     }
 }
 

@@ -56,6 +56,7 @@ async fn main() {
 
     let mut world = World::new();
     world.insert_resource(TickCount::default());
+    world.insert_resource(mud_script::LuaHost::default());
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
         error!(error = %e, "world load failed");

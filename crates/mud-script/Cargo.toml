@@ -6,6 +6,19 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+bevy_ecs = "0.18.1"
+mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
+mud-world = { version = "0.1.0", path = "../mud-world" }
+tracing = "0.1.44"
 
-[lints]
-workspace = true
+[lints.rust]
+# Bridges Lua callbacks to bevy_ecs World via a raw pointer; unsafe is
+# contained in WorldPtr/world_from_lua and sound under the invariant
+# documented in lib.rs (single-threaded, never re-entrant).
+unsafe_code = "allow"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
