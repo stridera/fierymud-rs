@@ -60,3 +60,96 @@ pub fn effects_tick(world: &mut World) {
         info!(expired, orphaned, "effects tick");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mud_world::EffectSource;
+
+    fn make_effect(world: &mut World, target: Entity, secs: i32) -> Entity {
+        world
+            .spawn((
+                EffectInstance {
+                    kind: 1,
+                    name: "test ward".to_string(),
+                    strength: 1,
+                    remaining_secs: secs,
+                    source: EffectSource::Admin,
+                },
+                AppliedTo(target),
+            ))
+            .id()
+    }
+
+    fn run_effects_tick(world: &mut World) {
+        // effects_tick is gated on tick % 10 == 0.
+        world.insert_resource(TickCount(EFFECT_PERIOD_TICKS));
+        effects_tick(world);
+    }
+
+    #[test]
+    fn decrements_remaining_secs() {
+        let mut world = World::new();
+        let target = world.spawn_empty().id();
+        let eff = make_effect(&mut world, target, 5);
+
+        run_effects_tick(&mut world);
+
+        let inst = world.get::<EffectInstance>(eff).expect("effect still alive");
+        assert_eq!(inst.remaining_secs, 4);
+    }
+
+    #[test]
+    fn despawns_when_duration_expires() {
+        let mut world = World::new();
+        let target = world.spawn_empty().id();
+        let eff = make_effect(&mut world, target, 1);
+
+        run_effects_tick(&mut world);
+
+        assert!(
+            world.get_entity(eff).is_err(),
+            "effect despawned when remaining_secs hit 0"
+        );
+    }
+
+    #[test]
+    fn permanent_effect_is_left_alone() {
+        let mut world = World::new();
+        let target = world.spawn_empty().id();
+        let eff = make_effect(&mut world, target, -1);
+
+        run_effects_tick(&mut world);
+        run_effects_tick(&mut world);
+
+        let inst = world.get::<EffectInstance>(eff).expect("permanent stays");
+        assert_eq!(inst.remaining_secs, -1, "permanent flag preserved");
+    }
+
+    #[test]
+    fn orphaned_effect_when_target_despawns() {
+        let mut world = World::new();
+        let target = world.spawn_empty().id();
+        let eff = make_effect(&mut world, target, 100);
+        // Target goes away mid-game.
+        world.get_entity_mut(target).unwrap().despawn();
+
+        run_effects_tick(&mut world);
+
+        assert!(
+            world.get_entity(eff).is_err(),
+            "orphan cleanup despawned the effect"
+        );
+    }
+
+    #[test]
+    fn skips_off_period_ticks() {
+        let mut world = World::new();
+        let target = world.spawn_empty().id();
+        let eff = make_effect(&mut world, target, 5);
+        world.insert_resource(TickCount(EFFECT_PERIOD_TICKS - 1));
+        effects_tick(&mut world);
+        let inst = world.get::<EffectInstance>(eff).expect("untouched");
+        assert_eq!(inst.remaining_secs, 5, "off-period tick is a no-op");
+    }
+}
