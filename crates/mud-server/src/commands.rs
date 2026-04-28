@@ -1060,29 +1060,34 @@ mod tests {
         let hp = Some(Health { hp: 42, max: 100 });
         let st = Some(Stamina { current: 7, max: 50 });
         let name = Some("Strider");
-        assert_eq!(render_prompt("<%h/%H>", hp, st, name), "<42/100> ");
-        assert_eq!(render_prompt("<%v/%V mv>", hp, st, name), "<7/50 mv> ");
+        let room = Some("The Void");
+        assert_eq!(render_prompt("<%h/%H>", hp, st, name, room), "<42/100> ");
+        assert_eq!(render_prompt("<%v/%V mv>", hp, st, name, room), "<7/50 mv> ");
         assert_eq!(
-            render_prompt("<%h/%H %v/%V>", hp, st, name),
+            render_prompt("<%h/%H %v/%V>", hp, st, name, room),
             "<42/100 7/50> "
         );
         // Trailing space already present — don't double-add.
-        assert_eq!(render_prompt("<%h> ", hp, st, name), "<42> ");
+        assert_eq!(render_prompt("<%h> ", hp, st, name, room), "<42> ");
         // Literal percent.
-        assert_eq!(render_prompt("100%%", hp, st, name), "100% ");
+        assert_eq!(render_prompt("100%%", hp, st, name, room), "100% ");
         // Name substitution.
-        assert_eq!(render_prompt("[%n]", hp, st, name), "[Strider] ");
+        assert_eq!(render_prompt("[%n]", hp, st, name, room), "[Strider] ");
+        // Room substitution.
+        assert_eq!(render_prompt("[%r]", hp, st, name, room), "[The Void] ");
         // Unknown variable: pass through literally so the player sees they
         // typed something we don't implement.
-        assert_eq!(render_prompt("[%z]", hp, st, name), "[%z] ");
+        assert_eq!(render_prompt("[%z]", hp, st, name, room), "[%z] ");
         // Missing Health: question marks.
-        assert_eq!(render_prompt("<%h/%H>", None, st, name), "<?/?> ");
+        assert_eq!(render_prompt("<%h/%H>", None, st, name, room), "<?/?> ");
         // Missing Stamina: question marks for v/V.
-        assert_eq!(render_prompt("<%v/%V>", hp, None, name), "<?/?> ");
+        assert_eq!(render_prompt("<%v/%V>", hp, None, name, room), "<?/?> ");
         // Missing name: question mark.
-        assert_eq!(render_prompt("[%n]", hp, st, None), "[?] ");
+        assert_eq!(render_prompt("[%n]", hp, st, None, room), "[?] ");
+        // Missing room: question mark.
+        assert_eq!(render_prompt("[%r]", hp, st, name, None), "[?] ");
         // Empty template still gets a trailing space.
-        assert_eq!(render_prompt("", hp, st, name), " ");
+        assert_eq!(render_prompt("", hp, st, name, room), " ");
     }
 
     fn spawn_with_hp(world: &mut World, hp: i32, max: i32) -> Entity {
@@ -1155,7 +1160,11 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
     let hp = world.get::<Health>(target).copied();
     let stamina = world.get::<Stamina>(target).copied();
     let name = world.get::<Named>(target).map(|n| n.name.as_str());
-    let rendered = render_prompt(template, hp, stamina, name);
+    let room = world
+        .get::<Located>(target)
+        .and_then(|l| world.get::<Named>(l.0))
+        .map(|n| n.name.as_str());
+    let rendered = render_prompt(template, hp, stamina, name, room);
     let _ = conn.0.send(rendered);
 }
 
@@ -1164,6 +1173,7 @@ fn render_prompt(
     hp: Option<Health>,
     stamina: Option<Stamina>,
     name: Option<&str>,
+    room: Option<&str>,
 ) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let mut chars = template.chars();
@@ -1188,6 +1198,10 @@ fn render_prompt(
                 },
                 Some('n') => match name {
                     Some(n) => out.push_str(n),
+                    None => out.push('?'),
+                },
+                Some('r') => match room {
+                    Some(r) => out.push_str(r),
                     None => out.push('?'),
                 },
                 Some('%') | None => out.push('%'),
