@@ -20,6 +20,8 @@ use mud_world::{
 };
 use tracing::info_span;
 
+use crate::{ServerStart, TickCount};
+
 // ---------------------------------------------------------------------------
 // Connection component (entity-attached outbound channel)
 // ---------------------------------------------------------------------------
@@ -264,6 +266,45 @@ const COMMANDS: &[Command] = &[
             long: "Shows each occupied slot and the item filling it.",
         },
         run: cmd_equipment,
+    },
+    Command {
+        names: &["exits", "ex"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "exits",
+            summary: "List the exits from your current room.",
+            long: "Shows each direction with the destination room's name. \
+                   Exits whose target room isn't loaded show as '(beyond)'.",
+        },
+        run: cmd_exits,
+    },
+    Command {
+        names: &["time", "uptime"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "time",
+            summary: "Show server uptime and tick count.",
+            long: "Real-world time, how long the server has been running, \
+                   and the current world tick.",
+        },
+        run: cmd_time,
+    },
+    Command {
+        names: &["where"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "where",
+            summary: "List all online players and their rooms.",
+            long: "Builder+ command. Shows each player's name and the room \
+                   they're currently in.",
+        },
+        run: cmd_where,
     },
     Command {
         names: &["effects", "affects"],
@@ -751,6 +792,102 @@ fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
 
 fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, "Goodbye!\r\n");
+}
+
+fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(exits) = world.get::<Exits>(located.0).cloned() else {
+        send_to(world, player, "\r\nNo exits.\r\n");
+        return;
+    };
+    if exits.0.is_empty() {
+        send_to(world, player, "\r\nNo exits.\r\n");
+        return;
+    }
+    // Resolve each exit's target room name; sort by direction's canonical order.
+    let mut rows: Vec<(mud_db::enums::Direction, String)> = exits
+        .0
+        .iter()
+        .map(|(dir, ed)| {
+            let target_name = ed
+                .to
+                .and_then(|e| world.get::<Named>(e).map(|n| n.name.clone()))
+                .unwrap_or_else(|| "(beyond)".to_string());
+            (*dir, target_name)
+        })
+        .collect();
+    rows.sort_by_key(|(d, _)| direction_order(*d));
+    let mut out = String::from("\r\nExits:\r\n");
+    for (dir, room) in &rows {
+        out.push_str(&format!("  {:>10} - {}\r\n", direction_name(*dir), room));
+    }
+    send_to(world, player, out);
+}
+
+fn direction_order(d: mud_db::enums::Direction) -> u8 {
+    use mud_db::enums::Direction::{
+        Down, East, In, North, Northeast, Northwest, Out, Portal, South, Southeast, Southwest, Up,
+        West,
+    };
+    match d {
+        North => 0,
+        East => 1,
+        South => 2,
+        West => 3,
+        Up => 4,
+        Down => 5,
+        Northeast => 6,
+        Southeast => 7,
+        Southwest => 8,
+        Northwest => 9,
+        In => 10,
+        Out => 11,
+        Portal => 12,
+        mud_db::enums::Direction::None => 13,
+    }
+}
+
+fn cmd_time(world: &mut World, player: Entity, _args: &str) {
+    let tick = world.resource::<TickCount>().0;
+    let started = world.resource::<ServerStart>().0;
+    let uptime = started.elapsed();
+    let now = chrono::Utc::now();
+
+    let secs = uptime.as_secs();
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("  Server time: {}\r\n", now.format("%Y-%m-%d %H:%M:%S UTC")));
+    out.push_str(&format!("  Uptime:      {h}h {m}m {s}s\r\n"));
+    out.push_str(&format!("  World tick:  {tick}\r\n"));
+    send_to(world, player, out);
+}
+
+fn cmd_where(world: &mut World, player: Entity, _args: &str) {
+    let mut rows: Vec<(String, String)> = {
+        let mut q = world
+            .query_filtered::<(&Named, &Located), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .map(|(n, l)| {
+                let room_name = world
+                    .get::<Named>(l.0)
+                    .map(|n| n.name.clone())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                (n.name.clone(), room_name)
+            })
+            .collect()
+    };
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = format!("\r\n{} player(s) online:\r\n", rows.len());
+    for (name, room) in &rows {
+        out.push_str(&format!("  {name:<24} {room}\r\n"));
+    }
+    send_to(world, player, out);
 }
 
 fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {

@@ -3,7 +3,7 @@ mod commands;
 mod effects;
 mod login;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy_ecs::prelude::*;
 use mud_net::{Inbound, InboundKind};
@@ -17,6 +17,9 @@ use crate::login::ConnRouter;
 
 #[derive(Resource, Default)]
 pub(crate) struct TickCount(pub(crate) u64);
+
+#[derive(Resource)]
+pub(crate) struct ServerStart(pub(crate) Instant);
 
 fn advance_tick(mut tick: ResMut<TickCount>) {
     tick.0 += 1;
@@ -56,6 +59,7 @@ async fn main() {
 
     let mut world = World::new();
     world.insert_resource(TickCount::default());
+    world.insert_resource(ServerStart(Instant::now()));
     world.insert_resource(mud_script::LuaHost::default());
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
