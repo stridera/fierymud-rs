@@ -1479,7 +1479,17 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 
-fn cmd_look(world: &mut World, player: Entity, _args: &str) {
+fn cmd_look(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if !arg.is_empty() {
+        if let Some(dir) = parse_direction(arg) {
+            look_direction(world, player, dir);
+            return;
+        }
+        // Anything else: fall through to examine (look <object>).
+        cmd_examine(world, player, arg);
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
@@ -1880,6 +1890,68 @@ fn cmd_flags(world: &mut World, player: Entity, _args: &str) {
     };
     for label in &flags {
         out.push_str(&format!("  {label}\r\n"));
+    }
+    send_to(world, player, out);
+}
+
+/// Parse a direction word or its short alias to a Direction enum.
+/// Returns None for anything that doesn't match a movement direction.
+fn parse_direction(s: &str) -> Option<Direction> {
+    match s.to_ascii_lowercase().as_str() {
+        "north" | "n" => Some(Direction::North),
+        "south" | "s" => Some(Direction::South),
+        "east" | "e" => Some(Direction::East),
+        "west" | "w" => Some(Direction::West),
+        "up" | "u" => Some(Direction::Up),
+        "down" | "d" => Some(Direction::Down),
+        "northeast" | "ne" => Some(Direction::Northeast),
+        "northwest" | "nw" => Some(Direction::Northwest),
+        "southeast" | "se" => Some(Direction::Southeast),
+        "southwest" | "sw" => Some(Direction::Southwest),
+        "in" => Some(Direction::In),
+        "out" => Some(Direction::Out),
+        _ => None,
+    }
+}
+
+/// Peek at a neighboring room through the named exit. Reports whether
+/// the exit is closed/locked, and otherwise prints the target room's
+/// name and description (no occupants — that requires actually being
+/// there).
+fn look_direction(world: &mut World, player: Entity, dir: Direction) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(exits) = world.get::<Exits>(located.0).cloned() else {
+        send_to(world, player, "You see nothing in that direction.\r\n");
+        return;
+    };
+    let Some(ed) = exits.0.get(&dir).copied() else {
+        send_to(world, player, "You see nothing in that direction.\r\n");
+        return;
+    };
+    if ed.state == mud_db::enums::ExitState::Closed
+        || ed.state == mud_db::enums::ExitState::Locked
+    {
+        send_to(world, player, "The way is closed.\r\n");
+        return;
+    }
+    let Some(target_room) = ed.to else {
+        send_to(world, player, "The way fades into the unknown.\r\n");
+        return;
+    };
+    let name = world
+        .get::<Named>(target_room)
+        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    let desc = world
+        .get::<Description>(target_room)
+        .map(|d| strip_color_tags(&d.0))
+        .unwrap_or_default();
+    let mut out = format!("\r\nYou peer {}.\r\n  {name}\r\n", direction_name(dir));
+    if !desc.trim().is_empty() {
+        out.push_str("  ");
+        out.push_str(desc.trim_end());
+        out.push_str("\r\n");
     }
     send_to(world, player, out);
 }
