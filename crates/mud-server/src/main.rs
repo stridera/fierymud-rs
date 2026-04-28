@@ -2,6 +2,7 @@ mod combat;
 mod commands;
 mod effects;
 mod login;
+mod regen;
 
 use std::time::{Duration, Instant};
 
@@ -90,6 +91,7 @@ async fn main() {
             advance_tick,
             combat::combat_tick,
             effects::effects_tick,
+            regen::regen_tick,
             log_heartbeat,
         )
             .chain(),
