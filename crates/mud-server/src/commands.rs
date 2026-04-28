@@ -112,6 +112,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_help,
     },
     Command {
+        names: &["examine", "exa"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "examine <target>",
+            summary: "Look closely at a person or thing in the room.",
+            long: "Match by name or keyword (case-insensitive substring) on \
+                   anything in your current room — mobs, other players, \
+                   items, or equipped gear. Shows their long description.",
+        },
+        run: cmd_examine,
+    },
+    Command {
         names: &["look", "l"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -950,6 +964,83 @@ fn cmd_help(world: &mut World, player: Entity, args: &str) {
 
 fn visible(cmd: &Command, role: UserRole, perms: &[Permission]) -> bool {
     role.at_least(cmd.min_role) && cmd.required_perm.is_none_or(|p| perms.contains(&p))
+}
+
+fn cmd_examine(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Examine whom or what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let needle = target_word.to_ascii_lowercase();
+
+    // Self-target.
+    if needle == "me" || needle == "self" {
+        let name = world
+            .get::<Named>(player)
+            .map_or_else(String::new, |n| n.name.clone());
+        send_to(world, player, format!("\r\nYou look at yourself: {name}.\r\n"));
+        return;
+    }
+
+    // Search the room — mobs and players are equally examinable; items too,
+    // both on the ground and on the player's person.
+    let target = {
+        let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>)>();
+        q.iter(world)
+            .find(|(e, l, n, kw)| {
+                *e != player && (l.0 == room || l.0 == player) && matches(&needle, n, *kw)
+            })
+            .map(|(e, _, _, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(
+            world,
+            player,
+            format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+
+    let name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+    let description = world
+        .get::<Description>(target)
+        .map(|d| d.0.clone())
+        .unwrap_or_default();
+    let posture = world.get::<Posture>(target).map(|p| p.0);
+
+    let mut out = format!("\r\nYou look at {name}.\r\n");
+    if !description.trim().is_empty() {
+        out.push_str(&format!("{}\r\n", description.trim_end()));
+    }
+    if let Some(p) = posture
+        && p != PostureKind::Standing
+    {
+        out.push_str(&format!("{name} is {} here.\r\n", p.label()));
+    }
+    if let Some(hp) = world.get::<Health>(target).copied() {
+        let pct = if hp.max > 0 {
+            (hp.hp * 100) / hp.max
+        } else {
+            0
+        };
+        let condition = match pct {
+            i32::MIN..=0 => "is dying",
+            1..=15 => "is mortally wounded",
+            16..=35 => "is badly hurt",
+            36..=60 => "is bleeding",
+            61..=85 => "has some scrapes",
+            _ => "is in excellent shape",
+        };
+        out.push_str(&format!("{name} {condition}.\r\n"));
+    }
+    send_to(world, player, out);
 }
 
 fn cmd_look(world: &mut World, player: Entity, _args: &str) {
