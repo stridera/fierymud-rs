@@ -1,5 +1,6 @@
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
+pub mod character_items;
 pub mod characters;
 pub mod effects;
 pub mod enums;
