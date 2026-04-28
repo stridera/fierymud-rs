@@ -64,9 +64,18 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
     .await
 }
 
-/// Replace every row for a character with the supplied set. Wipe-and-rewrite
-/// avoids tracking row identity across saves — the runtime doesn't need
-/// stable item ids today, and reusing them would mean diffing two sets.
+/// Replace the top-level item rows for a character (every row whose
+/// `container_id IS NULL` — i.e. items the runtime materializes as
+/// inventory or equipped). Rows nested inside containers stay untouched:
+/// the runtime doesn't yet rehydrate them and we don't want to wipe
+/// stashed inventory just because we don't model it yet.
+///
+/// Side effect of the DELETE: any row whose `container_id` pointed to a
+/// row we just deleted has its `container_id` set to NULL via the schema's
+/// `ON DELETE SET NULL` cascade. Those orphans become top-level on the
+/// next login and get loaded into the player's inventory — graceful
+/// degradation rather than silent loss. (Once the runtime grows real
+/// container commands and parent-aware save logic, this stops mattering.)
 ///
 /// All in one transaction so a failure mid-save doesn't leave the
 /// character with a partial inventory.
@@ -77,7 +86,7 @@ pub async fn save_for(
 ) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query!(
-        r#"DELETE FROM "CharacterItems" WHERE character_id = $1"#,
+        r#"DELETE FROM "CharacterItems" WHERE character_id = $1 AND container_id IS NULL"#,
         character_id,
     )
     .execute(&mut *tx)
