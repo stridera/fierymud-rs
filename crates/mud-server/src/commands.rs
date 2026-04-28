@@ -1987,7 +1987,12 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     let posture = world.get::<Posture>(target).map(|p| p.0);
 
     let mode = color_mode_for(world, player);
-    let mut out = format!("\r\nYou look at {name}.\r\n");
+    // `name` may itself carry color tags (object names in particular).
+    // The status lines that follow embed the rendered name verbatim, so
+    // any trailing reset from render_color_tags terminates cleanly before
+    // the literal " is sleeping here." / " is bleeding." text.
+    let name_rendered = render_color_tags(&name, mode);
+    let mut out = format!("\r\nYou look at {name_rendered}.\r\n");
     if !description.trim().is_empty() {
         out.push_str(&format!(
             "{}\r\n",
@@ -1997,10 +2002,13 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     if let Some(p) = posture
         && p != PostureKind::Standing
     {
-        out.push_str(&format!("{name} is {} here.\r\n", p.label()));
+        out.push_str(&format!("{name_rendered} is {} here.\r\n", p.label()));
     }
     if let Some(hp) = world.get::<Health>(target).copied() {
-        out.push_str(&format!("{name} {condition}.\r\n", condition = condition_label(hp)));
+        out.push_str(&format!(
+            "{name_rendered} {condition}.\r\n",
+            condition = condition_label(hp)
+        ));
     }
     send_to(world, player, out);
 }
@@ -2101,10 +2109,18 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!("{}\r\n", render_color_tags(line, mode)));
     }
     if !other_players.is_empty() {
-        out.push_str(&format!("Also here: {}\r\n", other_players.join(", ")));
+        let rendered: Vec<String> = other_players
+            .iter()
+            .map(|p| render_color_tags(p, mode))
+            .collect();
+        out.push_str(&format!("Also here: {}\r\n", rendered.join(", ")));
     }
     if !items.is_empty() {
-        out.push_str(&format!("On the ground: {}\r\n", items.join(", ")));
+        let rendered: Vec<String> = items
+            .iter()
+            .map(|i| render_color_tags(i, mode))
+            .collect();
+        out.push_str(&format!("On the ground: {}\r\n", rendered.join(", ")));
     }
     // Auto-exits: only render the exits line on look when the player has the
     // AUTO_EXIT flag set. Without it, the room shows clean and the player
@@ -2715,13 +2731,14 @@ fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
             .map(|(_, n, _)| n.name.clone())
             .collect()
     };
+    let mode = color_mode_for(world, player);
     let mut out = if items.is_empty() {
         "\r\nYou are carrying nothing.\r\n".to_string()
     } else {
         format!("\r\nYou are carrying {} item(s):\r\n", items.len())
     };
     for name in &items {
-        out.push_str(&format!("  {name}\r\n"));
+        out.push_str(&format!("  {}\r\n", render_color_tags(name, mode)));
     }
     send_to(world, player, out);
 }
