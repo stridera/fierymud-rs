@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::enums::Permission;
+use crate::enums::{Permission, PlayerFlag};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterRow {
@@ -16,6 +16,7 @@ pub struct CharacterRow {
     pub armor_class: i32,
     pub alignment: i32,
     pub permissions: Vec<Permission>,
+    pub player_flags: Vec<PlayerFlag>,
     pub current_room_zone_id: Option<i32>,
     pub current_room_id: Option<i32>,
     pub recall_room_zone_id: Option<i32>,
@@ -28,6 +29,7 @@ pub async fn save_state(
     hit_points: i32,
     current_room_zone_id: Option<i32>,
     current_room_id: Option<i32>,
+    player_flags: &[PlayerFlag],
 ) -> sqlx::Result<()> {
     sqlx::query!(
         r#"
@@ -35,12 +37,14 @@ pub async fn save_state(
         SET hit_points = $1,
             current_room_zone_id = $2,
             current_room_id = $3,
+            player_flags = $4,
             last_login = NOW()
-        WHERE id = $4
+        WHERE id = $5
         "#,
         hit_points,
         current_room_zone_id,
         current_room_id,
+        player_flags as &[PlayerFlag],
         character_id,
     )
     .execute(pool)
@@ -64,6 +68,7 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             armor_class,
             alignment,
             permissions AS "permissions!: Vec<Permission>",
+            player_flags AS "player_flags!: Vec<PlayerFlag>",
             current_room_zone_id,
             current_room_id,
             recall_room_zone_id,

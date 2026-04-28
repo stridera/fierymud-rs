@@ -4,8 +4,8 @@ use bevy_ecs::prelude::*;
 use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::User};
 use mud_net::{ConnId, Outbound};
 use mud_world::{
-    Account, CombatStats, Health, Located, Named, Online, Player, Posture, PostureKind, WorldKey,
-    WorldKeyIndex,
+    Account, CombatStats, Health, Located, Named, Online, Player, PlayerFlags, Posture,
+    PostureKind, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -241,6 +241,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 health,
                 combat,
                 Posture(PostureKind::Standing),
+                PlayerFlags(c.player_flags.clone()),
             ))
             .id();
     };
@@ -270,6 +271,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             health,
             combat,
             Posture(PostureKind::Standing),
+            PlayerFlags(c.player_flags.clone()),
         ))
         .id()
 }
@@ -278,16 +280,25 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
     let Some(account) = world.get::<Account>(entity).cloned() else {
         return;
     };
-    let hp = world
-        .get::<Health>(entity)
-        .map_or(0, |h| h.hp);
+    let hp = world.get::<Health>(entity).map_or(0, |h| h.hp);
     let (zone_id, room_id) = world
         .get::<Located>(entity)
         .and_then(|l| world.get::<WorldKey>(l.0).copied())
         .map_or((None, None), |wk| (Some(wk.zone), Some(wk.id)));
+    let flags = world
+        .get::<PlayerFlags>(entity)
+        .map(|f| f.0.clone())
+        .unwrap_or_default();
 
-    if let Err(e) =
-        characters::save_state(pool, &account.character_id, hp, zone_id, room_id).await
+    if let Err(e) = characters::save_state(
+        pool,
+        &account.character_id,
+        hp,
+        zone_id,
+        room_id,
+        &flags,
+    )
+    .await
     {
         warn!(error = %e, character_id = %account.character_id, "save failed");
     } else {
@@ -296,6 +307,7 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
             hp,
             zone_id,
             room_id,
+            flag_count = flags.len(),
             "player saved"
         );
     }

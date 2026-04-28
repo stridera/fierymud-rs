@@ -141,6 +141,29 @@ pub struct Follower(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LastTeller(pub Entity);
 
+/// Toggleable per-player preferences (DEAF, `NO_TELL`, AFK, etc.). Loaded
+/// from `Characters.player_flags` on login; saved back on disconnect.
+#[derive(Component, Debug, Clone, Default)]
+pub struct PlayerFlags(pub Vec<mud_db::enums::PlayerFlag>);
+
+impl PlayerFlags {
+    #[must_use]
+    pub fn has(&self, flag: mud_db::enums::PlayerFlag) -> bool {
+        self.0.contains(&flag)
+    }
+
+    /// Toggle the flag and return whether it ended up on (true) or off (false).
+    pub fn toggle(&mut self, flag: mud_db::enums::PlayerFlag) -> bool {
+        if let Some(idx) = self.0.iter().position(|f| *f == flag) {
+            self.0.swap_remove(idx);
+            false
+        } else {
+            self.0.push(flag);
+            true
+        }
+    }
+}
+
 /// Body posture. The schema's Position enum is broader (DEAD, GHOST,
 /// `MORTALLY_WOUNDED`, INCAPACITATED, STUNNED) — those land when combat
 /// has real damage states, not posture changes.

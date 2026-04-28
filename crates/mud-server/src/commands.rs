@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::{Direction, ExitState, Permission, UserRole};
+use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, UserRole};
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
     Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Named, Online, Player,
-    Posture, PostureKind, Slot,
+    PlayerFlags, Posture, PostureKind, Slot,
     SocialDef, SocialRegistry, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
@@ -320,6 +320,36 @@ const COMMANDS: &[Command] = &[
                    most accept an optional target.",
         },
         run: cmd_socials,
+    },
+    Command {
+        names: &["toggle"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "toggle <flag>",
+            summary: "Flip a player flag on or off.",
+            long: "Examples: `toggle afk`, `toggle deaf`, `toggle notell`. \
+                   `flags` lists all currently-set flags. Recognised names \
+                   include AFK, DEAF, NO_TELL/NOTELL, BRIEF, COMPACT, \
+                   AUTO_LOOT, AUTO_GOLD, AUTO_EXIT, WIMPY, QUEST, PK, MSP, \
+                   MXP, HOLY_LIGHT, COLOR_BLIND, SHOW_DICE_ROLLS, SHOW_IDS, \
+                   NO_SUMMON, CONSENT, NO_REPEAT.",
+        },
+        run: cmd_toggle,
+    },
+    Command {
+        names: &["flags"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "flags",
+            summary: "List your active player flags.",
+            long: "Shows every flag currently set on you. Use `toggle <flag>` \
+                   to flip one on or off.",
+        },
+        run: cmd_flags,
     },
     Command {
         names: &["effects", "affects"],
@@ -845,6 +875,12 @@ pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
     }
 }
 
+fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool {
+    world
+        .get::<PlayerFlags>(entity)
+        .is_some_and(|f| f.has(flag))
+}
+
 // ---------------------------------------------------------------------------
 // Info handlers
 // ---------------------------------------------------------------------------
@@ -960,13 +996,23 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
 }
 
 fn cmd_who(world: &mut World, player: Entity, _args: &str) {
-    let names: Vec<String> = {
-        let mut q = world.query_filtered::<&Named, (With<Player>, With<Online>)>();
-        q.iter(world).map(|n| n.name.clone()).collect()
+    let rows: Vec<(String, bool)> = {
+        let mut q = world
+            .query_filtered::<(&Named, Option<&PlayerFlags>), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .map(|(n, f)| {
+                let afk = f.is_some_and(|pf| pf.has(PlayerFlag::Afk));
+                (n.name.clone(), afk)
+            })
+            .collect()
     };
-    let mut out = format!("\r\n{} online:\r\n", names.len());
-    for name in &names {
-        out.push_str(&format!("  {name}\r\n"));
+    let mut out = format!("\r\n{} online:\r\n", rows.len());
+    for (name, afk) in &rows {
+        if *afk {
+            out.push_str(&format!("  {name} [AFK]\r\n"));
+        } else {
+            out.push_str(&format!("  {name}\r\n"));
+        }
     }
     send_to(world, player, out);
 }
@@ -1080,6 +1126,47 @@ fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
 
 fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, "Goodbye!\r\n");
+}
+
+fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
+    let raw = args.trim();
+    if raw.is_empty() {
+        send_to(world, player, "Toggle which flag? Try `flags` to see what's set, or `help toggle`.\r\n");
+        return;
+    }
+    let Some(flag) = PlayerFlag::from_label(raw) else {
+        send_to(world, player, format!("Unknown flag '{raw}'.\r\n"));
+        return;
+    };
+    let now_on = world
+        .get_mut::<PlayerFlags>(player)
+        .map(|mut pf| pf.toggle(flag));
+    let Some(now_on) = now_on else {
+        send_to(world, player, "You have no player flags slot.\r\n");
+        return;
+    };
+    let label = flag.label();
+    if now_on {
+        send_to(world, player, format!("{label} is now ON.\r\n"));
+    } else {
+        send_to(world, player, format!("{label} is now OFF.\r\n"));
+    }
+}
+
+fn cmd_flags(world: &mut World, player: Entity, _args: &str) {
+    let flags: Vec<&'static str> = world
+        .get::<PlayerFlags>(player)
+        .map(|f| f.0.iter().map(|fl| fl.label()).collect())
+        .unwrap_or_default();
+    let mut out = if flags.is_empty() {
+        "\r\nNo flags set.\r\n".to_string()
+    } else {
+        format!("\r\n{} flag(s) set:\r\n", flags.len())
+    };
+    for label in &flags {
+        out.push_str(&format!("  {label}\r\n"));
+    }
+    send_to(world, player, out);
 }
 
 fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
@@ -1780,6 +1867,17 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You mutter quietly to yourself.\r\n");
         return;
     }
+    if has_flag(world, target, PlayerFlag::NoTell) {
+        let actual = world
+            .get::<Named>(target)
+            .map_or_else(String::new, |n| n.name.clone());
+        send_to(
+            world,
+            player,
+            format!("{actual} is not accepting tells right now.\r\n"),
+        );
+        return;
+    }
 
     let player_name = world
         .get::<Named>(player)
@@ -1833,6 +1931,9 @@ fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
         q.iter(world).collect()
     };
     for t in targets {
+        if t != player && has_flag(world, t, PlayerFlag::Deaf) {
+            continue;
+        }
         let line = if t == player {
             format!("You gossip, \"{message}\"\r\n")
         } else {
@@ -1883,6 +1984,9 @@ fn cmd_shout(world: &mut World, player: Entity, args: &str) {
         q.iter(world).collect()
     };
     for t in targets {
+        if t != player && has_flag(world, t, PlayerFlag::Deaf) {
+            continue;
+        }
         let line = if t == player {
             format!("You shout, \"{message}\"\r\n")
         } else {
