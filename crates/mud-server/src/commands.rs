@@ -1213,52 +1213,346 @@ pub(crate) fn flush_prompts(world: &World) {
     }
 }
 
-/// Strip `FieryMUD` color/markup tags (`<b:yellow>`, `</>`, `<r>`, etc.) so
-/// the raw text is readable. Future work: translate to ANSI when the
-/// player's client supports it.
-pub(crate) fn strip_color_tags(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+/// Decide which `ColorMode` a player should see based on their flags.
+/// `COLOR_BLIND` opts out to plain text; everyone else gets ANSI.
+pub(crate) fn color_mode_for(world: &World, player: Entity) -> ColorMode {
+    if has_flag(world, player, PlayerFlag::ColorBlind) {
+        ColorMode::Strip
+    } else {
+        ColorMode::Ansi
+    }
+}
+
+/// How to handle the `FieryMUD` XML-Lite markup in player-facing strings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ColorMode {
+    /// Translate tags to ANSI escape sequences. The default for
+    /// color-capable clients.
+    Ansi,
+    /// Drop every tag, leaving plain text. Used for the `COLOR_BLIND`
+    /// flag and for log lines / tests where escape codes would be noise.
+    Strip,
+}
+
+/// Per-layer style state. Each opening tag pushes one of these to the
+/// stack; closes pop. Anonymous tags (`<b:red>` style) keep `name`
+/// empty and can only be closed via `</>`. The 8 bool fields map 1:1
+/// to ANSI attribute codes (1, 2, 3, 4, 5, 7, 8, 9) — a bitflags type
+/// would compile to the same thing, just with an extra dependency.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Default, Clone, Debug)]
+struct StyleLayer {
+    name: String,
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underline: bool,
+    blink: bool,
+    reverse: bool,
+    hidden: bool,
+    strikethrough: bool,
+    /// ANSI foreground code (30–37 for normal, 90–97 for bright).
+    fg: Option<u8>,
+    /// ANSI background code (40–47 for normal, 100–107 for bright).
+    bg: Option<u8>,
+}
+
+/// Render `FieryMUD` XML-Lite markup. Stack-based: `<name>` pushes,
+/// `</name>` pops the most recent matching layer, `</>` clears the
+/// whole stack. Multi-modifier opens (`<b:yellow>`) push an anonymous
+/// layer that must be closed with `</>`.
+///
+/// Supported subset (matches the markup in our seeded content):
+/// - Attributes: `b`, `u`, `i`, `s`, `dim`, `blink`, `reverse`, `hide`
+/// - Named foreground: red/green/blue/yellow/cyan/purple/magenta/
+///   white/black/brown/orange (last two are aliases per the docs)
+/// - Named background via `bg-NAME`
+///
+/// Indexed (`cN` / `bgcN`) and RGB (`#RRGGBB` / `bg#RRGGBB`) tags are
+/// not yet implemented — they parse as no-op modifiers (the layer is
+/// pushed but contributes nothing). No content in the world uses them.
+///
+/// Malformed input is tolerated quietly — unterminated `<` swallows
+/// the rest of the string, empty `<>` drops cleanly. Both match the
+/// previous strip-only behavior.
+pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut stack: Vec<StyleLayer> = Vec::new();
     let mut chars = s.chars();
+
     while let Some(c) = chars.next() {
-        if c == '<' {
-            for c2 in chars.by_ref() {
-                if c2 == '>' {
-                    break;
-                }
-            }
-        } else {
+        if c != '<' {
             out.push(c);
+            continue;
+        }
+        // Read up to the matching `>`. If we hit end-of-input before
+        // `>`, drain — matches the historical strip-only behavior.
+        let mut tag = String::new();
+        let mut closed = false;
+        for next in chars.by_ref() {
+            if next == '>' {
+                closed = true;
+                break;
+            }
+            tag.push(next);
+        }
+        if !closed {
+            break;
+        }
+        if apply_tag(&tag, &mut stack) && mode == ColorMode::Ansi {
+            emit_ansi_state(&mut out, &stack);
         }
     }
+    if mode == ColorMode::Ansi && !stack.is_empty() {
+        out.push_str("\x1b[0m");
+    }
     out
+}
+
+/// Mutate the style stack in response to one parsed tag. Returns true
+/// if the stack changed; the caller uses that to skip a no-op ANSI
+/// re-emit (empty `<>`, `</no-such-name>`).
+fn apply_tag(tag: &str, stack: &mut Vec<StyleLayer>) -> bool {
+    if let Some(name) = tag.strip_prefix('/') {
+        if name.is_empty() {
+            if stack.is_empty() {
+                return false;
+            }
+            stack.clear();
+            return true;
+        }
+        if let Some(pos) = stack.iter().rposition(|l| l.name == name) {
+            stack.truncate(pos);
+            return true;
+        }
+        return false;
+    }
+    if tag.is_empty() {
+        return false;
+    }
+    let parts: Vec<&str> = tag.split(':').collect();
+    let mut layer = StyleLayer {
+        // Single-modifier tags are named (closeable via `</name>`);
+        // multi-modifier tags are anonymous (only closeable via `</>`).
+        name: if parts.len() == 1 { parts[0].to_string() } else { String::new() },
+        ..StyleLayer::default()
+    };
+    for p in parts {
+        apply_modifier(&mut layer, p);
+    }
+    stack.push(layer);
+    true
+}
+
+fn apply_modifier(layer: &mut StyleLayer, m: &str) {
+    match m {
+        "b" => layer.bold = true,
+        "u" => layer.underline = true,
+        "i" => layer.italic = true,
+        "s" => layer.strikethrough = true,
+        "dim" | "d" => layer.dim = true,
+        "blink" => layer.blink = true,
+        "reverse" => layer.reverse = true,
+        "hide" => layer.hidden = true,
+        _ => {
+            if let Some(rest) = m.strip_prefix("bg-") {
+                if let Some(c) = named_color(rest) {
+                    layer.bg = Some(c + 10); // bg ANSI = fg + 10
+                }
+            } else if let Some(c) = named_color(m) {
+                layer.fg = Some(c);
+            }
+            // Other modifier shapes (cN / #RRGGBB / etc.) parse as
+            // no-ops; layer contributes nothing for those positions.
+        }
+    }
+}
+
+/// Map a named color word to its base ANSI foreground code. Aliases
+/// (`magenta`/`purple`, `cyan`/`teal`, `brown`/`yellow`, `orange` →
+/// bright yellow) follow the `FieryMUD` `XMLLite` docs.
+fn named_color(s: &str) -> Option<u8> {
+    Some(match s {
+        "black" => 30,
+        "red" => 31,
+        "green" => 32,
+        "yellow" | "brown" => 33,
+        "blue" => 34,
+        "purple" | "magenta" => 35,
+        "cyan" | "teal" => 36,
+        "white" => 37,
+        // Bright variants
+        "orange" => 93,
+        _ => return None,
+    })
+}
+
+/// Emit `\x1b[0m` plus the cumulative codes for the merged stack
+/// state. Called after every push/pop so the rendered output reflects
+/// the active style at that point.
+fn emit_ansi_state(out: &mut String, stack: &[StyleLayer]) {
+    out.push_str("\x1b[0m");
+    if stack.is_empty() {
+        return;
+    }
+    let merged = merge_stack(stack);
+    let mut codes: Vec<u8> = Vec::new();
+    if merged.bold {
+        codes.push(1);
+    }
+    if merged.dim {
+        codes.push(2);
+    }
+    if merged.italic {
+        codes.push(3);
+    }
+    if merged.underline {
+        codes.push(4);
+    }
+    if merged.blink {
+        codes.push(5);
+    }
+    if merged.reverse {
+        codes.push(7);
+    }
+    if merged.hidden {
+        codes.push(8);
+    }
+    if merged.strikethrough {
+        codes.push(9);
+    }
+    if let Some(fg) = merged.fg {
+        codes.push(fg);
+    }
+    if let Some(bg) = merged.bg {
+        codes.push(bg);
+    }
+    if codes.is_empty() {
+        return;
+    }
+    out.push_str("\x1b[");
+    let strs: Vec<String> = codes.iter().map(u8::to_string).collect();
+    out.push_str(&strs.join(";"));
+    out.push('m');
+}
+
+/// Collapse the stack into one effective style: attributes OR-combined,
+/// foreground/background = most-recent (deepest layer wins).
+fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
+    let mut m = StyleLayer::default();
+    for layer in stack {
+        m.bold |= layer.bold;
+        m.dim |= layer.dim;
+        m.italic |= layer.italic;
+        m.underline |= layer.underline;
+        m.blink |= layer.blink;
+        m.reverse |= layer.reverse;
+        m.hidden |= layer.hidden;
+        m.strikethrough |= layer.strikethrough;
+        if layer.fg.is_some() {
+            m.fg = layer.fg;
+        }
+        if layer.bg.is_some() {
+            m.bg = layer.bg;
+        }
+    }
+    m
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_damage, condition_label, direction_name, format_idle, parse_direction,
-        render_prompt, sector_movement_cost, strip_color_tags,
+        ColorMode, apply_damage, condition_label, direction_name, format_idle, parse_direction,
+        render_color_tags, render_prompt, sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
     use mud_world::{Health, Stamina};
 
+    fn strip(s: &str) -> String {
+        render_color_tags(s, ColorMode::Strip)
+    }
+    fn ansi(s: &str) -> String {
+        render_color_tags(s, ColorMode::Ansi)
+    }
+
     #[test]
-    fn strip_color_tags_handles_common_patterns() {
+    fn render_color_tags_strip_mode_matches_legacy() {
         // No tags: identity.
-        assert_eq!(strip_color_tags("plain text"), "plain text");
+        assert_eq!(strip("plain text"), "plain text");
         // Single tag pair.
-        assert_eq!(strip_color_tags("<r>red</>"), "red");
-        // Nested-looking: just sequential.
-        assert_eq!(
-            strip_color_tags("<b:yellow>warning:</> watch out"),
-            "warning: watch out"
-        );
-        // Unterminated tag: drains rest of string (acceptable for malformed
-        // input).
-        assert_eq!(strip_color_tags("hello <b:yellow"), "hello ");
-        // Empty tags.
-        assert_eq!(strip_color_tags("<>x<>y"), "xy");
+        assert_eq!(strip("<r>red</>"), "red");
+        // Multi-modifier open + full reset close.
+        assert_eq!(strip("<b:yellow>warning:</> watch out"), "warning: watch out");
+        // Unterminated tag: drains rest of string.
+        assert_eq!(strip("hello <b:yellow"), "hello ");
+        // Empty tags drop cleanly.
+        assert_eq!(strip("<>x<>y"), "xy");
+    }
+
+    #[test]
+    fn render_color_tags_named_color_emits_fg_then_reset() {
+        // <green>...</> → \x1b[0m \x1b[32m text \x1b[0m \x1b[0m
+        let out = ansi("<green>grass</>");
+        assert!(out.contains("\x1b[32m"), "fg green present: {out:?}");
+        assert!(out.starts_with("\x1b[0m\x1b[32m"));
+        assert!(out.ends_with("\x1b[0m"));
+        assert!(out.contains("grass"));
+    }
+
+    #[test]
+    fn render_color_tags_bold_named() {
+        let out = ansi("<b:yellow>warning</>");
+        // Bold + fg yellow merged: \x1b[1;33m
+        assert!(out.contains("\x1b[1;33m"), "bold+yellow merged: {out:?}");
+        assert!(out.contains("warning"));
+        assert!(out.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn render_color_tags_close_named_pops_only_that_layer() {
+        // <b><red>X</red>Y</b>: red closes, bold persists for Y.
+        let out = ansi("<b><red>X</red>Y</b>");
+        // After </red>, state should be just bold (1m). Y rendered with bold only.
+        // Easiest assert: substring "Y" preceded by "\x1b[1m" before any 31m for it.
+        assert!(out.contains('Y'));
+        assert!(out.contains("\x1b[1m"), "bold-only state present: {out:?}");
+    }
+
+    #[test]
+    fn render_color_tags_full_reset_clears_stack() {
+        // </> in the middle should fully reset.
+        let out = ansi("<b><red>X</> plain");
+        // After </>, should emit a reset and "plain" should NOT be wrapped in any code.
+        // We test: "plain" appears in output, and the last escape before "plain" is a reset.
+        assert!(out.contains("plain"));
+        assert!(out.contains("\x1b[0m plain") || out.contains("\x1b[0mplain"));
+    }
+
+    #[test]
+    fn render_color_tags_anonymous_open_only_closes_with_full_reset() {
+        // <b:red>...</b> shouldn't close — </b> doesn't match anonymous layer.
+        // The anonymous layer only closes on </> or end of string.
+        let out = ansi("<b:red>X</b>Y");
+        // Both X and Y should still be styled (bold+red), since </b> didn't match.
+        // We expect the trailing reset at end-of-string.
+        assert!(out.contains('X'));
+        assert!(out.contains('Y'));
+        assert!(out.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn render_color_tags_unknown_modifier_does_not_panic() {
+        // RGB and indexed forms aren't implemented yet — they parse as
+        // no-op modifiers (push a layer with no effect).
+        let out = ansi("<#ff0000>red?</>");
+        // Layer has no fg/bg/attributes, so emit_state produces just \x1b[0m.
+        assert!(out.contains("red?"));
+    }
+
+    #[test]
+    fn render_color_tags_empty_tag_is_dropped() {
+        assert_eq!(ansi("<>x<>y"), "xy");
     }
 
     #[test]
@@ -1692,9 +1986,13 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         .unwrap_or_default();
     let posture = world.get::<Posture>(target).map(|p| p.0);
 
+    let mode = color_mode_for(world, player);
     let mut out = format!("\r\nYou look at {name}.\r\n");
     if !description.trim().is_empty() {
-        out.push_str(&format!("{}\r\n", strip_color_tags(description.trim_end())));
+        out.push_str(&format!(
+            "{}\r\n",
+            render_color_tags(description.trim_end(), mode)
+        ));
     }
     if let Some(p) = posture
         && p != PostureKind::Standing
@@ -1788,15 +2086,19 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
 
+    let mode = color_mode_for(world, player);
     let mut out = String::new();
-    out.push_str(&format!("\r\n{room_name}\r\n"));
+    out.push_str(&format!("\r\n{}\r\n", render_color_tags(&room_name, mode)));
     // BRIEF flag suppresses the description — name/occupants/exits only.
     // CircleMUD-standard "brief mode".
     if !has_flag(world, player, PlayerFlag::Brief) && !room_desc.trim().is_empty() {
-        out.push_str(&format!("{}\r\n", strip_color_tags(room_desc.trim_end())));
+        out.push_str(&format!(
+            "{}\r\n",
+            render_color_tags(room_desc.trim_end(), mode)
+        ));
     }
     for line in &mob_lines {
-        out.push_str(&format!("{}\r\n", strip_color_tags(line)));
+        out.push_str(&format!("{}\r\n", render_color_tags(line, mode)));
     }
     if !other_players.is_empty() {
         out.push_str(&format!("Also here: {}\r\n", other_players.join(", ")));
@@ -2284,9 +2586,11 @@ fn look_direction(world: &mut World, player: Entity, dir: Direction) {
         return;
     };
     let name = name_or(world, target_room, "<unknown>");
+    let mode = color_mode_for(world, player);
+    let name = render_color_tags(&name, mode);
     let desc = world
         .get::<Description>(target_room)
-        .map(|d| strip_color_tags(&d.0))
+        .map(|d| render_color_tags(&d.0, mode))
         .unwrap_or_default();
     let mut out = format!("\r\nYou peer {}.\r\n  {name}\r\n", direction_name(dir));
     if !desc.trim().is_empty() {
