@@ -1967,20 +1967,12 @@ fn cmd_wake(world: &mut World, player: Entity, args: &str) {
         target,
         format!("{player_name} wakes you up.\r\n"),
     );
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && *e != target && l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(
-            world,
-            b,
-            format!("{player_name} wakes {target_name} up.\r\n"),
-        );
-    }
+    broadcast_room_except_players(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{player_name} wakes {target_name} up.\r\n"),
+    );
 }
 
 fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
@@ -2017,16 +2009,12 @@ fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
         PostureKind::Resting => "begins resting",
         PostureKind::Sleeping => "lies down and sleeps",
     };
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(world, b, format!("{mover_name} {third}.\r\n"));
-    }
+    broadcast_room_except_players(
+        world,
+        located.0,
+        &[player],
+        &format!("{mover_name} {third}.\r\n"),
+    );
 }
 
 fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
@@ -2730,20 +2718,12 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
         target,
         format!("{speaker} whispers to you, \"{message}\"\r\n"),
     );
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && *e != target && l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(
-            world,
-            b,
-            format!("{speaker} whispers something to {target_name}.\r\n"),
-        );
-    }
+    broadcast_room_except_players(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{speaker} whispers something to {target_name}.\r\n"),
+    );
 }
 
 fn cmd_bug(world: &mut World, player: Entity, args: &str) {
@@ -2935,6 +2915,29 @@ pub(crate) fn broadcast_room_except(
 ) {
     let targets: Vec<Entity> = {
         let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == room && !except.contains(e))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        send_to(world, t, msg);
+    }
+}
+
+/// Like `broadcast_room_except`, but only fans out to entities that have
+/// the `Player` marker. Used for messages that semantically don't apply
+/// to mobs (whisper bystanders, posture announcements, social emotes, etc.)
+/// — even though I/O is a no-op for mobs since they have no Connection,
+/// keeping the filter narrow keeps `PROMPT_RECIPIENTS` clean.
+pub(crate) fn broadcast_room_except_players(
+    world: &mut World,
+    room: Entity,
+    except: &[Entity],
+    msg: &str,
+) {
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
             .filter(|(e, l)| l.0 == room && !except.contains(e))
             .map(|(e, _)| e)
@@ -3232,16 +3235,12 @@ fn require_alert_posture(world: &mut World, player: Entity, action: &str) -> boo
                 let mover_name = world
                     .get::<Named>(player)
                     .map_or_else(String::new, |n| n.name.clone());
-                let bystanders: Vec<Entity> = {
-                    let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-                    q.iter(world)
-                        .filter(|(e, l)| *e != player && l.0 == located.0)
-                        .map(|(e, _)| e)
-                        .collect()
-                };
-                for b in bystanders {
-                    send_to(world, b, format!("{mover_name} stands up.\r\n"));
-                }
+                broadcast_room_except_players(
+                    world,
+                    located.0,
+                    &[player],
+                    &format!("{mover_name} stands up.\r\n"),
+                );
             }
             true
         }
@@ -3915,22 +3914,12 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
     let admin_name = world
         .get::<Named>(player)
         .map_or_else(String::new, |n| n.name.clone());
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(
-            world,
-            b,
-            format!(
-                "{admin_name} extends a hand and {target_name} crumbles to dust.\r\n"
-            ),
-        );
-    }
+    broadcast_room_except_players(
+        world,
+        located.0,
+        &[player],
+        &format!("{admin_name} extends a hand and {target_name} crumbles to dust.\r\n"),
+    );
     send_to(
         world,
         player,
@@ -4166,20 +4155,12 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     let player_name = world
         .get::<Named>(player)
         .map_or_else(String::new, |n| n.name.clone());
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == room)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(
-            world,
-            b,
-            format!("{player_name} summons {proto_name} from thin air.\r\n"),
-        );
-    }
+    broadcast_room_except_players(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} summons {proto_name} from thin air.\r\n"),
+    );
 }
 
 fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
