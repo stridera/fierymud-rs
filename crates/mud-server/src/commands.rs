@@ -18,9 +18,9 @@ use mud_world::{
     EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastInputAt, LastTeller,
     Located, LoggedInAt, Mob,
     MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint,
-    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, WearableIn, WorldKeyIndex,
+    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, WearableIn, WorldKey, WorldKeyIndex,
 };
-use tracing::info_span;
+use tracing::{info, info_span};
 
 use crate::{ServerStart, TickCount};
 
@@ -350,6 +350,48 @@ const COMMANDS: &[Command] = &[
                    most accept an optional target.",
         },
         run: cmd_socials,
+    },
+    Command {
+        names: &["bug"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "bug <description>",
+            summary: "Report a bug to the staff.",
+            long: "Writes the report to the server log tagged with your \
+                   character name. Be specific — what you did, what you \
+                   expected, what happened.",
+        },
+        run: cmd_bug,
+    },
+    Command {
+        names: &["idea"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "idea <suggestion>",
+            summary: "Suggest a new feature or improvement.",
+            long: "Writes the suggestion to the server log tagged with \
+                   your character name. No promises — but the staff reads \
+                   them.",
+        },
+        run: cmd_idea,
+    },
+    Command {
+        names: &["typo"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "typo <correction>",
+            summary: "Report a typo or wording problem.",
+            long: "Writes the correction to the server log tagged with \
+                   your character name. Mention the room/object/mob if \
+                   you can — it speeds up the fix.",
+        },
+        run: cmd_typo,
     },
     Command {
         names: &["prompt"],
@@ -2417,6 +2459,52 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
             format!("{speaker} whispers something to {target_name}.\r\n"),
         );
     }
+}
+
+fn cmd_bug(world: &mut World, player: Entity, args: &str) {
+    submit_feedback(world, player, "bug", args);
+}
+fn cmd_idea(world: &mut World, player: Entity, args: &str) {
+    submit_feedback(world, player, "idea", args);
+}
+fn cmd_typo(world: &mut World, player: Entity, args: &str) {
+    submit_feedback(world, player, "typo", args);
+}
+
+/// Log a player feedback report (`bug`/`idea`/`typo`) to the tracing
+/// pipeline so it ends up in the server log for staff review. Includes
+/// the player's name, character id, and current room id when available
+/// — useful for `typo` reports that almost always need location context.
+fn submit_feedback(world: &mut World, player: Entity, kind: &'static str, args: &str) {
+    let body = args.trim();
+    if body.is_empty() {
+        send_to(world, player, format!("Usage: {kind} <message>\r\n"));
+        return;
+    }
+    let name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let char_id = world
+        .get::<Account>(player)
+        .map(|a| a.character_id.clone())
+        .unwrap_or_default();
+    let room_key = world
+        .get::<Located>(player)
+        .and_then(|l| world.get::<WorldKey>(l.0))
+        .map(|wk| format!("{}:{}", wk.zone, wk.id));
+    info!(
+        kind,
+        player = %name,
+        character_id = %char_id,
+        room = room_key.as_deref().unwrap_or("?"),
+        body = %body,
+        "player feedback"
+    );
+    send_to(
+        world,
+        player,
+        format!("Thanks. Your {kind} report has been logged.\r\n"),
+    );
 }
 
 fn cmd_socials(world: &mut World, player: Entity, _args: &str) {
