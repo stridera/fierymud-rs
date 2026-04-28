@@ -908,6 +908,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_apply,
     },
     Command {
+        names: &["restore"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "restore [target]",
+            summary: "Refill HP and stamina to max on yourself or another actor.",
+            long: "Builder+ debug/utility. Sets Health.hp = max and \
+                   Stamina.current = max. With no argument, restores the \
+                   caster. With a target (substring match in the room), \
+                   restores them and notifies the room.",
+        },
+        run: cmd_restore,
+    },
+    Command {
         names: &["lua"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -3667,6 +3682,47 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 // ---------------------------------------------------------------------------
 // Admin handlers
 // ---------------------------------------------------------------------------
+
+fn cmd_restore(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let target = if arg.is_empty() || arg.eq_ignore_ascii_case("me")
+        || arg.eq_ignore_ascii_case("self")
+    {
+        player
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let Some(found) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        found
+    };
+    if let Some(mut h) = world.get_mut::<Health>(target) {
+        h.hp = h.max;
+    }
+    if let Some(mut s) = world.get_mut::<Stamina>(target) {
+        s.current = s.max;
+    }
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    if target == player {
+        send_to(world, player, "You feel completely refreshed.\r\n");
+        return;
+    }
+    let admin_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    send_to(world, player, format!("You restore {target_name}.\r\n"));
+    send_to(
+        world,
+        target,
+        format!("{admin_name} restores you. You feel completely refreshed.\r\n"),
+    );
+}
 
 fn cmd_apply(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
