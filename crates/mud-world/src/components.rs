@@ -291,3 +291,47 @@ pub struct ExitData {
 
 #[derive(Component, Debug, Clone, Default)]
 pub struct Exits(pub HashMap<Direction, ExitData>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mud_db::enums::PlayerFlag;
+
+    #[test]
+    fn player_flags_toggle_round_trip() {
+        let mut pf = PlayerFlags::default();
+        assert!(!pf.has(PlayerFlag::Afk));
+        // First toggle adds, returns true (now on).
+        assert!(pf.toggle(PlayerFlag::Afk));
+        assert!(pf.has(PlayerFlag::Afk));
+        // Second toggle removes, returns false (now off).
+        assert!(!pf.toggle(PlayerFlag::Afk));
+        assert!(!pf.has(PlayerFlag::Afk));
+    }
+
+    #[test]
+    fn player_flags_toggle_independent_per_flag() {
+        let mut pf = PlayerFlags::default();
+        pf.toggle(PlayerFlag::Afk);
+        pf.toggle(PlayerFlag::Deaf);
+        pf.toggle(PlayerFlag::NoTell);
+        assert!(pf.has(PlayerFlag::Afk));
+        assert!(pf.has(PlayerFlag::Deaf));
+        assert!(pf.has(PlayerFlag::NoTell));
+        assert!(!pf.has(PlayerFlag::Wimpy));
+        // Toggling one off doesn't affect the others.
+        pf.toggle(PlayerFlag::Deaf);
+        assert!(pf.has(PlayerFlag::Afk));
+        assert!(!pf.has(PlayerFlag::Deaf));
+        assert!(pf.has(PlayerFlag::NoTell));
+    }
+
+    #[test]
+    fn player_flags_has_on_empty() {
+        let pf = PlayerFlags::default();
+        // No flags → has() returns false for everything.
+        assert!(!pf.has(PlayerFlag::Afk));
+        assert!(!pf.has(PlayerFlag::Brief));
+        assert!(!pf.has(PlayerFlag::Wimpy));
+    }
+}
