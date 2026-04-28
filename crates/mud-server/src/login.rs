@@ -78,9 +78,13 @@ impl ConnRouter {
             self.advance_login(conn_id, text, pool, world).await;
         } else if let Some(&entity) = self.playing.get(&conn_id) {
             commands::dispatch(world, entity, &text);
+            commands::send_prompt(world, entity);
         }
     }
 
+    // The state machine is naturally a sequence of stage-arm bodies; splitting
+    // would just hide the linear flow.
+    #[allow(clippy::too_many_lines)]
     async fn advance_login(
         &mut self,
         conn_id: ConnId,
@@ -189,6 +193,7 @@ impl ConnRouter {
                 let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
                 let entity = spawn_player(world, &user, &char_row, outbound);
                 self.playing.insert(conn_id, entity);
+                commands::send_prompt(world, entity);
                 info!(
                     conn_id,
                     char_name = %char_row.name,

@@ -904,6 +904,17 @@ pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
     }
 }
 
+/// Send a one-line prompt to a player. Hardcoded `<HP/MaxHP> ` for now;
+/// `Characters.prompt` template + variable substitution is a future step.
+pub(crate) fn send_prompt(world: &World, target: Entity) {
+    let hp = world.get::<Health>(target).copied();
+    if let Some(hp) = hp
+        && let Some(conn) = world.get::<Connection>(target)
+    {
+        let _ = conn.0.send(format!("<{}/{}> ", hp.hp, hp.max));
+    }
+}
+
 fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool {
     world
         .get::<PlayerFlags>(entity)
