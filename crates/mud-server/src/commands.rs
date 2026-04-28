@@ -894,6 +894,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_transfer,
     },
     Command {
+        names: &["force"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "force <player> <command>",
+            summary: "Make a player run a command as themselves.",
+            long: "Implementor-only. Dispatches <command> with <player> \
+                   as the actor — exactly as if they had typed it. The \
+                   player sees their command's normal output and a note \
+                   that you forced it. Useful for testing and unsticking \
+                   stuck sessions.",
+        },
+        run: cmd_force,
+    },
+    Command {
         names: &["summon"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -4112,6 +4128,50 @@ fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
         player,
         format!("Recall point bound: {room_name}.\r\n"),
     );
+}
+
+fn cmd_force(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 || parts[1].trim().is_empty() {
+        send_to(world, player, "Usage: force <player> <command>\r\n");
+        return;
+    }
+    let target_word = parts[0].trim();
+    let cmd_text = parts[1].trim();
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(target_word))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{target_word}' isn't online.\r\n"));
+        return;
+    };
+    let admin_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    send_to(
+        world,
+        player,
+        format!("You force {target_name} to: {cmd_text}\r\n"),
+    );
+    send_to(
+        world,
+        target,
+        format!("{admin_name} forces you to: {cmd_text}\r\n"),
+    );
+    info!(
+        admin = %admin_name,
+        target = %target_name,
+        command = %cmd_text,
+        "force"
+    );
+    dispatch(world, target, cmd_text);
 }
 
 fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
