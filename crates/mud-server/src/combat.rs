@@ -335,3 +335,152 @@ fn broadcast_room_except(world: &mut World, room: Entity, except: &[Entity], msg
         send_to(world, t, msg);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spawn a minimal "room" (just an Entity with no components — combat
+    /// only needs an Entity handle for Located references; nothing reads
+    /// room contents during a swing) and return its handle.
+    fn make_room(world: &mut World) -> Entity {
+        world.spawn_empty().id()
+    }
+
+    /// Spawn an attacker with Fighting+CombatStats+Located+Named pointed
+    /// at `target`. `dmg_roll` is configurable so callers can predict the
+    /// numeric outcome.
+    fn make_attacker(
+        world: &mut World,
+        room: Entity,
+        target: Entity,
+        dmg_roll: i32,
+    ) -> Entity {
+        world
+            .spawn((
+                Named { name: "Attacker".to_string() },
+                Located(room),
+                Fighting(target),
+                CombatStats {
+                    hit_roll: 0,
+                    dmg_roll,
+                    ac: 10,
+                    alignment: 0,
+                },
+                Posture(PostureKind::Standing),
+            ))
+            .id()
+    }
+
+    fn make_target(world: &mut World, room: Entity, hp: i32) -> Entity {
+        world
+            .spawn((
+                Named { name: "Target".to_string() },
+                Located(room),
+                Health { hp, max: hp },
+            ))
+            .id()
+    }
+
+    fn run_combat_tick(world: &mut World) {
+        // combat_tick fires only on multiples of COMBAT_PERIOD_TICKS (10).
+        world.insert_resource(TickCount(COMBAT_PERIOD_TICKS));
+        combat_tick(world);
+    }
+
+    #[test]
+    fn applies_damage_when_attacker_swings() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 50);
+        let _attacker = make_attacker(&mut world, room, target, 7);
+
+        run_combat_tick(&mut world);
+
+        let hp = world.get::<Health>(target).expect("target still has Health");
+        assert_eq!(hp.hp, 43, "target HP dropped by attacker's dmg_roll");
+        assert_eq!(hp.max, 50, "max HP unchanged");
+    }
+
+    #[test]
+    fn skips_off_period_ticks() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 50);
+        let _attacker = make_attacker(&mut world, room, target, 7);
+        // Off-period: nothing should happen.
+        world.insert_resource(TickCount(COMBAT_PERIOD_TICKS - 1));
+        combat_tick(&mut world);
+        let hp = world.get::<Health>(target).expect("target still has Health");
+        assert_eq!(hp.hp, 50, "no swing fires off-period");
+    }
+
+    #[test]
+    fn auto_disengages_on_room_mismatch() {
+        let mut world = World::new();
+        let room_a = make_room(&mut world);
+        let room_b = make_room(&mut world);
+        let target = make_target(&mut world, room_b, 50);
+        let attacker = make_attacker(&mut world, room_a, target, 7);
+
+        run_combat_tick(&mut world);
+
+        // Different rooms — attacker drops Fighting, no damage applied.
+        assert!(
+            world.get::<Fighting>(attacker).is_none(),
+            "attacker disengaged after room mismatch"
+        );
+        assert_eq!(world.get::<Health>(target).unwrap().hp, 50);
+    }
+
+    #[test]
+    fn sleeping_attacker_does_not_swing() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 50);
+        let attacker = make_attacker(&mut world, room, target, 7);
+        // Override posture to Sleeping.
+        world
+            .get_entity_mut(attacker)
+            .unwrap()
+            .insert(Posture(PostureKind::Sleeping));
+
+        run_combat_tick(&mut world);
+
+        assert_eq!(
+            world.get::<Health>(target).unwrap().hp,
+            50,
+            "no damage from sleeping attacker"
+        );
+        // Fighting stays — the player is still committed; they just couldn't act.
+        assert!(world.get::<Fighting>(attacker).is_some());
+    }
+
+    #[test]
+    fn lethal_blow_despawns_mob() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = world
+            .spawn((
+                Mob,
+                Named { name: "Target".to_string() },
+                Located(room),
+                Health { hp: 5, max: 5 },
+            ))
+            .id();
+        let attacker = make_attacker(&mut world, room, target, 100);
+
+        run_combat_tick(&mut world);
+
+        assert!(
+            world.get_entity(target).is_err(),
+            "lethal blow despawned the mob"
+        );
+        // Attacker's Fighting should be cleared too — handle_death sweeps
+        // every Fighting against the dead victim.
+        assert!(
+            world.get::<Fighting>(attacker).is_none(),
+            "attacker's Fighting cleared after target died"
+        );
+    }
+}
