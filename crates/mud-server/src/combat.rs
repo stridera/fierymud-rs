@@ -127,8 +127,21 @@ pub fn combat_tick(world: &mut World) {
             .collect()
     };
 
-    for s in swings {
-        apply_swing(world, &s);
+    for s in &swings {
+        apply_swing(world, s);
+    }
+
+    // Refresh the prompt for everyone who participated, so HP/Stamina
+    // changes show up live without having to type a command. Mobs have
+    // no Connection, so send_prompt is a no-op for them. Despawned
+    // entities are skipped via get_entity.
+    let mut prompted = std::collections::HashSet::new();
+    for s in &swings {
+        for &entity in &[s.attacker, s.target] {
+            if prompted.insert(entity) && world.get_entity(entity).is_ok() {
+                crate::commands::send_prompt(world, entity);
+            }
+        }
     }
 }
 
