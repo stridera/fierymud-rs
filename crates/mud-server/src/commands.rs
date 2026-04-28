@@ -923,6 +923,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_restore,
     },
     Command {
+        names: &["slay"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "slay <mob>",
+            summary: "Instantly destroy a mob in your current room.",
+            long: "Builder+ shortcut for combat testing. Despawns the mob \
+                   and ends any combat against it. Players are refused — \
+                   use `restore` if a player is in trouble, or `attack` \
+                   if you really mean to fight.",
+        },
+        run: cmd_slay,
+    },
+    Command {
         names: &["lua"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -3682,6 +3697,78 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 // ---------------------------------------------------------------------------
 // Admin handlers
 // ---------------------------------------------------------------------------
+
+fn cmd_slay(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: slay <mob>\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if world.get::<Player>(target).is_some() {
+        send_to(
+            world,
+            player,
+            "Slaying players is not allowed. Use `restore` if they're in trouble.\r\n",
+        );
+        return;
+    }
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+
+    // End any combat against this mob — attackers stop swinging.
+    let attackers: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Fighting)>();
+        q.iter(world)
+            .filter(|(_, f)| f.0 == target)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for a in attackers {
+        if let Ok(mut e) = world.get_entity_mut(a) {
+            e.remove::<Fighting>();
+        }
+        send_to(world, a, "Your target falls.\r\n");
+    }
+
+    // Notify the room before despawn.
+    let admin_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 == located.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(
+            world,
+            b,
+            format!(
+                "{admin_name} extends a hand and {target_name} crumbles to dust.\r\n"
+            ),
+        );
+    }
+    send_to(
+        world,
+        player,
+        format!("{target_name} crumbles to dust at your gesture.\r\n"),
+    );
+
+    if let Ok(e) = world.get_entity_mut(target) {
+        e.despawn();
+    }
+}
 
 fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
