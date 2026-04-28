@@ -280,8 +280,7 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
     };
     let hp = world
         .get::<Health>(entity)
-        .map(|h| h.hp)
-        .unwrap_or(0);
+        .map_or(0, |h| h.hp);
     let (zone_id, room_id) = world
         .get::<Located>(entity)
         .and_then(|l| world.get::<WorldKey>(l.0).copied())

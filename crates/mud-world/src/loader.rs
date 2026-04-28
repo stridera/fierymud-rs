@@ -28,6 +28,9 @@ pub struct LoadStats {
 ///   pass 3: resolve room-to-room exits and populate the Exits component
 ///   pass 4: just count mobs/objects/effects so we know they loaded — actual
 ///           prototype caching comes when the spawner needs it.
+// The structure is one long pass-by-pass loader; splitting into helpers would
+// just hide the order. Long but linear.
+#[allow(clippy::too_many_lines)]
 pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<LoadStats> {
     let mut stats = LoadStats::default();
 
@@ -55,16 +58,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let room_rows = rooms::list_rooms(pool).await?;
     let mut room_index: HashMap<(i32, i32), Entity> = HashMap::with_capacity(room_rows.len());
     for r in &room_rows {
-        let zone_entity = match zone_index.get(&r.zone_id) {
-            Some(&e) => e,
-            None => {
-                warn!(
-                    zone_id = r.zone_id,
-                    room_id = r.id,
-                    "room references missing zone; skipping"
-                );
-                continue;
-            }
+        let Some(&zone_entity) = zone_index.get(&r.zone_id) else {
+            warn!(
+                zone_id = r.zone_id,
+                room_id = r.id,
+                "room references missing zone; skipping"
+            );
+            continue;
         };
         let entity = world
             .spawn((

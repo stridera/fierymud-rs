@@ -26,6 +26,7 @@ impl Default for LuaHost {
 }
 
 impl LuaHost {
+    #[must_use] 
     pub fn new() -> Self {
         // TODO: lock down os/io/debug modules. mlua 0.11 doesn't expose a
         // direct sandbox helper for stock Lua 5.4 builds; we'll do explicit
@@ -124,9 +125,7 @@ fn format_args(args: &Variadic<Value>) -> String {
     args.iter()
         .map(|v| match v {
             Value::String(s) => s
-                .to_str()
-                .map(|cow| cow.to_string())
-                .unwrap_or_else(|_| "<bad-utf8>".to_string()),
+                .to_str().map_or_else(|_| "<bad-utf8>".to_string(), |cow| cow.to_string()),
             Value::Integer(n) => n.to_string(),
             Value::Number(n) => format!("{n}"),
             Value::Boolean(b) => b.to_string(),
@@ -157,12 +156,12 @@ impl UserData for LuaActor {
         });
         methods.add_method("hp", |lua, this, ()| {
             world_from_lua(lua, |w| {
-                w.get::<Health>(this.entity).map(|h| h.hp).unwrap_or(0)
+                w.get::<Health>(this.entity).map_or(0, |h| h.hp)
             })
         });
         methods.add_method("max_hp", |lua, this, ()| {
             world_from_lua(lua, |w| {
-                w.get::<Health>(this.entity).map(|h| h.max).unwrap_or(0)
+                w.get::<Health>(this.entity).map_or(0, |h| h.max)
             })
         });
         methods.add_method("is_player", |lua, this, ()| {
@@ -184,9 +183,7 @@ impl UserData for LuaActor {
         methods.add_meta_method(MetaMethod::ToString, |lua, this, ()| {
             world_from_lua(lua, |w| {
                 let name = w
-                    .get::<Named>(this.entity)
-                    .map(|n| n.name.clone())
-                    .unwrap_or_else(|| "<unknown>".to_string());
+                    .get::<Named>(this.entity).map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
                 format!("Actor({name})")
             })
         });

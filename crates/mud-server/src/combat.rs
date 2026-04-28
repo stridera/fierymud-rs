@@ -60,7 +60,7 @@ pub fn seed_test_mobs(world: &mut World) {
 }
 
 /// Spawn a couple of starter items in The Void so we can test inventory.
-/// Real spawning via ObjectResets is a future step.
+/// Real spawning via `ObjectResets` is a future step.
 pub fn seed_test_items(world: &mut World) {
     let void = world
         .resource::<WorldKeyIndex>()
@@ -89,7 +89,7 @@ pub fn seed_test_items(world: &mut World) {
     info!("seeded test items in The Void");
 }
 
-/// Exclusive system: every COMBAT_PERIOD_TICKS world ticks, every entity with
+/// Exclusive system: every `COMBAT_PERIOD_TICKS` world ticks, every entity with
 /// Fighting takes a swing at its target.
 pub fn combat_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
@@ -188,11 +188,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
     );
 
     if dead {
-        handle_death(world, s.target, target_name, room);
+        handle_death(world, s.target, &target_name, room);
     }
 }
 
-fn handle_death(world: &mut World, victim: Entity, victim_name: String, room: Entity) {
+fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Entity) {
     let is_player = world.get::<Player>(victim).is_some();
 
     // Find every entity that was fighting the victim.

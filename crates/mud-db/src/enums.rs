@@ -154,7 +154,7 @@ pub enum UserRole {
 
 impl UserRole {
     /// Numeric hierarchy used for `min_role` checks. Higher = more privileged.
-    /// Roles aren't strictly linear in MUDs (Coder vs HeadBuilder etc.), so we
+    /// Roles aren't strictly linear in MUDs (Coder vs `HeadBuilder` etc.), so we
     /// expose `rank()` rather than deriving Ord on the enum.
     #[must_use]
     pub const fn rank(self) -> u8 {

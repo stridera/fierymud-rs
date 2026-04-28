@@ -15,16 +15,22 @@ use tracing_subscriber::EnvFilter;
 
 use crate::login::ConnRouter;
 
+const TICK_HZ: u64 = 10;
+
 #[derive(Resource, Default)]
 pub(crate) struct TickCount(pub(crate) u64);
 
 #[derive(Resource)]
 pub(crate) struct ServerStart(pub(crate) Instant);
 
+// Bevy systems take their resources by value (Res<T> is a smart-pointer
+// wrapper); clippy::needless_pass_by_value doesn't know the API.
+#[allow(clippy::needless_pass_by_value)]
 fn advance_tick(mut tick: ResMut<TickCount>) {
     tick.0 += 1;
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn log_heartbeat(tick: Res<TickCount>) {
     if tick.0.is_multiple_of(600) {
         info!(tick = tick.0, "heartbeat");
@@ -41,20 +47,16 @@ async fn main() {
 
     info!("fierymud-rs starting");
 
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(v) => v,
-        Err(_) => {
-            error!("DATABASE_URL not set; aborting");
-            return;
-        }
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        error!("DATABASE_URL not set; aborting");
+        return;
     };
 
-    let pool = match mud_db::connect(&database_url).await {
-        Ok(p) => p,
-        Err(e) => {
-            error!(error = %e, "failed to connect to database");
-            return;
-        }
+    let Ok(pool) = mud_db::connect(&database_url)
+        .await
+        .inspect_err(|e| error!(error = %e, "failed to connect to database"))
+    else {
+        return;
     };
 
     let mut world = World::new();
@@ -93,7 +95,6 @@ async fn main() {
             .chain(),
     );
 
-    const TICK_HZ: u64 = 10;
     let mut ticker = interval(Duration::from_millis(1000 / TICK_HZ));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 

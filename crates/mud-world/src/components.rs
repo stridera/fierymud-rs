@@ -21,7 +21,7 @@ pub struct Online;
 
 /// Account ownership and authorization data, stamped onto the Player entity
 /// at login. `role` comes from the Users row; `perms` and `character_id`
-/// come from the Characters row. character_id is what save-on-disconnect
+/// come from the Characters row. `character_id` is what save-on-disconnect
 /// uses to write state back.
 #[derive(Component, Debug, Clone)]
 pub struct Account {
@@ -80,6 +80,7 @@ impl Slot {
         Self::Light,
     ];
 
+    #[must_use] 
     pub fn label(self) -> &'static str {
         match self {
             Self::Head => "head",
@@ -100,7 +101,7 @@ impl Slot {
 }
 
 /// Item-only: the slot this item is wearable in. Items without a
-/// WearableIn component aren't wearable at all.
+/// `WearableIn` component aren't wearable at all.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct WearableIn(pub Slot);
 
@@ -141,7 +142,7 @@ pub struct Follower(pub Entity);
 pub struct LastTeller(pub Entity);
 
 /// Body posture. The schema's Position enum is broader (DEAD, GHOST,
-/// MORTALLY_WOUNDED, INCAPACITATED, STUNNED) — those land when combat
+/// `MORTALLY_WOUNDED`, INCAPACITATED, STUNNED) — those land when combat
 /// has real damage states, not posture changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostureKind {
@@ -152,6 +153,7 @@ pub enum PostureKind {
 }
 
 impl PostureKind {
+    #[must_use] 
     pub fn label(self) -> &'static str {
         match self {
             Self::Standing => "standing",
@@ -179,7 +181,7 @@ pub enum EffectSource {
 /// that applies effects (not enforced here).
 #[derive(Component, Debug, Clone)]
 pub struct EffectInstance {
-    /// FK into the EffectCatalog resource.
+    /// FK into the `EffectCatalog` resource.
     pub kind: i32,
     /// Cached display name (also in catalog; copied here so messages don't
     /// need to look up the catalog every tick).
@@ -190,7 +192,7 @@ pub struct EffectInstance {
     pub source: EffectSource,
 }
 
-/// Edge from an EffectInstance entity back to the entity that's affected.
+/// Edge from an `EffectInstance` entity back to the entity that's affected.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct AppliedTo(pub Entity);
 

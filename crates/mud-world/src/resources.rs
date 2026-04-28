@@ -11,7 +11,7 @@ pub struct WorldKeyIndex {
 }
 
 /// Catalog of effect *types* loaded from the Effect table at startup.
-/// Active applications live as ECS entities (EffectInstance + AppliedTo);
+/// Active applications live as ECS entities (`EffectInstance` + `AppliedTo`);
 /// the catalog supplies metadata that doesn't change per-application.
 #[derive(Resource, Debug, Default)]
 pub struct EffectCatalog {
@@ -19,6 +19,7 @@ pub struct EffectCatalog {
 }
 
 impl EffectCatalog {
+    #[must_use] 
     pub fn find_by_name(&self, name: &str) -> Option<&EffectDef> {
         self.by_id
             .values()
@@ -63,6 +64,7 @@ pub struct SocialRegistry {
 }
 
 impl SocialRegistry {
+    #[must_use] 
     pub fn get(&self, name: &str) -> Option<&SocialDef> {
         self.by_name.get(&name.to_ascii_lowercase())
     }

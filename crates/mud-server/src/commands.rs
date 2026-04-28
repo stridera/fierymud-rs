@@ -780,20 +780,17 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         return;
     }
 
-    let (cmd, n_consumed) = match longest_prefix_match(&tokens) {
-        Some(m) => m,
-        None => {
-            // Fall through to socials before declaring unknown.
-            if try_dispatch_social(world, player, tokens[0], skip_n_tokens(trimmed, 1)) {
-                return;
-            }
-            send_to(
-                world,
-                player,
-                format!("Unknown command: {}\r\n", tokens[0]),
-            );
+    let Some((cmd, n_consumed)) = longest_prefix_match(&tokens) else {
+        // Fall through to socials before declaring unknown.
+        if try_dispatch_social(world, player, tokens[0], skip_n_tokens(trimmed, 1)) {
             return;
         }
+        send_to(
+            world,
+            player,
+            format!("Unknown command: {}\r\n", tokens[0]),
+        );
+        return;
     };
 
     // Permission gate
@@ -855,8 +852,7 @@ pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
 fn cmd_help(world: &mut World, player: Entity, args: &str) {
     let (role, perms) = world
         .get::<Account>(player)
-        .map(|a| (a.role, a.perms.clone()))
-        .unwrap_or((UserRole::Player, Vec::new()));
+        .map_or((UserRole::Player, Vec::new()), |a| (a.role, a.perms.clone()));
 
     let topic = args.trim().to_ascii_lowercase();
     if topic.is_empty() {
@@ -928,7 +924,7 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
         q.iter(world)
             .filter(|(e, l, _, item, _)| *e != player && l.0 == room && item.is_none())
             .map(|(_, _, n, _, posture)| {
-                let p = posture.map(|p| p.0).unwrap_or(PostureKind::Standing);
+                let p = posture.map_or(PostureKind::Standing, |p| p.0);
                 if p == PostureKind::Standing {
                     n.name.clone()
                 } else {
@@ -1167,9 +1163,7 @@ fn cmd_where(world: &mut World, player: Entity, _args: &str) {
         q.iter(world)
             .map(|(n, l)| {
                 let room_name = world
-                    .get::<Named>(l.0)
-                    .map(|n| n.name.clone())
-                    .unwrap_or_else(|| "<unknown>".to_string());
+                    .get::<Named>(l.0).map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
                 (n.name.clone(), room_name)
             })
             .collect()
@@ -2111,8 +2105,7 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
 
     let dmg_roll = world
         .get::<CombatStats>(player)
-        .map(|cs| cs.dmg_roll)
-        .unwrap_or(1);
+        .map_or(1, |cs| cs.dmg_roll);
     let damage = (dmg_roll + 4).max(1);
 
     let target_name = world
@@ -2284,8 +2277,7 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
 
     let dmg_roll = world
         .get::<CombatStats>(player)
-        .map(|cs| cs.dmg_roll)
-        .unwrap_or(1);
+        .map_or(1, |cs| cs.dmg_roll);
     let damage = (dmg_roll + 3).max(1);
 
     let target_name = world
