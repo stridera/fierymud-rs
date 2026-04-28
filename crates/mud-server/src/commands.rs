@@ -2415,10 +2415,23 @@ fn check_stamina(world: &World, player: Entity, cost: i32, verb: &str) -> bool {
     true
 }
 
-/// Pay the stamina cost. Caps current at zero.
+/// Pay the stamina cost. Caps current at zero. Sends one-time messages
+/// when crossing the "tired" (25% of max) and "exhausted" (0) thresholds
+/// downward — never on the way back up (regen handles that silently).
 fn drain_stamina(world: &mut World, player: Entity, cost: i32) {
+    let Some((old, max)) = world.get::<Stamina>(player).map(|s| (s.current, s.max)) else {
+        return;
+    };
+    let new_value = (old - cost).max(0);
     if let Some(mut s) = world.get_mut::<Stamina>(player) {
-        s.current = (s.current - cost).max(0);
+        s.current = new_value;
+    }
+    let tired_threshold = max / 4;
+    if old > tired_threshold && new_value <= tired_threshold && new_value > 0 {
+        send_to(world, player, "You're getting tired.\r\n");
+    }
+    if old > 0 && new_value == 0 {
+        send_to(world, player, "You collapse, exhausted.\r\n");
     }
 }
 
