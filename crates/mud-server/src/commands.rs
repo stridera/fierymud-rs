@@ -538,6 +538,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_disengage,
     },
     Command {
+        names: &["bash"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "bash <target>",
+            summary: "Slam a target, knocking them off their feet.",
+            long: "Deals dmg_roll+3 damage and forces the target into a \
+                   sitting posture. Targets without combat stats simply \
+                   take the damage.",
+        },
+        run: cmd_bash,
+    },
+    Command {
         names: &["follow"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -1888,7 +1902,47 @@ fn cmd_shout(world: &mut World, player: Entity, args: &str) {
 // Combat handler
 // ---------------------------------------------------------------------------
 
+/// Refuse the action if the entity is sleeping; auto-rise from a sitting or
+/// resting posture (with announcements). Returns false if the action should
+/// be aborted.
+fn require_alert_posture(world: &mut World, player: Entity, action: &str) -> bool {
+    let posture = world.get::<Posture>(player).copied();
+    match posture.map(|p| p.0) {
+        Some(PostureKind::Sleeping) => {
+            send_to(world, player, format!("You can't {action} while sleeping.\r\n"));
+            false
+        }
+        Some(PostureKind::Sitting | PostureKind::Resting) => {
+            // Auto-stand.
+            if let Ok(mut e) = world.get_entity_mut(player) {
+                e.insert(Posture(PostureKind::Standing));
+            }
+            send_to(world, player, "You stand up.\r\n");
+            if let Some(located) = world.get::<Located>(player).copied() {
+                let mover_name = world
+                    .get::<Named>(player)
+                    .map_or_else(String::new, |n| n.name.clone());
+                let bystanders: Vec<Entity> = {
+                    let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+                    q.iter(world)
+                        .filter(|(e, l)| *e != player && l.0 == located.0)
+                        .map(|(e, _)| e)
+                        .collect()
+                };
+                for b in bystanders {
+                    send_to(world, b, format!("{mover_name} stands up.\r\n"));
+                }
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
 fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
+    if !require_alert_posture(world, player, "attack") {
+        return;
+    }
     let target_name = target_name.trim();
     if target_name.is_empty() {
         send_to(world, player, "Attack what?\r\n");
@@ -2028,6 +2082,9 @@ fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
 }
 
 fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "kick") {
+        return;
+    }
     let Some(fighting) = world.get::<Fighting>(player).copied() else {
         send_to(world, player, "You aren't fighting anyone.\r\n");
         return;
@@ -2194,6 +2251,109 @@ fn would_create_cycle(world: &mut World, start: Entity, end: Entity) -> bool {
     false
 }
 
+fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
+    if !require_alert_posture(world, player, "bash") {
+        return;
+    }
+    let target_word = target_word.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Bash what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let target = find_actor_in_room(world, target_word, located.0, player);
+    let Some(target) = target else {
+        send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
+        return;
+    };
+
+    // Engage if not already.
+    let already_fighting = world.get::<Fighting>(player).is_some();
+    if !already_fighting
+        && let Ok(mut e) = world.get_entity_mut(player)
+    {
+        e.insert(Fighting(target));
+    }
+    if world.get::<CombatStats>(target).is_some()
+        && let Ok(mut e) = world.get_entity_mut(target)
+    {
+        e.insert(Fighting(player));
+    }
+
+    let dmg_roll = world
+        .get::<CombatStats>(player)
+        .map(|cs| cs.dmg_roll)
+        .unwrap_or(1);
+    let damage = (dmg_roll + 3).max(1);
+
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    let dead = if let Some(mut hp) = world.get_mut::<Health>(target) {
+        hp.hp -= damage;
+        hp.hp <= 0
+    } else {
+        false
+    };
+
+    // Knockdown — set target to Sitting.
+    if !dead && let Ok(mut e) = world.get_entity_mut(target) {
+        e.insert(Posture(PostureKind::Sitting));
+    }
+
+    send_to(
+        world,
+        player,
+        format!("You bash {target_name} for {damage} damage, knocking them down!\r\n"),
+    );
+    send_to(
+        world,
+        target,
+        format!("{player_name} bashes you for {damage} damage, knocking you down!\r\n"),
+    );
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && *e != target && l.0 == located.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(
+            world,
+            b,
+            format!("{player_name} bashes {target_name}, knocking them down.\r\n"),
+        );
+    }
+
+    if dead {
+        let is_player = world.get::<Player>(target).is_some();
+        if is_player {
+            if let Some(mut hp) = world.get_mut::<Health>(target) {
+                hp.hp = hp.max;
+            }
+            if let Ok(mut e) = world.get_entity_mut(target) {
+                e.remove::<Fighting>();
+            }
+            send_to(world, target, "You collapse, then gasp back to life with full health.\r\n");
+        } else {
+            send_to(world, player, "Your target falls.\r\n");
+            if let Ok(e) = world.get_entity_mut(target) {
+                e.despawn();
+            }
+            if let Ok(mut e) = world.get_entity_mut(player) {
+                e.remove::<Fighting>();
+            }
+        }
+    }
+}
+
 fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Fighting>(player).is_none() {
         send_to(world, player, "You aren't fighting anyone.\r\n");
@@ -2230,6 +2390,9 @@ mv!(cmd_in, In);
 mv!(cmd_out, Out);
 
 fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
+    if !require_alert_posture(world, player, "move") {
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };

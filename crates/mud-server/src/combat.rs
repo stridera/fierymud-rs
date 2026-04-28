@@ -99,10 +99,15 @@ pub fn combat_tick(world: &mut World) {
 
     // Phase 1: snapshot the swing list. Each tuple is fully owned data so
     // the borrow on the query is released before we start mutating.
+    // Sleeping attackers are skipped — they can't swing until awoken.
     let swings: Vec<Swing> = {
-        let mut q = world.query::<(Entity, &Fighting, &CombatStats, &Named)>();
+        let mut q =
+            world.query::<(Entity, &Fighting, &CombatStats, &Named, Option<&Posture>)>();
         q.iter(world)
-            .map(|(attacker, fighting, cs, name)| Swing {
+            .filter(|(_, _, _, _, posture)| {
+                !matches!(posture.map(|p| p.0), Some(PostureKind::Sleeping))
+            })
+            .map(|(attacker, fighting, cs, name, _)| Swing {
                 attacker,
                 target: fighting.0,
                 damage: cs.dmg_roll.max(1),
