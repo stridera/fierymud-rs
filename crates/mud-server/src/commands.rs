@@ -440,6 +440,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_say,
     },
     Command {
+        names: &["whisper"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "whisper <target> <message>",
+            summary: "Speak privately to one person in the same room.",
+            long: "The target hears the message verbatim; bystanders see \
+                   only that you whispered something to them, not the \
+                   contents. The target must be in the same room.",
+        },
+        run: cmd_whisper,
+    },
+    Command {
         names: &["tell", "t"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2349,6 +2363,59 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
             format!("{speaker} says, \"{message}\"\r\n")
         };
         send_to(world, target, line);
+    }
+}
+
+fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 || parts[1].trim().is_empty() {
+        send_to(world, player, "Usage: whisper <target> <message>\r\n");
+        return;
+    }
+    let target_word = parts[0].trim();
+    let message = parts[1].trim();
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
+        send_to(
+            world,
+            player,
+            format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+    let speaker = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    send_to(
+        world,
+        player,
+        format!("You whisper to {target_name}, \"{message}\"\r\n"),
+    );
+    send_to(
+        world,
+        target,
+        format!("{speaker} whispers to you, \"{message}\"\r\n"),
+    );
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && *e != target && l.0 == located.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(
+            world,
+            b,
+            format!("{speaker} whispers something to {target_name}.\r\n"),
+        );
     }
 }
 
