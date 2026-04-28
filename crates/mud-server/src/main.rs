@@ -1,3 +1,4 @@
+mod combat;
 mod commands;
 mod login;
 
@@ -14,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 use crate::login::ConnRouter;
 
 #[derive(Resource, Default)]
-struct TickCount(u64);
+pub(crate) struct TickCount(pub(crate) u64);
 
 fn advance_tick(mut tick: ResMut<TickCount>) {
     tick.0 += 1;
@@ -60,6 +61,8 @@ async fn main() {
         return;
     }
 
+    combat::seed_test_mobs(&mut world);
+
     let listen_addr =
         std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into());
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<Inbound>();
@@ -72,7 +75,7 @@ async fn main() {
 
     let mut router = ConnRouter::new();
     let mut schedule = Schedule::default();
-    schedule.add_systems((advance_tick, log_heartbeat).chain());
+    schedule.add_systems((advance_tick, combat::combat_tick, log_heartbeat).chain());
 
     const TICK_HZ: u64 = 10;
     let mut ticker = interval(Duration::from_millis(1000 / TICK_HZ));

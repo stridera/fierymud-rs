@@ -23,6 +23,29 @@ pub struct Online;
 #[derive(Component, Debug, Clone)]
 pub struct Account(pub String);
 
+/// Marker: this entity is a non-player mob/NPC instance.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Mob;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Health {
+    pub hp: i32,
+    pub max: i32,
+}
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct CombatStats {
+    pub hit_roll: i32,
+    pub dmg_roll: i32,
+    pub ac: i32,
+    pub alignment: i32,
+}
+
+/// Combat state: this entity is currently fighting the target. Removed when
+/// combat ends (death, flee, room mismatch).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Fighting(pub Entity);
+
 /// Composite (zone, id) identity for entities loaded from the schema.
 /// Lets the runtime round-trip an entity back to its DB row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]

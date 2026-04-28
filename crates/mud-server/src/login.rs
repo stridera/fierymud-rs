@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::User};
 use mud_net::{ConnId, Outbound};
-use mud_world::{Account, Located, Named, Online, Player, WorldKeyIndex};
+use mud_world::{Account, CombatStats, Health, Located, Named, Online, Player, WorldKeyIndex};
 use tracing::{info, warn};
 
 use crate::commands::{self, Connection};
@@ -206,6 +206,17 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
         .copied()
         .or_else(|| index.rooms.get(&FALLBACK_START).copied());
 
+    let health = Health {
+        hp: c.hit_points,
+        max: c.hit_points_max,
+    };
+    let combat = CombatStats {
+        hit_roll: c.hit_roll,
+        dmg_roll: c.damage_roll,
+        ac: c.armor_class,
+        alignment: c.alignment,
+    };
+
     let Some(room_entity) = room_entity else {
         let _ = outbound.send(format!(
             "No starting room available (tried ({zone},{room}) and fallback {FALLBACK_START:?}).\r\n",
@@ -218,6 +229,8 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 Named { name: c.name.clone() },
                 Account(user.id.clone()),
                 Connection(outbound),
+                health,
+                combat,
             ))
             .id();
     };
@@ -239,6 +252,8 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             Account(user.id.clone()),
             Located(room_entity),
             Connection(outbound),
+            health,
+            combat,
         ))
         .id()
 }
