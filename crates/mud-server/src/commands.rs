@@ -2030,10 +2030,7 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _, _, _)| e)
     };
     let Some(target) = target else {
-        send_to(
-            world,
-            player,
-            format!("You don't see '{target_word}' here.\r\n"),
+        send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
         );
         return;
     };
@@ -2473,16 +2470,13 @@ fn cmd_wake(world: &mut World, player: Entity, args: &str) {
     };
     let target_name = name_of(world, target);
     if world.get::<Posture>(target).map(|p| p.0) != Some(PostureKind::Sleeping) {
-        send_to(world, player, format!("{target_name} is already awake.\r\n"));
+        send_rendered(world, player, &format!("{target_name} is already awake.\r\n"));
         return;
     }
     try_insert(world, target, Posture(PostureKind::Standing));
     let player_name = name_of(world, player);
-    send_to(world, player, format!("You wake {target_name}.\r\n"));
-    send_to(
-        world,
-        target,
-        format!("{player_name} wakes you up.\r\n"),
+    send_rendered(world, player, &format!("You wake {target_name}.\r\n"));
+    send_rendered(world, target, &format!("{player_name} wakes you up.\r\n"),
     );
     broadcast_room_except_players_rendered(
         world,
@@ -2826,7 +2820,7 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
         l.0 = player;
     }
 
-    send_to(world, player, format!("You pick up {item_name}.\r\n"));
+    send_rendered(world, player, &format!("You pick up {item_name}.\r\n"));
     broadcast_room_except_rendered(
         world,
         room,
@@ -2843,10 +2837,7 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     }
     let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
     let Some(item) = item else {
-        send_to(
-            world,
-            player,
-            format!("You aren't carrying '{target_word}'.\r\n"),
+        send_rendered(world, player, &format!("You aren't carrying '{target_word}'.\r\n"),
         );
         return;
     };
@@ -2863,7 +2854,7 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
         l.0 = room;
     }
 
-    send_to(world, player, format!("You drop {item_name}.\r\n"));
+    send_rendered(world, player, &format!("You drop {item_name}.\r\n"));
     broadcast_room_except_rendered(
         world,
         room,
@@ -2888,19 +2879,13 @@ fn cmd_give(world: &mut World, player: Entity, args: &str) {
 
     let item = find_carried_by(world, item_word, player, EquipFilter::Inventory);
     let Some(item) = item else {
-        send_to(
-            world,
-            player,
-            format!("You aren't carrying '{item_word}'.\r\n"),
+        send_rendered(world, player, &format!("You aren't carrying '{item_word}'.\r\n"),
         );
         return;
     };
     let target = find_actor_in_room(world, target_word, room, player);
     let Some(target) = target else {
-        send_to(
-            world,
-            player,
-            format!("You don't see '{target_word}' here.\r\n"),
+        send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
         );
         return;
     };
@@ -2958,17 +2943,14 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
     let item_name = name_of(world, item);
 
     let Some(WearableIn(slot)) = world.get::<WearableIn>(item).copied() else {
-        send_to(world, player, format!("{item_name} can't be worn.\r\n"));
+        send_rendered(world, player, &format!("{item_name} can't be worn.\r\n"));
         return;
     };
 
     if let Some(forced) = force_slot
         && forced != slot
     {
-        send_to(
-            world,
-            player,
-            format!("{item_name} can't be wielded.\r\n"),
+        send_rendered(world, player, &format!("{item_name} can't be wielded.\r\n"),
         );
         return;
     }
@@ -2980,10 +2962,7 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
             .any(|(l, eq)| l.0 == player && eq.0 == slot)
     };
     if slot_taken {
-        send_to(
-            world,
-            player,
-            format!("Your {} is already occupied.\r\n", slot.label()),
+        send_rendered(world, player, &format!("Your {} is already occupied.\r\n", slot.label()),
         );
         return;
     }
@@ -2991,7 +2970,7 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
     try_insert(world, item, EquippedSlot(slot));
 
     let verb = if slot == Slot::Wield { "wield" } else { "wear" };
-    send_to(world, player, format!("You {verb} {item_name}.\r\n"));
+    send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
 }
 
 fn cmd_remove(world: &mut World, player: Entity, args: &str) {
@@ -3002,16 +2981,13 @@ fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     }
     let item = find_carried_by(world, target_word, player, EquipFilter::Equipped);
     let Some(item) = item else {
-        send_to(
-            world,
-            player,
-            format!("You aren't wearing '{target_word}'.\r\n"),
+        send_rendered(world, player, &format!("You aren't wearing '{target_word}'.\r\n"),
         );
         return;
     };
     let item_name = name_of(world, item);
     try_remove::<EquippedSlot>(world, item);
-    send_to(world, player, format!("You remove {item_name}.\r\n"));
+    send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
 }
 
 fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
@@ -3164,7 +3140,7 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
         } else {
             format!("{speaker} says, \"{message}\"\r\n")
         };
-        send_to(world, target, line);
+        send_rendered(world, target, &line);
     }
 }
 
@@ -3181,20 +3157,14 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
-        send_to(
-            world,
-            player,
-            format!("You don't see '{target_word}' here.\r\n"),
+        send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
         );
         return;
     };
     let speaker = name_of(world, player);
     let target_name = name_of(world, target);
 
-    send_to(
-        world,
-        player,
-        format!("You whisper to {target_name}, \"{message}\"\r\n"),
+    send_rendered(world, player, &format!("You whisper to {target_name}, \"{message}\"\r\n"),
     );
     send_to(
         world,
@@ -3306,7 +3276,7 @@ fn run_social(world: &mut World, player: Entity, social: &SocialDef, args: &str)
         // No-arg path.
         if let Some(line) = social.char_no_arg.as_ref() {
             let s = substitute(line, &actor_name, None);
-            send_to(world, player, format!("{s}\r\n"));
+            send_rendered(world, player, &format!("{s}\r\n"));
         }
         if let Some(line) = social.others_no_arg.as_ref() {
             let s = substitute(line, &actor_name, None);
@@ -3320,7 +3290,7 @@ fn run_social(world: &mut World, player: Entity, social: &SocialDef, args: &str)
     if self_target {
         if let Some(line) = social.char_auto.as_ref() {
             let s = substitute(line, &actor_name, Some(&actor_name));
-            send_to(world, player, format!("{s}\r\n"));
+            send_rendered(world, player, &format!("{s}\r\n"));
         }
         if let Some(line) = social.others_auto.as_ref() {
             let s = substitute(line, &actor_name, Some(&actor_name));
@@ -3344,11 +3314,11 @@ fn run_social(world: &mut World, player: Entity, social: &SocialDef, args: &str)
 
     if let Some(line) = social.char_found.as_ref() {
         let s = substitute(line, &actor_name, Some(&target_name));
-        send_to(world, player, format!("{s}\r\n"));
+        send_rendered(world, player, &format!("{s}\r\n"));
     }
     if let Some(line) = social.vict_found.as_ref() {
         let s = substitute(line, &actor_name, Some(&target_name));
-        send_to(world, target, format!("{s}\r\n"));
+        send_rendered(world, target, &format!("{s}\r\n"));
     }
     if let Some(line) = social.others_found.as_ref() {
         let s = substitute(line, &actor_name, Some(&target_name));
@@ -3378,6 +3348,15 @@ fn substitute(template: &str, actor_name: &str, target_name: Option<&str>) -> St
         .replace("{target.pronoun.objective}", "them")
         .replace("{target.pronoun.subjective}", "they")
         .replace("{target.pronoun.possessive}", "their")
+}
+
+/// Single-recipient companion to `broadcast_room_except_rendered`.
+/// Renders the message's color tags with the recipient's `ColorMode`,
+/// then sends. Use when a directed `send_to(world, t, format!(...))`
+/// embeds a name that may carry XML-Lite tags.
+pub(crate) fn send_rendered(world: &World, target: Entity, text: &str) {
+    let mode = color_mode_for(world, target);
+    send_to(world, target, render_color_tags(text, mode));
 }
 
 /// Read an entity's `Named.name` as an owned String. Empty when the
@@ -3487,7 +3466,7 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _)| e)
     };
     let Some(target) = target else {
-        send_to(world, player, format!("'{target_name}' isn't online.\r\n"));
+        send_rendered(world, player, &format!("'{target_name}' isn't online.\r\n"));
         return;
     };
     if target == player {
@@ -3496,10 +3475,7 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
     }
     if has_flag(world, target, PlayerFlag::NoTell) {
         let actual = name_of(world, target);
-        send_to(
-            world,
-            player,
-            format!("{actual} is not accepting tells right now.\r\n"),
+        send_rendered(world, player, &format!("{actual} is not accepting tells right now.\r\n"),
         );
         return;
     }
@@ -3507,15 +3483,16 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
     let player_name = name_of(world, player);
     let target_name = name_of(world, target);
 
-    send_to(world, player, format!("You tell {target_name}, \"{message}\"\r\n"));
+    send_rendered(world, player, &format!("You tell {target_name}, \"{message}\"\r\n"));
     if has_flag(world, target, PlayerFlag::Afk) {
-        send_to(
-            world,
-            player,
-            format!("({target_name} is AFK and may not respond right away.)\r\n"),
+        send_rendered(world, player, &format!("({target_name} is AFK and may not respond right away.)\r\n"),
         );
     }
-    send_to(world, target, format!("{player_name} tells you, \"{message}\"\r\n"));
+    send_rendered(
+        world,
+        target,
+        &format!("{player_name} tells you, \"{message}\"\r\n"),
+    );
 
     // Stamp the receiver so they can `reply`.
     try_insert(world, target, LastTeller(player));
@@ -3776,10 +3753,7 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     };
 
     let Some(target) = target else {
-        send_to(
-            world,
-            player,
-            format!("You don't see '{target_name}' here.\r\n"),
+        send_rendered(world, player, &format!("You don't see '{target_name}' here.\r\n"),
         );
         return;
     };
@@ -3796,7 +3770,7 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     drain_stamina(world, player, ATTACK_COST);
 
     send_to(world, player, format!("You attack {actual_name}!\r\n"));
-    send_to(world, target, format!("{player_name} attacks you!\r\n"));
+    send_rendered(world, target, &format!("{player_name} attacks you!\r\n"));
     broadcast_room_except_rendered(
         world,
         located.0,
@@ -3816,10 +3790,7 @@ fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
         return;
     };
     let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
-        send_to(
-            world,
-            player,
-            format!("You don't see '{target_word}' here.\r\n"),
+        send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
         );
         return;
     };
@@ -3831,10 +3802,7 @@ fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
     let target_dmg = world.get::<CombatStats>(target).map_or(0, |c| c.dmg_roll);
 
     if target_max_hp == 0 {
-        send_to(
-            world,
-            player,
-            format!("{target_name} doesn't look like a fighter at all.\r\n"),
+        send_rendered(world, player, &format!("{target_name} doesn't look like a fighter at all.\r\n"),
         );
         return;
     }
@@ -3857,7 +3825,7 @@ fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
         "would slaughter you. Don't try it."
     };
 
-    send_to(world, player, format!("{target_name} {verdict}\r\n"));
+    send_rendered(world, player, &format!("{target_name} {verdict}\r\n"));
 }
 
 pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
@@ -3902,7 +3870,7 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
             .collect()
     };
     for o in from_others {
-        send_to(world, o, format!("{mover_name} panics and flees {dir_name}!\r\n"));
+        send_rendered(world, o, &format!("{mover_name} panics and flees {dir_name}!\r\n"));
     }
 
     // Drop our own Fighting; combat_tick auto-disengages attackers on
@@ -3924,10 +3892,7 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
         format!("the {}", direction_name(d))
     });
     for o in to_others {
-        send_to(
-            world,
-            o,
-            format!("{mover_name} arrives, panting, from {arrival_dir}.\r\n"),
+        send_rendered(world, o, &format!("{mover_name} arrives, panting, from {arrival_dir}.\r\n"),
         );
     }
     send_to(world, player, format!("You flee {dir_name}!\r\n"));
@@ -3974,8 +3939,12 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
 
     let (dead, threshold_msg) = apply_damage(world, target, damage);
 
-    send_to(world, player, format!("You kick {target_name} for {damage} damage!\r\n"));
-    send_to(world, target, format!("{player_name} kicks you for {damage} damage!\r\n"));
+    send_rendered(world, player, &format!("You kick {target_name} for {damage} damage!\r\n"));
+    send_rendered(
+        world,
+        target,
+        &format!("{player_name} kicks you for {damage} damage!\r\n"),
+    );
     if let Some(m) = threshold_msg {
         send_to(world, target, m);
     }
@@ -4024,8 +3993,12 @@ fn cmd_follow(world: &mut World, player: Entity, args: &str) {
     try_insert(world, player, Follower(target));
     let target_name = name_of(world, target);
     let player_name = name_of(world, player);
-    send_to(world, player, format!("You start following {target_name}.\r\n"));
-    send_to(world, target, format!("{player_name} starts following you.\r\n"));
+    send_rendered(world, player, &format!("You start following {target_name}.\r\n"));
+    send_rendered(
+        world,
+        target,
+        &format!("{player_name} starts following you.\r\n"),
+    );
 }
 
 fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
@@ -4033,9 +4006,13 @@ fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
     try_remove::<Follower>(world, player);
     if let Some(Follower(prev_target)) = prev {
         let target_name = name_of(world, prev_target);
-        send_to(world, player, format!("You stop following {target_name}.\r\n"));
+        send_rendered(world, player, &format!("You stop following {target_name}.\r\n"));
         let player_name = name_of(world, player);
-        send_to(world, prev_target, format!("{player_name} stops following you.\r\n"));
+        send_rendered(
+            world,
+            prev_target,
+            &format!("{player_name} stops following you.\r\n"),
+        );
     } else {
         send_to(world, player, "You weren't following anyone.\r\n");
     }
@@ -4110,15 +4087,9 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         e.insert(Posture(PostureKind::Sitting));
     }
 
-    send_to(
-        world,
-        player,
-        format!("You bash {target_name} for {damage} damage, knocking them down!\r\n"),
+    send_rendered(world, player, &format!("You bash {target_name} for {damage} damage, knocking them down!\r\n"),
     );
-    send_to(
-        world,
-        target,
-        format!("{player_name} bashes you for {damage} damage, knocking you down!\r\n"),
+    send_rendered(world, target, &format!("{player_name} bashes you for {damage} damage, knocking you down!\r\n"),
     );
     if let Some(m) = threshold_msg {
         send_to(world, target, m);
@@ -4250,7 +4221,7 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 .collect()
         };
         for o in from_others {
-            send_to(world, o, format!("{mover_name} leaves {dir_name}.\r\n"));
+            send_rendered(world, o, &format!("{mover_name} leaves {dir_name}.\r\n"));
         }
     }
 
@@ -4278,10 +4249,7 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 .collect()
         };
         for o in to_others {
-            send_to(
-                world,
-                o,
-                format!("{mover_name} arrives from {arrival_dir}.\r\n"),
+            send_rendered(world, o, &format!("{mover_name} arrives from {arrival_dir}.\r\n"),
             );
         }
     }
@@ -4335,10 +4303,7 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{admin_name} extends a hand and {target_name} crumbles to dust.\r\n"),
     );
-    send_to(
-        world,
-        player,
-        format!("{target_name} crumbles to dust at your gesture.\r\n"),
+    send_rendered(world, player, &format!("{target_name} crumbles to dust at your gesture.\r\n"),
     );
 
     if let Ok(e) = world.get_entity_mut(target) {
@@ -4375,11 +4340,8 @@ fn cmd_restore(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let admin_name = name_of(world, player);
-    send_to(world, player, format!("You restore {target_name}.\r\n"));
-    send_to(
-        world,
-        target,
-        format!("{admin_name} restores you. You feel completely refreshed.\r\n"),
+    send_rendered(world, player, &format!("You restore {target_name}.\r\n"));
+    send_rendered(world, target, &format!("{admin_name} restores you. You feel completely refreshed.\r\n"),
     );
 }
 
@@ -4425,10 +4387,7 @@ fn cmd_apply(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _, _)| e)
     };
     let Some(target) = target else {
-        send_to(
-            world,
-            player,
-            format!("No '{target_word}' here.\r\n"),
+        send_rendered(world, player, &format!("No '{target_word}' here.\r\n"),
         );
         return;
     };
@@ -4513,10 +4472,7 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         .get(&(zone, mob_id))
         .cloned();
     let Some(proto) = proto else {
-        send_to(
-            world,
-            player,
-            format!("No mob prototype ({zone}, {mob_id}).\r\n"),
+        send_rendered(world, player, &format!("No mob prototype ({zone}, {mob_id}).\r\n"),
         );
         return;
     };
@@ -4609,7 +4565,7 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
             .collect()
     };
     for o in from_others {
-        send_to(world, o, format!("{mover_name} fades away in a flash of light.\r\n"));
+        send_rendered(world, o, &format!("{mover_name} fades away in a flash of light.\r\n"));
     }
 
     if let Some(mut l) = world.get_mut::<Located>(player) {
@@ -4625,10 +4581,7 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
             .collect()
     };
     for o in to_others {
-        send_to(
-            world,
-            o,
-            format!("{mover_name} appears in a flash of light.\r\n"),
+        send_rendered(world, o, &format!("{mover_name} appears in a flash of light.\r\n"),
         );
     }
 
@@ -4675,12 +4628,16 @@ fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
     let was_frozen = world.get::<Frozen>(target).is_some();
     if was_frozen {
         try_remove::<Frozen>(world, target);
-        send_to(world, player, format!("You thaw {target_name}.\r\n"));
-        send_to(world, target, format!("{admin_name} thaws you. You can move again.\r\n"));
+        send_rendered(world, player, &format!("You thaw {target_name}.\r\n"));
+        send_rendered(
+            world,
+            target,
+            &format!("{admin_name} thaws you. You can move again.\r\n"),
+        );
         info!(admin = %admin_name, target = %target_name, action = "thaw", "freeze toggle");
     } else {
         try_insert(world, target, Frozen);
-        send_to(world, player, format!("You freeze {target_name}.\r\n"));
+        send_rendered(world, player, &format!("You freeze {target_name}.\r\n"));
         send_to(
             world,
             target,
@@ -4713,15 +4670,9 @@ fn cmd_force(world: &mut World, player: Entity, args: &str) {
     let admin_name = name_of(world, player);
     let target_name = name_of(world, target);
 
-    send_to(
-        world,
-        player,
-        format!("You force {target_name} to: {cmd_text}\r\n"),
+    send_rendered(world, player, &format!("You force {target_name} to: {cmd_text}\r\n"),
     );
-    send_to(
-        world,
-        target,
-        format!("{admin_name} forces you to: {cmd_text}\r\n"),
+    send_rendered(world, target, &format!("{admin_name} forces you to: {cmd_text}\r\n"),
     );
     info!(
         admin = %admin_name,
@@ -4777,10 +4728,7 @@ fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     for b in src_bystanders {
-        send_to(
-            world,
-            b,
-            format!("{target_name} vanishes in a puff of smoke.\r\n"),
+        send_rendered(world, b, &format!("{target_name} vanishes in a puff of smoke.\r\n"),
         );
     }
 
@@ -4798,18 +4746,12 @@ fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     for b in dest_bystanders {
-        send_to(
-            world,
-            b,
-            format!("{target_name} appears, summoned by {admin_name}.\r\n"),
+        send_rendered(world, b, &format!("{target_name} appears, summoned by {admin_name}.\r\n"),
         );
     }
 
-    send_to(world, player, format!("You summon {target_name}.\r\n"));
-    send_to(
-        world,
-        target,
-        format!("{admin_name} summons you.\r\n"),
+    send_rendered(world, player, &format!("You summon {target_name}.\r\n"));
+    send_rendered(world, target, &format!("{admin_name} summons you.\r\n"),
     );
     cmd_look(world, target, "");
 }
