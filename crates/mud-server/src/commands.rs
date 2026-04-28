@@ -1561,11 +1561,17 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
     if !items.is_empty() {
         out.push_str(&format!("On the ground: {}\r\n", items.join(", ")));
     }
-    if exits.is_empty() {
-        out.push_str("Exits: none\r\n");
-    } else {
-        let names: Vec<&str> = exits.iter().map(|d| direction_name(*d)).collect();
-        out.push_str(&format!("Exits: {}\r\n", names.join(", ")));
+    // Auto-exits: only render the exits line on look when the player has the
+    // AUTO_EXIT flag set. Without it, the room shows clean and the player
+    // types `exits` (or peeks with `look <dir>`) on demand. Classic CircleMUD
+    // semantics — kept opt-in to avoid clutter.
+    if has_flag(world, player, PlayerFlag::AutoExit) {
+        if exits.is_empty() {
+            out.push_str("Exits: none\r\n");
+        } else {
+            let names: Vec<&str> = exits.iter().map(|d| direction_name(*d)).collect();
+            out.push_str(&format!("Exits: {}\r\n", names.join(", ")));
+        }
     }
     send_to(world, player, out);
 }
