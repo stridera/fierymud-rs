@@ -261,7 +261,12 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
 }
 
-fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Entity) {
+pub(crate) fn handle_death(
+    world: &mut World,
+    victim: Entity,
+    victim_name: &str,
+    room: Entity,
+) {
     let is_player = world.get::<Player>(victim).is_some();
 
     if is_player {

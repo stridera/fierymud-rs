@@ -3580,26 +3580,7 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     );
 
     if dead {
-        // Defer to combat::handle_death? It's pub(crate) only inside combat.rs.
-        // Simplest: just clear Fighting on attacker; the next combat tick
-        // will sweep the orphan. For now just despawn here.
-        let is_player = world.get::<Player>(target).is_some();
-        if is_player {
-            // Revive
-            if let Some(mut hp) = world.get_mut::<Health>(target) {
-                hp.hp = hp.max;
-            }
-            try_remove::<Fighting>(world, target);
-            send_to(world, target, "You collapse, then gasp back to life with full health.\r\n");
-        } else {
-            send_to(world, player, "Your target falls.\r\n");
-            // Mob death: let combat_tick clean up via orphan logic on next pass.
-            if let Ok(e) = world.get_entity_mut(target) {
-                e.despawn();
-            }
-            // Clear our own Fighting so combat doesn't re-target a despawned entity.
-            try_remove::<Fighting>(world, player);
-        }
+        crate::combat::handle_death(world, target, &target_name, player_room);
     }
 }
 
@@ -3743,20 +3724,7 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     );
 
     if dead {
-        let is_player = world.get::<Player>(target).is_some();
-        if is_player {
-            if let Some(mut hp) = world.get_mut::<Health>(target) {
-                hp.hp = hp.max;
-            }
-            try_remove::<Fighting>(world, target);
-            send_to(world, target, "You collapse, then gasp back to life with full health.\r\n");
-        } else {
-            send_to(world, player, "Your target falls.\r\n");
-            if let Ok(e) = world.get_entity_mut(target) {
-                e.despawn();
-            }
-            try_remove::<Fighting>(world, player);
-        }
+        crate::combat::handle_death(world, target, &target_name, located.0);
     }
 }
 
