@@ -1774,6 +1774,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let cs = world.get::<CombatStats>(player).copied();
     let fighting = world.get::<Fighting>(player).copied();
     let posture = world.get::<Posture>(player).copied();
+    let logged_in = world.get::<LoggedInAt>(player).copied();
 
     let mut out = format!("\r\n{name}\r\n");
     if let Some(hp) = hp {
@@ -1790,6 +1791,9 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     }
     if let Some(p) = posture {
         out.push_str(&format!("  Posture: {}\r\n", p.0.label()));
+    }
+    if let Some(l) = logged_in {
+        out.push_str(&format!("  Online for: {}\r\n", format_idle(l.0.elapsed().as_secs())));
     }
     if let Some(f) = fighting {
         let target_name = world
