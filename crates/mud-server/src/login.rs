@@ -6,6 +6,8 @@ use mud_net::{ConnId, Outbound};
 use mud_world::{Account, Located, Named, Online, Player, WorldKeyIndex};
 use tracing::{info, warn};
 
+use crate::commands::{self, Connection};
+
 const BANNER: &str = "\r\n=========================================\r\n   fierymud-rs (Rust ECS rewrite)\r\n=========================================\r\n";
 const EMAIL_PROMPT: &str = "Email: ";
 const PASSWORD_PROMPT: &str = "Password: ";
@@ -71,13 +73,8 @@ impl ConnRouter {
     ) {
         if self.login.contains_key(&conn_id) {
             self.advance_login(conn_id, text, pool, world).await;
-        } else if self.playing.contains_key(&conn_id) {
-            // Gameplay command processing arrives in step 6+. For now, just
-            // acknowledge so the player knows the line was received.
-            if let Some(_entity) = self.playing.get(&conn_id) {
-                // No-op — log only.
-                info!(conn_id, text, "in-game line (commands not yet wired)");
-            }
+        } else if let Some(&entity) = self.playing.get(&conn_id) {
+            commands::dispatch(world, entity, &text);
         }
     }
 
@@ -171,7 +168,11 @@ impl ConnRouter {
 
             Stage::CharSelect { user, characters } => {
                 let pick = trimmed.parse::<usize>().ok();
-                let Some(char_row) = pick.and_then(|n| n.checked_sub(1)).and_then(|i| characters.get(i)).cloned() else {
+                let Some(char_row) = pick
+                    .and_then(|n| n.checked_sub(1))
+                    .and_then(|i| characters.get(i))
+                    .cloned()
+                else {
                     let _ = ctx
                         .outbound
                         .send(format!("Pick 1-{}.\r\n", characters.len()));
@@ -179,10 +180,10 @@ impl ConnRouter {
                     return;
                 };
 
-                // Move out of login, spawn entity.
-                let outbound = ctx.outbound.clone();
-                self.login.remove(&conn_id);
-                let entity = spawn_player(world, &user, &char_row, &outbound);
+                // Drop the &mut ctx borrow by removing — the LoginCtx and its
+                // outbound move into the Player entity's Connection component.
+                let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
+                let entity = spawn_player(world, &user, &char_row, outbound);
                 self.playing.insert(conn_id, entity);
                 info!(
                     conn_id,
@@ -195,21 +196,19 @@ impl ConnRouter {
     }
 }
 
-fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: &Outbound) -> Entity {
+fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outbound) -> Entity {
     let (zone, room) = pick_starting_room(c);
 
     let index = world.resource::<WorldKeyIndex>();
-    let room_entity = index.rooms.get(&(zone, room)).copied().or_else(|| {
-        index
-            .rooms
-            .get(&FALLBACK_START)
-            .copied()
-    });
+    let room_entity = index
+        .rooms
+        .get(&(zone, room))
+        .copied()
+        .or_else(|| index.rooms.get(&FALLBACK_START).copied());
 
     let Some(room_entity) = room_entity else {
         let _ = outbound.send(format!(
-            "No starting room available (tried ({zone},{room}) and fallback {:?}).\r\n",
-            FALLBACK_START
+            "No starting room available (tried ({zone},{room}) and fallback {FALLBACK_START:?}).\r\n",
         ));
         // Spawn a "stranded" player without a Located so they don't crash later.
         return world
@@ -218,19 +217,18 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: &Out
                 Online,
                 Named { name: c.name.clone() },
                 Account(user.id.clone()),
+                Connection(outbound),
             ))
             .id();
     };
 
     let room_name = world
         .get::<Named>(room_entity)
-        .map(|n| n.name.clone())
-        .unwrap_or_else(|| "<unknown>".into());
+        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
 
     let _ = outbound.send(format!(
-        "\r\nWelcome, {name}.\r\nYou appear in: {room}\r\n\r\n",
+        "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",
         name = c.name,
-        room = room_name,
     ));
 
     world
@@ -240,6 +238,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: &Out
             Named { name: c.name.clone() },
             Account(user.id.clone()),
             Located(room_entity),
+            Connection(outbound),
         ))
         .id()
 }
