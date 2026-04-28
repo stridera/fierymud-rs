@@ -2332,20 +2332,12 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
     }
 
     send_to(world, player, format!("You pick up {item_name}.\r\n"));
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == room)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(
-            world,
-            b,
-            format!("{player_name} picks up {item_name}.\r\n"),
-        );
-    }
+    broadcast_room_except(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} picks up {item_name}.\r\n"),
+    );
 }
 
 fn cmd_drop(world: &mut World, player: Entity, args: &str) {
@@ -2381,16 +2373,12 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     }
 
     send_to(world, player, format!("You drop {item_name}.\r\n"));
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == room)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(world, b, format!("{player_name} drops {item_name}.\r\n"));
-    }
+    broadcast_room_except(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} drops {item_name}.\r\n"),
+    );
 }
 
 fn cmd_give(world: &mut World, player: Entity, args: &str) {
@@ -2450,20 +2438,12 @@ fn cmd_give(world: &mut World, player: Entity, args: &str) {
         target,
         format!("{player_name} gives you {item_name}.\r\n"),
     );
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && *e != target && l.0 == room)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(
-            world,
-            b,
-            format!("{player_name} gives {item_name} to {target_name}.\r\n"),
-        );
-    }
+    broadcast_room_except(
+        world,
+        room,
+        &[player, target],
+        &format!("{player_name} gives {item_name} to {target_name}.\r\n"),
+    );
 }
 
 fn cmd_wear(world: &mut World, player: Entity, args: &str) {
@@ -3325,16 +3305,12 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
 
     send_to(world, player, format!("You attack {actual_name}!\r\n"));
     send_to(world, target, format!("{player_name} attacks you!\r\n"));
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && *e != target && l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(world, b, format!("{player_name} attacks {actual_name}.\r\n"));
-    }
+    broadcast_room_except(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{player_name} attacks {actual_name}.\r\n"),
+    );
 }
 
 fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
@@ -3523,16 +3499,12 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if let Some(m) = threshold_msg {
         send_to(world, target, m);
     }
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && *e != target && l.0 == player_room)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(world, b, format!("{player_name} kicks {target_name}.\r\n"));
-    }
+    broadcast_room_except(
+        world,
+        player_room,
+        &[player, target],
+        &format!("{player_name} kicks {target_name}.\r\n"),
+    );
 
     if dead {
         // Defer to combat::handle_death? It's pub(crate) only inside combat.rs.
@@ -3710,20 +3682,12 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     if let Some(m) = threshold_msg {
         send_to(world, target, m);
     }
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && *e != target && l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in bystanders {
-        send_to(
-            world,
-            b,
-            format!("{player_name} bashes {target_name}, knocking them down.\r\n"),
-        );
-    }
+    broadcast_room_except(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{player_name} bashes {target_name}, knocking them down.\r\n"),
+    );
 
     if dead {
         let is_player = world.get::<Player>(target).is_some();
