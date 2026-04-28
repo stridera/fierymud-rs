@@ -2818,6 +2818,15 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     if !require_alert_posture(world, player, "move") {
         return;
     }
+    // Stamina pre-flight: a player with 0 stamina is too tired to move.
+    // (Followers along for the ride aren't checked — they go where the
+    // leader goes; they don't pay the cost either.)
+    if let Some(s) = world.get::<Stamina>(player).copied()
+        && s.current <= 0
+    {
+        send_to(world, player, "You're too exhausted to move.\r\n");
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
@@ -2889,6 +2898,12 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         if let Some(mut l) = world.get_mut::<Located>(mover) {
             l.0 = target;
         }
+    }
+
+    // Drain the leader's stamina (1 per step). Followers don't pay the
+    // cost — they're being led.
+    if let Some(mut s) = world.get_mut::<Stamina>(player) {
+        s.current = (s.current - 1).max(0);
     }
 
     // Notify the destination room of arrivals.
