@@ -5,7 +5,7 @@ use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::U
 use mud_net::{ConnId, Outbound};
 use mud_world::{
     Account, CombatStats, Health, Located, Named, Online, Player, PlayerFlags, Posture,
-    PostureKind, WorldKey, WorldKeyIndex,
+    PostureKind, Prompt, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -247,6 +247,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 combat,
                 Posture(PostureKind::Standing),
                 PlayerFlags(c.player_flags.clone()),
+                Prompt(c.prompt.clone()),
             ))
             .id();
     };
@@ -294,6 +295,10 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
         .get::<PlayerFlags>(entity)
         .map(|f| f.0.clone())
         .unwrap_or_default();
+    let prompt = world
+        .get::<Prompt>(entity)
+        .map(|p| p.0.clone())
+        .unwrap_or_default();
 
     if let Err(e) = characters::save_state(
         pool,
@@ -302,6 +307,7 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
         zone_id,
         room_id,
         &flags,
+        &prompt,
     )
     .await
     {

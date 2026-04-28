@@ -141,6 +141,13 @@ pub struct Follower(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LastTeller(pub Entity);
 
+/// Per-player prompt template loaded from `Characters.prompt`. Variable
+/// substitution: `%h`/`%H` (current/max HP). More variables (`%v`/`%V`
+/// for stamina, `%n` for name, etc.) land when the systems they reference
+/// do.
+#[derive(Component, Debug, Clone)]
+pub struct Prompt(pub String);
+
 /// Toggleable per-player preferences (DEAF, `NO_TELL`, AFK, etc.). Loaded
 /// from `Characters.player_flags` on login; saved back on disconnect.
 #[derive(Component, Debug, Clone, Default)]

@@ -16,8 +16,8 @@ use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance, EffectSource,
     EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Mob,
-    MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Slot, SocialDef,
-    SocialRegistry, WearableIn, WorldKeyIndex,
+    MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, Slot,
+    SocialDef, SocialRegistry, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -334,6 +334,22 @@ const COMMANDS: &[Command] = &[
                    most accept an optional target.",
         },
         run: cmd_socials,
+    },
+    Command {
+        names: &["prompt"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "prompt [template]",
+            summary: "Show or change your status prompt template.",
+            long: "With no argument, prints your current template. With a \
+                   template, replaces it. Variables: %h current HP, %H max \
+                   HP, %% literal percent. Examples: \
+                     prompt <%h/%Hhp> \
+                     prompt [%h hp] ",
+        },
+        run: cmd_prompt,
     },
     Command {
         names: &["toggle"],
@@ -926,7 +942,8 @@ pub(crate) fn strip_color_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_color_tags;
+    use super::{render_prompt, strip_color_tags};
+    use mud_world::Health;
 
     #[test]
     fn strip_color_tags_handles_common_patterns() {
@@ -945,17 +962,79 @@ mod tests {
         // Empty tags.
         assert_eq!(strip_color_tags("<>x<>y"), "xy");
     }
+
+    #[test]
+    fn render_prompt_substitutes_hp() {
+        let hp = Some(Health { hp: 42, max: 100 });
+        assert_eq!(render_prompt("<%h/%H>", hp), "<42/100> ");
+        // Trailing space already present — don't double-add.
+        assert_eq!(render_prompt("<%h> ", hp), "<42> ");
+        // Literal percent.
+        assert_eq!(render_prompt("100%%", hp), "100% ");
+        // Unknown variable: pass through literally so the player sees they
+        // typed something we don't implement.
+        assert_eq!(render_prompt("[%v]", hp), "[%v] ");
+        // Missing Health: question marks.
+        assert_eq!(render_prompt("<%h/%H>", None), "<?/?> ");
+        // Empty template still gets a trailing space.
+        assert_eq!(render_prompt("", hp), " ");
+    }
 }
 
-/// Send a one-line prompt to a player. Hardcoded `<HP/MaxHP> ` for now;
-/// `Characters.prompt` template + variable substitution is a future step.
+/// Send the player's prompt template with variables substituted. Falls back
+/// to a sensible default if no Prompt component is attached or the template
+/// is empty.
 pub(crate) fn send_prompt(world: &World, target: Entity) {
+    let Some(conn) = world.get::<Connection>(target) else {
+        return;
+    };
+    let template = world
+        .get::<Prompt>(target)
+        .map(|p| p.0.as_str())
+        .filter(|t| !t.is_empty())
+        .unwrap_or("<%h/%H> ");
     let hp = world.get::<Health>(target).copied();
-    if let Some(hp) = hp
-        && let Some(conn) = world.get::<Connection>(target)
-    {
-        let _ = conn.0.send(format!("<{}/{}> ", hp.hp, hp.max));
+    let rendered = render_prompt(template, hp);
+    let _ = conn.0.send(rendered);
+}
+
+fn render_prompt(template: &str, hp: Option<Health>) -> String {
+    let mut out = String::with_capacity(template.len() + 16);
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some('h') => {
+                    if let Some(hp) = hp {
+                        out.push_str(&hp.hp.to_string());
+                    } else {
+                        out.push('?');
+                    }
+                }
+                Some('H') => {
+                    if let Some(hp) = hp {
+                        out.push_str(&hp.max.to_string());
+                    } else {
+                        out.push('?');
+                    }
+                }
+                Some('%') | None => out.push('%'),
+                Some(other) => {
+                    // Unknown variable: leave the literal `%X` so it's
+                    // visible the template wants something we don't yet
+                    // implement (e.g., %v/%V for stamina).
+                    out.push('%');
+                    out.push(other);
+                }
+            }
+        } else {
+            out.push(c);
+        }
     }
+    if !out.ends_with(' ') {
+        out.push(' ');
+    }
+    out
 }
 
 fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool {
@@ -1309,6 +1388,29 @@ fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
 
 fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, "Goodbye!\r\n");
+}
+
+fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
+    let template = args.trim();
+    if template.is_empty() {
+        let current = world
+            .get::<Prompt>(player)
+            .map(|p| p.0.clone())
+            .unwrap_or_default();
+        send_to(
+            world,
+            player,
+            format!(
+                "Your prompt is: {current}\r\n\
+                 Variables: %h (current HP), %H (max HP), %% (literal %).\r\n"
+            ),
+        );
+        return;
+    }
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(Prompt(template.to_string()));
+    }
+    send_to(world, player, format!("Prompt set to: {template}\r\n"));
 }
 
 fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
