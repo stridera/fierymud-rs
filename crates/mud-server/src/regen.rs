@@ -85,8 +85,34 @@ pub fn regen_tick(world: &mut World) {
 
 #[cfg(test)]
 mod tests {
-    use super::{health_per_tick, stamina_per_tick};
-    use mud_world::PostureKind;
+    use super::*;
+
+    fn make_player(
+        world: &mut World,
+        hp: i32,
+        hp_max: i32,
+        stamina: i32,
+        stamina_max: i32,
+        posture: PostureKind,
+    ) -> Entity {
+        world
+            .spawn((
+                Online,
+                Health { hp, max: hp_max },
+                Stamina {
+                    current: stamina,
+                    max: stamina_max,
+                },
+                Posture(posture),
+            ))
+            .id()
+    }
+
+    fn run_regen_tick(world: &mut World) {
+        // regen_tick gates on tick % 10 == 0.
+        world.insert_resource(TickCount(REGEN_PERIOD_TICKS));
+        regen_tick(world);
+    }
 
     #[test]
     fn regen_rates_scale_with_posture() {
@@ -100,5 +126,77 @@ mod tests {
         assert_eq!(health_per_tick(PostureKind::Sitting), 1);
         assert_eq!(health_per_tick(PostureKind::Resting), 2);
         assert_eq!(health_per_tick(PostureKind::Sleeping), 4);
+    }
+
+    #[test]
+    fn standing_regens_stamina_only() {
+        let mut world = World::new();
+        let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Standing);
+        run_regen_tick(&mut world);
+        assert_eq!(world.get::<Stamina>(p).unwrap().current, 31);
+        assert_eq!(world.get::<Health>(p).unwrap().hp, 50, "standing doesn't auto-heal");
+    }
+
+    #[test]
+    fn sleeping_regens_both_pools_at_full_rate() {
+        let mut world = World::new();
+        let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Sleeping);
+        run_regen_tick(&mut world);
+        assert_eq!(world.get::<Stamina>(p).unwrap().current, 38, "+8 stamina");
+        assert_eq!(world.get::<Health>(p).unwrap().hp, 54, "+4 hp");
+    }
+
+    #[test]
+    fn caps_at_max() {
+        let mut world = World::new();
+        // Already at max — no change.
+        let at_max = make_player(&mut world, 100, 100, 50, 50, PostureKind::Sleeping);
+        // Within one tick of max — clamp.
+        let near_max = make_player(&mut world, 97, 100, 49, 50, PostureKind::Sleeping);
+        run_regen_tick(&mut world);
+        assert_eq!(world.get::<Stamina>(at_max).unwrap().current, 50);
+        assert_eq!(world.get::<Health>(at_max).unwrap().hp, 100);
+        assert_eq!(world.get::<Stamina>(near_max).unwrap().current, 50, "+8 clamped to 50");
+        assert_eq!(world.get::<Health>(near_max).unwrap().hp, 100, "+4 clamped to 100");
+    }
+
+    #[test]
+    fn fighting_blocks_regen() {
+        let mut world = World::new();
+        let dummy = world.spawn_empty().id();
+        let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Resting);
+        world
+            .get_entity_mut(p)
+            .unwrap()
+            .insert(Fighting(dummy));
+        run_regen_tick(&mut world);
+        assert_eq!(world.get::<Stamina>(p).unwrap().current, 30, "no stamina regen while fighting");
+        assert_eq!(world.get::<Health>(p).unwrap().hp, 50, "no hp regen while fighting");
+    }
+
+    #[test]
+    fn offline_players_skip() {
+        let mut world = World::new();
+        // Spawn directly without Online (skips make_player).
+        let p = world
+            .spawn((
+                Health { hp: 50, max: 100 },
+                Stamina { current: 30, max: 50 },
+                Posture(PostureKind::Sleeping),
+            ))
+            .id();
+        run_regen_tick(&mut world);
+        assert_eq!(world.get::<Stamina>(p).unwrap().current, 30);
+        assert_eq!(world.get::<Health>(p).unwrap().hp, 50);
+    }
+
+    #[test]
+    fn skips_off_period_ticks() {
+        let mut world = World::new();
+        let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Sleeping);
+        world.insert_resource(TickCount(REGEN_PERIOD_TICKS - 1));
+        regen_tick(&mut world);
+        assert_eq!(world.get::<Stamina>(p).unwrap().current, 30);
+        assert_eq!(world.get::<Health>(p).unwrap().hp, 50);
     }
 }
