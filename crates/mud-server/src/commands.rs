@@ -3109,6 +3109,10 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You can't recall while fighting!\r\n");
+        return;
+    }
     let Some(target) = world.get::<RecallPoint>(player).map(|r| r.0) else {
         send_to(
             world,
