@@ -1220,7 +1220,10 @@ pub(crate) fn strip_color_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_damage, format_idle, render_prompt, sector_movement_cost, strip_color_tags};
+    use super::{
+        apply_damage, direction_name, format_idle, parse_direction, render_prompt,
+        sector_movement_cost, strip_color_tags,
+    };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
     use mud_world::{Health, Stamina};
@@ -1362,6 +1365,40 @@ mod tests {
         let (dead, msg) = apply_damage(&mut w, e, 10);
         assert!(!dead);
         assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn parse_direction_handles_full_words_and_aliases() {
+        use mud_db::enums::Direction;
+        assert_eq!(parse_direction("north"), Some(Direction::North));
+        assert_eq!(parse_direction("n"), Some(Direction::North));
+        assert_eq!(parse_direction("NW"), Some(Direction::Northwest));
+        assert_eq!(parse_direction("northwest"), Some(Direction::Northwest));
+        assert_eq!(parse_direction("up"), Some(Direction::Up));
+        assert_eq!(parse_direction("d"), Some(Direction::Down));
+        assert_eq!(parse_direction("in"), Some(Direction::In));
+        assert_eq!(parse_direction("out"), Some(Direction::Out));
+        // Unknown / non-direction input.
+        assert_eq!(parse_direction("portal"), None, "Direction::Portal isn't a movement direction");
+        assert_eq!(parse_direction(""), None);
+        assert_eq!(parse_direction("ne!"), None, "trailing punctuation rejects");
+        assert_eq!(parse_direction("sword"), None);
+    }
+
+    #[test]
+    fn direction_round_trip() {
+        use mud_db::enums::Direction;
+        // Every direction `direction_name` produces should parse back.
+        for d in [
+            Direction::North, Direction::South, Direction::East, Direction::West,
+            Direction::Up, Direction::Down,
+            Direction::Northeast, Direction::Northwest,
+            Direction::Southeast, Direction::Southwest,
+            Direction::In, Direction::Out,
+        ] {
+            let name = direction_name(d);
+            assert_eq!(parse_direction(name), Some(d), "round-trip {name}");
+        }
     }
 }
 
