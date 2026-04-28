@@ -140,3 +140,71 @@ pub enum MobRole {
     Boss,
     RaidBoss,
 }
+
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[sqlx(type_name = "UserRole", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum UserRole {
+    Player,
+    Immortal,
+    Builder,
+    HeadBuilder,
+    Coder,
+    Implementor,
+}
+
+impl UserRole {
+    /// Numeric hierarchy used for `min_role` checks. Higher = more privileged.
+    /// Roles aren't strictly linear in MUDs (Coder vs HeadBuilder etc.), so we
+    /// expose `rank()` rather than deriving Ord on the enum.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Player => 0,
+            Self::Immortal => 100,
+            Self::Builder => 110,
+            Self::HeadBuilder => 120,
+            Self::Coder => 130,
+            Self::Implementor => 140,
+        }
+    }
+
+    #[must_use]
+    pub const fn at_least(self, min: Self) -> bool {
+        self.rank() >= min.rank()
+    }
+}
+
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[sqlx(type_name = "Permission", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Permission {
+    Build,
+    Code,
+    Admin,
+    God,
+    Shutdown,
+    Wizlock,
+    Syslog,
+    Log,
+    Force,
+    Snoop,
+    Freeze,
+    Thaw,
+    Ban,
+    Unban,
+    Dc,
+    Advance,
+    Restore,
+    Notitle,
+    Squelch,
+    Teleport,
+    Transfer,
+    Summon,
+    Invisible,
+    Nohassle,
+    ZoneReset,
+    Wiznet,
+    /// Legacy in-game OLC. Not used in fierymud-rs — world editing is done
+    /// through Muditor. Kept here only so sqlx can decode rows that still
+    /// have this Postgres enum value granted.
+    Olc,
+}

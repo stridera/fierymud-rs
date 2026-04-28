@@ -19,9 +19,14 @@ pub struct Player;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Online;
 
-/// Account ownership: this player belongs to the User with this UUID.
+/// Account ownership and authorization data, stamped onto the Player entity
+/// at login. `role` comes from the Users row, `perms` from the Characters row.
 #[derive(Component, Debug, Clone)]
-pub struct Account(pub String);
+pub struct Account {
+    pub user_id: String,
+    pub role: mud_db::enums::UserRole,
+    pub perms: Vec<mud_db::enums::Permission>,
+}
 
 /// Marker: this entity is a non-player mob/NPC instance.
 #[derive(Component, Debug, Clone, Copy)]

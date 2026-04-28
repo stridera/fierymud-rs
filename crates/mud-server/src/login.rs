@@ -108,6 +108,7 @@ impl ConnRouter {
                                 email: trimmed.into(),
                                 display_name: String::new(),
                                 password_hash: None,
+                                role: mud_db::enums::UserRole::Player,
                             },
                         };
                     }
@@ -227,7 +228,11 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 Player,
                 Online,
                 Named { name: c.name.clone() },
-                Account(user.id.clone()),
+                Account {
+                user_id: user.id.clone(),
+                role: user.role,
+                perms: c.permissions.clone(),
+            },
                 Connection(outbound),
                 health,
                 combat,
@@ -249,7 +254,11 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             Player,
             Online,
             Named { name: c.name.clone() },
-            Account(user.id.clone()),
+            Account {
+                user_id: user.id.clone(),
+                role: user.role,
+                perms: c.permissions.clone(),
+            },
             Located(room_entity),
             Connection(outbound),
             health,

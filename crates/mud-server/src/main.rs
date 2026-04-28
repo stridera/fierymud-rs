@@ -62,6 +62,7 @@ async fn main() {
     }
 
     combat::seed_test_mobs(&mut world);
+    commands::validate_registry();
 
     let listen_addr =
         std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into());

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
+use crate::enums::Permission;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterRow {
     pub id: String,
@@ -13,6 +15,7 @@ pub struct CharacterRow {
     pub damage_roll: i32,
     pub armor_class: i32,
     pub alignment: i32,
+    pub permissions: Vec<Permission>,
     pub current_room_zone_id: Option<i32>,
     pub current_room_id: Option<i32>,
     pub recall_room_zone_id: Option<i32>,
@@ -34,6 +37,7 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             damage_roll,
             armor_class,
             alignment,
+            permissions AS "permissions!: Vec<Permission>",
             current_room_zone_id,
             current_room_id,
             recall_room_zone_id,
