@@ -13,7 +13,7 @@ const EFFECT_PERIOD_TICKS: u64 = 10;
 /// connection); also despawn any effect whose target entity has gone away.
 pub fn effects_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
-    if tick % EFFECT_PERIOD_TICKS != 0 {
+    if !tick.is_multiple_of(EFFECT_PERIOD_TICKS) {
         return;
     }
 

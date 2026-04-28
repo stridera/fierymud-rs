@@ -26,7 +26,7 @@ fn advance_tick(mut tick: ResMut<TickCount>) {
 }
 
 fn log_heartbeat(tick: Res<TickCount>) {
-    if tick.0 % 600 == 0 {
+    if tick.0.is_multiple_of(600) {
         info!(tick = tick.0, "heartbeat");
     }
 }

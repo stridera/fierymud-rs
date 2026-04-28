@@ -93,7 +93,7 @@ pub fn seed_test_items(world: &mut World) {
 /// Fighting takes a swing at its target.
 pub fn combat_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
-    if tick % COMBAT_PERIOD_TICKS != 0 {
+    if !tick.is_multiple_of(COMBAT_PERIOD_TICKS) {
         return;
     }
 

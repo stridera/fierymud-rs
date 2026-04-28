@@ -1632,7 +1632,7 @@ fn cmd_socials(world: &mut World, player: Entity, _args: &str) {
             out.push_str("\r\n");
         }
     }
-    if names.len() % cols != 0 {
+    if !names.len().is_multiple_of(cols) {
         out.push_str("\r\n");
     }
     send_to(world, player, out);
