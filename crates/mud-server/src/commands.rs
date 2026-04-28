@@ -382,6 +382,24 @@ const COMMANDS: &[Command] = &[
         run: cmd_spells,
     },
     Command {
+        names: &["cast", "c"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "cast <spell> [target]",
+            summary: "Cast a spell from the loaded catalog.",
+            long: "Looks up the ability by case-insensitive name (partial \
+                   match accepted). For now this is a stub: prints the \
+                   ability's metadata so you can see what's in the \
+                   catalog. Real effect application — slot consumption, \
+                   restriction checks, damage/heal/buff resolution — \
+                   lands when CharacterAbilities and the effect \
+                   pipeline are wired.",
+        },
+        run: cmd_cast,
+    },
+    Command {
         names: &["bug"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3289,6 +3307,66 @@ fn cmd_spells(world: &mut World, player: Entity, args: &str) {
             out.push_str("\r\n");
         }
     }
+    send_to(world, player, out);
+}
+
+fn cmd_cast(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.is_empty() || parts[0].trim().is_empty() {
+        send_to(world, player, "Cast what?\r\n");
+        return;
+    }
+    let spell_name = parts[0].trim().to_ascii_lowercase();
+    let target_word = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    // Find by exact key first, then by substring.
+    let catalog = world.resource::<AbilityCatalog>();
+    let def = catalog
+        .by_name
+        .get(&spell_name)
+        .cloned()
+        .or_else(|| {
+            catalog
+                .by_name
+                .values()
+                .find(|d| d.plain_name.to_ascii_lowercase().contains(&spell_name))
+                .cloned()
+        });
+    let Some(def) = def else {
+        send_to(
+            world,
+            player,
+            format!("No ability matching '{spell_name}'.\r\n"),
+        );
+        return;
+    };
+
+    let mode = color_mode_for(world, player);
+    let mut out = String::from("\r\n");
+    out.push_str(&format!(
+        "  {} ({})\r\n",
+        render_color_tags(&def.name, mode),
+        def.kind.label()
+    ));
+    if let Some(desc) = &def.description {
+        out.push_str(&format!("    {}\r\n", render_color_tags(desc.trim(), mode)));
+    }
+    out.push_str(&format!(
+        "    cast time: {} round(s)   cooldown: {}ms   {}area\r\n",
+        def.cast_time_rounds,
+        def.cooldown_ms,
+        if def.is_area { "" } else { "single-target / not " }
+    ));
+    out.push_str(&format!(
+        "    {}{}{}\r\n",
+        if def.violent { "violent  " } else { "" },
+        if def.in_combat_only { "combat-only  " } else { "" },
+        if def.combat_ok { "" } else { "non-combat  " },
+    ));
+    if let Some(target) = target_word {
+        out.push_str(&format!("    target: {target}\r\n"));
+    }
+    out.push_str("    (casting not yet implemented — this is metadata only)\r\n");
     send_to(world, player, out);
 }
 
