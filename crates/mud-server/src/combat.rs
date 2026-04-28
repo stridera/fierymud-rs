@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    CombatStats, Description, Fighting, Health, Item, Keywords, Located, Mob, Named, Player,
-    PlayerFlags, Posture, PostureKind, Slot, WearableIn, WorldKeyIndex,
+    CombatStats, Description, Exits, Fighting, Health, Item, Keywords, Located, Mob, Named,
+    Player, PlayerFlags, Posture, PostureKind, Slot, WearableIn, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -248,8 +248,25 @@ fn apply_swing(world: &mut World, s: &Swing) {
         && hp.hp > 0
         && hp.hp * 4 < hp.max
     {
-        send_to(world, s.target, "You panic!\r\n");
-        cmd_flee(world, s.target, "");
+        // Look for any open exit before announcing the panic — otherwise
+        // we'd print "You panic!" and then immediately "There's nowhere
+        // to run!" from cmd_flee, which reads as a contradiction.
+        let has_exit = world
+            .get::<Exits>(room)
+            .is_some_and(|e| {
+                e.0.values()
+                    .any(|ed| ed.state == mud_db::enums::ExitState::Open && ed.to.is_some())
+            });
+        if has_exit {
+            send_to(world, s.target, "You panic!\r\n");
+            cmd_flee(world, s.target, "");
+        } else {
+            send_to(
+                world,
+                s.target,
+                "You panic, but there's nowhere to run!\r\n",
+            );
+        }
     }
 }
 
