@@ -8,6 +8,7 @@ pub struct Room {
     pub zone_id: i32,
     pub id: i32,
     pub name: String,
+    pub room_description: String,
     pub sector: Sector,
     pub base_light_level: i32,
     pub capacity: i32,
@@ -21,6 +22,7 @@ pub async fn list_rooms(pool: &PgPool) -> sqlx::Result<Vec<Room>> {
             zone_id,
             id,
             name,
+            room_description,
             sector AS "sector: Sector",
             base_light_level,
             capacity

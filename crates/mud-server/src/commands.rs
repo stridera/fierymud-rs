@@ -14,10 +14,10 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, UserRole};
 use mud_net::Outbound;
 use mud_world::{
-    Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
-    Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Mob, MobPrototypes,
-    Named, Online, Player, PlayerFlags, Posture, PostureKind, Slot, SocialDef, SocialRegistry,
-    WearableIn, WorldKeyIndex,
+    Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance, EffectSource,
+    EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Mob,
+    MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Slot, SocialDef,
+    SocialRegistry, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -962,6 +962,10 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
     let room_name = world
         .get::<Named>(room)
         .map_or_else(|| "<nowhere>".to_string(), |n| n.name.clone());
+    let room_desc = world
+        .get::<Description>(room)
+        .map(|d| d.0.clone())
+        .unwrap_or_default();
     let exits: Vec<Direction> = world
         .get::<Exits>(room)
         .map(|e| e.0.keys().copied().collect())
@@ -995,6 +999,9 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
 
     let mut out = String::new();
     out.push_str(&format!("\r\n{room_name}\r\n"));
+    if !room_desc.trim().is_empty() {
+        out.push_str(&format!("{}\r\n", room_desc.trim_end()));
+    }
     if !others.is_empty() {
         out.push_str(&format!("Also here: {}\r\n", others.join(", ")));
     }

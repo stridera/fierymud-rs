@@ -232,6 +232,11 @@ pub struct Named {
     pub name: String,
 }
 
+/// Long-form description text. Used by `look` for rooms, by `examine` for
+/// items/mobs eventually. Empty string means "no description".
+#[derive(Component, Debug, Clone)]
+pub struct Description(pub String);
+
 /// Containment relationship: this entity is "inside" the target.
 /// Rooms are inside their Zone; later, players/objects will be inside Rooms.
 #[derive(Component, Debug, Clone, Copy)]

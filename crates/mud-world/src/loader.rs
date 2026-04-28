@@ -4,7 +4,9 @@ use bevy_ecs::prelude::*;
 use mud_db::{effects, mobs, objects, room_exits, rooms, socials, sqlx::PgPool, zones};
 use tracing::{info, warn};
 
-use crate::components::{ExitData, Exits, Located, Named, Room, RoomSector, WorldKey, Zone};
+use crate::components::{
+    Description, ExitData, Exits, Located, Named, Room, RoomSector, WorldKey, Zone,
+};
 use crate::resources::{
     EffectCatalog, EffectDef, MobProto, MobPrototypes, ObjectProto, ObjectPrototypes, SocialDef,
     SocialRegistry, WorldKeyIndex,
@@ -76,6 +78,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 Named {
                     name: r.name.clone(),
                 },
+                Description(r.room_description.clone()),
                 Located(zone_entity),
                 RoomSector(r.sector),
                 Exits::default(),
