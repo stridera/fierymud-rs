@@ -147,6 +147,12 @@ pub struct Follower(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LastTeller(pub Entity);
 
+/// Wall-clock instant of the player's most recent dispatched command.
+/// Stamped at the top of `commands::dispatch`. Absent on a player who has
+/// connected but not yet typed anything — `who` shows them as fresh.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LastInputAt(pub std::time::Instant);
+
 /// Per-player prompt template loaded from `Characters.prompt`. Variable
 /// substitution: `%h`/`%H` (current/max HP). More variables (`%v`/`%V`
 /// for stamina, `%n` for name, etc.) land when the systems they reference

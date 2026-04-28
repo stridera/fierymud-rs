@@ -15,7 +15,8 @@ use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRo
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance, EffectSource,
-    EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Mob,
+    EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastInputAt, LastTeller,
+    Located, Mob,
     MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint,
     RoomSector, Slot, SocialDef, SocialRegistry, Stamina, WearableIn, WorldKeyIndex,
 };
@@ -902,6 +903,11 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     // typing player gets a prompt at end-of-turn via flush_prompts. Marking
     // here also dedupes against any send_to(player, …) inside the handler.
     mark_for_prompt(player);
+    // Stamp activity even for empty input — pressing return to "wake up" a
+    // session counts as activity for idle-timer purposes.
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(LastInputAt(std::time::Instant::now()));
+    }
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;
@@ -1040,7 +1046,7 @@ pub(crate) fn strip_color_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_damage, render_prompt, sector_movement_cost, strip_color_tags};
+    use super::{apply_damage, format_idle, render_prompt, sector_movement_cost, strip_color_tags};
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
     use mud_world::{Health, Stamina};
@@ -1116,6 +1122,18 @@ mod tests {
         assert_eq!(render_prompt("[%r]", hp, st, name, None), "[?] ");
         // Empty template still gets a trailing space.
         assert_eq!(render_prompt("", hp, st, name, room), " ");
+    }
+
+    #[test]
+    fn format_idle_picks_a_unit() {
+        assert_eq!(format_idle(0), "0s");
+        assert_eq!(format_idle(45), "45s");
+        assert_eq!(format_idle(60), "1m");
+        assert_eq!(format_idle(125), "2m");
+        assert_eq!(format_idle(3599), "59m");
+        assert_eq!(format_idle(3600), "1h");
+        assert_eq!(format_idle(3660), "1h1m");
+        assert_eq!(format_idle(7320), "2h2m");
     }
 
     fn spawn_with_hp(world: &mut World, hp: i32, max: i32) -> Entity {
@@ -1472,25 +1490,47 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
 }
 
 fn cmd_who(world: &mut World, player: Entity, _args: &str) {
-    let rows: Vec<(String, bool)> = {
-        let mut q = world
-            .query_filtered::<(&Named, Option<&PlayerFlags>), (With<Player>, With<Online>)>();
+    let rows: Vec<(String, bool, Option<u64>)> = {
+        let mut q = world.query_filtered::<(
+            &Named,
+            Option<&PlayerFlags>,
+            Option<&LastInputAt>,
+        ), (With<Player>, With<Online>)>();
         q.iter(world)
-            .map(|(n, f)| {
+            .map(|(n, f, last)| {
                 let afk = f.is_some_and(|pf| pf.has(PlayerFlag::Afk));
-                (n.name.clone(), afk)
+                let idle = last.map(|l| l.0.elapsed().as_secs());
+                (n.name.clone(), afk, idle)
             })
             .collect()
     };
     let mut out = format!("\r\n{} online:\r\n", rows.len());
-    for (name, afk) in &rows {
+    for (name, afk, idle) in &rows {
+        out.push_str("  ");
+        out.push_str(name);
         if *afk {
-            out.push_str(&format!("  {name} [AFK]\r\n"));
-        } else {
-            out.push_str(&format!("  {name}\r\n"));
+            out.push_str(" [AFK]");
         }
+        if let Some(secs) = idle
+            && *secs >= 60
+        {
+            out.push_str(&format!(" [idle {}]", format_idle(*secs)));
+        }
+        out.push_str("\r\n");
     }
     send_to(world, player, out);
+}
+
+fn format_idle(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 { format!("{h}h") } else { format!("{h}h{m}m") }
+    }
 }
 
 fn cmd_score(world: &mut World, player: Entity, _args: &str) {
