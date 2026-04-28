@@ -60,7 +60,7 @@ pub enum Sector {
     Avernus,
 }
 
-#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[sqlx(type_name = "Direction", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Direction {
     North,

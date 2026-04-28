@@ -1150,6 +1150,9 @@ name = "mud-server"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "dotenvy",
+ "mud-db",
+ "mud-world",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1158,6 +1161,12 @@ dependencies = [
 [[package]]
 name = "mud-world"
 version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "mud-db",
+ "sqlx",
+ "tracing",
+]
 
 [[package]]
 name = "nonmax"

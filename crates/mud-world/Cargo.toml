@@ -6,6 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+bevy_ecs = "0.18.1"
+mud-db = { version = "0.1.0", path = "../mud-db" }
+sqlx = { version = "0.8.6", default-features = false, features = ["postgres", "macros"] }
+tracing = "0.1.44"
 
 [lints]
 workspace = true

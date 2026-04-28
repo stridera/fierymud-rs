@@ -3,7 +3,7 @@ use std::time::Duration;
 use bevy_ecs::prelude::*;
 use tokio::signal;
 use tokio::time::{MissedTickBehavior, interval};
-use tracing::{info, info_span};
+use tracing::{error, info, info_span};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Resource, Default)]
@@ -14,7 +14,7 @@ fn advance_tick(mut tick: ResMut<TickCount>) {
 }
 
 fn log_heartbeat(tick: Res<TickCount>) {
-    if tick.0 % 10 == 0 {
+    if tick.0 % 600 == 0 {
         info!(tick = tick.0, "heartbeat");
     }
 }
@@ -25,10 +25,33 @@ async fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
+    let _ = dotenvy::dotenv();
+
     info!("fierymud-rs starting");
+
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(v) => v,
+        Err(_) => {
+            error!("DATABASE_URL not set; aborting");
+            return;
+        }
+    };
+
+    let pool = match mud_db::connect(&database_url).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!(error = %e, "failed to connect to database");
+            return;
+        }
+    };
 
     let mut world = World::new();
     world.insert_resource(TickCount::default());
+
+    if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
+        error!(error = %e, "world load failed");
+        return;
+    }
 
     let mut schedule = Schedule::default();
     schedule.add_systems((advance_tick, log_heartbeat).chain());
