@@ -1511,6 +1511,13 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .map_or_else(|| "<gone>".to_string(), |n| n.name.clone());
         out.push_str(&format!("  Fighting: {target_name}\r\n"));
     }
+    let flags: Vec<&'static str> = world
+        .get::<PlayerFlags>(player)
+        .map(|f| f.0.iter().map(|fl| fl.label()).collect())
+        .unwrap_or_default();
+    if !flags.is_empty() {
+        out.push_str(&format!("  Flags: {}\r\n", flags.join(", ")));
+    }
     send_to(world, player, out);
 }
 
