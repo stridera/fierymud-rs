@@ -1012,7 +1012,8 @@ pub(crate) fn strip_color_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_prompt, sector_movement_cost, strip_color_tags};
+    use super::{apply_damage, render_prompt, sector_movement_cost, strip_color_tags};
+    use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
     use mud_world::{Health, Stamina};
 
@@ -1077,6 +1078,60 @@ mod tests {
         assert_eq!(render_prompt("<%v/%V>", hp, None), "<?/?> ");
         // Empty template still gets a trailing space.
         assert_eq!(render_prompt("", hp, st), " ");
+    }
+
+    fn spawn_with_hp(world: &mut World, hp: i32, max: i32) -> Entity {
+        world.spawn(Health { hp, max }).id()
+    }
+
+    #[test]
+    fn apply_damage_reports_thresholds() {
+        let mut w = World::new();
+        // Max 100 → hurt=50, badly=25, near=10.
+
+        // Crossing only the 50% line: 80 → 40.
+        let e = spawn_with_hp(&mut w, 80, 100);
+        let (dead, msg) = apply_damage(&mut w, e, 40);
+        assert!(!dead);
+        assert_eq!(msg, Some("You are hurt.\r\n"));
+        assert_eq!(w.get::<Health>(e).unwrap().hp, 40);
+
+        // Crossing only the 25% line: 40 → 20 (already past 50% → no re-fire).
+        let e = spawn_with_hp(&mut w, 40, 100);
+        let (_, msg) = apply_damage(&mut w, e, 20);
+        assert_eq!(msg, Some("You are badly hurt!\r\n"));
+
+        // Crossing only the 10% line.
+        let e = spawn_with_hp(&mut w, 20, 100);
+        let (_, msg) = apply_damage(&mut w, e, 12);
+        assert_eq!(msg, Some("You are near death!\r\n"));
+
+        // Skip-crossing: 80 → 5 should report the deepest band only.
+        let e = spawn_with_hp(&mut w, 80, 100);
+        let (_, msg) = apply_damage(&mut w, e, 75);
+        assert_eq!(msg, Some("You are near death!\r\n"));
+
+        // Lethal blow: dead, no threshold message.
+        let e = spawn_with_hp(&mut w, 5, 100);
+        let (dead, msg) = apply_damage(&mut w, e, 5);
+        assert!(dead);
+        assert_eq!(msg, None);
+
+        // No crossing: 90 → 80 (still above 50%).
+        let e = spawn_with_hp(&mut w, 90, 100);
+        let (_, msg) = apply_damage(&mut w, e, 10);
+        assert_eq!(msg, None);
+
+        // Same-band damage: 40 → 30 (already in 25%-50% band, no new line).
+        let e = spawn_with_hp(&mut w, 40, 100);
+        let (_, msg) = apply_damage(&mut w, e, 10);
+        assert_eq!(msg, None);
+
+        // No Health component → no-op.
+        let e = w.spawn_empty().id();
+        let (dead, msg) = apply_damage(&mut w, e, 10);
+        assert!(!dead);
+        assert_eq!(msg, None);
     }
 }
 
@@ -2415,6 +2470,44 @@ fn check_stamina(world: &World, player: Entity, cost: i32, verb: &str) -> bool {
     true
 }
 
+/// Apply `amount` damage to `target`'s Health. Returns `(dead, threshold_msg)`
+/// — `dead` is true if HP dropped to zero or below; `threshold_msg`, if Some,
+/// is a one-time downward-crossing message ("hurt"/"badly hurt"/"near death")
+/// that the caller should `send_to(target, ..)` after its hit-line so the
+/// ordering reads naturally. None when no threshold was crossed, when the
+/// target lacks Health, or when the blow was lethal (death message takes over).
+/// Most-severe-wins: a single hit that crosses several thresholds emits only
+/// the lowest-band message.
+pub(crate) fn apply_damage(
+    world: &mut World,
+    target: Entity,
+    amount: i32,
+) -> (bool, Option<&'static str>) {
+    let Some((old, max)) = world.get::<Health>(target).map(|h| (h.hp, h.max)) else {
+        return (false, None);
+    };
+    let new_value = old - amount;
+    if let Some(mut h) = world.get_mut::<Health>(target) {
+        h.hp = new_value;
+    }
+    if new_value <= 0 {
+        return (true, None);
+    }
+    let near = max / 10;
+    let badly = max / 4;
+    let hurt = max / 2;
+    let msg = if old > near && new_value <= near {
+        Some("You are near death!\r\n")
+    } else if old > badly && new_value <= badly {
+        Some("You are badly hurt!\r\n")
+    } else if old > hurt && new_value <= hurt {
+        Some("You are hurt.\r\n")
+    } else {
+        None
+    };
+    (false, msg)
+}
+
 /// Pay the stamina cost. Caps current at zero. Sends one-time messages
 /// when crossing the "tired" (25% of max) and "exhausted" (0) thresholds
 /// downward — never on the way back up (regen handles that silently).
@@ -2662,15 +2755,13 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
         .get::<Named>(player)
         .map_or_else(String::new, |n| n.name.clone());
 
-    let dead = if let Some(mut hp) = world.get_mut::<Health>(target) {
-        hp.hp -= damage;
-        hp.hp <= 0
-    } else {
-        false
-    };
+    let (dead, threshold_msg) = apply_damage(world, target, damage);
 
     send_to(world, player, format!("You kick {target_name} for {damage} damage!\r\n"));
     send_to(world, target, format!("{player_name} kicks you for {damage} damage!\r\n"));
+    if let Some(m) = threshold_msg {
+        send_to(world, target, m);
+    }
     let bystanders: Vec<Entity> = {
         let mut q = world.query::<(Entity, &Located)>();
         q.iter(world)
@@ -2838,12 +2929,7 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         .get::<Named>(player)
         .map_or_else(String::new, |n| n.name.clone());
 
-    let dead = if let Some(mut hp) = world.get_mut::<Health>(target) {
-        hp.hp -= damage;
-        hp.hp <= 0
-    } else {
-        false
-    };
+    let (dead, threshold_msg) = apply_damage(world, target, damage);
 
     // Knockdown — set target to Sitting.
     if !dead && let Ok(mut e) = world.get_entity_mut(target) {
@@ -2860,6 +2946,9 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         target,
         format!("{player_name} bashes you for {damage} damage, knocking you down!\r\n"),
     );
+    if let Some(m) = threshold_msg {
+        send_to(world, target, m);
+    }
     let bystanders: Vec<Entity> = {
         let mut q = world.query::<(Entity, &Located)>();
         q.iter(world)

@@ -6,7 +6,7 @@ use mud_world::{
 use tracing::info;
 
 use crate::TickCount;
-use crate::commands::send_to;
+use crate::commands::{apply_damage, send_to};
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
 
@@ -170,16 +170,14 @@ fn apply_swing(world: &mut World, s: &Swing) {
         .get::<Named>(s.target)
         .map_or_else(String::new, |n| n.name.clone());
 
-    let dead = if let Some(mut hp) = world.get_mut::<Health>(s.target) {
-        hp.hp -= s.damage;
-        hp.hp <= 0
-    } else {
+    if world.get::<Health>(s.target).is_none() {
         // No Health component: nothing to damage. End combat from this side.
         if let Ok(mut e) = world.get_entity_mut(s.attacker) {
             e.remove::<Fighting>();
         }
         return;
-    };
+    }
+    let (dead, threshold_msg) = apply_damage(world, s.target, s.damage);
 
     send_to(
         world,
@@ -194,6 +192,9 @@ fn apply_swing(world: &mut World, s: &Swing) {
             s.attacker_name, s.damage
         ),
     );
+    if let Some(m) = threshold_msg {
+        send_to(world, s.target, m);
+    }
     broadcast_room_except(
         world,
         room,
