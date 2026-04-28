@@ -1,6 +1,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    CombatStats, Fighting, Health, Item, Keywords, Located, Mob, Named, Player, WorldKeyIndex,
+    CombatStats, Fighting, Health, Item, Keywords, Located, Mob, Named, Player, Slot, WearableIn,
+    WorldKeyIndex,
 };
 use tracing::info;
 
@@ -72,6 +73,7 @@ pub fn seed_test_items(world: &mut World) {
         },
         Keywords(vec!["sword".into(), "rusty".into()]),
         Located(room),
+        WearableIn(Slot::Wield),
     ));
     world.spawn((
         Item,

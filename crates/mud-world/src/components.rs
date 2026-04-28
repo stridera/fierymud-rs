@@ -42,6 +42,70 @@ pub struct Item;
 #[derive(Component, Debug, Clone)]
 pub struct Keywords(pub Vec<String>);
 
+/// Equipment slots a wearable item can occupy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Slot {
+    Head,
+    Neck,
+    Body,
+    Arms,
+    Hands,
+    LeftFinger,
+    RightFinger,
+    Waist,
+    Legs,
+    Feet,
+    Wield,
+    Hold,
+    Light,
+}
+
+impl Slot {
+    pub const ORDER: &'static [Self] = &[
+        Self::Head,
+        Self::Neck,
+        Self::Body,
+        Self::Arms,
+        Self::Hands,
+        Self::LeftFinger,
+        Self::RightFinger,
+        Self::Waist,
+        Self::Legs,
+        Self::Feet,
+        Self::Wield,
+        Self::Hold,
+        Self::Light,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Neck => "neck",
+            Self::Body => "body",
+            Self::Arms => "arms",
+            Self::Hands => "hands",
+            Self::LeftFinger => "finger (left)",
+            Self::RightFinger => "finger (right)",
+            Self::Waist => "waist",
+            Self::Legs => "legs",
+            Self::Feet => "feet",
+            Self::Wield => "wielded",
+            Self::Hold => "held",
+            Self::Light => "light",
+        }
+    }
+}
+
+/// Item-only: the slot this item is wearable in. Items without a
+/// WearableIn component aren't wearable at all.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WearableIn(pub Slot);
+
+/// Item-only, only present while the item is equipped: which slot it
+/// occupies. Combined with Located(wearer) means "X has Y equipped in Z".
+#[derive(Component, Debug, Clone, Copy)]
+pub struct EquippedSlot(pub Slot);
+
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Health {
     pub hp: i32,

@@ -14,8 +14,9 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Permission, UserRole};
 use mud_net::Outbound;
 use mud_world::{
-    Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, Exits, Fighting,
-    Health, Item, Keywords, Located, Named, Online, Player, WorldKeyIndex,
+    Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
+    Exits, Fighting, Health, Item, Keywords, Located, Named, Online, Player, Slot, WearableIn,
+    WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -199,6 +200,70 @@ const COMMANDS: &[Command] = &[
                    you drop it.",
         },
         run: cmd_drop,
+    },
+    Command {
+        names: &["give"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "give <item> <target>",
+            summary: "Hand an item to another character in the room.",
+            long: "Both you and the target must be in the same room. The \
+                   item must be in your inventory (not equipped — `remove` \
+                   first if needed).",
+        },
+        run: cmd_give,
+    },
+    Command {
+        names: &["wear"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "wear <item>",
+            summary: "Equip a wearable item from your inventory.",
+            long: "The item must have a wear-slot, and that slot must be \
+                   free. Use `remove` to take something off first.",
+        },
+        run: cmd_wear,
+    },
+    Command {
+        names: &["wield"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "wield <item>",
+            summary: "Wield a weapon (shortcut for wear into the Wield slot).",
+            long: "Equivalent to wear, but only succeeds for items that go \
+                   into the wield slot.",
+        },
+        run: cmd_wield,
+    },
+    Command {
+        names: &["remove", "rem"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "remove <item>",
+            summary: "Unequip an item, returning it to your inventory.",
+            long: "The item must currently be equipped on you.",
+        },
+        run: cmd_remove,
+    },
+    Command {
+        names: &["equipment", "eq"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "equipment",
+            summary: "List items you are wearing/wielding.",
+            long: "Shows each occupied slot and the item filling it.",
+        },
+        run: cmd_equipment,
     },
     Command {
         names: &["effects", "affects"],
@@ -690,10 +755,11 @@ fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
 
 fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
     let items: Vec<String> = {
-        let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
+        let mut q = world
+            .query_filtered::<(&Located, &Named, Option<&EquippedSlot>), With<Item>>();
         q.iter(world)
-            .filter(|(l, _)| l.0 == player)
-            .map(|(_, n)| n.name.clone())
+            .filter(|(l, _, eq)| l.0 == player && eq.is_none())
+            .map(|(_, n, _)| n.name.clone())
             .collect()
     };
     let mut out = if items.is_empty() {
@@ -718,7 +784,7 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
 
-    let item = find_item_in(world, target_word, room);
+    let item = find_in_room(world, target_word, room);
     let Some(item) = item else {
         send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
         return;
@@ -758,7 +824,7 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Drop what?\r\n");
         return;
     }
-    let item = find_item_in(world, target_word, player);
+    let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
     let Some(item) = item else {
         send_to(
             world,
@@ -797,25 +863,266 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-/// Find the first Item entity inside `container` (a room or a player) whose
-/// keywords (case-insensitive) contain `needle`. Falls back to substring
-/// match on the entity's display Name.
-fn find_item_in(world: &mut World, needle: &str, container: Entity) -> Option<Entity> {
+fn cmd_give(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 || parts[1].trim().is_empty() {
+        send_to(world, player, "Usage: give <item> <target>\r\n");
+        return;
+    }
+    let item_word = parts[0].trim();
+    let target_word = parts[1].trim();
+
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+
+    let item = find_carried_by(world, item_word, player, EquipFilter::Inventory);
+    let Some(item) = item else {
+        send_to(
+            world,
+            player,
+            format!("You aren't carrying '{item_word}'.\r\n"),
+        );
+        return;
+    };
+    let target = find_actor_in_room(world, target_word, room, player);
+    let Some(target) = target else {
+        send_to(
+            world,
+            player,
+            format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+
+    let item_name = world
+        .get::<Named>(item)
+        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    if let Some(mut l) = world.get_mut::<Located>(item) {
+        l.0 = target;
+    }
+
+    send_to(
+        world,
+        player,
+        format!("You give {item_name} to {target_name}.\r\n"),
+    );
+    send_to(
+        world,
+        target,
+        format!("{player_name} gives you {item_name}.\r\n"),
+    );
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && *e != target && l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(
+            world,
+            b,
+            format!("{player_name} gives {item_name} to {target_name}.\r\n"),
+        );
+    }
+}
+
+fn cmd_wear(world: &mut World, player: Entity, args: &str) {
+    wear_into(world, player, args.trim(), None);
+}
+
+fn cmd_wield(world: &mut World, player: Entity, args: &str) {
+    wear_into(world, player, args.trim(), Some(Slot::Wield));
+}
+
+fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: Option<Slot>) {
+    if target_word.is_empty() {
+        send_to(world, player, "Wear what?\r\n");
+        return;
+    }
+
+    let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
+    let Some(item) = item else {
+        send_to(
+            world,
+            player,
+            format!("You aren't carrying '{target_word}'.\r\n"),
+        );
+        return;
+    };
+
+    let item_name = world
+        .get::<Named>(item)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    let Some(WearableIn(slot)) = world.get::<WearableIn>(item).copied() else {
+        send_to(world, player, format!("{item_name} can't be worn.\r\n"));
+        return;
+    };
+
+    if let Some(forced) = force_slot
+        && forced != slot
+    {
+        send_to(
+            world,
+            player,
+            format!("{item_name} can't be wielded.\r\n"),
+        );
+        return;
+    }
+
+    // Check the slot is free.
+    let slot_taken = {
+        let mut q = world.query_filtered::<(&Located, &EquippedSlot), With<Item>>();
+        q.iter(world)
+            .any(|(l, eq)| l.0 == player && eq.0 == slot)
+    };
+    if slot_taken {
+        send_to(
+            world,
+            player,
+            format!("Your {} is already occupied.\r\n", slot.label()),
+        );
+        return;
+    }
+
+    if let Ok(mut e) = world.get_entity_mut(item) {
+        e.insert(EquippedSlot(slot));
+    }
+
+    let verb = if slot == Slot::Wield { "wield" } else { "wear" };
+    send_to(world, player, format!("You {verb} {item_name}.\r\n"));
+}
+
+fn cmd_remove(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Remove what?\r\n");
+        return;
+    }
+    let item = find_carried_by(world, target_word, player, EquipFilter::Equipped);
+    let Some(item) = item else {
+        send_to(
+            world,
+            player,
+            format!("You aren't wearing '{target_word}'.\r\n"),
+        );
+        return;
+    };
+    let item_name = world
+        .get::<Named>(item)
+        .map_or_else(String::new, |n| n.name.clone());
+    if let Ok(mut e) = world.get_entity_mut(item) {
+        e.remove::<EquippedSlot>();
+    }
+    send_to(world, player, format!("You remove {item_name}.\r\n"));
+}
+
+fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
+    // Build a Slot -> name map in canonical order.
+    let mut by_slot: Vec<(Slot, String)> = {
+        let mut q =
+            world.query_filtered::<(&Located, &Named, &EquippedSlot), With<Item>>();
+        q.iter(world)
+            .filter(|(l, _, _)| l.0 == player)
+            .map(|(_, n, eq)| (eq.0, n.name.clone()))
+            .collect()
+    };
+    if by_slot.is_empty() {
+        send_to(world, player, "\r\nYou aren't wearing anything.\r\n");
+        return;
+    }
+    by_slot.sort_by_key(|(s, _)| Slot::ORDER.iter().position(|x| x == s).unwrap_or(usize::MAX));
+    let mut out = String::from("\r\nEquipment:\r\n");
+    for (slot, name) in &by_slot {
+        out.push_str(&format!("  {:>14}: {}\r\n", slot.label(), name));
+    }
+    send_to(world, player, out);
+}
+
+/// Match by Keywords substring first, falling back to Name substring.
+fn matches(needle: &str, name: &Named, kw: Option<&Keywords>) -> bool {
+    if let Some(kw) = kw
+        && kw.0.iter().any(|k| k.to_ascii_lowercase().contains(needle))
+    {
+        return true;
+    }
+    name.name.to_ascii_lowercase().contains(needle)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EquipFilter {
+    /// Carried but not equipped (i.e. in inventory).
+    Inventory,
+    /// Currently equipped.
+    Equipped,
+    /// Either. Reserved for "look in self" flows we'll add later.
+    #[allow(dead_code)]
+    Anywhere,
+}
+
+fn find_carried_by(
+    world: &mut World,
+    needle: &str,
+    carrier: Entity,
+    filter: EquipFilter,
+) -> Option<Entity> {
+    let needle = needle.to_ascii_lowercase();
+    let mut q = world.query_filtered::<(
+        Entity,
+        &Located,
+        &Named,
+        Option<&Keywords>,
+        Option<&EquippedSlot>,
+    ), With<Item>>();
+    q.iter(world)
+        .find(|(_, l, n, kw, eq)| {
+            if l.0 != carrier {
+                return false;
+            }
+            let is_equipped = eq.is_some();
+            let pass_filter = match filter {
+                EquipFilter::Inventory => !is_equipped,
+                EquipFilter::Equipped => is_equipped,
+                EquipFilter::Anywhere => true,
+            };
+            pass_filter && matches(&needle, n, *kw)
+        })
+        .map(|(e, _, _, _, _)| e)
+}
+
+fn find_in_room(world: &mut World, needle: &str, room: Entity) -> Option<Entity> {
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
     q.iter(world)
-        .find(|(_, l, n, kw)| {
-            if l.0 != container {
-                return false;
-            }
-            if let Some(kw) = kw
-                && kw.0.iter().any(|k| k.to_ascii_lowercase().contains(&needle))
-            {
-                return true;
-            }
-            n.name.to_ascii_lowercase().contains(&needle)
-        })
+        .find(|(_, l, n, kw)| l.0 == room && matches(&needle, n, *kw))
         .map(|(e, _, _, _)| e)
+}
+
+/// Find a non-Item entity in `room` (player or mob) for give/attack-style
+/// targeting.
+fn find_actor_in_room(
+    world: &mut World,
+    needle: &str,
+    room: Entity,
+    exclude: Entity,
+) -> Option<Entity> {
+    let needle = needle.to_ascii_lowercase();
+    let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>, Option<&Item>)>();
+    q.iter(world)
+        .find(|(e, l, n, kw, item)| {
+            *e != exclude && l.0 == room && item.is_none() && matches(&needle, n, *kw)
+        })
+        .map(|(e, _, _, _, _)| e)
 }
 
 fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
