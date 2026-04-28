@@ -416,6 +416,49 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_attack,
     },
+    Command {
+        names: &["flee"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "flee",
+            summary: "Run away from combat through a random open exit.",
+            long: "Picks an open exit at random and moves you through it. \
+                   You stop fighting; attackers stop on the next combat \
+                   tick (they auto-disengage when their target leaves the \
+                   room).",
+        },
+        run: cmd_flee,
+    },
+    Command {
+        names: &["kick"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "kick",
+            summary: "Make an immediate kick attack on your current target.",
+            long: "Extra attack outside the normal combat-tick rhythm. \
+                   Damage = dmg_roll + 4. You must already be fighting \
+                   someone.",
+        },
+        run: cmd_kick,
+    },
+    Command {
+        names: &["disengage"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "disengage",
+            summary: "Stop fighting your current target.",
+            long: "Removes your Fighting state — you stop swinging. \
+                   Opponents may keep attacking until they auto-disengage \
+                   or you leave the room.",
+        },
+        run: cmd_disengage,
+    },
     // ----- Movement -----
     Command {
         names: &["north", "n"],
@@ -1677,6 +1720,181 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     for b in bystanders {
         send_to(world, b, format!("{player_name} attacks {actual_name}.\r\n"));
     }
+}
+
+fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let from_room = located.0;
+
+    // Collect open exits with valid targets.
+    let candidates: Vec<(mud_db::enums::Direction, Entity)> = world
+        .get::<Exits>(from_room)
+        .map(|e| {
+            e.0.iter()
+                .filter_map(|(dir, ed)| {
+                    if ed.state == mud_db::enums::ExitState::Open {
+                        ed.to.map(|t| (*dir, t))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if candidates.is_empty() {
+        send_to(world, player, "There's nowhere to run!\r\n");
+        return;
+    }
+
+    let pick = rand::random_range(0..candidates.len());
+    let (dir, target) = candidates[pick];
+    let dir_name = direction_name(dir);
+
+    let mover_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    // Notify the room you're fleeing.
+    let from_others: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 == from_room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for o in from_others {
+        send_to(world, o, format!("{mover_name} panics and flees {dir_name}!\r\n"));
+    }
+
+    // Drop our own Fighting; combat_tick auto-disengages attackers on
+    // the next 1Hz pass via the room-mismatch check.
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.remove::<Fighting>();
+    }
+
+    // Move + announce arrival + auto-look.
+    if let Some(mut l) = world.get_mut::<Located>(player) {
+        l.0 = target;
+    }
+    let to_others: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 == target)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
+        format!("the {}", direction_name(d))
+    });
+    for o in to_others {
+        send_to(
+            world,
+            o,
+            format!("{mover_name} arrives, panting, from {arrival_dir}.\r\n"),
+        );
+    }
+    send_to(world, player, format!("You flee {dir_name}!\r\n"));
+    cmd_look(world, player, "");
+}
+
+fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
+    let Some(fighting) = world.get::<Fighting>(player).copied() else {
+        send_to(world, player, "You aren't fighting anyone.\r\n");
+        return;
+    };
+    let target = fighting.0;
+    if world.get_entity(target).is_err() {
+        // Target has been despawned; clean up our stale Fighting.
+        if let Ok(mut e) = world.get_entity_mut(player) {
+            e.remove::<Fighting>();
+        }
+        send_to(world, player, "Your target is gone.\r\n");
+        return;
+    }
+    let Some(player_room) = world.get::<Located>(player).map(|l| l.0) else {
+        return;
+    };
+    let Some(target_room) = world.get::<Located>(target).map(|l| l.0) else {
+        return;
+    };
+    if player_room != target_room {
+        send_to(world, player, "Your target isn't here.\r\n");
+        return;
+    }
+
+    let dmg_roll = world
+        .get::<CombatStats>(player)
+        .map(|cs| cs.dmg_roll)
+        .unwrap_or(1);
+    let damage = (dmg_roll + 4).max(1);
+
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    let dead = if let Some(mut hp) = world.get_mut::<Health>(target) {
+        hp.hp -= damage;
+        hp.hp <= 0
+    } else {
+        false
+    };
+
+    send_to(world, player, format!("You kick {target_name} for {damage} damage!\r\n"));
+    send_to(world, target, format!("{player_name} kicks you for {damage} damage!\r\n"));
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && *e != target && l.0 == player_room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(world, b, format!("{player_name} kicks {target_name}.\r\n"));
+    }
+
+    if dead {
+        // Defer to combat::handle_death? It's pub(crate) only inside combat.rs.
+        // Simplest: just clear Fighting on attacker; the next combat tick
+        // will sweep the orphan. For now just despawn here.
+        let is_player = world.get::<Player>(target).is_some();
+        if is_player {
+            // Revive
+            if let Some(mut hp) = world.get_mut::<Health>(target) {
+                hp.hp = hp.max;
+            }
+            if let Ok(mut e) = world.get_entity_mut(target) {
+                e.remove::<Fighting>();
+            }
+            send_to(world, target, "You collapse, then gasp back to life with full health.\r\n");
+        } else {
+            send_to(world, player, "Your target falls.\r\n");
+            // Mob death: let combat_tick clean up via orphan logic on next pass.
+            if let Ok(e) = world.get_entity_mut(target) {
+                e.despawn();
+            }
+            // Clear our own Fighting so combat doesn't re-target a despawned entity.
+            if let Ok(mut e) = world.get_entity_mut(player) {
+                e.remove::<Fighting>();
+            }
+        }
+    }
+}
+
+fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<Fighting>(player).is_none() {
+        send_to(world, player, "You aren't fighting anyone.\r\n");
+        return;
+    }
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.remove::<Fighting>();
+    }
+    send_to(world, player, "You stop fighting.\r\n");
 }
 
 // ---------------------------------------------------------------------------
