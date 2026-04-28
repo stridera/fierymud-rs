@@ -4,6 +4,7 @@ pub mod character_items;
 pub mod characters;
 pub mod effects;
 pub mod enums;
+pub mod mob_reset_equipment;
 pub mod mob_resets;
 pub mod mobs;
 pub mod object_resets;

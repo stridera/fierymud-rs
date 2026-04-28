@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    effects, mob_resets, mobs, object_resets, objects, room_exits, rooms, socials, sqlx::PgPool,
-    zones,
+    effects, mob_reset_equipment, mob_resets, mobs, object_resets, objects, room_exits, rooms,
+    socials, sqlx::PgPool, zones,
 };
 use tracing::{info, warn};
 
 use crate::components::{
-    CombatStats, Description, ExitData, Exits, Health, Item, Keywords, Located, Mob, Named,
-    Posture, PostureKind, Room, RoomSector, WorldKey, Zone,
+    CombatStats, Description, EquippedSlot, ExitData, Exits, Health, Item, Keywords, Located, Mob,
+    Named, Posture, PostureKind, Room, RoomSector, Slot, WorldKey, Zone,
 };
 use crate::resources::{
     EffectCatalog, EffectDef, MobProto, MobPrototypes, ObjectProto, ObjectPrototypes, SocialDef,
@@ -33,6 +33,10 @@ pub struct LoadStats {
     pub mob_resets_skipped: usize,
     pub object_resets_spawned: usize,
     pub object_resets_skipped: usize,
+    /// Equipment items successfully attached to a reset-spawned mob.
+    pub mob_equipment_spawned: usize,
+    /// Equipment rows whose proto/slot/parent mob couldn't be resolved.
+    pub mob_equipment_skipped: usize,
 }
 
 /// Load the persistent world from the database into the ECS World:
@@ -225,8 +229,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // were inserted above so the spawners can read them. Probability gating
     // and respawn timing belong to a future tick system; for now we always
     // spawn when probability is non-zero, capping at max_instances per
-    // reset row (which today means 1 — multi-instance resets are rare).
+    // reset row.
+    //
+    // Track each spawned mob entity by its reset_id so the equipment pass
+    // below can attach gear to the right instances.
     let mob_reset_rows = mob_resets::list_all(pool).await?;
+    let mut mobs_by_reset: HashMap<i32, Vec<Entity>> =
+        HashMap::with_capacity(mob_reset_rows.len());
     for r in &mob_reset_rows {
         if r.probability <= 0.0 {
             continue;
@@ -247,25 +256,31 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         };
         let hp = proto.rolled_hp();
         let dmg = proto.avg_damage();
+        let mut spawned_for_reset: Vec<Entity> =
+            Vec::with_capacity(usize::try_from(r.max_instances.max(1)).unwrap_or(1));
         for _ in 0..r.max_instances.max(1) {
-            world.spawn((
-                Mob,
-                Named { name: proto.name.clone() },
-                Keywords(proto.keywords.clone()),
-                Description(proto.room_description.clone()),
-                WorldKey { zone: proto.zone_id, id: proto.id },
-                Located(room_entity),
-                Health { hp, max: hp },
-                CombatStats {
-                    hit_roll: proto.hit_roll,
-                    dmg_roll: dmg,
-                    ac: proto.armor_class,
-                    alignment: proto.alignment,
-                },
-                Posture(PostureKind::Standing),
-            ));
+            let e = world
+                .spawn((
+                    Mob,
+                    Named { name: proto.name.clone() },
+                    Keywords(proto.keywords.clone()),
+                    Description(proto.room_description.clone()),
+                    WorldKey { zone: proto.zone_id, id: proto.id },
+                    Located(room_entity),
+                    Health { hp, max: hp },
+                    CombatStats {
+                        hit_roll: proto.hit_roll,
+                        dmg_roll: dmg,
+                        ac: proto.armor_class,
+                        alignment: proto.alignment,
+                    },
+                    Posture(PostureKind::Standing),
+                ))
+                .id();
+            spawned_for_reset.push(e);
             stats.mob_resets_spawned += 1;
         }
+        mobs_by_reset.insert(r.id, spawned_for_reset);
     }
 
     let object_reset_rows = object_resets::list_all(pool).await?;
@@ -302,6 +317,44 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
     }
 
+    // Pass 6: equip mobs spawned by Pass 5 according to MobResetEquipment.
+    // Each row attaches one Item to every mob spawned for its reset_id.
+    // Items get Located on the mob and EquippedSlot when wear_location
+    // parses; rows whose proto/slot/parent can't be resolved are skipped.
+    let equipment_rows = mob_reset_equipment::list_all(pool).await?;
+    for eq in &equipment_rows {
+        if eq.probability <= 0.0 {
+            continue;
+        }
+        let proto = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(eq.object_zone_id, eq.object_id))
+            .cloned();
+        let mob_entities = mobs_by_reset.get(&eq.reset_id).cloned();
+        let (Some(proto), Some(mob_entities)) = (proto, mob_entities) else {
+            stats.mob_equipment_skipped += 1;
+            continue;
+        };
+        let slot = eq.wear_location.as_deref().and_then(Slot::from_label);
+        for &mob in &mob_entities {
+            let mut bundle = world.spawn((
+                Item,
+                Named { name: proto.name.clone() },
+                Keywords(proto.keywords.clone()),
+                WorldKey { zone: proto.zone_id, id: proto.id },
+                Located(mob),
+            ));
+            if let Some(desc) = proto.examine_description.clone() {
+                bundle.insert(Description(desc));
+            }
+            if let Some(s) = slot {
+                bundle.insert(EquippedSlot(s));
+            }
+            stats.mob_equipment_spawned += 1;
+        }
+    }
+
     info!(
         zones = stats.zones,
         rooms = stats.rooms,
@@ -315,6 +368,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         mob_resets_skipped = stats.mob_resets_skipped,
         object_resets_spawned = stats.object_resets_spawned,
         object_resets_skipped = stats.object_resets_skipped,
+        mob_equipment_spawned = stats.mob_equipment_spawned,
+        mob_equipment_skipped = stats.mob_equipment_skipped,
         "world loaded"
     );
 
