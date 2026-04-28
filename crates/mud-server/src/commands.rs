@@ -1299,6 +1299,17 @@ pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
         if !closed {
             break;
         }
+        // Only consume `<...>` as a tag if the content actually looks
+        // tag-shaped. This is what lets the default prompt template
+        // `<%h/%H>` survive: after %-substitution it's `<42/100>`, which
+        // contains a `/` mid-content (not the leading-slash close form)
+        // and so doesn't match any color-tag shape — we emit it literally.
+        if !is_tag_shaped(&tag) {
+            out.push('<');
+            out.push_str(&tag);
+            out.push('>');
+            continue;
+        }
         if apply_tag(&tag, &mut stack) && mode == ColorMode::Ansi {
             emit_ansi_state(&mut out, &stack);
         }
@@ -1307,6 +1318,24 @@ pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
         out.push_str("\x1b[0m");
     }
     out
+}
+
+/// True if `<tag>` looks like an XML-Lite color/style tag — i.e. its
+/// contents only contain characters the spec uses (alphanumerics, `:`
+/// for modifier separators, `#` for RGB, `-` and `_` for `bg-NAME`-
+/// style names) plus an optional leading `/` for close tags. The empty
+/// string also returns true to preserve the previous "drop empty `<>`"
+/// behavior. Anything else (most importantly `<%h/%H>`-style prompt
+/// vars) is treated as literal text.
+fn is_tag_shaped(tag: &str) -> bool {
+    let bytes = tag.as_bytes();
+    let body = if bytes.first() == Some(&b'/') {
+        &bytes[1..]
+    } else {
+        bytes
+    };
+    body.iter()
+        .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'#' | b'_' | b'-'))
 }
 
 /// Mutate the style stack in response to one parsed tag. Returns true
@@ -1553,6 +1582,30 @@ mod tests {
     #[test]
     fn render_color_tags_empty_tag_is_dropped() {
         assert_eq!(ansi("<>x<>y"), "xy");
+    }
+
+    #[test]
+    fn render_color_tags_preserves_prompt_var_shapes() {
+        // The default prompt template after %-substitution looks like
+        // <42/100> — not tag-shaped (slash mid-content), so emit literally.
+        assert_eq!(strip("<42/100>"), "<42/100>");
+        assert_eq!(ansi("<42/100>"), "<42/100>");
+        // Mixed: a real tag pair around a tag-shaped-but-pseudo content.
+        // <green>...</> still renders; the inner <42/100> stays literal.
+        let out = ansi("<green><42/100></>");
+        assert!(out.contains("<42/100>"), "literal prompt-var preserved: {out:?}");
+        assert!(out.contains("\x1b[32m"), "outer green still renders: {out:?}");
+    }
+
+    #[test]
+    fn render_color_tags_rejects_unknown_punctuation_in_tags() {
+        // Spaces aren't valid tag chars per the spec ("no whitespace in tags").
+        assert_eq!(strip("<r ed>X</>"), "<r ed>X");
+        // '/' mid-content (not the leading-slash close form) means literal.
+        assert_eq!(strip("<a/b>X</>"), "<a/b>X");
+        // Hash, hyphen, underscore are valid tag chars (RGB / bg- / cN_etc).
+        assert_eq!(strip("<#FF0000>red</>"), "red");
+        assert_eq!(strip("<bg-red>x</>"), "x");
     }
 
     #[test]
@@ -1821,7 +1874,13 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
         .and_then(|l| world.get::<Named>(l.0))
         .map(|n| n.name.as_str());
     let rendered = render_prompt(template, hp, stamina, name, room);
-    let _ = conn.0.send(rendered);
+    // Prompts can carry color tags both directly in the template
+    // (`prompt <red>%h</>`) and indirectly via %r / %n (room and player
+    // names that may have embedded tags). render_color_tags handles
+    // both — and is_tag_shaped lets the default `<%h/%H>` survive
+    // since `<42/100>` isn't tag-shaped after %-substitution.
+    let mode = color_mode_for(world, target);
+    let _ = conn.0.send(render_color_tags(&rendered, mode));
 }
 
 fn render_prompt(
