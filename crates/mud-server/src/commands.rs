@@ -2943,7 +2943,11 @@ fn substitute(template: &str, actor_name: &str, target_name: Option<&str>) -> St
         .replace("{target.pronoun.possessive}", "their")
 }
 
-fn broadcast_room_except(
+/// Send `msg` to every entity in `room`, skipping any in `except`. Used by
+/// say/whisper/transfer/combat-broadcast etc. — anywhere a "the room sees
+/// X happen" line needs to fan out without including the actor(s) who saw
+/// the first-person variant.
+pub(crate) fn broadcast_room_except(
     world: &mut World,
     room: Entity,
     except: &[Entity],

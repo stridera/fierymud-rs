@@ -6,7 +6,7 @@ use mud_world::{
 use tracing::info;
 
 use crate::TickCount;
-use crate::commands::{apply_damage, cmd_flee, drain_stamina, send_to};
+use crate::commands::{apply_damage, broadcast_room_except, cmd_flee, drain_stamina, send_to};
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
 
@@ -320,19 +320,6 @@ fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Enti
             e.despawn();
         }
         info!(?victim, name = %victim_name, "mob despawned");
-    }
-}
-
-fn broadcast_room_except(world: &mut World, room: Entity, except: &[Entity], msg: &str) {
-    let targets: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == room && !except.contains(e))
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for t in targets {
-        send_to(world, t, msg);
     }
 }
 
