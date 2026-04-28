@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    CombatStats, Fighting, Health, Item, Keywords, Located, Mob, Named, Player, Posture,
-    PostureKind, Slot, WearableIn, WorldKeyIndex,
+    CombatStats, Description, Fighting, Health, Item, Keywords, Located, Mob, Named, Player,
+    Posture, PostureKind, Slot, WearableIn, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -25,6 +25,7 @@ pub fn seed_test_mobs(world: &mut World) {
                 name: "a training dummy".to_string(),
             },
             Keywords(vec!["dummy".into(), "training".into()]),
+            Description("A scarecrow-like training dummy stands here, patiently waiting to be punched.".into()),
             Located(room),
             Health { hp: 30, max: 30 },
             Posture(PostureKind::Standing),
@@ -45,6 +46,7 @@ pub fn seed_test_mobs(world: &mut World) {
                 name: "a weak goblin".to_string(),
             },
             Keywords(vec!["goblin".into(), "weak".into()]),
+            Description("A weak goblin sneers and clutches a rusty knife.".into()),
             Located(room),
             Health { hp: 25, max: 25 },
             CombatStats {

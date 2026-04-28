@@ -971,20 +971,33 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
         .map(|e| e.0.keys().copied().collect())
         .unwrap_or_default();
 
-    // Mobs/players in the room (anything in this room that isn't an Item).
-    // Non-standing entities show their posture.
-    let others: Vec<String> = {
+    // Players in the room — names go in "Also here:". Non-standing players
+    // get a posture annotation.
+    let other_players: Vec<String> = {
         let mut q = world
-            .query::<(Entity, &Located, &Named, Option<&Item>, Option<&Posture>)>();
+            .query_filtered::<(Entity, &Located, &Named, Option<&Posture>), With<Player>>();
         q.iter(world)
-            .filter(|(e, l, _, item, _)| *e != player && l.0 == room && item.is_none())
-            .map(|(_, _, n, _, posture)| {
+            .filter(|(e, l, _, _)| *e != player && l.0 == room)
+            .map(|(_, _, n, posture)| {
                 let p = posture.map_or(PostureKind::Standing, |p| p.0);
                 if p == PostureKind::Standing {
                     n.name.clone()
                 } else {
                     format!("{} (is {} here)", n.name, p.label())
                 }
+            })
+            .collect()
+    };
+    // Mobs — each gets their own line with their room_description, falling
+    // back to the name if Description is missing or empty.
+    let mob_lines: Vec<String> = {
+        let mut q = world
+            .query_filtered::<(&Located, &Named, Option<&Description>), With<Mob>>();
+        q.iter(world)
+            .filter(|(l, _, _)| l.0 == room)
+            .map(|(_, n, desc)| {
+                desc.filter(|d| !d.0.trim().is_empty())
+                    .map_or_else(|| n.name.clone(), |d| d.0.trim_end().to_string())
             })
             .collect()
     };
@@ -1002,8 +1015,11 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
     if !room_desc.trim().is_empty() {
         out.push_str(&format!("{}\r\n", room_desc.trim_end()));
     }
-    if !others.is_empty() {
-        out.push_str(&format!("Also here: {}\r\n", others.join(", ")));
+    for line in &mob_lines {
+        out.push_str(&format!("{line}\r\n"));
+    }
+    if !other_players.is_empty() {
+        out.push_str(&format!("Also here: {}\r\n", other_players.join(", ")));
     }
     if !items.is_empty() {
         out.push_str(&format!("On the ground: {}\r\n", items.join(", ")));
@@ -2769,6 +2785,7 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     let dmg = proto.avg_damage();
     let proto_name = proto.name.clone();
     let proto_keywords = proto.keywords.clone();
+    let proto_room_desc = proto.room_description.clone();
     let proto_alignment = proto.alignment;
     let proto_hit_roll = proto.hit_roll;
     let proto_armor_class = proto.armor_class;
@@ -2778,6 +2795,7 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
             Mob,
             Named { name: proto_name.clone() },
             Keywords(proto_keywords),
+            Description(proto_room_desc),
             Located(room),
             Health { hp, max: hp },
             CombatStats {

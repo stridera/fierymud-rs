@@ -69,6 +69,7 @@ pub struct MobProto {
     pub id: i32,
     pub name: String,
     pub keywords: Vec<String>,
+    pub room_description: String,
     pub level: i32,
     pub alignment: i32,
     pub role: mud_db::enums::MobRole,
