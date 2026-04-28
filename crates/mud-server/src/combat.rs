@@ -6,7 +6,9 @@ use mud_world::{
 use tracing::info;
 
 use crate::TickCount;
-use crate::commands::{apply_damage, broadcast_room_except, cmd_flee, drain_stamina, send_to};
+use crate::commands::{
+    apply_damage, broadcast_room_except, cmd_flee, disengage_attackers_of, drain_stamina, send_to,
+};
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
 
@@ -273,17 +275,16 @@ fn apply_swing(world: &mut World, s: &Swing) {
 fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Entity) {
     let is_player = world.get::<Player>(victim).is_some();
 
-    // Find every entity that was fighting the victim.
-    let attackers: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Fighting)>();
-        q.iter(world)
-            .filter(|(_, f)| f.0 == victim)
-            .map(|(e, _)| e)
-            .collect()
-    };
-
     if is_player {
         // Player "death": revive in place, end all combat involving them.
+        // Silent disengage on the attackers — the revive line covers it.
+        let attackers: Vec<Entity> = {
+            let mut q = world.query::<(Entity, &Fighting)>();
+            q.iter(world)
+                .filter(|(_, f)| f.0 == victim)
+                .map(|(e, _)| e)
+                .collect()
+        };
         if let Some(mut hp) = world.get_mut::<Health>(victim) {
             hp.hp = hp.max;
         }
@@ -308,14 +309,9 @@ fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Enti
         );
         info!(?victim, name = %victim_name, "player auto-revived");
     } else {
-        // Mob death: notify, despawn, stop attackers.
+        // Mob death: notify, despawn, stop attackers (with "target falls" line).
         broadcast_room_except(world, room, &[], &format!("{victim_name} dies.\r\n"));
-        for a in attackers {
-            if let Ok(mut e) = world.get_entity_mut(a) {
-                e.remove::<Fighting>();
-            }
-            send_to(world, a, "Your target falls.\r\n");
-        }
+        disengage_attackers_of(world, victim);
         if let Ok(e) = world.get_entity_mut(victim) {
             e.despawn();
         }

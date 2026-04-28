@@ -3191,6 +3191,27 @@ pub(crate) fn apply_damage(
     (false, msg)
 }
 
+/// Find every entity Fighting `target`, remove their Fighting component,
+/// and send "Your target falls." to each. Used by both the natural
+/// death path (`combat::handle_death`'s mob branch) and the admin `slay`
+/// command — anywhere a target stops existing as a combatant and we
+/// need everyone gunning for them to disengage cleanly.
+pub(crate) fn disengage_attackers_of(world: &mut World, target: Entity) {
+    let attackers: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Fighting)>();
+        q.iter(world)
+            .filter(|(_, f)| f.0 == target)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for a in attackers {
+        if let Ok(mut e) = world.get_entity_mut(a) {
+            e.remove::<Fighting>();
+        }
+        send_to(world, a, "Your target falls.\r\n");
+    }
+}
+
 /// Pay the stamina cost. Caps current at zero. Sends one-time messages
 /// when crossing the "tired" (25% of max) and "exhausted" (0) thresholds
 /// downward — never on the way back up (regen handles that silently).
@@ -3924,19 +3945,7 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
         .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
 
     // End any combat against this mob — attackers stop swinging.
-    let attackers: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Fighting)>();
-        q.iter(world)
-            .filter(|(_, f)| f.0 == target)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for a in attackers {
-        if let Ok(mut e) = world.get_entity_mut(a) {
-            e.remove::<Fighting>();
-        }
-        send_to(world, a, "Your target falls.\r\n");
-    }
+    disengage_attackers_of(world, target);
 
     // Notify the room before despawn.
     let admin_name = world
