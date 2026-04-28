@@ -125,6 +125,12 @@ pub struct CombatStats {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Fighting(pub Entity);
 
+/// Following state: this entity moves automatically when the target moves.
+/// Distinct from Located — followers retain their own Located even while
+/// chasing the leader, and the follow edge is preserved across rooms.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Follower(pub Entity);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectSource {
     Spell,

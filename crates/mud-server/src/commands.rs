@@ -15,8 +15,8 @@ use mud_db::enums::{Direction, ExitState, Permission, UserRole};
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
-    Exits, Fighting, Health, Item, Keywords, Located, Named, Online, Player, Slot, SocialDef,
-    SocialRegistry, WearableIn, WorldKeyIndex,
+    Exits, Fighting, Follower, Health, Item, Keywords, Located, Named, Online, Player, Slot,
+    SocialDef, SocialRegistry, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -458,6 +458,33 @@ const COMMANDS: &[Command] = &[
                    or you leave the room.",
         },
         run: cmd_disengage,
+    },
+    Command {
+        names: &["follow"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "follow <name>",
+            summary: "Trail another character automatically.",
+            long: "When the target moves, you move with them through the \
+                   same exit. `follow self` (or `unfollow`) stops \
+                   following. Cycles are silently broken — you can't \
+                   follow someone who is already following you.",
+        },
+        run: cmd_follow,
+    },
+    Command {
+        names: &["unfollow"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "unfollow",
+            summary: "Stop following whoever you were following.",
+            long: "No-op if you weren't following anyone.",
+        },
+        run: cmd_unfollow,
     },
     // ----- Movement -----
     Command {
@@ -1886,6 +1913,87 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     }
 }
 
+fn cmd_follow(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Follow whom?\r\n");
+        return;
+    }
+    if target_word.eq_ignore_ascii_case("self") || target_word.eq_ignore_ascii_case("me") {
+        cmd_unfollow(world, player, "");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let target = find_actor_in_room(world, target_word, located.0, player);
+    let Some(target) = target else {
+        send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
+        return;
+    };
+
+    // Cycle guard: if target already follows us (or any chain leading back to
+    // us), refuse — keeps cmd_move's BFS terminating.
+    if would_create_cycle(world, target, player) {
+        send_to(
+            world,
+            player,
+            "That would create a follow cycle.\r\n",
+        );
+        return;
+    }
+
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(Follower(target));
+    }
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    send_to(world, player, format!("You start following {target_name}.\r\n"));
+    send_to(world, target, format!("{player_name} starts following you.\r\n"));
+}
+
+fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
+    let prev = world.get::<Follower>(player).copied();
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.remove::<Follower>();
+    }
+    if let Some(Follower(prev_target)) = prev {
+        let target_name = world
+            .get::<Named>(prev_target)
+            .map_or_else(String::new, |n| n.name.clone());
+        send_to(world, player, format!("You stop following {target_name}.\r\n"));
+        let player_name = world
+            .get::<Named>(player)
+            .map_or_else(String::new, |n| n.name.clone());
+        send_to(world, prev_target, format!("{player_name} stops following you.\r\n"));
+    } else {
+        send_to(world, player, "You weren't following anyone.\r\n");
+    }
+}
+
+/// Walk the Follower chain from `start`. Return true if `end` is reachable
+/// (would create a cycle if `end` then started following `start`).
+fn would_create_cycle(world: &mut World, start: Entity, end: Entity) -> bool {
+    let mut current = start;
+    let mut hops = 0;
+    while let Some(Follower(next)) = world.get::<Follower>(current).copied() {
+        if next == end {
+            return true;
+        }
+        current = next;
+        hops += 1;
+        if hops > 64 {
+            // Defensive: existing cycle somewhere; treat as cycle.
+            return true;
+        }
+    }
+    false
+}
+
 fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Fighting>(player).is_none() {
         send_to(world, player, "You aren't fighting anyone.\r\n");
@@ -1943,45 +2051,87 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         return;
     };
 
-    let mover_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    // Walk the follower graph rooted at `player`, but only enroll followers
+    // who are currently in the same source room — followers in other rooms
+    // shouldn't teleport.
+    let mut movers: Vec<Entity> = Vec::with_capacity(4);
+    movers.push(player);
+    let mut idx = 0;
+    while idx < movers.len() {
+        let leader = movers[idx];
+        idx += 1;
+        let new_followers: Vec<Entity> = {
+            let mut q = world.query::<(Entity, &Located, &Follower)>();
+            q.iter(world)
+                .filter(|(e, l, f)| {
+                    f.0 == leader && l.0 == from_room && !movers.contains(e)
+                })
+                .map(|(e, _, _)| e)
+                .collect()
+        };
+        for f in new_followers {
+            movers.push(f);
+        }
+    }
+
     let dir_name = direction_name(dir);
-
-    let from_others: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == from_room)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for o in from_others {
-        send_to(world, o, format!("{mover_name} leaves {dir_name}.\r\n"));
-    }
-
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = target;
-    }
-
-    let to_others: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == target)
-            .map(|(e, _)| e)
-            .collect()
-    };
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))
     });
-    for o in to_others {
-        send_to(
-            world,
-            o,
-            format!("{mover_name} arrives from {arrival_dir}.\r\n"),
-        );
+
+    // Notify the source room of each mover departing (in chain order).
+    for &mover in &movers {
+        let mover_name = world
+            .get::<Named>(mover)
+            .map_or_else(String::new, |n| n.name.clone());
+        let from_others: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+            q.iter(world)
+                .filter(|(e, l)| !movers.contains(e) && l.0 == from_room)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        for o in from_others {
+            send_to(world, o, format!("{mover_name} leaves {dir_name}.\r\n"));
+        }
     }
 
-    cmd_look(world, player, "");
+    // Move everyone.
+    for &mover in &movers {
+        if let Some(mut l) = world.get_mut::<Located>(mover) {
+            l.0 = target;
+        }
+    }
+
+    // Notify the destination room of arrivals.
+    for &mover in &movers {
+        let mover_name = world
+            .get::<Named>(mover)
+            .map_or_else(String::new, |n| n.name.clone());
+        let to_others: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+            q.iter(world)
+                .filter(|(e, l)| !movers.contains(e) && l.0 == target)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        for o in to_others {
+            send_to(
+                world,
+                o,
+                format!("{mover_name} arrives from {arrival_dir}.\r\n"),
+            );
+        }
+    }
+
+    // Each mover sees the new room. Followers also get a "You follow." line
+    // before the look.
+    for (i, &mover) in movers.iter().enumerate() {
+        if i > 0 {
+            send_to(world, mover, "You follow.\r\n");
+        }
+        cmd_look(world, mover, "");
+    }
 }
 
 // ---------------------------------------------------------------------------
