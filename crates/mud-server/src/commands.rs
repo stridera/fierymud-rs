@@ -1400,6 +1400,75 @@ mod tests {
             assert_eq!(parse_direction(name), Some(d), "round-trip {name}");
         }
     }
+
+    // Dispatch-level integration tests. dispatch() writes to a thread-local
+    // PROMPT_RECIPIENTS set and may mutate world state through registered
+    // command handlers. We focus on observable component state since
+    // recipients without a Connection don't actually receive any output.
+    use crate::commands::{dispatch, Frozen};
+    use mud_db::enums::UserRole;
+    use mud_world::{Account, Named, Online, Player, Posture, PostureKind};
+
+    fn spawn_player_for_dispatch(world: &mut World, role: UserRole) -> Entity {
+        world
+            .spawn((
+                Player,
+                Online,
+                Named { name: "Tester".to_string() },
+                Account {
+                    user_id: "u".into(),
+                    character_id: "c".into(),
+                    role,
+                    perms: vec![],
+                },
+                Posture(PostureKind::Sitting),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn dispatch_stand_changes_posture() {
+        let mut world = World::new();
+        let p = spawn_player_for_dispatch(&mut world, UserRole::Player);
+        dispatch(&mut world, p, "stand");
+        assert_eq!(
+            world.get::<Posture>(p).map(|p| p.0),
+            Some(PostureKind::Standing),
+            "dispatched 'stand' lifted the sitting player"
+        );
+    }
+
+    #[test]
+    fn dispatch_admin_command_refused_for_player_role() {
+        let mut world = World::new();
+        let p = spawn_player_for_dispatch(&mut world, UserRole::Player);
+        // `goto` is Builder+; a plain Player should bounce. No state change
+        // since no movement happens; we just verify nothing panics and the
+        // posture (irrelevant to goto) is untouched. The "You can't do that."
+        // line is sent via a Connection-less send_to and is therefore silent
+        // in this harness — registry-gating is the actual coverage here.
+        dispatch(&mut world, p, "goto 30 5");
+        // No Located component was inserted (cmd_goto would have set one).
+        assert!(world.get::<mud_world::Located>(p).is_none());
+    }
+
+    #[test]
+    fn dispatch_blocks_frozen_player_but_allows_quit() {
+        let mut world = World::new();
+        let p = spawn_player_for_dispatch(&mut world, UserRole::Player);
+        world.get_entity_mut(p).unwrap().insert(Frozen);
+        // Attempt 'stand' — should be refused; posture unchanged.
+        dispatch(&mut world, p, "stand");
+        assert_eq!(
+            world.get::<Posture>(p).map(|p| p.0),
+            Some(PostureKind::Sitting),
+            "frozen player can't change posture"
+        );
+        // 'quit' is whitelisted but the actual quit handler tries to close
+        // a Connection — without one it's effectively a no-op for state.
+        // We only verify the gate doesn't panic.
+        dispatch(&mut world, p, "quit");
+    }
 }
 
 /// Send the player's prompt template with variables substituted. Falls back
