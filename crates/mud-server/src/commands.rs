@@ -2484,7 +2484,7 @@ fn cmd_wake(world: &mut World, player: Entity, args: &str) {
         target,
         format!("{player_name} wakes you up.\r\n"),
     );
-    broadcast_room_except_players(
+    broadcast_room_except_players_rendered(
         world,
         located.0,
         &[player, target],
@@ -2522,7 +2522,7 @@ fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
         PostureKind::Resting => "begins resting",
         PostureKind::Sleeping => "lies down and sleeps",
     };
-    broadcast_room_except_players(
+    broadcast_room_except_players_rendered(
         world,
         located.0,
         &[player],
@@ -2827,7 +2827,7 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
     }
 
     send_to(world, player, format!("You pick up {item_name}.\r\n"));
-    broadcast_room_except(
+    broadcast_room_except_rendered(
         world,
         room,
         &[player],
@@ -2864,7 +2864,7 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     }
 
     send_to(world, player, format!("You drop {item_name}.\r\n"));
-    broadcast_room_except(
+    broadcast_room_except_rendered(
         world,
         room,
         &[player],
@@ -2923,7 +2923,7 @@ fn cmd_give(world: &mut World, player: Entity, args: &str) {
         target,
         format!("{player_name} gives you {item_name}.\r\n"),
     );
-    broadcast_room_except(
+    broadcast_room_except_rendered(
         world,
         room,
         &[player, target],
@@ -3201,7 +3201,7 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
         target,
         format!("{speaker} whispers to you, \"{message}\"\r\n"),
     );
-    broadcast_room_except_players(
+    broadcast_room_except_players_rendered(
         world,
         located.0,
         &[player, target],
@@ -3310,7 +3310,7 @@ fn run_social(world: &mut World, player: Entity, social: &SocialDef, args: &str)
         }
         if let Some(line) = social.others_no_arg.as_ref() {
             let s = substitute(line, &actor_name, None);
-            broadcast_room_except(world, room, &[player], &format!("{s}\r\n"));
+            broadcast_room_except_rendered(world, room, &[player], &format!("{s}\r\n"));
         }
         return;
     }
@@ -3324,7 +3324,7 @@ fn run_social(world: &mut World, player: Entity, social: &SocialDef, args: &str)
         }
         if let Some(line) = social.others_auto.as_ref() {
             let s = substitute(line, &actor_name, Some(&actor_name));
-            broadcast_room_except(world, room, &[player], &format!("{s}\r\n"));
+            broadcast_room_except_rendered(world, room, &[player], &format!("{s}\r\n"));
         }
         return;
     }
@@ -3352,7 +3352,7 @@ fn run_social(world: &mut World, player: Entity, social: &SocialDef, args: &str)
     }
     if let Some(line) = social.others_found.as_ref() {
         let s = substitute(line, &actor_name, Some(&target_name));
-        broadcast_room_except(world, room, &[player, target], &format!("{s}\r\n"));
+        broadcast_room_except_rendered(world, room, &[player, target], &format!("{s}\r\n"));
     }
 }
 
@@ -3378,28 +3378,6 @@ fn substitute(template: &str, actor_name: &str, target_name: Option<&str>) -> St
         .replace("{target.pronoun.objective}", "them")
         .replace("{target.pronoun.subjective}", "they")
         .replace("{target.pronoun.possessive}", "their")
-}
-
-/// Send `msg` to every entity in `room`, skipping any in `except`. Used by
-/// say/whisper/transfer/combat-broadcast etc. — anywhere a "the room sees
-/// X happen" line needs to fan out without including the actor(s) who saw
-/// the first-person variant.
-pub(crate) fn broadcast_room_except(
-    world: &mut World,
-    room: Entity,
-    except: &[Entity],
-    msg: &str,
-) {
-    let targets: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == room && !except.contains(e))
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for t in targets {
-        send_to(world, t, msg);
-    }
 }
 
 /// Read an entity's `Named.name` as an owned String. Empty when the
@@ -3442,35 +3420,12 @@ pub(crate) fn try_remove<C: bevy_ecs::component::Component>(world: &mut World, e
     }
 }
 
-/// Like `broadcast_room_except`, but only fans out to entities that have
-/// the `Player` marker. Used for messages that semantically don't apply
-/// to mobs (whisper bystanders, posture announcements, social emotes, etc.)
-/// — even though I/O is a no-op for mobs since they have no Connection,
-/// keeping the filter narrow keeps `PROMPT_RECIPIENTS` clean.
-pub(crate) fn broadcast_room_except_players(
-    world: &mut World,
-    room: Entity,
-    except: &[Entity],
-    msg: &str,
-) {
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == room && !except.contains(e))
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for t in targets {
-        send_to(world, t, msg);
-    }
-}
-
-/// Like `broadcast_room_except`, but renders `raw_msg`'s color tags
-/// per-recipient — each player gets ANSI or stripped output based on
-/// their own `COLOR_BLIND` flag. Use this when the broadcast text
-/// embeds entity names that may carry XML-Lite tags (mob/object names
-/// from the seeded world). Pre-rendering once would lock all recipients
-/// into the same mode; this helper does the right thing per player.
+/// Send `raw_msg` to every entity in `room`, skipping any in `except`,
+/// rendering color tags per-recipient — each player gets ANSI or
+/// stripped output based on their own `COLOR_BLIND` flag. The default
+/// "the room sees X happen" broadcast: every message in this codebase
+/// embeds entity names that may carry XML-Lite tags, so we render once
+/// per recipient rather than locking everyone into a single mode.
 pub(crate) fn broadcast_room_except_rendered(
     world: &mut World,
     room: Entity,
@@ -3479,6 +3434,30 @@ pub(crate) fn broadcast_room_except_rendered(
 ) {
     let targets: Vec<Entity> = {
         let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == room && !except.contains(e))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        let mode = color_mode_for(world, t);
+        send_to(world, t, render_color_tags(raw_msg, mode));
+    }
+}
+
+/// `broadcast_room_except_rendered`, with a `Player` filter on the
+/// query. Used for messages that semantically don't apply to mobs
+/// (whisper bystanders, posture announcements, social emotes, etc.) —
+/// keeps the `PROMPT_RECIPIENTS` set narrow even though `send_to` is
+/// already a no-op for actors without a `Connection`.
+pub(crate) fn broadcast_room_except_players_rendered(
+    world: &mut World,
+    room: Entity,
+    except: &[Entity],
+    raw_msg: &str,
+) {
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
             .filter(|(e, l)| l.0 == room && !except.contains(e))
             .map(|(e, _)| e)
@@ -3755,7 +3734,7 @@ fn require_alert_posture(world: &mut World, player: Entity, action: &str) -> boo
             send_to(world, player, "You stand up.\r\n");
             if let Some(located) = world.get::<Located>(player).copied() {
                 let mover_name = name_of(world, player);
-                broadcast_room_except_players(
+                broadcast_room_except_players_rendered(
                     world,
                     located.0,
                     &[player],
@@ -3818,7 +3797,7 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
 
     send_to(world, player, format!("You attack {actual_name}!\r\n"));
     send_to(world, target, format!("{player_name} attacks you!\r\n"));
-    broadcast_room_except(
+    broadcast_room_except_rendered(
         world,
         located.0,
         &[player, target],
@@ -4000,7 +3979,7 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if let Some(m) = threshold_msg {
         send_to(world, target, m);
     }
-    broadcast_room_except(
+    broadcast_room_except_rendered(
         world,
         player_room,
         &[player, target],
@@ -4144,7 +4123,7 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     if let Some(m) = threshold_msg {
         send_to(world, target, m);
     }
-    broadcast_room_except(
+    broadcast_room_except_rendered(
         world,
         located.0,
         &[player, target],
@@ -4350,7 +4329,7 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
 
     // Notify the room before despawn.
     let admin_name = name_of(world, player);
-    broadcast_room_except_players(
+    broadcast_room_except_players_rendered(
         world,
         located.0,
         &[player],
@@ -4583,7 +4562,7 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         ),
     );
     let player_name = name_of(world, player);
-    broadcast_room_except_players(
+    broadcast_room_except_players_rendered(
         world,
         room,
         &[player],
