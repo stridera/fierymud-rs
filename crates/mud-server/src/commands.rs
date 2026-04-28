@@ -14,12 +14,11 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRole};
 use mud_net::Outbound;
 use mud_world::{
-    Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance, EffectSource,
-    EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item, Keywords, LastInputAt,
-    LastTeller, Located, LoggedInAt, Mob,
-    MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint,
-    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, UiStyle, WearableIn, WorldKey,
-    WorldKeyIndex,
+    AbilityCatalog, Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance,
+    EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item, Keywords,
+    LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes, Named, Online, Player,
+    PlayerFlags, Posture, PostureKind, Prompt, RecallPoint, RoomSector, Slot, SocialDef,
+    SocialRegistry, Stamina, UiStyle, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, info_span};
 
@@ -365,6 +364,22 @@ const COMMANDS: &[Command] = &[
                    most accept an optional target.",
         },
         run: cmd_socials,
+    },
+    Command {
+        names: &["spells", "abilities", "abil"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "spells [filter]",
+            summary: "List loaded abilities (spells/chants/songs/skills).",
+            long: "Shows every ability the world has loaded, grouped by \
+                   kind. Optional filter narrows by case-insensitive \
+                   substring match on the name. Once a per-character \
+                   ability list lands this command will show only what \
+                   you know — for now it's the full catalog.",
+        },
+        run: cmd_spells,
     },
     Command {
         names: &["bug"],
@@ -3226,6 +3241,55 @@ fn submit_feedback(world: &mut World, player: Entity, kind: &'static str, args: 
         player,
         format!("Thanks. Your {kind} report has been logged.\r\n"),
     );
+}
+
+fn cmd_spells(world: &mut World, player: Entity, args: &str) {
+    use mud_db::abilities::AbilityKind;
+
+    let filter = args.trim().to_ascii_lowercase();
+    let mode = color_mode_for(world, player);
+
+    // Group by kind for readable output. Each entry: (display_name, kind_label).
+    let mut buckets: std::collections::BTreeMap<&'static str, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for def in world.resource::<AbilityCatalog>().by_name.values() {
+        if !filter.is_empty() && !def.plain_name.to_ascii_lowercase().contains(&filter) {
+            continue;
+        }
+        let bucket = match def.kind {
+            AbilityKind::Spell => "Spells",
+            AbilityKind::Chant => "Chants",
+            AbilityKind::Song => "Songs",
+            AbilityKind::Skill => "Skills",
+        };
+        buckets.entry(bucket).or_default().push(def.name.clone());
+    }
+    if buckets.is_empty() {
+        if filter.is_empty() {
+            send_to(world, player, "\r\nNo abilities loaded.\r\n");
+        } else {
+            send_rendered(
+                world,
+                player,
+                &format!("\r\nNo abilities matching '{filter}'.\r\n"),
+            );
+        }
+        return;
+    }
+
+    let mut out = String::from("\r\n");
+    for (bucket, names) in &mut buckets {
+        names.sort_unstable();
+        out.push_str(&format!("{} ({}):\r\n", bucket, names.len()));
+        for chunk in names.chunks(3) {
+            out.push_str("  ");
+            for n in chunk {
+                out.push_str(&format!("{:<26}", render_color_tags(n, mode)));
+            }
+            out.push_str("\r\n");
+        }
+    }
+    send_to(world, player, out);
 }
 
 fn cmd_socials(world: &mut World, player: Entity, _args: &str) {

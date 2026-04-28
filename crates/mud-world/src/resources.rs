@@ -67,6 +67,35 @@ pub struct MobPrototypes {
     pub by_key: HashMap<(i32, i32), MobProto>,
 }
 
+/// Catalog of every ability (spell / chant / song / skill) in the game,
+/// keyed by lowercased plain name for command-line lookup. The runtime
+/// reads this on `cast` / `spells` / etc. The richer detail tables
+/// (`AbilityComponent`, `AbilityEffect`, ...) are loaded on demand
+/// once a command actually needs them.
+#[derive(Resource, Debug, Default)]
+pub struct AbilityCatalog {
+    pub by_name: HashMap<String, AbilityDef>,
+}
+
+// Five bool flags mirror schema columns; see mud_db::abilities::AbilityRow.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone)]
+pub struct AbilityDef {
+    pub id: i32,
+    /// Display name (may contain XML-Lite color tags).
+    pub name: String,
+    /// Lowercased plain name — also the key in `by_name`.
+    pub plain_name: String,
+    pub description: Option<String>,
+    pub kind: mud_db::abilities::AbilityKind,
+    pub violent: bool,
+    pub combat_ok: bool,
+    pub in_combat_only: bool,
+    pub cast_time_rounds: i32,
+    pub cooldown_ms: i32,
+    pub is_area: bool,
+}
+
 /// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The
 /// respawn tick walks this to decide whether each row needs to refill
 /// up to `max_instances`. The room entity is resolved at load time so

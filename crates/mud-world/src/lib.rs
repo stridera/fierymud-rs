@@ -10,6 +10,6 @@ pub use components::{
 };
 pub use loader::{LoadStats, load_from_db};
 pub use resources::{
-    EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectProto,
-    ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
+    AbilityCatalog, AbilityDef, EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog,
+    MobResetEntry, ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
 };

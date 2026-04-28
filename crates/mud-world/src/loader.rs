@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    effects, mob_reset_equipment, mob_resets, mobs, object_reset_contents, object_resets, objects,
-    room_exits, rooms, socials, sqlx::PgPool, zones,
+    abilities, effects, mob_reset_equipment, mob_resets, mobs, object_reset_contents,
+    object_resets, objects, room_exits, rooms, socials, sqlx::PgPool, zones,
 };
 use tracing::{info, warn};
 
@@ -12,8 +12,8 @@ use crate::components::{
     Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Slot, WorldKey, Zone,
 };
 use crate::resources::{
-    EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectProto,
-    ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
+    AbilityCatalog, AbilityDef, EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog,
+    MobResetEntry, ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -26,6 +26,7 @@ pub struct LoadStats {
     pub objects_listed: usize,
     pub effects_listed: usize,
     pub socials_listed: usize,
+    pub abilities_loaded: usize,
     /// Reset rows that successfully spawned a live entity into a room.
     pub mob_resets_spawned: usize,
     /// Reset rows whose target room or mob prototype was missing —
@@ -220,6 +221,30 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     stats.socials_listed = social_registry.by_name.len();
 
+    // Pass 4b: ability catalog (every spell / chant / song / skill).
+    let ability_rows = abilities::list_all(pool).await?;
+    let mut ability_catalog = AbilityCatalog::default();
+    for row in ability_rows {
+        let key = row.plain_name.to_ascii_lowercase();
+        ability_catalog.by_name.insert(
+            key,
+            AbilityDef {
+                id: row.id,
+                name: row.name,
+                plain_name: row.plain_name,
+                description: row.description,
+                kind: abilities::AbilityKind::from_label(&row.ability_type),
+                violent: row.violent,
+                combat_ok: row.combat_ok,
+                in_combat_only: row.in_combat_only,
+                cast_time_rounds: row.cast_time_rounds,
+                cooldown_ms: row.cooldown_ms,
+                is_area: row.is_area,
+            },
+        );
+    }
+    stats.abilities_loaded = ability_catalog.by_name.len();
+
     world.insert_resource(WorldKeyIndex {
         zones: zone_index,
         rooms: room_index,
@@ -228,6 +253,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(object_prototypes);
     world.insert_resource(effect_catalog);
     world.insert_resource(social_registry);
+    world.insert_resource(ability_catalog);
 
     // Pass 5: spawn live entities from MobResets / ObjectResets. Resources
     // were inserted above so the spawners can read them. Probability gating
@@ -451,6 +477,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         objects = stats.objects_listed,
         effects = stats.effects_listed,
         socials = stats.socials_listed,
+        abilities = stats.abilities_loaded,
         mob_resets_spawned = stats.mob_resets_spawned,
         mob_resets_skipped = stats.mob_resets_skipped,
         object_resets_spawned = stats.object_resets_spawned,
