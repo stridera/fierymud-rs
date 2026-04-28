@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::User};
 use mud_net::{ConnId, Outbound};
-use mud_world::{Account, CombatStats, Health, Located, Named, Online, Player, WorldKeyIndex};
+use mud_world::{
+    Account, CombatStats, Health, Located, Named, Online, Player, Posture, PostureKind,
+    WorldKeyIndex,
+};
 use tracing::{info, warn};
 
 use crate::commands::{self, Connection};
@@ -236,6 +239,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 Connection(outbound),
                 health,
                 combat,
+                Posture(PostureKind::Standing),
             ))
             .id();
     };
@@ -263,6 +267,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             Connection(outbound),
             health,
             combat,
+            Posture(PostureKind::Standing),
         ))
         .id()
 }

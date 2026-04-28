@@ -137,6 +137,31 @@ pub struct Follower(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LastTeller(pub Entity);
 
+/// Body posture. The schema's Position enum is broader (DEAD, GHOST,
+/// MORTALLY_WOUNDED, INCAPACITATED, STUNNED) — those land when combat
+/// has real damage states, not posture changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostureKind {
+    Standing,
+    Sitting,
+    Resting,
+    Sleeping,
+}
+
+impl PostureKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standing => "standing",
+            Self::Sitting => "sitting",
+            Self::Resting => "resting",
+            Self::Sleeping => "sleeping",
+        }
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Posture(pub PostureKind);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectSource {
     Spell,

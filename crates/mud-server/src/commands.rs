@@ -15,7 +15,8 @@ use mud_db::enums::{Direction, ExitState, Permission, UserRole};
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
-    Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Named, Online, Player, Slot,
+    Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Named, Online, Player,
+    Posture, PostureKind, Slot,
     SocialDef, SocialRegistry, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
@@ -472,6 +473,57 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["stand"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "stand",
+            summary: "Get to your feet.",
+            long: "Changes your posture to standing.",
+        },
+        run: cmd_stand,
+    },
+    Command {
+        names: &["sit"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "sit",
+            summary: "Sit down.",
+            long: "Changes your posture to sitting.",
+        },
+        run: cmd_sit,
+    },
+    Command {
+        names: &["rest"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "rest",
+            summary: "Rest in place.",
+            long: "Changes your posture to resting. Slightly more relaxed \
+                   than sitting; future hp/stamina regen will scale with \
+                   posture.",
+        },
+        run: cmd_rest,
+    },
+    Command {
+        names: &["sleep"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "sleep",
+            summary: "Lie down and sleep.",
+            long: "Changes your posture to sleeping. Wake with `stand` \
+                   (or sit/rest).",
+        },
+        run: cmd_sleep,
+    },
+    Command {
         names: &["disengage"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -855,11 +907,20 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
         .unwrap_or_default();
 
     // Mobs/players in the room (anything in this room that isn't an Item).
+    // Non-standing entities show their posture.
     let others: Vec<String> = {
-        let mut q = world.query::<(Entity, &Located, &Named, Option<&Item>)>();
+        let mut q = world
+            .query::<(Entity, &Located, &Named, Option<&Item>, Option<&Posture>)>();
         q.iter(world)
-            .filter(|(e, l, _, item)| *e != player && l.0 == room && item.is_none())
-            .map(|(_, _, n, _)| n.name.clone())
+            .filter(|(e, l, _, item, _)| *e != player && l.0 == room && item.is_none())
+            .map(|(_, _, n, _, posture)| {
+                let p = posture.map(|p| p.0).unwrap_or(PostureKind::Standing);
+                if p == PostureKind::Standing {
+                    n.name.clone()
+                } else {
+                    format!("{} (is {} here)", n.name, p.label())
+                }
+            })
             .collect()
     };
     // Items on the ground in this room.
@@ -907,6 +968,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let hp = world.get::<Health>(player).copied();
     let cs = world.get::<CombatStats>(player).copied();
     let fighting = world.get::<Fighting>(player).copied();
+    let posture = world.get::<Posture>(player).copied();
 
     let mut out = format!("\r\n{name}\r\n");
     if let Some(hp) = hp {
@@ -918,6 +980,9 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             cs.hit_roll, cs.dmg_roll, cs.ac, cs.alignment
         ));
     }
+    if let Some(p) = posture {
+        out.push_str(&format!("  Posture: {}\r\n", p.0.label()));
+    }
     if let Some(f) = fighting {
         let target_name = world
             .get::<Named>(f.0)
@@ -925,6 +990,65 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         out.push_str(&format!("  Fighting: {target_name}\r\n"));
     }
     send_to(world, player, out);
+}
+
+fn cmd_stand(world: &mut World, player: Entity, _args: &str) {
+    set_posture(world, player, PostureKind::Standing);
+}
+fn cmd_sit(world: &mut World, player: Entity, _args: &str) {
+    set_posture(world, player, PostureKind::Sitting);
+}
+fn cmd_rest(world: &mut World, player: Entity, _args: &str) {
+    set_posture(world, player, PostureKind::Resting);
+}
+fn cmd_sleep(world: &mut World, player: Entity, _args: &str) {
+    set_posture(world, player, PostureKind::Sleeping);
+}
+
+fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
+    let current = world.get::<Posture>(player).map(|p| p.0);
+    if current == Some(new) {
+        send_to(
+            world,
+            player,
+            format!("You are already {}.\r\n", new.label()),
+        );
+        return;
+    }
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(Posture(new));
+    }
+    let verb = match new {
+        PostureKind::Standing => "stand up",
+        PostureKind::Sitting => "sit down",
+        PostureKind::Resting => "begin resting",
+        PostureKind::Sleeping => "lie down and sleep",
+    };
+    send_to(world, player, format!("You {verb}.\r\n"));
+
+    // Announce to the room.
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let mover_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let third = match new {
+        PostureKind::Standing => "stands up",
+        PostureKind::Sitting => "sits down",
+        PostureKind::Resting => "begins resting",
+        PostureKind::Sleeping => "lies down and sleeps",
+    };
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 == located.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(world, b, format!("{mover_name} {third}.\r\n"));
+    }
 }
 
 fn cmd_roles(world: &mut World, player: Entity, _args: &str) {

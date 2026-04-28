@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    CombatStats, Fighting, Health, Item, Keywords, Located, Mob, Named, Player, Slot, WearableIn,
-    WorldKeyIndex,
+    CombatStats, Fighting, Health, Item, Keywords, Located, Mob, Named, Player, Posture,
+    PostureKind, Slot, WearableIn, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -24,8 +24,10 @@ pub fn seed_test_mobs(world: &mut World) {
             Named {
                 name: "a training dummy".to_string(),
             },
+            Keywords(vec!["dummy".into(), "training".into()]),
             Located(room),
             Health { hp: 30, max: 30 },
+            Posture(PostureKind::Standing),
             // No CombatStats: dummy doesn't retaliate.
         ));
         info!("seeded training dummy in The Void");
@@ -51,6 +53,7 @@ pub fn seed_test_mobs(world: &mut World) {
                 ac: 10,
                 alignment: -100,
             },
+            Posture(PostureKind::Standing),
         ));
         info!("seeded weak goblin in Town Center");
     }
