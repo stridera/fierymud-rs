@@ -307,4 +307,57 @@ mod tests {
             .expect("ok");
         assert_eq!(out2, "TestActor\r\n");
     }
+
+    #[test]
+    fn room_name_returns_named_room_when_located() {
+        let mut world = World::new();
+        let room = world
+            .spawn(Named { name: "Town Center".to_string() })
+            .id();
+        let actor = world
+            .spawn((
+                Named { name: "TestActor".to_string() },
+                Health { hp: 1, max: 1 },
+                Located(room),
+            ))
+            .id();
+        let host = LuaHost::new();
+        let out = host
+            .exec_for_actor(&mut world, actor, "print(actor:room_name())")
+            .expect("ok");
+        assert_eq!(out, "Town Center\r\n");
+    }
+
+    #[test]
+    fn tostring_renders_actor_with_name() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        let out = host
+            .exec_for_actor(&mut world, actor, "print(tostring(actor))")
+            .expect("ok");
+        assert_eq!(out, "Actor(TestActor)\r\n");
+    }
+
+    #[test]
+    fn missing_components_have_safe_defaults() {
+        // Spawn an actor with NO Named, NO Health — the bindings should
+        // return empty/zero rather than panic.
+        let mut world = World::new();
+        let actor = world.spawn_empty().id();
+        let host = LuaHost::new();
+        let name = host
+            .exec_for_actor(&mut world, actor, "print(actor:name())")
+            .expect("ok");
+        // Missing Named → empty string, print emits a bare "\r\n" line.
+        assert_eq!(name, "\r\n");
+        let hp = host
+            .exec_for_actor(&mut world, actor, "print(actor:hp() .. ',' .. actor:max_hp())")
+            .expect("ok");
+        assert_eq!(hp, "0,0\r\n");
+        let tostring = host
+            .exec_for_actor(&mut world, actor, "print(tostring(actor))")
+            .expect("ok");
+        // Named missing falls back to "<unknown>".
+        assert_eq!(tostring, "Actor(<unknown>)\r\n");
+    }
 }
