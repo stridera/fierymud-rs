@@ -32,6 +32,16 @@ pub struct Account {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Mob;
 
+/// Marker: this entity is an item instance (weapon, potion, container, …).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Item;
+
+/// Lookup keywords for an entity, used by `get`/`drop`/`attack` matching.
+/// First entry is typically the canonical identifier ("sword"), followed by
+/// other words a player might type ("rusty", "iron").
+#[derive(Component, Debug, Clone)]
+pub struct Keywords(pub Vec<String>);
+
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Health {
     pub hp: i32,

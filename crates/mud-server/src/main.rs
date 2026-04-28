@@ -64,6 +64,7 @@ async fn main() {
     }
 
     combat::seed_test_mobs(&mut world);
+    combat::seed_test_items(&mut world);
     commands::validate_registry();
 
     let listen_addr =

@@ -15,7 +15,7 @@ use mud_db::enums::{Direction, ExitState, Permission, UserRole};
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, Exits, Fighting,
-    Health, Located, Named, Online, Player, WorldKeyIndex,
+    Health, Item, Keywords, Located, Named, Online, Player, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -157,6 +157,48 @@ const COMMANDS: &[Command] = &[
                    attached to your account.",
         },
         run: cmd_roles,
+    },
+    Command {
+        names: &["inventory", "i", "inv"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "inventory",
+            summary: "List items you are carrying.",
+            long: "Shows everything in your inventory by name. \
+                   Use `get` to pick items up and `drop` to set them down.",
+        },
+        run: cmd_inventory,
+    },
+    Command {
+        names: &["get", "take", "g"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "get <item>",
+            summary: "Pick up an item from the room.",
+            long: "Match is by case-insensitive substring on the item's \
+                   keywords (or its name). The item moves into your \
+                   inventory; everyone else in the room sees you pick \
+                   it up.",
+        },
+        run: cmd_get,
+    },
+    Command {
+        names: &["drop"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "drop <item>",
+            summary: "Drop an item from your inventory onto the floor.",
+            long: "Match is by case-insensitive substring on keywords. \
+                   The item is left in the current room; bystanders see \
+                   you drop it.",
+        },
+        run: cmd_drop,
     },
     Command {
         names: &["effects", "affects"],
@@ -552,11 +594,20 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
         .map(|e| e.0.keys().copied().collect())
         .unwrap_or_default();
 
+    // Mobs/players in the room (anything in this room that isn't an Item).
     let others: Vec<String> = {
-        let mut q = world.query::<(Entity, &Located, &Named)>();
+        let mut q = world.query::<(Entity, &Located, &Named, Option<&Item>)>();
         q.iter(world)
-            .filter(|(e, l, _)| *e != player && l.0 == room)
-            .map(|(_, _, n)| n.name.clone())
+            .filter(|(e, l, _, item)| *e != player && l.0 == room && item.is_none())
+            .map(|(_, _, n, _)| n.name.clone())
+            .collect()
+    };
+    // Items on the ground in this room.
+    let items: Vec<String> = {
+        let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
+        q.iter(world)
+            .filter(|(l, _)| l.0 == room)
+            .map(|(_, n)| n.name.clone())
             .collect()
     };
 
@@ -564,6 +615,9 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
     out.push_str(&format!("\r\n{room_name}\r\n"));
     if !others.is_empty() {
         out.push_str(&format!("Also here: {}\r\n", others.join(", ")));
+    }
+    if !items.is_empty() {
+        out.push_str(&format!("On the ground: {}\r\n", items.join(", ")));
     }
     if exits.is_empty() {
         out.push_str("Exits: none\r\n");
@@ -632,6 +686,136 @@ fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
 
 fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, "Goodbye!\r\n");
+}
+
+fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
+    let items: Vec<String> = {
+        let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
+        q.iter(world)
+            .filter(|(l, _)| l.0 == player)
+            .map(|(_, n)| n.name.clone())
+            .collect()
+    };
+    let mut out = if items.is_empty() {
+        "\r\nYou are carrying nothing.\r\n".to_string()
+    } else {
+        format!("\r\nYou are carrying {} item(s):\r\n", items.len())
+    };
+    for name in &items {
+        out.push_str(&format!("  {name}\r\n"));
+    }
+    send_to(world, player, out);
+}
+
+fn cmd_get(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Get what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+
+    let item = find_item_in(world, target_word, room);
+    let Some(item) = item else {
+        send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
+        return;
+    };
+
+    let item_name = world
+        .get::<Named>(item)
+        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    if let Some(mut l) = world.get_mut::<Located>(item) {
+        l.0 = player;
+    }
+
+    send_to(world, player, format!("You pick up {item_name}.\r\n"));
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(
+            world,
+            b,
+            format!("{player_name} picks up {item_name}.\r\n"),
+        );
+    }
+}
+
+fn cmd_drop(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Drop what?\r\n");
+        return;
+    }
+    let item = find_item_in(world, target_word, player);
+    let Some(item) = item else {
+        send_to(
+            world,
+            player,
+            format!("You aren't carrying '{target_word}'.\r\n"),
+        );
+        return;
+    };
+
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+
+    let item_name = world
+        .get::<Named>(item)
+        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    if let Some(mut l) = world.get_mut::<Located>(item) {
+        l.0 = room;
+    }
+
+    send_to(world, player, format!("You drop {item_name}.\r\n"));
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(world, b, format!("{player_name} drops {item_name}.\r\n"));
+    }
+}
+
+/// Find the first Item entity inside `container` (a room or a player) whose
+/// keywords (case-insensitive) contain `needle`. Falls back to substring
+/// match on the entity's display Name.
+fn find_item_in(world: &mut World, needle: &str, container: Entity) -> Option<Entity> {
+    let needle = needle.to_ascii_lowercase();
+    let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+    q.iter(world)
+        .find(|(_, l, n, kw)| {
+            if l.0 != container {
+                return false;
+            }
+            if let Some(kw) = kw
+                && kw.0.iter().any(|k| k.to_ascii_lowercase().contains(&needle))
+            {
+                return true;
+            }
+            n.name.to_ascii_lowercase().contains(&needle)
+        })
+        .map(|(e, _, _, _)| e)
 }
 
 fn cmd_effects(world: &mut World, player: Entity, _args: &str) {

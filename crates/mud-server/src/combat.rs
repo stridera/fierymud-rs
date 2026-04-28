@@ -1,6 +1,6 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    CombatStats, Fighting, Health, Located, Mob, Named, Player, WorldKeyIndex,
+    CombatStats, Fighting, Health, Item, Keywords, Located, Mob, Named, Player, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -41,6 +41,7 @@ pub fn seed_test_mobs(world: &mut World) {
             Named {
                 name: "a weak goblin".to_string(),
             },
+            Keywords(vec!["goblin".into(), "weak".into()]),
             Located(room),
             Health { hp: 25, max: 25 },
             CombatStats {
@@ -52,6 +53,35 @@ pub fn seed_test_mobs(world: &mut World) {
         ));
         info!("seeded weak goblin in Town Center");
     }
+}
+
+/// Spawn a couple of starter items in The Void so we can test inventory.
+/// Real spawning via ObjectResets is a future step.
+pub fn seed_test_items(world: &mut World) {
+    let void = world
+        .resource::<WorldKeyIndex>()
+        .rooms
+        .get(&(0, 0))
+        .copied();
+    let Some(room) = void else { return };
+
+    world.spawn((
+        Item,
+        Named {
+            name: "a rusty sword".to_string(),
+        },
+        Keywords(vec!["sword".into(), "rusty".into()]),
+        Located(room),
+    ));
+    world.spawn((
+        Item,
+        Named {
+            name: "a healing potion".to_string(),
+        },
+        Keywords(vec!["potion".into(), "healing".into()]),
+        Located(room),
+    ));
+    info!("seeded test items in The Void");
 }
 
 /// Exclusive system: every COMBAT_PERIOD_TICKS world ticks, every entity with

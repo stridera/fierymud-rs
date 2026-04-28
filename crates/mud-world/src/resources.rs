@@ -35,3 +35,21 @@ pub struct EffectDef {
     pub tags: Vec<String>,
     pub presence_override: Option<String>,
 }
+
+/// Catalog of object prototypes loaded from the Objects table at startup.
+/// Spawning a real instance copies the relevant fields onto a new entity.
+#[derive(Resource, Debug, Default)]
+pub struct ObjectPrototypes {
+    pub by_key: HashMap<(i32, i32), ObjectProto>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectProto {
+    pub zone_id: i32,
+    pub id: i32,
+    pub r#type: mud_db::enums::ObjectType,
+    pub name: String,
+    pub keywords: Vec<String>,
+    pub weight: f64,
+    pub level: i32,
+}

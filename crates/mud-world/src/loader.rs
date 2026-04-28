@@ -5,7 +5,7 @@ use mud_db::{effects, mobs, objects, room_exits, rooms, sqlx::PgPool, zones};
 use tracing::{info, warn};
 
 use crate::components::{ExitData, Exits, Located, Named, Room, RoomSector, WorldKey, Zone};
-use crate::resources::{EffectCatalog, EffectDef, WorldKeyIndex};
+use crate::resources::{EffectCatalog, EffectDef, ObjectProto, ObjectPrototypes, WorldKeyIndex};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LoadStats {
@@ -107,11 +107,28 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
     }
 
-    // Pass 4: catalog data. Mob/Object prototype caching still deferred —
-    // we just count those for now. Effects become a Resource since they
-    // get queried by name when applying.
+    // Pass 4: catalog data. Mob prototype caching still deferred. Object
+    // and Effect catalogs become Resources since commands look them up
+    // by name/key.
     stats.mobs_listed = mobs::list_mobs(pool).await?.len();
-    stats.objects_listed = objects::list_objects(pool).await?.len();
+
+    let object_rows = objects::list_objects(pool).await?;
+    let mut object_prototypes = ObjectPrototypes::default();
+    for row in object_rows {
+        object_prototypes.by_key.insert(
+            (row.zone_id, row.id),
+            ObjectProto {
+                zone_id: row.zone_id,
+                id: row.id,
+                r#type: row.r#type,
+                name: row.name,
+                keywords: row.keywords,
+                weight: row.weight,
+                level: row.level,
+            },
+        );
+    }
+    stats.objects_listed = object_prototypes.by_key.len();
 
     let effect_rows = effects::list_effects(pool).await?;
     let mut effect_catalog = EffectCatalog::default();
@@ -134,6 +151,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         zones: zone_index,
         rooms: room_index,
     });
+    world.insert_resource(object_prototypes);
     world.insert_resource(effect_catalog);
 
     info!(
