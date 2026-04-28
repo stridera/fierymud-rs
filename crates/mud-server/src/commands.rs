@@ -878,6 +878,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_goto,
     },
     Command {
+        names: &["transfer"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "transfer <player>",
+            summary: "Pull an online player to your current room.",
+            long: "Builder+ command. Looks up an online player by exact \
+                   name (case-insensitive) and moves them to wherever \
+                   you are. Both the source and destination rooms see \
+                   the gesture; the transferred player gets a brief \
+                   notice and an automatic look at the new room.",
+        },
+        run: cmd_transfer,
+    },
+    Command {
         names: &["summon"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -4096,6 +4112,92 @@ fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
         player,
         format!("Recall point bound: {room_name}.\r\n"),
     );
+}
+
+fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: transfer <player>\r\n");
+        return;
+    }
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(arg))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "You're already with yourself.\r\n");
+        return;
+    }
+    let Some(dest_loc) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere — can't transfer here.\r\n");
+        return;
+    };
+    let Some(src_loc) = world.get::<Located>(target).copied() else {
+        send_to(world, player, "They're nowhere; nothing to transfer from.\r\n");
+        return;
+    };
+    if src_loc.0 == dest_loc.0 {
+        send_to(world, player, "They're already in your room.\r\n");
+        return;
+    }
+
+    let admin_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    // Source-room bystanders (everyone but the target).
+    let src_bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != target && l.0 == src_loc.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in src_bystanders {
+        send_to(
+            world,
+            b,
+            format!("{target_name} vanishes in a puff of smoke.\r\n"),
+        );
+    }
+
+    // Move the target.
+    if let Some(mut l) = world.get_mut::<Located>(target) {
+        l.0 = dest_loc.0;
+    }
+
+    // Destination-room bystanders (everyone but admin and the just-arrived target).
+    let dest_bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && *e != target && l.0 == dest_loc.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in dest_bystanders {
+        send_to(
+            world,
+            b,
+            format!("{target_name} appears, summoned by {admin_name}.\r\n"),
+        );
+    }
+
+    send_to(world, player, format!("You summon {target_name}.\r\n"));
+    send_to(
+        world,
+        target,
+        format!("{admin_name} summons you.\r\n"),
+    );
+    cmd_look(world, target, "");
 }
 
 fn cmd_goto(world: &mut World, player: Entity, args: &str) {
