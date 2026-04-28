@@ -1059,25 +1059,30 @@ mod tests {
     fn render_prompt_substitutes_hp_and_stamina() {
         let hp = Some(Health { hp: 42, max: 100 });
         let st = Some(Stamina { current: 7, max: 50 });
-        assert_eq!(render_prompt("<%h/%H>", hp, st), "<42/100> ");
-        assert_eq!(render_prompt("<%v/%V mv>", hp, st), "<7/50 mv> ");
+        let name = Some("Strider");
+        assert_eq!(render_prompt("<%h/%H>", hp, st, name), "<42/100> ");
+        assert_eq!(render_prompt("<%v/%V mv>", hp, st, name), "<7/50 mv> ");
         assert_eq!(
-            render_prompt("<%h/%H %v/%V>", hp, st),
+            render_prompt("<%h/%H %v/%V>", hp, st, name),
             "<42/100 7/50> "
         );
         // Trailing space already present — don't double-add.
-        assert_eq!(render_prompt("<%h> ", hp, st), "<42> ");
+        assert_eq!(render_prompt("<%h> ", hp, st, name), "<42> ");
         // Literal percent.
-        assert_eq!(render_prompt("100%%", hp, st), "100% ");
+        assert_eq!(render_prompt("100%%", hp, st, name), "100% ");
+        // Name substitution.
+        assert_eq!(render_prompt("[%n]", hp, st, name), "[Strider] ");
         // Unknown variable: pass through literally so the player sees they
-        // typed something we don't implement (e.g., %n for name).
-        assert_eq!(render_prompt("[%n]", hp, st), "[%n] ");
+        // typed something we don't implement.
+        assert_eq!(render_prompt("[%z]", hp, st, name), "[%z] ");
         // Missing Health: question marks.
-        assert_eq!(render_prompt("<%h/%H>", None, st), "<?/?> ");
+        assert_eq!(render_prompt("<%h/%H>", None, st, name), "<?/?> ");
         // Missing Stamina: question marks for v/V.
-        assert_eq!(render_prompt("<%v/%V>", hp, None), "<?/?> ");
+        assert_eq!(render_prompt("<%v/%V>", hp, None, name), "<?/?> ");
+        // Missing name: question mark.
+        assert_eq!(render_prompt("[%n]", hp, st, None), "[?] ");
         // Empty template still gets a trailing space.
-        assert_eq!(render_prompt("", hp, st), " ");
+        assert_eq!(render_prompt("", hp, st, name), " ");
     }
 
     fn spawn_with_hp(world: &mut World, hp: i32, max: i32) -> Entity {
@@ -1149,11 +1154,17 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
         .unwrap_or("<%h/%H> ");
     let hp = world.get::<Health>(target).copied();
     let stamina = world.get::<Stamina>(target).copied();
-    let rendered = render_prompt(template, hp, stamina);
+    let name = world.get::<Named>(target).map(|n| n.name.as_str());
+    let rendered = render_prompt(template, hp, stamina, name);
     let _ = conn.0.send(rendered);
 }
 
-fn render_prompt(template: &str, hp: Option<Health>, stamina: Option<Stamina>) -> String {
+fn render_prompt(
+    template: &str,
+    hp: Option<Health>,
+    stamina: Option<Stamina>,
+    name: Option<&str>,
+) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let mut chars = template.chars();
     while let Some(c) = chars.next() {
@@ -1175,11 +1186,15 @@ fn render_prompt(template: &str, hp: Option<Health>, stamina: Option<Stamina>) -
                     Some(s) => out.push_str(&s.max.to_string()),
                     None => out.push('?'),
                 },
+                Some('n') => match name {
+                    Some(n) => out.push_str(n),
+                    None => out.push('?'),
+                },
                 Some('%') | None => out.push('%'),
                 Some(other) => {
                     // Unknown variable: leave the literal `%X` so it's
                     // visible the template wants something we don't yet
-                    // implement (e.g., `%n` for name).
+                    // implement.
                     out.push('%');
                     out.push(other);
                 }
