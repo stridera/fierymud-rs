@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
-use mud_db::{effects, mobs, objects, room_exits, rooms, socials, sqlx::PgPool, zones};
+use mud_db::{
+    effects, mob_resets, mobs, object_resets, objects, room_exits, rooms, socials, sqlx::PgPool,
+    zones,
+};
 use tracing::{info, warn};
 
 use crate::components::{
-    Description, ExitData, Exits, Located, Named, Room, RoomSector, WorldKey, Zone,
+    CombatStats, Description, ExitData, Exits, Health, Item, Keywords, Located, Mob, Named,
+    Posture, PostureKind, Room, RoomSector, WorldKey, Zone,
 };
 use crate::resources::{
     EffectCatalog, EffectDef, MobProto, MobPrototypes, ObjectProto, ObjectPrototypes, SocialDef,
@@ -22,6 +26,13 @@ pub struct LoadStats {
     pub objects_listed: usize,
     pub effects_listed: usize,
     pub socials_listed: usize,
+    /// Reset rows that successfully spawned a live entity into a room.
+    pub mob_resets_spawned: usize,
+    /// Reset rows whose target room or mob prototype was missing —
+    /// counted so a stat regression flags a broken import.
+    pub mob_resets_skipped: usize,
+    pub object_resets_spawned: usize,
+    pub object_resets_skipped: usize,
 }
 
 /// Load the persistent world from the database into the ECS World:
@@ -210,6 +221,87 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(effect_catalog);
     world.insert_resource(social_registry);
 
+    // Pass 5: spawn live entities from MobResets / ObjectResets. Resources
+    // were inserted above so the spawners can read them. Probability gating
+    // and respawn timing belong to a future tick system; for now we always
+    // spawn when probability is non-zero, capping at max_instances per
+    // reset row (which today means 1 — multi-instance resets are rare).
+    let mob_reset_rows = mob_resets::list_all(pool).await?;
+    for r in &mob_reset_rows {
+        if r.probability <= 0.0 {
+            continue;
+        }
+        let proto = world
+            .resource::<MobPrototypes>()
+            .by_key
+            .get(&(r.mob_zone_id, r.mob_id))
+            .cloned();
+        let room_entity = world
+            .resource::<WorldKeyIndex>()
+            .rooms
+            .get(&(r.room_zone_id, r.room_id))
+            .copied();
+        let (Some(proto), Some(room_entity)) = (proto, room_entity) else {
+            stats.mob_resets_skipped += 1;
+            continue;
+        };
+        let hp = proto.rolled_hp();
+        let dmg = proto.avg_damage();
+        for _ in 0..r.max_instances.max(1) {
+            world.spawn((
+                Mob,
+                Named { name: proto.name.clone() },
+                Keywords(proto.keywords.clone()),
+                Description(proto.room_description.clone()),
+                WorldKey { zone: proto.zone_id, id: proto.id },
+                Located(room_entity),
+                Health { hp, max: hp },
+                CombatStats {
+                    hit_roll: proto.hit_roll,
+                    dmg_roll: dmg,
+                    ac: proto.armor_class,
+                    alignment: proto.alignment,
+                },
+                Posture(PostureKind::Standing),
+            ));
+            stats.mob_resets_spawned += 1;
+        }
+    }
+
+    let object_reset_rows = object_resets::list_all(pool).await?;
+    for r in &object_reset_rows {
+        if r.probability <= 0.0 {
+            continue;
+        }
+        let proto = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(r.object_zone_id, r.object_id))
+            .cloned();
+        let room_entity = world
+            .resource::<WorldKeyIndex>()
+            .rooms
+            .get(&(r.room_zone_id, r.room_id))
+            .copied();
+        let (Some(proto), Some(room_entity)) = (proto, room_entity) else {
+            stats.object_resets_skipped += 1;
+            continue;
+        };
+        for _ in 0..r.max_instances.max(1) {
+            let mut bundle = world.spawn((
+                Item,
+                Named { name: proto.name.clone() },
+                Keywords(proto.keywords.clone()),
+                WorldKey { zone: proto.zone_id, id: proto.id },
+                Located(room_entity),
+            ));
+            if let Some(desc) = proto.examine_description.clone() {
+                bundle.insert(Description(desc));
+            }
+            stats.object_resets_spawned += 1;
+        }
+    }
+
     info!(
         zones = stats.zones,
         rooms = stats.rooms,
@@ -219,6 +311,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         objects = stats.objects_listed,
         effects = stats.effects_listed,
         socials = stats.socials_listed,
+        mob_resets_spawned = stats.mob_resets_spawned,
+        mob_resets_skipped = stats.mob_resets_skipped,
+        object_resets_spawned = stats.object_resets_spawned,
+        object_resets_skipped = stats.object_resets_skipped,
         "world loaded"
     );
 
