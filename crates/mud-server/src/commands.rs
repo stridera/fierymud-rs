@@ -1236,8 +1236,8 @@ pub(crate) fn strip_color_tags(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_damage, direction_name, format_idle, parse_direction, render_prompt,
-        sector_movement_cost, strip_color_tags,
+        apply_damage, condition_label, direction_name, format_idle, parse_direction,
+        render_prompt, sector_movement_cost, strip_color_tags,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -1380,6 +1380,27 @@ mod tests {
         let (dead, msg) = apply_damage(&mut w, e, 10);
         assert!(!dead);
         assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn condition_label_bands() {
+        let h = |hp, max| Health { hp, max };
+        // Boundary tests at each cutoff. (hp*100)/max is the pct.
+        assert_eq!(condition_label(h(100, 100)), "is in excellent shape"); // 100
+        assert_eq!(condition_label(h(86, 100)), "is in excellent shape");
+        assert_eq!(condition_label(h(85, 100)), "has some scrapes");
+        assert_eq!(condition_label(h(61, 100)), "has some scrapes");
+        assert_eq!(condition_label(h(60, 100)), "is bleeding");
+        assert_eq!(condition_label(h(36, 100)), "is bleeding");
+        assert_eq!(condition_label(h(35, 100)), "is badly hurt");
+        assert_eq!(condition_label(h(16, 100)), "is badly hurt");
+        assert_eq!(condition_label(h(15, 100)), "is mortally wounded");
+        assert_eq!(condition_label(h(1, 100)), "is mortally wounded");
+        assert_eq!(condition_label(h(0, 100)), "is dying");
+        // Negative HP: dying.
+        assert_eq!(condition_label(h(-5, 100)), "is dying");
+        // max=0 special: any hp → 0% → dying. Defensive against bad data.
+        assert_eq!(condition_label(h(50, 0)), "is dying");
     }
 
     #[test]
@@ -1681,22 +1702,24 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!("{name} is {} here.\r\n", p.label()));
     }
     if let Some(hp) = world.get::<Health>(target).copied() {
-        let pct = if hp.max > 0 {
-            (hp.hp * 100) / hp.max
-        } else {
-            0
-        };
-        let condition = match pct {
-            i32::MIN..=0 => "is dying",
-            1..=15 => "is mortally wounded",
-            16..=35 => "is badly hurt",
-            36..=60 => "is bleeding",
-            61..=85 => "has some scrapes",
-            _ => "is in excellent shape",
-        };
-        out.push_str(&format!("{name} {condition}.\r\n"));
+        out.push_str(&format!("{name} {condition}.\r\n", condition = condition_label(hp)));
     }
     send_to(world, player, out);
+}
+
+/// Map an entity's Health to a flavorful condition string for `examine`.
+/// Six bands by HP percentage: 0% / 1-15 / 16-35 / 36-60 / 61-85 / 86+.
+/// `max=0` is treated as 0% (entity has been zeroed somehow).
+pub(crate) fn condition_label(hp: Health) -> &'static str {
+    let pct = if hp.max > 0 { (hp.hp * 100) / hp.max } else { 0 };
+    match pct {
+        i32::MIN..=0 => "is dying",
+        1..=15 => "is mortally wounded",
+        16..=35 => "is badly hurt",
+        36..=60 => "is bleeding",
+        61..=85 => "has some scrapes",
+        _ => "is in excellent shape",
+    }
 }
 
 fn cmd_look(world: &mut World, player: Entity, args: &str) {
