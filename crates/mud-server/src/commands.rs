@@ -904,6 +904,49 @@ pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
     }
 }
 
+/// Strip `FieryMUD` color/markup tags (`<b:yellow>`, `</>`, `<r>`, etc.) so
+/// the raw text is readable. Future work: translate to ANSI when the
+/// player's client supports it.
+pub(crate) fn strip_color_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            for c2 in chars.by_ref() {
+                if c2 == '>' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_color_tags;
+
+    #[test]
+    fn strip_color_tags_handles_common_patterns() {
+        // No tags: identity.
+        assert_eq!(strip_color_tags("plain text"), "plain text");
+        // Single tag pair.
+        assert_eq!(strip_color_tags("<r>red</>"), "red");
+        // Nested-looking: just sequential.
+        assert_eq!(
+            strip_color_tags("<b:yellow>warning:</> watch out"),
+            "warning: watch out"
+        );
+        // Unterminated tag: drains rest of string (acceptable for malformed
+        // input).
+        assert_eq!(strip_color_tags("hello <b:yellow"), "hello ");
+        // Empty tags.
+        assert_eq!(strip_color_tags("<>x<>y"), "xy");
+    }
+}
+
 /// Send a one-line prompt to a player. Hardcoded `<HP/MaxHP> ` for now;
 /// `Characters.prompt` template + variable substitution is a future step.
 pub(crate) fn send_prompt(world: &World, target: Entity) {
@@ -1028,7 +1071,7 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
 
     let mut out = format!("\r\nYou look at {name}.\r\n");
     if !description.trim().is_empty() {
-        out.push_str(&format!("{}\r\n", description.trim_end()));
+        out.push_str(&format!("{}\r\n", strip_color_tags(description.trim_end())));
     }
     if let Some(p) = posture
         && p != PostureKind::Standing
@@ -1115,10 +1158,10 @@ fn cmd_look(world: &mut World, player: Entity, _args: &str) {
     let mut out = String::new();
     out.push_str(&format!("\r\n{room_name}\r\n"));
     if !room_desc.trim().is_empty() {
-        out.push_str(&format!("{}\r\n", room_desc.trim_end()));
+        out.push_str(&format!("{}\r\n", strip_color_tags(room_desc.trim_end())));
     }
     for line in &mob_lines {
-        out.push_str(&format!("{line}\r\n"));
+        out.push_str(&format!("{}\r\n", strip_color_tags(line)));
     }
     if !other_players.is_empty() {
         out.push_str(&format!("Also here: {}\r\n", other_players.join(", ")));
