@@ -373,3 +373,62 @@ fn pick_starting_room(c: &CharacterRow) -> (i32, i32) {
     }
     FALLBACK_START
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(
+        cur: Option<(i32, i32)>,
+        recall: Option<(i32, i32)>,
+    ) -> CharacterRow {
+        CharacterRow {
+            id: "c".into(),
+            name: "Tester".into(),
+            user_id: Some("u".into()),
+            level: 1,
+            hit_points: 10,
+            hit_points_max: 10,
+            stamina: 10,
+            stamina_max: 10,
+            hit_roll: 0,
+            damage_roll: 0,
+            armor_class: 10,
+            alignment: 0,
+            permissions: vec![],
+            player_flags: vec![],
+            prompt: String::new(),
+            current_room_zone_id: cur.map(|c| c.0),
+            current_room_id: cur.map(|c| c.1),
+            recall_room_zone_id: recall.map(|r| r.0),
+            recall_room_id: recall.map(|r| r.1),
+        }
+    }
+
+    #[test]
+    fn current_room_wins_when_both_set() {
+        let r = row(Some((30, 5)), Some((10, 1)));
+        assert_eq!(pick_starting_room(&r), (30, 5));
+    }
+
+    #[test]
+    fn falls_back_to_recall_when_current_unset() {
+        let r = row(None, Some((10, 1)));
+        assert_eq!(pick_starting_room(&r), (10, 1));
+    }
+
+    #[test]
+    fn falls_back_to_void_when_neither_set() {
+        let r = row(None, None);
+        assert_eq!(pick_starting_room(&r), FALLBACK_START);
+    }
+
+    #[test]
+    fn partial_current_falls_through_to_recall() {
+        // current has only zone, no room id — both must be Some to use it.
+        let mut r = row(None, Some((10, 1)));
+        r.current_room_zone_id = Some(30);
+        // current_room_id stays None — pick_starting_room should skip it.
+        assert_eq!(pick_starting_room(&r), (10, 1));
+    }
+}
