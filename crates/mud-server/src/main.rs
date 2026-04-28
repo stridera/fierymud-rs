@@ -3,6 +3,7 @@ mod commands;
 mod effects;
 mod login;
 mod regen;
+mod respawn;
 
 use std::time::{Duration, Instant};
 
@@ -92,6 +93,7 @@ async fn main() {
             combat::combat_tick,
             effects::effects_tick,
             regen::regen_tick,
+            respawn::respawn_tick,
             log_heartbeat,
         )
             .chain(),

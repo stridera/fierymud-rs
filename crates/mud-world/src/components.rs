@@ -206,6 +206,13 @@ pub struct LastInputAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LoggedInAt(pub std::time::Instant);
 
+/// Marker linking a spawned mob entity back to the `MobResets.id` row
+/// that produced it. The respawn tick system queries entities by this
+/// component to count live instances per reset and decide whether to
+/// refill below `max_instances`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct FromMobReset(pub i32);
+
 /// Admin sanction marker: the player's command dispatch is refused
 /// (with a message) until the marker is removed. Session-scoped — does
 /// not persist across disconnect/reconnect.

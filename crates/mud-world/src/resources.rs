@@ -67,6 +67,24 @@ pub struct MobPrototypes {
     pub by_key: HashMap<(i32, i32), MobProto>,
 }
 
+/// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The
+/// respawn tick walks this to decide whether each row needs to refill
+/// up to `max_instances`. The room entity is resolved at load time so
+/// the tick doesn't need to look it up via `WorldKeyIndex` each pass.
+#[derive(Resource, Debug, Default)]
+pub struct MobResetCatalog {
+    pub entries: Vec<MobResetEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MobResetEntry {
+    pub reset_id: i32,
+    pub mob_zone_id: i32,
+    pub mob_id: i32,
+    pub room_entity: bevy_ecs::prelude::Entity,
+    pub max_instances: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct MobProto {
     pub zone_id: i32,

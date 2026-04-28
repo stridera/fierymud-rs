@@ -8,12 +8,12 @@ use mud_db::{
 use tracing::{info, warn};
 
 use crate::components::{
-    CombatStats, Description, EquippedSlot, ExitData, Exits, Health, Item, Keywords, Located, Mob,
-    Named, Posture, PostureKind, Room, RoomSector, Slot, WorldKey, Zone,
+    CombatStats, Description, EquippedSlot, ExitData, Exits, FromMobReset, Health, Item, Keywords,
+    Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Slot, WorldKey, Zone,
 };
 use crate::resources::{
-    EffectCatalog, EffectDef, MobProto, MobPrototypes, ObjectProto, ObjectPrototypes, SocialDef,
-    SocialRegistry, WorldKeyIndex,
+    EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectProto,
+    ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -240,6 +240,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let mob_reset_rows = mob_resets::list_all(pool).await?;
     let mut mobs_by_reset: HashMap<i32, Vec<Entity>> =
         HashMap::with_capacity(mob_reset_rows.len());
+    let mut reset_catalog_entries: Vec<MobResetEntry> = Vec::with_capacity(mob_reset_rows.len());
     for r in &mob_reset_rows {
         if r.probability <= 0.0 {
             continue;
@@ -279,13 +280,25 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                         alignment: proto.alignment,
                     },
                     Posture(PostureKind::Standing),
+                    FromMobReset(r.id),
                 ))
                 .id();
             spawned_for_reset.push(e);
             stats.mob_resets_spawned += 1;
         }
         mobs_by_reset.insert(r.id, spawned_for_reset);
+        // Cache enough to refill: the respawn system reads this resource
+        // and re-uses the existing MobPrototypes / WorldKeyIndex resources
+        // to materialize fresh mobs.
+        reset_catalog_entries.push(MobResetEntry {
+            reset_id: r.id,
+            mob_zone_id: r.mob_zone_id,
+            mob_id: r.mob_id,
+            room_entity,
+            max_instances: r.max_instances,
+        });
     }
+    world.insert_resource(MobResetCatalog { entries: reset_catalog_entries });
 
     let object_reset_rows = object_resets::list_all(pool).await?;
     // Mirrors mobs_by_reset: for ObjectResetContents to find which container
