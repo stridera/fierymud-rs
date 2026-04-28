@@ -11,6 +11,18 @@ pub struct Zone;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Room;
 
+/// Marker: this entity is a player character.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Player;
+
+/// Marker: this entity is currently connected (logged in and online).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Online;
+
+/// Account ownership: this player belongs to the User with this UUID.
+#[derive(Component, Debug, Clone)]
+pub struct Account(pub String);
+
 /// Composite (zone, id) identity for entities loaded from the schema.
 /// Lets the runtime round-trip an entity back to its DB row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]

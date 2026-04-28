@@ -1,46 +1,27 @@
-use std::collections::HashMap;
+mod login;
+
 use std::time::Duration;
 
 use bevy_ecs::prelude::*;
-use mud_net::{ConnId, Inbound, InboundKind, Outbound};
+use mud_net::{Inbound, InboundKind};
 use tokio::signal;
 use tokio::sync::mpsc;
 use tokio::time::{MissedTickBehavior, interval};
-use tracing::{error, info, info_span, warn};
+use tracing::{error, info, info_span};
 use tracing_subscriber::EnvFilter;
+
+use crate::login::ConnRouter;
 
 #[derive(Resource, Default)]
 struct TickCount(u64);
-
-#[derive(Resource, Default)]
-struct PendingCommands(Vec<(ConnId, String)>);
-
-#[derive(Resource, Default)]
-struct ConnRegistry {
-    senders: HashMap<ConnId, Outbound>,
-}
 
 fn advance_tick(mut tick: ResMut<TickCount>) {
     tick.0 += 1;
 }
 
-fn echo_system(mut pending: ResMut<PendingCommands>, registry: Res<ConnRegistry>) {
-    for (conn_id, text) in pending.0.drain(..) {
-        if let Some(sender) = registry.senders.get(&conn_id)
-            && sender.send(format!("echo: {text}\r\n")).is_err()
-        {
-            warn!(conn_id, "outbound send failed (client gone?)");
-        }
-    }
-}
-
-fn log_heartbeat(tick: Res<TickCount>, registry: Res<ConnRegistry>) {
+fn log_heartbeat(tick: Res<TickCount>) {
     if tick.0 % 600 == 0 {
-        info!(
-            tick = tick.0,
-            connections = registry.senders.len(),
-            "heartbeat"
-        );
+        info!(tick = tick.0, "heartbeat");
     }
 }
 
@@ -72,8 +53,6 @@ async fn main() {
 
     let mut world = World::new();
     world.insert_resource(TickCount::default());
-    world.insert_resource(PendingCommands::default());
-    world.insert_resource(ConnRegistry::default());
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
         error!(error = %e, "world load failed");
@@ -90,8 +69,9 @@ async fn main() {
         }
     });
 
+    let mut router = ConnRouter::new();
     let mut schedule = Schedule::default();
-    schedule.add_systems((advance_tick, echo_system, log_heartbeat).chain());
+    schedule.add_systems((advance_tick, log_heartbeat).chain());
 
     const TICK_HZ: u64 = 10;
     let mut ticker = interval(Duration::from_millis(1000 / TICK_HZ));
@@ -106,19 +86,26 @@ async fn main() {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let pending_disconnects = drain_inbound(&mut world, &mut inbound_rx);
-                {
-                    let span = info_span!("tick");
-                    let _g = span.enter();
-                    schedule.run(&mut world);
-                }
-                // Process disconnects after the tick so the same tick's outbound
-                // sends still find their sender in the registry.
-                if !pending_disconnects.is_empty() {
-                    let registry = &mut world.resource_mut::<ConnRegistry>().senders;
-                    for conn_id in pending_disconnects {
-                        info!(conn_id, "client disconnected");
-                        registry.remove(&conn_id);
+                let span = info_span!("tick");
+                let _g = span.enter();
+                schedule.run(&mut world);
+            }
+            msg = inbound_rx.recv() => {
+                let Some(msg) = msg else {
+                    error!("inbound channel closed; shutting down");
+                    break;
+                };
+                match msg.kind {
+                    InboundKind::Connected { peer, outbound } => {
+                        info!(conn_id = msg.conn, %peer, "client connected");
+                        router.on_connect(msg.conn, outbound);
+                    }
+                    InboundKind::Line(text) => {
+                        router.on_line(msg.conn, text, &pool, &mut world).await;
+                    }
+                    InboundKind::Disconnected => {
+                        info!(conn_id = msg.conn, "client disconnected");
+                        router.on_disconnect(&mut world, msg.conn);
                     }
                 }
             }
@@ -131,34 +118,7 @@ async fn main() {
 
     info!(
         final_tick = world.resource::<TickCount>().0,
+        live_connections = router.live_connections(),
         "fierymud-rs stopped"
     );
-}
-
-/// Drain pending net events into the world. Connected/Line are applied
-/// immediately; Disconnected IDs are returned so callers can process them
-/// *after* the tick (otherwise the same-tick echo system loses its sender).
-fn drain_inbound(world: &mut World, rx: &mut mpsc::UnboundedReceiver<Inbound>) -> Vec<ConnId> {
-    let mut disconnects = Vec::new();
-    while let Ok(msg) = rx.try_recv() {
-        match msg.kind {
-            InboundKind::Connected { peer, outbound } => {
-                info!(conn_id = msg.conn, %peer, "client connected");
-                world
-                    .resource_mut::<ConnRegistry>()
-                    .senders
-                    .insert(msg.conn, outbound);
-            }
-            InboundKind::Line(text) => {
-                world
-                    .resource_mut::<PendingCommands>()
-                    .0
-                    .push((msg.conn, text));
-            }
-            InboundKind::Disconnected => {
-                disconnects.push(msg.conn);
-            }
-        }
-    }
-    disconnects
 }

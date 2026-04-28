@@ -1,11 +1,13 @@
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
+pub mod characters;
 pub mod effects;
 pub mod enums;
 pub mod mobs;
 pub mod objects;
 pub mod room_exits;
 pub mod rooms;
+pub mod users;
 pub mod zones;
 
 pub use sqlx;
