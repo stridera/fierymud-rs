@@ -3080,7 +3080,7 @@ pub(crate) fn apply_damage(
 /// Pay the stamina cost. Caps current at zero. Sends one-time messages
 /// when crossing the "tired" (25% of max) and "exhausted" (0) thresholds
 /// downward — never on the way back up (regen handles that silently).
-fn drain_stamina(world: &mut World, player: Entity, cost: i32) {
+pub(crate) fn drain_stamina(world: &mut World, player: Entity, cost: i32) {
     let Some((old, max)) = world.get::<Stamina>(player).map(|s| (s.current, s.max)) else {
         return;
     };

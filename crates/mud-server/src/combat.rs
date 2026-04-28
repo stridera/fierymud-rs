@@ -6,7 +6,7 @@ use mud_world::{
 use tracing::info;
 
 use crate::TickCount;
-use crate::commands::{apply_damage, send_to};
+use crate::commands::{apply_damage, drain_stamina, send_to};
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
 
@@ -215,6 +215,15 @@ fn apply_swing(world: &mut World, s: &Swing) {
         &[s.attacker, s.target],
         &format!("{} hits {target_name}.\r\n", s.attacker_name),
     );
+
+    // Sustained-combat stamina drain: 1 per swing on the attacker. No-op
+    // for actors without a Stamina component (most mobs). Threshold
+    // messages ("getting tired" / "collapse") fire automatically the first
+    // time the attacker crosses each band — adds pressure to disengage
+    // rather than fight forever.
+    if !dead {
+        drain_stamina(world, s.attacker, 1);
+    }
 
     if dead {
         handle_death(world, s.target, &target_name, room);
