@@ -1549,7 +1549,9 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
 
     let mut out = String::new();
     out.push_str(&format!("\r\n{room_name}\r\n"));
-    if !room_desc.trim().is_empty() {
+    // BRIEF flag suppresses the description — name/occupants/exits only.
+    // CircleMUD-standard "brief mode".
+    if !has_flag(world, player, PlayerFlag::Brief) && !room_desc.trim().is_empty() {
         out.push_str(&format!("{}\r\n", strip_color_tags(room_desc.trim_end())));
     }
     for line in &mob_lines {
