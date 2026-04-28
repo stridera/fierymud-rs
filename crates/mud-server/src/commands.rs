@@ -1625,9 +1625,7 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
 
     // Self-target.
     if needle == "me" || needle == "self" {
-        let name = world
-            .get::<Named>(player)
-            .map_or_else(String::new, |n| n.name.clone());
+        let name = name_of(world, player);
         send_to(world, player, format!("\r\nYou look at yourself: {name}.\r\n"));
         return;
     }
@@ -1651,9 +1649,7 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
-    let name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let name = name_of(world, target);
     let description = world
         .get::<Description>(target)
         .map(|d| d.0.clone())
@@ -1872,9 +1868,7 @@ fn format_idle(secs: u64) -> String {
 }
 
 fn cmd_score(world: &mut World, player: Entity, _args: &str) {
-    let name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let name = name_of(world, player);
     let hp = world.get::<Health>(player).copied();
     let stamina = world.get::<Stamina>(player).copied();
     let cs = world.get::<CombatStats>(player).copied();
@@ -1948,9 +1942,7 @@ fn cmd_wake(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
         return;
     };
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = name_of(world, target);
     if world.get::<Posture>(target).map(|p| p.0) != Some(PostureKind::Sleeping) {
         send_to(world, player, format!("{target_name} is already awake.\r\n"));
         return;
@@ -1958,9 +1950,7 @@ fn cmd_wake(world: &mut World, player: Entity, args: &str) {
     if let Ok(mut e) = world.get_entity_mut(target) {
         e.insert(Posture(PostureKind::Standing));
     }
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = name_of(world, player);
     send_to(world, player, format!("You wake {target_name}.\r\n"));
     send_to(
         world,
@@ -2000,9 +1990,7 @@ fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
-    let mover_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let mover_name = name_of(world, player);
     let third = match new {
         PostureKind::Standing => "stands up",
         PostureKind::Sitting => "sits down",
@@ -2308,12 +2296,8 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
-    let item_name = world
-        .get::<Named>(item)
-        .map_or_else(String::new, |n| n.name.clone());
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let item_name = name_of(world, item);
+    let player_name = name_of(world, player);
 
     if let Some(mut l) = world.get_mut::<Located>(item) {
         l.0 = player;
@@ -2349,12 +2333,8 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
 
-    let item_name = world
-        .get::<Named>(item)
-        .map_or_else(String::new, |n| n.name.clone());
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let item_name = name_of(world, item);
+    let player_name = name_of(world, player);
 
     if let Some(mut l) = world.get_mut::<Located>(item) {
         l.0 = room;
@@ -2402,15 +2382,9 @@ fn cmd_give(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
-    let item_name = world
-        .get::<Named>(item)
-        .map_or_else(String::new, |n| n.name.clone());
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let item_name = name_of(world, item);
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
 
     if let Some(mut l) = world.get_mut::<Located>(item) {
         l.0 = target;
@@ -2458,9 +2432,7 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
         return;
     };
 
-    let item_name = world
-        .get::<Named>(item)
-        .map_or_else(String::new, |n| n.name.clone());
+    let item_name = name_of(world, item);
 
     let Some(WearableIn(slot)) = world.get::<WearableIn>(item).copied() else {
         send_to(world, player, format!("{item_name} can't be worn.\r\n"));
@@ -2516,9 +2488,7 @@ fn cmd_remove(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    let item_name = world
-        .get::<Named>(item)
-        .map_or_else(String::new, |n| n.name.clone());
+    let item_name = name_of(world, item);
     if let Ok(mut e) = world.get_entity_mut(item) {
         e.remove::<EquippedSlot>();
     }
@@ -2659,9 +2629,7 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
-    let speaker = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let speaker = name_of(world, player);
 
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
@@ -2701,12 +2669,8 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    let speaker = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let speaker = name_of(world, player);
+    let target_name = name_of(world, target);
 
     send_to(
         world,
@@ -2746,9 +2710,7 @@ fn submit_feedback(world: &mut World, player: Entity, kind: &'static str, args: 
         send_to(world, player, format!("Usage: {kind} <message>\r\n"));
         return;
     }
-    let name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let name = name_of(world, player);
     let char_id = world
         .get::<Account>(player)
         .map(|a| a.character_id.clone())
@@ -2819,9 +2781,7 @@ fn run_social(world: &mut World, player: Entity, social: &SocialDef, args: &str)
     };
     let room = located.0;
 
-    let actor_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let actor_name = name_of(world, player);
 
     if target_word.is_empty() {
         // No-arg path.
@@ -2861,9 +2821,7 @@ fn run_social(world: &mut World, player: Entity, social: &SocialDef, args: &str)
         return;
     };
 
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = name_of(world, target);
 
     if let Some(line) = social.char_found.as_ref() {
         let s = substitute(line, &actor_name, Some(&target_name));
@@ -2925,6 +2883,15 @@ pub(crate) fn broadcast_room_except(
     }
 }
 
+/// Read an entity's `Named.name` as an owned String. Empty when the
+/// component is missing — matches the historical fallback at every
+/// call site that wants a name for `format!`-ing.
+pub(crate) fn name_of(world: &World, e: Entity) -> String {
+    world
+        .get::<Named>(e)
+        .map_or_else(String::new, |n| n.name.clone())
+}
+
 /// Like `broadcast_room_except`, but only fans out to entities that have
 /// the `Player` marker. Used for messages that semantically don't apply
 /// to mobs (whisper bystanders, posture announcements, social emotes, etc.)
@@ -2974,9 +2941,7 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if has_flag(world, target, PlayerFlag::NoTell) {
-        let actual = world
-            .get::<Named>(target)
-            .map_or_else(String::new, |n| n.name.clone());
+        let actual = name_of(world, target);
         send_to(
             world,
             player,
@@ -2985,12 +2950,8 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = name_of(world, player);
+    let target_name = name_of(world, target);
 
     send_to(world, player, format!("You tell {target_name}, \"{message}\"\r\n"));
     if has_flag(world, target, PlayerFlag::Afk) {
@@ -3022,9 +2983,7 @@ fn cmd_reply(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're no longer online.\r\n");
         return;
     }
-    let last_name = world
-        .get::<Named>(last)
-        .map_or_else(String::new, |n| n.name.clone());
+    let last_name = name_of(world, last);
     // Forward through cmd_tell so we get the LastTeller stamping for free.
     cmd_tell(world, player, &format!("{last_name} {message}"));
 }
@@ -3035,9 +2994,7 @@ fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Gossip what?\r\n");
         return;
     }
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = name_of(world, player);
 
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
@@ -3065,9 +3022,7 @@ fn cmd_emote(world: &mut World, player: Entity, args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = name_of(world, player);
     let line = format!("{player_name} {action}\r\n");
 
     let targets: Vec<Entity> = {
@@ -3088,9 +3043,7 @@ fn cmd_shout(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Shout what?\r\n");
         return;
     }
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = name_of(world, player);
 
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
@@ -3232,9 +3185,7 @@ fn require_alert_posture(world: &mut World, player: Entity, action: &str) -> boo
             }
             send_to(world, player, "You stand up.\r\n");
             if let Some(located) = world.get::<Located>(player).copied() {
-                let mover_name = world
-                    .get::<Named>(player)
-                    .map_or_else(String::new, |n| n.name.clone());
+                let mover_name = name_of(world, player);
                 broadcast_room_except_players(
                     world,
                     located.0,
@@ -3285,12 +3236,8 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         return;
     };
 
-    let actual_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let actual_name = name_of(world, target);
+    let player_name = name_of(world, player);
 
     if let Ok(mut e) = world.get_entity_mut(player) {
         e.insert(Fighting(target));
@@ -3330,9 +3277,7 @@ fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
         );
         return;
     };
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = name_of(world, target);
 
     let self_max_hp = world.get::<Health>(player).map_or(1, |h| h.max).max(1);
     let self_dmg = world.get::<CombatStats>(player).map_or(0, |c| c.dmg_roll);
@@ -3400,9 +3345,7 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
     let (dir, target) = candidates[pick];
     let dir_name = direction_name(dir);
 
-    let mover_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let mover_name = name_of(world, player);
 
     // Notify the room you're fleeing.
     let from_others: Vec<Entity> = {
@@ -3484,12 +3427,8 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     let damage = (dmg_roll + 4).max(1);
     drain_stamina(world, player, KICK_COST);
 
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
 
     let (dead, threshold_msg) = apply_damage(world, target, damage);
 
@@ -3566,12 +3505,8 @@ fn cmd_follow(world: &mut World, player: Entity, args: &str) {
     if let Ok(mut e) = world.get_entity_mut(player) {
         e.insert(Follower(target));
     }
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
     send_to(world, player, format!("You start following {target_name}.\r\n"));
     send_to(world, target, format!("{player_name} starts following you.\r\n"));
 }
@@ -3582,13 +3517,9 @@ fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
         e.remove::<Follower>();
     }
     if let Some(Follower(prev_target)) = prev {
-        let target_name = world
-            .get::<Named>(prev_target)
-            .map_or_else(String::new, |n| n.name.clone());
+        let target_name = name_of(world, prev_target);
         send_to(world, player, format!("You stop following {target_name}.\r\n"));
-        let player_name = world
-            .get::<Named>(player)
-            .map_or_else(String::new, |n| n.name.clone());
+        let player_name = name_of(world, player);
         send_to(world, prev_target, format!("{player_name} stops following you.\r\n"));
     } else {
         send_to(world, player, "You weren't following anyone.\r\n");
@@ -3654,12 +3585,8 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     let damage = (dmg_roll + 3).max(1);
     drain_stamina(world, player, BASH_COST);
 
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
 
     let (dead, threshold_msg) = apply_damage(world, target, damage);
 
@@ -3818,9 +3745,7 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 
     // Notify the source room of each mover departing (in chain order).
     for &mover in &movers {
-        let mover_name = world
-            .get::<Named>(mover)
-            .map_or_else(String::new, |n| n.name.clone());
+        let mover_name = name_of(world, mover);
         let from_others: Vec<Entity> = {
             let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
             q.iter(world)
@@ -3848,9 +3773,7 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 
     // Notify the destination room of arrivals.
     for &mover in &movers {
-        let mover_name = world
-            .get::<Named>(mover)
-            .map_or_else(String::new, |n| n.name.clone());
+        let mover_name = name_of(world, mover);
         let to_others: Vec<Entity> = {
             let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
             q.iter(world)
@@ -3911,9 +3834,7 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
     disengage_attackers_of(world, target);
 
     // Notify the room before despawn.
-    let admin_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let admin_name = name_of(world, player);
     broadcast_room_except_players(
         world,
         located.0,
@@ -3961,9 +3882,7 @@ fn cmd_restore(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You feel completely refreshed.\r\n");
         return;
     }
-    let admin_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let admin_name = name_of(world, player);
     send_to(world, player, format!("You restore {target_name}.\r\n"));
     send_to(
         world,
@@ -4152,9 +4071,7 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
             "Summoned {proto_name} (entity {mob_entity:?}) — HP {hp}, dmg {dmg}.\r\n"
         ),
     );
-    let player_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let player_name = name_of(world, player);
     broadcast_room_except_players(
         world,
         room,
@@ -4193,9 +4110,7 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
         return;
     }
 
-    let mover_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
+    let mover_name = name_of(world, player);
 
     // Notify source room.
     let from_others: Vec<Entity> = {
@@ -4271,12 +4186,8 @@ fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Freezing yourself would be unwise.\r\n");
         return;
     }
-    let admin_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let admin_name = name_of(world, player);
+    let target_name = name_of(world, target);
     let was_frozen = world.get::<Frozen>(target).is_some();
     if was_frozen {
         if let Ok(mut e) = world.get_entity_mut(target) {
@@ -4319,12 +4230,8 @@ fn cmd_force(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("'{target_word}' isn't online.\r\n"));
         return;
     };
-    let admin_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let admin_name = name_of(world, player);
+    let target_name = name_of(world, target);
 
     send_to(
         world,
@@ -4378,12 +4285,8 @@ fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    let admin_name = world
-        .get::<Named>(player)
-        .map_or_else(String::new, |n| n.name.clone());
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let admin_name = name_of(world, player);
+    let target_name = name_of(world, target);
 
     // Source-room bystanders (everyone but the target).
     let src_bystanders: Vec<Entity> = {

@@ -7,7 +7,8 @@ use tracing::info;
 
 use crate::TickCount;
 use crate::commands::{
-    apply_damage, broadcast_room_except, cmd_flee, disengage_attackers_of, drain_stamina, send_to,
+    apply_damage, broadcast_room_except, cmd_flee, disengage_attackers_of, drain_stamina, name_of,
+    send_to,
 };
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
@@ -168,9 +169,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
     let room = attacker_room.unwrap();
 
-    let target_name = world
-        .get::<Named>(s.target)
-        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = name_of(world, s.target);
 
     if world.get::<Health>(s.target).is_none() {
         // No Health component: nothing to damage. End combat from this side.
