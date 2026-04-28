@@ -14,8 +14,17 @@ use crate::commands::{
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
 
-/// Spawn a couple of hardcoded mobs so combat has someone to hit. Real
-/// mob-reset spawning is a future step.
+/// Spawn a single hardcoded test mob in The Void so combat tests have a
+/// stable target without depending on reset content. The Void has no
+/// MobResets/ObjectResets in the imported world, so this dummy is the
+/// only thing there. The dummy intentionally has no `CombatStats` —
+/// it's a punching bag that doesn't fight back, useful for testing
+/// hit-resolution without coping with retaliation.
+///
+/// (The "weak goblin in Town Center" we used to seed lived alongside
+/// the real `MobResets` content for that room — now that resets spawn
+/// real stray dogs there, the seeded goblin would just be a confusing
+/// duplicate.)
 pub fn seed_test_mobs(world: &mut World) {
     let void = world
         .resource::<WorldKeyIndex>()
@@ -36,32 +45,6 @@ pub fn seed_test_mobs(world: &mut World) {
             // No CombatStats: dummy doesn't retaliate.
         ));
         info!("seeded training dummy in The Void");
-    }
-
-    let town = world
-        .resource::<WorldKeyIndex>()
-        .rooms
-        .get(&(30, 5))
-        .copied();
-    if let Some(room) = town {
-        world.spawn((
-            Mob,
-            Named {
-                name: "a weak goblin".to_string(),
-            },
-            Keywords(vec!["goblin".into(), "weak".into()]),
-            Description("A weak goblin sneers and clutches a rusty knife.".into()),
-            Located(room),
-            Health { hp: 25, max: 25 },
-            CombatStats {
-                hit_roll: 0,
-                dmg_roll: 2,
-                ac: 10,
-                alignment: -100,
-            },
-            Posture(PostureKind::Standing),
-        ));
-        info!("seeded weak goblin in Town Center");
     }
 }
 
