@@ -10,6 +10,8 @@ pub struct Object {
     pub r#type: ObjectType,
     pub name: String,
     pub keywords: Vec<String>,
+    pub room_description: String,
+    pub examine_description: Option<String>,
     pub level: i32,
     pub weight: f64,
     pub cost: i32,
@@ -25,6 +27,8 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             type AS "type: ObjectType",
             name,
             keywords AS "keywords!: Vec<String>",
+            room_description,
+            examine_description,
             level,
             weight,
             cost

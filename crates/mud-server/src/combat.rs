@@ -77,6 +77,10 @@ pub fn seed_test_items(world: &mut World) {
             name: "a rusty sword".to_string(),
         },
         Keywords(vec!["sword".into(), "rusty".into()]),
+        Description(
+            "An iron blade pitted with rust, edge dulled by years of disuse. Still serviceable."
+                .into(),
+        ),
         Located(room),
         WearableIn(Slot::Wield),
     ));
@@ -86,6 +90,11 @@ pub fn seed_test_items(world: &mut World) {
             name: "a healing potion".to_string(),
         },
         Keywords(vec!["potion".into(), "healing".into()]),
+        Description(
+            "A small glass vial filled with a swirling crimson liquid. \
+             It smells faintly of mint and copper."
+                .into(),
+        ),
         Located(room),
     ));
     info!("seeded test items in The Void");
