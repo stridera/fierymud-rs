@@ -18,7 +18,8 @@ use mud_world::{
     EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item, Keywords, LastInputAt,
     LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint,
-    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, WearableIn, WorldKey, WorldKeyIndex,
+    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, UiStyle, WearableIn, WorldKey,
+    WorldKeyIndex,
 };
 use tracing::{info, info_span};
 
@@ -423,6 +424,22 @@ const COMMANDS: &[Command] = &[
                      prompt [%h hp] ",
         },
         run: cmd_prompt,
+    },
+    Command {
+        names: &["style"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "style [fancy | standard | minimal]",
+            summary: "Choose a UI style for info commands like score.",
+            long: "Three tiers: fancy (ASCII-art borders), standard (the \
+                   default — clean indented lines), and minimal (a single \
+                   dense line, useful in narrow viewports). With no \
+                   argument, shows the current style. Currently only score \
+                   honors this; more commands will follow.",
+        },
+        run: cmd_style,
     },
     Command {
         names: &["toggle"],
@@ -1863,6 +1880,21 @@ fn format_idle(secs: u64) -> String {
     }
 }
 
+/// Bundle of all the data the `score` renderers consume. Building it once
+/// in `cmd_score` avoids re-querying components per render variant and
+/// keeps the renderer signatures from blowing past clippy's
+/// `too_many_arguments` threshold.
+struct ScoreData<'a> {
+    name: &'a str,
+    hp: Option<Health>,
+    stamina: Option<Stamina>,
+    cs: Option<CombatStats>,
+    posture: Option<Posture>,
+    logged_in: Option<LoggedInAt>,
+    fight_target: Option<&'a str>,
+    flags: &'a [&'static str],
+}
+
 fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let name = name_of(world, player);
     let hp = world.get::<Health>(player).copied();
@@ -1871,38 +1903,141 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let fighting = world.get::<Fighting>(player).copied();
     let posture = world.get::<Posture>(player).copied();
     let logged_in = world.get::<LoggedInAt>(player).copied();
+    let fight_target_name = fighting.map(|f| name_or(world, f.0, "<gone>"));
+    let flags: Vec<&'static str> = world
+        .get::<PlayerFlags>(player)
+        .map(|f| f.0.iter().map(|fl| fl.label()).collect())
+        .unwrap_or_default();
+    let style = world.get::<UiStyle>(player).copied().unwrap_or_default();
 
-    let mut out = format!("\r\n{name}\r\n");
-    if let Some(hp) = hp {
+    let data = ScoreData {
+        name: &name,
+        hp,
+        stamina,
+        cs,
+        posture,
+        logged_in,
+        fight_target: fight_target_name.as_deref(),
+        flags: &flags,
+    };
+    let out = match style {
+        UiStyle::Standard => render_score_standard(&data),
+        UiStyle::Fancy => render_score_fancy(&data),
+        UiStyle::Minimal => render_score_minimal(&data),
+    };
+    send_to(world, player, out);
+}
+
+fn render_score_standard(d: &ScoreData) -> String {
+    let mut out = format!("\r\n{}\r\n", d.name);
+    if let Some(hp) = d.hp {
         out.push_str(&format!("  HP: {} / {}\r\n", hp.hp, hp.max));
     }
-    if let Some(stamina) = stamina {
-        out.push_str(&format!("  Stamina: {} / {}\r\n", stamina.current, stamina.max));
+    if let Some(s) = d.stamina {
+        out.push_str(&format!("  Stamina: {} / {}\r\n", s.current, s.max));
     }
-    if let Some(cs) = cs {
+    if let Some(cs) = d.cs {
         out.push_str(&format!(
             "  Hit roll: {}    Damage roll: {}    AC: {}    Alignment: {}\r\n",
             cs.hit_roll, cs.dmg_roll, cs.ac, cs.alignment
         ));
     }
-    if let Some(p) = posture {
+    if let Some(p) = d.posture {
         out.push_str(&format!("  Posture: {}\r\n", p.0.label()));
     }
-    if let Some(l) = logged_in {
+    if let Some(l) = d.logged_in {
         out.push_str(&format!("  Online for: {}\r\n", format_idle(l.0.elapsed().as_secs())));
     }
-    if let Some(f) = fighting {
-        let target_name = name_or(world, f.0, "<gone>");
-        out.push_str(&format!("  Fighting: {target_name}\r\n"));
+    if let Some(target) = d.fight_target {
+        out.push_str(&format!("  Fighting: {target}\r\n"));
     }
-    let flags: Vec<&'static str> = world
-        .get::<PlayerFlags>(player)
-        .map(|f| f.0.iter().map(|fl| fl.label()).collect())
-        .unwrap_or_default();
-    if !flags.is_empty() {
-        out.push_str(&format!("  Flags: {}\r\n", flags.join(", ")));
+    if !d.flags.is_empty() {
+        out.push_str(&format!("  Flags: {}\r\n", d.flags.join(", ")));
     }
-    send_to(world, player, out);
+    out
+}
+
+fn render_score_fancy(d: &ScoreData) -> String {
+    // Box width = 56 chars between the borders.
+    const W: usize = 56;
+    let name = d.name;
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
+    let title = format!("{name:^W$}");
+    out.push_str(&format!("|{title}|\r\n"));
+    out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
+    let mut row = |s: String| {
+        out.push_str(&format!("| {s:<width$} |\r\n", width = W - 2));
+    };
+    if let Some(hp) = d.hp {
+        row(format!("HP:        {} / {}", hp.hp, hp.max));
+    }
+    if let Some(s) = d.stamina {
+        row(format!("Stamina:   {} / {}", s.current, s.max));
+    }
+    if let Some(cs) = d.cs {
+        row(format!(
+            "Hit: {}   Dmg: {}   AC: {}   Align: {}",
+            cs.hit_roll, cs.dmg_roll, cs.ac, cs.alignment
+        ));
+    }
+    if let Some(p) = d.posture {
+        row(format!("Posture:   {}", p.0.label()));
+    }
+    if let Some(l) = d.logged_in {
+        row(format!("Online:    {}", format_idle(l.0.elapsed().as_secs())));
+    }
+    if let Some(target) = d.fight_target {
+        row(format!("Fighting:  {target}"));
+    }
+    if !d.flags.is_empty() {
+        row(format!("Flags:     {}", d.flags.join(", ")));
+    }
+    out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
+    out
+}
+
+fn render_score_minimal(d: &ScoreData) -> String {
+    let mut parts = vec![d.name.to_string()];
+    if let Some(hp) = d.hp {
+        parts.push(format!("hp:{}/{}", hp.hp, hp.max));
+    }
+    if let Some(s) = d.stamina {
+        parts.push(format!("st:{}/{}", s.current, s.max));
+    }
+    if let Some(cs) = d.cs {
+        parts.push(format!("dmg:{} ac:{}", cs.dmg_roll, cs.ac));
+    }
+    if let Some(p) = d.posture {
+        parts.push(format!("p:{}", p.0.label()));
+    }
+    if let Some(target) = d.fight_target {
+        parts.push(format!("vs:{target}"));
+    }
+    format!("{}\r\n", parts.join("  "))
+}
+
+fn cmd_style(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        let cur = world.get::<UiStyle>(player).copied().unwrap_or_default();
+        send_to(
+            world,
+            player,
+            format!("UI style: {} (try: fancy / standard / minimal)\r\n", cur.label()),
+        );
+        return;
+    }
+    let Some(new) = UiStyle::from_label(arg) else {
+        send_to(
+            world,
+            player,
+            format!("Unknown style '{arg}'. Try: fancy, standard, minimal.\r\n"),
+        );
+        return;
+    };
+    try_insert(world, player, new);
+    send_to(world, player, format!("UI style set to {}.\r\n", new.label()));
 }
 
 fn cmd_stand(world: &mut World, player: Entity, _args: &str) {

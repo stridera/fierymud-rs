@@ -165,6 +165,42 @@ pub struct LoggedInAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Frozen;
 
+/// Output verbosity preference for info commands (score/equipment/look/etc).
+/// Session-scoped for now — eventual home is an Account field or a
+/// `PlayerToggle` row so it persists across logins.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiStyle {
+    /// ASCII-art borders, generous spacing — for capable terminals.
+    Fancy,
+    /// The current default: clean, indented, one fact per line.
+    #[default]
+    Standard,
+    /// Single-line dense readout — for narrow viewports or scripting.
+    Minimal,
+}
+
+impl UiStyle {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fancy => "fancy",
+            Self::Standard => "standard",
+            Self::Minimal => "minimal",
+        }
+    }
+
+    /// Parse a user-typed style word; case-insensitive, with sensible aliases.
+    #[must_use]
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "fancy" => Some(Self::Fancy),
+            "standard" | "default" | "normal" => Some(Self::Standard),
+            "minimal" | "tight" | "brief" => Some(Self::Minimal),
+            _ => None,
+        }
+    }
+}
+
 /// Per-player prompt template loaded from `Characters.prompt`. Variable
 /// substitution: `%h`/`%H` (current/max HP). More variables (`%v`/`%V`
 /// for stamina, `%n` for name, etc.) land when the systems they reference
