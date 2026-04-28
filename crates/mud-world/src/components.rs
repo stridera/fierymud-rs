@@ -116,6 +116,12 @@ pub struct Health {
     pub max: i32,
 }
 
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Stamina {
+    pub current: i32,
+    pub max: i32,
+}
+
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct CombatStats {
     pub hit_roll: i32,

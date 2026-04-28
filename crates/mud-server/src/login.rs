@@ -5,7 +5,7 @@ use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::U
 use mud_net::{ConnId, Outbound};
 use mud_world::{
     Account, CombatStats, Health, Located, Named, Online, Player, PlayerFlags, Posture,
-    PostureKind, Prompt, RecallPoint, WorldKey, WorldKeyIndex,
+    PostureKind, Prompt, RecallPoint, Stamina, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -225,6 +225,10 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
         hp: c.hit_points,
         max: c.hit_points_max,
     };
+    let stamina = Stamina {
+        current: c.stamina,
+        max: c.stamina_max,
+    };
     let combat = CombatStats {
         hit_roll: c.hit_roll,
         dmg_roll: c.damage_roll,
@@ -250,6 +254,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             },
                 Connection(outbound),
                 health,
+                stamina,
                 combat,
                 Posture(PostureKind::Standing),
                 PlayerFlags(c.player_flags.clone()),
@@ -287,6 +292,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             Located(room_entity),
             Connection(outbound),
             health,
+            stamina,
             combat,
             Posture(PostureKind::Standing),
             PlayerFlags(c.player_flags.clone()),
@@ -306,6 +312,7 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
         return;
     };
     let hp = world.get::<Health>(entity).map_or(0, |h| h.hp);
+    let stamina = world.get::<Stamina>(entity).map_or(0, |s| s.current);
     let (zone_id, room_id) = world
         .get::<Located>(entity)
         .and_then(|l| world.get::<WorldKey>(l.0).copied())
@@ -327,6 +334,7 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
         pool,
         &account.character_id,
         hp,
+        stamina,
         zone_id,
         room_id,
         recall_zone,

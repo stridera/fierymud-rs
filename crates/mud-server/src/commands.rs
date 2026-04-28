@@ -17,7 +17,7 @@ use mud_world::{
     Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance, EffectSource,
     EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Mob,
     MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint,
-    Slot, SocialDef, SocialRegistry, WearableIn, WorldKeyIndex,
+    Slot, SocialDef, SocialRegistry, Stamina, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -345,8 +345,9 @@ const COMMANDS: &[Command] = &[
             summary: "Show or change your status prompt template.",
             long: "With no argument, prints your current template. With a \
                    template, replaces it. Variables: %h current HP, %H max \
-                   HP, %% literal percent. Examples: \
-                     prompt <%h/%Hhp> \
+                   HP, %v current stamina, %V max stamina, %% literal \
+                   percent. Examples: \
+                     prompt <%h/%H hp %v/%V mv> \
                      prompt [%h hp] ",
         },
         run: cmd_prompt,
@@ -970,7 +971,7 @@ pub(crate) fn strip_color_tags(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{render_prompt, strip_color_tags};
-    use mud_world::Health;
+    use mud_world::{Health, Stamina};
 
     #[test]
     fn strip_color_tags_handles_common_patterns() {
@@ -991,20 +992,28 @@ mod tests {
     }
 
     #[test]
-    fn render_prompt_substitutes_hp() {
+    fn render_prompt_substitutes_hp_and_stamina() {
         let hp = Some(Health { hp: 42, max: 100 });
-        assert_eq!(render_prompt("<%h/%H>", hp), "<42/100> ");
+        let st = Some(Stamina { current: 7, max: 50 });
+        assert_eq!(render_prompt("<%h/%H>", hp, st), "<42/100> ");
+        assert_eq!(render_prompt("<%v/%V mv>", hp, st), "<7/50 mv> ");
+        assert_eq!(
+            render_prompt("<%h/%H %v/%V>", hp, st),
+            "<42/100 7/50> "
+        );
         // Trailing space already present — don't double-add.
-        assert_eq!(render_prompt("<%h> ", hp), "<42> ");
+        assert_eq!(render_prompt("<%h> ", hp, st), "<42> ");
         // Literal percent.
-        assert_eq!(render_prompt("100%%", hp), "100% ");
+        assert_eq!(render_prompt("100%%", hp, st), "100% ");
         // Unknown variable: pass through literally so the player sees they
-        // typed something we don't implement.
-        assert_eq!(render_prompt("[%v]", hp), "[%v] ");
+        // typed something we don't implement (e.g., %n for name).
+        assert_eq!(render_prompt("[%n]", hp, st), "[%n] ");
         // Missing Health: question marks.
-        assert_eq!(render_prompt("<%h/%H>", None), "<?/?> ");
+        assert_eq!(render_prompt("<%h/%H>", None, st), "<?/?> ");
+        // Missing Stamina: question marks for v/V.
+        assert_eq!(render_prompt("<%v/%V>", hp, None), "<?/?> ");
         // Empty template still gets a trailing space.
-        assert_eq!(render_prompt("", hp), " ");
+        assert_eq!(render_prompt("", hp, st), " ");
     }
 }
 
@@ -1021,35 +1030,38 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
         .filter(|t| !t.is_empty())
         .unwrap_or("<%h/%H> ");
     let hp = world.get::<Health>(target).copied();
-    let rendered = render_prompt(template, hp);
+    let stamina = world.get::<Stamina>(target).copied();
+    let rendered = render_prompt(template, hp, stamina);
     let _ = conn.0.send(rendered);
 }
 
-fn render_prompt(template: &str, hp: Option<Health>) -> String {
+fn render_prompt(template: &str, hp: Option<Health>, stamina: Option<Stamina>) -> String {
     let mut out = String::with_capacity(template.len() + 16);
-    let mut chars = template.chars().peekable();
+    let mut chars = template.chars();
     while let Some(c) = chars.next() {
         if c == '%' {
             match chars.next() {
-                Some('h') => {
-                    if let Some(hp) = hp {
-                        out.push_str(&hp.hp.to_string());
-                    } else {
-                        out.push('?');
-                    }
-                }
-                Some('H') => {
-                    if let Some(hp) = hp {
-                        out.push_str(&hp.max.to_string());
-                    } else {
-                        out.push('?');
-                    }
-                }
+                Some('h') => match hp {
+                    Some(hp) => out.push_str(&hp.hp.to_string()),
+                    None => out.push('?'),
+                },
+                Some('H') => match hp {
+                    Some(hp) => out.push_str(&hp.max.to_string()),
+                    None => out.push('?'),
+                },
+                Some('v') => match stamina {
+                    Some(s) => out.push_str(&s.current.to_string()),
+                    None => out.push('?'),
+                },
+                Some('V') => match stamina {
+                    Some(s) => out.push_str(&s.max.to_string()),
+                    None => out.push('?'),
+                },
                 Some('%') | None => out.push('%'),
                 Some(other) => {
                     // Unknown variable: leave the literal `%X` so it's
                     // visible the template wants something we don't yet
-                    // implement (e.g., %v/%V for stamina).
+                    // implement (e.g., `%n` for name).
                     out.push('%');
                     out.push(other);
                 }
@@ -1311,6 +1323,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         .get::<Named>(player)
         .map_or_else(String::new, |n| n.name.clone());
     let hp = world.get::<Health>(player).copied();
+    let stamina = world.get::<Stamina>(player).copied();
     let cs = world.get::<CombatStats>(player).copied();
     let fighting = world.get::<Fighting>(player).copied();
     let posture = world.get::<Posture>(player).copied();
@@ -1318,6 +1331,9 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let mut out = format!("\r\n{name}\r\n");
     if let Some(hp) = hp {
         out.push_str(&format!("  HP: {} / {}\r\n", hp.hp, hp.max));
+    }
+    if let Some(stamina) = stamina {
+        out.push_str(&format!("  Stamina: {} / {}\r\n", stamina.current, stamina.max));
     }
     if let Some(cs) = cs {
         out.push_str(&format!(
@@ -1429,7 +1445,8 @@ fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
             player,
             format!(
                 "Your prompt is: {current}\r\n\
-                 Variables: %h (current HP), %H (max HP), %% (literal %).\r\n"
+                 Variables: %h current HP, %H max HP, %v current stamina, \
+                 %V max stamina, %% literal %.\r\n"
             ),
         );
         return;
