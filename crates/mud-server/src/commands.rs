@@ -323,6 +323,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_where,
     },
     Command {
+        names: &["idle"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "idle",
+            summary: "Show online players sorted by idle time, longest first.",
+            long: "Same population as `who`, but ordered by how long since \
+                   each player last typed something. Players who just \
+                   connected and haven't typed yet show as `fresh`; anyone \
+                   under a minute shows as `active`.",
+        },
+        run: cmd_idle,
+    },
+    Command {
         names: &["socials"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -1517,6 +1532,37 @@ fn cmd_who(world: &mut World, player: Entity, _args: &str) {
             out.push_str(&format!(" [idle {}]", format_idle(*secs)));
         }
         out.push_str("\r\n");
+    }
+    send_to(world, player, out);
+}
+
+fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
+    // Sort key: Some(secs) for stamped players (descending), None for
+    // fresh-never-typed (sort to bottom).
+    let mut rows: Vec<(String, Option<u64>)> = {
+        let mut q = world.query_filtered::<(
+            &Named,
+            Option<&LastInputAt>,
+        ), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .map(|(n, last)| (n.name.clone(), last.map(|l| l.0.elapsed().as_secs())))
+            .collect()
+    };
+    // Highest idle first; fresh-never-typed go to the bottom.
+    rows.sort_by(|a, b| match (a.1, b.1) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.0.cmp(&b.0),
+    });
+    let mut out = format!("\r\n{} online by idle:\r\n", rows.len());
+    for (name, idle) in &rows {
+        let label = match idle {
+            None => "fresh".to_string(),
+            Some(s) if *s < 60 => "active".to_string(),
+            Some(s) => format_idle(*s),
+        };
+        out.push_str(&format!("  {name:<24} {label}\r\n"));
     }
     send_to(world, player, out);
 }
