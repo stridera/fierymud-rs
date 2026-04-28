@@ -125,7 +125,7 @@ async fn main() {
                     }
                     InboundKind::Disconnected => {
                         info!(conn_id = msg.conn, "client disconnected");
-                        router.on_disconnect(&mut world, msg.conn);
+                        router.on_disconnect(&mut world, msg.conn, &pool).await;
                     }
                 }
             }

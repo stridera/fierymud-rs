@@ -22,6 +22,32 @@ pub struct CharacterRow {
     pub recall_room_id: Option<i32>,
 }
 
+pub async fn save_state(
+    pool: &PgPool,
+    character_id: &str,
+    hit_points: i32,
+    current_room_zone_id: Option<i32>,
+    current_room_id: Option<i32>,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE "Characters"
+        SET hit_points = $1,
+            current_room_zone_id = $2,
+            current_room_id = $3,
+            last_login = NOW()
+        WHERE id = $4
+        "#,
+        hit_points,
+        current_room_zone_id,
+        current_room_id,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<CharacterRow>> {
     sqlx::query_as!(
         CharacterRow,

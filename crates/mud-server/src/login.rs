@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::User};
 use mud_net::{ConnId, Outbound};
 use mud_world::{
-    Account, CombatStats, Health, Located, Named, Online, Player, Posture, PostureKind,
+    Account, CombatStats, Health, Located, Named, Online, Player, Posture, PostureKind, WorldKey,
     WorldKeyIndex,
 };
 use tracing::{info, warn};
@@ -59,10 +59,10 @@ impl ConnRouter {
         );
     }
 
-    pub fn on_disconnect(&mut self, world: &mut World, conn_id: ConnId) {
+    pub async fn on_disconnect(&mut self, world: &mut World, conn_id: ConnId, pool: &PgPool) {
         self.login.remove(&conn_id);
         if let Some(entity) = self.playing.remove(&conn_id) {
-            // Despawn the player entity. Save-on-disconnect comes later.
+            save_player(world, entity, pool).await;
             world.despawn(entity);
         }
     }
@@ -233,6 +233,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 Named { name: c.name.clone() },
                 Account {
                 user_id: user.id.clone(),
+                character_id: c.id.clone(),
                 role: user.role,
                 perms: c.permissions.clone(),
             },
@@ -260,6 +261,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             Named { name: c.name.clone() },
             Account {
                 user_id: user.id.clone(),
+                character_id: c.id.clone(),
                 role: user.role,
                 perms: c.permissions.clone(),
             },
@@ -270,6 +272,34 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             Posture(PostureKind::Standing),
         ))
         .id()
+}
+
+async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
+    let Some(account) = world.get::<Account>(entity).cloned() else {
+        return;
+    };
+    let hp = world
+        .get::<Health>(entity)
+        .map(|h| h.hp)
+        .unwrap_or(0);
+    let (zone_id, room_id) = world
+        .get::<Located>(entity)
+        .and_then(|l| world.get::<WorldKey>(l.0).copied())
+        .map_or((None, None), |wk| (Some(wk.zone), Some(wk.id)));
+
+    if let Err(e) =
+        characters::save_state(pool, &account.character_id, hp, zone_id, room_id).await
+    {
+        warn!(error = %e, character_id = %account.character_id, "save failed");
+    } else {
+        info!(
+            character_id = %account.character_id,
+            hp,
+            zone_id,
+            room_id,
+            "player saved"
+        );
+    }
 }
 
 fn pick_starting_room(c: &CharacterRow) -> (i32, i32) {

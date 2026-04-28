@@ -20,10 +20,13 @@ pub struct Player;
 pub struct Online;
 
 /// Account ownership and authorization data, stamped onto the Player entity
-/// at login. `role` comes from the Users row, `perms` from the Characters row.
+/// at login. `role` comes from the Users row; `perms` and `character_id`
+/// come from the Characters row. character_id is what save-on-disconnect
+/// uses to write state back.
 #[derive(Component, Debug, Clone)]
 pub struct Account {
     pub user_id: String,
+    pub character_id: String,
     pub role: mud_db::enums::UserRole,
     pub perms: Vec<mud_db::enums::Permission>,
 }
