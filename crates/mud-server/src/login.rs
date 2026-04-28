@@ -65,6 +65,19 @@ impl ConnRouter {
         self.login.remove(&conn_id);
         if let Some(entity) = self.playing.remove(&conn_id) {
             save_player(world, entity, pool).await;
+            // Despawn the player AND every item they were carrying / wearing.
+            // Located(player) catches both inventory and equipped (EquippedSlot
+            // is additive, items are still Located on the carrier).
+            let items: Vec<Entity> = {
+                let mut q = world.query::<(Entity, &Located, &Item)>();
+                q.iter(world)
+                    .filter(|(_, l, _)| l.0 == entity)
+                    .map(|(e, _, _)| e)
+                    .collect()
+            };
+            for item in items {
+                world.despawn(item);
+            }
             world.despawn(entity);
         }
     }
@@ -324,7 +337,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
     entity
 }
 
-async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
+async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
     let Some(account) = world.get::<Account>(entity).cloned() else {
         return;
     };
@@ -347,6 +360,23 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
         .and_then(|r| world.get::<WorldKey>(r.0).copied())
         .map_or((None, None), |wk| (Some(wk.zone), Some(wk.id)));
 
+    // Snapshot every Item Located on the player. Items inside containers
+    // the player is carrying have Located(container_item) — those stay in
+    // the DB on the previous save until container-chain support lands;
+    // walking just the directly-carried set here matches the load path.
+    let new_items: Vec<mud_db::character_items::NewCharacterItem> = {
+        let mut q = world.query::<(&Located, &WorldKey, Option<&EquippedSlot>, &Item)>();
+        q.iter(world)
+            .filter(|(l, _, _, _)| l.0 == entity)
+            .map(|(_, wk, eq, _)| mud_db::character_items::NewCharacterItem {
+                object_zone_id: wk.zone,
+                object_id: wk.id,
+                equipped_location: eq.map(|s| s.0.db_label().to_string()),
+            })
+            .collect()
+    };
+    let item_count = new_items.len();
+
     if let Err(e) = characters::save_state(
         pool,
         &account.character_id,
@@ -362,18 +392,29 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
     .await
     {
         warn!(error = %e, character_id = %account.character_id, "save failed");
-    } else {
-        info!(
-            character_id = %account.character_id,
-            hp,
-            zone_id,
-            room_id,
-            recall_zone,
-            recall_room,
-            flag_count = flags.len(),
-            "player saved"
-        );
+        return;
     }
+    if let Err(e) = mud_db::character_items::save_for(
+        pool,
+        &account.character_id,
+        &new_items,
+    )
+    .await
+    {
+        warn!(error = %e, character_id = %account.character_id, "items save failed");
+        return;
+    }
+    info!(
+        character_id = %account.character_id,
+        hp,
+        zone_id,
+        room_id,
+        recall_zone,
+        recall_room,
+        flag_count = flags.len(),
+        item_count,
+        "player saved"
+    );
 }
 
 /// Materialize each saved `CharacterItem` into a live Item entity attached
