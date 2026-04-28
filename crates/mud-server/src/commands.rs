@@ -2334,6 +2334,13 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
         .map_or_else(String::new, |n| n.name.clone());
 
     send_to(world, player, format!("You tell {target_name}, \"{message}\"\r\n"));
+    if has_flag(world, target, PlayerFlag::Afk) {
+        send_to(
+            world,
+            player,
+            format!("({target_name} is AFK and may not respond right away.)\r\n"),
+        );
+    }
     send_to(world, target, format!("{player_name} tells you, \"{message}\"\r\n"));
 
     // Stamp the receiver so they can `reply`.
