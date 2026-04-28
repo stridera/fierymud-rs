@@ -16,7 +16,7 @@ use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance, EffectSource,
     EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastInputAt, LastTeller,
-    Located, Mob,
+    Located, LoggedInAt, Mob,
     MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint,
     RoomSector, Slot, SocialDef, SocialRegistry, Stamina, WearableIn, WorldKeyIndex,
 };
@@ -1537,15 +1537,20 @@ fn cmd_who(world: &mut World, player: Entity, _args: &str) {
 }
 
 fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
-    // Sort key: Some(secs) for stamped players (descending), None for
-    // fresh-never-typed (sort to bottom).
-    let mut rows: Vec<(String, Option<u64>)> = {
+    let mut rows: Vec<(String, Option<u64>, Option<u64>)> = {
         let mut q = world.query_filtered::<(
             &Named,
             Option<&LastInputAt>,
+            Option<&LoggedInAt>,
         ), (With<Player>, With<Online>)>();
         q.iter(world)
-            .map(|(n, last)| (n.name.clone(), last.map(|l| l.0.elapsed().as_secs())))
+            .map(|(n, last, login)| {
+                (
+                    n.name.clone(),
+                    last.map(|l| l.0.elapsed().as_secs()),
+                    login.map(|l| l.0.elapsed().as_secs()),
+                )
+            })
             .collect()
     };
     // Highest idle first; fresh-never-typed go to the bottom.
@@ -1556,13 +1561,17 @@ fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
         (None, None) => a.0.cmp(&b.0),
     });
     let mut out = format!("\r\n{} online by idle:\r\n", rows.len());
-    for (name, idle) in &rows {
-        let label = match idle {
+    out.push_str("  Name                     Idle      Online\r\n");
+    for (name, idle, online) in &rows {
+        let idle_label = match idle {
             None => "fresh".to_string(),
             Some(s) if *s < 60 => "active".to_string(),
             Some(s) => format_idle(*s),
         };
-        out.push_str(&format!("  {name:<24} {label}\r\n"));
+        let online_label = online.map_or_else(|| "?".to_string(), format_idle);
+        out.push_str(&format!(
+            "  {name:<24} {idle_label:<9} {online_label}\r\n"
+        ));
     }
     send_to(world, player, out);
 }

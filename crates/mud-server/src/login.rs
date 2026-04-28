@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::User};
 use mud_net::{ConnId, Outbound};
 use mud_world::{
-    Account, CombatStats, Health, Located, Named, Online, Player, PlayerFlags, Posture,
+    Account, CombatStats, Health, Located, LoggedInAt, Named, Online, Player, PlayerFlags, Posture,
     PostureKind, Prompt, RecallPoint, Stamina, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
@@ -262,6 +262,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 Posture(PostureKind::Standing),
                 PlayerFlags(c.player_flags.clone()),
                 Prompt(c.prompt.clone()),
+                LoggedInAt(std::time::Instant::now()),
             ))
             .id();
         if let Some(re) = recall_entity
@@ -300,6 +301,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             Posture(PostureKind::Standing),
             PlayerFlags(c.player_flags.clone()),
             Prompt(c.prompt.clone()),
+            LoggedInAt(std::time::Instant::now()),
         ))
         .id();
     if let Some(re) = recall_entity

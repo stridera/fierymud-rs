@@ -153,6 +153,12 @@ pub struct LastTeller(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LastInputAt(pub std::time::Instant);
 
+/// Wall-clock instant the player's character entity was spawned (== when
+/// they finished login and entered the world). Stamped in
+/// `login::spawn_player`; persists for the duration of the session.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LoggedInAt(pub std::time::Instant);
+
 /// Per-player prompt template loaded from `Characters.prompt`. Variable
 /// substitution: `%h`/`%H` (current/max HP). More variables (`%v`/`%V`
 /// for stamina, `%n` for name, etc.) land when the systems they reference
