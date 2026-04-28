@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::User};
 use mud_net::{ConnId, Outbound};
+use mud_db::character_items::CharacterItemRow;
 use mud_world::{
-    Account, CombatStats, Health, Located, LoggedInAt, Named, Online, Player, PlayerFlags, Posture,
-    PostureKind, Prompt, RecallPoint, Stamina, WorldKey, WorldKeyIndex,
+    Account, CombatStats, Description, EquippedSlot, Health, Item, Keywords, Located, LoggedInAt,
+    Named, Online, ObjectPrototypes, Player, PlayerFlags, Posture, PostureKind, Prompt,
+    RecallPoint, Slot, Stamina, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -191,16 +193,28 @@ impl ConnRouter {
                     return;
                 };
 
+                // Pre-load the character's saved inventory before we spawn —
+                // we're still in async context here, spawn_player is sync.
+                let item_rows = match mud_db::character_items::list_for(pool, &char_row.id).await
+                {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        warn!(conn_id, error = %e, "character_items load failed");
+                        Vec::new()
+                    }
+                };
                 // Drop the &mut ctx borrow by removing — the LoginCtx and its
                 // outbound move into the Player entity's Connection component.
                 let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
                 let entity = spawn_player(world, &user, &char_row, outbound);
+                let item_count = spawn_inventory(world, entity, &item_rows);
                 self.playing.insert(conn_id, entity);
                 commands::send_prompt(world, entity);
                 info!(
                     conn_id,
                     char_name = %char_row.name,
                     char_level = char_row.level,
+                    item_count,
                     "player spawned"
                 );
             }
@@ -360,6 +374,55 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
             "player saved"
         );
     }
+}
+
+/// Materialize each saved `CharacterItem` into a live Item entity attached
+/// to `player`. Skips rows whose prototype isn't loaded (logs a warn) and
+/// rows with a `container_id` that we don't yet resolve. Returns how many
+/// items were spawned (for the login info line).
+fn spawn_inventory(world: &mut World, player: Entity, rows: &[CharacterItemRow]) -> usize {
+    let mut spawned = 0usize;
+    for row in rows {
+        if row.container_id.is_some() {
+            // Container chain handling is a follow-up — for now items
+            // inside containers stay parked in the DB and don't appear
+            // in the player's inventory.
+            continue;
+        }
+        let proto = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(row.object_zone_id, row.object_id))
+            .cloned();
+        let Some(proto) = proto else {
+            warn!(
+                row_id = row.id,
+                object_zone_id = row.object_zone_id,
+                object_id = row.object_id,
+                "character_items row references missing ObjectProto; skipping"
+            );
+            continue;
+        };
+        let mut bundle = world.spawn((
+            Item,
+            Named { name: proto.name.clone() },
+            Keywords(proto.keywords.clone()),
+            WorldKey { zone: proto.zone_id, id: proto.id },
+            Located(player),
+        ));
+        if let Some(desc) = proto.examine_description.clone() {
+            bundle.insert(Description(desc));
+        }
+        let item_entity = bundle.id();
+        if let Some(slot_str) = row.equipped_location.as_deref()
+            && let Some(slot) = Slot::from_label(slot_str)
+            && let Ok(mut e) = world.get_entity_mut(item_entity)
+        {
+            e.insert(EquippedSlot(slot));
+        }
+        spawned += 1;
+    }
+    spawned
 }
 
 fn pick_starting_room(c: &CharacterRow) -> (i32, i32) {

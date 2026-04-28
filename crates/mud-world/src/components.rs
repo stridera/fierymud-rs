@@ -80,7 +80,7 @@ impl Slot {
         Self::Light,
     ];
 
-    #[must_use] 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Head => "head",
@@ -96,6 +96,53 @@ impl Slot {
             Self::Wield => "wielded",
             Self::Hold => "held",
             Self::Light => "light",
+        }
+    }
+
+    /// Canonical `SCREAMING_SNAKE_CASE` name for DB persistence — matches
+    /// the `equipped_location` text we write to `CharacterItems`.
+    #[must_use]
+    pub fn db_label(self) -> &'static str {
+        match self {
+            Self::Head => "HEAD",
+            Self::Neck => "NECK",
+            Self::Body => "BODY",
+            Self::Arms => "ARMS",
+            Self::Hands => "HANDS",
+            Self::LeftFinger => "FINGER_LEFT",
+            Self::RightFinger => "FINGER_RIGHT",
+            Self::Waist => "WAIST",
+            Self::Legs => "LEGS",
+            Self::Feet => "FEET",
+            Self::Wield => "WIELD",
+            Self::Hold => "HOLD",
+            Self::Light => "LIGHT",
+        }
+    }
+
+    /// Parse the free-text `equipped_location` from `CharacterItems`. Case
+    /// insensitive. Returns None for slots we don't yet model (BADGE,
+    /// EARS, FACE, ABOUT, NECK_1/NECK_2-as-distinct, etc.) — the caller
+    /// treats those rows as inventory rather than dropping them entirely.
+    #[must_use]
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.to_ascii_uppercase().as_str() {
+            "HEAD" => Some(Self::Head),
+            // Schema sometimes splits NECK_1/NECK_2 — we collapse to one
+            // slot for now since the runtime doesn't model the pair.
+            "NECK" | "NECK_1" | "NECK_2" => Some(Self::Neck),
+            "BODY" => Some(Self::Body),
+            "ARMS" => Some(Self::Arms),
+            "HANDS" => Some(Self::Hands),
+            "FINGER_LEFT" | "FINGER_R" => Some(Self::LeftFinger),
+            "FINGER_RIGHT" | "FINGER_L" => Some(Self::RightFinger),
+            "WAIST" => Some(Self::Waist),
+            "LEGS" => Some(Self::Legs),
+            "FEET" => Some(Self::Feet),
+            "WIELD" => Some(Self::Wield),
+            "HOLD" => Some(Self::Hold),
+            "LIGHT" => Some(Self::Light),
+            _ => None,
         }
     }
 }
@@ -369,5 +416,36 @@ mod tests {
         assert!(!pf.has(PlayerFlag::Afk));
         assert!(!pf.has(PlayerFlag::Brief));
         assert!(!pf.has(PlayerFlag::Wimpy));
+    }
+
+    #[test]
+    fn slot_round_trip_db_label() {
+        for s in Slot::ORDER {
+            let label = s.db_label();
+            assert_eq!(Slot::from_label(label), Some(*s), "round-trip {label}");
+        }
+    }
+
+    #[test]
+    fn slot_from_label_is_case_insensitive() {
+        assert_eq!(Slot::from_label("body"), Some(Slot::Body));
+        assert_eq!(Slot::from_label("Body"), Some(Slot::Body));
+        assert_eq!(Slot::from_label("BODY"), Some(Slot::Body));
+    }
+
+    #[test]
+    fn slot_from_label_collapses_neck_pair() {
+        assert_eq!(Slot::from_label("NECK_1"), Some(Slot::Neck));
+        assert_eq!(Slot::from_label("NECK_2"), Some(Slot::Neck));
+        assert_eq!(Slot::from_label("NECK"), Some(Slot::Neck));
+    }
+
+    #[test]
+    fn slot_from_label_unknowns_return_none() {
+        assert_eq!(Slot::from_label("BADGE"), None);
+        assert_eq!(Slot::from_label("ABOUT"), None);
+        assert_eq!(Slot::from_label("EARS"), None);
+        assert_eq!(Slot::from_label(""), None);
+        assert_eq!(Slot::from_label("garbage"), None);
     }
 }

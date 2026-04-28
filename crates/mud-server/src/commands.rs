@@ -3005,9 +3005,14 @@ fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     by_slot.sort_by_key(|(s, _)| Slot::ORDER.iter().position(|x| x == s).unwrap_or(usize::MAX));
+    let mode = color_mode_for(world, player);
     let mut out = String::from("\r\nEquipment:\r\n");
     for (slot, name) in &by_slot {
-        out.push_str(&format!("  {:>14}: {}\r\n", slot.label(), name));
+        out.push_str(&format!(
+            "  {:>14}: {}\r\n",
+            slot.label(),
+            render_color_tags(name, mode)
+        ));
     }
     send_to(world, player, out);
 }
