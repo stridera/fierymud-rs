@@ -1,5 +1,6 @@
 mod combat;
 mod commands;
+mod effects;
 mod login;
 
 use std::time::Duration;
@@ -76,7 +77,15 @@ async fn main() {
 
     let mut router = ConnRouter::new();
     let mut schedule = Schedule::default();
-    schedule.add_systems((advance_tick, combat::combat_tick, log_heartbeat).chain());
+    schedule.add_systems(
+        (
+            advance_tick,
+            combat::combat_tick,
+            effects::effects_tick,
+            log_heartbeat,
+        )
+            .chain(),
+    );
 
     const TICK_HZ: u64 = 10;
     let mut ticker = interval(Duration::from_millis(1000 / TICK_HZ));

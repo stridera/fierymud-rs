@@ -8,6 +8,7 @@ pub struct Effect {
     pub description: Option<String>,
     pub effect_type: String,
     pub tags: Vec<String>,
+    pub presence_override: Option<String>,
 }
 
 pub async fn list_effects(pool: &PgPool) -> sqlx::Result<Vec<Effect>> {
@@ -19,7 +20,8 @@ pub async fn list_effects(pool: &PgPool) -> sqlx::Result<Vec<Effect>> {
             name,
             description,
             "effectType" AS effect_type,
-            tags AS "tags!: Vec<String>"
+            tags AS "tags!: Vec<String>",
+            presence_override
         FROM "Effect"
         ORDER BY id
         "#

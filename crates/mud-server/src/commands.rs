@@ -14,7 +14,8 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Permission, UserRole};
 use mud_net::Outbound;
 use mud_world::{
-    Account, CombatStats, Exits, Fighting, Health, Located, Named, Online, Player, WorldKeyIndex,
+    Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, Exits, Fighting,
+    Health, Located, Named, Online, Player, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -156,6 +157,20 @@ const COMMANDS: &[Command] = &[
                    attached to your account.",
         },
         run: cmd_roles,
+    },
+    Command {
+        names: &["effects", "affects"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "effects",
+            summary: "List active effects on yourself.",
+            long: "Each line shows an effect name and its remaining \
+                   duration in seconds (or 'permanent' if it has no \
+                   timer).",
+        },
+        run: cmd_effects,
     },
     Command {
         names: &["quit"],
@@ -309,6 +324,21 @@ const COMMANDS: &[Command] = &[
                    without checking exits or doors.",
         },
         run: cmd_goto,
+    },
+    Command {
+        names: &["apply"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "apply <effect_name> <target> [seconds]",
+            summary: "Apply an effect to a target.",
+            long: "Spawns an EffectInstance attached to the target. Target \
+                   can be 'me'/'self' or a substring of any named entity \
+                   in your current room. Duration defaults to 30 seconds; \
+                   use -1 for permanent.",
+        },
+        run: cmd_apply,
     },
 ];
 
@@ -587,6 +617,29 @@ fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, "Goodbye!\r\n");
 }
 
+fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
+    let active: Vec<(String, i32)> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, a)| a.0 == player)
+            .map(|(inst, _)| (inst.name.clone(), inst.remaining_secs))
+            .collect()
+    };
+    let mut out = if active.is_empty() {
+        "\r\nYou have no active effects.\r\n".to_string()
+    } else {
+        format!("\r\n{} active effect(s):\r\n", active.len())
+    };
+    for (name, remaining) in active {
+        if remaining < 0 {
+            out.push_str(&format!("  {name} (permanent)\r\n"));
+        } else {
+            out.push_str(&format!("  {name} ({remaining}s remaining)\r\n"));
+        }
+    }
+    send_to(world, player, out);
+}
+
 // ---------------------------------------------------------------------------
 // Communication handlers
 // ---------------------------------------------------------------------------
@@ -777,6 +830,92 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 // ---------------------------------------------------------------------------
 // Admin handlers
 // ---------------------------------------------------------------------------
+
+fn cmd_apply(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        send_to(
+            world,
+            player,
+            "Usage: apply <effect_name> <target> [seconds]\r\n",
+        );
+        return;
+    }
+    let effect_name = parts[0];
+    let target_word = parts[1];
+    let duration_s: i32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+
+    let effect_def = world
+        .resource::<EffectCatalog>()
+        .find_by_name(effect_name)
+        .cloned();
+    let Some(effect_def) = effect_def else {
+        send_to(world, player, format!("Unknown effect: {effect_name}\r\n"));
+        return;
+    };
+
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let target = if target_word.eq_ignore_ascii_case("me")
+        || target_word.eq_ignore_ascii_case("self")
+    {
+        Some(player)
+    } else {
+        let target_lower = target_word.to_ascii_lowercase();
+        let mut q = world.query::<(Entity, &Located, &Named)>();
+        q.iter(world)
+            .find(|(e, l, n)| {
+                *e != player
+                    && l.0 == located.0
+                    && n.name.to_ascii_lowercase().contains(&target_lower)
+            })
+            .map(|(e, _, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(
+            world,
+            player,
+            format!("No '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+
+    world.spawn((
+        EffectInstance {
+            kind: effect_def.id,
+            name: effect_def.name.clone(),
+            strength: 1,
+            remaining_secs: duration_s,
+            source: EffectSource::Admin,
+        },
+        AppliedTo(target),
+    ));
+
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    let dur_label = if duration_s < 0 {
+        "permanently".to_string()
+    } else {
+        format!("for {duration_s}s")
+    };
+    send_to(
+        world,
+        player,
+        format!(
+            "Applied '{}' to {target_name} {dur_label}.\r\n",
+            effect_def.name
+        ),
+    );
+    if target != player {
+        send_to(
+            world,
+            target,
+            format!("You feel the effect of {}.\r\n", effect_def.name),
+        );
+    }
+}
 
 fn cmd_goto(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();

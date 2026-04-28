@@ -5,7 +5,7 @@ use mud_db::{effects, mobs, objects, room_exits, rooms, sqlx::PgPool, zones};
 use tracing::{info, warn};
 
 use crate::components::{ExitData, Exits, Located, Named, Room, RoomSector, WorldKey, Zone};
-use crate::resources::WorldKeyIndex;
+use crate::resources::{EffectCatalog, EffectDef, WorldKeyIndex};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LoadStats {
@@ -107,16 +107,34 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
     }
 
-    // Pass 4: confirm mobs/objects/effects load. Caching them as resources
-    // for the spawner is a job for the next step; for now just count.
+    // Pass 4: catalog data. Mob/Object prototype caching still deferred —
+    // we just count those for now. Effects become a Resource since they
+    // get queried by name when applying.
     stats.mobs_listed = mobs::list_mobs(pool).await?.len();
     stats.objects_listed = objects::list_objects(pool).await?.len();
-    stats.effects_listed = effects::list_effects(pool).await?.len();
+
+    let effect_rows = effects::list_effects(pool).await?;
+    let mut effect_catalog = EffectCatalog::default();
+    for row in effect_rows {
+        effect_catalog.by_id.insert(
+            row.id,
+            EffectDef {
+                id: row.id,
+                name: row.name,
+                description: row.description,
+                effect_type: row.effect_type,
+                tags: row.tags,
+                presence_override: row.presence_override,
+            },
+        );
+    }
+    stats.effects_listed = effect_catalog.by_id.len();
 
     world.insert_resource(WorldKeyIndex {
         zones: zone_index,
         rooms: room_index,
     });
+    world.insert_resource(effect_catalog);
 
     info!(
         zones = stats.zones,

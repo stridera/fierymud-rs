@@ -51,6 +51,35 @@ pub struct CombatStats {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Fighting(pub Entity);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectSource {
+    Spell,
+    Item,
+    Room,
+    Admin,
+    Other(String),
+}
+
+/// One active effect. Each application is its own child entity, attached
+/// via `AppliedTo`. Cap on stacking is per-effect-type and lives in code
+/// that applies effects (not enforced here).
+#[derive(Component, Debug, Clone)]
+pub struct EffectInstance {
+    /// FK into the EffectCatalog resource.
+    pub kind: i32,
+    /// Cached display name (also in catalog; copied here so messages don't
+    /// need to look up the catalog every tick).
+    pub name: String,
+    pub strength: i32,
+    /// Seconds remaining; -1 means permanent.
+    pub remaining_secs: i32,
+    pub source: EffectSource,
+}
+
+/// Edge from an EffectInstance entity back to the entity that's affected.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct AppliedTo(pub Entity);
+
 /// Composite (zone, id) identity for entities loaded from the schema.
 /// Lets the runtime round-trip an entity back to its DB row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
