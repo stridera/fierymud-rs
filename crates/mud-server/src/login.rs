@@ -5,7 +5,7 @@ use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::U
 use mud_net::{ConnId, Outbound};
 use mud_world::{
     Account, CombatStats, Health, Located, Named, Online, Player, PlayerFlags, Posture,
-    PostureKind, Prompt, WorldKey, WorldKeyIndex,
+    PostureKind, Prompt, RecallPoint, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -214,6 +214,12 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
         .get(&(zone, room))
         .copied()
         .or_else(|| index.rooms.get(&FALLBACK_START).copied());
+    // Recall point: only set when the row has both coordinates AND the room
+    // is loaded. Missing recall is a normal state (`recall` will report it).
+    let recall_entity = match (c.recall_room_zone_id, c.recall_room_id) {
+        (Some(rz), Some(rr)) => index.rooms.get(&(rz, rr)).copied(),
+        _ => None,
+    };
 
     let health = Health {
         hp: c.hit_points,
@@ -231,7 +237,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             "No starting room available (tried ({zone},{room}) and fallback {FALLBACK_START:?}).\r\n",
         ));
         // Spawn a "stranded" player without a Located so they don't crash later.
-        return world
+        let stranded = world
             .spawn((
                 Player,
                 Online,
@@ -250,6 +256,12 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 Prompt(c.prompt.clone()),
             ))
             .id();
+        if let Some(re) = recall_entity
+            && let Ok(mut e) = world.get_entity_mut(stranded)
+        {
+            e.insert(RecallPoint(re));
+        }
+        return stranded;
     };
 
     let room_name = world
@@ -261,7 +273,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
         name = c.name,
     ));
 
-    world
+    let entity = world
         .spawn((
             Player,
             Online,
@@ -278,8 +290,15 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             combat,
             Posture(PostureKind::Standing),
             PlayerFlags(c.player_flags.clone()),
+            Prompt(c.prompt.clone()),
         ))
-        .id()
+        .id();
+    if let Some(re) = recall_entity
+        && let Ok(mut e) = world.get_entity_mut(entity)
+    {
+        e.insert(RecallPoint(re));
+    }
+    entity
 }
 
 async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
@@ -299,6 +318,10 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
         .get::<Prompt>(entity)
         .map(|p| p.0.clone())
         .unwrap_or_default();
+    let (recall_zone, recall_room) = world
+        .get::<RecallPoint>(entity)
+        .and_then(|r| world.get::<WorldKey>(r.0).copied())
+        .map_or((None, None), |wk| (Some(wk.zone), Some(wk.id)));
 
     if let Err(e) = characters::save_state(
         pool,
@@ -306,6 +329,8 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
         hp,
         zone_id,
         room_id,
+        recall_zone,
+        recall_room,
         &flags,
         &prompt,
     )
@@ -318,6 +343,8 @@ async fn save_player(world: &World, entity: Entity, pool: &PgPool) {
             hp,
             zone_id,
             room_id,
+            recall_zone,
+            recall_room,
             flag_count = flags.len(),
             "player saved"
         );

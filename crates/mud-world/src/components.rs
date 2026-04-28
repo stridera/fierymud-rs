@@ -148,6 +148,12 @@ pub struct LastTeller(pub Entity);
 #[derive(Component, Debug, Clone)]
 pub struct Prompt(pub String);
 
+/// Where a player goes when they `recall`. Resolved from
+/// `Characters.recall_room_*` at spawn time. Absent if the row had NULLs
+/// for either coordinate or the target room isn't loaded.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RecallPoint(pub Entity);
+
 /// Toggleable per-player preferences (DEAF, `NO_TELL`, AFK, etc.). Loaded
 /// from `Characters.player_flags` on login; saved back on disconnect.
 #[derive(Component, Debug, Clone, Default)]

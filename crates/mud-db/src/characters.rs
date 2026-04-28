@@ -24,12 +24,17 @@ pub struct CharacterRow {
     pub recall_room_id: Option<i32>,
 }
 
+// One UPDATE-per-column-set is the simplest call site for this many fields;
+// a SaveState struct would just shuffle the names. Revisit if it grows.
+#[allow(clippy::too_many_arguments)]
 pub async fn save_state(
     pool: &PgPool,
     character_id: &str,
     hit_points: i32,
     current_room_zone_id: Option<i32>,
     current_room_id: Option<i32>,
+    recall_room_zone_id: Option<i32>,
+    recall_room_id: Option<i32>,
     player_flags: &[PlayerFlag],
     prompt: &str,
 ) -> sqlx::Result<()> {
@@ -39,14 +44,18 @@ pub async fn save_state(
         SET hit_points = $1,
             current_room_zone_id = $2,
             current_room_id = $3,
-            player_flags = $4,
-            prompt = $5,
+            recall_room_zone_id = $4,
+            recall_room_id = $5,
+            player_flags = $6,
+            prompt = $7,
             last_login = NOW()
-        WHERE id = $6
+        WHERE id = $8
         "#,
         hit_points,
         current_room_zone_id,
         current_room_id,
+        recall_room_zone_id,
+        recall_room_id,
         player_flags as &[PlayerFlag],
         prompt,
         character_id,

@@ -16,8 +16,8 @@ use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance, EffectSource,
     EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Mob,
-    MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, Slot,
-    SocialDef, SocialRegistry, WearableIn, WorldKeyIndex,
+    MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint,
+    Slot, SocialDef, SocialRegistry, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -718,6 +718,33 @@ const COMMANDS: &[Command] = &[
         category: Category::Movement,
         help: MOVE_HELP,
         run: cmd_southwest,
+    },
+    Command {
+        names: &["recall"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Movement,
+        help: Help {
+            usage: "recall",
+            summary: "Teleport to your recall point.",
+            long: "Move instantly to your saved recall room. If you haven't \
+                   set one, you're told so. Use `setrecall` in your current \
+                   room to bind it as your recall point.",
+        },
+        run: cmd_recall,
+    },
+    Command {
+        names: &["setrecall"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "setrecall",
+            summary: "Bind your recall point to the current room.",
+            long: "Saves the current room as your recall destination. \
+                   Persists across logins.",
+        },
+        run: cmd_setrecall,
     },
     Command {
         names: &["in"],
@@ -3079,6 +3106,90 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
             format!("{player_name} summons {proto_name} from thin air.\r\n"),
         );
     }
+}
+
+fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
+    let Some(target) = world.get::<RecallPoint>(player).map(|r| r.0) else {
+        send_to(
+            world,
+            player,
+            "You have no recall point set. Use `setrecall` somewhere to bind one.\r\n",
+        );
+        return;
+    };
+    if world.get_entity(target).is_err() {
+        send_to(world, player, "Your recall point has vanished.\r\n");
+        if let Ok(mut e) = world.get_entity_mut(player) {
+            e.remove::<RecallPoint>();
+        }
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere; can't recall.\r\n");
+        return;
+    };
+    let from_room = located.0;
+    if from_room == target {
+        send_to(world, player, "You're already at your recall point.\r\n");
+        return;
+    }
+
+    let mover_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    // Notify source room.
+    let from_others: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 == from_room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for o in from_others {
+        send_to(world, o, format!("{mover_name} fades away in a flash of light.\r\n"));
+    }
+
+    if let Some(mut l) = world.get_mut::<Located>(player) {
+        l.0 = target;
+    }
+
+    // Notify destination room.
+    let to_others: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 == target)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for o in to_others {
+        send_to(
+            world,
+            o,
+            format!("{mover_name} appears in a flash of light.\r\n"),
+        );
+    }
+
+    send_to(world, player, "The world swirls around you...\r\n");
+    cmd_look(world, player, "");
+}
+
+fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere; can't bind a recall point.\r\n");
+        return;
+    };
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(RecallPoint(located.0));
+    }
+    let room_name = world
+        .get::<Named>(located.0)
+        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    send_to(
+        world,
+        player,
+        format!("Recall point bound: {room_name}.\r\n"),
+    );
 }
 
 fn cmd_goto(world: &mut World, player: Entity, args: &str) {
