@@ -61,7 +61,7 @@ async fn main() {
     }
 
     let listen_addr =
-        std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4103".into());
+        std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into());
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<Inbound>();
     let listen_addr_for_task = listen_addr.clone();
     tokio::spawn(async move {
