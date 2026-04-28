@@ -505,6 +505,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_attack,
     },
     Command {
+        names: &["consider", "con"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "consider <target>",
+            summary: "Size up a potential opponent.",
+            long: "Compares the target's max HP and damage roll to yours \
+                   and reports a rough difficulty band. Doesn't engage \
+                   the target — just a flavor read.",
+        },
+        run: cmd_consider,
+    },
+    Command {
         names: &["flee"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2667,6 +2681,63 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     for b in bystanders {
         send_to(world, b, format!("{player_name} attacks {actual_name}.\r\n"));
     }
+}
+
+fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
+    let target_word = target_word.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Consider whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
+        send_to(
+            world,
+            player,
+            format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    let self_max_hp = world.get::<Health>(player).map_or(1, |h| h.max).max(1);
+    let self_dmg = world.get::<CombatStats>(player).map_or(0, |c| c.dmg_roll);
+    let target_max_hp = world.get::<Health>(target).map_or(0, |h| h.max);
+    let target_dmg = world.get::<CombatStats>(target).map_or(0, |c| c.dmg_roll);
+
+    if target_max_hp == 0 {
+        send_to(
+            world,
+            player,
+            format!("{target_name} doesn't look like a fighter at all.\r\n"),
+        );
+        return;
+    }
+
+    // Score = max_hp scaled by damage output (1 + dmg/10). Compare ratio to
+    // self. The cutoffs are chosen by feel — easy to retune later.
+    let self_score = f64::from(self_max_hp) * (1.0 + f64::from(self_dmg) / 10.0);
+    let target_score = f64::from(target_max_hp) * (1.0 + f64::from(target_dmg) / 10.0);
+    let ratio = target_score / self_score.max(1.0);
+
+    let verdict = if ratio < 0.30 {
+        "is no match for you."
+    } else if ratio < 0.70 {
+        "looks like an easy fight."
+    } else if ratio < 1.50 {
+        "might give you a fight."
+    } else if ratio < 3.00 {
+        "looks tougher than you."
+    } else {
+        "would slaughter you. Don't try it."
+    };
+
+    send_to(world, player, format!("{target_name} {verdict}\r\n"));
 }
 
 fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
