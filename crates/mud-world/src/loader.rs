@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    effects, mob_reset_equipment, mob_resets, mobs, object_resets, objects, room_exits, rooms,
-    socials, sqlx::PgPool, zones,
+    effects, mob_reset_equipment, mob_resets, mobs, object_reset_contents, object_resets, objects,
+    room_exits, rooms, socials, sqlx::PgPool, zones,
 };
 use tracing::{info, warn};
 
@@ -37,6 +37,10 @@ pub struct LoadStats {
     pub mob_equipment_spawned: usize,
     /// Equipment rows whose proto/slot/parent mob couldn't be resolved.
     pub mob_equipment_skipped: usize,
+    /// Nested-content items (chest contains scroll, etc.) materialized.
+    pub object_contents_spawned: usize,
+    /// Content rows whose parent or proto couldn't be resolved.
+    pub object_contents_skipped: usize,
 }
 
 /// Load the persistent world from the database into the ECS World:
@@ -284,6 +288,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
 
     let object_reset_rows = object_resets::list_all(pool).await?;
+    // Mirrors mobs_by_reset: for ObjectResetContents to find which container
+    // entity belongs to a given reset_id.
+    let mut objects_by_reset: HashMap<i32, Vec<Entity>> =
+        HashMap::with_capacity(object_reset_rows.len());
     for r in &object_reset_rows {
         if r.probability <= 0.0 {
             continue;
@@ -302,6 +310,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             stats.object_resets_skipped += 1;
             continue;
         };
+        let mut spawned_for_reset: Vec<Entity> =
+            Vec::with_capacity(usize::try_from(r.max_instances.max(1)).unwrap_or(1));
         for _ in 0..r.max_instances.max(1) {
             let mut bundle = world.spawn((
                 Item,
@@ -313,8 +323,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             if let Some(desc) = proto.examine_description.clone() {
                 bundle.insert(Description(desc));
             }
+            spawned_for_reset.push(bundle.id());
             stats.object_resets_spawned += 1;
         }
+        objects_by_reset.insert(r.id, spawned_for_reset);
     }
 
     // Pass 6: equip mobs spawned by Pass 5 according to MobResetEquipment.
@@ -355,6 +367,68 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
     }
 
+    // Pass 7: nested ObjectResetContents. Each row spawns N items
+    // (`quantity`) inside their parent — either the container entity
+    // from Pass 5 (parent_content_id IS NULL) or another content entity
+    // spawned earlier in this pass. We iterate twice to handle the
+    // small amount of nested-content nesting that exists today (max
+    // depth 2 in fierydev); deeper nesting would just add another
+    // pass. Each row's spawned entities are tracked by content id so
+    // children can find them.
+    let content_rows = object_reset_contents::list_all(pool).await?;
+    let mut entities_by_content: HashMap<i32, Vec<Entity>> =
+        HashMap::with_capacity(content_rows.len());
+    // Two-pass: top-level first (parent_content_id IS NULL), nested
+    // second. With only depth-2 in the data this fully resolves.
+    for pass in 0..2 {
+        for row in &content_rows {
+            // Already spawned this row's items? skip.
+            if entities_by_content.contains_key(&row.id) {
+                continue;
+            }
+            // Deeper-nested rows wait for their parent in pass 1.
+            let want_top_level = pass == 0;
+            if row.parent_content_id.is_some() == want_top_level {
+                continue;
+            }
+            // Resolve parent entities.
+            let parents: Option<Vec<Entity>> = if let Some(pcid) = row.parent_content_id {
+                entities_by_content.get(&pcid).cloned()
+            } else {
+                objects_by_reset.get(&row.reset_id).cloned()
+            };
+            let proto = world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(row.object_zone_id, row.object_id))
+                .cloned();
+            let (Some(parents), Some(proto)) = (parents, proto) else {
+                stats.object_contents_skipped += 1;
+                continue;
+            };
+            let qty = usize::try_from(row.quantity.max(1)).unwrap_or(1);
+            let mut spawned_for_content: Vec<Entity> =
+                Vec::with_capacity(parents.len() * qty);
+            for parent in parents {
+                for _ in 0..qty {
+                    let mut bundle = world.spawn((
+                        Item,
+                        Named { name: proto.name.clone() },
+                        Keywords(proto.keywords.clone()),
+                        WorldKey { zone: proto.zone_id, id: proto.id },
+                        Located(parent),
+                    ));
+                    if let Some(desc) = proto.examine_description.clone() {
+                        bundle.insert(Description(desc));
+                    }
+                    spawned_for_content.push(bundle.id());
+                    stats.object_contents_spawned += 1;
+                }
+            }
+            entities_by_content.insert(row.id, spawned_for_content);
+        }
+    }
+
     info!(
         zones = stats.zones,
         rooms = stats.rooms,
@@ -370,6 +444,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         object_resets_skipped = stats.object_resets_skipped,
         mob_equipment_spawned = stats.mob_equipment_spawned,
         mob_equipment_skipped = stats.mob_equipment_skipped,
+        object_contents_spawned = stats.object_contents_spawned,
+        object_contents_skipped = stats.object_contents_skipped,
         "world loaded"
     );
 
