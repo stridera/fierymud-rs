@@ -159,6 +159,12 @@ pub struct LastInputAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LoggedInAt(pub std::time::Instant);
 
+/// Admin sanction marker: the player's command dispatch is refused
+/// (with a message) until the marker is removed. Session-scoped — does
+/// not persist across disconnect/reconnect.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Frozen;
+
 /// Per-player prompt template loaded from `Characters.prompt`. Variable
 /// substitution: `%h`/`%H` (current/max HP). More variables (`%v`/`%V`
 /// for stamina, `%n` for name, etc.) land when the systems they reference

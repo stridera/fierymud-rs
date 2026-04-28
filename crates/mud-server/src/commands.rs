@@ -15,8 +15,8 @@ use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRo
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance, EffectSource,
-    EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastInputAt, LastTeller,
-    Located, LoggedInAt, Mob,
+    EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item, Keywords, LastInputAt,
+    LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint,
     RoomSector, Slot, SocialDef, SocialRegistry, Stamina, WearableIn, WorldKey, WorldKeyIndex,
 };
@@ -910,6 +910,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_force,
     },
     Command {
+        names: &["freeze"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "freeze <player>",
+            summary: "Toggle a player's input-dispatch lockout.",
+            long: "Implementor-only. While frozen, the target's commands \
+                   are refused (except `quit`) and they see a sanction \
+                   notice. Run `freeze <player>` again to thaw them. \
+                   Session-scoped — disconnect clears it.",
+        },
+        run: cmd_freeze,
+    },
+    Command {
         names: &["summon"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -1051,6 +1066,18 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     let lower = trimmed.to_ascii_lowercase();
     let tokens: Vec<&str> = lower.split_whitespace().collect();
     if tokens.is_empty() {
+        return;
+    }
+
+    // Frozen players: refuse anything except `quit` (always-allowed escape
+    // hatch so the player isn't trapped indefinitely if the admin forgets).
+    if world.get::<Frozen>(player).is_some() && tokens[0] != "quit" {
+        send_to(
+            world,
+            player,
+            "You are frozen by an Implementor and cannot act. \
+             Type `quit` to disconnect, or wait to be thawed.\r\n",
+        );
         return;
     }
 
@@ -4128,6 +4155,56 @@ fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
         player,
         format!("Recall point bound: {room_name}.\r\n"),
     );
+}
+
+fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: freeze <player>\r\n");
+        return;
+    }
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(arg))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "Freezing yourself would be unwise.\r\n");
+        return;
+    }
+    let admin_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+    let was_frozen = world.get::<Frozen>(target).is_some();
+    if was_frozen {
+        if let Ok(mut e) = world.get_entity_mut(target) {
+            e.remove::<Frozen>();
+        }
+        send_to(world, player, format!("You thaw {target_name}.\r\n"));
+        send_to(world, target, format!("{admin_name} thaws you. You can move again.\r\n"));
+        info!(admin = %admin_name, target = %target_name, action = "thaw", "freeze toggle");
+    } else {
+        if let Ok(mut e) = world.get_entity_mut(target) {
+            e.insert(Frozen);
+        }
+        send_to(world, player, format!("You freeze {target_name}.\r\n"));
+        send_to(
+            world,
+            target,
+            format!(
+                "{admin_name} freezes you in place. You cannot act until thawed.\r\n"
+            ),
+        );
+        info!(admin = %admin_name, target = %target_name, action = "freeze", "freeze toggle");
+    }
 }
 
 fn cmd_force(world: &mut World, player: Entity, args: &str) {
