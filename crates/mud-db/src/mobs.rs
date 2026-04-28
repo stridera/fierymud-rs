@@ -8,9 +8,18 @@ pub struct Mob {
     pub zone_id: i32,
     pub id: i32,
     pub name: String,
+    pub keywords: Vec<String>,
     pub level: i32,
     pub alignment: i32,
     pub role: MobRole,
+    pub hp_dice_num: i32,
+    pub hp_dice_size: i32,
+    pub hp_dice_bonus: i32,
+    pub damage_dice_num: i32,
+    pub damage_dice_size: i32,
+    pub damage_dice_bonus: i32,
+    pub hit_roll: i32,
+    pub armor_class: i32,
 }
 
 pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
@@ -21,9 +30,18 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             zone_id,
             id,
             name,
+            keywords AS "keywords!: Vec<String>",
             level,
             alignment,
-            role AS "role: MobRole"
+            role AS "role: MobRole",
+            hp_dice_num,
+            hp_dice_size,
+            hp_dice_bonus,
+            damage_dice_num,
+            damage_dice_size,
+            damage_dice_bonus,
+            hit_roll,
+            armor_class
         FROM "Mobs"
         ORDER BY zone_id, id
         "#

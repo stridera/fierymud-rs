@@ -6,8 +6,8 @@ use tracing::{info, warn};
 
 use crate::components::{ExitData, Exits, Located, Named, Room, RoomSector, WorldKey, Zone};
 use crate::resources::{
-    EffectCatalog, EffectDef, ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry,
-    WorldKeyIndex,
+    EffectCatalog, EffectDef, MobProto, MobPrototypes, ObjectProto, ObjectPrototypes, SocialDef,
+    SocialRegistry, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -111,10 +111,33 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
     }
 
-    // Pass 4: catalog data. Mob prototype caching still deferred. Object
-    // and Effect catalogs become Resources since commands look them up
-    // by name/key.
-    stats.mobs_listed = mobs::list_mobs(pool).await?.len();
+    // Pass 4: catalog data. Mob, Object, Effect, and Social catalogs all
+    // become Resources since commands look them up by name/key.
+    let mob_rows = mobs::list_mobs(pool).await?;
+    let mut mob_prototypes = MobPrototypes::default();
+    for row in mob_rows {
+        mob_prototypes.by_key.insert(
+            (row.zone_id, row.id),
+            MobProto {
+                zone_id: row.zone_id,
+                id: row.id,
+                name: row.name,
+                keywords: row.keywords,
+                level: row.level,
+                alignment: row.alignment,
+                role: row.role,
+                hp_dice_num: row.hp_dice_num,
+                hp_dice_size: row.hp_dice_size,
+                hp_dice_bonus: row.hp_dice_bonus,
+                damage_dice_num: row.damage_dice_num,
+                damage_dice_size: row.damage_dice_size,
+                damage_dice_bonus: row.damage_dice_bonus,
+                hit_roll: row.hit_roll,
+                armor_class: row.armor_class,
+            },
+        );
+    }
+    stats.mobs_listed = mob_prototypes.by_key.len();
 
     let object_rows = objects::list_objects(pool).await?;
     let mut object_prototypes = ObjectPrototypes::default();
@@ -176,6 +199,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         zones: zone_index,
         rooms: room_index,
     });
+    world.insert_resource(mob_prototypes);
     world.insert_resource(object_prototypes);
     world.insert_resource(effect_catalog);
     world.insert_resource(social_registry);

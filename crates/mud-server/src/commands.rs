@@ -15,9 +15,9 @@ use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, UserRole};
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
-    Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Named, Online, Player,
-    PlayerFlags, Posture, PostureKind, Slot,
-    SocialDef, SocialRegistry, WearableIn, WorldKeyIndex,
+    Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Mob, MobPrototypes,
+    Named, Online, Player, PlayerFlags, Posture, PostureKind, Slot, SocialDef, SocialRegistry,
+    WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -718,6 +718,21 @@ const COMMANDS: &[Command] = &[
                    without checking exits or doors.",
         },
         run: cmd_goto,
+    },
+    Command {
+        names: &["summon"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "summon <zone_id> <mob_id>",
+            summary: "Spawn a mob from its prototype into your current room.",
+            long: "Builder+. Looks up `MobPrototypes[(zone, id)]`, rolls HP \
+                   from the prototype's hp dice, derives damage from the \
+                   damage dice (average), and spawns a fresh entity with \
+                   Mob/Health/CombatStats/Posture/Located in your room.",
+        },
+        run: cmd_summon,
     },
     Command {
         names: &["apply"],
@@ -2705,6 +2720,92 @@ fn cmd_lua(world: &mut World, player: Entity, args: &str) {
         Err(e) => {
             send_to(world, player, format!("{e}\r\n"));
         }
+    }
+}
+
+fn cmd_summon(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 2 {
+        send_to(world, player, "Usage: summon <zone_id> <mob_id>\r\n");
+        return;
+    }
+    let Ok(zone) = parts[0].parse::<i32>() else {
+        send_to(world, player, "Invalid zone id.\r\n");
+        return;
+    };
+    let Ok(mob_id) = parts[1].parse::<i32>() else {
+        send_to(world, player, "Invalid mob id.\r\n");
+        return;
+    };
+
+    let proto = world
+        .resource::<MobPrototypes>()
+        .by_key
+        .get(&(zone, mob_id))
+        .cloned();
+    let Some(proto) = proto else {
+        send_to(
+            world,
+            player,
+            format!("No mob prototype ({zone}, {mob_id}).\r\n"),
+        );
+        return;
+    };
+
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere; can't summon.\r\n");
+        return;
+    };
+    let room = located.0;
+
+    let hp = proto.rolled_hp();
+    let dmg = proto.avg_damage();
+    let proto_name = proto.name.clone();
+    let proto_keywords = proto.keywords.clone();
+    let proto_alignment = proto.alignment;
+    let proto_hit_roll = proto.hit_roll;
+    let proto_armor_class = proto.armor_class;
+
+    let mob_entity = world
+        .spawn((
+            Mob,
+            Named { name: proto_name.clone() },
+            Keywords(proto_keywords),
+            Located(room),
+            Health { hp, max: hp },
+            CombatStats {
+                hit_roll: proto_hit_roll,
+                dmg_roll: dmg,
+                ac: proto_armor_class,
+                alignment: proto_alignment,
+            },
+            Posture(PostureKind::Standing),
+        ))
+        .id();
+
+    send_to(
+        world,
+        player,
+        format!(
+            "Summoned {proto_name} (entity {mob_entity:?}) — HP {hp}, dmg {dmg}.\r\n"
+        ),
+    );
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(
+            world,
+            b,
+            format!("{player_name} summons {proto_name} from thin air.\r\n"),
+        );
     }
 }
 

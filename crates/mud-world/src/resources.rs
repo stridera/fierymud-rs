@@ -55,6 +55,51 @@ pub struct ObjectProto {
     pub level: i32,
 }
 
+/// Catalog of mob prototypes loaded from the Mobs table at startup. The
+/// `summon` admin command and (eventually) the `MobReset` spawner read this
+/// to materialize fresh mob entities.
+#[derive(Resource, Debug, Default)]
+pub struct MobPrototypes {
+    pub by_key: HashMap<(i32, i32), MobProto>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MobProto {
+    pub zone_id: i32,
+    pub id: i32,
+    pub name: String,
+    pub keywords: Vec<String>,
+    pub level: i32,
+    pub alignment: i32,
+    pub role: mud_db::enums::MobRole,
+    pub hp_dice_num: i32,
+    pub hp_dice_size: i32,
+    pub hp_dice_bonus: i32,
+    pub damage_dice_num: i32,
+    pub damage_dice_size: i32,
+    pub damage_dice_bonus: i32,
+    pub hit_roll: i32,
+    pub armor_class: i32,
+}
+
+impl MobProto {
+    /// Max-roll HP from the dice expression `NdM+B`. Deterministic; combat
+    /// damage will be rolled per-tick later.
+    #[must_use]
+    pub fn rolled_hp(&self) -> i32 {
+        (self.hp_dice_num * self.hp_dice_size + self.hp_dice_bonus).max(1)
+    }
+
+    /// Average roll for `damage_dice`; gives a stable `dmg_roll` for `CombatStats`.
+    #[must_use]
+    pub fn avg_damage(&self) -> i32 {
+        let n = self.damage_dice_num;
+        let m = self.damage_dice_size;
+        let b = self.damage_dice_bonus;
+        (n * (m + 1) / 2 + b).max(1)
+    }
+}
+
 /// Catalog of social commands ("smile", "bow", "hug" …) loaded from the
 /// Social table at startup. Looked up by name when the command dispatcher
 /// fails to find a builtin.

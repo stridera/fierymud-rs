@@ -9,6 +9,6 @@ pub use components::{
 };
 pub use loader::{LoadStats, load_from_db};
 pub use resources::{
-    EffectCatalog, EffectDef, ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry,
-    WorldKeyIndex,
+    EffectCatalog, EffectDef, MobProto, MobPrototypes, ObjectProto, ObjectPrototypes, SocialDef,
+    SocialRegistry, WorldKeyIndex,
 };
