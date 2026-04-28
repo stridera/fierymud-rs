@@ -7,6 +7,7 @@ pub mod mobs;
 pub mod objects;
 pub mod room_exits;
 pub mod rooms;
+pub mod socials;
 pub mod users;
 pub mod zones;
 

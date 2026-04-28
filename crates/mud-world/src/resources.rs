@@ -53,3 +53,31 @@ pub struct ObjectProto {
     pub weight: f64,
     pub level: i32,
 }
+
+/// Catalog of social commands ("smile", "bow", "hug" …) loaded from the
+/// Social table at startup. Looked up by name when the command dispatcher
+/// fails to find a builtin.
+#[derive(Resource, Debug, Default)]
+pub struct SocialRegistry {
+    pub by_name: HashMap<String, SocialDef>,
+}
+
+impl SocialRegistry {
+    pub fn get(&self, name: &str) -> Option<&SocialDef> {
+        self.by_name.get(&name.to_ascii_lowercase())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SocialDef {
+    pub name: String,
+    pub hide: bool,
+    pub char_no_arg: Option<String>,
+    pub others_no_arg: Option<String>,
+    pub char_found: Option<String>,
+    pub others_found: Option<String>,
+    pub vict_found: Option<String>,
+    pub not_found: Option<String>,
+    pub char_auto: Option<String>,
+    pub others_auto: Option<String>,
+}

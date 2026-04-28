@@ -15,8 +15,8 @@ use mud_db::enums::{Direction, ExitState, Permission, UserRole};
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
-    Exits, Fighting, Health, Item, Keywords, Located, Named, Online, Player, Slot, WearableIn,
-    WorldKeyIndex,
+    Exits, Fighting, Health, Item, Keywords, Located, Named, Online, Player, Slot, SocialDef,
+    SocialRegistry, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -305,6 +305,20 @@ const COMMANDS: &[Command] = &[
                    they're currently in.",
         },
         run: cmd_where,
+    },
+    Command {
+        names: &["socials"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "socials",
+            summary: "List every social emote command.",
+            long: "Shows all loaded socials (smile, bow, hug, …) in a \
+                   columnar grid. Type the social name directly to run it; \
+                   most accept an optional target.",
+        },
+        run: cmd_socials,
     },
     Command {
         names: &["effects", "affects"],
@@ -607,6 +621,10 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     let (cmd, n_consumed) = match longest_prefix_match(&tokens) {
         Some(m) => m,
         None => {
+            // Fall through to socials before declaring unknown.
+            if try_dispatch_social(world, player, tokens[0], skip_n_tokens(trimmed, 1)) {
+                return;
+            }
             send_to(
                 world,
                 player,
@@ -1357,6 +1375,155 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
             format!("{speaker} says, \"{message}\"\r\n")
         };
         send_to(world, target, line);
+    }
+}
+
+fn cmd_socials(world: &mut World, player: Entity, _args: &str) {
+    let mut names: Vec<String> = world
+        .resource::<SocialRegistry>()
+        .by_name
+        .keys()
+        .cloned()
+        .collect();
+    names.sort_unstable();
+    let mut out = format!("\r\n{} socials available:\r\n", names.len());
+    let cols = 6usize;
+    let col_width = 14usize;
+    for (i, name) in names.iter().enumerate() {
+        if i % cols == 0 {
+            out.push_str("  ");
+        }
+        out.push_str(&format!("{name:<col_width$}"));
+        if i % cols == cols - 1 {
+            out.push_str("\r\n");
+        }
+    }
+    if names.len() % cols != 0 {
+        out.push_str("\r\n");
+    }
+    send_to(world, player, out);
+}
+
+/// Try to dispatch `verb` as a social. Returns true if a matching social was
+/// found (regardless of outcome — includes cases where target wasn't found).
+fn try_dispatch_social(world: &mut World, player: Entity, verb: &str, args: &str) -> bool {
+    let social = world
+        .resource::<SocialRegistry>()
+        .get(verb)
+        .cloned();
+    let Some(social) = social else {
+        return false;
+    };
+    run_social(world, player, &social, args);
+    true
+}
+
+fn run_social(world: &mut World, player: Entity, social: &SocialDef, args: &str) {
+    let target_word = args.trim();
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+
+    let actor_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    if target_word.is_empty() {
+        // No-arg path.
+        if let Some(line) = social.char_no_arg.as_ref() {
+            let s = substitute(line, &actor_name, None);
+            send_to(world, player, format!("{s}\r\n"));
+        }
+        if let Some(line) = social.others_no_arg.as_ref() {
+            let s = substitute(line, &actor_name, None);
+            broadcast_room_except(world, room, &[player], &format!("{s}\r\n"));
+        }
+        return;
+    }
+
+    // Self-target?
+    let self_target = matches_self(&actor_name, target_word);
+    if self_target {
+        if let Some(line) = social.char_auto.as_ref() {
+            let s = substitute(line, &actor_name, Some(&actor_name));
+            send_to(world, player, format!("{s}\r\n"));
+        }
+        if let Some(line) = social.others_auto.as_ref() {
+            let s = substitute(line, &actor_name, Some(&actor_name));
+            broadcast_room_except(world, room, &[player], &format!("{s}\r\n"));
+        }
+        return;
+    }
+
+    // Try to find the target in the room.
+    let target = find_actor_in_room(world, target_word, room, player);
+    let Some(target) = target else {
+        if let Some(line) = social.not_found.as_ref() {
+            send_to(world, player, format!("{line}\r\n"));
+        } else {
+            send_to(world, player, format!("'{target_word}' isn't here.\r\n"));
+        }
+        return;
+    };
+
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+
+    if let Some(line) = social.char_found.as_ref() {
+        let s = substitute(line, &actor_name, Some(&target_name));
+        send_to(world, player, format!("{s}\r\n"));
+    }
+    if let Some(line) = social.vict_found.as_ref() {
+        let s = substitute(line, &actor_name, Some(&target_name));
+        send_to(world, target, format!("{s}\r\n"));
+    }
+    if let Some(line) = social.others_found.as_ref() {
+        let s = substitute(line, &actor_name, Some(&target_name));
+        broadcast_room_except(world, room, &[player, target], &format!("{s}\r\n"));
+    }
+}
+
+fn matches_self(actor_name: &str, target_word: &str) -> bool {
+    if target_word.eq_ignore_ascii_case("me") || target_word.eq_ignore_ascii_case("self") {
+        return true;
+    }
+    actor_name
+        .to_ascii_lowercase()
+        .contains(&target_word.to_ascii_lowercase())
+}
+
+/// Replace social template placeholders. Genderless pronouns until we wire
+/// per-character gender; "their" / "them" / "they" are the safe defaults.
+fn substitute(template: &str, actor_name: &str, target_name: Option<&str>) -> String {
+    let target = target_name.unwrap_or("someone");
+    template
+        .replace("{actor.name}", actor_name)
+        .replace("{target.name}", target)
+        .replace("{actor.pronoun.objective}", "them")
+        .replace("{actor.pronoun.subjective}", "they")
+        .replace("{actor.pronoun.possessive}", "their")
+        .replace("{target.pronoun.objective}", "them")
+        .replace("{target.pronoun.subjective}", "they")
+        .replace("{target.pronoun.possessive}", "their")
+}
+
+fn broadcast_room_except(
+    world: &mut World,
+    room: Entity,
+    except: &[Entity],
+    msg: &str,
+) {
+    let targets: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == room && !except.contains(e))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        send_to(world, t, msg);
     }
 }
 

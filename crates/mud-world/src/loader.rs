@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
-use mud_db::{effects, mobs, objects, room_exits, rooms, sqlx::PgPool, zones};
+use mud_db::{effects, mobs, objects, room_exits, rooms, socials, sqlx::PgPool, zones};
 use tracing::{info, warn};
 
 use crate::components::{ExitData, Exits, Located, Named, Room, RoomSector, WorldKey, Zone};
-use crate::resources::{EffectCatalog, EffectDef, ObjectProto, ObjectPrototypes, WorldKeyIndex};
+use crate::resources::{
+    EffectCatalog, EffectDef, ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry,
+    WorldKeyIndex,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LoadStats {
@@ -16,6 +19,7 @@ pub struct LoadStats {
     pub mobs_listed: usize,
     pub objects_listed: usize,
     pub effects_listed: usize,
+    pub socials_listed: usize,
 }
 
 /// Load the persistent world from the database into the ECS World:
@@ -147,12 +151,34 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     stats.effects_listed = effect_catalog.by_id.len();
 
+    let social_rows = socials::list_all(pool).await?;
+    let mut social_registry = SocialRegistry::default();
+    for row in social_rows {
+        social_registry.by_name.insert(
+            row.name.to_ascii_lowercase(),
+            SocialDef {
+                name: row.name,
+                hide: row.hide,
+                char_no_arg: row.char_no_arg,
+                others_no_arg: row.others_no_arg,
+                char_found: row.char_found,
+                others_found: row.others_found,
+                vict_found: row.vict_found,
+                not_found: row.not_found,
+                char_auto: row.char_auto,
+                others_auto: row.others_auto,
+            },
+        );
+    }
+    stats.socials_listed = social_registry.by_name.len();
+
     world.insert_resource(WorldKeyIndex {
         zones: zone_index,
         rooms: room_index,
     });
     world.insert_resource(object_prototypes);
     world.insert_resource(effect_catalog);
+    world.insert_resource(social_registry);
 
     info!(
         zones = stats.zones,
@@ -162,6 +188,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         mobs = stats.mobs_listed,
         objects = stats.objects_listed,
         effects = stats.effects_listed,
+        socials = stats.socials_listed,
         "world loaded"
     );
 

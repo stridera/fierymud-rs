@@ -8,4 +8,7 @@ pub use components::{
     WearableIn, WorldKey, Zone,
 };
 pub use loader::{LoadStats, load_from_db};
-pub use resources::{EffectCatalog, EffectDef, ObjectProto, ObjectPrototypes, WorldKeyIndex};
+pub use resources::{
+    EffectCatalog, EffectDef, ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry,
+    WorldKeyIndex,
+};
