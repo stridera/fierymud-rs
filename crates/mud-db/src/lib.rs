@@ -1,14 +1,18 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+use sqlx::postgres::{PgPool, PgPoolOptions};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod effects;
+pub mod enums;
+pub mod mobs;
+pub mod objects;
+pub mod room_exits;
+pub mod rooms;
+pub mod zones;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub use sqlx;
+
+pub async fn connect(database_url: &str) -> sqlx::Result<PgPool> {
+    PgPoolOptions::new()
+        .max_connections(8)
+        .connect(database_url)
+        .await
 }
