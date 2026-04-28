@@ -3861,17 +3861,13 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
 
     let mover_name = name_of(world, player);
 
-    // Notify the room you're fleeing.
-    let from_others: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == from_room)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for o in from_others {
-        send_rendered(world, o, &format!("{mover_name} panics and flees {dir_name}!\r\n"));
-    }
+    // Notify the source room you're fleeing.
+    broadcast_room_except_players_rendered(
+        world,
+        from_room,
+        &[player],
+        &format!("{mover_name} panics and flees {dir_name}!\r\n"),
+    );
 
     // Drop our own Fighting; combat_tick auto-disengages attackers on
     // the next 1Hz pass via the room-mismatch check.
@@ -3881,20 +3877,15 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
     if let Some(mut l) = world.get_mut::<Located>(player) {
         l.0 = target;
     }
-    let to_others: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == target)
-            .map(|(e, _)| e)
-            .collect()
-    };
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))
     });
-    for o in to_others {
-        send_rendered(world, o, &format!("{mover_name} arrives, panting, from {arrival_dir}.\r\n"),
-        );
-    }
+    broadcast_room_except_players_rendered(
+        world,
+        target,
+        &[player],
+        &format!("{mover_name} arrives, panting, from {arrival_dir}.\r\n"),
+    );
     send_to(world, player, format!("You flee {dir_name}!\r\n"));
     cmd_look(world, player, "");
 }
@@ -4213,16 +4204,12 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // Notify the source room of each mover departing (in chain order).
     for &mover in &movers {
         let mover_name = name_of(world, mover);
-        let from_others: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-            q.iter(world)
-                .filter(|(e, l)| !movers.contains(e) && l.0 == from_room)
-                .map(|(e, _)| e)
-                .collect()
-        };
-        for o in from_others {
-            send_rendered(world, o, &format!("{mover_name} leaves {dir_name}.\r\n"));
-        }
+        broadcast_room_except_players_rendered(
+            world,
+            from_room,
+            &movers,
+            &format!("{mover_name} leaves {dir_name}.\r\n"),
+        );
     }
 
     // Move everyone.
@@ -4241,17 +4228,12 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // Notify the destination room of arrivals.
     for &mover in &movers {
         let mover_name = name_of(world, mover);
-        let to_others: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-            q.iter(world)
-                .filter(|(e, l)| !movers.contains(e) && l.0 == target)
-                .map(|(e, _)| e)
-                .collect()
-        };
-        for o in to_others {
-            send_rendered(world, o, &format!("{mover_name} arrives from {arrival_dir}.\r\n"),
-            );
-        }
+        broadcast_room_except_players_rendered(
+            world,
+            target,
+            &movers,
+            &format!("{mover_name} arrives from {arrival_dir}.\r\n"),
+        );
     }
 
     // Each mover sees the new room. Followers also get a "You follow." line
@@ -4557,33 +4539,24 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
     let mover_name = name_of(world, player);
 
     // Notify source room.
-    let from_others: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == from_room)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for o in from_others {
-        send_rendered(world, o, &format!("{mover_name} fades away in a flash of light.\r\n"));
-    }
+    broadcast_room_except_players_rendered(
+        world,
+        from_room,
+        &[player],
+        &format!("{mover_name} fades away in a flash of light.\r\n"),
+    );
 
     if let Some(mut l) = world.get_mut::<Located>(player) {
         l.0 = target;
     }
 
     // Notify destination room.
-    let to_others: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && l.0 == target)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for o in to_others {
-        send_rendered(world, o, &format!("{mover_name} appears in a flash of light.\r\n"),
-        );
-    }
+    broadcast_room_except_players_rendered(
+        world,
+        target,
+        &[player],
+        &format!("{mover_name} appears in a flash of light.\r\n"),
+    );
 
     send_to(world, player, "The world swirls around you...\r\n");
     cmd_look(world, player, "");
