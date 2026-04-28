@@ -1140,6 +1140,10 @@ dependencies = [
 [[package]]
 name = "mud-net"
 version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "mud-script"
@@ -1152,6 +1156,7 @@ dependencies = [
  "bevy_ecs",
  "dotenvy",
  "mud-db",
+ "mud-net",
  "mud-world",
  "tokio",
  "tracing",

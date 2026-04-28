@@ -9,6 +9,7 @@ publish.workspace = true
 bevy_ecs = "0.18.1"
 dotenvy = "0.15.7"
 mud-db = { version = "0.1.0", path = "../mud-db" }
+mud-net = { version = "0.1.0", path = "../mud-net" }
 mud-world = { version = "0.1.0", path = "../mud-world" }
 tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 tracing = "0.1.44"
