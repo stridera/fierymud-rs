@@ -2392,6 +2392,36 @@ fn cmd_shout(world: &mut World, player: Entity, args: &str) {
 // Combat handler
 // ---------------------------------------------------------------------------
 
+/// Combat-action stamina costs (one stop in scope so a balance pass can
+/// retune them in one place).
+const ATTACK_COST: i32 = 2;
+const KICK_COST: i32 = 5;
+const BASH_COST: i32 = 8;
+
+/// Pre-flight stamina check. Returns false if the player has Stamina and
+/// it's below `cost`; sends "You're too winded to <verb>." and the caller
+/// should abort. Players without a Stamina component pass (mobs, etc.).
+fn check_stamina(world: &World, player: Entity, cost: i32, verb: &str) -> bool {
+    if let Some(s) = world.get::<Stamina>(player).copied()
+        && s.current < cost
+    {
+        send_to(
+            world,
+            player,
+            format!("You're too winded to {verb}.\r\n"),
+        );
+        return false;
+    }
+    true
+}
+
+/// Pay the stamina cost. Caps current at zero.
+fn drain_stamina(world: &mut World, player: Entity, cost: i32) {
+    if let Some(mut s) = world.get_mut::<Stamina>(player) {
+        s.current = (s.current - cost).max(0);
+    }
+}
+
 /// Refuse the action if the entity is sleeping; auto-rise from a sitting or
 /// resting posture (with announcements). Returns false if the action should
 /// be aborted.
@@ -2431,6 +2461,9 @@ fn require_alert_posture(world: &mut World, player: Entity, action: &str) -> boo
 
 fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     if !require_alert_posture(world, player, "attack") {
+        return;
+    }
+    if !check_stamina(world, player, ATTACK_COST, "attack") {
         return;
     }
     let target_name = target_name.trim();
@@ -2478,6 +2511,7 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     {
         e.insert(Fighting(player));
     }
+    drain_stamina(world, player, ATTACK_COST);
 
     send_to(world, player, format!("You attack {actual_name}!\r\n"));
     send_to(world, target, format!("{player_name} attacks you!\r\n"));
@@ -2575,6 +2609,9 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "kick") {
         return;
     }
+    if !check_stamina(world, player, KICK_COST, "kick") {
+        return;
+    }
     let Some(fighting) = world.get::<Fighting>(player).copied() else {
         send_to(world, player, "You aren't fighting anyone.\r\n");
         return;
@@ -2603,6 +2640,7 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
         .get::<CombatStats>(player)
         .map_or(1, |cs| cs.dmg_roll);
     let damage = (dmg_roll + 4).max(1);
+    drain_stamina(world, player, KICK_COST);
 
     let target_name = world
         .get::<Named>(target)
@@ -2744,6 +2782,9 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     if !require_alert_posture(world, player, "bash") {
         return;
     }
+    if !check_stamina(world, player, BASH_COST, "bash") {
+        return;
+    }
     let target_word = target_word.trim();
     if target_word.is_empty() {
         send_to(world, player, "Bash what?\r\n");
@@ -2775,6 +2816,7 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         .get::<CombatStats>(player)
         .map_or(1, |cs| cs.dmg_roll);
     let damage = (dmg_roll + 3).max(1);
+    drain_stamina(world, player, BASH_COST);
 
     let target_name = world
         .get::<Named>(target)
