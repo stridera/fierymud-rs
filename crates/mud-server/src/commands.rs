@@ -593,10 +593,24 @@ const COMMANDS: &[Command] = &[
         help: Help {
             usage: "sleep",
             summary: "Lie down and sleep.",
-            long: "Changes your posture to sleeping. Wake with `stand` \
-                   (or sit/rest).",
+            long: "Changes your posture to sleeping. Wake with `wake`, \
+                   `stand`, `sit`, or `rest`.",
         },
         run: cmd_sleep,
+    },
+    Command {
+        names: &["wake"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "wake [target]",
+            summary: "Wake yourself, or rouse a sleeping companion.",
+            long: "With no argument, brings you out of sleep to standing. \
+                   With a target, finds a sleeping player or mob in the \
+                   room and stands them up; everyone in the room sees it.",
+        },
+        run: cmd_wake,
     },
     Command {
         names: &["disengage"],
@@ -1532,6 +1546,59 @@ fn cmd_rest(world: &mut World, player: Entity, _args: &str) {
 }
 fn cmd_sleep(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Sleeping);
+}
+
+fn cmd_wake(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        if world.get::<Posture>(player).map(|p| p.0) == Some(PostureKind::Sleeping) {
+            set_posture(world, player, PostureKind::Standing);
+        } else {
+            send_to(world, player, "You aren't asleep.\r\n");
+        }
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    let target_name = world
+        .get::<Named>(target)
+        .map_or_else(String::new, |n| n.name.clone());
+    if world.get::<Posture>(target).map(|p| p.0) != Some(PostureKind::Sleeping) {
+        send_to(world, player, format!("{target_name} is already awake.\r\n"));
+        return;
+    }
+    if let Ok(mut e) = world.get_entity_mut(target) {
+        e.insert(Posture(PostureKind::Standing));
+    }
+    let player_name = world
+        .get::<Named>(player)
+        .map_or_else(String::new, |n| n.name.clone());
+    send_to(world, player, format!("You wake {target_name}.\r\n"));
+    send_to(
+        world,
+        target,
+        format!("{player_name} wakes you up.\r\n"),
+    );
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && *e != target && l.0 == located.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in bystanders {
+        send_to(
+            world,
+            b,
+            format!("{player_name} wakes {target_name} up.\r\n"),
+        );
+    }
 }
 
 fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
