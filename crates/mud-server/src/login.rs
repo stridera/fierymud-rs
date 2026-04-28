@@ -273,9 +273,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
         return stranded;
     };
 
-    let room_name = world
-        .get::<Named>(room_entity)
-        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    let room_name = commands::name_or(world, room_entity, "<unknown>");
 
     let _ = outbound.send(format!(
         "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",

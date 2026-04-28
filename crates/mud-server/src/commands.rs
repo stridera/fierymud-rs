@@ -1701,9 +1701,7 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
 
-    let room_name = world
-        .get::<Named>(room)
-        .map_or_else(|| "<nowhere>".to_string(), |n| n.name.clone());
+    let room_name = name_or(world, room, "<nowhere>");
     let room_desc = world
         .get::<Description>(room)
         .map(|d| d.0.clone())
@@ -1896,9 +1894,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         out.push_str(&format!("  Online for: {}\r\n", format_idle(l.0.elapsed().as_secs())));
     }
     if let Some(f) = fighting {
-        let target_name = world
-            .get::<Named>(f.0)
-            .map_or_else(|| "<gone>".to_string(), |n| n.name.clone());
+        let target_name = name_or(world, f.0, "<gone>");
         out.push_str(&format!("  Fighting: {target_name}\r\n"));
     }
     let flags: Vec<&'static str> = world
@@ -2137,9 +2133,7 @@ fn look_direction(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "The way fades into the unknown.\r\n");
         return;
     };
-    let name = world
-        .get::<Named>(target_room)
-        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    let name = name_or(world, target_room, "<unknown>");
     let desc = world
         .get::<Description>(target_room)
         .map(|d| strip_color_tags(&d.0))
@@ -2245,8 +2239,7 @@ fn cmd_where(world: &mut World, player: Entity, _args: &str) {
             .query_filtered::<(&Named, &Located), (With<Player>, With<Online>)>();
         q.iter(world)
             .map(|(n, l)| {
-                let room_name = world
-                    .get::<Named>(l.0).map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+                let room_name = name_or(world, l.0, "<unknown>");
                 (n.name.clone(), room_name)
             })
             .collect()
@@ -2890,6 +2883,15 @@ pub(crate) fn name_of(world: &World, e: Entity) -> String {
     world
         .get::<Named>(e)
         .map_or_else(String::new, |n| n.name.clone())
+}
+
+/// Same shape as `name_of` but with a caller-chosen fallback string —
+/// used by sites that prefer literal placeholders like `<unknown>`,
+/// `<gone>`, or `<nowhere>` when the entity lacks a Named.
+pub(crate) fn name_or(world: &World, e: Entity, fallback: &str) -> String {
+    world
+        .get::<Named>(e)
+        .map_or_else(|| fallback.to_string(), |n| n.name.clone())
 }
 
 /// Like `broadcast_room_except`, but only fans out to entities that have
@@ -3826,9 +3828,7 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    let target_name = name_or(world, target, "<unknown>");
 
     // End any combat against this mob — attackers stop swinging.
     disengage_attackers_of(world, target);
@@ -3875,9 +3875,7 @@ fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     if let Some(mut s) = world.get_mut::<Stamina>(target) {
         s.current = s.max;
     }
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    let target_name = name_or(world, target, "<unknown>");
     if target == player {
         send_to(world, player, "You feel completely refreshed.\r\n");
         return;
@@ -3952,9 +3950,7 @@ fn cmd_apply(world: &mut World, player: Entity, args: &str) {
         AppliedTo(target),
     ));
 
-    let target_name = world
-        .get::<Named>(target)
-        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    let target_name = name_or(world, target, "<unknown>");
     let dur_label = if duration_s < 0 {
         "permanently".to_string()
     } else {
@@ -4156,9 +4152,7 @@ fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
     if let Ok(mut e) = world.get_entity_mut(player) {
         e.insert(RecallPoint(located.0));
     }
-    let room_name = world
-        .get::<Named>(located.0)
-        .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+    let room_name = name_or(world, located.0, "<unknown>");
     send_to(
         world,
         player,
