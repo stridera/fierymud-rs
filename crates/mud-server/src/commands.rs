@@ -11,13 +11,13 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, UserRole};
+use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRole};
 use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance, EffectSource,
     EquippedSlot, Exits, Fighting, Follower, Health, Item, Keywords, LastTeller, Located, Mob,
     MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint,
-    Slot, SocialDef, SocialRegistry, Stamina, WearableIn, WorldKeyIndex,
+    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, WearableIn, WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -970,7 +970,8 @@ pub(crate) fn strip_color_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_prompt, strip_color_tags};
+    use super::{render_prompt, sector_movement_cost, strip_color_tags};
+    use mud_db::enums::Sector;
     use mud_world::{Health, Stamina};
 
     #[test]
@@ -989,6 +990,26 @@ mod tests {
         assert_eq!(strip_color_tags("hello <b:yellow"), "hello ");
         // Empty tags.
         assert_eq!(strip_color_tags("<>x<>y"), "xy");
+    }
+
+    #[test]
+    fn sector_movement_cost_brackets() {
+        // Easy terrain: 1.
+        assert_eq!(sector_movement_cost(Sector::City), 1);
+        assert_eq!(sector_movement_cost(Sector::Road), 1);
+        assert_eq!(sector_movement_cost(Sector::Field), 1);
+        // Magical planes: 1 (floating, not walking).
+        assert_eq!(sector_movement_cost(Sector::Air), 1);
+        assert_eq!(sector_movement_cost(Sector::Astralplane), 1);
+        // Standard wilderness: 2.
+        assert_eq!(sector_movement_cost(Sector::Forest), 2);
+        assert_eq!(sector_movement_cost(Sector::Hills), 2);
+        // Slogging: 3.
+        assert_eq!(sector_movement_cost(Sector::Mountain), 3);
+        assert_eq!(sector_movement_cost(Sector::Swamp), 3);
+        // Swimming: 4 / underwater: 6.
+        assert_eq!(sector_movement_cost(Sector::Water), 4);
+        assert_eq!(sector_movement_cost(Sector::Underwater), 6);
     }
 
     #[test]
@@ -2814,17 +2835,12 @@ mv!(cmd_southwest, Southwest);
 mv!(cmd_in, In);
 mv!(cmd_out, Out);
 
+// Walk + follower cascade + per-mover notifications + auto-look + stamina
+// drain — naturally a long sequence; splitting into helpers would just
+// shuffle the order.
+#[allow(clippy::too_many_lines)]
 fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     if !require_alert_posture(world, player, "move") {
-        return;
-    }
-    // Stamina pre-flight: a player with 0 stamina is too tired to move.
-    // (Followers along for the ride aren't checked — they go where the
-    // leader goes; they don't pay the cost either.)
-    if let Some(s) = world.get::<Stamina>(player).copied()
-        && s.current <= 0
-    {
-        send_to(world, player, "You're too exhausted to move.\r\n");
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {
@@ -2847,6 +2863,20 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "That exit leads nowhere.\r\n");
         return;
     };
+
+    // Stamina pre-flight: cost depends on the target room's sector.
+    // Followers along for the ride aren't checked — they go where the leader
+    // goes; the leader pays the cost.
+    let target_sector = world
+        .get::<RoomSector>(target)
+        .map_or(Sector::Field, |s| s.0);
+    let stamina_cost = sector_movement_cost(target_sector);
+    if let Some(s) = world.get::<Stamina>(player).copied()
+        && s.current < stamina_cost
+    {
+        send_to(world, player, "You're too exhausted to move.\r\n");
+        return;
+    }
 
     // Walk the follower graph rooted at `player`, but only enroll followers
     // who are currently in the same source room — followers in other rooms
@@ -2900,10 +2930,10 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         }
     }
 
-    // Drain the leader's stamina (1 per step). Followers don't pay the
-    // cost — they're being led.
+    // Drain the leader's stamina by the target sector's cost. Followers
+    // don't pay the cost — they're being led.
     if let Some(mut s) = world.get_mut::<Stamina>(player) {
-        s.current = (s.current - 1).max(0);
+        s.current = (s.current - stamina_cost).max(0);
     }
 
     // Notify the destination room of arrivals.
@@ -3260,6 +3290,37 @@ fn cmd_goto(world: &mut World, player: Entity, args: &str) {
 // ---------------------------------------------------------------------------
 // Direction name helpers
 // ---------------------------------------------------------------------------
+
+/// Stamina drained when moving INTO a room of this sector. The mapping
+/// roughly tracks classic CircleMUD/FieryMUD: paved/easy = 1, normal
+/// terrain = 2, water/swamp = 3-4, magical/floating planes = 1 (you're
+/// not really walking).
+fn sector_movement_cost(s: Sector) -> i32 {
+    match s {
+        // Easy terrain: paved, indoors, level grass; OR magical/floating
+        // planes where you're not really walking.
+        Sector::Structure
+        | Sector::City
+        | Sector::Road
+        | Sector::Field
+        | Sector::Grasslands
+        | Sector::Beach
+        | Sector::Air
+        | Sector::Astralplane
+        | Sector::Etherealplane
+        | Sector::Airplane
+        | Sector::Fireplane
+        | Sector::Earthplane
+        | Sector::Avernus => 1,
+        // Standard wilderness.
+        Sector::Forest | Sector::Hills | Sector::Cave | Sector::Ruins | Sector::Underdark => 2,
+        // Slogging / difficult.
+        Sector::Mountain | Sector::Shallows | Sector::Swamp => 3,
+        // Swimming.
+        Sector::Water => 4,
+        Sector::Underwater => 6,
+    }
+}
 
 fn direction_name(d: Direction) -> &'static str {
     use Direction::{
