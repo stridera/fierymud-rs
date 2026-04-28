@@ -177,6 +177,8 @@ fn apply_swing(world: &mut World, s: &Swing) {
         }
         return;
     }
+    let was_sleeping =
+        world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
     let (dead, threshold_msg) = apply_damage(world, s.target, s.damage);
 
     send_to(
@@ -192,6 +194,18 @@ fn apply_swing(world: &mut World, s: &Swing) {
             s.attacker_name, s.damage
         ),
     );
+    if was_sleeping && !dead {
+        if let Ok(mut e) = world.get_entity_mut(s.target) {
+            e.insert(Posture(PostureKind::Standing));
+        }
+        send_to(world, s.target, "You jolt awake!\r\n");
+        broadcast_room_except(
+            world,
+            room,
+            &[s.attacker, s.target],
+            &format!("{target_name} jolts awake!\r\n"),
+        );
+    }
     if let Some(m) = threshold_msg {
         send_to(world, s.target, m);
     }
