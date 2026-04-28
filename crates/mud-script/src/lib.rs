@@ -189,3 +189,122 @@ impl UserData for LuaActor {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_world_with_actor() -> (World, Entity) {
+        let mut world = World::new();
+        let actor = world
+            .spawn((
+                Player,
+                Named { name: "TestActor".to_string() },
+                Health { hp: 42, max: 100 },
+            ))
+            .id();
+        (world, actor)
+    }
+
+    #[test]
+    fn actor_name_round_trips() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        let out = host
+            .exec_for_actor(&mut world, actor, "print(actor:name())")
+            .expect("ok");
+        assert_eq!(out, "TestActor\r\n");
+    }
+
+    #[test]
+    fn actor_hp_and_max_hp() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                actor,
+                "print(actor:hp() .. '/' .. actor:max_hp())",
+            )
+            .expect("ok");
+        assert_eq!(out, "42/100\r\n");
+    }
+
+    #[test]
+    fn is_player_vs_is_mob() {
+        let (mut world, player) = make_world_with_actor();
+        let mob = world
+            .spawn((Mob, Named { name: "Goblin".to_string() }))
+            .id();
+        let host = LuaHost::new();
+        let player_out = host
+            .exec_for_actor(
+                &mut world,
+                player,
+                "print(actor:is_player(), actor:is_mob())",
+            )
+            .expect("ok");
+        // Lua's print joins multiple args with tab.
+        assert_eq!(player_out, "true\tfalse\r\n");
+        let mob_out = host
+            .exec_for_actor(
+                &mut world,
+                mob,
+                "print(actor:is_player(), actor:is_mob())",
+            )
+            .expect("ok");
+        assert_eq!(mob_out, "false\ttrue\r\n");
+    }
+
+    #[test]
+    fn room_name_nil_when_unplaced() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        let out = host
+            .exec_for_actor(&mut world, actor, "print(actor:room_name())")
+            .expect("ok");
+        // No Located component → room_name returns nil; print renders as "nil".
+        assert_eq!(out, "nil\r\n");
+    }
+
+    #[test]
+    fn syntax_error_returns_lua_error_string() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        let err = host
+            .exec_for_actor(&mut world, actor, "this is not valid lua")
+            .expect_err("syntax error expected");
+        assert!(
+            err.starts_with("lua error:"),
+            "error string starts with prefix: got {err}"
+        );
+    }
+
+    #[test]
+    fn multi_print_concatenates_lines() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                actor,
+                "print('one'); print('two'); print('three')",
+            )
+            .expect("ok");
+        assert_eq!(out, "one\r\ntwo\r\nthree\r\n");
+    }
+
+    #[test]
+    fn each_call_clears_actor_global() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        // First call binds actor; second should rebind, but if the first
+        // somehow leaked, the second call could still see the first's actor.
+        // Both calls should print the SAME actor's name (TestActor).
+        let _ = host.exec_for_actor(&mut world, actor, "print(actor:name())").unwrap();
+        let out2 = host
+            .exec_for_actor(&mut world, actor, "print(actor:name())")
+            .expect("ok");
+        assert_eq!(out2, "TestActor\r\n");
+    }
+}
