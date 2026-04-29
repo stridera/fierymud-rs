@@ -1332,6 +1332,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_slay,
     },
     Command {
+        names: &["stat"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "stat [<target>]",
+            summary: "Dump ECS state of an entity in your room (or self).",
+            long: "Builder+ diagnostic. With no arg or `me`/`self`, \
+                   inspects you. With a keyword, finds the matching mob/ \
+                   player/item in the room and prints its components: \
+                   WorldKey, Health, Stamina, Posture, CombatStats, \
+                   Profile (players), and any active EffectInstances \
+                   pointing at it.",
+        },
+        run: cmd_stat,
+    },
+    Command {
         names: &["loadobj", "loado"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -5791,6 +5808,131 @@ fn cmd_lua(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, format!("{e}\r\n"));
         }
     }
+}
+
+/// `stat <target>`: dump components on a single entity for diagnosis.
+/// Resolves the target via the same in-room finder `cmd_examine` uses
+/// (or self when arg empty / "me" / "self"). Output is intentionally
+/// dense — a Debug-style readout, not for player consumption.
+#[allow(clippy::too_many_lines)]
+fn cmd_stat(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let target = if arg.is_empty() || arg.eq_ignore_ascii_case("me")
+        || arg.eq_ignore_ascii_case("self")
+    {
+        player
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        // Try actor (mob/player) first, then item.
+        let needle = arg.to_ascii_lowercase();
+        let actor = find_actor_in_room(world, arg, located.0, player);
+        let item = actor.or_else(|| {
+            let mut q = world
+                .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+            q.iter(world)
+                .find(|(_, l, n, kw)| l.0 == located.0 && matches(&needle, n, *kw))
+                .map(|(e, _, _, _)| e)
+        });
+        let Some(found) = item else {
+            send_to(world, player, format!("No '{arg}' here.\r\n"));
+            return;
+        };
+        found
+    };
+
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("entity:        {target:?}\r\n"));
+    out.push_str(&format!("name:          {}\r\n", name_of(world, target)));
+    if let Some(wk) = world.get::<WorldKey>(target) {
+        out.push_str(&format!("world_key:     ({}, {})\r\n", wk.zone, wk.id));
+    }
+    if let Some(located) = world.get::<Located>(target) {
+        let in_name = name_or(world, located.0, "<unknown>");
+        out.push_str(&format!("located_in:    {:?} ({})\r\n", located.0, in_name));
+    }
+    if let Some(kw) = world.get::<Keywords>(target) {
+        out.push_str(&format!("keywords:      {:?}\r\n", kw.0));
+    }
+    if world.get::<Player>(target).is_some() {
+        out.push_str("kind:          Player\r\n");
+    } else if world.get::<Mob>(target).is_some() {
+        out.push_str("kind:          Mob\r\n");
+    } else if world.get::<Item>(target).is_some() {
+        out.push_str("kind:          Item\r\n");
+    } else {
+        out.push_str("kind:          (other)\r\n");
+    }
+    if let Some(h) = world.get::<Health>(target) {
+        out.push_str(&format!("health:        {}/{}\r\n", h.hp, h.max));
+    }
+    if let Some(s) = world.get::<Stamina>(target) {
+        out.push_str(&format!("stamina:       {}/{}\r\n", s.current, s.max));
+    }
+    if let Some(p) = world.get::<Posture>(target) {
+        out.push_str(&format!("posture:       {}\r\n", p.0.label()));
+    }
+    if let Some(cs) = world.get::<CombatStats>(target) {
+        out.push_str(&format!(
+            "combat:        hit {} / dmg {} / ac {} / align {}\r\n",
+            cs.hit_roll, cs.dmg_roll, cs.ac, cs.alignment
+        ));
+    }
+    if let Some(prof) = world.get::<Profile>(target) {
+        let class_label = prof
+            .class_id
+            .and_then(|id| {
+                world
+                    .get_resource::<ClassCatalog>()
+                    .and_then(|c| c.by_id.get(&id).map(|d| d.plain_name.clone()))
+            })
+            .unwrap_or_else(|| String::from("(none)"));
+        out.push_str(&format!(
+            "profile:       L{} {} ({}), xp {}\r\n",
+            prof.level, prof.race, class_label, prof.experience,
+        ));
+    }
+    if let Some(f) = world.get::<Fighting>(target) {
+        let n = name_or(world, f.0, "<gone>");
+        out.push_str(&format!("fighting:      {:?} ({n})\r\n", f.0));
+    }
+    if let Some(eq) = world.get::<EquippedSlot>(target) {
+        out.push_str(&format!("equipped_slot: {}\r\n", eq.0.db_label()));
+    }
+    if let Some(account) = world.get::<Account>(target) {
+        out.push_str(&format!(
+            "account:       role={} char_id={}\r\n",
+            account.role.label(),
+            account.character_id,
+        ));
+    }
+    if let Some(fl) = world.get::<PlayerFlags>(target) {
+        let labels: Vec<&'static str> = fl.0.iter().map(|f| f.label()).collect();
+        if labels.is_empty() {
+            out.push_str("flags:         <none>\r\n");
+        } else {
+            out.push_str(&format!("flags:         {}\r\n", labels.join(", ")));
+        }
+    }
+    // EffectInstances applied to this entity.
+    let effects: Vec<(String, i32)> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, applied)| applied.0 == target)
+            .map(|(eff, _)| (eff.name.clone(), eff.remaining_secs))
+            .collect()
+    };
+    if effects.is_empty() {
+        out.push_str("effects:       <none>\r\n");
+    } else {
+        out.push_str(&format!("effects:       {} active\r\n", effects.len()));
+        for (name, secs) in &effects {
+            out.push_str(&format!("               {name} ({secs}s)\r\n"));
+        }
+    }
+    send_to(world, player, out);
 }
 
 /// `loadobj <zone> <id>`: object counterpart to `summon`. Resolves
