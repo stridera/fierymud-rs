@@ -1163,6 +1163,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_layhands,
     },
     Command {
+        names: &["retreat"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "retreat <direction>",
+            summary: "Flee combat in a specific direction.",
+            long: "Like `flee` but you choose where to go. Refused if \
+                   the direction has no exit, the door's closed, or \
+                   the target room is dangling.",
+        },
+        run: cmd_retreat,
+    },
+    Command {
         names: &["bandage"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6299,6 +6313,62 @@ fn cmd_assist(world: &mut World, player: Entity, args: &str) {
     }
     let target_name = name_or(world, ally_target, "<unknown>");
     cmd_attack(world, player, &target_name);
+}
+
+/// `retreat <direction>`: directional flee. Same combat-disengage
+/// + arrival broadcast as `flee`, but you pick the exit. Refused
+///   when the direction has no open exit.
+fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let Some(dir) = parse_direction(arg) else {
+        send_to(world, player, "Retreat which way?\r\n");
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let from_room = located.0;
+    let Some(exits) = world.get::<Exits>(from_room).cloned() else {
+        send_to(world, player, "No exits here.\r\n");
+        return;
+    };
+    let Some(ed) = exits.0.get(&dir).copied() else {
+        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        return;
+    };
+    if ed.state != ExitState::Open {
+        send_to(world, player, format!("The exit {} is closed.\r\n", direction_name(dir)));
+        return;
+    }
+    let Some(target) = ed.to else {
+        send_to(world, player, "That exit goes nowhere.\r\n");
+        return;
+    };
+
+    let dir_name = direction_name(dir);
+    let mover_name = name_of(world, player);
+
+    broadcast_room_except_players_rendered(
+        world,
+        from_room,
+        &[player],
+        &format!("{mover_name} retreats {dir_name}!\r\n"),
+    );
+    try_remove::<Fighting>(world, player);
+    if let Some(mut l) = world.get_mut::<Located>(player) {
+        l.0 = target;
+    }
+    let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
+        format!("the {}", direction_name(d))
+    });
+    broadcast_room_except_players_rendered(
+        world,
+        target,
+        &[player],
+        &format!("{mover_name} retreats here from {arrival_dir}.\r\n"),
+    );
+    send_to(world, player, format!("You retreat {dir_name}.\r\n"));
+    cmd_look(world, player, "");
 }
 
 /// `layhands [<target>]`: in-combat self/ally heal (30 HP, 12 stam).
