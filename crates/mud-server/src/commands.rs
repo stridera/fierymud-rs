@@ -1025,6 +1025,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["gouge"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "gouge [<target>]",
+            summary: "Eye gouge — damage plus a temporary blind effect.",
+            long: "Costs 7 stamina, deals dmg_roll damage, applies a \
+                   `blind` EffectInstance for 30s. Default target is \
+                   your current Fighting target. Refused if the target \
+                   is already blinded.",
+        },
+        run: cmd_gouge,
+    },
+    Command {
         names: &["backstab", "bs"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5303,6 +5318,8 @@ const DISARM_COST: i32 = 5;
 const HITALL_COST: i32 = 10;
 const BACKSTAB_COST: i32 = 6;
 const BACKSTAB_MULT: i32 = 2;
+const GOUGE_COST: i32 = 7;
+const GOUGE_BLIND_SECS: i32 = 30;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
@@ -5701,6 +5718,95 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
 
     if dead {
         crate::combat::handle_death(world, target, &target_name, player_room);
+    }
+}
+
+/// `gouge [<target>]`: damage + temporary blind effect. Default
+/// target = current Fighting target.
+fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "gouge") {
+        return;
+    }
+    if !check_stamina(world, player, GOUGE_COST, "gouge") {
+        return;
+    }
+    let arg = args.trim();
+    let target = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Gouge whom? You aren't fighting.\r\n");
+            return;
+        };
+        t
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    if target == player {
+        send_to(world, player, "You can't gouge yourself.\r\n");
+        return;
+    }
+    // Already blinded? Refuse.
+    let already_blind = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world).any(|(eff, applied)| {
+            applied.0 == target && eff.name.eq_ignore_ascii_case("blind")
+        })
+    };
+    if already_blind {
+        let target_name = name_or(world, target, "<unknown>");
+        send_to(world, player, format!("{target_name} is already blinded.\r\n"));
+        return;
+    }
+    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
+        send_to(world, player, "Target is in limbo.\r\n");
+        return;
+    };
+
+    let dmg = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
+    drain_stamina(world, player, GOUGE_COST);
+
+    let player_name = name_of(world, player);
+    let target_name = name_or(world, target, "<unknown>");
+    let (dead, _) = apply_damage(world, target, dmg);
+
+    if !dead {
+        // Apply the blind effect.
+        world.spawn((
+            EffectInstance {
+                kind: 0,
+                name: "blind".to_string(),
+                strength: 1,
+                remaining_secs: GOUGE_BLIND_SECS,
+                source: EffectSource::Other("gouge".to_string()),
+            },
+            AppliedTo(target),
+        ));
+    }
+
+    send_to(world, player, format!(
+        "You gouge {target_name}'s eyes for {dmg} damage!\r\n"
+    ));
+    if !dead {
+        send_rendered(world, target, &format!(
+            "{player_name} gouges your eyes; you can't see!\r\n"
+        ));
+    }
+    broadcast_room_except_rendered(
+        world,
+        target_room,
+        &[player, target],
+        &format!("{player_name} stabs at {target_name}'s eyes!\r\n"),
+    );
+
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, target_room);
     }
 }
 
