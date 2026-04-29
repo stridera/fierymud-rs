@@ -50,6 +50,7 @@ pub async fn save_state(
     recall_room_id: Option<i32>,
     player_flags: &[PlayerFlag],
     prompt: &str,
+    title: Option<&str>,
 ) -> sqlx::Result<()> {
     sqlx::query!(
         r#"
@@ -62,8 +63,9 @@ pub async fn save_state(
             recall_room_id = $6,
             player_flags = $7,
             prompt = $8,
+            title = $9,
             last_login = NOW()
-        WHERE id = $9
+        WHERE id = $10
         "#,
         hit_points,
         stamina,
@@ -73,6 +75,7 @@ pub async fn save_state(
         recall_room_id,
         player_flags as &[PlayerFlag],
         prompt,
+        title,
         character_id,
     )
     .execute(pool)

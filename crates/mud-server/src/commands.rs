@@ -151,8 +151,7 @@ const COMMANDS: &[Command] = &[
             summary: "Show or change the epithet shown after your name.",
             long: "With no argument, prints your current title. With a \
                    new title, sets it (max 60 chars). With `clear` (or \
-                   `none` / `-`), removes it. In-memory only for now \
-                   — resets to the DB value on next login.",
+                   `none` / `-`), removes it. Persists on disconnect.",
         },
         run: cmd_title,
     },
@@ -2343,9 +2342,8 @@ pub(crate) fn condition_label(hp: Health) -> &'static str {
 }
 
 /// `title [<text> | clear]`: show / set / remove the player's epithet
-/// shown on `who`. In-memory only this iteration — `save_state` is
-/// blocked by an unrelated `PlayerFlag` array-type bug (see
-/// SUGGESTIONS.md); persistence joins once that's fixed. Capped at 60
+/// shown on `who`. Stored as a Title component; persisted to
+/// `Characters.title` on disconnect via `save_state`. Capped at 60
 /// chars to keep the `who` columns sane.
 const MAX_TITLE_LEN: usize = 60;
 fn cmd_title(world: &mut World, player: Entity, args: &str) {

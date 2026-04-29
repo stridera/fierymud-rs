@@ -396,6 +396,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         .get::<Prompt>(entity)
         .map(|p| p.0.clone())
         .unwrap_or_default();
+    let title = world.get::<Title>(entity).map(|t| t.0.clone());
     let (recall_zone, recall_room) = world
         .get::<RecallPoint>(entity)
         .and_then(|r| world.get::<WorldKey>(r.0).copied())
@@ -429,6 +430,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         recall_room,
         &flags,
         &prompt,
+        title.as_deref(),
     )
     .await
     {
