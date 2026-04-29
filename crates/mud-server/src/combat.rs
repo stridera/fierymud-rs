@@ -1,7 +1,8 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    CombatStats, Description, Exits, Fighting, Health, Item, Keywords, Located, Mob, Named,
-    Player, PlayerFlags, Posture, PostureKind, Slot, WearableIn, WorldKeyIndex,
+    AppliedTo, CombatStats, Description, EffectInstance, Exits, Fighting, Health, Item, Keywords,
+    Located, Mob, Named, Player, PlayerFlags, Posture, PostureKind, Slot, WearableIn,
+    WorldKeyIndex,
 };
 use tracing::info;
 
@@ -95,6 +96,17 @@ pub fn combat_tick(world: &mut World) {
         return;
     }
 
+    // Pre-pass: collect all entities currently affected by `berserk`
+    // so the swing snapshot can apply a +50% damage bonus without a
+    // separate per-attacker effect lookup.
+    let berserk_attackers: std::collections::HashSet<Entity> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(eff, _)| eff.name.eq_ignore_ascii_case("berserk"))
+            .map(|(_, a)| a.0)
+            .collect()
+    };
+
     // Phase 1: snapshot the swing list. Each tuple is fully owned data so
     // the borrow on the query is released before we start mutating.
     // Sleeping attackers are skipped — they can't swing until awoken.
@@ -105,11 +117,19 @@ pub fn combat_tick(world: &mut World) {
             .filter(|(_, _, _, _, posture)| {
                 !matches!(posture.map(|p| p.0), Some(PostureKind::Sleeping))
             })
-            .map(|(attacker, fighting, cs, name, _)| Swing {
-                attacker,
-                target: fighting.0,
-                damage: cs.dmg_roll.max(1),
-                attacker_name: name.name.clone(),
+            .map(|(attacker, fighting, cs, name, _)| {
+                let base = cs.dmg_roll.max(1);
+                let damage = if berserk_attackers.contains(&attacker) {
+                    (base * 3) / 2
+                } else {
+                    base
+                };
+                Swing {
+                    attacker,
+                    target: fighting.0,
+                    damage,
+                    attacker_name: name.name.clone(),
+                }
             })
             .collect()
     };
