@@ -1197,6 +1197,48 @@ const COMMANDS: &[Command] = &[
         run: cmd_berserk,
     },
     Command {
+        names: &["tripup", "trip"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "tripup [<target>]",
+            summary: "Trip target into Resting posture (lighter than stomp).",
+            long: "Costs 5 stamina, deals 1/4 your dmg_roll, sets the \
+                   target to Resting. Like stomp but cheaper and \
+                   leaves them slightly less prone.",
+        },
+        run: cmd_tripup,
+    },
+    Command {
+        names: &["sweep"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "sweep",
+            summary: "Sweeping kick — knock every standing mob in room prone.",
+            long: "Costs 12 stamina. Deals 1/4 dmg_roll to every \
+                   Standing Mob in the room and sets each to Sitting. \
+                   Players never targeted.",
+        },
+        run: cmd_sweep,
+    },
+    Command {
+        names: &["roundhouse"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "roundhouse",
+            summary: "Powerful kick — 1.5x dmg_roll on your current target.",
+            long: "Costs 7 stamina. Heavier kick than the basic `kick` \
+                   skill (which adds +4); pure dmg_roll multiplier. \
+                   Requires you to be fighting someone.",
+        },
+        run: cmd_roundhouse,
+    },
+    Command {
         names: &["stomp"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6071,6 +6113,9 @@ const REND_BLEED_SECS: i32 = 30;
 const ROAR_COST: i32 = 8;
 const ROAR_FEAR_SECS: i32 = 20;
 const STOMP_COST: i32 = 6;
+const TRIPUP_COST: i32 = 5;
+const SWEEP_COST: i32 = 12;
+const ROUNDHOUSE_COST: i32 = 7;
 const BERSERK_COST: i32 = 8;
 const BERSERK_DURATION_SECS: i32 = 60;
 
@@ -6585,6 +6630,167 @@ fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} stomps {target_name} to the ground!\r\n"),
     );
 
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, target_room);
+    }
+}
+
+/// `tripup` / `trip`: lighter version of stomp. Costs 5 stamina,
+/// deals 1/4 `dmg_roll`, leaves target Resting (rather than Sitting).
+fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "tripup") {
+        return;
+    }
+    if !check_stamina(world, player, TRIPUP_COST, "tripup") {
+        return;
+    }
+    let arg = args.trim();
+    let target = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Trip up whom? You aren't fighting.\r\n");
+            return;
+        };
+        t
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    if target == player {
+        send_to(world, player, "You can't trip yourself.\r\n");
+        return;
+    }
+    let cur = world.get::<Posture>(target).map(|p| p.0);
+    if !matches!(cur, Some(PostureKind::Standing)) {
+        let target_name = name_or(world, target, "<unknown>");
+        send_to(world, player, format!("{target_name} is already on the ground.\r\n"));
+        return;
+    }
+    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
+        return;
+    };
+
+    let dmg = world.get::<CombatStats>(player).map_or(1, |c| (c.dmg_roll / 4).max(1));
+    drain_stamina(world, player, TRIPUP_COST);
+    let player_name = name_of(world, player);
+    let target_name = name_or(world, target, "<unknown>");
+    let (dead, _) = apply_damage(world, target, dmg);
+    if !dead
+        && let Ok(mut e) = world.get_entity_mut(target)
+    {
+        e.insert(Posture(PostureKind::Resting));
+    }
+    send_to(world, player, format!(
+        "You sweep {target_name}'s legs out for {dmg} damage; they fall.\r\n"
+    ));
+    if !dead {
+        send_rendered(world, target, &format!(
+            "{player_name} sweeps your legs out from under you!\r\n"
+        ));
+    }
+    broadcast_room_except_rendered(
+        world, target_room, &[player, target],
+        &format!("{player_name} trips {target_name} to the ground.\r\n"),
+    );
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, target_room);
+    }
+}
+
+/// `sweep`: room-wide kick — knock every standing mob in the room
+/// to Sitting and deal 1/4 `dmg_roll`. Players are filtered out.
+fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "sweep") {
+        return;
+    }
+    if !check_stamina(world, player, SWEEP_COST, "sweep") {
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let dmg = world.get::<CombatStats>(player).map_or(1, |c| (c.dmg_roll / 4).max(1));
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located, Option<&Posture>, Option<&Health>), With<Mob>>();
+        q.iter(world)
+            .filter(|(_, l, p, h)| {
+                l.0 == room
+                    && h.is_some()
+                    && matches!(p.map(|p| p.0), None | Some(PostureKind::Standing))
+            })
+            .map(|(e, _, _, _)| e)
+            .collect()
+    };
+    if targets.is_empty() {
+        send_to(world, player, "Nothing here to sweep.\r\n");
+        return;
+    }
+    drain_stamina(world, player, SWEEP_COST);
+    let player_name = name_of(world, player);
+    let count = targets.len();
+    for t in targets {
+        let target_name = name_or(world, t, "<unknown>");
+        let (dead, _) = apply_damage(world, t, dmg);
+        if dead {
+            crate::combat::handle_death(world, t, &target_name, room);
+        } else if let Ok(mut e) = world.get_entity_mut(t) {
+            e.insert(Posture(PostureKind::Sitting));
+        }
+    }
+    send_to(world, player, format!(
+        "You sweep your leg in a wide arc — {count} go down!\r\n"
+    ));
+    broadcast_room_except_rendered(
+        world, room, &[player],
+        &format!("{player_name} sweeps a wide kick across the room!\r\n"),
+    );
+}
+
+/// `roundhouse`: heavier kick variant. Costs 7 stamina, deals
+/// 1.5x `dmg_roll` on the current Fighting target. Requires being
+/// in combat (no auto-engage).
+fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "roundhouse") {
+        return;
+    }
+    if !check_stamina(world, player, ROUNDHOUSE_COST, "roundhouse") {
+        return;
+    }
+    let Some(Fighting(target)) = world.get::<Fighting>(player).copied() else {
+        send_to(world, player, "You aren't fighting anyone.\r\n");
+        return;
+    };
+    if world.get_entity(target).is_err() {
+        try_remove::<Fighting>(world, player);
+        send_to(world, player, "Your target is gone.\r\n");
+        return;
+    }
+    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
+        return;
+    };
+    let dmg = world.get::<CombatStats>(player).map_or(1, |c| ((c.dmg_roll * 3) / 2).max(1));
+    drain_stamina(world, player, ROUNDHOUSE_COST);
+    let player_name = name_of(world, player);
+    let target_name = name_or(world, target, "<unknown>");
+    let (dead, _) = apply_damage(world, target, dmg);
+    send_to(world, player, format!(
+        "You roundhouse-kick {target_name} for {dmg} damage!\r\n"
+    ));
+    if !dead {
+        send_rendered(world, target, &format!(
+            "{player_name} lands a roundhouse kick on you for {dmg} damage!\r\n"
+        ));
+    }
+    broadcast_room_except_rendered(
+        world, target_room, &[player, target],
+        &format!("{player_name} roundhouse-kicks {target_name}!\r\n"),
+    );
     if dead {
         crate::combat::handle_death(world, target, &target_name, target_room);
     }
