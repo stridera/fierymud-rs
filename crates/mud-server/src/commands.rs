@@ -3908,7 +3908,7 @@ fn look_direction(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "You see nothing in that direction.\r\n");
         return;
     };
-    let Some(ed) = exits.0.get(&dir).cloned() else {
+    let Some(ed) = exits.0.get(&dir).copied() else {
         send_to(world, player, "You see nothing in that direction.\r\n");
         return;
     };
@@ -4075,7 +4075,7 @@ fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let Some((state, key_req)) = world
         .get::<Exits>(room)
-        .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key.clone())))
+        .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key)))
     else {
         send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
         return;
@@ -4088,53 +4088,21 @@ fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("There's no keyhole {}.\r\n", direction_name(dir)));
         return;
     };
-    // Resolve the key. The legacy import stores object vnum strings —
-    // convert via FieryMUD's `vnum / 100`, `vnum % 100` convention to
-    // a `WorldKey` and match against carried items by exact key. Falls
-    // back to keyword match if the value isn't a parseable vnum.
-    let parsed = key_req.parse::<i32>().ok();
-    let key_world = parsed.map(|v| (v / 100, v % 100));
-    let proto_keywords: Option<Vec<String>> = key_world.and_then(|wk| {
-        world
-            .resource::<ObjectPrototypes>()
-            .by_key
-            .get(&wk)
-            .map(|p| p.keywords.clone())
-    });
-    let has_key = if let Some(wk) = key_world {
-        // Primary: exact WorldKey match.
-        let by_world_key = {
-            let mut q = world
-                .query_filtered::<(&Located, &WorldKey), With<Item>>();
-            q.iter(world)
-                .any(|(l, k)| l.0 == player && k.zone == wk.0 && k.id == wk.1)
-        };
-        if by_world_key {
-            true
-        } else {
-            // Secondary: substring keyword match on a keyword from the
-            // proto, in case the item came from somewhere else without
-            // a matching WorldKey.
-            let kws = proto_keywords.as_deref().unwrap_or(&[]);
-            let mut q = world
-                .query_filtered::<(&Located, &Named, Option<&Keywords>), With<Item>>();
-            q.iter(world).any(|(l, n, k)| {
-                l.0 == player
-                    && kws.iter().any(|kw| matches(&kw.to_ascii_lowercase(), n, k))
-            })
-        }
-    } else {
-        // Tertiary: legacy free-form key text. Match against name/keywords.
-        let needle = key_req.to_ascii_lowercase();
-        let mut q = world
-            .query_filtered::<(&Located, &Named, Option<&Keywords>), With<Item>>();
-        q.iter(world).any(|(l, n, k)| l.0 == player && matches(&needle, n, k))
+    // Match a carried item by exact `WorldKey` against the exit's
+    // (zone, id) key composite. The fallback keyword chain we used
+    // for the old text-encoded vnum data isn't needed any more.
+    let has_key = {
+        let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
+        q.iter(world)
+            .any(|(l, k)| l.0 == player && k.zone == key_req.0 && k.id == key_req.1)
     };
     if !has_key {
-        let hint = proto_keywords
-            .as_deref()
-            .and_then(|kws| kws.first())
-            .map_or_else(|| key_req.clone(), Clone::clone);
+        let hint = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&key_req)
+            .and_then(|p| p.keywords.first().cloned())
+            .unwrap_or_else(|| format!("({}, {})", key_req.0, key_req.1));
         send_to(world, player, format!(
             "You need '{hint}' to unlock that.\r\n",
         ));
@@ -7180,7 +7148,7 @@ fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "No exits here.\r\n");
         return;
     };
-    let Some(ed) = exits.0.get(&dir).cloned() else {
+    let Some(ed) = exits.0.get(&dir).copied() else {
         send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
         return;
     };
@@ -7559,7 +7527,7 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 
     let exit = world
         .get::<Exits>(from_room)
-        .and_then(|e| e.0.get(&dir).cloned());
+        .and_then(|e| e.0.get(&dir).copied());
     let Some(exit) = exit else {
         send_to(world, player, "You can't go that way.\r\n");
         return;

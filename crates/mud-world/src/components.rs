@@ -512,15 +512,15 @@ pub struct Located(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct RoomSector(pub Sector);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExitData {
     /// Resolved target room entity, if the target exists in the loaded world.
     pub to: Option<Entity>,
     pub state: ExitState,
-    /// Required key keyword for `unlock` (matched case-insensitively
-    /// against an item's `Keywords` / `Named.name`). None for exits
-    /// that need no key.
-    pub key: Option<String>,
+    /// Composite (zone, id) of the required key Object. None for
+    /// exits that need no key. `unlock` looks up the player's
+    /// inventory by exact `WorldKey` match.
+    pub key: Option<(i32, i32)>,
 }
 
 #[derive(Component, Debug, Clone, Default)]

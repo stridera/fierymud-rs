@@ -125,16 +125,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         } else {
             stats.exits_dangling += 1;
         }
-        // The legacy import stores "-1" or "0" in `key` for "no key
-        // required" and uses object vnum strings otherwise. Normalize
-        // sentinels to None so the runtime sees a clean "is there a
-        // keyhole?" predicate.
-        let key = e
-            .key
-            .as_ref()
-            .map(|k| k.trim())
-            .filter(|k| !k.is_empty() && *k != "-1" && *k != "0")
-            .map(str::to_string);
+        // Composite `key_zone_id` + `key_id` columns. Both NULL means
+        // no key required; both Some means the (zone, id) of the
+        // required Object proto.
+        let key = match (e.key_zone_id, e.key_id) {
+            (Some(z), Some(i)) => Some((z, i)),
+            _ => None,
+        };
         if let Some(mut exits) = world.get_mut::<Exits>(source) {
             exits.0.insert(
                 e.direction,
