@@ -3544,6 +3544,10 @@ fn invoke_ability(
         if def.is_area { "" } else { "single-target / not " }
     ));
     out.push_str(&format!(
+        "    requires posture: {}\r\n",
+        def.min_position_label,
+    ));
+    out.push_str(&format!(
         "    {}{}{}\r\n",
         if def.violent { "violent  " } else { "" },
         if def.in_combat_only { "combat-only  " } else { "" },
