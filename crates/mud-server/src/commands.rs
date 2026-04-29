@@ -1025,6 +1025,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["rescue"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "rescue <player>",
+            summary: "Take an enemy's aggression onto yourself.",
+            long: "Find <player> in your room. Their attacker now \
+                   targets you instead and you target them. The ally \
+                   is freed from combat. Costs 6 stamina. Refused if \
+                   you're already fighting and refused if your ally \
+                   isn't being attacked.",
+        },
+        run: cmd_rescue,
+    },
+    Command {
         names: &["assist"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5235,6 +5251,7 @@ const KICK_COST: i32 = 5;
 const BASH_COST: i32 = 8;
 const BANDAGE_COST: i32 = 4;
 const BANDAGE_HEAL: i32 = 10;
+const RESCUE_COST: i32 = 6;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
@@ -5634,6 +5651,80 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if dead {
         crate::combat::handle_death(world, target, &target_name, player_room);
     }
+}
+
+/// `rescue <player>`: redirect the ally's attacker onto yourself.
+/// Requires the ally is in your room and currently has a `Fighting`
+/// target. The attacker's Fighting flips to the rescuer; the ally's
+/// Fighting is cleared so they're free to flee or rest. Cost: 6
+/// stamina.
+fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "rescue") {
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You're already fighting.\r\n");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Rescue whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(ally) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if ally == player {
+        send_to(world, player, "You can't rescue yourself.\r\n");
+        return;
+    }
+    let Some(Fighting(attacker)) = world.get::<Fighting>(ally).copied() else {
+        let ally_name = name_or(world, ally, "<unknown>");
+        send_to(world, player, format!("{ally_name} isn't being attacked.\r\n"));
+        return;
+    };
+    if world.get_entity(attacker).is_err() {
+        send_to(world, player, "Their attacker has vanished.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, RESCUE_COST, "rescue") {
+        return;
+    }
+    drain_stamina(world, player, RESCUE_COST);
+
+    // Flip the targets: ally is freed, attacker now targets player,
+    // player targets attacker.
+    try_remove::<Fighting>(world, ally);
+    try_insert(world, attacker, Fighting(player));
+    try_insert(world, player, Fighting(attacker));
+
+    let player_name = name_of(world, player);
+    let ally_name = name_of(world, ally);
+    let attacker_name = name_or(world, attacker, "<unknown>");
+    send_to(world, player, format!(
+        "You rescue {ally_name} from {attacker_name}!\r\n"
+    ));
+    send_rendered(world, ally, &format!(
+        "{player_name} rescues you from {attacker_name}!\r\n"
+    ));
+    if attacker != player {
+        send_rendered(
+            world,
+            attacker,
+            &format!("{player_name} steps in to defend {ally_name}!\r\n"),
+        );
+    }
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player, ally, attacker],
+        &format!("{player_name} rescues {ally_name} from {attacker_name}.\r\n"),
+    );
 }
 
 /// `assist <player>`: engage whatever your teammate is fighting.
