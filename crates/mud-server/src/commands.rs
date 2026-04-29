@@ -1025,6 +1025,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["assist"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "assist <player>",
+            summary: "Engage your ally's current target.",
+            long: "Looks up <player> in your current room, finds whom \
+                   they're fighting, and engages that target — same \
+                   stamina cost and rules as `attack`. Refused if \
+                   they're not fighting, if their target is gone, or \
+                   if you're already fighting someone else.",
+        },
+        run: cmd_assist,
+    },
+    Command {
         names: &["bandage"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5568,6 +5584,41 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if dead {
         crate::combat::handle_death(world, target, &target_name, player_room);
     }
+}
+
+/// `assist <player>`: engage whatever your teammate is fighting.
+/// Resolves the teammate's `Fighting` target, then forwards to
+/// `cmd_attack` with the target's name so we get all the standard
+/// engagement bookkeeping (stamina, posture gate, broadcast).
+fn cmd_assist(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Assist whom?\r\n");
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You're already fighting.\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(ally) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    let Some(Fighting(ally_target)) = world.get::<Fighting>(ally).copied() else {
+        let ally_name = name_or(world, ally, "<unknown>");
+        send_to(world, player, format!("{ally_name} isn't fighting anyone.\r\n"));
+        return;
+    };
+    if world.get_entity(ally_target).is_err() {
+        send_to(world, player, "Their target is already gone.\r\n");
+        return;
+    }
+    let target_name = name_or(world, ally_target, "<unknown>");
+    cmd_attack(world, player, &target_name);
 }
 
 /// `bandage [<target>]`: apply first aid for a small heal. Out-of-
