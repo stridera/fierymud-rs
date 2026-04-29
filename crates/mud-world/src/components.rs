@@ -340,13 +340,28 @@ pub enum PostureKind {
 }
 
 impl PostureKind {
-    #[must_use] 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Standing => "standing",
             Self::Sitting => "sitting",
             Self::Resting => "resting",
             Self::Sleeping => "sleeping",
+        }
+    }
+
+    /// Posture rank matching the schema's `Position` enum sort order
+    /// (SLEEPING=6 .. STANDING=9). Used by ability gating: `cast`
+    /// refuses if `current_rank < ability.min_posture_rank`. The
+    /// schema's lower ranks (DEAD .. STUNNED) aren't modeled here, so
+    /// any rank ≤ 6 passes for every runtime posture.
+    #[must_use]
+    pub fn rank(self) -> i32 {
+        match self {
+            Self::Sleeping => 6,
+            Self::Resting => 7,
+            Self::Sitting => 8,
+            Self::Standing => 9,
         }
     }
 }

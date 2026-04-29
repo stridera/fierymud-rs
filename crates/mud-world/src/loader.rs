@@ -229,6 +229,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let mut ability_catalog = AbilityCatalog::default();
     for row in ability_rows {
         let key = row.plain_name.to_ascii_lowercase();
+        let min_posture_rank = position_rank(&row.min_position);
         ability_catalog.by_name.insert(
             key,
             AbilityDef {
@@ -243,6 +244,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 cast_time_rounds: row.cast_time_rounds,
                 cooldown_ms: row.cooldown_ms,
                 is_area: row.is_area,
+                min_position_label: row.min_position,
+                min_posture_rank,
             },
         );
     }
@@ -539,4 +542,23 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     );
 
     Ok(stats)
+}
+
+/// Map the schema `Position` enum label to the rank used by ability
+/// gating. Order matches `pg_enum.enumsortorder`. Unknown labels return
+/// 0 so they never gate a runtime posture (fail-open: a malformed row
+/// shouldn't make a spell uncastable).
+fn position_rank(label: &str) -> i32 {
+    match label {
+        "DEAD" => 1,
+        "GHOST" => 2,
+        "MORTALLY_WOUNDED" => 3,
+        "INCAPACITATED" => 4,
+        "STUNNED" => 5,
+        "SLEEPING" => 6,
+        "RESTING" => 7,
+        "SITTING" => 8,
+        "STANDING" => 9,
+        _ => 0,
+    }
 }

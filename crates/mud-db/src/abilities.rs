@@ -63,6 +63,11 @@ pub struct AbilityRow {
     pub cast_time_rounds: i32,
     pub cooldown_ms: i32,
     pub is_area: bool,
+    /// Minimum posture required to invoke. Schema enum (DEAD .. STANDING)
+    /// — runtime only models the upper four (SLEEPING / RESTING / SITTING
+    /// / STANDING) so anything below SLEEPING is satisfied by every
+    /// runtime posture.
+    pub min_position: String,
 }
 
 pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
@@ -80,7 +85,8 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
             in_combat_only,
             cast_time_rounds,
             cooldown_ms,
-            is_area
+            is_area,
+            "minPosition"::text AS "min_position!: String"
         FROM "Ability"
         ORDER BY id
         "#

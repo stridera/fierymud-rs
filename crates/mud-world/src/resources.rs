@@ -128,6 +128,14 @@ pub struct AbilityDef {
     pub cast_time_rounds: i32,
     pub cooldown_ms: i32,
     pub is_area: bool,
+    /// Schema label for `Ability.minPosition` (e.g. "STANDING" /
+    /// "SITTING") — kept verbatim for display.
+    pub min_position_label: String,
+    /// Numeric rank derived from `min_position_label` for comparison
+    /// against `PostureKind::rank`. Schema rank order is
+    /// DEAD=1 .. STANDING=9; runtime postures occupy 6..9. Anything ≤ 6
+    /// is satisfied by every runtime posture.
+    pub min_posture_rank: i32,
 }
 
 /// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The

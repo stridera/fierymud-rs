@@ -3508,6 +3508,25 @@ fn invoke_ability(
         return;
     }
 
+    // Posture gate (Ability.minPosition). Most abilities require STANDING;
+    // a few are SITTING-OK. Anything below the runtime's modeled postures
+    // (rank ≤ 6 SLEEPING) passes for every alive player.
+    let cur_rank = world.get::<Posture>(player).map_or(9, |p| p.0.rank());
+    if cur_rank < def.min_posture_rank {
+        send_to(
+            world,
+            player,
+            format!(
+                "You can't {verb} {} while {}.\r\n",
+                def.plain_name,
+                world
+                    .get::<Posture>(player)
+                    .map_or("incapacitated", |p| p.0.label()),
+            ),
+        );
+        return;
+    }
+
     let mode = color_mode_for(world, player);
     let mut out = String::from("\r\n");
     out.push_str(&format!(
