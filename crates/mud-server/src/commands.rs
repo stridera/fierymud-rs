@@ -14,8 +14,8 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRole};
 use mud_net::Outbound;
 use mud_world::{
-    AbilityCatalog, Account, AccountSummary, AppliedTo, ClassCatalog, CombatStats, Description,
-    EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
+    AbilityCatalog, Account, AccountSummary, AppliedTo, ClassCatalog, CombatStats, Cooldowns,
+    Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stunned, TellLog, Title, UiStyle,
@@ -5783,6 +5783,31 @@ fn invoke_ability(
         return;
     }
 
+    // Cooldown gate (Ability.cooldown_ms). Only abilities with
+    // cooldown_ms > 0 are enforced; the per-character `Cooldowns`
+    // component carries an Instant per ability.id at which the cooldown
+    // expires. Stale entries (in the past) are silently treated as
+    // expired and overwritten on next successful cast.
+    if def.cooldown_ms > 0
+        && let Some(cd) = world.get::<Cooldowns>(player)
+        && let Some(ready_at) = cd.ready_at.get(&def.id).copied()
+    {
+        let now = std::time::Instant::now();
+        if ready_at > now {
+            let remaining = ready_at.saturating_duration_since(now);
+            let secs = remaining.as_secs_f32().max(0.1);
+            send_to(
+                world,
+                player,
+                format!(
+                    "You can't {verb} {} yet — {secs:.1}s remaining.\r\n",
+                    def.plain_name,
+                ),
+            );
+            return;
+        }
+    }
+
     let mode = color_mode_for(world, player);
     let mut out = String::from("\r\n");
     out.push_str(&format!(
@@ -6213,6 +6238,19 @@ fn invoke_ability(
             except.push(target_entity);
         }
         broadcast_room_except_rendered(world, located.0, &except, &format!("{rendered}\r\n"));
+    }
+    // Cooldown write-back: only when the cast actually applied at
+    // least one effect (skips no-op casts like "nothing to dispel" so
+    // a player isn't penalized for misfires).
+    if def.cooldown_ms > 0 && !applied_msgs.is_empty() {
+        let ready_at = std::time::Instant::now()
+            + std::time::Duration::from_millis(u64::try_from(def.cooldown_ms).unwrap_or(0));
+        let mut cd = world
+            .get_mut::<Cooldowns>(player)
+            .map(|mut c| std::mem::take(&mut *c))
+            .unwrap_or_default();
+        cd.ready_at.insert(def.id, ready_at);
+        crate::commands::try_insert(world, player, cd);
     }
     let _ = spawn_count;
 }

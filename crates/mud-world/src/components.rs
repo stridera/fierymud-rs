@@ -195,6 +195,16 @@ pub struct Fighting(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Stunned;
 
+/// Per-character ability cooldown table. Maps `Ability.id` → the
+/// `Instant` at which the cooldown expires (i.e. the ability becomes
+/// usable again). Inserted lazily on first cooldown set; entries past
+/// their `ready_at` are stale and ignored. Session-scoped — not
+/// persisted to the database.
+#[derive(Component, Debug, Default, Clone)]
+pub struct Cooldowns {
+    pub ready_at: std::collections::HashMap<i32, std::time::Instant>,
+}
+
 /// Following state: this entity moves automatically when the target moves.
 /// Distinct from Located — followers retain their own Located even while
 /// chasing the leader, and the follow edge is preserved across rooms.
