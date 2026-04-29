@@ -3361,6 +3361,20 @@ fn cmd_cast(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
+    // Gate on KnownAbilities when the player has any. Empty/missing
+    // component falls through (admin testing path).
+    if let Some(known) = world.get::<KnownAbilities>(player)
+        && !known.entries.is_empty()
+        && !known.has_any(def.id)
+    {
+        send_to(
+            world,
+            player,
+            format!("You don't know how to cast {}.\r\n", def.plain_name),
+        );
+        return;
+    }
+
     let mode = color_mode_for(world, player);
     let mut out = String::from("\r\n");
     out.push_str(&format!(
