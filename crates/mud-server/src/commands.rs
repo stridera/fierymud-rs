@@ -5031,6 +5031,15 @@ fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
         if t != player && has_flag(world, t, PlayerFlag::Deaf) {
             continue;
         }
+        // Per-target ignore: receiver hides messages from senders on
+        // their list. Sender sees their own message normally.
+        if t != player
+            && world
+                .get::<IgnoreList>(t)
+                .is_some_and(|l| l.contains(&player_name))
+        {
+            continue;
+        }
         let line = if t == player {
             format!("You gossip, \"{message}\"\r\n")
         } else {
@@ -5078,6 +5087,13 @@ fn cmd_shout(world: &mut World, player: Entity, args: &str) {
     };
     for t in targets {
         if t != player && has_flag(world, t, PlayerFlag::Deaf) {
+            continue;
+        }
+        if t != player
+            && world
+                .get::<IgnoreList>(t)
+                .is_some_and(|l| l.contains(&player_name))
+        {
             continue;
         }
         let line = if t == player {
