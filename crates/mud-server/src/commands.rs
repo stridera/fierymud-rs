@@ -2407,10 +2407,10 @@ mod tests {
         ColorMode, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
         apply_knockdown_posture, check_ability_restrictions, condition_label, direction_name,
         evaluate_formula, evaluate_simple_formula, format_idle, has_effect_named,
-        is_being_attacked, normalize_dice_notation, parse_direction, remove_effect_named,
-        render_color_tags, render_prompt, resolve_dispel_filter, resolve_dispel_scope,
-        resolve_effect_conditions, resolve_effect_resource, resolve_knockdown_posture,
-        resolve_redirect_aggro, sector_movement_cost,
+        is_being_attacked, is_immobilized, normalize_dice_notation, parse_direction,
+        remove_effect_named, render_color_tags, render_prompt, resolve_dispel_filter,
+        resolve_dispel_scope, resolve_effect_conditions, resolve_effect_resource,
+        resolve_knockdown_posture, resolve_redirect_aggro, sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -3120,6 +3120,34 @@ mod tests {
             check_ability_restrictions(&mut world, caster, target, &rules),
             None
         );
+    }
+
+    #[test]
+    fn restriction_not_immobilized_detects_stun_and_effects() {
+        use mud_world::Stunned;
+        let mut world = World::new();
+        let caster_a = world.spawn(()).id();
+        let caster_b = world.spawn(()).id();
+        let target = world.spawn(()).id();
+        // Caster A: stunned (marker present).
+        world.entity_mut(caster_a).insert(Stunned);
+        assert!(is_immobilized(&mut world, caster_a));
+        // Caster B: spawn a paralysis effect targeting B.
+        spawn_effect_named(&mut world, caster_b, "paralysis");
+        assert!(is_immobilized(&mut world, caster_b));
+        // Free caster: no stun, no immobilizers.
+        let free = world.spawn(()).id();
+        assert!(!is_immobilized(&mut world, free));
+        // Now wire it through the rules evaluator: caster_a refused.
+        let rules: Vec<serde_json::Value> = vec![serde_json::json!({
+            "type": "not_immobilized",
+            "message": "You can't move!",
+        })];
+        let r = check_ability_restrictions(&mut world, caster_a, target, &rules);
+        assert_eq!(r.as_deref(), Some("You can't move!"));
+        // Free caster passes.
+        let r = check_ability_restrictions(&mut world, free, target, &rules);
+        assert_eq!(r, None);
     }
 
     #[test]
@@ -6200,6 +6228,8 @@ fn invoke_ability(
 /// - `not_blind` — target lacks any `EffectInstance` named "blind".
 /// - `in_combat` / `not_in_combat` — target has / lacks `Fighting`.
 /// - `not_tanking` — caster has no attackers (no entity Fighting them).
+/// - `not_immobilized` — caster lacks the `Stunned` marker and any
+///   recognized immobilizing effect (`paralysis`, `web`, `hold_person`, ...).
 /// - `npc_only` — target has the `Mob` marker.
 /// - `has_weapon` — caster has any item equipped in `Slot::Wield`.
 fn check_ability_restrictions(
@@ -6225,6 +6255,7 @@ fn check_ability_restrictions(
             "in_combat" => world.get::<Fighting>(resolved_target).is_some(),
             "not_in_combat" => world.get::<Fighting>(resolved_target).is_none(),
             "not_tanking" => !is_being_attacked(world, caster),
+            "not_immobilized" => !is_immobilized(world, caster),
             "npc_only" => world.get::<Mob>(resolved_target).is_some(),
             "has_weapon" => caster_has_equipped(world, caster, Slot::Wield),
             // `has_shield` and other equipment-flag rules need
@@ -6284,6 +6315,29 @@ fn check_rule_standing(world: &World, target: Entity) -> bool {
 fn is_being_attacked(world: &mut World, caster: Entity) -> bool {
     let mut q = world.query::<&Fighting>();
     q.iter(world).any(|f| f.0 == caster)
+}
+
+const IMMOBILIZER_EFFECT_NAMES: &[&str] = &[
+    "paralysis",
+    "paralyze",
+    "web",
+    "frozen",
+    "freeze",
+    "hold_person",
+    "immobilize",
+];
+
+/// True iff `caster` is immobilized — has the `Stunned` marker or
+/// any active `EffectInstance` named with a recognized immobilizing
+/// effect. Used by the `not_immobilized` restriction rule
+/// (`KICK`, `TRIP_UP`, `DISENGAGE`).
+fn is_immobilized(world: &mut World, caster: Entity) -> bool {
+    if world.get::<Stunned>(caster).is_some() {
+        return true;
+    }
+    IMMOBILIZER_EFFECT_NAMES
+        .iter()
+        .any(|n| has_effect_named(world, caster, n))
 }
 
 /// True iff `caster` has any item equipped in the named slot.
