@@ -1554,8 +1554,8 @@ fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColorMode, apply_damage, condition_label, direction_name, format_idle, parse_direction,
-        render_color_tags, render_prompt, sector_movement_cost,
+        ColorMode, apply_damage, condition_label, direction_name, evaluate_simple_formula,
+        format_idle, parse_direction, render_color_tags, render_prompt, sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -1914,6 +1914,37 @@ mod tests {
         // a Connection — without one it's effectively a no-op for state.
         // We only verify the gate doesn't panic.
         dispatch(&mut world, p, "quit");
+    }
+
+    #[test]
+    fn formula_eval_single_term() {
+        assert_eq!(evaluate_simple_formula("level", 12, 0), Some(12));
+        assert_eq!(evaluate_simple_formula("skill", 0, 250), Some(250));
+        assert_eq!(evaluate_simple_formula("7", 0, 0), Some(7));
+    }
+
+    #[test]
+    fn formula_eval_binary_ops() {
+        assert_eq!(evaluate_simple_formula("level * 2", 10, 0), Some(20));
+        assert_eq!(evaluate_simple_formula("level * 10", 5, 0), Some(50));
+        assert_eq!(evaluate_simple_formula("skill / 4", 0, 100), Some(25));
+        assert_eq!(evaluate_simple_formula("level + 3", 10, 0), Some(13));
+        assert_eq!(evaluate_simple_formula("level - 1", 10, 0), Some(9));
+    }
+
+    #[test]
+    fn formula_eval_div_by_zero_returns_none() {
+        // Won't divide; falls through to next fallback.
+        assert_eq!(evaluate_simple_formula("level / 0", 10, 0), None);
+    }
+
+    #[test]
+    fn formula_eval_unknown_complex_returns_none() {
+        // Complex expressions aren't supported; caller falls through to default.
+        assert_eq!(evaluate_simple_formula("base_damage + skill", 10, 5), None);
+        assert_eq!(evaluate_simple_formula("(level)", 10, 0), None);
+        assert_eq!(evaluate_simple_formula("pow(skill, 2)", 0, 5), None);
+        assert_eq!(evaluate_simple_formula("level * 2 + skill", 10, 5), None);
     }
 }
 
@@ -3546,11 +3577,16 @@ fn invoke_ability(
     }
     // Look up the effects this ability applies and spawn an
     // EffectInstance per mapping attached to the resolved target.
-    // Duration: if override_params has a numeric `duration` (in MUD
-    // hours per `durationUnit: "hours"`), convert to seconds; formula-
-    // valued durations ("level * 2", "skill / 4") fall back to the
-    // global default until the casting pipeline grows a formula
-    // evaluator.
+    // Duration is resolved via the formula evaluator: a numeric
+    // `duration` becomes seconds (constant in MUD hours unless
+    // `durationUnit` overrides), and a formula string like
+    // `"level * 2"` substitutes the caster's level / skill from
+    // `Profile` and `KnownAbilities` respectively.
+    let caster_level = world.get::<Profile>(player).map_or(1, |p| p.level.max(1));
+    let caster_skill = world
+        .get::<KnownAbilities>(player)
+        .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).map(|(_, p, _)| *p))
+        .unwrap_or(0);
     let effect_specs: Vec<(i32, String, i32)> = {
         let mappings = world
             .resource::<AbilityCatalog>()
@@ -3569,6 +3605,8 @@ fn invoke_ability(
                         resolve_effect_duration(
                             override_params.as_ref(),
                             Some(&e.default_params),
+                            caster_level,
+                            caster_skill,
                         ),
                     )
                 })
@@ -3630,31 +3668,39 @@ fn invoke_ability(
 /// blob, falling back to the `Effect.default_params` blob, and finally
 /// to the global default. Schema convention is `{"duration": <int>,
 /// "durationUnit": "hours"}` for constants and `{"duration":
-/// "<formula>", ...}` for expressions. Constants are converted via 1
-/// MUD hour = 75 real seconds (per the existing fierymud time scale).
-/// Formula strings (still numeric `as_i64()` returns None on them)
-/// fall through.
+/// "<formula>", ...}` for expressions like `"level * 2"` or `"skill"`.
+/// Constants and resolved formulas are converted via 1 MUD hour = 75
+/// real seconds when no `durationUnit` is set.
 fn resolve_effect_duration(
     override_params: Option<&serde_json::Value>,
     default_params: Option<&serde_json::Value>,
+    level: i32,
+    skill: i32,
 ) -> i32 {
-    if let Some(secs) = duration_from_blob(override_params) {
+    if let Some(secs) = duration_from_blob(override_params, level, skill) {
         return secs;
     }
-    if let Some(secs) = duration_from_blob(default_params) {
+    if let Some(secs) = duration_from_blob(default_params, level, skill) {
         return secs;
     }
     APPLIED_EFFECT_DURATION_SECS
 }
 
-/// Try to extract a constant numeric duration in seconds from one
-/// JSONB blob. Returns None if the blob is missing, has no `duration`,
-/// or the duration is a non-numeric (formula string).
-fn duration_from_blob(params: Option<&serde_json::Value>) -> Option<i32> {
+/// Try to extract a duration in seconds from one JSONB blob. The
+/// `duration` field can be an integer literal (e.g. `2`) or a simple
+/// formula string (e.g. `"level"`, `"level * 2"`, `"skill / 4"`).
+/// Returns None if the blob is missing, has no `duration`, or the
+/// formula is too complex for the simple evaluator (parens, multi-op,
+/// `pow()`, etc.) — caller falls through to the next fallback.
+fn duration_from_blob(params: Option<&serde_json::Value>, level: i32, skill: i32) -> Option<i32> {
     const SECS_PER_MUD_HOUR: i32 = 75;
     let p = params?;
     let d = p.get("duration")?;
-    let n = d.as_i64()?;
+    let raw = match d {
+        serde_json::Value::Number(n) => i32::try_from(n.as_i64()?).ok()?,
+        serde_json::Value::String(s) => evaluate_simple_formula(s, level, skill)?,
+        _ => return None,
+    };
     let unit_seconds = match p.get("durationUnit").and_then(serde_json::Value::as_str) {
         Some("hours") | None => SECS_PER_MUD_HOUR,
         Some("minutes") => 60,
@@ -3662,8 +3708,39 @@ fn duration_from_blob(params: Option<&serde_json::Value>) -> Option<i32> {
         // "seconds" or any unknown unit: treat the integer as seconds.
         Some(_) => 1,
     };
-    let raw = i32::try_from(n).ok()?;
     Some(raw.saturating_mul(unit_seconds).max(1))
+}
+
+/// Evaluate the small formula grammar found in effect duration blobs:
+///   `<term>` | `<term> <op> <term>`  where
+///   `<term>` = `level` | `skill` | integer
+///   `<op>`   = `+` | `-` | `*` | `/`
+/// Tokens are whitespace-separated. Anything else (parens, multi-term,
+/// `pow()`, etc.) returns None so the caller falls through.
+fn evaluate_simple_formula(expr: &str, level: i32, skill: i32) -> Option<i32> {
+    let tokens: Vec<&str> = expr.split_whitespace().collect();
+    let term = |tok: &str| -> Option<i32> {
+        match tok {
+            "level" => Some(level),
+            "skill" => Some(skill),
+            _ => tok.parse::<i32>().ok(),
+        }
+    };
+    match tokens.as_slice() {
+        [a] => term(a),
+        [a, op, b] => {
+            let lhs = term(a)?;
+            let rhs = term(b)?;
+            match *op {
+                "+" => Some(lhs.saturating_add(rhs)),
+                "-" => Some(lhs.saturating_sub(rhs)),
+                "*" => Some(lhs.saturating_mul(rhs)),
+                "/" if rhs != 0 => Some(lhs / rhs),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn capitalize(s: &str) -> String {
