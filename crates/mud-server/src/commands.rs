@@ -3012,6 +3012,21 @@ mod tests {
     }
 
     #[test]
+    fn try_remove_fighting_clears_component() {
+        use crate::commands::try_remove;
+        use mud_world::Fighting;
+        let mut world = World::new();
+        let foe = world.spawn(()).id();
+        let me = world.spawn(Fighting(foe)).id();
+        assert!(world.get::<Fighting>(me).is_some());
+        try_remove::<Fighting>(&mut world, me);
+        assert!(world.get::<Fighting>(me).is_none());
+        // Removing again is a no-op.
+        try_remove::<Fighting>(&mut world, me);
+        assert!(world.get::<Fighting>(me).is_none());
+    }
+
+    #[test]
     fn apply_knockdown_posture_no_component_is_noop() {
         let mut world = World::new();
         let target = world.spawn(()).id();
@@ -5763,6 +5778,19 @@ fn invoke_ability(
                 } else {
                     format!("{} (cleansed {removed} effect(s))", spec.name)
                 });
+            }
+            "stop_combat" => {
+                // Remove `Fighting` from the target so it disengages.
+                // Doesn't disengage *attackers of* the target — for
+                // that, use `disengage_attackers_of`. The effect is
+                // instant; no EffectInstance is spawned.
+                let was_fighting = world.get::<Fighting>(target_entity).is_some();
+                if was_fighting {
+                    crate::commands::try_remove::<Fighting>(world, target_entity);
+                    applied_msgs.push(format!("{} (combat ended)", spec.name));
+                } else {
+                    applied_msgs.push(format!("{} (not in combat)", spec.name));
+                }
             }
             "knockdown" => {
                 // Knockdown has two parts: an immediate posture
