@@ -335,6 +335,32 @@ const COMMANDS: &[Command] = &[
         run: cmd_wield,
     },
     Command {
+        names: &["eat"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "eat <item>",
+            summary: "Consume a food item from your inventory.",
+            long: "Despawns the food. Refused on non-food items. \
+                   Effects (hunger, ConsumableEffects) are deferred.",
+        },
+        run: cmd_eat,
+    },
+    Command {
+        names: &["quaff", "drink"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "quaff <potion>",
+            summary: "Drink a potion from your inventory.",
+            long: "Despawns the potion. Refused on non-potion items. \
+                   Effect application (ConsumableEffects) is deferred.",
+        },
+        run: cmd_quaff,
+    },
+    Command {
         names: &["hold", "grab"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4658,6 +4684,44 @@ fn cmd_wield(world: &mut World, player: Entity, args: &str) {
 
 fn cmd_hold(world: &mut World, player: Entity, args: &str) {
     wear_into(world, player, args.trim(), Some(Slot::Hold));
+}
+
+/// `eat <item>` / `quaff <item>`: consume a Food / Potion. Looks up
+/// the item's proto, checks the type, then despawns. Effects are a
+/// follow-up — they need `ConsumableEffects` loading.
+fn consume_item(world: &mut World, player: Entity, args: &str, expected: mud_db::enums::ObjectType, verb: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
+        return;
+    }
+    let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
+    let Some(item) = item else {
+        send_to(world, player, format!("You aren't carrying '{target_word}'.\r\n"));
+        return;
+    };
+    let item_name = name_of(world, item);
+    let kind = world
+        .get::<WorldKey>(item)
+        .and_then(|k| world.resource::<ObjectPrototypes>().by_key.get(&(k.zone, k.id)).map(|p| p.r#type));
+    if kind != Some(expected) {
+        send_to(world, player, format!(
+            "You can't {verb} {item_name}.\r\n",
+        ));
+        return;
+    }
+    send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
+    if let Ok(e) = world.get_entity_mut(item) {
+        e.despawn();
+    }
+}
+
+fn cmd_eat(world: &mut World, player: Entity, args: &str) {
+    consume_item(world, player, args, mud_db::enums::ObjectType::Food, "eat");
+}
+
+fn cmd_quaff(world: &mut World, player: Entity, args: &str) {
+    consume_item(world, player, args, mud_db::enums::ObjectType::Potion, "quaff");
 }
 
 fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: Option<Slot>) {
