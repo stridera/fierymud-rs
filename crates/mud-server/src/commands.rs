@@ -3897,6 +3897,27 @@ fn direction_order(d: mud_db::enums::Direction) -> u8 {
     }
 }
 
+/// Apply `new_state` to the door at `(room, dir)` *and* to its
+/// counterpart on the other side of the connection (via
+/// `opposite(dir)` from the exit's `to` room). One-sided edits would
+/// drift over time as players walk through and re-open the same
+/// door from each side.
+fn flip_door_both_sides(world: &mut World, room: Entity, dir: Direction, new_state: ExitState) {
+    let mut other_room: Option<Entity> = None;
+    if let Some(mut exits) = world.get_mut::<Exits>(room)
+        && let Some(ed) = exits.0.get_mut(&dir)
+    {
+        ed.state = new_state;
+        other_room = ed.to;
+    }
+    if let (Some(other), Some(opp)) = (other_room, opposite(dir))
+        && let Some(mut exits) = world.get_mut::<Exits>(other)
+        && let Some(ed) = exits.0.get_mut(&opp)
+    {
+        ed.state = new_state;
+    }
+}
+
 /// `open <direction>`: flip a closed exit to Open. Refused on
 /// locked exits and on exits that don't exist.
 fn cmd_open(world: &mut World, player: Entity, args: &str) {
@@ -3927,11 +3948,7 @@ fn cmd_open(world: &mut World, player: Entity, args: &str) {
         }
         ExitState::Closed => {}
     }
-    if let Some(mut exits) = world.get_mut::<Exits>(room)
-        && let Some(ed) = exits.0.get_mut(&dir)
-    {
-        ed.state = ExitState::Open;
-    }
+    flip_door_both_sides(world, room, dir, ExitState::Open);
     send_to(world, player, format!("You open the way {}.\r\n", direction_name(dir)));
     let player_name = name_of(world, player);
     broadcast_room_except_players_rendered(
@@ -3968,11 +3985,7 @@ fn cmd_close(world: &mut World, player: Entity, args: &str) {
         }
         ExitState::Open => {}
     }
-    if let Some(mut exits) = world.get_mut::<Exits>(room)
-        && let Some(ed) = exits.0.get_mut(&dir)
-    {
-        ed.state = ExitState::Closed;
-    }
+    flip_door_both_sides(world, room, dir, ExitState::Closed);
     send_to(world, player, format!("You close the way {}.\r\n", direction_name(dir)));
     let player_name = name_of(world, player);
     broadcast_room_except_players_rendered(
