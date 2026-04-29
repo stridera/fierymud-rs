@@ -2408,8 +2408,9 @@ mod tests {
         apply_knockdown_posture, condition_label, direction_name, evaluate_formula,
         evaluate_simple_formula, format_idle, has_effect_named, normalize_dice_notation,
         parse_direction, remove_effect_named, render_color_tags, render_prompt,
-        resolve_effect_conditions, resolve_effect_resource, resolve_knockdown_posture,
-        resolve_redirect_aggro, sector_movement_cost,
+        resolve_dispel_filter, resolve_dispel_scope, resolve_effect_conditions,
+        resolve_effect_resource, resolve_knockdown_posture, resolve_redirect_aggro,
+        sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -3009,6 +3010,40 @@ mod tests {
             world.get::<Posture>(already_sitting).map(|p| p.0),
             Some(PostureKind::Resting)
         );
+    }
+
+    #[test]
+    fn resolve_dispel_filter_lowercases_with_override_priority() {
+        // No params → empty.
+        assert_eq!(resolve_dispel_filter(None, None), "");
+        // Default-only.
+        let default_p = serde_json::json!({"filter": "Magic"});
+        assert_eq!(resolve_dispel_filter(None, Some(&default_p)), "magic");
+        // Override wins.
+        let override_p = serde_json::json!({"filter": "BUFF"});
+        assert_eq!(
+            resolve_dispel_filter(Some(&override_p), Some(&default_p)),
+            "buff"
+        );
+    }
+
+    #[test]
+    fn resolve_dispel_scope_defaults_to_all() {
+        use super::DispelScope;
+        // Default to All when missing.
+        assert!(matches!(resolve_dispel_scope(None, None), DispelScope::All));
+        // "first" → First.
+        let first = serde_json::json!({"scope": "first"});
+        assert!(matches!(
+            resolve_dispel_scope(Some(&first), None),
+            DispelScope::First
+        ));
+        // Anything else (typo, "all", "everything") → All.
+        let bogus = serde_json::json!({"scope": "everything"});
+        assert!(matches!(
+            resolve_dispel_scope(Some(&bogus), None),
+            DispelScope::All
+        ));
     }
 
     #[test]
@@ -5794,6 +5829,32 @@ fn invoke_ability(
                     format!("{} (cleansed {removed} effect(s))", spec.name)
                 });
             }
+            "dispel" => {
+                // Remove EffectInstances on the target whose source
+                // EffectDef carries the configured tag (e.g. "magic",
+                // "buff", "debuff"). Power/saving-throw resistance
+                // not yet modeled — every dispel succeeds. Scope
+                // "first" stops after one removal; "all" strips
+                // everything matching.
+                let filter = resolve_dispel_filter(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                );
+                let scope = resolve_dispel_scope(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                );
+                if filter.is_empty() {
+                    applied_msgs.push(format!("{} (no filter specified)", spec.name));
+                    continue;
+                }
+                let removed = remove_effects_by_tag(world, target_entity, &filter, scope);
+                applied_msgs.push(if removed == 0 {
+                    format!("{} (nothing to dispel)", spec.name)
+                } else {
+                    format!("{} (dispelled {removed} effect(s))", spec.name)
+                });
+            }
             "redirect" => {
                 // Two semantics live under `redirect`:
                 //   aggro=true  → rescue/intercept: take the target's
@@ -5967,6 +6028,88 @@ fn resolve_effect_resource(
     pick(override_params)
         .or_else(|| pick(default_params))
         .unwrap_or_else(|| "hp".to_string())
+}
+
+/// "first" stops after one removal; everything else (including the
+/// schema default `"all"`) means strip every match.
+#[derive(Debug, Clone, Copy)]
+enum DispelScope {
+    All,
+    First,
+}
+
+/// Read `filter` from a dispel effect's params (override → default).
+/// Lowercased for case-insensitive tag matching against
+/// `EffectDef.tags`. Returns empty when neither blob has a filter
+/// — caller falls through to a "no filter specified" message.
+fn resolve_dispel_filter(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> String {
+    let pick = |p: Option<&serde_json::Value>| -> Option<String> {
+        p?.get("filter")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    pick(override_params)
+        .or_else(|| pick(default_params))
+        .unwrap_or_default()
+}
+
+/// Read `scope` ("first" or "all") from a dispel effect's params.
+/// Defaults to All — matches the schema default and the historical
+/// dispel-everything behavior.
+fn resolve_dispel_scope(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> DispelScope {
+    let pick = |p: Option<&serde_json::Value>| -> Option<String> {
+        p?.get("scope")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    match pick(override_params).or_else(|| pick(default_params)).as_deref() {
+        Some("first") => DispelScope::First,
+        _ => DispelScope::All,
+    }
+}
+
+/// Remove `EffectInstance`s on `target` whose source `EffectDef`
+/// carries `tag` in its `tags` list. Returns the number despawned.
+/// With `scope = First`, stops after one removal.
+fn remove_effects_by_tag(
+    world: &mut World,
+    target: Entity,
+    tag: &str,
+    scope: DispelScope,
+) -> usize {
+    let tag_match: std::collections::HashSet<i32> = world
+        .resource::<EffectCatalog>()
+        .by_id
+        .iter()
+        .filter(|(_, def)| def.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+        .map(|(id, _)| *id)
+        .collect();
+    if tag_match.is_empty() {
+        return 0;
+    }
+    let mut to_remove: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, eff, applied)| applied.0 == target && tag_match.contains(&eff.kind))
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    if matches!(scope, DispelScope::First) {
+        to_remove.truncate(1);
+    }
+    let count = to_remove.len();
+    for e in to_remove {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    count
 }
 
 /// Read `aggro` from a redirect effect's params. True selects the
