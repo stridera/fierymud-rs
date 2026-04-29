@@ -16,7 +16,7 @@ use mud_net::Outbound;
 use mud_world::{
     AbilityCatalog, Account, AccountSummary, AppliedTo, ClassCatalog, CombatStats, Description,
     EffectCatalog, EffectInstance, EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen,
-    Health, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
+    Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, TellLog, Title, UiStyle,
     WearableIn, WorldKey, WorldKeyIndex,
@@ -894,6 +894,34 @@ const COMMANDS: &[Command] = &[
                    If they've gone offline, you'll get a useful error.",
         },
         run: cmd_reply,
+    },
+    Command {
+        names: &["ignore"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "ignore [<player> | -<player> | clear]",
+            summary: "Block tells from a specific player.",
+            long: "With no arg, lists ignored names. With a name, adds \
+                   them to your ignore list. With `-name` (or `unignore \
+                   name`), removes them. With `clear`, drops all. \
+                   Session-scoped — list resets on disconnect.",
+        },
+        run: cmd_ignore,
+    },
+    Command {
+        names: &["unignore"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "unignore <player>",
+            summary: "Stop ignoring a player.",
+            long: "Removes a name from your ignore list. Equivalent to \
+                   `ignore -<name>`.",
+        },
+        run: cmd_unignore,
     },
     Command {
         names: &["lasttells", "lt"],
@@ -4836,6 +4864,23 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
+    // Per-target ignore: if the receiver has us on their IgnoreList,
+    // refuse with a generic message (don't leak which players ignore
+    // them — the exact wording matches `NoTell` to keep social
+    // friction low).
+    let player_name_for_check = name_of(world, player);
+    if world
+        .get::<IgnoreList>(target)
+        .is_some_and(|l| l.contains(&player_name_for_check))
+    {
+        let actual = name_of(world, target);
+        send_rendered(
+            world,
+            player,
+            &format!("{actual} is not accepting tells right now.\r\n"),
+        );
+        return;
+    }
 
     let player_name = name_of(world, player);
     let target_name = name_of(world, target);
@@ -4882,6 +4927,71 @@ fn cmd_reply(world: &mut World, player: Entity, args: &str) {
     let last_name = name_of(world, last);
     // Forward through cmd_tell so we get the LastTeller stamping for free.
     cmd_tell(world, player, &format!("{last_name} {message}"));
+}
+
+/// `ignore [<name> | -<name> | clear]`: manage a per-session list of
+/// blocked tell senders. A no-arg call lists current entries.
+fn cmd_ignore(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        let entries = world.get::<IgnoreList>(player).map(|l| l.0.clone()).unwrap_or_default();
+        if entries.is_empty() {
+            send_to(world, player, "You're ignoring nobody.\r\n");
+        } else {
+            let mut out = format!("\r\nIgnoring {} player(s):\r\n", entries.len());
+            for n in &entries {
+                out.push_str(&format!("  {n}\r\n"));
+            }
+            send_to(world, player, out);
+        }
+        return;
+    }
+    if arg.eq_ignore_ascii_case("clear") {
+        if let Ok(mut e) = world.get_entity_mut(player) {
+            e.remove::<IgnoreList>();
+        }
+        send_to(world, player, "Ignore list cleared.\r\n");
+        return;
+    }
+    if let Some(name) = arg.strip_prefix('-') {
+        let name = name.trim();
+        if name.is_empty() {
+            send_to(world, player, "Unignore whom?\r\n");
+            return;
+        }
+        cmd_unignore(world, player, name);
+        return;
+    }
+    // Add a name. `IgnoreList` is created on first use.
+    let added = if let Some(mut list) = world.get_mut::<IgnoreList>(player) {
+        list.add(arg)
+    } else {
+        let mut l = IgnoreList::default();
+        let added = l.add(arg);
+        try_insert(world, player, l);
+        added
+    };
+    if added {
+        send_to(world, player, format!("You will now ignore {arg}.\r\n"));
+    } else {
+        send_to(world, player, format!("You're already ignoring {arg}.\r\n"));
+    }
+}
+
+fn cmd_unignore(world: &mut World, player: Entity, args: &str) {
+    let name = args.trim();
+    if name.is_empty() {
+        send_to(world, player, "Unignore whom?\r\n");
+        return;
+    }
+    let removed = world
+        .get_mut::<IgnoreList>(player)
+        .is_some_and(|mut l| l.remove(name));
+    if removed {
+        send_to(world, player, format!("You no longer ignore {name}.\r\n"));
+    } else {
+        send_to(world, player, format!("You aren't ignoring {name}.\r\n"));
+    }
 }
 
 fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {

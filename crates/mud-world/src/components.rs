@@ -207,6 +207,39 @@ pub struct AccountSummary {
     pub characters: Vec<(String, i32)>,
 }
 
+/// Per-session ignore list. A player whose name appears here can't
+/// reach this entity through `tell` — the sender gets a "they're
+/// ignoring you" message and the receiver sees nothing. Stored as
+/// case-insensitive lowercased names.
+#[derive(Component, Debug, Default, Clone)]
+pub struct IgnoreList(pub Vec<String>);
+
+impl IgnoreList {
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        let lc = name.to_ascii_lowercase();
+        self.0.contains(&lc)
+    }
+
+    /// Returns true if added, false if already present.
+    pub fn add(&mut self, name: &str) -> bool {
+        let lc = name.to_ascii_lowercase();
+        if self.0.contains(&lc) {
+            return false;
+        }
+        self.0.push(lc);
+        true
+    }
+
+    /// Returns true if removed, false if not present.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let lc = name.to_ascii_lowercase();
+        let before = self.0.len();
+        self.0.retain(|n| *n != lc);
+        self.0.len() < before
+    }
+}
+
 /// Bounded history of recent `tell` senders, newest first. Stores the
 /// sender's name at the time (not their Entity) so the readout is
 /// stable across reconnects / despawns. Display-only — `reply` still
