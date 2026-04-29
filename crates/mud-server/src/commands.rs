@@ -2813,10 +2813,41 @@ mod tests {
     fn formula_eval_unknown_still_returns_none() {
         // Unknown identifiers and unsupported calls still fall through.
         assert_eq!(evaluate_simple_formula("base_damage + skill", 10, 5), None);
-        assert_eq!(evaluate_simple_formula("pow(skill, 2)", 0, 5), None);
+        // pow() is now supported (see formula_eval_pow_with_float_exp).
+        assert_eq!(evaluate_simple_formula("foo(1, 2)", 0, 0), None);
         // Malformed: dangling operator.
         assert_eq!(evaluate_simple_formula("level +", 10, 0), None);
         assert_eq!(evaluate_simple_formula("(level", 10, 0), None);
+    }
+
+    #[test]
+    fn formula_eval_pow_with_float_exp() {
+        let mut det = |_n: i32, _m: i32| 0;
+        // Integer base, float exp: pow(8, 2) = 64
+        assert_eq!(evaluate_formula("pow(skill, 2)", 0, 8, &mut det), Some(64));
+        // Float exp: pow(50, 1.44) ≈ 50^1.44 ≈ 297.something
+        let r = evaluate_formula("pow(skill, 1.44)", 0, 50, &mut det).unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let expected = (50f64).powf(1.44).round() as i32;
+        assert_eq!(r, expected);
+        // Composite: roll_dice(8, 25) + pow(skill, 1.44) — substitute
+        // deterministic dice. dice closure returns 0; 0 + pow(0, 1.44) = 0
+        // (0^anything = 0 by convention).
+        assert_eq!(
+            evaluate_formula("roll_dice(8, 25) + pow(skill, 1.44)", 0, 0, &mut det),
+            Some(0)
+        );
+        // amount_from_blob uses the live RNG for roll_dice; verify it
+        // returns *something* in the plausible range for skill=0
+        // (8d25 = 8..200, pow(0, 1.44) = 0).
+        let blob = serde_json::json!({"amount": "roll_dice(8, 25) + pow(skill, 1.44)"});
+        let v = amount_from_blob(Some(&blob), 0, 0).expect("formula resolves");
+        assert!((8..=200).contains(&v), "8d25 result {v} in range");
+        // Float literal outside pow → unsupported, returns None.
+        assert_eq!(evaluate_formula("1.5 + skill", 0, 5, &mut det), None);
+        // Malformed pow (missing exp) → None.
+        assert_eq!(evaluate_formula("pow(skill,)", 0, 5, &mut det), None);
+        assert_eq!(evaluate_formula("pow(skill", 0, 5, &mut det), None);
     }
 
     #[test]
@@ -6926,6 +6957,10 @@ fn evaluate_formula(
 #[derive(Debug, Clone, PartialEq)]
 enum FormulaToken {
     Num(i32),
+    /// Floating-point literal — only meaningful inside `pow(...)` as
+    /// the exponent. The rest of the grammar stays integer; a Float
+    /// outside pow returns None (caller falls through).
+    Float(f64),
     Ident(String),
     LParen,
     RParen,
@@ -6982,7 +7017,26 @@ fn tokenize_formula(expr: &str) -> Option<Vec<FormulaToken>> {
                         break;
                     }
                 }
-                tokens.push(FormulaToken::Num(s.parse().ok()?));
+                // Float literal: `123.45`. Only consume the `.` if a
+                // digit follows — bare `.` could be from another grammar.
+                let mut peek_clone = chars.clone();
+                if peek_clone.next() == Some('.')
+                    && peek_clone.peek().is_some_and(char::is_ascii_digit)
+                {
+                    s.push('.');
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        if c.is_ascii_digit() {
+                            s.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    tokens.push(FormulaToken::Float(s.parse().ok()?));
+                } else {
+                    tokens.push(FormulaToken::Num(s.parse().ok()?));
+                }
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let mut s = String::new();
@@ -7090,6 +7144,36 @@ impl FormulaParser<'_> {
                 let n = name.clone();
                 if matches!(self.peek(), Some(FormulaToken::LParen)) {
                     self.advance();
+                    // Special-case `pow(base, exp)` so the exponent
+                    // can be a Float literal — the rest of the grammar
+                    // is integer-only.
+                    if n == "pow" {
+                        let base = self.parse_expr(level, skill, dice)?;
+                        if !matches!(self.advance(), Some(FormulaToken::Comma)) {
+                            return None;
+                        }
+                        let exp = match self.advance()? {
+                            FormulaToken::Float(f) => *f,
+                            FormulaToken::Num(i) => f64::from(*i),
+                            _ => return None,
+                        };
+                        if !matches!(self.advance(), Some(FormulaToken::RParen)) {
+                            return None;
+                        }
+                        let result = f64::from(base).powf(exp);
+                        // Round and clamp to i32 range. NaN / inf
+                        // become None so the caller falls through.
+                        if !result.is_finite() {
+                            return None;
+                        }
+                        let rounded = result.round();
+                        if rounded > f64::from(i32::MAX) || rounded < f64::from(i32::MIN) {
+                            return None;
+                        }
+                        // Safe: bounded above.
+                        #[allow(clippy::cast_possible_truncation)]
+                        return Some(rounded as i32);
+                    }
                     let mut args: Vec<i32> = Vec::new();
                     if !matches!(self.peek(), Some(FormulaToken::RParen)) {
                         args.push(self.parse_expr(level, skill, dice)?);
