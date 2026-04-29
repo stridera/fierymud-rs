@@ -172,6 +172,19 @@ impl UserRole {
     pub const fn at_least(self, min: Self) -> bool {
         self.rank() >= min.rank()
     }
+
+    /// Display label used by `account` and the role readout.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Player => "Player",
+            Self::Immortal => "Immortal",
+            Self::Builder => "Builder",
+            Self::HeadBuilder => "Head Builder",
+            Self::Coder => "Coder",
+            Self::Implementor => "Implementor",
+        }
+    }
 }
 
 // `type_name` carries embedded quotes so sqlx preserves the mixed-case

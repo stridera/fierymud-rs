@@ -5,9 +5,10 @@ use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::U
 use mud_net::{ConnId, Outbound};
 use mud_db::character_items::CharacterItemRow;
 use mud_world::{
-    Account, CombatStats, Description, EquippedSlot, Health, Item, Keywords, KnownAbilities,
-    Located, LoggedInAt, Named, Online, ObjectPrototypes, Player, PlayerFlags, Posture,
-    PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title, WorldKey, WorldKeyIndex,
+    Account, AccountSummary, CombatStats, Description, EquippedSlot, Health, Item, Keywords,
+    KnownAbilities, Located, LoggedInAt, Named, Online, ObjectPrototypes, Player, PlayerFlags,
+    Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title, WorldKey,
+    WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -237,8 +238,17 @@ impl ConnRouter {
                         .collect(),
                 };
                 let ability_count = known_abilities.entries.len();
+                let summary = AccountSummary {
+                    email: user.email.clone(),
+                    display_name: user.display_name.clone(),
+                    characters: characters
+                        .iter()
+                        .map(|c| (c.name.clone(), c.level))
+                        .collect(),
+                };
                 if let Ok(mut e) = world.get_entity_mut(entity) {
                     e.insert(known_abilities);
+                    e.insert(summary);
                     if let Some(t) = char_row.title.as_deref()
                         && !t.trim().is_empty()
                     {

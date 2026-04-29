@@ -14,12 +14,12 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRole};
 use mud_net::Outbound;
 use mud_world::{
-    AbilityCatalog, Account, AppliedTo, ClassCatalog, CombatStats, Description, EffectCatalog,
-    EffectInstance, EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item,
-    Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes,
-    Named, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint,
-    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, TellLog, Title, UiStyle, WearableIn,
-    WorldKey, WorldKeyIndex,
+    AbilityCatalog, Account, AccountSummary, AppliedTo, ClassCatalog, CombatStats, Description,
+    EffectCatalog, EffectInstance, EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen,
+    Health, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
+    MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
+    RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, TellLog, Title, UiStyle,
+    WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, info_span};
 
@@ -368,6 +368,21 @@ const COMMANDS: &[Command] = &[
                    primary name's slot.",
         },
         run: cmd_commands,
+    },
+    Command {
+        names: &["account"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "account",
+            summary: "Show your account email, role, and character roster.",
+            long: "Read-only summary of who you're logged in as and \
+                   which character is currently active. Snapshot taken \
+                   at login — characters created mid-session won't \
+                   appear until you reconnect.",
+        },
+        run: cmd_account,
     },
     Command {
         names: &["world", "users"],
@@ -3325,6 +3340,32 @@ fn direction_order(d: mud_db::enums::Direction) -> u8 {
         Portal => 12,
         mud_db::enums::Direction::None => 13,
     }
+}
+
+/// `account`: read-only summary from the `AccountSummary` component
+/// inserted at login. Active character is the one with the same name
+/// as the entity's Named component (which is unique per player).
+fn cmd_account(world: &mut World, player: Entity, _args: &str) {
+    let Some(summary) = world.get::<AccountSummary>(player).cloned() else {
+        send_to(world, player, "No account info available.\r\n");
+        return;
+    };
+    let active_name = name_of(world, player);
+    let role = world
+        .get::<Account>(player)
+        .map_or(UserRole::Player, |a| a.role);
+
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("  Email:        {}\r\n", summary.email));
+    out.push_str(&format!("  Display name: {}\r\n", summary.display_name));
+    out.push_str(&format!("  Role:         {}\r\n", role.label()));
+    out.push_str(&format!("  Characters    ({}):\r\n", summary.characters.len()));
+    for (name, level) in &summary.characters {
+        let marker = if name == &active_name { " *" } else { "  " };
+        out.push_str(&format!("   {marker} {name} (level {level})\r\n"));
+    }
+    out.push_str("\r\n  * = currently playing\r\n");
+    send_to(world, player, out);
 }
 
 /// `commands`: flat alphabetical list of every command the player has

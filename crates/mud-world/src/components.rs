@@ -194,6 +194,19 @@ pub struct Follower(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LastTeller(pub Entity);
 
+/// Read-only summary of the account behind this player session.
+/// Snapshot taken at login from `Users` and `Characters`; powers the
+/// `account` command without needing a DB roundtrip per query.
+/// Stale-by-design — won't reflect characters created mid-session.
+#[derive(Component, Debug, Clone)]
+pub struct AccountSummary {
+    pub email: String,
+    pub display_name: String,
+    /// (name, level) per character on this account, sorted as
+    /// `Characters::list_for_user` returned them (level desc, name asc).
+    pub characters: Vec<(String, i32)>,
+}
+
 /// Bounded history of recent `tell` senders, newest first. Stores the
 /// sender's name at the time (not their Entity) so the readout is
 /// stable across reconnects / despawns. Display-only — `reply` still
