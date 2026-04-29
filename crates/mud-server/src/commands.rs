@@ -2405,12 +2405,12 @@ fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 mod tests {
     use super::{
         ColorMode, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
-        apply_knockdown_posture, condition_label, direction_name, evaluate_formula,
-        evaluate_simple_formula, format_idle, has_effect_named, normalize_dice_notation,
-        parse_direction, remove_effect_named, render_color_tags, render_prompt,
-        resolve_dispel_filter, resolve_dispel_scope, resolve_effect_conditions,
-        resolve_effect_resource, resolve_knockdown_posture, resolve_redirect_aggro,
-        sector_movement_cost,
+        apply_knockdown_posture, check_ability_restrictions, condition_label, direction_name,
+        evaluate_formula, evaluate_simple_formula, format_idle, has_effect_named,
+        is_being_attacked, normalize_dice_notation, parse_direction, remove_effect_named,
+        render_color_tags, render_prompt, resolve_dispel_filter, resolve_dispel_scope,
+        resolve_effect_conditions, resolve_effect_resource, resolve_knockdown_posture,
+        resolve_redirect_aggro, sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -3060,6 +3060,87 @@ mod tests {
         // Non-bool aggro field → falls through to default.
         let bogus = serde_json::json!({"aggro": "yes"});
         assert!(resolve_redirect_aggro(Some(&bogus), Some(&default_p)));
+    }
+
+    #[test]
+    fn restriction_alignment_prohibits_evil_caster() {
+        use mud_world::CombatStats;
+        let mut world = World::new();
+        let evil = world.spawn(CombatStats { alignment: -500, ..Default::default() }).id();
+        let neutral = world.spawn(CombatStats::default()).id();
+        let dummy = world.spawn(()).id();
+        let rule = serde_json::json!([{
+            "type": "alignment",
+            "target": "caster",
+            "value": "evil",
+            "prohibited": true,
+            "message": "The gods reject you.",
+        }]);
+        let rules: Vec<serde_json::Value> = rule.as_array().unwrap().clone();
+        // Evil caster: refused.
+        let r = check_ability_restrictions(&mut world, evil, dummy, &rules);
+        assert_eq!(r.as_deref(), Some("The gods reject you."));
+        // Neutral caster: passes.
+        let r = check_ability_restrictions(&mut world, neutral, dummy, &rules);
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn restriction_alignment_required_target() {
+        use mud_world::CombatStats;
+        let mut world = World::new();
+        let caster = world.spawn(()).id();
+        let undead = world.spawn(CombatStats { alignment: -500, ..Default::default() }).id();
+        let good = world.spawn(CombatStats { alignment: 500, ..Default::default() }).id();
+        let rules: Vec<serde_json::Value> = vec![serde_json::json!({
+            "type": "alignment",
+            "target": "victim",
+            "value": "evil",
+            "required": true,
+            "message": "Target must be evil.",
+        })];
+        // Evil target: passes.
+        assert_eq!(check_ability_restrictions(&mut world, caster, undead, &rules), None);
+        // Good target: refused.
+        let r = check_ability_restrictions(&mut world, caster, good, &rules);
+        assert_eq!(r.as_deref(), Some("Target must be evil."));
+    }
+
+    #[test]
+    fn restriction_unknown_rule_passes() {
+        let mut world = World::new();
+        let caster = world.spawn(()).id();
+        let target = world.spawn(()).id();
+        let rules: Vec<serde_json::Value> = vec![serde_json::json!({
+            "type": "future_unknown_check",
+            "message": "Should not appear.",
+        })];
+        // Unknown type → pass.
+        assert_eq!(
+            check_ability_restrictions(&mut world, caster, target, &rules),
+            None
+        );
+    }
+
+    #[test]
+    fn restriction_not_tanking_refuses_when_attacked() {
+        use mud_world::Fighting;
+        let mut world = World::new();
+        let caster = world.spawn(()).id();
+        let attacker = world.spawn(Fighting(caster)).id();
+        let target = world.spawn(()).id();
+        let rules: Vec<serde_json::Value> = vec![serde_json::json!({
+            "type": "not_tanking",
+            "message": "You're being attacked!",
+        })];
+        let r = check_ability_restrictions(&mut world, caster, target, &rules);
+        assert_eq!(r.as_deref(), Some("You're being attacked!"));
+        // Sanity: helper agrees.
+        assert!(is_being_attacked(&mut world, caster));
+        // Despawn the attacker — caster passes.
+        world.entity_mut(attacker).despawn();
+        let r = check_ability_restrictions(&mut world, caster, target, &rules);
+        assert_eq!(r, None);
     }
 
     #[test]
@@ -6117,10 +6198,10 @@ fn invoke_ability(
 ///   `prohibited`/`required`: bool. Threshold: ±350.
 /// - `target_standing` / `position` — target's `Posture` is `Standing`.
 /// - `not_blind` — target lacks any `EffectInstance` named "blind".
-/// - `in_combat` / `not_in_combat` — caster has / lacks `Fighting`.
+/// - `in_combat` / `not_in_combat` — target has / lacks `Fighting`.
+/// - `not_tanking` — caster has no attackers (no entity Fighting them).
 /// - `npc_only` — target has the `Mob` marker.
-/// - `has_shield` / `has_weapon` — caster has any item equipped in
-///   the matching `Slot`.
+/// - `has_weapon` — caster has any item equipped in `Slot::Wield`.
 fn check_ability_restrictions(
     world: &mut World,
     caster: Entity,
@@ -6143,6 +6224,7 @@ fn check_ability_restrictions(
             "not_blind" => !has_effect_named(world, resolved_target, "blind"),
             "in_combat" => world.get::<Fighting>(resolved_target).is_some(),
             "not_in_combat" => world.get::<Fighting>(resolved_target).is_none(),
+            "not_tanking" => !is_being_attacked(world, caster),
             "npc_only" => world.get::<Mob>(resolved_target).is_some(),
             "has_weapon" => caster_has_equipped(world, caster, Slot::Wield),
             // `has_shield` and other equipment-flag rules need
@@ -6194,6 +6276,14 @@ fn check_rule_standing(world: &World, target: Entity) -> bool {
     world
         .get::<Posture>(target)
         .is_none_or(|p| p.0 == PostureKind::Standing)
+}
+
+/// True iff any entity is currently `Fighting(caster)` — i.e. the
+/// caster has at least one attacker. Used by the `not_tanking`
+/// restriction rule (e.g. BACKSTAB refuses while being attacked).
+fn is_being_attacked(world: &mut World, caster: Entity) -> bool {
+    let mut q = world.query::<&Fighting>();
+    q.iter(world).any(|f| f.0 == caster)
 }
 
 /// True iff `caster` has any item equipped in the named slot.
