@@ -142,6 +142,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_experience,
     },
     Command {
+        names: &["title"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "title [<new title> | clear]",
+            summary: "Show or change the epithet shown after your name.",
+            long: "With no argument, prints your current title. With a \
+                   new title, sets it (max 60 chars). With `clear` (or \
+                   `none` / `-`), removes it. In-memory only for now \
+                   — resets to the DB value on next login.",
+        },
+        run: cmd_title,
+    },
+    Command {
         names: &["examine", "exa"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2325,6 +2340,44 @@ pub(crate) fn condition_label(hp: Health) -> &'static str {
         61..=85 => "has some scrapes",
         _ => "is in excellent shape",
     }
+}
+
+/// `title [<text> | clear]`: show / set / remove the player's epithet
+/// shown on `who`. In-memory only this iteration — `save_state` is
+/// blocked by an unrelated `PlayerFlag` array-type bug (see
+/// SUGGESTIONS.md); persistence joins once that's fixed. Capped at 60
+/// chars to keep the `who` columns sane.
+const MAX_TITLE_LEN: usize = 60;
+fn cmd_title(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        let cur = world.get::<Title>(player).map(|t| t.0.clone());
+        let line = match cur {
+            Some(t) => format!("Your title: {t}\r\n"),
+            None => "You have no title set. Use `title <new>` to add one.\r\n".to_string(),
+        };
+        send_to(world, player, line);
+        return;
+    }
+    if matches!(arg.to_ascii_lowercase().as_str(), "clear" | "none" | "-") {
+        if let Ok(mut e) = world.get_entity_mut(player) {
+            e.remove::<Title>();
+        }
+        send_to(world, player, "Title cleared.\r\n");
+        return;
+    }
+    if arg.len() > MAX_TITLE_LEN {
+        send_to(
+            world,
+            player,
+            format!("Title too long (max {MAX_TITLE_LEN} chars).\r\n"),
+        );
+        return;
+    }
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(Title(arg.to_string()));
+    }
+    send_to(world, player, format!("Title set to: {arg}\r\n"));
 }
 
 /// `experience` / `exp` / `xp`: print level and total XP from Profile.
