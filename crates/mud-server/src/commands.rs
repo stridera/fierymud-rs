@@ -386,6 +386,32 @@ const COMMANDS: &[Command] = &[
         run: cmd_commands,
     },
     Command {
+        names: &["open"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "open <direction>",
+            summary: "Open a closed door in the given direction.",
+            long: "Refused if the exit is already open or locked. \
+                   Locked doors need a key (use `unlock`).",
+        },
+        run: cmd_open,
+    },
+    Command {
+        names: &["close"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "close <direction>",
+            summary: "Close an open door in the given direction.",
+            long: "Refused if the exit has no door, is already \
+                   closed, or doesn't exist.",
+        },
+        run: cmd_close,
+    },
+    Command {
         names: &["read"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3869,6 +3895,92 @@ fn direction_order(d: mud_db::enums::Direction) -> u8 {
         Portal => 12,
         mud_db::enums::Direction::None => 13,
     }
+}
+
+/// `open <direction>`: flip a closed exit to Open. Refused on
+/// locked exits and on exits that don't exist.
+fn cmd_open(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let Some(dir) = parse_direction(arg) else {
+        send_to(world, player, "Open which way?\r\n");
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let cur_state = world
+        .get::<Exits>(room)
+        .and_then(|e| e.0.get(&dir).map(|ed| ed.state));
+    let Some(state) = cur_state else {
+        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        return;
+    };
+    match state {
+        ExitState::Open => {
+            send_to(world, player, format!("It's already open {}.\r\n", direction_name(dir)));
+            return;
+        }
+        ExitState::Locked => {
+            send_to(world, player, format!("It's locked {}.\r\n", direction_name(dir)));
+            return;
+        }
+        ExitState::Closed => {}
+    }
+    if let Some(mut exits) = world.get_mut::<Exits>(room)
+        && let Some(ed) = exits.0.get_mut(&dir)
+    {
+        ed.state = ExitState::Open;
+    }
+    send_to(world, player, format!("You open the way {}.\r\n", direction_name(dir)));
+    let player_name = name_of(world, player);
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} opens the door {}.\r\n", direction_name(dir)),
+    );
+}
+
+/// `close <direction>`: flip an open exit to Closed. Refused on
+/// already-closed/locked or non-existent exits.
+fn cmd_close(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let Some(dir) = parse_direction(arg) else {
+        send_to(world, player, "Close which way?\r\n");
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let cur_state = world
+        .get::<Exits>(room)
+        .and_then(|e| e.0.get(&dir).map(|ed| ed.state));
+    let Some(state) = cur_state else {
+        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        return;
+    };
+    match state {
+        ExitState::Closed | ExitState::Locked => {
+            send_to(world, player, format!("It's already closed {}.\r\n", direction_name(dir)));
+            return;
+        }
+        ExitState::Open => {}
+    }
+    if let Some(mut exits) = world.get_mut::<Exits>(room)
+        && let Some(ed) = exits.0.get_mut(&dir)
+    {
+        ed.state = ExitState::Closed;
+    }
+    send_to(world, player, format!("You close the way {}.\r\n", direction_name(dir)));
+    let player_name = name_of(world, player);
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} closes the door {}.\r\n", direction_name(dir)),
+    );
 }
 
 /// `read <item>`: find an item by keyword on the player or in their
