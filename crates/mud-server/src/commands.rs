@@ -5929,10 +5929,57 @@ fn invoke_ability(
             })
             .collect()
     };
+    // Capture caster + target names *before* effects apply. The
+    // damage arm can despawn the target mid-loop; later rendering
+    // would otherwise see `<unknown>` and angle-bracket-eat the
+    // template through XML-Lite color rendering. Same for the
+    // AbilityMessages set lookup — pull it once up front.
+    let messages_pre = world
+        .resource::<AbilityCatalog>()
+        .messages
+        .get(&def.id)
+        .cloned();
+    let actor_name_pre = name_of(world, player);
+    let target_name_pre = if target_entity == player {
+        actor_name_pre.clone()
+    } else {
+        name_or(world, target_entity, "<unknown>")
+    };
     let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
     let mut spawn_count: usize = 0;
     for spec in &effect_specs {
         match spec.effect_type.as_str() {
+            "damage" => {
+                // Resolve `amount` from override → default params and
+                // apply via `apply_damage`. Most schema formulas use
+                // unsupported tokens (`pow`, `weapon_damage`,
+                // `str_bonus`, ...) and return None — those casts
+                // do 0 damage today and a follow-up extends the
+                // formula evaluator. No EffectInstance spawned.
+                let amount = resolve_effect_amount(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    caster_level,
+                    caster_skill,
+                )
+                .unwrap_or(0);
+                if amount > 0 {
+                    let (dead, _) =
+                        crate::commands::apply_damage(world, target_entity, amount);
+                    if dead
+                        && let Some(located) = world.get::<Located>(target_entity).copied()
+                    {
+                        let target_name = name_or(world, target_entity, "<unknown>");
+                        crate::combat::handle_death(
+                            world,
+                            target_entity,
+                            &target_name,
+                            located.0,
+                        );
+                    }
+                }
+                applied_msgs.push(format!("{} (-{} HP)", spec.name, amount));
+            }
             "heal" => {
                 let amount = resolve_effect_amount(
                     spec.override_params.as_ref(),
@@ -6145,20 +6192,12 @@ fn invoke_ability(
             }
         }
     }
-    // Templated message set (if the ability has one in
-    // AbilityMessages). Loaded at startup; per-ability rows are
-    // optional, and individual fields within a row are optional too.
-    let messages = world
-        .resource::<AbilityCatalog>()
-        .messages
-        .get(&def.id)
-        .cloned();
-    let actor_name = name_of(world, player);
-    let target_name_raw = if target_entity == player {
-        actor_name.clone()
-    } else {
-        name_or(world, target_entity, "<unknown>")
-    };
+    // Pull pre-loop captures forward — the damage arm can despawn
+    // the target mid-loop, so we use the names captured before the
+    // effects fired.
+    let messages = messages_pre;
+    let actor_name = actor_name_pre;
+    let target_name_raw = target_name_pre;
     if applied_msgs.is_empty() {
         out.push_str(&format!(
             "    (no effects defined for this {} — nothing to apply)\r\n",
