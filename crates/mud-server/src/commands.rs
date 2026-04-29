@@ -2142,7 +2142,8 @@ fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 mod tests {
     use super::{
         ColorMode, apply_damage, condition_label, direction_name, evaluate_simple_formula,
-        format_idle, parse_direction, render_color_tags, render_prompt, sector_movement_cost,
+        format_idle, has_effect_named, parse_direction, remove_effect_named, render_color_tags,
+        render_prompt, sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -2532,6 +2533,64 @@ mod tests {
         assert_eq!(evaluate_simple_formula("(level)", 10, 0), None);
         assert_eq!(evaluate_simple_formula("pow(skill, 2)", 0, 5), None);
         assert_eq!(evaluate_simple_formula("level * 2 + skill", 10, 5), None);
+    }
+
+    use mud_world::{AppliedTo, EffectInstance, EffectSource};
+
+    fn spawn_effect_named(world: &mut World, target: Entity, name: &str) -> Entity {
+        world
+            .spawn((
+                EffectInstance {
+                    kind: 0,
+                    name: name.to_string(),
+                    strength: 1,
+                    remaining_secs: 30,
+                    source: EffectSource::Other("test".to_string()),
+                },
+                AppliedTo(target),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn has_effect_named_true_when_present() {
+        let mut world = World::new();
+        let target = world.spawn(()).id();
+        spawn_effect_named(&mut world, target, "bleed");
+        assert!(has_effect_named(&mut world, target, "bleed"));
+        assert!(has_effect_named(&mut world, target, "BLEED"));
+        assert!(!has_effect_named(&mut world, target, "blind"));
+    }
+
+    #[test]
+    fn has_effect_named_false_when_target_differs() {
+        let mut world = World::new();
+        let target_a = world.spawn(()).id();
+        let target_b = world.spawn(()).id();
+        spawn_effect_named(&mut world, target_a, "bleed");
+        assert!(has_effect_named(&mut world, target_a, "bleed"));
+        assert!(!has_effect_named(&mut world, target_b, "bleed"));
+    }
+
+    #[test]
+    fn remove_effect_named_despawns_matches() {
+        let mut world = World::new();
+        let target = world.spawn(()).id();
+        let bleed_a = spawn_effect_named(&mut world, target, "bleed");
+        let bleed_b = spawn_effect_named(&mut world, target, "bleed");
+        let blind = spawn_effect_named(&mut world, target, "blind");
+        assert!(remove_effect_named(&mut world, target, "bleed"));
+        assert!(world.get_entity(bleed_a).is_err(), "bleed_a despawned");
+        assert!(world.get_entity(bleed_b).is_err(), "bleed_b despawned");
+        assert!(world.get_entity(blind).is_ok(), "blind survives");
+    }
+
+    #[test]
+    fn remove_effect_named_returns_false_when_no_match() {
+        let mut world = World::new();
+        let target = world.spawn(()).id();
+        spawn_effect_named(&mut world, target, "bleed");
+        assert!(!remove_effect_named(&mut world, target, "blind"));
     }
 }
 
