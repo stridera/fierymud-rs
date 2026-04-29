@@ -1070,6 +1070,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_gouge,
     },
     Command {
+        names: &["springleap"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "springleap <target>",
+            summary: "Out-of-combat leaping kick — 1.5x damage opener.",
+            long: "Deals 1.5x your dmg_roll on the opening swing and \
+                   engages the target. Refused if you're already \
+                   fighting or if the target is already in combat.",
+        },
+        run: cmd_springleap,
+    },
+    Command {
         names: &["backstab", "bs"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5389,6 +5403,7 @@ const DISARM_COST: i32 = 5;
 const HITALL_COST: i32 = 10;
 const BACKSTAB_COST: i32 = 6;
 const BACKSTAB_MULT: i32 = 2;
+const SPRINGLEAP_COST: i32 = 7;
 const GOUGE_COST: i32 = 7;
 const GOUGE_BLIND_SECS: i32 = 30;
 const ROAR_COST: i32 = 8;
@@ -5969,6 +5984,79 @@ fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
 
     if dead {
         crate::combat::handle_death(world, target, &target_name, target_room);
+    }
+}
+
+/// `springleap <target>`: out-of-combat leaping kick for 1.5x
+/// damage. Same engagement gates as `backstab`.
+fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "springleap") {
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You can't springleap while already fighting.\r\n");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Springleap whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "You can't springleap yourself.\r\n");
+        return;
+    }
+    if world.get::<Fighting>(target).is_some() {
+        send_to(world, player, "They're already fighting; no surprise.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, SPRINGLEAP_COST, "springleap") {
+        return;
+    }
+
+    // 1.5x dmg_roll, integer-truncated.
+    let base_dmg = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
+    let dmg = ((base_dmg * 3) / 2).max(1);
+    drain_stamina(world, player, SPRINGLEAP_COST);
+
+    let player_name = name_of(world, player);
+    let target_name = name_or(world, target, "<unknown>");
+    let (dead, _) = apply_damage(world, target, dmg);
+
+    send_to(world, player, format!(
+        "You leap and kick {target_name} for {dmg} damage!\r\n"
+    ));
+    if !dead {
+        send_rendered(
+            world,
+            target,
+            &format!("{player_name} springs in and kicks you for {dmg} damage!\r\n"),
+        );
+    }
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{player_name} springs in and kicks {target_name}!\r\n"),
+    );
+
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, located.0);
+    } else {
+        try_insert(world, player, Fighting(target));
+        if world.get::<CombatStats>(target).is_some()
+            && let Ok(mut e) = world.get_entity_mut(target)
+        {
+            e.insert(Fighting(player));
+        }
     }
 }
 
