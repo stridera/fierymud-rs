@@ -188,6 +188,13 @@ pub struct CombatStats {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Fighting(pub Entity);
 
+/// Marker: this entity is stunned and skips combat swings. Inserted by
+/// `stun` effects in `invoke_ability`; removed by `effects_tick` once
+/// every backing `EffectInstance` named "stun" on the entity has
+/// expired.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Stunned;
+
 /// Following state: this entity moves automatically when the target moves.
 /// Distinct from Located — followers retain their own Located even while
 /// chasing the leader, and the follow edge is preserved across rooms.

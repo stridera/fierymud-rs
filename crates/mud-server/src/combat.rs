@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AppliedTo, CombatStats, Description, EffectInstance, Exits, Fighting, Health, Item, Keywords,
-    Located, Mob, Named, Player, PlayerFlags, Posture, PostureKind, Slot, WearableIn,
+    Located, Mob, Named, Player, PlayerFlags, Posture, PostureKind, Slot, Stunned, WearableIn,
     WorldKeyIndex,
 };
 use tracing::info;
@@ -113,15 +113,25 @@ pub fn combat_tick(world: &mut World) {
     // mirrors the player-command posture gate (require_alert_posture)
     // and gives `stomp` (which sets target Posture to Sitting) a real
     // combat consequence. Mobs without a Posture component fall through
-    // (they're alert by default).
+    // (they're alert by default). `Stunned` attackers also skip — the
+    // marker is added by the stun effect-type and removed by
+    // `effects_tick` once every backing stun EffectInstance expires.
     let swings: Vec<Swing> = {
-        let mut q =
-            world.query::<(Entity, &Fighting, &CombatStats, &Named, Option<&Posture>)>();
+        let mut q = world
+            .query::<(
+                Entity,
+                &Fighting,
+                &CombatStats,
+                &Named,
+                Option<&Posture>,
+                Option<&Stunned>,
+            )>();
         q.iter(world)
-            .filter(|(_, _, _, _, posture)| {
-                matches!(posture.map(|p| p.0), None | Some(PostureKind::Standing))
+            .filter(|(_, _, _, _, posture, stunned)| {
+                stunned.is_none()
+                    && matches!(posture.map(|p| p.0), None | Some(PostureKind::Standing))
             })
-            .map(|(attacker, fighting, cs, name, _)| {
+            .map(|(attacker, fighting, cs, name, _, _)| {
                 let base = cs.dmg_roll.max(1);
                 let damage = if berserk_attackers.contains(&attacker) {
                     (base * 3) / 2

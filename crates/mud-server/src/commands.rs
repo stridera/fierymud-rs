@@ -18,7 +18,7 @@ use mud_world::{
     EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
-    RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, TellLog, Title, UiStyle,
+    RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stunned, TellLog, Title, UiStyle,
     WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, info_span};
@@ -5828,6 +5828,32 @@ fn invoke_ability(
                 } else {
                     format!("{} (cleansed {removed} effect(s))", spec.name)
                 });
+            }
+            "stun" => {
+                // Mark the target as Stunned (skips combat swings)
+                // and also spawn the EffectInstance so the effect
+                // appears in the listing and the duration ticks down.
+                // `effects_tick` removes the Stunned marker once the
+                // last "stun" EffectInstance on the target expires.
+                crate::commands::try_insert(world, target_entity, Stunned);
+                let dur_secs = resolve_effect_duration(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    caster_level,
+                    caster_skill,
+                );
+                world.spawn((
+                    EffectInstance {
+                        kind: spec.id,
+                        name: spec.name.clone(),
+                        strength: 1,
+                        remaining_secs: dur_secs,
+                        source: EffectSource::Spell,
+                    },
+                    AppliedTo(target_entity),
+                ));
+                spawn_count += 1;
+                applied_msgs.push(format!("{} (stunned)", spec.name));
             }
             "dispel" => {
                 // Remove EffectInstances on the target whose source

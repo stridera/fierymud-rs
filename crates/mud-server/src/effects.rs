@@ -1,9 +1,9 @@
 use bevy_ecs::prelude::*;
-use mud_world::{AppliedTo, EffectInstance, Located};
+use mud_world::{AppliedTo, EffectInstance, Located, Stunned};
 use tracing::info;
 
 use crate::TickCount;
-use crate::commands::{apply_damage, name_or, send_to};
+use crate::commands::{apply_damage, name_or, send_to, try_remove};
 
 /// One effect tick = one second.
 const EFFECT_PERIOD_TICKS: u64 = 10;
@@ -78,6 +78,21 @@ pub fn effects_tick(world: &mut World) {
                 e.despawn();
             }
             expired += 1;
+            // Stun marker outlives only as long as at least one
+            // backing `stun` EffectInstance is on the target. After
+            // despawning *this* one, recheck and clear if none left.
+            if name.eq_ignore_ascii_case("stun") {
+                let still_stunned = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world)
+                        .any(|(eff, applied)| {
+                            applied.0 == target && eff.name.eq_ignore_ascii_case("stun")
+                        })
+                };
+                if !still_stunned {
+                    try_remove::<Stunned>(world, target);
+                }
+            }
         }
     }
     if killed_by_bleed > 0 {
@@ -167,6 +182,54 @@ mod tests {
         assert!(
             world.get_entity(eff).is_err(),
             "orphan cleanup despawned the effect"
+        );
+    }
+
+    #[test]
+    fn stun_marker_cleared_when_last_stun_expires() {
+        let mut world = World::new();
+        let target = world.spawn_empty().id();
+        // Two stacked stuns: one expires this tick, one keeps going.
+        let _stun_a = world
+            .spawn((
+                EffectInstance {
+                    kind: 21,
+                    name: "stun".to_string(),
+                    strength: 1,
+                    remaining_secs: 1,
+                    source: EffectSource::Spell,
+                },
+                AppliedTo(target),
+            ))
+            .id();
+        let _stun_b = world
+            .spawn((
+                EffectInstance {
+                    kind: 21,
+                    name: "stun".to_string(),
+                    strength: 1,
+                    remaining_secs: 5,
+                    source: EffectSource::Spell,
+                },
+                AppliedTo(target),
+            ))
+            .id();
+        world.entity_mut(target).insert(Stunned);
+
+        run_effects_tick(&mut world);
+        // First stun expires; second still active → Stunned must remain.
+        assert!(
+            world.get::<Stunned>(target).is_some(),
+            "Stunned stays while another stun is alive"
+        );
+
+        // Tick down four more times to expire the longer stun.
+        for _ in 0..5 {
+            run_effects_tick(&mut world);
+        }
+        assert!(
+            world.get::<Stunned>(target).is_none(),
+            "Stunned cleared after the last stun fades"
         );
     }
 
