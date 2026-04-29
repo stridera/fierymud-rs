@@ -1,12 +1,16 @@
 use bevy_ecs::prelude::*;
-use mud_world::{AppliedTo, EffectInstance};
+use mud_world::{AppliedTo, EffectInstance, Located};
 use tracing::info;
 
 use crate::TickCount;
-use crate::commands::send_to;
+use crate::commands::{apply_damage, name_or, send_to};
 
 /// One effect tick = one second.
 const EFFECT_PERIOD_TICKS: u64 = 10;
+/// Damage-per-tick for the `bleed` debuff. 2/s for 30s = 60 total
+/// — comparable to one rend hit, kept low so multiple stacked damage-over-time effects
+/// stay within combat budgets.
+const BLEED_DPS: i32 = 2;
 
 /// Decrement remaining duration on every active effect; despawn ones whose
 /// duration hit zero (with a "fades" message to the target if it has a
@@ -28,6 +32,7 @@ pub fn effects_tick(world: &mut World) {
 
     let mut expired = 0usize;
     let mut orphaned = 0usize;
+    let mut killed_by_bleed = 0usize;
     for (eff_entity, target, ticks, name) in snapshots {
         if world.get_entity(target).is_err() {
             // Target gone — orphaned effect.
@@ -36,6 +41,26 @@ pub fn effects_tick(world: &mut World) {
             }
             orphaned += 1;
             continue;
+        }
+        // Damage-over-time effects: apply HP loss before the duration
+        // tick. Lethal damage despawns the target plus all its effects,
+        // so we short-circuit the rest of this iteration.
+        if name.eq_ignore_ascii_case("bleed") {
+            let (dead, _) = apply_damage(world, target, BLEED_DPS);
+            send_to(world, target, format!("You bleed for {BLEED_DPS} damage.\r\n"));
+            if dead {
+                let target_name = name_or(world, target, "<unknown>");
+                let room = world.get::<Located>(target).copied().map(|l| l.0);
+                if let Some(r) = room {
+                    crate::combat::handle_death(world, target, &target_name, r);
+                }
+                killed_by_bleed += 1;
+                // The bleed effect entity is already despawned by
+                // handle_death's cleanup of all child effects (or
+                // orphan-pickup on the next tick). Don't touch
+                // eff_entity here.
+                continue;
+            }
         }
         if ticks < 0 {
             // Permanent — leave alone.
@@ -54,6 +79,9 @@ pub fn effects_tick(world: &mut World) {
             }
             expired += 1;
         }
+    }
+    if killed_by_bleed > 0 {
+        info!(killed_by_bleed, "bleed deaths");
     }
 
     if expired > 0 || orphaned > 0 {
