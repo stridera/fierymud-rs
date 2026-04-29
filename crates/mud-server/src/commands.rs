@@ -5732,19 +5732,38 @@ fn invoke_ability(
             render_color_tags(&target_name, mode),
         ));
     }
-    // Surface any AbilityRestrictions messages so the player knows what
-    // would gate the cast once real checking lands. Pulled from the
-    // catalog by ability id.
-    if let Some(messages) = world
+    // Live gate: walk AbilityRestrictions and refuse the cast on the
+    // first failing rule, emitting that rule's `message` to the
+    // caster. Unknown rule types pass — the runtime grows interpretation
+    // incrementally. Falls back to no-op for abilities without a
+    // restrictions row.
+    if let Some(rules) = world
         .resource::<AbilityCatalog>()
-        .restriction_messages
+        .restriction_rules
         .get(&def.id)
         .cloned()
+        && let Some(refusal) =
+            check_ability_restrictions(world, player, target_entity, &rules)
     {
-        for m in &messages {
-            out.push_str(&format!("    requires: {m}\r\n"));
-        }
+        let actor_name = name_of(world, player);
+        let target_name = if target_entity == player {
+            actor_name.clone()
+        } else {
+            name_or(world, target_entity, "<unknown>")
+        };
+        let rendered = render_ability_template(
+            &refusal,
+            &actor_name,
+            &target_name,
+            target_entity == player,
+        );
+        send_to(world, player, format!("{rendered}\r\n"));
+        return;
     }
+    // (The legacy "requires:" informational block was removed once
+    // the rules became live — the messages are written as failure
+    // text, so showing them on success is misleading. The player
+    // sees them only when the gate refuses the cast above.)
     // Look up the effects this ability applies and dispatch each by
     // its `Effect.effectType`. `heal` is applied immediately to the
     // target's `Health` (or `Stamina` when `resource = "move"`); other
@@ -6087,6 +6106,101 @@ fn invoke_ability(
         broadcast_room_except_rendered(world, located.0, &except, &format!("{rendered}\r\n"));
     }
     let _ = spawn_count;
+}
+
+/// Walk an ability's restriction rules and return the first failing
+/// rule's `message`, or None if all rules pass / are unknown types.
+/// Supported rule types (the runtime grows interpretation
+/// incrementally; unknown types pass silently rather than refuse):
+///
+/// - `alignment` — `value`: "good"|"evil"|"neutral", `target`: "caster"|"victim",
+///   `prohibited`/`required`: bool. Threshold: ±350.
+/// - `target_standing` / `position` — target's `Posture` is `Standing`.
+/// - `not_blind` — target lacks any `EffectInstance` named "blind".
+/// - `in_combat` / `not_in_combat` — caster has / lacks `Fighting`.
+/// - `npc_only` — target has the `Mob` marker.
+/// - `has_shield` / `has_weapon` — caster has any item equipped in
+///   the matching `Slot`.
+fn check_ability_restrictions(
+    world: &mut World,
+    caster: Entity,
+    target: Entity,
+    rules: &[serde_json::Value],
+) -> Option<String> {
+    for rule in rules {
+        let Some(rule_type) = rule.get("type").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let target_kind = rule.get("target").and_then(serde_json::Value::as_str);
+        let resolved_target = if target_kind == Some("caster") {
+            caster
+        } else {
+            target
+        };
+        let passed = match rule_type {
+            "alignment" => check_rule_alignment(world, resolved_target, rule),
+            "target_standing" | "position" => check_rule_standing(world, target),
+            "not_blind" => !has_effect_named(world, resolved_target, "blind"),
+            "in_combat" => world.get::<Fighting>(resolved_target).is_some(),
+            "not_in_combat" => world.get::<Fighting>(resolved_target).is_none(),
+            "npc_only" => world.get::<Mob>(resolved_target).is_some(),
+            "has_weapon" => caster_has_equipped(world, caster, Slot::Wield),
+            // `has_shield` and other equipment-flag rules need
+            // wear-flag plumbing not yet modeled — pass for now.
+            // Unknown type → pass (don't refuse) so adding new rule
+            // types in Muditor doesn't accidentally lock players out.
+            _ => true,
+        };
+        if !passed {
+            return rule
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from)
+                .or_else(|| Some(format!("Restricted: {rule_type} check failed.")));
+        }
+    }
+    None
+}
+
+/// Evaluate the `alignment` rule. Standard MUD thresholds: alignment
+/// of 350+ is "good", of -350 or less is "evil", in between is
+/// "neutral". Rule semantics: `prohibited=true` refuses when target
+/// matches the value; `required=true` (or unset) refuses when target
+/// doesn't match. Returns true when the rule passes.
+fn check_rule_alignment(world: &World, target: Entity, rule: &serde_json::Value) -> bool {
+    let Some(value) = rule.get("value").and_then(serde_json::Value::as_str) else {
+        return true;
+    };
+    let alignment = world.get::<CombatStats>(target).map_or(0, |s| s.alignment);
+    let matches = match value.to_ascii_lowercase().as_str() {
+        "good" => alignment >= 350,
+        "evil" => alignment <= -350,
+        "neutral" => alignment > -350 && alignment < 350,
+        _ => return true,
+    };
+    let prohibited = rule
+        .get("prohibited")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if prohibited {
+        !matches
+    } else {
+        matches
+    }
+}
+
+/// `target_standing` / `position` — target is upright.
+fn check_rule_standing(world: &World, target: Entity) -> bool {
+    world
+        .get::<Posture>(target)
+        .is_none_or(|p| p.0 == PostureKind::Standing)
+}
+
+/// True iff `caster` has any item equipped in the named slot.
+fn caster_has_equipped(world: &mut World, caster: Entity, slot: Slot) -> bool {
+    let mut q = world.query::<(&Located, &EquippedSlot)>();
+    q.iter(world)
+        .any(|(loc, eq)| loc.0 == caster && eq.0 == slot)
 }
 
 /// Substitute `{actor.X}` / `{target.X}` placeholders in an

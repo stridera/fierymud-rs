@@ -120,10 +120,15 @@ pub struct AbilityCatalog {
     pub by_name: HashMap<String, AbilityDef>,
     /// Per-ability human-readable requirement messages, keyed by
     /// `Ability.id`. Sourced from `AbilityRestrictions.requirements`
-    /// (each rule object's `message` field). Real gating uses the
-    /// rule type/parameters; this map is just for the metadata
-    /// readout today.
+    /// (each rule object's `message` field). Used for the `requires:`
+    /// metadata readout in cast/skill output.
     pub restriction_messages: HashMap<i32, Vec<String>>,
+    /// Per-ability raw rule objects (full JSONB blobs from
+    /// `AbilityRestrictions.requirements`), keyed by `Ability.id`.
+    /// Each rule has at minimum a `type` field; the runtime evaluator
+    /// (`check_ability_restrictions` in commands) interprets the
+    /// supported subset and falls through silently on unknown types.
+    pub restriction_rules: HashMap<i32, Vec<serde_json::Value>>,
     /// Effect mappings each ability applies, in `order`. Sourced from
     /// `AbilityEffect`. Stored as (`effect_id`, `override_params`) so
     /// the casting pipeline can read per-mapping duration / amount /

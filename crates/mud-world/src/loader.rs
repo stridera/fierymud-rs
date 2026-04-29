@@ -271,7 +271,17 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .filter_map(|v| v.get("message").and_then(serde_json::Value::as_str).map(String::from))
             .collect();
         if !messages.is_empty() {
-            ability_catalog.restriction_messages.insert(row.ability_id, messages);
+            ability_catalog
+                .restriction_messages
+                .insert(row.ability_id, messages);
+        }
+        // Stash the full rule list so the runtime evaluator
+        // (commands::check_ability_restrictions) can interpret
+        // type-specific rules at cast time.
+        if !row.requirements.is_empty() {
+            ability_catalog
+                .restriction_rules
+                .insert(row.ability_id, row.requirements);
         }
     }
 
