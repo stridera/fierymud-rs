@@ -2405,9 +2405,10 @@ fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 mod tests {
     use super::{
         ColorMode, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
-        condition_label, direction_name, evaluate_formula, evaluate_simple_formula, format_idle,
-        has_effect_named, normalize_dice_notation, parse_direction, remove_effect_named,
-        render_color_tags, render_prompt, resolve_effect_conditions, resolve_effect_resource,
+        apply_knockdown_posture, condition_label, direction_name, evaluate_formula,
+        evaluate_simple_formula, format_idle, has_effect_named, normalize_dice_notation,
+        parse_direction, remove_effect_named, render_color_tags, render_prompt,
+        resolve_effect_conditions, resolve_effect_resource, resolve_knockdown_posture,
         sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
@@ -2948,6 +2949,77 @@ mod tests {
         let healed = apply_heal_stamina(&mut world, target, 100);
         assert_eq!(healed, 30);
         assert_eq!(world.get::<Stamina>(target).unwrap().current, 50);
+    }
+
+    #[test]
+    fn resolve_knockdown_posture_defaults_to_sitting() {
+        use mud_world::PostureKind;
+        // No params at all → Sitting (default).
+        assert_eq!(resolve_knockdown_posture(None, None), PostureKind::Sitting);
+        // Default params with target=resting → Resting.
+        let default_p = serde_json::json!({"target": "resting"});
+        assert_eq!(
+            resolve_knockdown_posture(None, Some(&default_p)),
+            PostureKind::Resting
+        );
+        // Override wins. Target=sitting overrides default=resting.
+        let override_p = serde_json::json!({"target": "sitting"});
+        assert_eq!(
+            resolve_knockdown_posture(Some(&override_p), Some(&default_p)),
+            PostureKind::Sitting
+        );
+        // Unknown target name falls through to Sitting.
+        let bogus = serde_json::json!({"target": "floor"});
+        assert_eq!(resolve_knockdown_posture(Some(&bogus), None), PostureKind::Sitting);
+    }
+
+    #[test]
+    fn apply_knockdown_posture_only_downgrades() {
+        use mud_world::{Posture, PostureKind};
+        let mut world = World::new();
+        let standing = world.spawn(Posture(PostureKind::Standing)).id();
+        let already_sitting = world.spawn(Posture(PostureKind::Sitting)).id();
+        let resting = world.spawn(Posture(PostureKind::Resting)).id();
+
+        // Standing → Sitting: change.
+        assert!(apply_knockdown_posture(&mut world, standing, PostureKind::Sitting));
+        assert_eq!(
+            world.get::<Posture>(standing).map(|p| p.0),
+            Some(PostureKind::Sitting)
+        );
+        // Sitting → Sitting: no-op.
+        assert!(!apply_knockdown_posture(&mut world, already_sitting, PostureKind::Sitting));
+        assert_eq!(
+            world.get::<Posture>(already_sitting).map(|p| p.0),
+            Some(PostureKind::Sitting)
+        );
+        // Resting → Sitting: would be an UPGRADE, refuse.
+        assert!(!apply_knockdown_posture(&mut world, resting, PostureKind::Sitting));
+        assert_eq!(
+            world.get::<Posture>(resting).map(|p| p.0),
+            Some(PostureKind::Resting)
+        );
+        // Sitting → Resting: legitimate further knockdown.
+        assert!(apply_knockdown_posture(
+            &mut world,
+            already_sitting,
+            PostureKind::Resting
+        ));
+        assert_eq!(
+            world.get::<Posture>(already_sitting).map(|p| p.0),
+            Some(PostureKind::Resting)
+        );
+    }
+
+    #[test]
+    fn apply_knockdown_posture_no_component_is_noop() {
+        let mut world = World::new();
+        let target = world.spawn(()).id();
+        assert!(!apply_knockdown_posture(
+            &mut world,
+            target,
+            mud_world::PostureKind::Sitting
+        ));
     }
 
     #[test]
@@ -5692,6 +5764,41 @@ fn invoke_ability(
                     format!("{} (cleansed {removed} effect(s))", spec.name)
                 });
             }
+            "knockdown" => {
+                // Knockdown has two parts: an immediate posture
+                // mutation (so the target is on the ground *now*) and
+                // a duration-tracked EffectInstance (so the effect
+                // shows up in `effects` and decays). Posture isn't
+                // bound to the effect's lifetime — matches the C++
+                // behavior where `stand` is the recovery action.
+                let posture = resolve_knockdown_posture(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                );
+                let toppled = apply_knockdown_posture(world, target_entity, posture);
+                let dur_secs = resolve_effect_duration(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    caster_level,
+                    caster_skill,
+                );
+                world.spawn((
+                    EffectInstance {
+                        kind: spec.id,
+                        name: spec.name.clone(),
+                        strength: 1,
+                        remaining_secs: dur_secs,
+                        source: EffectSource::Spell,
+                    },
+                    AppliedTo(target_entity),
+                ));
+                spawn_count += 1;
+                applied_msgs.push(if toppled {
+                    format!("{} (knocked {})", spec.name, posture.label())
+                } else {
+                    format!("{} (already {} or lower)", spec.name, posture.label())
+                });
+            }
             _ => {
                 let dur_secs = resolve_effect_duration(
                     spec.override_params.as_ref(),
@@ -5780,6 +5887,45 @@ fn resolve_effect_resource(
     pick(override_params)
         .or_else(|| pick(default_params))
         .unwrap_or_else(|| "hp".to_string())
+}
+
+/// Read knockdown's `target` field from override (then default)
+/// params. Maps `"resting"` to `Resting`; everything else (including
+/// missing) defaults to `Sitting` — matches the schema's
+/// knockdown-default semantics where the assumption is "you're on
+/// the ground" without specifying the exact subposture.
+fn resolve_knockdown_posture(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> PostureKind {
+    let pick = |p: Option<&serde_json::Value>| -> Option<String> {
+        p?.get("target")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    match pick(override_params).or_else(|| pick(default_params)).as_deref() {
+        Some("resting") => PostureKind::Resting,
+        _ => PostureKind::Sitting,
+    }
+}
+
+/// Set `target.Posture` to `posture` only if the target is currently
+/// at a *higher* rank (i.e. is upright relative to the desired
+/// knockdown posture). Returns true on actual change. No-op if
+/// the target lacks a Posture component (mobs without one stay
+/// implicit).
+fn apply_knockdown_posture(world: &mut World, target: Entity, posture: PostureKind) -> bool {
+    let current = world
+        .get::<Posture>(target)
+        .map_or(PostureKind::Standing, |p| p.0);
+    if current.rank() <= posture.rank() {
+        return false;
+    }
+    if let Some(mut p) = world.get_mut::<Posture>(target) {
+        p.0 = posture;
+        return true;
+    }
+    false
 }
 
 /// Pull a list of condition tags from an effect's params blob — the
