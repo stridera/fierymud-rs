@@ -4740,6 +4740,17 @@ fn invoke_ability(
 /// "<formula>", ...}` for expressions like `"level * 2"` or `"skill"`.
 /// Constants and resolved formulas are converted via 1 MUD hour = 75
 /// real seconds when no `durationUnit` is set.
+/// True iff `target` has an `EffectInstance` whose name matches
+/// `name` case-insensitively. Used by skills (gouge, berserk, ...)
+/// to refuse re-applying an already-active debuff/buff. O(E) over
+/// active effects; cheap at typical world scale (low hundreds).
+fn has_effect_named(world: &mut World, target: Entity, name: &str) -> bool {
+    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+    q.iter(world).any(|(eff, applied)| {
+        applied.0 == target && eff.name.eq_ignore_ascii_case(name)
+    })
+}
+
 fn resolve_effect_duration(
     override_params: Option<&serde_json::Value>,
     default_params: Option<&serde_json::Value>,
@@ -5825,13 +5836,7 @@ fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
         return;
     }
     // Already blinded? Refuse.
-    let already_blind = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world).any(|(eff, applied)| {
-            applied.0 == target && eff.name.eq_ignore_ascii_case("blind")
-        })
-    };
-    if already_blind {
+    if has_effect_named(world, target, "blind") {
         let target_name = name_or(world, target, "<unknown>");
         send_to(world, player, format!("{target_name} is already blinded.\r\n"));
         return;
