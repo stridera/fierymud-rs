@@ -1313,6 +1313,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_springleap,
     },
     Command {
+        names: &["throatcut"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "throatcut <target>",
+            summary: "Out-of-combat assassination — 2.5x damage opener.",
+            long: "Like backstab but heavier: 2.5x your dmg_roll on \
+                   the opening swing. Costs 8 stamina. Same engagement \
+                   rules — refused if you or target are already in \
+                   combat.",
+        },
+        run: cmd_throatcut,
+    },
+    Command {
         names: &["backstab", "bs"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6116,6 +6131,7 @@ const STOMP_COST: i32 = 6;
 const TRIPUP_COST: i32 = 5;
 const SWEEP_COST: i32 = 12;
 const ROUNDHOUSE_COST: i32 = 7;
+const THROATCUT_COST: i32 = 8;
 const BERSERK_COST: i32 = 8;
 const BERSERK_DURATION_SECS: i32 = 60;
 
@@ -7076,6 +7092,70 @@ fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} springs in and kicks {target_name}!\r\n"),
     );
 
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, located.0);
+    } else {
+        try_insert(world, player, Fighting(target));
+        if world.get::<CombatStats>(target).is_some()
+            && let Ok(mut e) = world.get_entity_mut(target)
+        {
+            e.insert(Fighting(player));
+        }
+    }
+}
+
+/// `throatcut <target>`: heavier backstab variant. 2.5x `dmg_roll`
+/// on the opening swing, 8 stamina.
+fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "throatcut") {
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "Your target is already aware of you.\r\n");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Throatcut whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "You can't throatcut yourself.\r\n");
+        return;
+    }
+    if world.get::<Fighting>(target).is_some() {
+        send_to(world, player, "They're too alert.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, THROATCUT_COST, "throatcut") {
+        return;
+    }
+
+    let base = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
+    let dmg = ((base * 5) / 2).max(1);
+    drain_stamina(world, player, THROATCUT_COST);
+    let player_name = name_of(world, player);
+    let target_name = name_or(world, target, "<unknown>");
+    let (dead, _) = apply_damage(world, target, dmg);
+    send_to(world, player, format!(
+        "You slash {target_name}'s throat for {dmg} damage!\r\n"
+    ));
+    if !dead {
+        send_rendered(world, target, &format!(
+            "{player_name} slashes your throat for {dmg} damage!\r\n"
+        ));
+    }
+    broadcast_room_except_rendered(
+        world, located.0, &[player, target],
+        &format!("{player_name} silently slashes {target_name}'s throat!\r\n"),
+    );
     if dead {
         crate::combat::handle_death(world, target, &target_name, located.0);
     } else {
