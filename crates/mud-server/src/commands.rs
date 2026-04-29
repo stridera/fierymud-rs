@@ -1197,6 +1197,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_berserk,
     },
     Command {
+        names: &["stomp"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "stomp [<target>]",
+            summary: "Knock the target prone (Sitting posture).",
+            long: "Costs 6 stamina, deals half your dmg_roll, sets the \
+                   target's posture to Sitting. Default target is your \
+                   current Fighting target. Refused on already-prone \
+                   targets.",
+        },
+        run: cmd_stomp,
+    },
+    Command {
         names: &["roar", "howl"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6055,6 +6070,7 @@ const REND_COST: i32 = 7;
 const REND_BLEED_SECS: i32 = 30;
 const ROAR_COST: i32 = 8;
 const ROAR_FEAR_SECS: i32 = 20;
+const STOMP_COST: i32 = 6;
 const BERSERK_COST: i32 = 8;
 const BERSERK_DURATION_SECS: i32 = 60;
 
@@ -6494,6 +6510,84 @@ fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
         &[player],
         &format!("{player_name} goes BERSERK!\r\n"),
     );
+}
+
+/// `stomp [<target>]`: damage + knock target prone. Default target
+/// is your current Fighting target. Refused on already-prone
+/// targets.
+fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "stomp") {
+        return;
+    }
+    if !check_stamina(world, player, STOMP_COST, "stomp") {
+        return;
+    }
+    let arg = args.trim();
+    let target = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Stomp whom? You aren't fighting.\r\n");
+            return;
+        };
+        t
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    if target == player {
+        send_to(world, player, "You can't stomp yourself.\r\n");
+        return;
+    }
+    let cur_posture = world.get::<Posture>(target).map(|p| p.0);
+    if !matches!(cur_posture, Some(PostureKind::Standing)) {
+        let target_name = name_or(world, target, "<unknown>");
+        send_to(world, player, format!(
+            "{target_name} is already on the ground.\r\n",
+        ));
+        return;
+    }
+    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
+        send_to(world, player, "Target is in limbo.\r\n");
+        return;
+    };
+
+    let dmg = world.get::<CombatStats>(player).map_or(1, |c| (c.dmg_roll / 2).max(1));
+    drain_stamina(world, player, STOMP_COST);
+
+    let player_name = name_of(world, player);
+    let target_name = name_or(world, target, "<unknown>");
+    let (dead, _) = apply_damage(world, target, dmg);
+
+    if !dead
+        && let Ok(mut e) = world.get_entity_mut(target)
+    {
+        e.insert(Posture(PostureKind::Sitting));
+    }
+
+    send_to(world, player, format!(
+        "You stomp on {target_name} for {dmg} damage; they go down!\r\n"
+    ));
+    if !dead {
+        send_rendered(world, target, &format!(
+            "{player_name} stomps you to the ground!\r\n"
+        ));
+    }
+    broadcast_room_except_rendered(
+        world,
+        target_room,
+        &[player, target],
+        &format!("{player_name} stomps {target_name} to the ground!\r\n"),
+    );
+
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, target_room);
+    }
 }
 
 /// `roar` / `howl`: room-wide fear application to mobs.
