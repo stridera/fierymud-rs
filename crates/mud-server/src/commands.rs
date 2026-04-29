@@ -1332,6 +1332,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_slay,
     },
     Command {
+        names: &["loadobj", "loado"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "loadobj <zone_id> <obj_id>",
+            summary: "Spawn an object prototype into your current room.",
+            long: "Counterpart to `summon` for objects. Resolves the \
+                   prototype via ObjectPrototypes[(zone, id)], spawns a \
+                   fresh Item entity in your room with WorldKey + Named + \
+                   Keywords (+ Description if the proto has an examine \
+                   text). Builder+.",
+        },
+        run: cmd_loadobj,
+    },
+    Command {
         names: &["purge"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -5775,6 +5791,77 @@ fn cmd_lua(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, format!("{e}\r\n"));
         }
     }
+}
+
+/// `loadobj <zone> <id>`: object counterpart to `summon`. Resolves
+/// the prototype, spawns a fresh Item in the player's room with the
+/// same component bundle the loader's reset pass produces (Item /
+/// Named / Keywords / `WorldKey` / `Located`, plus Description when
+/// the proto has an examine line).
+fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 2 {
+        send_to(world, player, "Usage: loadobj <zone_id> <obj_id>\r\n");
+        return;
+    }
+    let Ok(zone) = parts[0].parse::<i32>() else {
+        send_to(world, player, "Invalid zone id.\r\n");
+        return;
+    };
+    let Ok(obj_id) = parts[1].parse::<i32>() else {
+        send_to(world, player, "Invalid object id.\r\n");
+        return;
+    };
+
+    let proto = world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .get(&(zone, obj_id))
+        .cloned();
+    let Some(proto) = proto else {
+        send_to(
+            world,
+            player,
+            format!("No object prototype ({zone}, {obj_id}).\r\n"),
+        );
+        return;
+    };
+
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere; can't load.\r\n");
+        return;
+    };
+    let room = located.0;
+    let proto_name = proto.name.clone();
+    let proto_keywords = proto.keywords.clone();
+    let examine = proto.examine_description.clone();
+
+    let mut bundle = world.spawn((
+        Item,
+        Named { name: proto_name.clone() },
+        Keywords(proto_keywords),
+        WorldKey { zone: proto.zone_id, id: proto.id },
+        Located(room),
+    ));
+    if let Some(desc) = examine {
+        bundle.insert(Description(desc));
+    }
+    let item = bundle.id();
+
+    send_to(
+        world,
+        player,
+        format!(
+            "Loaded {proto_name} (entity {item:?}) at your feet.\r\n"
+        ),
+    );
+    let player_name = name_of(world, player);
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} produces {proto_name} from thin air.\r\n"),
+    );
 }
 
 fn cmd_summon(world: &mut World, player: Entity, args: &str) {
