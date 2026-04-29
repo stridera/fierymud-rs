@@ -1332,6 +1332,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_slay,
     },
     Command {
+        names: &["purge"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "purge [<target>]",
+            summary: "Despawn mobs + items in this room (or a single target).",
+            long: "With no argument, removes every mob and every \
+                   non-equipped item from the room — players are never \
+                   touched. With an argument, finds that mob/item by \
+                   keyword and despawns just it. Items inside containers \
+                   on a purged mob go with the mob (Located → mob).",
+        },
+        run: cmd_purge,
+    },
+    Command {
         names: &["lua"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -5537,6 +5553,88 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
     if let Ok(e) = world.get_entity_mut(target) {
         e.despawn();
     }
+}
+
+/// Builder+ room cleanup. Despawns every Mob and every non-equipped
+/// Item directly Located in the player's room (and nested items
+/// Located on those mobs go with them implicitly — when a parent is
+/// despawned, the orphan handler... well actually `bevy_ecs` doesn't
+/// auto-cascade, so we walk and despawn explicitly). Players are
+/// never touched.
+fn cmd_purge(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+
+    if !arg.is_empty() {
+        // Single-target form: try mobs/items in the room (no players).
+        let target = find_actor_in_room(world, arg, room, player)
+            .filter(|e| world.get::<Player>(*e).is_none())
+            .or_else(|| {
+                let mut q = world
+                    .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+                q.iter(world)
+                    .find(|(_, l, n, kw)| l.0 == room && matches(&arg.to_ascii_lowercase(), n, *kw))
+                    .map(|(e, _, _, _)| e)
+            });
+        let Some(target) = target else {
+            send_to(world, player, format!("No purge-able '{arg}' here.\r\n"));
+            return;
+        };
+        let target_name = name_or(world, target, "<unknown>");
+        // Cascade-despawn: anything Located on the target (mob's gear /
+        // container contents) goes too.
+        let nested: Vec<Entity> = {
+            let mut q = world.query::<(Entity, &Located)>();
+            q.iter(world).filter(|(_, l)| l.0 == target).map(|(e, _)| e).collect()
+        };
+        for n in nested {
+            if let Ok(e) = world.get_entity_mut(n) {
+                e.despawn();
+            }
+        }
+        if let Ok(e) = world.get_entity_mut(target) {
+            e.despawn();
+        }
+        send_rendered(world, player, &format!("You purge {target_name}.\r\n"));
+        return;
+    }
+
+    // No-arg form: every mob + every item in the room.
+    let mobs: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
+        q.iter(world).filter(|(_, l)| l.0 == room).map(|(e, _)| e).collect()
+    };
+    let items: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+        q.iter(world).filter(|(_, l)| l.0 == room).map(|(e, _)| e).collect()
+    };
+    let mob_count = mobs.len();
+    let item_count = items.len();
+    // Despawn nested children of mobs first (gear, contents).
+    let nested_of_mobs: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(_, l)| mobs.contains(&l.0))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let nested_count = nested_of_mobs.len();
+    for e in nested_of_mobs.into_iter().chain(mobs.into_iter()).chain(items.into_iter()) {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    send_to(
+        world,
+        player,
+        format!(
+            "Purged {mob_count} mob(s), {item_count} item(s), and {nested_count} nested.\r\n"
+        ),
+    );
 }
 
 fn cmd_restore(world: &mut World, player: Entity, args: &str) {
