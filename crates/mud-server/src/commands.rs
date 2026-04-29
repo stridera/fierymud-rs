@@ -389,15 +389,44 @@ const COMMANDS: &[Command] = &[
         help: Help {
             usage: "cast <spell> [target]",
             summary: "Cast a spell from the loaded catalog.",
-            long: "Looks up the ability by case-insensitive name (partial \
+            long: "Looks up a SPELL by case-insensitive name (partial \
                    match accepted). For now this is a stub: prints the \
                    ability's metadata so you can see what's in the \
                    catalog. Real effect application — slot consumption, \
                    restriction checks, damage/heal/buff resolution — \
                    lands when CharacterAbilities and the effect \
-                   pipeline are wired.",
+                   pipeline are wired. Only matches abilityType = \
+                   SPELL; for chants and songs use `chant` / `perform`.",
         },
         run: cmd_cast,
+    },
+    Command {
+        names: &["chant"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "chant <chant> [target]",
+            summary: "Invoke a chant from the catalog (cleric-side spells).",
+            long: "Same shape as `cast` but filters to abilityType = \
+                   CHANT. Stub: prints metadata and gates on \
+                   KnownAbilities, no effect application yet.",
+        },
+        run: cmd_chant,
+    },
+    Command {
+        names: &["perform"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "perform <song> [target]",
+            summary: "Perform a song from the catalog (bard).",
+            long: "Same shape as `cast` but filters to abilityType = \
+                   SONG. Stub: prints metadata and gates on \
+                   KnownAbilities, no effect application yet.",
+        },
+        run: cmd_perform,
     },
     Command {
         names: &["bug"],
@@ -3331,32 +3360,56 @@ fn cmd_spells(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_cast(world: &mut World, player: Entity, args: &str) {
+    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Spell, "cast");
+}
+
+fn cmd_chant(world: &mut World, player: Entity, args: &str) {
+    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Chant, "chant");
+}
+
+fn cmd_perform(world: &mut World, player: Entity, args: &str) {
+    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Song, "perform");
+}
+
+/// Shared cast/chant/perform body. Looks up the ability filtered by
+/// `kind`, gates on `KnownAbilities`, and prints metadata. Real effect
+/// application is the next slice — for now this is a stub that proves
+/// the lookup + permission check work end-to-end.
+fn invoke_ability(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    kind: mud_db::abilities::AbilityKind,
+    verb: &str,
+) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.is_empty() || parts[0].trim().is_empty() {
-        send_to(world, player, "Cast what?\r\n");
+        send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
         return;
     }
-    let spell_name = parts[0].trim().to_ascii_lowercase();
+    let needle = parts[0].trim().to_ascii_lowercase();
     let target_word = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
 
-    // Find by exact key first, then by substring.
+    // Find by exact key (and right kind) first, then fall back to the
+    // first substring match restricted to the same kind.
     let catalog = world.resource::<AbilityCatalog>();
     let def = catalog
         .by_name
-        .get(&spell_name)
+        .get(&needle)
+        .filter(|d| d.kind == kind)
         .cloned()
         .or_else(|| {
             catalog
                 .by_name
                 .values()
-                .find(|d| d.plain_name.to_ascii_lowercase().contains(&spell_name))
+                .find(|d| d.kind == kind && d.plain_name.to_ascii_lowercase().contains(&needle))
                 .cloned()
         });
     let Some(def) = def else {
         send_to(
             world,
             player,
-            format!("No ability matching '{spell_name}'.\r\n"),
+            format!("No {} matching '{needle}'.\r\n", kind.label()),
         );
         return;
     };
@@ -3370,7 +3423,7 @@ fn cmd_cast(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("You don't know how to cast {}.\r\n", def.plain_name),
+            format!("You don't know how to {} {}.\r\n", verb, def.plain_name),
         );
         return;
     }
@@ -3400,8 +3453,18 @@ fn cmd_cast(world: &mut World, player: Entity, args: &str) {
     if let Some(target) = target_word {
         out.push_str(&format!("    target: {target}\r\n"));
     }
-    out.push_str("    (casting not yet implemented — this is metadata only)\r\n");
+    out.push_str(&format!(
+        "    ({verb} not yet implemented — this is metadata only)\r\n"
+    ));
     send_to(world, player, out);
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+    }
 }
 
 fn cmd_socials(world: &mut World, player: Entity, _args: &str) {
