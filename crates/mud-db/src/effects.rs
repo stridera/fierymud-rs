@@ -9,6 +9,11 @@ pub struct Effect {
     pub effect_type: String,
     pub tags: Vec<String>,
     pub presence_override: Option<String>,
+    /// JSONB blob of the effect's default parameters (duration, amount,
+    /// target field, etc.). The `AbilityEffect` row's `override_params`
+    /// takes precedence; this is the secondary fallback before the
+    /// runtime's hardcoded global default.
+    pub default_params: serde_json::Value,
 }
 
 pub async fn list_effects(pool: &PgPool) -> sqlx::Result<Vec<Effect>> {
@@ -21,7 +26,8 @@ pub async fn list_effects(pool: &PgPool) -> sqlx::Result<Vec<Effect>> {
             description,
             "effectType" AS effect_type,
             tags AS "tags!: Vec<String>",
-            presence_override
+            presence_override,
+            default_params
         FROM "Effect"
         ORDER BY id
         "#

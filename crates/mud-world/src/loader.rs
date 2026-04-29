@@ -196,6 +196,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 effect_type: row.effect_type,
                 tags: row.tags,
                 presence_override: row.presence_override,
+                default_params: row.default_params,
             },
         );
     }

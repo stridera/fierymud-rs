@@ -35,6 +35,10 @@ pub struct EffectDef {
     pub effect_type: String,
     pub tags: Vec<String>,
     pub presence_override: Option<String>,
+    /// JSONB blob of default parameters from `Effect.default_params`.
+    /// Used as the secondary fallback for duration/amount/etc. when an
+    /// `AbilityEffect.override_params` row didn't supply them.
+    pub default_params: serde_json::Value,
 }
 
 /// Catalog of object prototypes loaded from the Objects table at startup.

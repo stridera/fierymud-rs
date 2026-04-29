@@ -3528,7 +3528,10 @@ fn invoke_ability(
                     (
                         *id,
                         e.name.clone(),
-                        resolve_effect_duration(override_params.as_ref()),
+                        resolve_effect_duration(
+                            override_params.as_ref(),
+                            Some(&e.default_params),
+                        ),
                     )
                 })
             })
@@ -3586,27 +3589,43 @@ fn invoke_ability(
 }
 
 /// Pull a numeric duration out of an `AbilityEffect.override_params`
-/// JSON blob. Schema convention is `{"duration": <int>, "durationUnit":
-/// "hours"}` for constants and `{"duration": "<formula>", ...}` for
-/// expressions. Constants are converted via 1 MUD hour = 75 real
-/// seconds (per the existing fierymud time scale). Anything else
-/// (formula strings, missing fields) falls back to the global
-/// default.
-fn resolve_effect_duration(params: Option<&serde_json::Value>) -> i32 {
+/// blob, falling back to the `Effect.default_params` blob, and finally
+/// to the global default. Schema convention is `{"duration": <int>,
+/// "durationUnit": "hours"}` for constants and `{"duration":
+/// "<formula>", ...}` for expressions. Constants are converted via 1
+/// MUD hour = 75 real seconds (per the existing fierymud time scale).
+/// Formula strings (still numeric `as_i64()` returns None on them)
+/// fall through.
+fn resolve_effect_duration(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> i32 {
+    if let Some(secs) = duration_from_blob(override_params) {
+        return secs;
+    }
+    if let Some(secs) = duration_from_blob(default_params) {
+        return secs;
+    }
+    APPLIED_EFFECT_DURATION_SECS
+}
+
+/// Try to extract a constant numeric duration in seconds from one
+/// JSONB blob. Returns None if the blob is missing, has no `duration`,
+/// or the duration is a non-numeric (formula string).
+fn duration_from_blob(params: Option<&serde_json::Value>) -> Option<i32> {
     const SECS_PER_MUD_HOUR: i32 = 75;
-    let Some(p) = params else { return APPLIED_EFFECT_DURATION_SECS };
-    let Some(d) = p.get("duration") else { return APPLIED_EFFECT_DURATION_SECS };
-    let Some(n) = d.as_i64() else { return APPLIED_EFFECT_DURATION_SECS };
+    let p = params?;
+    let d = p.get("duration")?;
+    let n = d.as_i64()?;
     let unit_seconds = match p.get("durationUnit").and_then(serde_json::Value::as_str) {
         Some("hours") | None => SECS_PER_MUD_HOUR,
         Some("minutes") => 60,
         Some("rounds") => 4,
-        // "seconds" or any unknown unit: treat the integer as seconds
-        // rather than risk a wildly-wrong unit interpretation.
+        // "seconds" or any unknown unit: treat the integer as seconds.
         Some(_) => 1,
     };
-    let raw = i32::try_from(n).unwrap_or(APPLIED_EFFECT_DURATION_SECS);
-    raw.saturating_mul(unit_seconds).max(1)
+    let raw = i32::try_from(n).ok()?;
+    Some(raw.saturating_mul(unit_seconds).max(1))
 }
 
 fn capitalize(s: &str) -> String {
