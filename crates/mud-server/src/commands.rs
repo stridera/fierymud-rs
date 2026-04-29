@@ -356,6 +356,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_exits,
     },
     Command {
+        names: &["world", "users"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "world",
+            summary: "Live entity counts: zones, rooms, mobs, items, players.",
+            long: "Snapshot of the world state right now: how many zones \
+                   and rooms loaded, how many live mobs and items \
+                   spawned, how many players online, server tick + \
+                   uptime. The aliases `users` mirrors `world` since \
+                   player count is the most-asked piece.",
+        },
+        run: cmd_world,
+    },
+    Command {
         names: &["time", "uptime"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3295,6 +3311,32 @@ fn direction_order(d: mud_db::enums::Direction) -> u8 {
         Portal => 12,
         mud_db::enums::Direction::None => 13,
     }
+}
+
+fn cmd_world(world: &mut World, player: Entity, _args: &str) {
+    let zones = world.query_filtered::<Entity, With<mud_world::Zone>>().iter(world).count();
+    let rooms = world.query_filtered::<Entity, With<mud_world::Room>>().iter(world).count();
+    let mobs = world.query_filtered::<Entity, With<Mob>>().iter(world).count();
+    let items = world.query_filtered::<Entity, With<Item>>().iter(world).count();
+    let players_online = world
+        .query_filtered::<Entity, (With<Player>, With<Online>)>()
+        .iter(world)
+        .count();
+    let tick = world.resource::<TickCount>().0;
+    let uptime_secs = world.resource::<ServerStart>().0.elapsed().as_secs();
+    let h = uptime_secs / 3600;
+    let m = (uptime_secs % 3600) / 60;
+    let s = uptime_secs % 60;
+
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("  Zones loaded:    {zones}\r\n"));
+    out.push_str(&format!("  Rooms loaded:    {rooms}\r\n"));
+    out.push_str(&format!("  Mobs spawned:    {mobs}\r\n"));
+    out.push_str(&format!("  Items spawned:   {items}\r\n"));
+    out.push_str(&format!("  Players online:  {players_online}\r\n"));
+    out.push_str(&format!("  Server tick:     {tick}\r\n"));
+    out.push_str(&format!("  Uptime:          {h}h {m}m {s}s\r\n"));
+    send_to(world, player, out);
 }
 
 fn cmd_time(world: &mut World, player: Entity, _args: &str) {
