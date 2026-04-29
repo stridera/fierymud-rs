@@ -1375,6 +1375,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_disengage,
     },
     Command {
+        names: &["doorbash"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "doorbash <direction>",
+            summary: "Force-open a closed or locked door.",
+            long: "Costs 10 stamina. Flips closed/locked exits to \
+                   Open on both sides — useful when you don't have \
+                   the key. Refused on already-open exits and when \
+                   no exit exists in the named direction.",
+        },
+        run: cmd_doorbash,
+    },
+    Command {
         names: &["bash", "bodyslam", "maul"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3918,6 +3933,51 @@ fn flip_door_both_sides(world: &mut World, room: Entity, dir: Direction, new_sta
     }
 }
 
+/// `doorbash <direction>`: force-open a closed/locked exit via
+/// stamina. Same two-sided sync as `open`/`close`.
+fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "doorbash") {
+        return;
+    }
+    if !check_stamina(world, player, DOORBASH_COST, "doorbash") {
+        return;
+    }
+    let arg = args.trim();
+    let Some(dir) = parse_direction(arg) else {
+        send_to(world, player, "Doorbash which way?\r\n");
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let cur_state = world
+        .get::<Exits>(room)
+        .and_then(|e| e.0.get(&dir).map(|ed| ed.state));
+    let Some(state) = cur_state else {
+        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        return;
+    };
+    if state == ExitState::Open {
+        send_to(world, player, format!("It's already open {}.\r\n", direction_name(dir)));
+        return;
+    }
+    drain_stamina(world, player, DOORBASH_COST);
+    flip_door_both_sides(world, room, dir, ExitState::Open);
+
+    let player_name = name_of(world, player);
+    send_to(world, player, format!(
+        "You bash open the way {}!\r\n",
+        direction_name(dir),
+    ));
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} bashes the door {} wide open!\r\n", direction_name(dir)),
+    );
+}
+
 /// `open <direction>`: flip a closed exit to Open. Refused on
 /// locked exits and on exits that don't exist.
 fn cmd_open(world: &mut World, player: Entity, args: &str) {
@@ -5741,6 +5801,7 @@ const LAYHANDS_HEAL: i32 = 30;
 const RESCUE_COST: i32 = 6;
 const DISARM_COST: i32 = 5;
 const HITALL_COST: i32 = 10;
+const DOORBASH_COST: i32 = 10;
 const BACKSTAB_COST: i32 = 6;
 const BACKSTAB_MULT: i32 = 2;
 const SPRINGLEAP_COST: i32 = 7;
