@@ -17,7 +17,7 @@ use mud_world::{
     AbilityCatalog, Account, AccountSummary, AppliedTo, ClassCatalog, CombatStats, Description,
     EffectCatalog, EffectInstance, EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen,
     Health, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
-    MobPrototypes, Named, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
+    MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, TellLog, Title, UiStyle,
     WearableIn, WorldKey, WorldKeyIndex,
 };
@@ -368,6 +368,21 @@ const COMMANDS: &[Command] = &[
                    primary name's slot.",
         },
         run: cmd_commands,
+    },
+    Command {
+        names: &["compare"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "compare <item-a> <item-b>",
+            summary: "Compare two carried/worn items by weight and level.",
+            long: "Each item is matched by keyword the same way `wear` \
+                   matches. Both items must be on you (inventory or \
+                   equipped). Prints the deltas with arrows pointing at \
+                   the lighter / lower-level side.",
+        },
+        run: cmd_compare,
     },
     Command {
         names: &["account"],
@@ -3340,6 +3355,86 @@ fn direction_order(d: mud_db::enums::Direction) -> u8 {
         Portal => 12,
         mud_db::enums::Direction::None => 13,
     }
+}
+
+/// `compare <a> <b>`: side-by-side weight + level + type comparison
+/// for two carried-or-worn items, plus a small deltas line. Splits
+/// the args at the first run of whitespace; multi-word keywords on
+/// either side aren't supported (a quoted-arg parser would be more
+/// general but no other command needs one yet).
+fn cmd_compare(world: &mut World, player: Entity, args: &str) {
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let Some(a_word) = parts.next().filter(|s| !s.is_empty()) else {
+        send_to(world, player, "Compare what to what?\r\n");
+        return;
+    };
+    let Some(b_word) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
+        send_to(world, player, "Compare to what?\r\n");
+        return;
+    };
+
+    let Some(a) = find_carried_by(world, a_word, player, EquipFilter::Anywhere) else {
+        send_to(world, player, format!("You don't have '{a_word}'.\r\n"));
+        return;
+    };
+    let Some(b) = find_carried_by(world, b_word, player, EquipFilter::Anywhere) else {
+        send_to(world, player, format!("You don't have '{b_word}'.\r\n"));
+        return;
+    };
+    if a == b {
+        send_to(world, player, "That's the same item.\r\n");
+        return;
+    }
+
+    let a_name = name_of(world, a);
+    let b_name = name_of(world, b);
+    let a_proto = world
+        .get::<WorldKey>(a)
+        .and_then(|k| world.resource::<ObjectPrototypes>().by_key.get(&(k.zone, k.id)).cloned());
+    let b_proto = world
+        .get::<WorldKey>(b)
+        .and_then(|k| world.resource::<ObjectPrototypes>().by_key.get(&(k.zone, k.id)).cloned());
+    let Some(ap) = a_proto else {
+        send_to(world, player, format!("No prototype data for {a_name}.\r\n"));
+        return;
+    };
+    let Some(bp) = b_proto else {
+        send_to(world, player, format!("No prototype data for {b_name}.\r\n"));
+        return;
+    };
+
+    let mode = color_mode_for(world, player);
+    let mut out = String::from("\r\n");
+    out.push_str(&format!(
+        "  A: {}    weight: {:.1}   level: {}   ({:?})\r\n",
+        render_color_tags(&a_name, mode),
+        ap.weight,
+        ap.level,
+        ap.r#type,
+    ));
+    out.push_str(&format!(
+        "  B: {}    weight: {:.1}   level: {}   ({:?})\r\n",
+        render_color_tags(&b_name, mode),
+        bp.weight,
+        bp.level,
+        bp.r#type,
+    ));
+    let weight_delta = ap.weight - bp.weight;
+    let level_delta = ap.level - bp.level;
+    let weight_line = if weight_delta.abs() < f64::EPSILON {
+        "Same weight.".to_string()
+    } else if weight_delta > 0.0 {
+        format!("A heavier by {weight_delta:.1}.")
+    } else {
+        format!("B heavier by {:.1}.", -weight_delta)
+    };
+    let level_line = match level_delta.cmp(&0) {
+        std::cmp::Ordering::Equal => "Same level.".to_string(),
+        std::cmp::Ordering::Greater => format!("A higher level by {level_delta}."),
+        std::cmp::Ordering::Less => format!("B higher level by {}.", -level_delta),
+    };
+    out.push_str(&format!("  {weight_line}  {level_line}\r\n"));
+    send_to(world, player, out);
 }
 
 /// `account`: read-only summary from the `AccountSummary` component
