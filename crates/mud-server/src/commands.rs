@@ -1025,6 +1025,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["roar", "howl"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "roar",
+            summary: "Intimidate every mob in the room with a fear effect.",
+            long: "Costs 8 stamina. Spawns a `fear` EffectInstance on \
+                   each mob currently in your room (skipping any \
+                   already feared) for 20s. Doesn't damage anyone, \
+                   doesn't engage. Players are not targeted.",
+        },
+        run: cmd_roar,
+    },
+    Command {
         names: &["gouge"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5320,6 +5335,8 @@ const BACKSTAB_COST: i32 = 6;
 const BACKSTAB_MULT: i32 = 2;
 const GOUGE_COST: i32 = 7;
 const GOUGE_BLIND_SECS: i32 = 30;
+const ROAR_COST: i32 = 8;
+const ROAR_FEAR_SECS: i32 = 20;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
@@ -5719,6 +5736,61 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if dead {
         crate::combat::handle_death(world, target, &target_name, player_room);
     }
+}
+
+/// `roar` / `howl`: room-wide fear application to mobs.
+fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "roar") {
+        return;
+    }
+    if !check_stamina(world, player, ROAR_COST, "roar") {
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+    // Pre-compute the set of currently-feared mobs so we don't stack.
+    let feared: std::collections::HashSet<Entity> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(e, _)| e.name.eq_ignore_ascii_case("fear"))
+            .map(|(_, applied)| applied.0)
+            .collect()
+    };
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == room && !feared.contains(e))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    drain_stamina(world, player, ROAR_COST);
+
+    let player_name = name_of(world, player);
+    let count = targets.len();
+    for t in targets {
+        world.spawn((
+            EffectInstance {
+                kind: 0,
+                name: "fear".to_string(),
+                strength: 1,
+                remaining_secs: ROAR_FEAR_SECS,
+                source: EffectSource::Other("roar".to_string()),
+            },
+            AppliedTo(t),
+        ));
+    }
+    send_to(world, player, format!(
+        "You roar a primal challenge. ({count} mob(s) feared)\r\n"
+    ));
+    broadcast_room_except_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} roars a primal challenge!\r\n"),
+    );
 }
 
 /// `gouge [<target>]`: damage + temporary blind effect. Default
