@@ -2404,9 +2404,10 @@ fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColorMode, apply_damage, condition_label, direction_name, evaluate_simple_formula,
-        format_idle, has_effect_named, parse_direction, remove_effect_named, render_color_tags,
-        render_prompt, sector_movement_cost,
+        ColorMode, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
+        condition_label, direction_name, evaluate_formula, evaluate_simple_formula, format_idle,
+        has_effect_named, normalize_dice_notation, parse_direction, remove_effect_named,
+        render_color_tags, render_prompt, resolve_effect_resource, sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -2790,12 +2791,83 @@ mod tests {
     }
 
     #[test]
-    fn formula_eval_unknown_complex_returns_none() {
-        // Complex expressions aren't supported; caller falls through to default.
+    fn formula_eval_parens_and_multi_op() {
+        // Expressions previously rejected now resolve via the recursive
+        // descent parser — operator precedence and parens both work.
+        assert_eq!(evaluate_simple_formula("(level)", 10, 0), Some(10));
+        assert_eq!(evaluate_simple_formula("level * 2 + skill", 10, 5), Some(25));
+        assert_eq!(
+            evaluate_simple_formula("100 + skill / 5", 0, 25),
+            Some(105)
+        );
+        assert_eq!(
+            evaluate_simple_formula("(level + skill) * 2", 3, 4),
+            Some(14)
+        );
+    }
+
+    #[test]
+    fn formula_eval_unknown_still_returns_none() {
+        // Unknown identifiers and unsupported calls still fall through.
         assert_eq!(evaluate_simple_formula("base_damage + skill", 10, 5), None);
-        assert_eq!(evaluate_simple_formula("(level)", 10, 0), None);
         assert_eq!(evaluate_simple_formula("pow(skill, 2)", 0, 5), None);
-        assert_eq!(evaluate_simple_formula("level * 2 + skill", 10, 5), None);
+        // Malformed: dangling operator.
+        assert_eq!(evaluate_simple_formula("level +", 10, 0), None);
+        assert_eq!(evaluate_simple_formula("(level", 10, 0), None);
+    }
+
+    #[test]
+    fn formula_eval_roll_dice_uses_callback() {
+        // Deterministic dice closure: every roll_dice(N, M) returns N * M.
+        let mut det = |n: i32, m: i32| n * m;
+        assert_eq!(evaluate_formula("roll_dice(2, 9)", 0, 0, &mut det), Some(18));
+        // Precedence: roll_dice + skill / 5 with skill=25 → 18 + 5 = 23
+        assert_eq!(
+            evaluate_formula("roll_dice(2, 9) + skill / 5", 0, 25, &mut det),
+            Some(23)
+        );
+        // The dice-notation normalizer rewrites NdM → roll_dice(N, M)
+        // before evaluation. `1d8` with the same stub is 8.
+        assert_eq!(amount_blob_eval("1d8", 0, 0, &mut det), Some(8));
+        // Constant `100 + 1d8 + skill / 5` with skill=20 is 100 + 8 + 4 = 112.
+        assert_eq!(
+            amount_blob_eval("100 + 1d8 + skill / 5", 0, 20, &mut det),
+            Some(112)
+        );
+    }
+
+    fn amount_blob_eval(
+        s: &str,
+        level: i32,
+        skill: i32,
+        dice: &mut dyn FnMut(i32, i32) -> i32,
+    ) -> Option<i32> {
+        evaluate_formula(&normalize_dice_notation(s), level, skill, dice)
+    }
+
+    #[test]
+    fn dice_notation_normalizer_rewrites_n_d_m() {
+        assert_eq!(normalize_dice_notation("1d8"), "roll_dice(1, 8)");
+        assert_eq!(normalize_dice_notation("2D6"), "roll_dice(2, 6)");
+        assert_eq!(
+            normalize_dice_notation("100 + 2d9 + skill / 5"),
+            "100 + roll_dice(2, 9) + skill / 5"
+        );
+        // Bare number untouched; no `d<digits>` pattern.
+        assert_eq!(normalize_dice_notation("100 + skill"), "100 + skill");
+    }
+
+    #[test]
+    fn amount_from_blob_reads_override_then_default() {
+        // Override-priority: amount=42 wins.
+        let blob = serde_json::json!({"amount": 42});
+        assert_eq!(amount_from_blob(Some(&blob), 0, 0), Some(42));
+        // String formula with skill substitution.
+        let blob = serde_json::json!({"amount": "skill / 4"});
+        assert_eq!(amount_from_blob(Some(&blob), 0, 100), Some(25));
+        // Missing field → None (caller falls through).
+        let blob = serde_json::json!({"duration": 5});
+        assert_eq!(amount_from_blob(Some(&blob), 0, 0), None);
     }
 
     use mud_world::{AppliedTo, EffectInstance, EffectSource};
@@ -2833,6 +2905,66 @@ mod tests {
         spawn_effect_named(&mut world, target_a, "bleed");
         assert!(has_effect_named(&mut world, target_a, "bleed"));
         assert!(!has_effect_named(&mut world, target_b, "bleed"));
+    }
+
+    #[test]
+    fn apply_heal_hp_caps_at_max() {
+        let mut world = World::new();
+        let target = world.spawn(Health { hp: 50, max: 100 }).id();
+        let healed = apply_heal_hp(&mut world, target, 30);
+        assert_eq!(healed, 30);
+        assert_eq!(world.get::<Health>(target).unwrap().hp, 80);
+        // Overheal: only fills to max.
+        let healed = apply_heal_hp(&mut world, target, 50);
+        assert_eq!(healed, 20);
+        assert_eq!(world.get::<Health>(target).unwrap().hp, 100);
+        // Already-full: no-op.
+        let healed = apply_heal_hp(&mut world, target, 25);
+        assert_eq!(healed, 0);
+        assert_eq!(world.get::<Health>(target).unwrap().hp, 100);
+    }
+
+    #[test]
+    fn apply_heal_hp_ignores_nonpositive() {
+        let mut world = World::new();
+        let target = world.spawn(Health { hp: 50, max: 100 }).id();
+        assert_eq!(apply_heal_hp(&mut world, target, 0), 0);
+        assert_eq!(apply_heal_hp(&mut world, target, -10), 0);
+        assert_eq!(world.get::<Health>(target).unwrap().hp, 50);
+    }
+
+    #[test]
+    fn apply_heal_hp_returns_zero_when_no_health() {
+        let mut world = World::new();
+        let target = world.spawn(()).id();
+        assert_eq!(apply_heal_hp(&mut world, target, 30), 0);
+    }
+
+    #[test]
+    fn apply_heal_stamina_caps_at_max() {
+        let mut world = World::new();
+        let target = world.spawn(Stamina { current: 20, max: 50 }).id();
+        let healed = apply_heal_stamina(&mut world, target, 100);
+        assert_eq!(healed, 30);
+        assert_eq!(world.get::<Stamina>(target).unwrap().current, 50);
+    }
+
+    #[test]
+    fn resolve_effect_resource_picks_override_first() {
+        let override_p = serde_json::json!({"resource": "Move"});
+        let default_p = serde_json::json!({"resource": "hp"});
+        // Override wins, lowercased.
+        assert_eq!(
+            resolve_effect_resource(Some(&override_p), Some(&default_p)),
+            "move"
+        );
+        // No override → default.
+        assert_eq!(
+            resolve_effect_resource(None, Some(&default_p)),
+            "hp"
+        );
+        // Neither → default to "hp".
+        assert_eq!(resolve_effect_resource(None, None), "hp");
     }
 
     #[test]
@@ -5425,19 +5557,17 @@ fn invoke_ability(
             out.push_str(&format!("    requires: {m}\r\n"));
         }
     }
-    // Look up the effects this ability applies and spawn an
-    // EffectInstance per mapping attached to the resolved target.
-    // Duration is resolved via the formula evaluator: a numeric
-    // `duration` becomes seconds (constant in MUD hours unless
-    // `durationUnit` overrides), and a formula string like
-    // `"level * 2"` substitutes the caster's level / skill from
-    // `Profile` and `KnownAbilities` respectively.
+    // Look up the effects this ability applies and dispatch each by
+    // its `Effect.effectType`. `heal` is applied immediately to the
+    // target's `Health` (or `Stamina` when `resource = "move"`); other
+    // types (`status`, `modify`, ...) spawn an `EffectInstance` whose
+    // duration the effect/regen ticks decrement.
     let caster_level = world.get::<Profile>(player).map_or(1, |p| p.level.max(1));
     let caster_skill = world
         .get::<KnownAbilities>(player)
         .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).map(|(_, p, _)| *p))
         .unwrap_or(0);
-    let effect_specs: Vec<(i32, String, i32)> = {
+    let effect_specs: Vec<EffectSpec> = {
         let mappings = world
             .resource::<AbilityCatalog>()
             .effects_for
@@ -5448,58 +5578,94 @@ fn invoke_ability(
         mappings
             .iter()
             .filter_map(|(id, override_params)| {
-                effect_catalog.by_id.get(id).map(|e| {
-                    (
-                        *id,
-                        e.name.clone(),
-                        resolve_effect_duration(
-                            override_params.as_ref(),
-                            Some(&e.default_params),
-                            caster_level,
-                            caster_skill,
-                        ),
-                    )
+                effect_catalog.by_id.get(id).map(|e| EffectSpec {
+                    id: *id,
+                    name: e.name.clone(),
+                    effect_type: e.effect_type.clone(),
+                    override_params: override_params.clone(),
+                    default_params: e.default_params.clone(),
                 })
             })
             .collect()
     };
-    let mut applied_names: Vec<String> = Vec::with_capacity(effect_specs.len());
-    for (eff_id, eff_name, dur_secs) in &effect_specs {
-        world.spawn((
-            EffectInstance {
-                kind: *eff_id,
-                name: eff_name.clone(),
-                strength: 1,
-                remaining_secs: *dur_secs,
-                source: EffectSource::Spell,
-            },
-            AppliedTo(target_entity),
-        ));
-        applied_names.push(eff_name.clone());
+    let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
+    let mut spawn_count: usize = 0;
+    for spec in &effect_specs {
+        // `match` (not `if`) because Phase B is adding more effect-type
+        // arms (cleanse, knockdown, redirect, ...) right after this one.
+        #[allow(clippy::single_match_else)]
+        match spec.effect_type.as_str() {
+            "heal" => {
+                let amount = resolve_effect_amount(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    caster_level,
+                    caster_skill,
+                );
+                let Some(amount) = amount else {
+                    applied_msgs.push(format!("{} (no amount resolved)", spec.name));
+                    continue;
+                };
+                let resource = resolve_effect_resource(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                );
+                let healed = match resource.as_str() {
+                    "move" | "stamina" => apply_heal_stamina(world, target_entity, amount),
+                    _ => apply_heal_hp(world, target_entity, amount),
+                };
+                let resource_label = if resource == "move" || resource == "stamina" {
+                    "stamina"
+                } else {
+                    "HP"
+                };
+                applied_msgs.push(format!("{} (+{healed} {resource_label})", spec.name));
+            }
+            _ => {
+                let dur_secs = resolve_effect_duration(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    caster_level,
+                    caster_skill,
+                );
+                world.spawn((
+                    EffectInstance {
+                        kind: spec.id,
+                        name: spec.name.clone(),
+                        strength: 1,
+                        remaining_secs: dur_secs,
+                        source: EffectSource::Spell,
+                    },
+                    AppliedTo(target_entity),
+                ));
+                spawn_count += 1;
+                applied_msgs.push(spec.name.clone());
+            }
+        }
     }
-    if applied_names.is_empty() {
+    if applied_msgs.is_empty() {
         out.push_str(&format!(
             "    (no effects defined for this {} — nothing to apply)\r\n",
             kind.label()
         ));
     } else if target_entity == player {
         out.push_str(&format!(
-            "    you {verb} {} ({} effect(s) applied)\r\n",
+            "    you {verb} {} — {}\r\n",
             def.plain_name,
-            applied_names.len()
+            applied_msgs.join(", ")
         ));
     } else {
         let target_name = name_or(world, target_entity, "<unknown>");
         out.push_str(&format!(
-            "    you {verb} {} on {} ({} effect(s) applied)\r\n",
+            "    you {verb} {} on {} — {}\r\n",
             def.plain_name,
             render_color_tags(&target_name, mode),
-            applied_names.len()
+            applied_msgs.join(", ")
         ));
     }
     send_to(world, player, out);
     // Notify the target if it's a different player.
-    if target_entity != player && !applied_names.is_empty() {
+    if target_entity != player && !applied_msgs.is_empty() {
         let player_name = name_of(world, player);
         send_rendered(
             world,
@@ -5508,10 +5674,81 @@ fn invoke_ability(
                 "{} {verb}s {} on you. ({} effect(s))\r\n",
                 player_name,
                 def.plain_name,
-                applied_names.len()
+                applied_msgs.len()
             ),
         );
     }
+    let _ = spawn_count;
+}
+
+/// One row from the effect-mapping fanout: id, presentational name,
+/// the effect's `effectType` (so the dispatcher can branch heal /
+/// damage / status / modify / ...), plus both params blobs so amount
+/// or duration can be resolved with the right precedence.
+#[derive(Debug, Clone)]
+struct EffectSpec {
+    id: i32,
+    name: String,
+    effect_type: String,
+    override_params: Option<serde_json::Value>,
+    default_params: serde_json::Value,
+}
+
+/// Pick the `resource` field out of `override_params` first, then
+/// `default_params`. Defaults to "hp" — matches the schema convention
+/// for heal effects whose blob omits the field.
+fn resolve_effect_resource(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> String {
+    let pick = |p: Option<&serde_json::Value>| -> Option<String> {
+        p?.get("resource")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    pick(override_params)
+        .or_else(|| pick(default_params))
+        .unwrap_or_else(|| "hp".to_string())
+}
+
+/// Add `amount` to `target.Health.hp`, capped at `max`. Returns the
+/// HP actually restored (0 if `target` has no Health, already full,
+/// or `amount <= 0`).
+fn apply_heal_hp(world: &mut World, target: Entity, amount: i32) -> i32 {
+    if amount <= 0 {
+        return 0;
+    }
+    let Some(h) = world.get::<Health>(target).copied() else {
+        return 0;
+    };
+    let new_hp = h.hp.saturating_add(amount).min(h.max);
+    let actual = (new_hp - h.hp).max(0);
+    if actual > 0
+        && let Some(mut hh) = world.get_mut::<Health>(target)
+    {
+        hh.hp = new_hp;
+    }
+    actual
+}
+
+/// Same as `apply_heal_hp` but for `Stamina.current`. Used by heal
+/// effects whose `resource` is `"move"` (the schema's name for the
+/// stamina pool).
+fn apply_heal_stamina(world: &mut World, target: Entity, amount: i32) -> i32 {
+    if amount <= 0 {
+        return 0;
+    }
+    let Some(s) = world.get::<Stamina>(target).copied() else {
+        return 0;
+    };
+    let new_v = s.current.saturating_add(amount).min(s.max);
+    let actual = (new_v - s.current).max(0);
+    if actual > 0
+        && let Some(mut ss) = world.get_mut::<Stamina>(target)
+    {
+        ss.current = new_v;
+    }
+    actual
 }
 
 /// Pull a numeric duration out of an `AbilityEffect.override_params`
@@ -5569,6 +5806,88 @@ fn resolve_effect_duration(
     APPLIED_EFFECT_DURATION_SECS
 }
 
+/// Pull a numeric `amount` out of an `AbilityEffect.override_params`
+/// blob first, falling back to the `Effect.default_params`. Used by
+/// the heal effect-type consumer in `invoke_ability` (and, eventually,
+/// the damage consumer). Returns None when neither blob carries an
+/// amount the formula evaluator can interpret — caller decides the
+/// fallback (e.g. drop the effect, log a default).
+fn resolve_effect_amount(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+    level: i32,
+    skill: i32,
+) -> Option<i32> {
+    if let Some(v) = amount_from_blob(override_params, level, skill) {
+        return Some(v);
+    }
+    amount_from_blob(default_params, level, skill)
+}
+
+/// Try to extract an amount from one JSONB blob. The `amount` field
+/// can be an integer literal, a formula string the evaluator
+/// understands (e.g. `"roll_dice(2,9) + skill / 5"`), or a plain dice
+/// notation like `"1d8"` which is normalized to `roll_dice(N, M)`.
+fn amount_from_blob(params: Option<&serde_json::Value>, level: i32, skill: i32) -> Option<i32> {
+    let p = params?;
+    let v = p.get("amount")?;
+    match v {
+        serde_json::Value::Number(n) => i32::try_from(n.as_i64()?).ok(),
+        serde_json::Value::String(s) => {
+            let normalized = normalize_dice_notation(s);
+            evaluate_simple_formula(&normalized, level, skill)
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite simple dice notation `NdM` (e.g. `1d8`, `2d6`) as
+/// `roll_dice(N, M)` so the formula evaluator can handle the shorthand
+/// the schema's heal/damage blobs use. Conservative: only matches
+/// whole-token `<digits>d<digits>` segments; leaves anything else
+/// alone.
+fn normalize_dice_notation(expr: &str) -> String {
+    // Single-pass scanner: walk chars, copy through, splice on `NdM`.
+    let bytes = expr.as_bytes();
+    let mut out = String::with_capacity(expr.len());
+    let mut idx: usize = 0;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if ch.is_ascii_digit() {
+            let num_start = idx;
+            while idx < bytes.len() && (bytes[idx] as char).is_ascii_digit() {
+                idx += 1;
+            }
+            // Look for `d<digits>` directly after the number.
+            if idx < bytes.len() && (bytes[idx] == b'd' || bytes[idx] == b'D') {
+                let after_d = idx + 1;
+                let mut sides_end = after_d;
+                while sides_end < bytes.len()
+                    && (bytes[sides_end] as char).is_ascii_digit()
+                {
+                    sides_end += 1;
+                }
+                if sides_end > after_d {
+                    let num_str = &expr[num_start..idx];
+                    let sides_str = &expr[after_d..sides_end];
+                    out.push_str("roll_dice(");
+                    out.push_str(num_str);
+                    out.push_str(", ");
+                    out.push_str(sides_str);
+                    out.push(')');
+                    idx = sides_end;
+                    continue;
+                }
+            }
+            out.push_str(&expr[num_start..idx]);
+        } else {
+            out.push(ch);
+            idx += 1;
+        }
+    }
+    out
+}
+
 /// Try to extract a duration in seconds from one JSONB blob. The
 /// `duration` field can be an integer literal (e.g. `2`) or a simple
 /// formula string (e.g. `"level"`, `"level * 2"`, `"skill / 4"`).
@@ -5594,35 +5913,244 @@ fn duration_from_blob(params: Option<&serde_json::Value>, level: i32, skill: i32
     Some(raw.saturating_mul(unit_seconds).max(1))
 }
 
-/// Evaluate the small formula grammar found in effect duration blobs:
-///   `<term>` | `<term> <op> <term>`  where
-///   `<term>` = `level` | `skill` | integer
-///   `<op>`   = `+` | `-` | `*` | `/`
-/// Tokens are whitespace-separated. Anything else (parens, multi-term,
-/// `pow()`, etc.) returns None so the caller falls through.
+/// Evaluate a formula expression for ability amounts and durations.
+/// Grammar:
+///   expr    := term (('+' | '-') term)*
+///   term    := factor (('*' | '/') factor)*
+///   factor  := number | symbol | call | '(' expr ')' | '-' factor
+///   symbol  := 'level' | 'skill'
+///   call    := identifier '(' expr (',' expr)* ')'
+/// Supported calls: `roll_dice(N, M)` — sum of N dice with M sides each.
+/// Returns None on unknown symbols/calls, malformed input, or division
+/// by zero so callers can fall through to the next fallback. Calls the
+/// live RNG via `rand::random_range`; deterministic cases (no dice)
+/// are reproducible.
 fn evaluate_simple_formula(expr: &str, level: i32, skill: i32) -> Option<i32> {
-    let tokens: Vec<&str> = expr.split_whitespace().collect();
-    let term = |tok: &str| -> Option<i32> {
-        match tok {
-            "level" => Some(level),
-            "skill" => Some(skill),
-            _ => tok.parse::<i32>().ok(),
+    evaluate_formula(expr, level, skill, &mut |n, s| roll_dice(n, s))
+}
+
+/// Roll `num` dice with `sides` sides each and sum them. Both args
+/// must be positive; non-positive inputs return 0.
+fn roll_dice(num: i32, sides: i32) -> i32 {
+    if num <= 0 || sides <= 0 {
+        return 0;
+    }
+    let mut total: i32 = 0;
+    for _ in 0..num {
+        total = total.saturating_add(rand::random_range(1..=sides));
+    }
+    total
+}
+
+/// Same grammar as `evaluate_simple_formula`, but the dice-roll
+/// callback is injectable so tests can pass a deterministic stub.
+fn evaluate_formula(
+    expr: &str,
+    level: i32,
+    skill: i32,
+    dice: &mut dyn FnMut(i32, i32) -> i32,
+) -> Option<i32> {
+    let tokens = tokenize_formula(expr)?;
+    let mut p = FormulaParser { tokens: &tokens, idx: 0 };
+    let v = p.parse_expr(level, skill, dice)?;
+    if p.idx != tokens.len() {
+        return None;
+    }
+    Some(v)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum FormulaToken {
+    Num(i32),
+    Ident(String),
+    LParen,
+    RParen,
+    Comma,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+}
+
+fn tokenize_formula(expr: &str) -> Option<Vec<FormulaToken>> {
+    let mut tokens = Vec::new();
+    let mut chars = expr.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            ' ' | '\t' => {
+                chars.next();
+            }
+            '(' => {
+                chars.next();
+                tokens.push(FormulaToken::LParen);
+            }
+            ')' => {
+                chars.next();
+                tokens.push(FormulaToken::RParen);
+            }
+            ',' => {
+                chars.next();
+                tokens.push(FormulaToken::Comma);
+            }
+            '+' => {
+                chars.next();
+                tokens.push(FormulaToken::Plus);
+            }
+            '-' => {
+                chars.next();
+                tokens.push(FormulaToken::Minus);
+            }
+            '*' => {
+                chars.next();
+                tokens.push(FormulaToken::Star);
+            }
+            '/' => {
+                chars.next();
+                tokens.push(FormulaToken::Slash);
+            }
+            c if c.is_ascii_digit() => {
+                let mut s = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_digit() {
+                        s.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(FormulaToken::Num(s.parse().ok()?));
+            }
+            c if c.is_ascii_alphabetic() || c == '_' => {
+                let mut s = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        s.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(FormulaToken::Ident(s));
+            }
+            _ => return None,
         }
-    };
-    match tokens.as_slice() {
-        [a] => term(a),
-        [a, op, b] => {
-            let lhs = term(a)?;
-            let rhs = term(b)?;
-            match *op {
-                "+" => Some(lhs.saturating_add(rhs)),
-                "-" => Some(lhs.saturating_sub(rhs)),
-                "*" => Some(lhs.saturating_mul(rhs)),
-                "/" if rhs != 0 => Some(lhs / rhs),
-                _ => None,
+    }
+    Some(tokens)
+}
+
+struct FormulaParser<'a> {
+    tokens: &'a [FormulaToken],
+    idx: usize,
+}
+
+impl FormulaParser<'_> {
+    fn peek(&self) -> Option<&FormulaToken> {
+        self.tokens.get(self.idx)
+    }
+    fn advance(&mut self) -> Option<&FormulaToken> {
+        let t = self.tokens.get(self.idx)?;
+        self.idx += 1;
+        Some(t)
+    }
+    fn parse_expr(
+        &mut self,
+        level: i32,
+        skill: i32,
+        dice: &mut dyn FnMut(i32, i32) -> i32,
+    ) -> Option<i32> {
+        let mut lhs = self.parse_term(level, skill, dice)?;
+        loop {
+            match self.peek() {
+                Some(FormulaToken::Plus) => {
+                    self.advance();
+                    let rhs = self.parse_term(level, skill, dice)?;
+                    lhs = lhs.saturating_add(rhs);
+                }
+                Some(FormulaToken::Minus) => {
+                    self.advance();
+                    let rhs = self.parse_term(level, skill, dice)?;
+                    lhs = lhs.saturating_sub(rhs);
+                }
+                _ => break,
             }
         }
-        _ => None,
+        Some(lhs)
+    }
+    fn parse_term(
+        &mut self,
+        level: i32,
+        skill: i32,
+        dice: &mut dyn FnMut(i32, i32) -> i32,
+    ) -> Option<i32> {
+        let mut lhs = self.parse_factor(level, skill, dice)?;
+        loop {
+            match self.peek() {
+                Some(FormulaToken::Star) => {
+                    self.advance();
+                    let rhs = self.parse_factor(level, skill, dice)?;
+                    lhs = lhs.saturating_mul(rhs);
+                }
+                Some(FormulaToken::Slash) => {
+                    self.advance();
+                    let rhs = self.parse_factor(level, skill, dice)?;
+                    if rhs == 0 {
+                        return None;
+                    }
+                    lhs /= rhs;
+                }
+                _ => break,
+            }
+        }
+        Some(lhs)
+    }
+    fn parse_factor(
+        &mut self,
+        level: i32,
+        skill: i32,
+        dice: &mut dyn FnMut(i32, i32) -> i32,
+    ) -> Option<i32> {
+        match self.advance()? {
+            FormulaToken::Num(n) => Some(*n),
+            FormulaToken::Minus => {
+                let v = self.parse_factor(level, skill, dice)?;
+                Some(v.saturating_neg())
+            }
+            FormulaToken::LParen => {
+                let v = self.parse_expr(level, skill, dice)?;
+                if !matches!(self.advance(), Some(FormulaToken::RParen)) {
+                    return None;
+                }
+                Some(v)
+            }
+            FormulaToken::Ident(name) => {
+                let n = name.clone();
+                if matches!(self.peek(), Some(FormulaToken::LParen)) {
+                    self.advance();
+                    let mut args: Vec<i32> = Vec::new();
+                    if !matches!(self.peek(), Some(FormulaToken::RParen)) {
+                        args.push(self.parse_expr(level, skill, dice)?);
+                        while matches!(self.peek(), Some(FormulaToken::Comma)) {
+                            self.advance();
+                            args.push(self.parse_expr(level, skill, dice)?);
+                        }
+                    }
+                    if !matches!(self.advance(), Some(FormulaToken::RParen)) {
+                        return None;
+                    }
+                    match (n.as_str(), args.as_slice()) {
+                        ("roll_dice", [num, sides]) => Some(dice(*num, *sides)),
+                        _ => None,
+                    }
+                } else {
+                    match n.as_str() {
+                        "level" => Some(level),
+                        "skill" => Some(skill),
+                        _ => None,
+                    }
+                }
+            }
+            _ => None,
+        }
     }
 }
 
