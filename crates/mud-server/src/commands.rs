@@ -1025,6 +1025,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["hitall", "tantrum"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "hitall",
+            summary: "One swing at every hostile mob in your room.",
+            long: "Costs 10 stamina. Damages each Mob in the room \
+                   for half your dmg_roll. Mobs with no Health (test \
+                   dummy) are skipped. The first surviving mob \
+                   becomes your Fighting target if you weren't \
+                   already fighting. Players are never targeted.",
+        },
+        run: cmd_hitall,
+    },
+    Command {
         names: &["disarm"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5269,6 +5285,7 @@ const BANDAGE_COST: i32 = 4;
 const BANDAGE_HEAL: i32 = 10;
 const RESCUE_COST: i32 = 6;
 const DISARM_COST: i32 = 5;
+const HITALL_COST: i32 = 10;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
@@ -5668,6 +5685,85 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if dead {
         crate::combat::handle_death(world, target, &target_name, player_room);
     }
+}
+
+/// `hitall` / `tantrum`: one swing at every Mob in the room. Each
+/// hit deals half the player's `dmg_roll`. Engages the first surviving
+/// mob if not already fighting. Mobs without Health (the training
+/// dummy) are skipped.
+fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "hitall") {
+        return;
+    }
+    if !check_stamina(world, player, HITALL_COST, "hitall") {
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+
+    let dmg = world
+        .get::<CombatStats>(player)
+        .map_or(1, |c| (c.dmg_roll / 2).max(1));
+    let mob_targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located, Option<&Health>), With<Mob>>();
+        q.iter(world)
+            .filter(|(_, l, h)| l.0 == room && h.is_some())
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    if mob_targets.is_empty() {
+        send_to(world, player, "Nothing here to swing at.\r\n");
+        return;
+    }
+    drain_stamina(world, player, HITALL_COST);
+
+    let player_name = name_of(world, player);
+    let already_fighting = world.get::<Fighting>(player).is_some();
+    let mut first_alive: Option<Entity> = None;
+    let mut hits: Vec<(String, bool)> = Vec::with_capacity(mob_targets.len());
+    for target in &mob_targets {
+        let target_name = name_or(world, *target, "<unknown>");
+        let (dead, _msg) = apply_damage(world, *target, dmg);
+        hits.push((target_name.clone(), dead));
+        if dead {
+            crate::combat::handle_death(world, *target, &target_name, room);
+        } else if first_alive.is_none() {
+            first_alive = Some(*target);
+        }
+    }
+
+    // Engage the first survivor if we weren't already fighting.
+    if !already_fighting
+        && let Some(first) = first_alive
+    {
+        try_insert(world, player, Fighting(first));
+        if world.get::<CombatStats>(first).is_some()
+            && let Ok(mut e) = world.get_entity_mut(first)
+        {
+            e.insert(Fighting(player));
+        }
+    }
+
+    let total_hits = hits.len();
+    let kills = hits.iter().filter(|(_, dead)| *dead).count();
+    send_to(
+        world,
+        player,
+        format!(
+            "You swing wildly: {total_hits} hit(s), {kills} kill(s) for {dmg} damage each.\r\n",
+        ),
+    );
+    broadcast_room_except_rendered(
+        world,
+        room,
+        &[player],
+        &format!(
+            "{player_name} swings wildly at everyone here.\r\n",
+        ),
+    );
 }
 
 /// `disarm [<target>]`: remove the target's wielded weapon. Default
