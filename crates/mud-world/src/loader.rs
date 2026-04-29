@@ -261,16 +261,16 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
     }
 
-    // Effect mappings: ordered list of effect ids per ability_id. Rows
-    // are returned ORDER BY ability_id, "order" so push order matches
-    // schema order.
+    // Effect mappings: ordered list of (effect_id, override_params)
+    // per ability_id. Rows are returned ORDER BY ability_id, "order"
+    // so push order matches schema order.
     let ability_effect_rows = ability_effects::list_all(pool).await?;
     for row in ability_effect_rows {
         ability_catalog
             .effects_for
             .entry(row.ability_id)
             .or_default()
-            .push(row.effect_id);
+            .push((row.effect_id, row.override_params));
     }
 
     world.insert_resource(WorldKeyIndex {

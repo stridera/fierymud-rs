@@ -3508,27 +3508,40 @@ fn invoke_ability(
     }
     // Look up the effects this ability applies and spawn an
     // EffectInstance per mapping attached to the resolved target.
-    let effect_specs: Vec<(i32, String)> = {
-        let effect_ids = world
+    // Duration: if override_params has a numeric `duration` (in MUD
+    // hours per `durationUnit: "hours"`), convert to seconds; formula-
+    // valued durations ("level * 2", "skill / 4") fall back to the
+    // global default until the casting pipeline grows a formula
+    // evaluator.
+    let effect_specs: Vec<(i32, String, i32)> = {
+        let mappings = world
             .resource::<AbilityCatalog>()
             .effects_for
             .get(&def.id)
             .cloned()
             .unwrap_or_default();
         let effect_catalog = world.resource::<EffectCatalog>();
-        effect_ids
+        mappings
             .iter()
-            .filter_map(|id| effect_catalog.by_id.get(id).map(|e| (*id, e.name.clone())))
+            .filter_map(|(id, override_params)| {
+                effect_catalog.by_id.get(id).map(|e| {
+                    (
+                        *id,
+                        e.name.clone(),
+                        resolve_effect_duration(override_params.as_ref()),
+                    )
+                })
+            })
             .collect()
     };
     let mut applied_names: Vec<String> = Vec::with_capacity(effect_specs.len());
-    for (eff_id, eff_name) in &effect_specs {
+    for (eff_id, eff_name, dur_secs) in &effect_specs {
         world.spawn((
             EffectInstance {
                 kind: *eff_id,
                 name: eff_name.clone(),
                 strength: 1,
-                remaining_secs: APPLIED_EFFECT_DURATION_SECS,
+                remaining_secs: *dur_secs,
                 source: EffectSource::Spell,
             },
             AppliedTo(target_entity),
@@ -3542,14 +3555,14 @@ fn invoke_ability(
         ));
     } else if target_entity == player {
         out.push_str(&format!(
-            "    you {verb} {} ({} effect(s) applied for {APPLIED_EFFECT_DURATION_SECS}s)\r\n",
+            "    you {verb} {} ({} effect(s) applied)\r\n",
             def.plain_name,
             applied_names.len()
         ));
     } else {
         let target_name = name_or(world, target_entity, "<unknown>");
         out.push_str(&format!(
-            "    you {verb} {} on {} ({} effect(s) applied for {APPLIED_EFFECT_DURATION_SECS}s)\r\n",
+            "    you {verb} {} on {} ({} effect(s) applied)\r\n",
             def.plain_name,
             render_color_tags(&target_name, mode),
             applied_names.len()
@@ -3563,13 +3576,37 @@ fn invoke_ability(
             world,
             target_entity,
             &format!(
-                "{} {verb}s {} on you. ({} effect(s) for {APPLIED_EFFECT_DURATION_SECS}s)\r\n",
+                "{} {verb}s {} on you. ({} effect(s))\r\n",
                 player_name,
                 def.plain_name,
                 applied_names.len()
             ),
         );
     }
+}
+
+/// Pull a numeric duration out of an `AbilityEffect.override_params`
+/// JSON blob. Schema convention is `{"duration": <int>, "durationUnit":
+/// "hours"}` for constants and `{"duration": "<formula>", ...}` for
+/// expressions. Constants are converted via 1 MUD hour = 75 real
+/// seconds (per the existing fierymud time scale). Anything else
+/// (formula strings, missing fields) falls back to the global
+/// default.
+fn resolve_effect_duration(params: Option<&serde_json::Value>) -> i32 {
+    const SECS_PER_MUD_HOUR: i32 = 75;
+    let Some(p) = params else { return APPLIED_EFFECT_DURATION_SECS };
+    let Some(d) = p.get("duration") else { return APPLIED_EFFECT_DURATION_SECS };
+    let Some(n) = d.as_i64() else { return APPLIED_EFFECT_DURATION_SECS };
+    let unit_seconds = match p.get("durationUnit").and_then(serde_json::Value::as_str) {
+        Some("hours") | None => SECS_PER_MUD_HOUR,
+        Some("minutes") => 60,
+        Some("rounds") => 4,
+        // "seconds" or any unknown unit: treat the integer as seconds
+        // rather than risk a wildly-wrong unit interpretation.
+        Some(_) => 1,
+    };
+    let raw = i32::try_from(n).unwrap_or(APPLIED_EFFECT_DURATION_SECS);
+    raw.saturating_mul(unit_seconds).max(1)
 }
 
 fn capitalize(s: &str) -> String {

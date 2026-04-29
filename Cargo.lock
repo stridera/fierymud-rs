@@ -1290,6 +1290,7 @@ dependencies = [
  "mud-script",
  "mud-world",
  "rand 0.10.1",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -81,12 +81,12 @@ pub struct AbilityCatalog {
     /// rule type/parameters; this map is just for the metadata
     /// readout today.
     pub restriction_messages: HashMap<i32, Vec<String>>,
-    /// Effect ids each ability applies, in `order`. Sourced from
-    /// `AbilityEffect`. Real casting consumes `override_params` /
-    /// `trigger` / `chance_pct` / `condition` from the rows; the
-    /// catalog only keeps the effect ids today for the metadata
-    /// readout.
-    pub effects_for: HashMap<i32, Vec<i32>>,
+    /// Effect mappings each ability applies, in `order`. Sourced from
+    /// `AbilityEffect`. Stored as (`effect_id`, `override_params`) so
+    /// the casting pipeline can read per-mapping duration / amount /
+    /// flag overrides without re-querying. Trigger / chance / condition
+    /// are still on demand.
+    pub effects_for: HashMap<i32, Vec<(i32, Option<serde_json::Value>)>>,
 }
 
 // Five bool flags mirror schema columns; see mud_db::abilities::AbilityRow.
