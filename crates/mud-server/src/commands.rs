@@ -1025,6 +1025,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["backstab", "bs"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "backstab <target>",
+            summary: "Surprise opener for double damage; out-of-combat only.",
+            long: "Deals 2x your dmg_roll on the opening swing and \
+                   engages the target. Refused if you're already \
+                   fighting (the target sees you coming) or if your \
+                   target is already in combat with someone else.",
+        },
+        run: cmd_backstab,
+    },
+    Command {
         names: &["hitall", "tantrum"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5286,6 +5301,8 @@ const BANDAGE_HEAL: i32 = 10;
 const RESCUE_COST: i32 = 6;
 const DISARM_COST: i32 = 5;
 const HITALL_COST: i32 = 10;
+const BACKSTAB_COST: i32 = 6;
+const BACKSTAB_MULT: i32 = 2;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
@@ -5684,6 +5701,81 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
 
     if dead {
         crate::combat::handle_death(world, target, &target_name, player_room);
+    }
+}
+
+/// `backstab <target>`: out-of-combat opener for 2x damage. Engages
+/// after the strike. Refused when the player is already fighting or
+/// when the target is already in combat with anyone (no surprise to
+/// be had).
+fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "backstab") {
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "Your target is already aware of you.\r\n");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Backstab whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "You can't backstab yourself.\r\n");
+        return;
+    }
+    if world.get::<Fighting>(target).is_some() {
+        send_to(world, player, "They're too alert to backstab.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, BACKSTAB_COST, "backstab") {
+        return;
+    }
+
+    let base_dmg = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
+    let dmg = (base_dmg * BACKSTAB_MULT).max(1);
+    drain_stamina(world, player, BACKSTAB_COST);
+
+    let player_name = name_of(world, player);
+    let target_name = name_or(world, target, "<unknown>");
+    let (dead, _) = apply_damage(world, target, dmg);
+
+    send_to(world, player, format!(
+        "You backstab {target_name} for {dmg} damage!\r\n"
+    ));
+    if !dead {
+        send_rendered(
+            world,
+            target,
+            &format!("{player_name} backstabs you for {dmg} damage!\r\n"),
+        );
+    }
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{player_name} drives a blade into {target_name}'s back!\r\n"),
+    );
+
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, located.0);
+    } else {
+        // Engage standard combat.
+        try_insert(world, player, Fighting(target));
+        if world.get::<CombatStats>(target).is_some()
+            && let Ok(mut e) = world.get_entity_mut(target)
+        {
+            e.insert(Fighting(player));
+        }
     }
 }
 
