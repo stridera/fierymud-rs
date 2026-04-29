@@ -3371,10 +3371,21 @@ fn cmd_perform(world: &mut World, player: Entity, args: &str) {
     invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Song, "perform");
 }
 
+/// Default duration when an ability spawns an `EffectInstance` from one
+/// of its `AbilityEffect` rows. Real per-effect duration lives in
+/// `override_params` / `Effect.duration`, but the runtime doesn't yet
+/// interpret those; one global default keeps the surface simple until
+/// the casting pipeline actually reads them.
+const APPLIED_EFFECT_DURATION_SECS: i32 = 60;
+
 /// Shared cast/chant/perform body. Looks up the ability filtered by
-/// `kind`, gates on `KnownAbilities`, and prints metadata. Real effect
-/// application is the next slice — for now this is a stub that proves
-/// the lookup + permission check work end-to-end.
+/// `kind`, gates on `KnownAbilities`, prints metadata, and spawns
+/// `EffectInstance` entities for each linked `AbilityEffect` attached
+/// to the caster. Real targeting / damage / restriction-checking is
+/// still a follow-up.
+// Linear top-to-bottom flow with a few inline metadata blocks; splitting
+// into helpers would just hide the ordering.
+#[allow(clippy::too_many_lines)]
 fn invoke_ability(
     world: &mut World,
     player: Entity,
@@ -3466,27 +3477,52 @@ fn invoke_ability(
             out.push_str(&format!("    requires: {m}\r\n"));
         }
     }
-    // List the effect names this ability would apply, looked up from
-    // the EffectCatalog by id. Real casting walks the same list and
-    // spawns EffectInstance entities.
-    if let Some(effect_ids) = world
-        .resource::<AbilityCatalog>()
-        .effects_for
-        .get(&def.id)
-        .cloned()
-    {
+    // Look up the effects this ability applies. Spawn one
+    // EffectInstance per mapping, attached to the caster for now —
+    // proper target resolution (the optional target_word) is a
+    // followup. Most non-violent buffs already make sense on self;
+    // damage/violent abilities will look weird until targeting +
+    // damage application land, but no existing system actually
+    // consumes "damage" effects yet so it's harmless.
+    let effect_specs: Vec<(i32, String)> = {
+        let effect_ids = world
+            .resource::<AbilityCatalog>()
+            .effects_for
+            .get(&def.id)
+            .cloned()
+            .unwrap_or_default();
         let effect_catalog = world.resource::<EffectCatalog>();
-        let names: Vec<String> = effect_ids
+        effect_ids
             .iter()
-            .filter_map(|id| effect_catalog.by_id.get(id).map(|e| e.name.clone()))
-            .collect();
-        if !names.is_empty() {
-            out.push_str(&format!("    applies: {}\r\n", names.join(", ")));
-        }
+            .filter_map(|id| effect_catalog.by_id.get(id).map(|e| (*id, e.name.clone())))
+            .collect()
+    };
+    let mut applied_names: Vec<String> = Vec::with_capacity(effect_specs.len());
+    for (eff_id, eff_name) in &effect_specs {
+        world.spawn((
+            EffectInstance {
+                kind: *eff_id,
+                name: eff_name.clone(),
+                strength: 1,
+                remaining_secs: APPLIED_EFFECT_DURATION_SECS,
+                source: EffectSource::Spell,
+            },
+            AppliedTo(player),
+        ));
+        applied_names.push(eff_name.clone());
     }
-    out.push_str(&format!(
-        "    ({verb} not yet implemented — this is metadata only)\r\n"
-    ));
+    if applied_names.is_empty() {
+        out.push_str(&format!(
+            "    (no effects defined for this {} — nothing to apply)\r\n",
+            kind.label()
+        ));
+    } else {
+        out.push_str(&format!(
+            "    you {verb} {} ({} effect(s) applied for {APPLIED_EFFECT_DURATION_SECS}s)\r\n",
+            def.plain_name,
+            applied_names.len()
+        ));
+    }
     send_to(world, player, out);
 }
 
