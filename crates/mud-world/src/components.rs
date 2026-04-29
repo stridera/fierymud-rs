@@ -194,6 +194,34 @@ pub struct Follower(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LastTeller(pub Entity);
 
+/// Bounded history of recent `tell` senders, newest first. Stores the
+/// sender's name at the time (not their Entity) so the readout is
+/// stable across reconnects / despawns. Display-only — `reply` still
+/// uses `LastTeller`.
+#[derive(Component, Debug, Default, Clone)]
+pub struct TellLog {
+    /// (`sender_name`, `when_received`). Capped at `cap`; oldest dropped.
+    pub entries: std::collections::VecDeque<(String, std::time::Instant)>,
+    pub cap: usize,
+}
+
+impl TellLog {
+    #[must_use]
+    pub const fn with_cap(cap: usize) -> Self {
+        Self {
+            entries: std::collections::VecDeque::new(),
+            cap,
+        }
+    }
+
+    pub fn push(&mut self, name: String) {
+        self.entries.push_front((name, std::time::Instant::now()));
+        while self.entries.len() > self.cap {
+            self.entries.pop_back();
+        }
+    }
+}
+
 /// Wall-clock instant of the player's most recent dispatched command.
 /// Stamped at the top of `commands::dispatch`. Absent on a player who has
 /// connected but not yet typed anything — `who` shows them as fresh.

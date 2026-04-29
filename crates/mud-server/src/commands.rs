@@ -18,8 +18,8 @@ use mud_world::{
     EffectInstance, EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item,
     Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes,
     Named, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint,
-    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Title, UiStyle, WearableIn, WorldKey,
-    WorldKeyIndex,
+    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, TellLog, Title, UiStyle, WearableIn,
+    WorldKey, WorldKeyIndex,
 };
 use tracing::{info, info_span};
 
@@ -820,6 +820,20 @@ const COMMANDS: &[Command] = &[
                    If they've gone offline, you'll get a useful error.",
         },
         run: cmd_reply,
+    },
+    Command {
+        names: &["lasttells", "lt"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "lasttells",
+            summary: "Show recent senders of `tell` to you (up to 10).",
+            long: "Newest first, with how long ago each was received. \
+                   Tracks names at receipt time, so the list is stable \
+                   even if a sender disconnects.",
+        },
+        run: cmd_lasttells,
     },
     Command {
         names: &["gossip", "/"],
@@ -4473,6 +4487,16 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
 
     // Stamp the receiver so they can `reply`.
     try_insert(world, target, LastTeller(player));
+    // Append to the bounded history shown by `lasttells`. Created on
+    // first inbound tell; subsequent pushes mutate in place.
+    let player_name_owned = player_name.clone();
+    if let Some(mut log) = world.get_mut::<TellLog>(target) {
+        log.push(player_name_owned);
+    } else {
+        let mut log = TellLog::with_cap(10);
+        log.push(player_name_owned);
+        try_insert(world, target, log);
+    }
 }
 
 fn cmd_reply(world: &mut World, player: Entity, args: &str) {
@@ -4492,6 +4516,27 @@ fn cmd_reply(world: &mut World, player: Entity, args: &str) {
     let last_name = name_of(world, last);
     // Forward through cmd_tell so we get the LastTeller stamping for free.
     cmd_tell(world, player, &format!("{last_name} {message}"));
+}
+
+fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {
+    let entries: Vec<(String, u64)> = world
+        .get::<TellLog>(player)
+        .map(|log| {
+            log.entries
+                .iter()
+                .map(|(name, when)| (name.clone(), when.elapsed().as_secs()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if entries.is_empty() {
+        send_to(world, player, "No recent tells.\r\n");
+        return;
+    }
+    let mut out = format!("\r\nRecent tells ({}):\r\n", entries.len());
+    for (name, secs_ago) in &entries {
+        out.push_str(&format!("  {:<20} ({} ago)\r\n", name, format_idle(*secs_ago)));
+    }
+    send_to(world, player, out);
 }
 
 fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
