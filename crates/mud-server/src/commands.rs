@@ -6019,7 +6019,12 @@ fn invoke_ability(
             }
         });
         if let Some(t) = caster_template {
-            let rendered = render_ability_template(t, &actor_name, &target_name_raw);
+            let rendered = render_ability_template(
+                t,
+                &actor_name,
+                &target_name_raw,
+                target_entity == player,
+            );
             out.push_str(&format!("    {}\r\n", render_color_tags(&rendered, mode)));
         } else if target_entity == player {
             out.push_str(&format!("    you {verb} {}\r\n", def.plain_name));
@@ -6040,7 +6045,9 @@ fn invoke_ability(
     if target_entity != player && !applied_msgs.is_empty() {
         let target_template = messages.as_ref().and_then(|m| m.success_to_victim.as_deref());
         let line = if let Some(t) = target_template {
-            render_ability_template(t, &actor_name, &target_name_raw)
+            // success_to_victim is rendered for the *victim* — they're
+            // never the actor, so reflexive collapse doesn't apply.
+            render_ability_template(t, &actor_name, &target_name_raw, false)
         } else {
             format!(
                 "{actor_name} {verb}s {} on you. ({} effect(s))",
@@ -6067,7 +6074,8 @@ fn invoke_ability(
         && let Some(t) = room_template
         && let Some(located) = world.get::<Located>(player).copied()
     {
-        let rendered = render_ability_template(t, &actor_name, &target_name_raw);
+        // Bystanders see actor + target as third parties — never reflexive.
+        let rendered = render_ability_template(t, &actor_name, &target_name_raw, false);
         let mut except: Vec<Entity> = vec![player];
         if target_entity != player {
             except.push(target_entity);
@@ -6081,10 +6089,22 @@ fn invoke_ability(
 /// `AbilityMessages` template. Names use the entity's `Named.name`
 /// verbatim; unknown pronouns default to gender-neutral
 /// they/them/their (entities don't carry gender yet — Phase E).
-fn render_ability_template(template: &str, actor_name: &str, target_name: &str) -> String {
+/// `reflexive=true` collapses target-side placeholders to second-person
+/// reflexive forms (`yourself` / `your`) so a self-targeted spell
+/// without a `success_to_self` row still reads naturally.
+fn render_ability_template(
+    template: &str,
+    actor_name: &str,
+    target_name: &str,
+    reflexive: bool,
+) -> String {
+    let target_sub = if reflexive { "yourself" } else { target_name };
+    let target_obj = if reflexive { "yourself" } else { "them" };
+    let target_poss = if reflexive { "your" } else { "their" };
+    let target_subj = if reflexive { "you" } else { "they" };
     template
         .replace("{actor.name}", actor_name)
-        .replace("{target.name}", target_name)
+        .replace("{target.name}", target_sub)
         .replace("{actor.he}", "they")
         .replace("{actor.she}", "they")
         .replace("{actor.it}", "they")
@@ -6092,13 +6112,13 @@ fn render_ability_template(template: &str, actor_name: &str, target_name: &str) 
         .replace("{actor.her}", "them")
         .replace("{actor.his}", "their")
         .replace("{actor.pos}", "their")
-        .replace("{target.he}", "they")
-        .replace("{target.she}", "they")
-        .replace("{target.it}", "they")
-        .replace("{target.him}", "them")
-        .replace("{target.her}", "them")
-        .replace("{target.his}", "their")
-        .replace("{target.pos}", "their")
+        .replace("{target.he}", target_subj)
+        .replace("{target.she}", target_subj)
+        .replace("{target.it}", target_subj)
+        .replace("{target.him}", target_obj)
+        .replace("{target.her}", target_obj)
+        .replace("{target.his}", target_poss)
+        .replace("{target.pos}", target_poss)
 }
 
 /// One row from the effect-mapping fanout: id, presentational name,
