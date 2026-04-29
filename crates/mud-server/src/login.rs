@@ -7,7 +7,7 @@ use mud_db::character_items::CharacterItemRow;
 use mud_world::{
     Account, CombatStats, Description, EquippedSlot, Health, Item, Keywords, KnownAbilities,
     Located, LoggedInAt, Named, Online, ObjectPrototypes, Player, PlayerFlags, Posture,
-    PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, WorldKey, WorldKeyIndex,
+    PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -239,6 +239,11 @@ impl ConnRouter {
                 let ability_count = known_abilities.entries.len();
                 if let Ok(mut e) = world.get_entity_mut(entity) {
                     e.insert(known_abilities);
+                    if let Some(t) = char_row.title.as_deref()
+                        && !t.trim().is_empty()
+                    {
+                        e.insert(Title(t.trim().to_string()));
+                    }
                 }
                 self.playing.insert(conn_id, entity);
                 commands::send_prompt(world, entity);
@@ -543,6 +548,7 @@ mod tests {
             class_id: None,
             race: "HUMAN".into(),
             experience: 0,
+            title: None,
         }
     }
 

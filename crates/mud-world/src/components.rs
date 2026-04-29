@@ -213,6 +213,14 @@ pub struct LoggedInAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FromMobReset(pub i32);
 
+/// Player-set epithet shown after the character name on `who` and
+/// (eventually) on the long room-occupant line. Loaded from
+/// `Characters.title` at login; absent when the column is NULL or
+/// empty. Mutable via the `title` command (setter to land in a
+/// follow-up commit).
+#[derive(Component, Debug, Clone)]
+pub struct Title(pub String);
+
 /// Character identity beyond name: class, race, experience. Loaded
 /// from `Characters` at login. Class and race are display-only for
 /// now; once the casting pipeline grows formula evaluation, the same

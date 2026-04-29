@@ -7,7 +7,7 @@ pub use components::{
     ExitData, Exits, Fighting, Follower, FromMobReset, Frozen, Health, Item, Keywords,
     KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, Named, Online, Player,
     PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Room, RoomSector, Slot,
-    Stamina, UiStyle, WearableIn, WorldKey, Zone,
+    Stamina, Title, UiStyle, WearableIn, WorldKey, Zone,
 };
 pub use loader::{LoadStats, load_from_db};
 pub use resources::{

@@ -31,6 +31,9 @@ pub struct CharacterRow {
     /// label since the runtime only displays it.
     pub race: String,
     pub experience: i32,
+    /// Player-set "the Wanderer" / "Slayer of Kobolds" line shown after
+    /// the character name on `who`. None when unset.
+    pub title: Option<String>,
 }
 
 // One UPDATE-per-column-set is the simplest call site for this many fields;
@@ -103,7 +106,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             recall_room_id,
             class_id,
             race::text AS "race!: String",
-            experience
+            experience,
+            title
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

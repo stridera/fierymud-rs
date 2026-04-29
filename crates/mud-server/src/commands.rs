@@ -18,7 +18,7 @@ use mud_world::{
     EffectInstance, EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item,
     Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes,
     Named, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint,
-    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, UiStyle, WearableIn, WorldKey,
+    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Title, UiStyle, WearableIn, WorldKey,
     WorldKeyIndex,
 };
 use tracing::{info, info_span};
@@ -2488,24 +2488,29 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_who(world: &mut World, player: Entity, _args: &str) {
-    let rows: Vec<(String, bool, Option<u64>)> = {
+    let rows: Vec<(String, Option<String>, bool, Option<u64>)> = {
         let mut q = world.query_filtered::<(
             &Named,
+            Option<&Title>,
             Option<&PlayerFlags>,
             Option<&LastInputAt>,
         ), (With<Player>, With<Online>)>();
         q.iter(world)
-            .map(|(n, f, last)| {
+            .map(|(n, t, f, last)| {
                 let afk = f.is_some_and(|pf| pf.has(PlayerFlag::Afk));
                 let idle = last.map(|l| l.0.elapsed().as_secs());
-                (n.name.clone(), afk, idle)
+                (n.name.clone(), t.map(|t| t.0.clone()), afk, idle)
             })
             .collect()
     };
     let mut out = format!("\r\n{} online:\r\n", rows.len());
-    for (name, afk, idle) in &rows {
+    for (name, title, afk, idle) in &rows {
         out.push_str("  ");
         out.push_str(name);
+        if let Some(t) = title {
+            out.push(' ');
+            out.push_str(t);
+        }
         if *afk {
             out.push_str(" [AFK]");
         }
