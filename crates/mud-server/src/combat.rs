@@ -109,13 +109,17 @@ pub fn combat_tick(world: &mut World) {
 
     // Phase 1: snapshot the swing list. Each tuple is fully owned data so
     // the borrow on the query is released before we start mutating.
-    // Sleeping attackers are skipped — they can't swing until awoken.
+    // Non-alert postures (Sleeping / Resting / Sitting) skip the swing —
+    // mirrors the player-command posture gate (require_alert_posture)
+    // and gives `stomp` (which sets target Posture to Sitting) a real
+    // combat consequence. Mobs without a Posture component fall through
+    // (they're alert by default).
     let swings: Vec<Swing> = {
         let mut q =
             world.query::<(Entity, &Fighting, &CombatStats, &Named, Option<&Posture>)>();
         q.iter(world)
             .filter(|(_, _, _, _, posture)| {
-                !matches!(posture.map(|p| p.0), Some(PostureKind::Sleeping))
+                matches!(posture.map(|p| p.0), None | Some(PostureKind::Standing))
             })
             .map(|(attacker, fighting, cs, name, _)| {
                 let base = cs.dmg_roll.max(1);
