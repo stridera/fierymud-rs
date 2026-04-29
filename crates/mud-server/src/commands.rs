@@ -5412,6 +5412,56 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         &[player, target],
         &format!("{player_name} attacks {actual_name}.\r\n"),
     );
+
+    // Auto-assist: anyone following `target` with AUTO_ASSIST set, in
+    // the same room, not already fighting — they engage `player`.
+    auto_assist_followers_of(world, target, player, located.0);
+}
+
+/// When `defender` is attacked, find every entity with
+/// `Follower(defender)` who has the `AUTO_ASSIST` flag, isn't already
+/// fighting, and is in `room`, and engage `attacker`. Used as the
+/// hook on the bottom of `cmd_attack`.
+fn auto_assist_followers_of(
+    world: &mut World,
+    defender: Entity,
+    attacker: Entity,
+    room: Entity,
+) {
+    let helpers: Vec<Entity> = {
+        let mut q = world
+            .query_filtered::<(Entity, &Follower, &Located, Option<&PlayerFlags>, Option<&Fighting>), With<Player>>();
+        q.iter(world)
+            .filter(|(e, f, l, flags, fighting)| {
+                *e != attacker
+                    && *e != defender
+                    && f.0 == defender
+                    && l.0 == room
+                    && fighting.is_none()
+                    && flags.is_some_and(|pf| pf.has(PlayerFlag::AutoAssist))
+            })
+            .map(|(e, _, _, _, _)| e)
+            .collect()
+    };
+    let attacker_name = name_or(world, attacker, "<unknown>");
+    for helper in helpers {
+        try_insert(world, helper, Fighting(attacker));
+        let helper_name = name_or(world, helper, "<unknown>");
+        send_rendered(
+            world,
+            helper,
+            &format!(
+                "You auto-assist and engage {attacker_name}!\r\n",
+            ),
+        );
+        send_rendered(
+            world,
+            attacker,
+            &format!(
+                "{helper_name} auto-assists and joins the fight against you!\r\n",
+            ),
+        );
+    }
 }
 
 fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
