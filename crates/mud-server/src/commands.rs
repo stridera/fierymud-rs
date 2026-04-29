@@ -15,7 +15,7 @@ use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRo
 use mud_net::Outbound;
 use mud_world::{
     AbilityCatalog, Account, AccountSummary, AppliedTo, ClassCatalog, CombatStats, Description,
-    EffectCatalog, EffectInstance, EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen,
+    EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, TellLog, Title, UiStyle,
@@ -112,6 +112,22 @@ const COMMANDS: &[Command] = &[
                    for that command.",
         },
         run: cmd_help,
+    },
+    Command {
+        names: &["scan"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "scan",
+            summary: "Peek at the adjacent rooms one step away.",
+            long: "For each unblocked exit, prints the target room's \
+                   name and how many mobs / players are there. Doors \
+                   that are closed or locked show their state instead. \
+                   Useful for spotting threats / hosts before walking \
+                   in.",
+        },
+        run: cmd_scan,
     },
     Command {
         names: &["glance"],
@@ -2641,6 +2657,78 @@ fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
         player,
         format!("\r\nLevel {}    Experience: {}\r\n", p.level, p.experience),
     );
+}
+
+/// `scan`: walk this room's exits and print one line per direction
+/// with the target room's name plus mob/player counts. Closed and
+/// locked exits print state instead of contents — you can see the
+/// door but not what's behind it.
+fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(exits) = world.get::<Exits>(located.0).cloned() else {
+        send_to(world, player, "No exits to scan.\r\n");
+        return;
+    };
+    if exits.0.is_empty() {
+        send_to(world, player, "No exits to scan.\r\n");
+        return;
+    }
+    // Sort by direction enum order so output is stable.
+    let mut entries: Vec<(Direction, ExitData)> = exits.0.into_iter().collect();
+    entries.sort_by_key(|(d, _)| direction_rank(*d));
+
+    let mut out = String::from("\r\n");
+    for (dir, ed) in &entries {
+        let dir_label = direction_name(*dir);
+        if ed.state != ExitState::Open {
+            out.push_str(&format!(
+                "  {dir_label:>9}: <{:?}>\r\n",
+                ed.state,
+            ));
+            continue;
+        }
+        let Some(target_room) = ed.to else {
+            out.push_str(&format!("  {dir_label:>9}: <dangling>\r\n"));
+            continue;
+        };
+        let target_name = name_or(world, target_room, "<unknown>");
+        let mob_count = world
+            .query_filtered::<&Located, With<Mob>>()
+            .iter(world)
+            .filter(|l| l.0 == target_room)
+            .count();
+        let player_count = world
+            .query_filtered::<&Located, (With<Player>, With<Online>)>()
+            .iter(world)
+            .filter(|l| l.0 == target_room)
+            .count();
+        out.push_str(&format!(
+            "  {dir_label:>9}: {target_name}  ({mob_count}m {player_count}p)\r\n"
+        ));
+    }
+    send_to(world, player, out);
+}
+
+fn direction_rank(d: Direction) -> u8 {
+    match d {
+        Direction::North => 0,
+        Direction::East => 1,
+        Direction::South => 2,
+        Direction::West => 3,
+        Direction::Up => 4,
+        Direction::Down => 5,
+        Direction::Northeast => 6,
+        Direction::Southeast => 7,
+        Direction::Southwest => 8,
+        Direction::Northwest => 9,
+        Direction::In => 10,
+        Direction::Out => 11,
+        Direction::Portal => 12,
+        Direction::None => 13,
+    }
 }
 
 /// One-line snapshot: name + posture + HP condition + current target.
