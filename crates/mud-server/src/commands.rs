@@ -4823,6 +4823,28 @@ fn has_effect_named(world: &mut World, target: Entity, name: &str) -> bool {
     })
 }
 
+/// Despawn every `EffectInstance` on `target` whose name matches
+/// `name` (case-insensitive). Returns true if any were removed.
+/// Used by curative skills (bandage stops bleed).
+fn remove_effect_named(world: &mut World, target: Entity, name: &str) -> bool {
+    let to_remove: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, eff, applied)| {
+                applied.0 == target && eff.name.eq_ignore_ascii_case(name)
+            })
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    let any = !to_remove.is_empty();
+    for e in to_remove {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    any
+}
+
 fn resolve_effect_duration(
     override_params: Option<&serde_json::Value>,
     default_params: Option<&serde_json::Value>,
@@ -6676,24 +6698,27 @@ fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
         h.hp = new_hp;
     }
     let healed = new_hp - target_hp.hp;
+    // Bandage staunches active bleeding as part of the same action.
+    let staunched = remove_effect_named(world, target, "bleed");
     let target_name = name_or(world, target, "<unknown>");
+    let bleed_suffix = if staunched { " Bleeding stops." } else { "" };
     if target == player {
         send_to(
             world,
             player,
-            format!("You bandage your wounds. (+{healed} HP)\r\n"),
+            format!("You bandage your wounds. (+{healed} HP){bleed_suffix}\r\n"),
         );
     } else {
         send_to(
             world,
             player,
-            format!("You bandage {target_name}. (+{healed} HP)\r\n"),
+            format!("You bandage {target_name}. (+{healed} HP){bleed_suffix}\r\n"),
         );
         send_rendered(
             world,
             target,
             &format!(
-                "{} bandages your wounds. (+{healed} HP)\r\n",
+                "{} bandages your wounds. (+{healed} HP){bleed_suffix}\r\n",
                 name_of(world, player),
             ),
         );
