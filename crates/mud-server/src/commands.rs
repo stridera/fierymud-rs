@@ -4022,18 +4022,55 @@ fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("There's no keyhole {}.\r\n", direction_name(dir)));
         return;
     };
-    // Look for a matching item in carried inventory.
-    let needle = key_req.to_ascii_lowercase();
-    let has_key = {
+    // Resolve the key. The legacy import stores object vnum strings —
+    // convert via FieryMUD's `vnum / 100`, `vnum % 100` convention to
+    // a `WorldKey` and match against carried items by exact key. Falls
+    // back to keyword match if the value isn't a parseable vnum.
+    let parsed = key_req.parse::<i32>().ok();
+    let key_world = parsed.map(|v| (v / 100, v % 100));
+    let proto_keywords: Option<Vec<String>> = key_world.and_then(|wk| {
+        world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&wk)
+            .map(|p| p.keywords.clone())
+    });
+    let has_key = if let Some(wk) = key_world {
+        // Primary: exact WorldKey match.
+        let by_world_key = {
+            let mut q = world
+                .query_filtered::<(&Located, &WorldKey), With<Item>>();
+            q.iter(world)
+                .any(|(l, k)| l.0 == player && k.zone == wk.0 && k.id == wk.1)
+        };
+        if by_world_key {
+            true
+        } else {
+            // Secondary: substring keyword match on a keyword from the
+            // proto, in case the item came from somewhere else without
+            // a matching WorldKey.
+            let kws = proto_keywords.as_deref().unwrap_or(&[]);
+            let mut q = world
+                .query_filtered::<(&Located, &Named, Option<&Keywords>), With<Item>>();
+            q.iter(world).any(|(l, n, k)| {
+                l.0 == player
+                    && kws.iter().any(|kw| matches(&kw.to_ascii_lowercase(), n, k))
+            })
+        }
+    } else {
+        // Tertiary: legacy free-form key text. Match against name/keywords.
+        let needle = key_req.to_ascii_lowercase();
         let mut q = world
             .query_filtered::<(&Located, &Named, Option<&Keywords>), With<Item>>();
-        q.iter(world).any(|(l, n, kw)| {
-            l.0 == player && matches(&needle, n, kw)
-        })
+        q.iter(world).any(|(l, n, k)| l.0 == player && matches(&needle, n, k))
     };
     if !has_key {
+        let hint = proto_keywords
+            .as_deref()
+            .and_then(|kws| kws.first())
+            .map_or_else(|| key_req.clone(), Clone::clone);
         send_to(world, player, format!(
-            "You need '{key_req}' to unlock that.\r\n",
+            "You need '{hint}' to unlock that.\r\n",
         ));
         return;
     }
