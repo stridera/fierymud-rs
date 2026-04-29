@@ -174,8 +174,13 @@ impl UserRole {
     }
 }
 
+// `type_name` carries embedded quotes so sqlx preserves the mixed-case
+// identifier through Postgres's name lookup; without quotes the
+// element name `PlayerFlag` is folded to lowercase by the server and
+// the encode path fails with "type playerflag does not exist".
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[sqlx(type_name = "PlayerFlag", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""PlayerFlag""#, rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(no_pg_array)]
 pub enum PlayerFlag {
     Brief,
     Compact,
@@ -199,6 +204,17 @@ pub enum PlayerFlag {
     MxpEnabled,
     HolyLight,
     ShowIds,
+}
+
+// sqlx's auto-derived PgHasArrayType lowercases the array type name
+// (sends `_playerflag`), but our Postgres array type is mixed-case
+// `_PlayerFlag`. Quote-wrapping the static literal preserves the case
+// through sqlx's pg_type lookup — the embedded `"` becomes a quoted
+// identifier in the lookup SQL.
+impl sqlx::postgres::PgHasArrayType for PlayerFlag {
+    fn array_type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_name(r#""_PlayerFlag""#)
+    }
 }
 
 impl PlayerFlag {
