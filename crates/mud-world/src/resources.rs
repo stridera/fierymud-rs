@@ -130,6 +130,34 @@ pub struct AbilityCatalog {
     /// flag overrides without re-querying. Trigger / chance / condition
     /// are still on demand.
     pub effects_for: HashMap<i32, Vec<(i32, Option<serde_json::Value>)>>,
+    /// Per-ability templated message strings (start / success / fail /
+    /// wearoff). 383 of 408 abilities have a row. Read by
+    /// `invoke_ability` to emit caster/target/room flavor text in
+    /// place of the dispatcher's terse defaults.
+    pub messages: HashMap<i32, AbilityMessageSet>,
+}
+
+/// Templated message strings for one ability, post-rendering decisions.
+/// All fields are optional; missing fields fall through to the runtime's
+/// default phrasing. Templates use `{actor.name}` / `{target.name}` and
+/// pronoun placeholders (`{actor.he}`, `{target.him}`, `{target.his}`).
+/// See `loader::ability_messages` for the source row shape.
+#[derive(Debug, Clone, Default)]
+pub struct AbilityMessageSet {
+    pub start_to_caster: Option<String>,
+    pub start_to_victim: Option<String>,
+    pub start_to_room: Option<String>,
+    pub success_to_caster: Option<String>,
+    pub success_to_victim: Option<String>,
+    pub success_to_room: Option<String>,
+    pub success_to_self: Option<String>,
+    pub success_self_room: Option<String>,
+    pub fail_to_caster: Option<String>,
+    pub fail_to_victim: Option<String>,
+    pub fail_to_room: Option<String>,
+    pub wearoff_to_target: Option<String>,
+    pub wearoff_to_room: Option<String>,
+    pub look_message: Option<String>,
 }
 
 // Five bool flags mirror schema columns; see mud_db::abilities::AbilityRow.

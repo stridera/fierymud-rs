@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_effects, ability_restrictions, classes, effects, mob_reset_equipment,
+    abilities, ability_effects, ability_messages, ability_restrictions, classes, effects, mob_reset_equipment,
     mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
     rooms, socials, sqlx::PgPool, zones,
 };
@@ -13,9 +13,9 @@ use crate::components::{
     Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Slot, WorldKey, Zone,
 };
 use crate::resources::{
-    AbilityCatalog, AbilityDef, ClassCatalog, ClassDef, EffectCatalog, EffectDef, MobProto,
-    MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto,
-    ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
+    AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, EffectCatalog,
+    EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog,
+    ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -285,6 +285,32 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .entry(row.ability_id)
             .or_default()
             .push((row.effect_id, row.override_params));
+    }
+
+    // Templated message strings (success/fail/wearoff text). Keyed by
+    // ability_id; per-row UNIQUE in the schema so each ability has
+    // at most one message set.
+    let message_rows = ability_messages::list_all(pool).await?;
+    for row in message_rows {
+        ability_catalog.messages.insert(
+            row.ability_id,
+            AbilityMessageSet {
+                start_to_caster: row.start_to_caster,
+                start_to_victim: row.start_to_victim,
+                start_to_room: row.start_to_room,
+                success_to_caster: row.success_to_caster,
+                success_to_victim: row.success_to_victim,
+                success_to_room: row.success_to_room,
+                success_to_self: row.success_to_self,
+                success_self_room: row.success_self_room,
+                fail_to_caster: row.fail_to_caster,
+                fail_to_victim: row.fail_to_victim,
+                fail_to_room: row.fail_to_room,
+                wearoff_to_target: row.wearoff_to_target,
+                wearoff_to_room: row.wearoff_to_room,
+                look_message: row.look_message,
+            },
+        );
     }
 
     // Pass 4c: class catalog. Just identity for the score / who readouts;
