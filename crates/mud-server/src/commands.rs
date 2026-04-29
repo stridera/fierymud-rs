@@ -735,6 +735,25 @@ const COMMANDS: &[Command] = &[
         run: cmd_perform,
     },
     Command {
+        names: &["skill", "use"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "skill <name> [target]",
+            summary: "Invoke a SKILL-type ability from the catalog.",
+            long: "Sibling to cast/chant/perform: looks up a SKILL \
+                   row by name and runs it through the same effect \
+                   application pipeline. New combat skills should be \
+                   added as Muditor `Ability` rows (kind=SKILL) with \
+                   `AbilityEffect` mappings — no Rust change needed. \
+                   Hardcoded skills (bandage, gouge, etc.) coexist \
+                   for now; they'll migrate as Phase B effect-type \
+                   consumers land.",
+        },
+        run: cmd_skill,
+    },
+    Command {
         names: &["bug"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5235,6 +5254,17 @@ fn cmd_chant(world: &mut World, player: Entity, args: &str) {
 
 fn cmd_perform(world: &mut World, player: Entity, args: &str) {
     invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Song, "perform");
+}
+
+/// `skill <name> [<target>]` — Phase A of the data-driven migration.
+/// Sibling to `cast`/`chant`/`perform`: looks up an `Ability` row of
+/// kind SKILL by name and invokes it through the same `invoke_ability`
+/// pipeline (effects, restrictions, posture gate, target resolution).
+/// Once Phase B effect-type consumers land, this dispatcher will be
+/// the entry point for any combat skill that's just data — gouge,
+/// stomp, berserk, etc. all migrate to plain Ability rows.
+fn cmd_skill(world: &mut World, player: Entity, args: &str) {
+    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Skill, "use");
 }
 
 /// Default duration when an ability spawns an `EffectInstance` from one
