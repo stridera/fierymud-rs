@@ -335,6 +335,33 @@ const COMMANDS: &[Command] = &[
         run: cmd_wield,
     },
     Command {
+        names: &["light"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "light <item>",
+            summary: "Light a torch or lantern.",
+            long: "Sets a `Lit` marker on a Light-type item in your \
+                   inventory. Refused on non-light items or items \
+                   that are already lit.",
+        },
+        run: cmd_light,
+    },
+    Command {
+        names: &["extinguish", "douse"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "extinguish <item>",
+            summary: "Put out a lit torch or lantern.",
+            long: "Removes the `Lit` marker from a held or carried \
+                   light source. Refused on items that aren't lit.",
+        },
+        run: cmd_extinguish,
+    },
+    Command {
         names: &["eat"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4684,6 +4711,58 @@ fn cmd_wield(world: &mut World, player: Entity, args: &str) {
 
 fn cmd_hold(world: &mut World, player: Entity, args: &str) {
     wear_into(world, player, args.trim(), Some(Slot::Hold));
+}
+
+/// `light <item>`: mark a Light-type carried item as lit. Refused
+/// on non-Light items or already-lit ones.
+fn cmd_light(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Light what?\r\n");
+        return;
+    }
+    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
+        send_to(world, player, format!("You aren't carrying '{target_word}'.\r\n"));
+        return;
+    };
+    let item_name = name_of(world, item);
+    let kind = world
+        .get::<WorldKey>(item)
+        .and_then(|k| world.resource::<ObjectPrototypes>().by_key.get(&(k.zone, k.id)).map(|p| p.r#type));
+    if kind != Some(mud_db::enums::ObjectType::Light) {
+        send_to(world, player, format!("{item_name} isn't a light source.\r\n"));
+        return;
+    }
+    if world.get::<mud_world::Lit>(item).is_some() {
+        send_to(world, player, format!("{item_name} is already lit.\r\n"));
+        return;
+    }
+    if let Ok(mut e) = world.get_entity_mut(item) {
+        e.insert(mud_world::Lit);
+    }
+    send_rendered(world, player, &format!("You light {item_name}.\r\n"));
+}
+
+/// `extinguish <item>`: clear the Lit marker.
+fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Extinguish what?\r\n");
+        return;
+    }
+    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
+        send_to(world, player, format!("You aren't carrying '{target_word}'.\r\n"));
+        return;
+    };
+    let item_name = name_of(world, item);
+    if world.get::<mud_world::Lit>(item).is_none() {
+        send_to(world, player, format!("{item_name} isn't lit.\r\n"));
+        return;
+    }
+    if let Ok(mut e) = world.get_entity_mut(item) {
+        e.remove::<mud_world::Lit>();
+    }
+    send_rendered(world, player, &format!("You extinguish {item_name}.\r\n"));
 }
 
 /// `eat <item>` / `quaff <item>`: consume a Food / Potion. Looks up

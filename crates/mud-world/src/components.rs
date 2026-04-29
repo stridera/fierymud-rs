@@ -39,6 +39,12 @@ pub struct Mob;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Item;
 
+/// Marker: a Light-type item is currently lit. Display-only today;
+/// once room-darkness mechanics land, this component on a held/worn
+/// item will let the carrier see in dark rooms.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Lit;
+
 /// Lookup keywords for an entity, used by `get`/`drop`/`attack` matching.
 /// First entry is typically the canonical identifier ("sword"), followed by
 /// other words a player might type ("rusty", "iron").
