@@ -1055,6 +1055,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_roar,
     },
     Command {
+        names: &["rend"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "rend [<target>]",
+            summary: "Tearing attack — damage plus bleed effect.",
+            long: "Costs 7 stamina, deals dmg_roll damage, applies a \
+                   `bleed` EffectInstance for 30s. Default target is \
+                   the current Fighting target. Refused if the target \
+                   is already bleeding.",
+        },
+        run: cmd_rend,
+    },
+    Command {
         names: &["gouge"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5406,6 +5421,8 @@ const BACKSTAB_MULT: i32 = 2;
 const SPRINGLEAP_COST: i32 = 7;
 const GOUGE_COST: i32 = 7;
 const GOUGE_BLIND_SECS: i32 = 30;
+const REND_COST: i32 = 7;
+const REND_BLEED_SECS: i32 = 30;
 const ROAR_COST: i32 = 8;
 const ROAR_FEAR_SECS: i32 = 20;
 const BERSERK_COST: i32 = 8;
@@ -5902,6 +5919,87 @@ fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
         &[player],
         &format!("{player_name} roars a primal challenge!\r\n"),
     );
+}
+
+/// `rend [<target>]`: tearing attack — damage + temporary bleed
+/// effect. Same shape as gouge but for the `bleed` debuff name.
+fn cmd_rend(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "rend") {
+        return;
+    }
+    if !check_stamina(world, player, REND_COST, "rend") {
+        return;
+    }
+    let arg = args.trim();
+    let target = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Rend whom? You aren't fighting.\r\n");
+            return;
+        };
+        t
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    if target == player {
+        send_to(world, player, "You can't rend yourself.\r\n");
+        return;
+    }
+    if has_effect_named(world, target, "bleed") {
+        let target_name = name_or(world, target, "<unknown>");
+        send_to(world, player, format!("{target_name} is already bleeding.\r\n"));
+        return;
+    }
+    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
+        send_to(world, player, "Target is in limbo.\r\n");
+        return;
+    };
+
+    let dmg = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
+    drain_stamina(world, player, REND_COST);
+
+    let player_name = name_of(world, player);
+    let target_name = name_or(world, target, "<unknown>");
+    let (dead, _) = apply_damage(world, target, dmg);
+
+    if !dead {
+        world.spawn((
+            EffectInstance {
+                kind: 0,
+                name: "bleed".to_string(),
+                strength: 1,
+                remaining_secs: REND_BLEED_SECS,
+                source: EffectSource::Other("rend".to_string()),
+            },
+            AppliedTo(target),
+        ));
+    }
+
+    send_to(world, player, format!(
+        "You rend {target_name} for {dmg} damage!\r\n"
+    ));
+    if !dead {
+        send_rendered(world, target, &format!(
+            "{player_name} tears into your flesh; you start to bleed!\r\n"
+        ));
+    }
+    broadcast_room_except_rendered(
+        world,
+        target_room,
+        &[player, target],
+        &format!("{player_name} tears into {target_name}!\r\n"),
+    );
+
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, target_room);
+    }
 }
 
 /// `gouge [<target>]`: damage + temporary blind effect. Default
