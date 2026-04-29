@@ -1332,6 +1332,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_slay,
     },
     Command {
+        names: &["zstat"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "zstat [<zone_id>]",
+            summary: "Dump ECS state of a zone.",
+            long: "Builder+. With no arg, inspects the zone you're in \
+                   (resolved from your room's WorldKey). Prints zone \
+                   name + entity, loaded room count, mob/object \
+                   prototype counts, and live spawned mob/item counts \
+                   originating from this zone's protos.",
+        },
+        run: cmd_zstat,
+    },
+    Command {
         names: &["rstat"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -5823,6 +5839,82 @@ fn cmd_lua(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, format!("{e}\r\n"));
         }
     }
+}
+
+/// `zstat [<id>]`: dump zone-level state. Resolves the zone via the
+/// player's current room (no arg) or by direct id (one arg).
+fn cmd_zstat(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let zone_id = if parts.is_empty() {
+        // Resolve via player's room WorldKey.
+        let Some(zone) = world
+            .get::<Located>(player)
+            .and_then(|l| world.get::<WorldKey>(l.0))
+            .map(|wk| wk.zone)
+        else {
+            send_to(world, player, "Can't find your zone.\r\n");
+            return;
+        };
+        zone
+    } else if parts.len() == 1 {
+        let Ok(id) = parts[0].parse::<i32>() else {
+            send_to(world, player, "Usage: zstat [<zone_id>]\r\n");
+            return;
+        };
+        id
+    } else {
+        send_to(world, player, "Usage: zstat [<zone_id>]\r\n");
+        return;
+    };
+
+    let Some(zone_entity) = world
+        .resource::<WorldKeyIndex>()
+        .zones
+        .get(&zone_id)
+        .copied()
+    else {
+        send_to(world, player, format!("No zone {zone_id} loaded.\r\n"));
+        return;
+    };
+    let zone_name = name_of(world, zone_entity);
+    let room_count = world
+        .query_filtered::<&Located, With<mud_world::Room>>()
+        .iter(world)
+        .filter(|l| l.0 == zone_entity)
+        .count();
+    let mob_proto_count = world
+        .resource::<MobPrototypes>()
+        .by_key
+        .keys()
+        .filter(|(z, _)| *z == zone_id)
+        .count();
+    let obj_proto_count = world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .keys()
+        .filter(|(z, _)| *z == zone_id)
+        .count();
+    let live_mobs = world
+        .query_filtered::<&WorldKey, With<Mob>>()
+        .iter(world)
+        .filter(|wk| wk.zone == zone_id)
+        .count();
+    let live_items = world
+        .query_filtered::<&WorldKey, With<Item>>()
+        .iter(world)
+        .filter(|wk| wk.zone == zone_id)
+        .count();
+
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("entity:        {zone_entity:?}\r\n"));
+    out.push_str(&format!("name:          {zone_name}\r\n"));
+    out.push_str(&format!("zone_id:       {zone_id}\r\n"));
+    out.push_str(&format!("rooms:         {room_count}\r\n"));
+    out.push_str(&format!("mob_protos:    {mob_proto_count}\r\n"));
+    out.push_str(&format!("obj_protos:    {obj_proto_count}\r\n"));
+    out.push_str(&format!("live_mobs:     {live_mobs}\r\n"));
+    out.push_str(&format!("live_items:    {live_items}\r\n"));
+    send_to(world, player, out);
 }
 
 /// `rstat [zone id]`: dump room components and occupant counts.
