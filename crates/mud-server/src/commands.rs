@@ -6051,6 +6051,21 @@ fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         out.push_str("kind:          Mob\r\n");
     } else if world.get::<Item>(target).is_some() {
         out.push_str("kind:          Item\r\n");
+        // Resolve through the prototype catalog for weight / level /
+        // type. Synthetic seed items lack a WorldKey and so fall
+        // through silently.
+        if let Some(wk) = world.get::<WorldKey>(target).copied()
+            && let Some(proto) = world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(wk.zone, wk.id))
+                .cloned()
+        {
+            out.push_str(&format!(
+                "proto:         weight {:.1}, level {}, type {:?}\r\n",
+                proto.weight, proto.level, proto.r#type,
+            ));
+        }
     } else {
         out.push_str("kind:          (other)\r\n");
     }
