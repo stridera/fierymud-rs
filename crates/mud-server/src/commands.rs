@@ -535,6 +535,58 @@ const COMMANDS: &[Command] = &[
         run: cmd_flags,
     },
     Command {
+        names: &["afk"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "afk",
+            summary: "Flip your away-from-keyboard flag.",
+            long: "Marks you AFK so others see the indicator on `who` and on \
+                   incoming tells. Run again to come back.",
+        },
+        run: cmd_afk,
+    },
+    Command {
+        names: &["notell"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "notell",
+            summary: "Refuse incoming `tell` messages.",
+            long: "When set, other players' `tell` to you is blocked with a \
+                   message. Run again to allow tells.",
+        },
+        run: cmd_notell,
+    },
+    Command {
+        names: &["deaf"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "deaf",
+            summary: "Stop hearing room-wide channels (gossip, shout).",
+            long: "When set, you no longer receive `gossip` or `shout` from \
+                   other players. Run again to hear them.",
+        },
+        run: cmd_deaf,
+    },
+    Command {
+        names: &["color", "colour"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "color",
+            summary: "Toggle ANSI color rendering for your output.",
+            long: "When colors are off, XML-Lite color tags are stripped \
+                   instead of rendered to ANSI. Persists for the session.",
+        },
+        run: cmd_color,
+    },
+    Command {
         names: &["effects", "affects"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2721,6 +2773,72 @@ fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
     } else {
         send_to(world, player, format!("{label} is now OFF.\r\n"));
     }
+}
+
+/// Toggle a single `PlayerFlag` and emit a friendlier message than the
+/// generic `toggle` command. `on_msg` / `off_msg` are written verbatim
+/// after the toggle. Used by the dedicated `afk` / `notell` / `deaf`
+/// / `color` commands so muscle-memory players don't have to type
+/// `toggle <flag>`.
+fn toggle_player_flag(
+    world: &mut World,
+    player: Entity,
+    flag: PlayerFlag,
+    on_msg: &str,
+    off_msg: &str,
+) {
+    let now_on = world
+        .get_mut::<PlayerFlags>(player)
+        .map(|mut pf| pf.toggle(flag));
+    let Some(now_on) = now_on else {
+        send_to(world, player, "You have no player flags slot.\r\n");
+        return;
+    };
+    send_to(world, player, format!("{}\r\n", if now_on { on_msg } else { off_msg }));
+}
+
+fn cmd_afk(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::Afk,
+        "You are now marked AFK.",
+        "You're back from AFK.",
+    );
+}
+
+fn cmd_notell(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::NoTell,
+        "You will no longer receive tells.",
+        "You will now receive tells.",
+    );
+}
+
+fn cmd_deaf(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::Deaf,
+        "You no longer hear gossip or shouts.",
+        "You can hear gossip and shouts again.",
+    );
+}
+
+// COLOR_BLIND is the underlying flag (semantics inverted relative to
+// the command name): COLOR_BLIND ON ⇒ colors stripped. The messages
+// flip accordingly so the player reads the visible behaviour, not the
+// flag state.
+fn cmd_color(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::ColorBlind,
+        "Colors are now OFF.",
+        "Colors are now ON.",
+    );
 }
 
 fn cmd_flags(world: &mut World, player: Entity, _args: &str) {
