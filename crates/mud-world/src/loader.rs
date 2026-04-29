@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_effects, ability_restrictions, effects, mob_reset_equipment, mob_resets,
-    mobs, object_reset_contents, object_resets, objects, room_exits, rooms, socials, sqlx::PgPool,
-    zones,
+    abilities, ability_effects, ability_restrictions, classes, effects, mob_reset_equipment,
+    mob_resets, mobs, object_reset_contents, object_resets, objects, room_exits, rooms, socials,
+    sqlx::PgPool, zones,
 };
 use tracing::{info, warn};
 
@@ -13,8 +13,9 @@ use crate::components::{
     Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Slot, WorldKey, Zone,
 };
 use crate::resources::{
-    AbilityCatalog, AbilityDef, EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog,
-    MobResetEntry, ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
+    AbilityCatalog, AbilityDef, ClassCatalog, ClassDef, EffectCatalog, EffectDef, MobProto,
+    MobPrototypes, MobResetCatalog, MobResetEntry, ObjectProto, ObjectPrototypes, SocialDef,
+    SocialRegistry, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -274,6 +275,24 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .push((row.effect_id, row.override_params));
     }
 
+    // Pass 4c: class catalog. Just identity for the score / who readouts;
+    // full mechanics (proficiencies, stat bonuses, allowed abilities) load
+    // on demand once the systems that need them land.
+    let class_rows = classes::list_all(pool).await?;
+    let mut class_catalog = ClassCatalog::default();
+    for row in class_rows {
+        class_catalog.by_id.insert(
+            row.id,
+            ClassDef {
+                id: row.id,
+                name: row.name,
+                plain_name: row.plain_name,
+                is_subclass: row.is_subclass,
+                parent_class_id: row.parent_class_id,
+            },
+        );
+    }
+
     world.insert_resource(WorldKeyIndex {
         zones: zone_index,
         rooms: room_index,
@@ -283,6 +302,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(effect_catalog);
     world.insert_resource(social_registry);
     world.insert_resource(ability_catalog);
+    world.insert_resource(class_catalog);
 
     // Pass 5: spawn live entities from MobResets / ObjectResets. Resources
     // were inserted above so the spawners can read them. Probability gating

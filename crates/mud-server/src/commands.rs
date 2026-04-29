@@ -14,11 +14,12 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRole};
 use mud_net::Outbound;
 use mud_world::{
-    AbilityCatalog, Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance,
-    EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item, Keywords,
-    KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes, Named,
-    Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint, RoomSector, Slot,
-    SocialDef, SocialRegistry, Stamina, UiStyle, WearableIn, WorldKey, WorldKeyIndex,
+    AbilityCatalog, Account, AppliedTo, ClassCatalog, CombatStats, Description, EffectCatalog,
+    EffectInstance, EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item,
+    Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes,
+    Named, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint,
+    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, UiStyle, WearableIn, WorldKey,
+    WorldKeyIndex,
 };
 use tracing::{info, info_span};
 
@@ -2352,6 +2353,10 @@ struct ScoreData<'a> {
     logged_in: Option<LoggedInAt>,
     fight_target: Option<&'a str>,
     flags: &'a [&'static str],
+    /// `(level, class_label, race, experience)` from the Profile component.
+    /// `class_label` is the catalog `name` (with color tags) when the
+    /// character has a class assigned, "Classless" otherwise.
+    profile: Option<(i32, &'a str, &'a str, i32)>,
 }
 
 fn cmd_score(world: &mut World, player: Entity, _args: &str) {
@@ -2368,6 +2373,23 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         .map(|f| f.0.iter().map(|fl| fl.label()).collect())
         .unwrap_or_default();
     let style = world.get::<UiStyle>(player).copied().unwrap_or_default();
+    // Profile + class catalog lookup: resolve the display name once here so
+    // renderers stay pure (no &World access). Uses `plain_name` (no color
+    // tags) so the fixed-width fancy box aligns correctly; once a visible-
+    // width-aware writer lands, this can switch to the colored `name`.
+    let profile_owned: Option<(i32, String, String, i32)> =
+        world.get::<Profile>(player).map(|prof| {
+            let class_label = prof
+                .class_id
+                .and_then(|id| {
+                    world
+                        .get_resource::<ClassCatalog>()
+                        .and_then(|c| c.by_id.get(&id))
+                        .map(|d| d.plain_name.clone())
+                })
+                .unwrap_or_else(|| String::from("Classless"));
+            (prof.level, class_label, prof.race.clone(), prof.experience)
+        });
 
     let data = ScoreData {
         name: &name,
@@ -2378,6 +2400,9 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         logged_in,
         fight_target: fight_target_name.as_deref(),
         flags: &flags,
+        profile: profile_owned
+            .as_ref()
+            .map(|(lvl, cls, race, xp)| (*lvl, cls.as_str(), race.as_str(), *xp)),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
@@ -2389,6 +2414,11 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
 
 fn render_score_standard(d: &ScoreData) -> String {
     let mut out = format!("\r\n{}\r\n", d.name);
+    if let Some((level, class, race, xp)) = d.profile {
+        out.push_str(&format!(
+            "  Level {level} {race} ({class})    XP: {xp}\r\n",
+        ));
+    }
     if let Some(hp) = d.hp {
         out.push_str(&format!("  HP: {} / {}\r\n", hp.hp, hp.max));
     }
@@ -2428,6 +2458,10 @@ fn render_score_fancy(d: &ScoreData) -> String {
     let mut row = |s: String| {
         out.push_str(&format!("| {s:<width$} |\r\n", width = W - 2));
     };
+    if let Some((level, class, race, xp)) = d.profile {
+        row(format!("Level:     {level} {race} ({class})"));
+        row(format!("XP:        {xp}"));
+    }
     if let Some(hp) = d.hp {
         row(format!("HP:        {} / {}", hp.hp, hp.max));
     }
@@ -2458,6 +2492,10 @@ fn render_score_fancy(d: &ScoreData) -> String {
 
 fn render_score_minimal(d: &ScoreData) -> String {
     let mut parts = vec![d.name.to_string()];
+    if let Some((level, class, race, xp)) = d.profile {
+        parts.push(format!("L{level} {race}/{class}"));
+        parts.push(format!("xp:{xp}"));
+    }
     if let Some(hp) = d.hp {
         parts.push(format!("hp:{}/{}", hp.hp, hp.max));
     }

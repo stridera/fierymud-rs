@@ -71,6 +71,24 @@ pub struct MobPrototypes {
     pub by_key: HashMap<(i32, i32), MobProto>,
 }
 
+/// Catalog of every player class, keyed by `Class.id`. Loaded once at
+/// startup; the runtime reads from this when rendering character info
+/// (score, who, etc.).
+#[derive(Resource, Debug, Default)]
+pub struct ClassCatalog {
+    pub by_id: HashMap<i32, ClassDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClassDef {
+    pub id: i32,
+    /// Display name — usually carries XML-Lite color tags.
+    pub name: String,
+    pub plain_name: String,
+    pub is_subclass: bool,
+    pub parent_class_id: Option<i32>,
+}
+
 /// Catalog of every ability (spell / chant / song / skill) in the game,
 /// keyed by lowercased plain name for command-line lookup. The runtime
 /// reads this on `cast` / `spells` / etc. The richer detail tables

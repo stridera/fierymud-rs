@@ -7,7 +7,7 @@ use mud_db::character_items::CharacterItemRow;
 use mud_world::{
     Account, CombatStats, Description, EquippedSlot, Health, Item, Keywords, KnownAbilities,
     Located, LoggedInAt, Named, Online, ObjectPrototypes, Player, PlayerFlags, Posture,
-    PostureKind, Prompt, RecallPoint, Slot, Stamina, WorldKey, WorldKeyIndex,
+    PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -255,6 +255,10 @@ impl ConnRouter {
     }
 }
 
+// Two near-identical spawn paths (room-resolved vs stranded) — splitting
+// them into helpers would just shuffle the bundle literals around without
+// reducing duplication. Allow the line count here.
+#[allow(clippy::too_many_lines)]
 fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outbound) -> Entity {
     let (zone, room) = pick_starting_room(c);
 
@@ -310,6 +314,12 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 PlayerFlags(c.player_flags.clone()),
                 Prompt(c.prompt.clone()),
                 LoggedInAt(std::time::Instant::now()),
+                Profile {
+                    level: c.level,
+                    class_id: c.class_id,
+                    race: c.race.clone(),
+                    experience: c.experience,
+                },
             ))
             .id();
         if let Some(re) = recall_entity
@@ -347,6 +357,12 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             PlayerFlags(c.player_flags.clone()),
             Prompt(c.prompt.clone()),
             LoggedInAt(std::time::Instant::now()),
+            Profile {
+                level: c.level,
+                class_id: c.class_id,
+                race: c.race.clone(),
+                experience: c.experience,
+            },
         ))
         .id();
     if let Some(re) = recall_entity
@@ -524,6 +540,9 @@ mod tests {
             current_room_id: cur.map(|c| c.1),
             recall_room_zone_id: recall.map(|r| r.0),
             recall_room_id: recall.map(|r| r.1),
+            class_id: None,
+            race: "HUMAN".into(),
+            experience: 0,
         }
     }
 

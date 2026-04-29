@@ -213,6 +213,21 @@ pub struct LoggedInAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FromMobReset(pub i32);
 
+/// Character identity beyond name: class, race, experience. Loaded
+/// from `Characters` at login. Class and race are display-only for
+/// now; once the casting pipeline grows formula evaluation, the same
+/// component will supply the input for `level` / `class.bonus_*` /
+/// race-modifier expressions.
+#[derive(Component, Debug, Clone)]
+pub struct Profile {
+    pub level: i32,
+    /// FK to `Class.id`. None for characters who haven't picked a class.
+    pub class_id: Option<i32>,
+    /// Schema enum value as a raw string — runtime renders it directly.
+    pub race: String,
+    pub experience: i32,
+}
+
 /// What abilities (spells / chants / songs / skills) a character has
 /// learned, plus their proficiency. Loaded from `CharacterAbilities`
 /// at login. The `known` flag mirrors the schema column — `true` for

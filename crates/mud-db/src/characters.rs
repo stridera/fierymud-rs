@@ -24,6 +24,13 @@ pub struct CharacterRow {
     pub current_room_id: Option<i32>,
     pub recall_room_zone_id: Option<i32>,
     pub recall_room_id: Option<i32>,
+    /// FK to `Class.id`. Optional in the schema; characters created
+    /// before class selection has no class yet.
+    pub class_id: Option<i32>,
+    /// Schema enum (HUMAN / ELF / GNOME / ...) — kept as the raw text
+    /// label since the runtime only displays it.
+    pub race: String,
+    pub experience: i32,
 }
 
 // One UPDATE-per-column-set is the simplest call site for this many fields;
@@ -93,7 +100,10 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             current_room_zone_id,
             current_room_id,
             recall_room_zone_id,
-            recall_room_id
+            recall_room_id,
+            class_id,
+            race::text AS "race!: String",
+            experience
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

@@ -6,6 +6,7 @@ pub mod ability_restrictions;
 pub mod character_abilities;
 pub mod character_items;
 pub mod characters;
+pub mod classes;
 pub mod effects;
 pub mod enums;
 pub mod mob_reset_equipment;
