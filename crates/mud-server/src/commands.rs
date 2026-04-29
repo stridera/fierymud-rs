@@ -3461,8 +3461,37 @@ fn invoke_ability(
         if def.in_combat_only { "combat-only  " } else { "" },
         if def.combat_ok { "" } else { "non-combat  " },
     ));
-    if let Some(target) = target_word {
-        out.push_str(&format!("    target: {target}\r\n"));
+    // Resolve the target. Empty / "me" / "self" → the caster.
+    // Anything else → look up an actor in the caster's room. If the
+    // word doesn't resolve, abort before applying any effects.
+    let target_entity = if let Some(word) = target_word
+        && !word.eq_ignore_ascii_case("me")
+        && !word.eq_ignore_ascii_case("self")
+    {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere; can't target.\r\n");
+            return;
+        };
+        let Some(found) = find_actor_in_room(world, word, located.0, player) else {
+            send_to(
+                world,
+                player,
+                format!("You don't see '{word}' here to target.\r\n"),
+            );
+            return;
+        };
+        found
+    } else {
+        player
+    };
+    if target_entity == player {
+        out.push_str("    target: yourself\r\n");
+    } else {
+        let target_name = name_or(world, target_entity, "<unknown>");
+        out.push_str(&format!(
+            "    target: {}\r\n",
+            render_color_tags(&target_name, mode),
+        ));
     }
     // Surface any AbilityRestrictions messages so the player knows what
     // would gate the cast once real checking lands. Pulled from the
@@ -3477,13 +3506,8 @@ fn invoke_ability(
             out.push_str(&format!("    requires: {m}\r\n"));
         }
     }
-    // Look up the effects this ability applies. Spawn one
-    // EffectInstance per mapping, attached to the caster for now —
-    // proper target resolution (the optional target_word) is a
-    // followup. Most non-violent buffs already make sense on self;
-    // damage/violent abilities will look weird until targeting +
-    // damage application land, but no existing system actually
-    // consumes "damage" effects yet so it's harmless.
+    // Look up the effects this ability applies and spawn an
+    // EffectInstance per mapping attached to the resolved target.
     let effect_specs: Vec<(i32, String)> = {
         let effect_ids = world
             .resource::<AbilityCatalog>()
@@ -3507,7 +3531,7 @@ fn invoke_ability(
                 remaining_secs: APPLIED_EFFECT_DURATION_SECS,
                 source: EffectSource::Spell,
             },
-            AppliedTo(player),
+            AppliedTo(target_entity),
         ));
         applied_names.push(eff_name.clone());
     }
@@ -3516,14 +3540,36 @@ fn invoke_ability(
             "    (no effects defined for this {} — nothing to apply)\r\n",
             kind.label()
         ));
-    } else {
+    } else if target_entity == player {
         out.push_str(&format!(
             "    you {verb} {} ({} effect(s) applied for {APPLIED_EFFECT_DURATION_SECS}s)\r\n",
             def.plain_name,
             applied_names.len()
         ));
+    } else {
+        let target_name = name_or(world, target_entity, "<unknown>");
+        out.push_str(&format!(
+            "    you {verb} {} on {} ({} effect(s) applied for {APPLIED_EFFECT_DURATION_SECS}s)\r\n",
+            def.plain_name,
+            render_color_tags(&target_name, mode),
+            applied_names.len()
+        ));
     }
     send_to(world, player, out);
+    // Notify the target if it's a different player.
+    if target_entity != player && !applied_names.is_empty() {
+        let player_name = name_of(world, player);
+        send_rendered(
+            world,
+            target_entity,
+            &format!(
+                "{} {verb}s {} on you. ({} effect(s) for {APPLIED_EFFECT_DURATION_SECS}s)\r\n",
+                player_name,
+                def.plain_name,
+                applied_names.len()
+            ),
+        );
+    }
 }
 
 fn capitalize(s: &str) -> String {
