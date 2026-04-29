@@ -415,6 +415,55 @@ const COMMANDS: &[Command] = &[
         run: cmd_compare,
     },
     Command {
+        names: &["motd"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "motd",
+            summary: "Show the message-of-the-day.",
+            long: "Static welcome text for now — once a GameConfig \
+                   `motd` row lands, this will read from there.",
+        },
+        run: cmd_motd,
+    },
+    Command {
+        names: &["news"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "news",
+            summary: "Recent server news.",
+            long: "Static for now; will read from a future news table.",
+        },
+        run: cmd_news,
+    },
+    Command {
+        names: &["credits"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "credits",
+            summary: "Show contributors and credits.",
+            long: "Acknowledges the project's antecedents.",
+        },
+        run: cmd_credits,
+    },
+    Command {
+        names: &["policies", "rules"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "policies",
+            summary: "Server rules and code of conduct.",
+            long: "Static for now.",
+        },
+        run: cmd_policies,
+    },
+    Command {
         names: &["account"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3948,6 +3997,76 @@ fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     };
     out.push_str(&format!("  {weight_line}  {level_line}\r\n"));
     send_to(world, player, out);
+}
+
+/// `motd` / `news` / `credits` / `policies`: static-text dumps.
+/// Each command prints a hardcoded constant for now; once a
+/// `GameConfig` table or files-on-disk source lands, the bodies move
+/// to a dynamic lookup. Today the goal is: muscle-memory commands
+/// shouldn't error out, and players get useful prose.
+const MOTD_TEXT: &str = "\
+\r\n=== Welcome to fierymud-rs ===\r\n\
+\r\n\
+A Rust ECS rewrite of FieryMUD, in active development. Many\r\n\
+commands work; many don't yet. Type `commands` for the full list\r\n\
+or `help <name>` for details. File a bug with `bug <message>` if\r\n\
+something looks broken.\r\n\
+\r\n\
+Combat is fully functional but unbalanced — be cautious in\r\n\
+high-level guild rooms (the Cleric's Guild guards hit for ~250).\r\n\
+";
+const NEWS_TEXT: &str = "\
+\r\n=== Recent Changes ===\r\n\
+\r\n\
+This list is curated by hand from the commit log. The most recent\r\n\
+runtime changes:\r\n\
+\r\n\
+- Combat skills landed: bandage, layhands, rescue, assist, disarm,\r\n\
+  hitall, backstab, springleap, gouge, roar, berserk, rend, retreat.\r\n\
+- Bleed and other DoT effects tick HP damage every second.\r\n\
+- Bandage staunches bleed.\r\n\
+- Berserk attackers deal +50% damage in combat.\r\n\
+\r\n\
+Run `commands` for everything you can use today.\r\n\
+";
+const CREDITS_TEXT: &str = "\
+\r\n=== Credits ===\r\n\
+\r\n\
+fierymud-rs is a clean-slate rewrite inspired by:\r\n\
+  - FieryMUD (the C++ codebase from Mielikki et al.)\r\n\
+  - DikuMUD / CircleMUD lineage\r\n\
+\r\n\
+Stack: Rust, bevy_ecs, sqlx, tokio, mlua. Thanks to those\r\n\
+projects' authors and to everyone who keeps a public MUD running.\r\n\
+";
+const POLICIES_TEXT: &str = "\
+\r\n=== Server Policies ===\r\n\
+\r\n\
+1. No harassment, slurs, or threats — to anyone, in any channel.\r\n\
+2. No cheating: bug exploits should be reported via `bug`, not\r\n\
+   used.\r\n\
+3. No multi-charing for an unfair advantage. Multi-charing is\r\n\
+   fine for socializing.\r\n\
+4. Admins enforce rules; appeals through `tell <admin> <message>`\r\n\
+   or by emailing the address in `motd`.\r\n\
+\r\n\
+This is a hobby server; please be kind.\r\n\
+";
+
+fn cmd_motd(world: &mut World, player: Entity, _args: &str) {
+    send_to(world, player, MOTD_TEXT.to_string());
+}
+
+fn cmd_news(world: &mut World, player: Entity, _args: &str) {
+    send_to(world, player, NEWS_TEXT.to_string());
+}
+
+fn cmd_credits(world: &mut World, player: Entity, _args: &str) {
+    send_to(world, player, CREDITS_TEXT.to_string());
+}
+
+fn cmd_policies(world: &mut World, player: Entity, _args: &str) {
+    send_to(world, player, POLICIES_TEXT.to_string());
 }
 
 /// `account`: read-only summary from the `AccountSummary` component
