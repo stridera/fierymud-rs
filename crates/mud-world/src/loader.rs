@@ -191,6 +191,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 examine_description: row.examine_description,
                 weight: row.weight,
                 level: row.level,
+                wear_flags: row.wear_flags,
             },
         );
     }
@@ -414,6 +415,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         };
         let mut spawned_for_reset: Vec<Entity> =
             Vec::with_capacity(usize::try_from(r.max_instances.max(1)).unwrap_or(1));
+        let primary_slot = wear_flags_primary_slot(&proto.wear_flags);
         for _ in 0..r.max_instances.max(1) {
             let mut bundle = world.spawn((
                 Item,
@@ -424,6 +426,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             ));
             if let Some(desc) = proto.examine_description.clone() {
                 bundle.insert(Description(desc));
+            }
+            if let Some(s) = primary_slot {
+                bundle.insert(crate::components::WearableIn(s));
             }
             spawned_for_reset.push(bundle.id());
             stats.object_resets_spawned += 1;
@@ -553,6 +558,43 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     );
 
     Ok(stats)
+}
+
+/// Pick a single primary `Slot` from a list of `WearFlag`s. Most
+/// items in legacy data carry exactly one flag; for the few that
+/// have several (e.g. ring on FINGER + neck-pendant on NECK) we
+/// prefer the more common-use slot. The runtime `Slot` enum is
+/// smaller than the schema's wear-flag set; flags without a runtime
+/// equivalent (Tail, Hover, Disguise, Badge) return None.
+#[must_use]
+pub fn wear_flags_primary_slot(flags: &[mud_db::enums::WearFlag]) -> Option<crate::components::Slot> {
+    use crate::components::Slot;
+    use mud_db::enums::WearFlag::{
+        About, Arms, Badge, Belt, Body, Disguise, Ear, Eyes, Face, Feet, Finger, Hands, Head,
+        Hover, Legs, Mainhand, Neck, Offhand, Tail, Twohand, Waist, Wrist,
+    };
+    // Priority order: prefer wield/hold/body slots over decorative.
+    for f in flags {
+        let slot = match f {
+            Mainhand | Twohand => Some(Slot::Wield),
+            Offhand => Some(Slot::Hold),
+            Body => Some(Slot::Body),
+            Head => Some(Slot::Head),
+            Arms => Some(Slot::Arms),
+            Legs => Some(Slot::Legs),
+            Feet => Some(Slot::Feet),
+            Hands => Some(Slot::Hands),
+            Waist | Belt => Some(Slot::Waist),
+            Neck => Some(Slot::Neck),
+            Finger => Some(Slot::LeftFinger),
+            // Schema flags with no runtime slot: ignored.
+            Wrist | About | Eyes | Face | Ear | Tail | Hover | Disguise | Badge => None,
+        };
+        if slot.is_some() {
+            return slot;
+        }
+    }
+    None
 }
 
 /// Map the schema `Position` enum label to the rank used by ability

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::enums::ObjectType;
+use crate::enums::{ObjectType, WearFlag};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Object {
@@ -15,6 +15,7 @@ pub struct Object {
     pub level: i32,
     pub weight: f64,
     pub cost: i32,
+    pub wear_flags: Vec<WearFlag>,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -31,7 +32,8 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             examine_description,
             level,
             weight,
-            cost
+            cost,
+            "wearFlags" AS "wear_flags!: Vec<WearFlag>"
         FROM "Objects"
         ORDER BY zone_id, id
         "#

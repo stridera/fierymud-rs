@@ -61,6 +61,10 @@ pub struct ObjectProto {
     pub examine_description: Option<String>,
     pub weight: f64,
     pub level: i32,
+    /// Wear-slot flags from the schema; spawned items derive a single
+    /// primary `WearableIn` from the first relevant flag (see
+    /// `wear_flags_to_slot`).
+    pub wear_flags: Vec<mud_db::enums::WearFlag>,
 }
 
 /// Catalog of mob prototypes loaded from the Mobs table at startup. The

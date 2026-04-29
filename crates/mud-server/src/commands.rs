@@ -335,6 +335,19 @@ const COMMANDS: &[Command] = &[
         run: cmd_wield,
     },
     Command {
+        names: &["hold", "grab"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "hold <item>",
+            summary: "Hold a non-weapon item in your offhand.",
+            long: "Equips an item in the Hold slot (lights, instruments, \
+                   wands). Refused on items that don't go in Hold.",
+        },
+        run: cmd_hold,
+    },
+    Command {
         names: &["remove", "rem"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4643,6 +4656,10 @@ fn cmd_wield(world: &mut World, player: Entity, args: &str) {
     wear_into(world, player, args.trim(), Some(Slot::Wield));
 }
 
+fn cmd_hold(world: &mut World, player: Entity, args: &str) {
+    wear_into(world, player, args.trim(), Some(Slot::Hold));
+}
+
 fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: Option<Slot>) {
     if target_word.is_empty() {
         send_to(world, player, "Wear what?\r\n");
@@ -4669,7 +4686,12 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
     if let Some(forced) = force_slot
         && forced != slot
     {
-        send_rendered(world, player, &format!("{item_name} can't be wielded.\r\n"),
+        let verb = match forced {
+            Slot::Wield => "wielded",
+            Slot::Hold => "held",
+            _ => "worn there",
+        };
+        send_rendered(world, player, &format!("{item_name} can't be {verb}.\r\n"),
         );
         return;
     }
@@ -4688,7 +4710,11 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
 
     try_insert(world, item, EquippedSlot(slot));
 
-    let verb = if slot == Slot::Wield { "wield" } else { "wear" };
+    let verb = match slot {
+        Slot::Wield => "wield",
+        Slot::Hold => "hold",
+        _ => "wear",
+    };
     send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
 }
 
@@ -8101,6 +8127,7 @@ fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     let proto_keywords = proto.keywords.clone();
     let examine = proto.examine_description.clone();
 
+    let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
     let mut bundle = world.spawn((
         Item,
         Named { name: proto_name.clone() },
@@ -8110,6 +8137,9 @@ fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     ));
     if let Some(desc) = examine {
         bundle.insert(Description(desc));
+    }
+    if let Some(s) = primary_slot {
+        bundle.insert(WearableIn(s));
     }
     let item = bundle.id();
 

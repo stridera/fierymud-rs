@@ -9,7 +9,7 @@ pub use components::{
     Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Room,
     RoomSector, Slot, Stamina, TellLog, Title, UiStyle, WearableIn, WorldKey, Zone,
 };
-pub use loader::{LoadStats, load_from_db};
+pub use loader::{LoadStats, load_from_db, wear_flags_primary_slot};
 pub use resources::{
     AbilityCatalog, AbilityDef, ClassCatalog, ClassDef, EffectCatalog, EffectDef, MobProto,
     MobPrototypes, MobResetCatalog, MobResetEntry, ObjectProto, ObjectPrototypes, SocialDef,

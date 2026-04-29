@@ -187,6 +187,37 @@ impl UserRole {
     }
 }
 
+/// Wear-slot flags from the schema. Loaded read-only with the
+/// `wearFlags` column; `WearableIn` derives a single primary slot
+/// from the first relevant flag. The runtime maps subsets of these
+/// onto our smaller `PostureKind`-shaped slot enum.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[sqlx(type_name = "WearFlag", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum WearFlag {
+    Finger,
+    Neck,
+    Ear,
+    Wrist,
+    Head,
+    Eyes,
+    Face,
+    Body,
+    About,
+    Arms,
+    Hands,
+    Waist,
+    Belt,
+    Legs,
+    Feet,
+    Tail,
+    Mainhand,
+    Offhand,
+    Twohand,
+    Badge,
+    Hover,
+    Disguise,
+}
+
 // `type_name` carries embedded quotes so sqlx preserves the mixed-case
 // identifier through Postgres's name lookup; without quotes the
 // element name `PlayerFlag` is folded to lowercase by the server and
