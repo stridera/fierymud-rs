@@ -356,6 +356,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_exits,
     },
     Command {
+        names: &["commands"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "commands",
+            summary: "Flat alphabetical list of every command you can use.",
+            long: "Shows just the names you have access to, without the \
+                   per-category framing `help` uses. Aliases share their \
+                   primary name's slot.",
+        },
+        run: cmd_commands,
+    },
+    Command {
         names: &["world", "users"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3311,6 +3325,38 @@ fn direction_order(d: mud_db::enums::Direction) -> u8 {
         Portal => 12,
         mud_db::enums::Direction::None => 13,
     }
+}
+
+/// `commands`: flat alphabetical list of every command the player has
+/// access to (after role + permission gating). Each command appears
+/// once under its primary name; aliases are folded into the same slot
+/// — `help <name>` still surfaces them per-command.
+// 4 cols of width 18 = 72-char body — fits standard 80-col terminals
+// after the 2-space leading indent. Width chosen for our longest
+// command names today (`autoassist`, `description`, `lasttells`).
+const COMMANDS_LIST_COLS: usize = 4;
+const COMMANDS_LIST_COL_WIDTH: usize = 18;
+fn cmd_commands(world: &mut World, player: Entity, _args: &str) {
+    let (role, perms) = world
+        .get::<Account>(player)
+        .map_or((UserRole::Player, Vec::new()), |a| (a.role, a.perms.clone()));
+    let mut names: Vec<&'static str> = COMMANDS
+        .iter()
+        .filter(|c| visible(c, role, &perms))
+        .map(|c| c.names[0])
+        .collect();
+    names.sort_unstable();
+
+    let mut out = format!("\r\n{} commands available:\r\n", names.len());
+    for chunk in names.chunks(COMMANDS_LIST_COLS) {
+        out.push_str("  ");
+        for name in chunk {
+            out.push_str(&format!("{name:<COMMANDS_LIST_COL_WIDTH$}"));
+        }
+        out.push_str("\r\n");
+    }
+    out.push_str("\r\nUse `help <command>` for details.\r\n");
+    send_to(world, player, out);
 }
 
 fn cmd_world(world: &mut World, player: Entity, _args: &str) {
