@@ -1,6 +1,7 @@
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
 pub mod abilities;
+pub mod ability_restrictions;
 pub mod character_abilities;
 pub mod character_items;
 pub mod characters;

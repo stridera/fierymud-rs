@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, effects, mob_reset_equipment, mob_resets, mobs, object_reset_contents,
-    object_resets, objects, room_exits, rooms, socials, sqlx::PgPool, zones,
+    abilities, ability_restrictions, effects, mob_reset_equipment, mob_resets, mobs,
+    object_reset_contents, object_resets, objects, room_exits, rooms, socials, sqlx::PgPool, zones,
 };
 use tracing::{info, warn};
 
@@ -244,6 +244,21 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         );
     }
     stats.abilities_loaded = ability_catalog.by_name.len();
+
+    // Restriction messages: only the `message` field per rule, indexed
+    // by ability_id. Rule type/parameters parse on demand once real
+    // gating lands.
+    let restriction_rows = ability_restrictions::list_all(pool).await?;
+    for row in restriction_rows {
+        let messages: Vec<String> = row
+            .requirements
+            .iter()
+            .filter_map(|v| v.get("message").and_then(serde_json::Value::as_str).map(String::from))
+            .collect();
+        if !messages.is_empty() {
+            ability_catalog.restriction_messages.insert(row.ability_id, messages);
+        }
+    }
 
     world.insert_resource(WorldKeyIndex {
         zones: zone_index,

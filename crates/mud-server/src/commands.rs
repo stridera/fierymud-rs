@@ -3453,6 +3453,19 @@ fn invoke_ability(
     if let Some(target) = target_word {
         out.push_str(&format!("    target: {target}\r\n"));
     }
+    // Surface any AbilityRestrictions messages so the player knows what
+    // would gate the cast once real checking lands. Pulled from the
+    // catalog by ability id.
+    if let Some(messages) = world
+        .resource::<AbilityCatalog>()
+        .restriction_messages
+        .get(&def.id)
+        .cloned()
+    {
+        for m in &messages {
+            out.push_str(&format!("    requires: {m}\r\n"));
+        }
+    }
     out.push_str(&format!(
         "    ({verb} not yet implemented — this is metadata only)\r\n"
     ));

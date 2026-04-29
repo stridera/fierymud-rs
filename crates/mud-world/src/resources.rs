@@ -75,6 +75,12 @@ pub struct MobPrototypes {
 #[derive(Resource, Debug, Default)]
 pub struct AbilityCatalog {
     pub by_name: HashMap<String, AbilityDef>,
+    /// Per-ability human-readable requirement messages, keyed by
+    /// `Ability.id`. Sourced from `AbilityRestrictions.requirements`
+    /// (each rule object's `message` field). Real gating uses the
+    /// rule type/parameters; this map is just for the metadata
+    /// readout today.
+    pub restriction_messages: HashMap<i32, Vec<String>>,
 }
 
 // Five bool flags mirror schema columns; see mud_db::abilities::AbilityRow.
