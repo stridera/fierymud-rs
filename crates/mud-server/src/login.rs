@@ -5,9 +5,9 @@ use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::U
 use mud_net::{ConnId, Outbound};
 use mud_db::character_items::CharacterItemRow;
 use mud_world::{
-    Account, CombatStats, Description, EquippedSlot, Health, Item, Keywords, Located, LoggedInAt,
-    Named, Online, ObjectPrototypes, Player, PlayerFlags, Posture, PostureKind, Prompt,
-    RecallPoint, Slot, Stamina, WorldKey, WorldKeyIndex,
+    Account, CombatStats, Description, EquippedSlot, Health, Item, Keywords, KnownAbilities,
+    Located, LoggedInAt, Named, Online, ObjectPrototypes, Player, PlayerFlags, Posture,
+    PostureKind, Prompt, RecallPoint, Slot, Stamina, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -216,11 +216,30 @@ impl ConnRouter {
                         Vec::new()
                     }
                 };
+                // What spells/skills they know.
+                let ability_rows =
+                    match mud_db::character_abilities::list_for(pool, &char_row.id).await {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            warn!(conn_id, error = %e, "character_abilities load failed");
+                            Vec::new()
+                        }
+                    };
                 // Drop the &mut ctx borrow by removing — the LoginCtx and its
                 // outbound move into the Player entity's Connection component.
                 let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
                 let entity = spawn_player(world, &user, &char_row, outbound);
                 let item_count = spawn_inventory(world, entity, &item_rows);
+                let known_abilities = KnownAbilities {
+                    entries: ability_rows
+                        .iter()
+                        .map(|r| (r.ability_id, r.proficiency, r.known))
+                        .collect(),
+                };
+                let ability_count = known_abilities.entries.len();
+                if let Ok(mut e) = world.get_entity_mut(entity) {
+                    e.insert(known_abilities);
+                }
                 self.playing.insert(conn_id, entity);
                 commands::send_prompt(world, entity);
                 info!(
@@ -228,6 +247,7 @@ impl ConnRouter {
                     char_name = %char_row.name,
                     char_level = char_row.level,
                     item_count,
+                    ability_count,
                     "player spawned"
                 );
             }

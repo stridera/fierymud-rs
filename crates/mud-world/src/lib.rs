@@ -4,9 +4,10 @@ pub mod resources;
 
 pub use components::{
     Account, AppliedTo, CombatStats, Description, EffectInstance, EffectSource, EquippedSlot,
-    ExitData, Exits, Fighting, Follower, FromMobReset, Frozen, Health, Item, Keywords, LastInputAt,
-    LastTeller, Located, LoggedInAt, Mob, Named, Online, Player, PlayerFlags, Posture, PostureKind,
-    Prompt, RecallPoint, Room, RoomSector, Slot, Stamina, UiStyle, WearableIn, WorldKey, Zone,
+    ExitData, Exits, Fighting, Follower, FromMobReset, Frozen, Health, Item, Keywords,
+    KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, Named, Online, Player,
+    PlayerFlags, Posture, PostureKind, Prompt, RecallPoint, Room, RoomSector, Slot, Stamina,
+    UiStyle, WearableIn, WorldKey, Zone,
 };
 pub use loader::{LoadStats, load_from_db};
 pub use resources::{

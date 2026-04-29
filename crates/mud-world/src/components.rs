@@ -213,6 +213,28 @@ pub struct LoggedInAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FromMobReset(pub i32);
 
+/// What abilities (spells / chants / songs / skills) a character has
+/// learned, plus their proficiency. Loaded from `CharacterAbilities`
+/// at login. The `known` flag mirrors the schema column — `true` for
+/// fully-learned abilities, `false` for ones the character has been
+/// taught but hasn't yet mastered. The `spells` listing filters on
+/// this; `cast` will eventually gate on it once real casting lands.
+#[derive(Component, Debug, Clone, Default)]
+pub struct KnownAbilities {
+    /// (`ability_id`, proficiency 0–1000+, known flag). Sorted by
+    /// `ability_id` (matches the DB's ORDER BY).
+    pub entries: Vec<(i32, i32, bool)>,
+}
+
+impl KnownAbilities {
+    /// True if the character has any (even unknown-but-being-learned) row
+    /// for this ability — used to filter the `spells` listing.
+    #[must_use]
+    pub fn has_any(&self, ability_id: i32) -> bool {
+        self.entries.iter().any(|(id, _, _)| *id == ability_id)
+    }
+}
+
 /// Admin sanction marker: the player's command dispatch is refused
 /// (with a message) until the marker is removed. Session-scoped — does
 /// not persist across disconnect/reconnect.

@@ -16,9 +16,9 @@ use mud_net::Outbound;
 use mud_world::{
     AbilityCatalog, Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance,
     EffectSource, EquippedSlot, Exits, Fighting, Follower, Frozen, Health, Item, Keywords,
-    LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes, Named, Online, Player,
-    PlayerFlags, Posture, PostureKind, Prompt, RecallPoint, RoomSector, Slot, SocialDef,
-    SocialRegistry, Stamina, UiStyle, WearableIn, WorldKey, WorldKeyIndex,
+    KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes, Named,
+    Online, Player, PlayerFlags, Posture, PostureKind, Prompt, RecallPoint, RoomSector, Slot,
+    SocialDef, SocialRegistry, Stamina, UiStyle, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, info_span};
 
@@ -3267,10 +3267,24 @@ fn cmd_spells(world: &mut World, player: Entity, args: &str) {
     let filter = args.trim().to_ascii_lowercase();
     let mode = color_mode_for(world, player);
 
-    // Group by kind for readable output. Each entry: (display_name, kind_label).
+    // If the player has a KnownAbilities component with any entries, only
+    // show abilities they actually know. Empty KnownAbilities (or no
+    // component at all) falls back to the full catalog — useful for
+    // bare admin tests and for characters whose ability list hasn't
+    // been seeded yet.
+    let known: Option<std::collections::HashSet<i32>> = world
+        .get::<KnownAbilities>(player)
+        .filter(|k| !k.entries.is_empty())
+        .map(|k| k.entries.iter().map(|(id, _, _)| *id).collect());
+
     let mut buckets: std::collections::BTreeMap<&'static str, Vec<String>> =
         std::collections::BTreeMap::new();
     for def in world.resource::<AbilityCatalog>().by_name.values() {
+        if let Some(set) = &known
+            && !set.contains(&def.id)
+        {
+            continue;
+        }
         if !filter.is_empty() && !def.plain_name.to_ascii_lowercase().contains(&filter) {
             continue;
         }
@@ -3283,19 +3297,25 @@ fn cmd_spells(world: &mut World, player: Entity, args: &str) {
         buckets.entry(bucket).or_default().push(def.name.clone());
     }
     if buckets.is_empty() {
+        let scope = if known.is_some() { "you know" } else { "loaded" };
         if filter.is_empty() {
-            send_to(world, player, "\r\nNo abilities loaded.\r\n");
+            send_to(world, player, format!("\r\nNo abilities {scope}.\r\n"));
         } else {
             send_rendered(
                 world,
                 player,
-                &format!("\r\nNo abilities matching '{filter}'.\r\n"),
+                &format!("\r\nNo abilities matching '{filter}' {scope}.\r\n"),
             );
         }
         return;
     }
 
-    let mut out = String::from("\r\n");
+    let header = if known.is_some() {
+        "Abilities you know"
+    } else {
+        "All loaded abilities"
+    };
+    let mut out = format!("\r\n{header}:\r\n");
     for (bucket, names) in &mut buckets {
         names.sort_unstable();
         out.push_str(&format!("{} ({}):\r\n", bucket, names.len()));
