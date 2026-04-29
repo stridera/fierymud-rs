@@ -131,6 +131,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 ExitData {
                     to: target,
                     state: e.default_state,
+                    key: e.key.clone(),
                 },
             );
         }

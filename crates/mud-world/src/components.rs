@@ -506,11 +506,15 @@ pub struct Located(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct RoomSector(pub Sector);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ExitData {
     /// Resolved target room entity, if the target exists in the loaded world.
     pub to: Option<Entity>,
     pub state: ExitState,
+    /// Required key keyword for `unlock` (matched case-insensitively
+    /// against an item's `Keywords` / `Named.name`). None for exits
+    /// that need no key.
+    pub key: Option<String>,
 }
 
 #[derive(Component, Debug, Clone, Default)]

@@ -399,6 +399,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_open,
     },
     Command {
+        names: &["unlock"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "unlock <direction>",
+            summary: "Unlock a locked door using a key in your inventory.",
+            long: "Searches your carried items for a keyword that \
+                   matches the exit's required key. On match, the \
+                   door is unlocked (state Closed); use `open` to \
+                   then walk through. Refused if the exit isn't \
+                   locked or you have no matching key.",
+        },
+        run: cmd_unlock,
+    },
+    Command {
         names: &["close"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3826,7 +3842,7 @@ fn look_direction(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "You see nothing in that direction.\r\n");
         return;
     };
-    let Some(ed) = exits.0.get(&dir).copied() else {
+    let Some(ed) = exits.0.get(&dir).cloned() else {
         send_to(world, player, "You see nothing in that direction.\r\n");
         return;
     };
@@ -3975,6 +3991,60 @@ fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         room,
         &[player],
         &format!("{player_name} bashes the door {} wide open!\r\n", direction_name(dir)),
+    );
+}
+
+/// `unlock <direction>`: find a key item in inventory whose name or
+/// keyword matches the exit's `key` and flip Locked → Closed (still
+/// needs `open` afterward). Two-sided sync.
+fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let Some(dir) = parse_direction(arg) else {
+        send_to(world, player, "Unlock which way?\r\n");
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let Some((state, key_req)) = world
+        .get::<Exits>(room)
+        .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key.clone())))
+    else {
+        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        return;
+    };
+    if state != ExitState::Locked {
+        send_to(world, player, format!("It's not locked {}.\r\n", direction_name(dir)));
+        return;
+    }
+    let Some(key_req) = key_req else {
+        send_to(world, player, format!("There's no keyhole {}.\r\n", direction_name(dir)));
+        return;
+    };
+    // Look for a matching item in carried inventory.
+    let needle = key_req.to_ascii_lowercase();
+    let has_key = {
+        let mut q = world
+            .query_filtered::<(&Located, &Named, Option<&Keywords>), With<Item>>();
+        q.iter(world).any(|(l, n, kw)| {
+            l.0 == player && matches(&needle, n, kw)
+        })
+    };
+    if !has_key {
+        send_to(world, player, format!(
+            "You need '{key_req}' to unlock that.\r\n",
+        ));
+        return;
+    }
+    flip_door_both_sides(world, room, dir, ExitState::Closed);
+    send_to(world, player, format!("You unlock the way {}.\r\n", direction_name(dir)));
+    let player_name = name_of(world, player);
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} unlocks the door {}.\r\n", direction_name(dir)),
     );
 }
 
@@ -6904,7 +6974,7 @@ fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "No exits here.\r\n");
         return;
     };
-    let Some(ed) = exits.0.get(&dir).copied() else {
+    let Some(ed) = exits.0.get(&dir).cloned() else {
         send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
         return;
     };
@@ -7283,7 +7353,7 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 
     let exit = world
         .get::<Exits>(from_room)
-        .and_then(|e| e.0.get(&dir).copied());
+        .and_then(|e| e.0.get(&dir).cloned());
     let Some(exit) = exit else {
         send_to(world, player, "You can't go that way.\r\n");
         return;

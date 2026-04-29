@@ -12,6 +12,8 @@ pub struct RoomExit {
     pub to_zone_id: Option<i32>,
     pub to_room_id: Option<i32>,
     pub default_state: ExitState,
+    /// Required key keyword for `unlock`. None for non-keyed exits.
+    pub key: Option<String>,
 }
 
 pub async fn list_exits(pool: &PgPool) -> sqlx::Result<Vec<RoomExit>> {
@@ -25,7 +27,8 @@ pub async fn list_exits(pool: &PgPool) -> sqlx::Result<Vec<RoomExit>> {
             direction AS "direction: Direction",
             to_zone_id,
             to_room_id,
-            default_state AS "default_state: ExitState"
+            default_state AS "default_state: ExitState",
+            key
         FROM "RoomExit"
         ORDER BY room_zone_id, room_id, direction
         "#
