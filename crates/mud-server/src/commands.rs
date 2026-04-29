@@ -2407,7 +2407,8 @@ mod tests {
         ColorMode, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
         condition_label, direction_name, evaluate_formula, evaluate_simple_formula, format_idle,
         has_effect_named, normalize_dice_notation, parse_direction, remove_effect_named,
-        render_color_tags, render_prompt, resolve_effect_resource, sector_movement_cost,
+        render_color_tags, render_prompt, resolve_effect_conditions, resolve_effect_resource,
+        sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -2950,6 +2951,35 @@ mod tests {
     }
 
     #[test]
+    fn resolve_effect_conditions_string_or_array() {
+        let s_blob = serde_json::json!({"condition": "Poison"});
+        assert_eq!(
+            resolve_effect_conditions(Some(&s_blob), None),
+            vec!["poison".to_string()]
+        );
+        let arr_blob = serde_json::json!({"condition": ["bleed", "POISON", "curse"]});
+        assert_eq!(
+            resolve_effect_conditions(Some(&arr_blob), None),
+            vec!["bleed".to_string(), "poison".to_string(), "curse".to_string()]
+        );
+        // Default-only fallback still works.
+        let default = serde_json::json!({"condition": "all"});
+        assert_eq!(
+            resolve_effect_conditions(None, Some(&default)),
+            vec!["all".to_string()]
+        );
+        // Override missing the field falls through to default.
+        let override_p = serde_json::json!({"resource": "hp"});
+        assert_eq!(
+            resolve_effect_conditions(Some(&override_p), Some(&default)),
+            vec!["all".to_string()]
+        );
+        // Both missing → empty.
+        let blob = serde_json::json!({});
+        assert_eq!(resolve_effect_conditions(Some(&blob), Some(&blob)), Vec::<String>::new());
+    }
+
+    #[test]
     fn resolve_effect_resource_picks_override_first() {
         let override_p = serde_json::json!({"resource": "Move"});
         let default_p = serde_json::json!({"resource": "hp"});
@@ -2974,18 +3004,38 @@ mod tests {
         let bleed_a = spawn_effect_named(&mut world, target, "bleed");
         let bleed_b = spawn_effect_named(&mut world, target, "bleed");
         let blind = spawn_effect_named(&mut world, target, "blind");
-        assert!(remove_effect_named(&mut world, target, "bleed"));
+        assert_eq!(remove_effect_named(&mut world, target, "bleed"), 2);
         assert!(world.get_entity(bleed_a).is_err(), "bleed_a despawned");
         assert!(world.get_entity(bleed_b).is_err(), "bleed_b despawned");
         assert!(world.get_entity(blind).is_ok(), "blind survives");
     }
 
     #[test]
-    fn remove_effect_named_returns_false_when_no_match() {
+    fn remove_effect_named_returns_zero_when_no_match() {
         let mut world = World::new();
         let target = world.spawn(()).id();
         spawn_effect_named(&mut world, target, "bleed");
-        assert!(!remove_effect_named(&mut world, target, "blind"));
+        assert_eq!(remove_effect_named(&mut world, target, "blind"), 0);
+    }
+
+    #[test]
+    fn remove_all_effects_on_despawns_every_applied_effect() {
+        use super::remove_all_effects_on;
+        let mut world = World::new();
+        let target = world.spawn(()).id();
+        let other = world.spawn(()).id();
+        let a = spawn_effect_named(&mut world, target, "bleed");
+        let b = spawn_effect_named(&mut world, target, "poison");
+        let c = spawn_effect_named(&mut world, target, "curse");
+        let untouched = spawn_effect_named(&mut world, other, "bleed");
+        assert_eq!(remove_all_effects_on(&mut world, target), 3);
+        assert!(world.get_entity(a).is_err());
+        assert!(world.get_entity(b).is_err());
+        assert!(world.get_entity(c).is_err());
+        assert!(
+            world.get_entity(untouched).is_ok(),
+            "effects on other entities are untouched"
+        );
     }
 }
 
@@ -5591,9 +5641,6 @@ fn invoke_ability(
     let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
     let mut spawn_count: usize = 0;
     for spec in &effect_specs {
-        // `match` (not `if`) because Phase B is adding more effect-type
-        // arms (cleanse, knockdown, redirect, ...) right after this one.
-        #[allow(clippy::single_match_else)]
         match spec.effect_type.as_str() {
             "heal" => {
                 let amount = resolve_effect_amount(
@@ -5620,6 +5667,30 @@ fn invoke_ability(
                     "HP"
                 };
                 applied_msgs.push(format!("{} (+{healed} {resource_label})", spec.name));
+            }
+            "cleanse" => {
+                let conditions = resolve_effect_conditions(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                );
+                if conditions.is_empty() {
+                    applied_msgs.push(format!("{} (no condition specified)", spec.name));
+                    continue;
+                }
+                let removed: usize = if conditions.iter().any(|c| c == "all") {
+                    remove_all_effects_on(world, target_entity)
+                } else {
+                    let mut total = 0usize;
+                    for cond in &conditions {
+                        total += remove_effect_named(world, target_entity, cond);
+                    }
+                    total
+                };
+                applied_msgs.push(if removed == 0 {
+                    format!("{} (nothing to cleanse)", spec.name)
+                } else {
+                    format!("{} (cleansed {removed} effect(s))", spec.name)
+                });
             }
             _ => {
                 let dur_secs = resolve_effect_duration(
@@ -5711,6 +5782,34 @@ fn resolve_effect_resource(
         .unwrap_or_else(|| "hp".to_string())
 }
 
+/// Pull a list of condition tags from an effect's params blob — the
+/// schema uses `"condition": "<tag>"` for a single tag and
+/// `"condition": ["<tag>", ...]` for a multi-tag cleanse. Override
+/// wins fully over default (no merging — empty override means "no
+/// override"). Returns an empty vec when neither blob carries a
+/// `condition`. Tags are lowercased for case-insensitive matching
+/// against `EffectInstance.name`.
+fn resolve_effect_conditions(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let pick = |p: Option<&serde_json::Value>| -> Option<Vec<String>> {
+        let v = p?.get("condition")?;
+        match v {
+            serde_json::Value::String(s) => Some(vec![s.to_ascii_lowercase()]),
+            serde_json::Value::Array(arr) => Some(
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_ascii_lowercase))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    };
+    pick(override_params)
+        .or_else(|| pick(default_params))
+        .unwrap_or_default()
+}
+
 /// Add `amount` to `target.Health.hp`, capped at `max`. Returns the
 /// HP actually restored (0 if `target` has no Health, already full,
 /// or `amount <= 0`).
@@ -5770,9 +5869,10 @@ fn has_effect_named(world: &mut World, target: Entity, name: &str) -> bool {
 }
 
 /// Despawn every `EffectInstance` on `target` whose name matches
-/// `name` (case-insensitive). Returns true if any were removed.
-/// Used by curative skills (bandage stops bleed).
-fn remove_effect_named(world: &mut World, target: Entity, name: &str) -> bool {
+/// `name` (case-insensitive). Returns the number despawned. Used by
+/// curative skills (bandage stops bleed) and by the `cleanse`
+/// effect-type consumer in `invoke_ability`.
+fn remove_effect_named(world: &mut World, target: Entity, name: &str) -> usize {
     let to_remove: Vec<Entity> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
@@ -5782,13 +5882,32 @@ fn remove_effect_named(world: &mut World, target: Entity, name: &str) -> bool {
             .map(|(e, _, _)| e)
             .collect()
     };
-    let any = !to_remove.is_empty();
+    let count = to_remove.len();
     for e in to_remove {
         if let Ok(em) = world.get_entity_mut(e) {
             em.despawn();
         }
     }
-    any
+    count
+}
+
+/// Despawn every `EffectInstance` on `target`, regardless of name.
+/// Used by `cleanse` effects whose `condition` is `"all"`.
+fn remove_all_effects_on(world: &mut World, target: Entity) -> usize {
+    let to_remove: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, _, applied)| applied.0 == target)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    let count = to_remove.len();
+    for e in to_remove {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    count
 }
 
 fn resolve_effect_duration(
@@ -8245,7 +8364,7 @@ fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
     }
     let healed = new_hp - target_hp.hp;
     // Bandage staunches active bleeding as part of the same action.
-    let staunched = remove_effect_named(world, target, "bleed");
+    let staunched = remove_effect_named(world, target, "bleed") > 0;
     let target_name = name_or(world, target, "<unknown>");
     let bleed_suffix = if staunched { " Bleeding stops." } else { "" };
     if target == player {
