@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_restrictions, effects, mob_reset_equipment, mob_resets, mobs,
-    object_reset_contents, object_resets, objects, room_exits, rooms, socials, sqlx::PgPool, zones,
+    abilities, ability_effects, ability_restrictions, effects, mob_reset_equipment, mob_resets,
+    mobs, object_reset_contents, object_resets, objects, room_exits, rooms, socials, sqlx::PgPool,
+    zones,
 };
 use tracing::{info, warn};
 
@@ -258,6 +259,18 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         if !messages.is_empty() {
             ability_catalog.restriction_messages.insert(row.ability_id, messages);
         }
+    }
+
+    // Effect mappings: ordered list of effect ids per ability_id. Rows
+    // are returned ORDER BY ability_id, "order" so push order matches
+    // schema order.
+    let ability_effect_rows = ability_effects::list_all(pool).await?;
+    for row in ability_effect_rows {
+        ability_catalog
+            .effects_for
+            .entry(row.ability_id)
+            .or_default()
+            .push(row.effect_id);
     }
 
     world.insert_resource(WorldKeyIndex {

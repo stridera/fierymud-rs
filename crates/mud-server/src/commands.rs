@@ -3466,6 +3466,24 @@ fn invoke_ability(
             out.push_str(&format!("    requires: {m}\r\n"));
         }
     }
+    // List the effect names this ability would apply, looked up from
+    // the EffectCatalog by id. Real casting walks the same list and
+    // spawns EffectInstance entities.
+    if let Some(effect_ids) = world
+        .resource::<AbilityCatalog>()
+        .effects_for
+        .get(&def.id)
+        .cloned()
+    {
+        let effect_catalog = world.resource::<EffectCatalog>();
+        let names: Vec<String> = effect_ids
+            .iter()
+            .filter_map(|id| effect_catalog.by_id.get(id).map(|e| e.name.clone()))
+            .collect();
+        if !names.is_empty() {
+            out.push_str(&format!("    applies: {}\r\n", names.join(", ")));
+        }
+    }
     out.push_str(&format!(
         "    ({verb} not yet implemented — this is metadata only)\r\n"
     ));
