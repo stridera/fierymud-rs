@@ -587,6 +587,75 @@ const COMMANDS: &[Command] = &[
         run: cmd_color,
     },
     Command {
+        names: &["autoexit"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "autoexit",
+            summary: "Toggle automatic exit listing on `look`.",
+            long: "When set, the room description is followed by the same \
+                   line `exits` would print. Already consumed by the look \
+                   path.",
+        },
+        run: cmd_autoexit,
+    },
+    Command {
+        names: &["autoloot"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "autoloot",
+            summary: "Toggle the auto-loot flag (no behavior wired yet).",
+            long: "Sets AUTO_LOOT. Once corpse loot lands, this controls \
+                   whether items on slain mobs jump to your inventory \
+                   automatically.",
+        },
+        run: cmd_autoloot,
+    },
+    Command {
+        names: &["autogold"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "autogold",
+            summary: "Toggle the auto-gold flag (no behavior wired yet).",
+            long: "Sets AUTO_GOLD. Once economy lands, this controls \
+                   whether coins from kills jump straight to your purse.",
+        },
+        run: cmd_autogold,
+    },
+    Command {
+        names: &["autoassist"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "autoassist",
+            summary: "Toggle the auto-assist flag (no behavior wired yet).",
+            long: "Sets AUTO_ASSIST. Once group combat lands, this \
+                   controls whether you automatically engage anyone \
+                   attacking your group leader.",
+        },
+        run: cmd_autoassist,
+    },
+    Command {
+        names: &["autosplit"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "autosplit",
+            summary: "Toggle the auto-split flag (no behavior wired yet).",
+            long: "Sets AUTO_SPLIT. Once the group system lands, this \
+                   controls whether kill rewards split automatically \
+                   between group members.",
+        },
+        run: cmd_autosplit,
+    },
+    Command {
         names: &["effects", "affects"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2838,6 +2907,56 @@ fn cmd_color(world: &mut World, player: Entity, _args: &str) {
         PlayerFlag::ColorBlind,
         "Colors are now OFF.",
         "Colors are now ON.",
+    );
+}
+
+fn cmd_autoexit(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::AutoExit,
+        "Exits will be shown automatically with each `look`.",
+        "Exits will no longer auto-list — use `exits` to see them.",
+    );
+}
+
+fn cmd_autoloot(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::AutoLoot,
+        "Auto-loot enabled.",
+        "Auto-loot disabled.",
+    );
+}
+
+fn cmd_autogold(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::AutoGold,
+        "Auto-gold enabled.",
+        "Auto-gold disabled.",
+    );
+}
+
+fn cmd_autoassist(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::AutoAssist,
+        "Auto-assist enabled.",
+        "Auto-assist disabled.",
+    );
+}
+
+fn cmd_autosplit(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::AutoSplit,
+        "Auto-split enabled.",
+        "Auto-split disabled.",
     );
 }
 
