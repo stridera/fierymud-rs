@@ -1025,6 +1025,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["bandage"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "bandage [<target>]",
+            summary: "Apply first aid for a small heal (out of combat).",
+            long: "Heals 10 HP at a cost of 4 stamina. With no arg or \
+                   `me`/`self`, bandages yourself. Otherwise tries to \
+                   find the target in your room. Refused while fighting \
+                   and refused on full-HP targets.",
+        },
+        run: cmd_bandage,
+    },
+    Command {
         names: &["stand"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5202,6 +5217,8 @@ fn cmd_shout(world: &mut World, player: Entity, args: &str) {
 const ATTACK_COST: i32 = 2;
 const KICK_COST: i32 = 5;
 const BASH_COST: i32 = 8;
+const BANDAGE_COST: i32 = 4;
+const BANDAGE_HEAL: i32 = 10;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
@@ -5550,6 +5567,80 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
 
     if dead {
         crate::combat::handle_death(world, target, &target_name, player_room);
+    }
+}
+
+/// `bandage [<target>]`: apply first aid for a small heal. Out-of-
+/// combat only. Self-target by default; arg-form finds someone in
+/// the same room.
+fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You can't bandage in combat.\r\n");
+        return;
+    }
+    let arg = args.trim();
+    let target = if arg.is_empty() || arg.eq_ignore_ascii_case("me")
+        || arg.eq_ignore_ascii_case("self")
+    {
+        player
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    if !check_stamina(world, player, BANDAGE_COST, "bandage") {
+        return;
+    }
+    let Some(target_hp) = world.get::<Health>(target).copied() else {
+        send_to(world, player, "There's nothing to bandage there.\r\n");
+        return;
+    };
+    if target_hp.hp >= target_hp.max {
+        let target_name = name_or(world, target, "<unknown>");
+        send_to(
+            world,
+            player,
+            if target == player {
+                "You're not hurt.\r\n".to_string()
+            } else {
+                format!("{target_name} isn't hurt.\r\n")
+            },
+        );
+        return;
+    }
+    drain_stamina(world, player, BANDAGE_COST);
+    let new_hp = (target_hp.hp + BANDAGE_HEAL).min(target_hp.max);
+    if let Some(mut h) = world.get_mut::<Health>(target) {
+        h.hp = new_hp;
+    }
+    let healed = new_hp - target_hp.hp;
+    let target_name = name_or(world, target, "<unknown>");
+    if target == player {
+        send_to(
+            world,
+            player,
+            format!("You bandage your wounds. (+{healed} HP)\r\n"),
+        );
+    } else {
+        send_to(
+            world,
+            player,
+            format!("You bandage {target_name}. (+{healed} HP)\r\n"),
+        );
+        send_rendered(
+            world,
+            target,
+            &format!(
+                "{} bandages your wounds. (+{healed} HP)\r\n",
+                name_of(world, player),
+            ),
+        );
     }
 }
 
