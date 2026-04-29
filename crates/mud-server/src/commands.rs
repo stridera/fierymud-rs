@@ -1332,6 +1332,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_slay,
     },
     Command {
+        names: &["rstat"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "rstat [<zone_id> <room_id>]",
+            summary: "Dump ECS state of a room.",
+            long: "Builder+. With no arg, inspects the room you're in. \
+                   With two integer ids, looks up the matching room via \
+                   WorldKeyIndex. Prints zone, id, sector, occupant \
+                   counts, and the populated exit table.",
+        },
+        run: cmd_rstat,
+    },
+    Command {
         names: &["stat"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -5808,6 +5823,88 @@ fn cmd_lua(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, format!("{e}\r\n"));
         }
     }
+}
+
+/// `rstat [zone id]`: dump room components and occupant counts.
+/// No-arg form uses the player's current room; two-int form looks
+/// the room up via `WorldKeyIndex`. Useful for verifying loader
+/// state and catching dangling references.
+fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let room = if parts.is_empty() {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        located.0
+    } else if parts.len() == 2 {
+        let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
+            send_to(world, player, "Usage: rstat [<zone_id> <room_id>]\r\n");
+            return;
+        };
+        let Some(found) = world
+            .resource::<WorldKeyIndex>()
+            .rooms
+            .get(&(zone, id))
+            .copied()
+        else {
+            send_to(world, player, format!("No room ({zone}, {id}) loaded.\r\n"));
+            return;
+        };
+        found
+    } else {
+        send_to(world, player, "Usage: rstat [<zone_id> <room_id>]\r\n");
+        return;
+    };
+
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("entity:        {room:?}\r\n"));
+    out.push_str(&format!("name:          {}\r\n", name_of(world, room)));
+    if let Some(wk) = world.get::<WorldKey>(room) {
+        out.push_str(&format!("world_key:     ({}, {})\r\n", wk.zone, wk.id));
+    }
+    if let Some(s) = world.get::<RoomSector>(room) {
+        out.push_str(&format!("sector:        {:?}\r\n", s.0));
+    }
+    if let Some(exits) = world.get::<Exits>(room).cloned() {
+        if exits.0.is_empty() {
+            out.push_str("exits:         <none>\r\n");
+        } else {
+            out.push_str(&format!("exits:         {} populated\r\n", exits.0.len()));
+            for (dir, ed) in &exits.0 {
+                let (target_name, target_label) = match ed.to {
+                    Some(t) => (name_or(world, t, "<unknown>"), format!("{t:?}")),
+                    None => ("<dangling>".to_string(), "None".to_string()),
+                };
+                out.push_str(&format!(
+                    "               {:>9} -> {} ({})\r\n",
+                    direction_name(*dir),
+                    target_label,
+                    target_name,
+                ));
+            }
+        }
+    }
+    // Occupants: mobs, players, items directly Located in this room.
+    let mob_count = world
+        .query_filtered::<&Located, With<Mob>>()
+        .iter(world)
+        .filter(|l| l.0 == room)
+        .count();
+    let player_count = world
+        .query_filtered::<&Located, With<Player>>()
+        .iter(world)
+        .filter(|l| l.0 == room)
+        .count();
+    let item_count = world
+        .query_filtered::<&Located, With<Item>>()
+        .iter(world)
+        .filter(|l| l.0 == room)
+        .count();
+    out.push_str(&format!(
+        "occupants:     {mob_count} mob(s), {player_count} player(s), {item_count} item(s)\r\n",
+    ));
+    send_to(world, player, out);
 }
 
 /// `stat <target>`: dump components on a single entity for diagnosis.
