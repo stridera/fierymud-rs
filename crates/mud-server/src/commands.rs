@@ -1025,6 +1025,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["disarm"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "disarm [<target>]",
+            summary: "Knock your opponent's weapon to the ground.",
+            long: "Removes the target's wielded item; the weapon drops \
+                   to the floor where any combatant can pick it up. \
+                   Default target is your current Fighting target. \
+                   Costs 5 stamina. Refused if the target isn't \
+                   wielding anything.",
+        },
+        run: cmd_disarm,
+    },
+    Command {
         names: &["rescue"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5252,6 +5268,7 @@ const BASH_COST: i32 = 8;
 const BANDAGE_COST: i32 = 4;
 const BANDAGE_HEAL: i32 = 10;
 const RESCUE_COST: i32 = 6;
+const DISARM_COST: i32 = 5;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
@@ -5651,6 +5668,86 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if dead {
         crate::combat::handle_death(world, target, &target_name, player_room);
     }
+}
+
+/// `disarm [<target>]`: remove the target's wielded weapon. Default
+/// target is the current Fighting target; arg-form accepts any mob/
+/// player in the room.
+fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "disarm") {
+        return;
+    }
+    if !check_stamina(world, player, DISARM_COST, "disarm") {
+        return;
+    }
+    let arg = args.trim();
+    let target = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Disarm whom? You aren't fighting.\r\n");
+            return;
+        };
+        t
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    if target == player {
+        send_to(world, player, "You can't disarm yourself.\r\n");
+        return;
+    }
+
+    // Find the target's wielded item.
+    let weapon: Option<Entity> = {
+        let mut q = world
+            .query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
+        q.iter(world)
+            .find(|(_, l, eq)| l.0 == target && eq.0 == Slot::Wield)
+            .map(|(e, _, _)| e)
+    };
+    let Some(weapon) = weapon else {
+        let target_name = name_or(world, target, "<unknown>");
+        send_to(world, player, format!("{target_name} isn't wielding anything.\r\n"));
+        return;
+    };
+    let Some(target_room) = world
+        .get::<Located>(target)
+        .copied()
+        .map(|l| l.0)
+    else {
+        send_to(world, player, "Target is in limbo; can't disarm.\r\n");
+        return;
+    };
+    drain_stamina(world, player, DISARM_COST);
+
+    // Drop weapon: remove EquippedSlot, re-Located to the room.
+    if let Ok(mut e) = world.get_entity_mut(weapon) {
+        e.remove::<EquippedSlot>();
+        e.insert(Located(target_room));
+    }
+    let weapon_name = name_or(world, weapon, "<weapon>");
+    let target_name = name_or(world, target, "<unknown>");
+    let player_name = name_of(world, player);
+    send_to(world, player, format!(
+        "You disarm {target_name}; {weapon_name} clatters to the ground.\r\n"
+    ));
+    if target != player {
+        send_rendered(world, target, &format!(
+            "{player_name} disarms you! {weapon_name} clatters to the ground.\r\n"
+        ));
+    }
+    broadcast_room_except_rendered(
+        world,
+        target_room,
+        &[player, target],
+        &format!("{player_name} disarms {target_name}; {weapon_name} drops.\r\n"),
+    );
 }
 
 /// `rescue <player>`: redirect the ally's attacker onto yourself.
