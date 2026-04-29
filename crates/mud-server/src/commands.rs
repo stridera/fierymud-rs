@@ -1025,6 +1025,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_kick,
     },
     Command {
+        names: &["berserk"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "berserk",
+            summary: "Self-buff: rage state for 60s.",
+            long: "Costs 8 stamina, spawns a `berserk` EffectInstance \
+                   on yourself for 60s. Refused if already berserk. \
+                   Combat damage scaling is a follow-up — for now \
+                   this is the visible buff state.",
+        },
+        run: cmd_berserk,
+    },
+    Command {
         names: &["roar", "howl"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5348,6 +5363,8 @@ const GOUGE_COST: i32 = 7;
 const GOUGE_BLIND_SECS: i32 = 30;
 const ROAR_COST: i32 = 8;
 const ROAR_FEAR_SECS: i32 = 20;
+const BERSERK_COST: i32 = 8;
+const BERSERK_DURATION_SECS: i32 = 60;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
@@ -5747,6 +5764,44 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if dead {
         crate::combat::handle_death(world, target, &target_name, player_room);
     }
+}
+
+/// `berserk`: self-buff applying a `berserk` `EffectInstance` for 60s.
+/// No combat-damage scaling consumer yet — visible state only. Same
+/// dedup pattern as gouge via `has_effect_named`.
+fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "berserk") {
+        return;
+    }
+    if has_effect_named(world, player, "berserk") {
+        send_to(world, player, "You're already in a rage.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, BERSERK_COST, "berserk") {
+        return;
+    }
+    drain_stamina(world, player, BERSERK_COST);
+    world.spawn((
+        EffectInstance {
+            kind: 0,
+            name: "berserk".to_string(),
+            strength: 1,
+            remaining_secs: BERSERK_DURATION_SECS,
+            source: EffectSource::Other("berserk".to_string()),
+        },
+        AppliedTo(player),
+    ));
+    send_to(world, player, "You go BERSERK!\r\n");
+    let player_name = name_of(world, player);
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player],
+        &format!("{player_name} goes BERSERK!\r\n"),
+    );
 }
 
 /// `roar` / `howl`: room-wide fear application to mobs.
