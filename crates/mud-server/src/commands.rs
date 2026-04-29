@@ -2409,7 +2409,7 @@ mod tests {
         evaluate_simple_formula, format_idle, has_effect_named, normalize_dice_notation,
         parse_direction, remove_effect_named, render_color_tags, render_prompt,
         resolve_effect_conditions, resolve_effect_resource, resolve_knockdown_posture,
-        sector_movement_cost,
+        resolve_redirect_aggro, sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -3009,6 +3009,21 @@ mod tests {
             world.get::<Posture>(already_sitting).map(|p| p.0),
             Some(PostureKind::Resting)
         );
+    }
+
+    #[test]
+    fn resolve_redirect_aggro_defaults_false_picks_override() {
+        // No params → default false (damage redirect — not implemented).
+        assert!(!resolve_redirect_aggro(None, None));
+        // Default with aggro=true — works without an override.
+        let default_p = serde_json::json!({"aggro": true});
+        assert!(resolve_redirect_aggro(None, Some(&default_p)));
+        // Override wins. Override false → false even if default true.
+        let override_p = serde_json::json!({"aggro": false});
+        assert!(!resolve_redirect_aggro(Some(&override_p), Some(&default_p)));
+        // Non-bool aggro field → falls through to default.
+        let bogus = serde_json::json!({"aggro": "yes"});
+        assert!(resolve_redirect_aggro(Some(&bogus), Some(&default_p)));
     }
 
     #[test]
@@ -5779,6 +5794,43 @@ fn invoke_ability(
                     format!("{} (cleansed {removed} effect(s))", spec.name)
                 });
             }
+            "redirect" => {
+                // Two semantics live under `redirect`:
+                //   aggro=true  → rescue/intercept: take the target's
+                //                 attacker as your own combatant.
+                //   aggro=false → damage redirect (percent of damage
+                //                 from target sent to caster) — not
+                //                 yet implemented.
+                let aggro = resolve_redirect_aggro(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                );
+                if !aggro {
+                    applied_msgs.push(format!(
+                        "{} (damage-redirect not implemented)",
+                        spec.name
+                    ));
+                    continue;
+                }
+                if target_entity == player {
+                    applied_msgs.push(format!("{} (can't rescue yourself)", spec.name));
+                    continue;
+                }
+                let Some(Fighting(attacker)) =
+                    world.get::<Fighting>(target_entity).copied()
+                else {
+                    applied_msgs.push(format!("{} (target isn't being attacked)", spec.name));
+                    continue;
+                };
+                if world.get_entity(attacker).is_err() {
+                    applied_msgs.push(format!("{} (attacker has vanished)", spec.name));
+                    continue;
+                }
+                crate::commands::try_remove::<Fighting>(world, target_entity);
+                crate::commands::try_insert(world, attacker, Fighting(player));
+                crate::commands::try_insert(world, player, Fighting(attacker));
+                applied_msgs.push(format!("{} (drew attacker's aggro)", spec.name));
+            }
             "stop_combat" => {
                 // Remove `Fighting` from the target so it disengages.
                 // Doesn't disengage *attackers of* the target — for
@@ -5915,6 +5967,22 @@ fn resolve_effect_resource(
     pick(override_params)
         .or_else(|| pick(default_params))
         .unwrap_or_else(|| "hp".to_string())
+}
+
+/// Read `aggro` from a redirect effect's params. True selects the
+/// rescue/intercept semantics (take the target's attacker as your
+/// own combatant). False (or missing) leaves the effect in the
+/// not-yet-implemented damage-redirect category.
+fn resolve_redirect_aggro(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> bool {
+    let pick = |p: Option<&serde_json::Value>| -> Option<bool> {
+        p?.get("aggro").and_then(serde_json::Value::as_bool)
+    };
+    pick(override_params)
+        .or_else(|| pick(default_params))
+        .unwrap_or(false)
 }
 
 /// Read knockdown's `target` field from override (then default)
