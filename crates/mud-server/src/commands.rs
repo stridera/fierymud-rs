@@ -2884,6 +2884,7 @@ mod tests {
                     strength: 1,
                     remaining_secs: 30,
                     source: EffectSource::Other("test".to_string()),
+                    ability_id: None,
                 },
                 AppliedTo(target),
             ))
@@ -5849,6 +5850,7 @@ fn invoke_ability(
                         strength: 1,
                         remaining_secs: dur_secs,
                         source: EffectSource::Spell,
+                        ability_id: Some(def.id),
                     },
                     AppliedTo(target_entity),
                 ));
@@ -5956,6 +5958,7 @@ fn invoke_ability(
                         strength: 1,
                         remaining_secs: dur_secs,
                         source: EffectSource::Spell,
+                        ability_id: Some(def.id),
                     },
                     AppliedTo(target_entity),
                 ));
@@ -5980,6 +5983,7 @@ fn invoke_ability(
                         strength: 1,
                         remaining_secs: dur_secs,
                         source: EffectSource::Spell,
+                        ability_id: Some(def.id),
                     },
                     AppliedTo(target_entity),
                 ));
@@ -7740,6 +7744,7 @@ fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
             strength: 1,
             remaining_secs: BERSERK_DURATION_SECS,
             source: EffectSource::Other("berserk".to_string()),
+            ability_id: None,
         },
         AppliedTo(player),
     ));
@@ -8035,6 +8040,7 @@ fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
                 strength: 1,
                 remaining_secs: ROAR_FEAR_SECS,
                 source: EffectSource::Other("roar".to_string()),
+                ability_id: None,
             },
             AppliedTo(t),
         ));
@@ -8106,6 +8112,7 @@ fn cmd_rend(world: &mut World, player: Entity, args: &str) {
                 strength: 1,
                 remaining_secs: REND_BLEED_SECS,
                 source: EffectSource::Other("rend".to_string()),
+                ability_id: None,
             },
             AppliedTo(target),
         ));
@@ -8189,6 +8196,7 @@ fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
                 strength: 1,
                 remaining_secs: GOUGE_BLIND_SECS,
                 source: EffectSource::Other("gouge".to_string()),
+                ability_id: None,
             },
             AppliedTo(target),
         ));
@@ -9408,6 +9416,7 @@ fn cmd_apply(world: &mut World, player: Entity, args: &str) {
             strength: 1,
             remaining_secs: duration_s,
             source: EffectSource::Admin,
+            ability_id: None,
         },
         AppliedTo(target),
     ));

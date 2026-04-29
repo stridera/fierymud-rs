@@ -1,9 +1,9 @@
 use bevy_ecs::prelude::*;
-use mud_world::{AppliedTo, EffectInstance, Located, Stunned};
+use mud_world::{AbilityCatalog, AppliedTo, EffectInstance, Located, Stunned};
 use tracing::info;
 
 use crate::TickCount;
-use crate::commands::{apply_damage, name_or, send_to, try_remove};
+use crate::commands::{apply_damage, name_of, name_or, send_rendered, send_to, try_remove};
 
 /// One effect tick = one second.
 const EFFECT_PERIOD_TICKS: u64 = 10;
@@ -21,19 +21,21 @@ pub fn effects_tick(world: &mut World) {
         return;
     }
 
-    // Snapshot all active effects: (effect_entity, target_entity, remaining_secs, name).
+    // Snapshot all active effects: (effect_entity, target_entity, remaining_secs, name, ability_id).
     // Doing this in a scoped block releases the query borrow before we mutate.
-    let snapshots: Vec<(Entity, Entity, i32, String)> = {
+    let snapshots: Vec<(Entity, Entity, i32, String, Option<i32>)> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
-            .map(|(eff, inst, applied)| (eff, applied.0, inst.remaining_secs, inst.name.clone()))
+            .map(|(eff, inst, applied)| {
+                (eff, applied.0, inst.remaining_secs, inst.name.clone(), inst.ability_id)
+            })
             .collect()
     };
 
     let mut expired = 0usize;
     let mut orphaned = 0usize;
     let mut killed_by_bleed = 0usize;
-    for (eff_entity, target, ticks, name) in snapshots {
+    for (eff_entity, target, ticks, name, ability_id) in snapshots {
         if world.get_entity(target).is_err() {
             // Target gone — orphaned effect.
             if let Ok(e) = world.get_entity_mut(eff_entity) {
@@ -71,9 +73,37 @@ pub fn effects_tick(world: &mut World) {
             inst.remaining_secs = new_ticks;
         }
         if new_ticks <= 0 {
+            // Look up wearoff_to_target / wearoff_to_room from the
+            // AbilityMessages catalog. ability_id is None for hardcoded
+            // effects (rend's bleed, gouge's blind, admin tests) — those
+            // fall through to the terse default.
+            let (wearoff_target, wearoff_room) = ability_id
+                .and_then(|aid| {
+                    world
+                        .resource::<AbilityCatalog>()
+                        .messages
+                        .get(&aid)
+                        .map(|m| (m.wearoff_to_target.clone(), m.wearoff_to_room.clone()))
+                })
+                .unwrap_or((None, None));
             // Send_to registers the target for end-of-tick prompt refresh
             // via commands::flush_prompts; no per-system tracking here.
-            send_to(world, target, format!("Your {name} fades.\r\n"));
+            let target_msg = wearoff_target
+                .as_deref()
+                .map_or_else(|| format!("Your {name} fades.\r\n"), |t| format!("{t}\r\n"));
+            send_rendered(world, target, &target_msg);
+            if let Some(line) = wearoff_room.as_deref()
+                && let Some(located) = world.get::<Located>(target).copied()
+            {
+                let target_name = name_of(world, target);
+                let rendered = line.replace("{target.name}", &target_name);
+                crate::commands::broadcast_room_except_rendered(
+                    world,
+                    located.0,
+                    &[target],
+                    &format!("{rendered}\r\n"),
+                );
+            }
             if let Ok(e) = world.get_entity_mut(eff_entity) {
                 e.despawn();
             }
@@ -118,6 +148,7 @@ mod tests {
                     strength: 1,
                     remaining_secs: secs,
                     source: EffectSource::Admin,
+                    ability_id: None,
                 },
                 AppliedTo(target),
             ))
@@ -198,6 +229,7 @@ mod tests {
                     strength: 1,
                     remaining_secs: 1,
                     source: EffectSource::Spell,
+                    ability_id: None,
                 },
                 AppliedTo(target),
             ))
@@ -210,6 +242,7 @@ mod tests {
                     strength: 1,
                     remaining_secs: 5,
                     source: EffectSource::Spell,
+                    ability_id: None,
                 },
                 AppliedTo(target),
             ))

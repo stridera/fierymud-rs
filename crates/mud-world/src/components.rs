@@ -487,6 +487,12 @@ pub struct EffectInstance {
     /// Seconds remaining; -1 means permanent.
     pub remaining_secs: i32,
     pub source: EffectSource,
+    /// `Ability.id` of whatever spawned this effect, when known. Used
+    /// by `effects_tick` to look up `wearoff_to_target` /
+    /// `wearoff_to_room` templates in `AbilityCatalog.messages`. None
+    /// for hardcoded effects (bleed-on-rend, admin tests) where there
+    /// is no originating ability row.
+    pub ability_id: Option<i32>,
 }
 
 /// Edge from an `EffectInstance` entity back to the entity that's affected.
