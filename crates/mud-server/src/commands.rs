@@ -156,6 +156,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_title,
     },
     Command {
+        names: &["description", "desc"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "description [<new prose> | clear]",
+            summary: "Show or set the prose `examine` shows for you.",
+            long: "With no argument, prints your current description. \
+                   With new text, replaces it (max 500 chars). With \
+                   `clear` / `none` / `-`, removes it. XML-Lite color \
+                   tags render the same as room descriptions. Persists \
+                   on disconnect.",
+        },
+        run: cmd_description,
+    },
+    Command {
         names: &["examine", "exa"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2376,6 +2392,44 @@ fn cmd_title(world: &mut World, player: Entity, args: &str) {
         e.insert(Title(arg.to_string()));
     }
     send_to(world, player, format!("Title set to: {arg}\r\n"));
+}
+
+/// `description` / `desc`: show / set / clear the player's `examine`
+/// prose. Stored as a `Description` component (the same component
+/// rooms and mobs use); persisted to `Characters.description` on
+/// disconnect via `save_state`. Capped at 500 chars to keep examine
+/// from runaway-pasting.
+const MAX_DESCRIPTION_LEN: usize = 500;
+fn cmd_description(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        let cur = world.get::<Description>(player).map(|d| d.0.clone());
+        let line = match cur {
+            Some(d) if !d.trim().is_empty() => format!("Your description:\r\n{d}\r\n"),
+            _ => "You have no description set. Use `description <prose>`.\r\n".to_string(),
+        };
+        send_to(world, player, line);
+        return;
+    }
+    if matches!(arg.to_ascii_lowercase().as_str(), "clear" | "none" | "-") {
+        if let Ok(mut e) = world.get_entity_mut(player) {
+            e.remove::<Description>();
+        }
+        send_to(world, player, "Description cleared.\r\n");
+        return;
+    }
+    if arg.len() > MAX_DESCRIPTION_LEN {
+        send_to(
+            world,
+            player,
+            format!("Description too long (max {MAX_DESCRIPTION_LEN} chars).\r\n"),
+        );
+        return;
+    }
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(Description(arg.to_string()));
+    }
+    send_to(world, player, "Description set.\r\n");
 }
 
 /// `experience` / `exp` / `xp`: print level and total XP from Profile.

@@ -34,6 +34,10 @@ pub struct CharacterRow {
     /// Player-set "the Wanderer" / "Slayer of Kobolds" line shown after
     /// the character name on `who`. None when unset.
     pub title: Option<String>,
+    /// Free-form prose shown to anyone using `examine` on this
+    /// character. None when unset; rendered with XML-Lite color tags
+    /// like room descriptions.
+    pub description: Option<String>,
 }
 
 // One UPDATE-per-column-set is the simplest call site for this many fields;
@@ -51,6 +55,7 @@ pub async fn save_state(
     player_flags: &[PlayerFlag],
     prompt: &str,
     title: Option<&str>,
+    description: Option<&str>,
 ) -> sqlx::Result<()> {
     sqlx::query!(
         r#"
@@ -64,8 +69,9 @@ pub async fn save_state(
             player_flags = $7,
             prompt = $8,
             title = $9,
+            description = $10,
             last_login = NOW()
-        WHERE id = $10
+        WHERE id = $11
         "#,
         hit_points,
         stamina,
@@ -76,6 +82,7 @@ pub async fn save_state(
         player_flags as &[PlayerFlag],
         prompt,
         title,
+        description,
         character_id,
     )
     .execute(pool)
@@ -110,7 +117,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             class_id,
             race::text AS "race!: String",
             experience,
-            title
+            title,
+            description
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

@@ -244,6 +244,11 @@ impl ConnRouter {
                     {
                         e.insert(Title(t.trim().to_string()));
                     }
+                    if let Some(d) = char_row.description.as_deref()
+                        && !d.trim().is_empty()
+                    {
+                        e.insert(Description(d.trim().to_string()));
+                    }
                 }
                 self.playing.insert(conn_id, entity);
                 commands::send_prompt(world, entity);
@@ -397,6 +402,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         .map(|p| p.0.clone())
         .unwrap_or_default();
     let title = world.get::<Title>(entity).map(|t| t.0.clone());
+    let description = world.get::<Description>(entity).map(|d| d.0.clone());
     let (recall_zone, recall_room) = world
         .get::<RecallPoint>(entity)
         .and_then(|r| world.get::<WorldKey>(r.0).copied())
@@ -431,6 +437,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         &flags,
         &prompt,
         title.as_deref(),
+        description.as_deref(),
     )
     .await
     {
@@ -551,6 +558,7 @@ mod tests {
             race: "HUMAN".into(),
             experience: 0,
             title: None,
+            description: None,
         }
     }
 
