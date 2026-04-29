@@ -370,6 +370,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_commands,
     },
     Command {
+        names: &["read"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "read <item>",
+            summary: "Read the text on an item (book, sign, scroll).",
+            long: "Finds an item by keyword on you or in the room and \
+                   prints its description text. Refuses on mobs and \
+                   players — use `examine` for those.",
+        },
+        run: cmd_read,
+    },
+    Command {
         names: &["compare"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3435,6 +3449,54 @@ fn direction_order(d: mud_db::enums::Direction) -> u8 {
         Portal => 12,
         mud_db::enums::Direction::None => 13,
     }
+}
+
+/// `read <item>`: find an item by keyword on the player or in their
+/// room and print its Description. Refuses on mobs/players (use
+/// `examine`). The Description component is the same one
+/// `ObjectPrototypes.examine_description` feeds at load time, so books
+/// / signs / scrolls all surface their text via this path.
+fn cmd_read(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(world, player, "Read what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let lc = needle.to_ascii_lowercase();
+    // Match items only — mobs/players go to `examine`. Search the
+    // player's inventory + the current room.
+    let target = {
+        let mut q = world
+            .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+        q.iter(world)
+            .find(|(_, l, n, kw)| {
+                (l.0 == player || l.0 == located.0) && matches(&lc, n, *kw)
+            })
+            .map(|(e, _, _, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("You can't find anything to read called '{needle}'.\r\n"));
+        return;
+    };
+    let name = name_of(world, target);
+    let mode = color_mode_for(world, player);
+    let name_rendered = render_color_tags(&name, mode);
+    let mut out = format!("\r\nYou read {name_rendered}:\r\n");
+    if let Some(desc) = world.get::<Description>(target) {
+        let body = desc.0.trim();
+        if body.is_empty() {
+            out.push_str("It's blank.\r\n");
+        } else {
+            out.push_str(&format!("{}\r\n", render_color_tags(body, mode)));
+        }
+    } else {
+        out.push_str("It's blank.\r\n");
+    }
+    send_to(world, player, out);
 }
 
 /// `compare <a> <b>`: side-by-side weight + level + type comparison
