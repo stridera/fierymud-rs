@@ -128,6 +128,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_glance,
     },
     Command {
+        names: &["experience", "exp", "xp"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "experience",
+            summary: "Show your current experience and level.",
+            long: "Prints your level and total experience points. The \
+                   per-level table that turns this into a `to next` \
+                   readout will land with the levelling system.",
+        },
+        run: cmd_experience,
+    },
+    Command {
         names: &["examine", "exa"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2311,6 +2325,21 @@ pub(crate) fn condition_label(hp: Health) -> &'static str {
         61..=85 => "has some scrapes",
         _ => "is in excellent shape",
     }
+}
+
+/// `experience` / `exp` / `xp`: print level and total XP from Profile.
+/// Standalone readout for the same numbers `score` already shows; the
+/// loose level→required-XP table will join later.
+fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
+    let Some(p) = world.get::<Profile>(player).cloned() else {
+        send_to(world, player, "You have no profile.\r\n");
+        return;
+    };
+    send_to(
+        world,
+        player,
+        format!("\r\nLevel {}    Experience: {}\r\n", p.level, p.experience),
+    );
 }
 
 /// One-line snapshot: name + posture + HP condition + current target.
