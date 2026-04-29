@@ -114,6 +114,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_help,
     },
     Command {
+        names: &["glance"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "glance <target>",
+            summary: "One-line condition check on someone in your room.",
+            long: "Tells you the target's name, posture, condition (e.g. \
+                   `bleeding`), and whether they're fighting. Faster than \
+                   `examine` for a quick teammate / enemy check.",
+        },
+        run: cmd_glance,
+    },
+    Command {
         names: &["examine", "exa"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2297,6 +2311,42 @@ pub(crate) fn condition_label(hp: Health) -> &'static str {
         61..=85 => "has some scrapes",
         _ => "is in excellent shape",
     }
+}
+
+/// One-line snapshot: name + posture + HP condition + current target.
+/// Useful for a quick teammate / enemy check without the wall of text
+/// from `examine`.
+fn cmd_glance(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Glance at whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere; can't glance.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
+        send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
+        return;
+    };
+    let name = name_of(world, target);
+    let cond = world
+        .get::<Health>(target)
+        .copied()
+        .map_or("looks fine", condition_label);
+    let posture = world
+        .get::<Posture>(target)
+        .map_or("standing", |p| p.0.label());
+    let fighting = world
+        .get::<Fighting>(target)
+        .map(|f| name_or(world, f.0, "<gone>"));
+    let mut line = format!("\r\n{name} ({posture}) {cond}");
+    if let Some(target_name) = fighting {
+        line.push_str(&format!(" — fighting {target_name}"));
+    }
+    line.push_str(".\r\n");
+    send_rendered(world, player, &line);
 }
 
 fn cmd_look(world: &mut World, player: Entity, args: &str) {
