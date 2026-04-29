@@ -5988,42 +5988,117 @@ fn invoke_ability(
             }
         }
     }
+    // Templated message set (if the ability has one in
+    // AbilityMessages). Loaded at startup; per-ability rows are
+    // optional, and individual fields within a row are optional too.
+    let messages = world
+        .resource::<AbilityCatalog>()
+        .messages
+        .get(&def.id)
+        .cloned();
+    let actor_name = name_of(world, player);
+    let target_name_raw = if target_entity == player {
+        actor_name.clone()
+    } else {
+        name_or(world, target_entity, "<unknown>")
+    };
     if applied_msgs.is_empty() {
         out.push_str(&format!(
             "    (no effects defined for this {} — nothing to apply)\r\n",
             kind.label()
         ));
-    } else if target_entity == player {
-        out.push_str(&format!(
-            "    you {verb} {} — {}\r\n",
-            def.plain_name,
-            applied_msgs.join(", ")
-        ));
     } else {
-        let target_name = name_or(world, target_entity, "<unknown>");
-        out.push_str(&format!(
-            "    you {verb} {} on {} — {}\r\n",
-            def.plain_name,
-            render_color_tags(&target_name, mode),
-            applied_msgs.join(", ")
-        ));
+        // Caster line: templated success_to_self (when self-targeted)
+        // → success_to_caster → fall through to the dispatcher's
+        // terse "you {verb} X" form.
+        let caster_template = messages.as_ref().and_then(|m| {
+            if target_entity == player {
+                m.success_to_self.as_deref().or(m.success_to_caster.as_deref())
+            } else {
+                m.success_to_caster.as_deref()
+            }
+        });
+        if let Some(t) = caster_template {
+            let rendered = render_ability_template(t, &actor_name, &target_name_raw);
+            out.push_str(&format!("    {}\r\n", render_color_tags(&rendered, mode)));
+        } else if target_entity == player {
+            out.push_str(&format!("    you {verb} {}\r\n", def.plain_name));
+        } else {
+            out.push_str(&format!(
+                "    you {verb} {} on {}\r\n",
+                def.plain_name,
+                render_color_tags(&target_name_raw, mode),
+            ));
+        }
+        // Diagnostic effect summary. Always shown so the player can
+        // see HP/posture/duration outcomes regardless of whether the
+        // template emitted.
+        out.push_str(&format!("    ({})\r\n", applied_msgs.join(", ")));
     }
     send_to(world, player, out);
-    // Notify the target if it's a different player.
+    // Target-side: templated success_to_victim → terse default.
     if target_entity != player && !applied_msgs.is_empty() {
-        let player_name = name_of(world, player);
-        send_rendered(
-            world,
-            target_entity,
-            &format!(
-                "{} {verb}s {} on you. ({} effect(s))\r\n",
-                player_name,
+        let target_template = messages.as_ref().and_then(|m| m.success_to_victim.as_deref());
+        let line = if let Some(t) = target_template {
+            render_ability_template(t, &actor_name, &target_name_raw)
+        } else {
+            format!(
+                "{actor_name} {verb}s {} on you. ({} effect(s))",
                 def.plain_name,
                 applied_msgs.len()
-            ),
-        );
+            )
+        };
+        send_rendered(world, target_entity, &format!("{line}\r\n"));
+    }
+    // Room broadcast: success_to_room (or success_self_room when
+    // self-targeted). Skipped if the ability has no template — the
+    // dispatcher previously emitted nothing to bystanders, so this
+    // is purely additive.
+    let room_template = messages.as_ref().and_then(|m| {
+        if target_entity == player {
+            m.success_self_room
+                .as_deref()
+                .or(m.success_to_room.as_deref())
+        } else {
+            m.success_to_room.as_deref()
+        }
+    });
+    if !applied_msgs.is_empty()
+        && let Some(t) = room_template
+        && let Some(located) = world.get::<Located>(player).copied()
+    {
+        let rendered = render_ability_template(t, &actor_name, &target_name_raw);
+        let mut except: Vec<Entity> = vec![player];
+        if target_entity != player {
+            except.push(target_entity);
+        }
+        broadcast_room_except_rendered(world, located.0, &except, &format!("{rendered}\r\n"));
     }
     let _ = spawn_count;
+}
+
+/// Substitute `{actor.X}` / `{target.X}` placeholders in an
+/// `AbilityMessages` template. Names use the entity's `Named.name`
+/// verbatim; unknown pronouns default to gender-neutral
+/// they/them/their (entities don't carry gender yet — Phase E).
+fn render_ability_template(template: &str, actor_name: &str, target_name: &str) -> String {
+    template
+        .replace("{actor.name}", actor_name)
+        .replace("{target.name}", target_name)
+        .replace("{actor.he}", "they")
+        .replace("{actor.she}", "they")
+        .replace("{actor.it}", "they")
+        .replace("{actor.him}", "them")
+        .replace("{actor.her}", "them")
+        .replace("{actor.his}", "their")
+        .replace("{actor.pos}", "their")
+        .replace("{target.he}", "they")
+        .replace("{target.she}", "they")
+        .replace("{target.it}", "they")
+        .replace("{target.him}", "them")
+        .replace("{target.her}", "them")
+        .replace("{target.his}", "their")
+        .replace("{target.pos}", "their")
 }
 
 /// One row from the effect-mapping fanout: id, presentational name,
