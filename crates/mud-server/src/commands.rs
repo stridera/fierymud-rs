@@ -657,7 +657,7 @@ const COMMANDS: &[Command] = &[
     },
     // ----- Combat -----
     Command {
-        names: &["attack", "kill", "k"],
+        names: &["attack", "kill", "k", "hit", "murder"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Combat,
@@ -793,7 +793,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_disengage,
     },
     Command {
-        names: &["bash"],
+        names: &["bash", "bodyslam", "maul"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Combat,
@@ -807,7 +807,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_bash,
     },
     Command {
-        names: &["follow"],
+        names: &["follow", "shadow"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
@@ -915,7 +915,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_southwest,
     },
     Command {
-        names: &["recall"],
+        names: &["recall", "home"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Movement,
