@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_effects, ability_restrictions, classes, effects, mob_reset_equipment,
-    mob_resets, mobs, object_reset_contents, object_resets, objects, room_exits, rooms, socials,
-    sqlx::PgPool, zones,
+    mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
+    rooms, socials, sqlx::PgPool, zones,
 };
 use tracing::{info, warn};
 
@@ -14,8 +14,8 @@ use crate::components::{
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, ClassCatalog, ClassDef, EffectCatalog, EffectDef, MobProto,
-    MobPrototypes, MobResetCatalog, MobResetEntry, ObjectProto, ObjectPrototypes, SocialDef,
-    SocialRegistry, WorldKeyIndex,
+    MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto,
+    ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -308,6 +308,23 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         );
     }
 
+    // Pass 4d: object-ability catalog (scrolls / wands / staves
+    // bound abilities). Lookups are by `(zone, id)` matching an item
+    // entity's `WorldKey`.
+    let oa_rows = object_abilities::list_all(pool).await?;
+    let mut object_ability_catalog = ObjectAbilityCatalog::default();
+    for row in oa_rows {
+        object_ability_catalog
+            .by_key
+            .entry((row.object_zone_id, row.object_id))
+            .or_default()
+            .push(crate::resources::ObjectAbilityBinding {
+                ability_id: row.ability_id,
+                level: row.level,
+                charges: row.charges,
+            });
+    }
+
     world.insert_resource(WorldKeyIndex {
         zones: zone_index,
         rooms: room_index,
@@ -318,6 +335,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(social_registry);
     world.insert_resource(ability_catalog);
     world.insert_resource(class_catalog);
+    world.insert_resource(object_ability_catalog);
 
     // Pass 5: spawn live entities from MobResets / ObjectResets. Resources
     // were inserted above so the spawners can read them. Probability gating

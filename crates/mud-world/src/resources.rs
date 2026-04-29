@@ -48,6 +48,23 @@ pub struct ObjectPrototypes {
     pub by_key: HashMap<(i32, i32), ObjectProto>,
 }
 
+/// One ability binding on an object proto. `charges = None` means
+/// unlimited; otherwise it's a finite-use charge count (wands).
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectAbilityBinding {
+    pub ability_id: i32,
+    pub level: i32,
+    pub charges: Option<i32>,
+}
+
+/// Catalog of `ObjectAbilities` rows: per-proto list of bound
+/// abilities. Read by `recite` / `wave` / `tap` and (today) by
+/// `stat` for diagnostics.
+#[derive(Resource, Debug, Default)]
+pub struct ObjectAbilityCatalog {
+    pub by_key: HashMap<(i32, i32), Vec<ObjectAbilityBinding>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ObjectProto {
     pub zone_id: i32,

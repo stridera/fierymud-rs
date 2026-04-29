@@ -12,6 +12,7 @@ pub mod enums;
 pub mod mob_reset_equipment;
 pub mod mob_resets;
 pub mod mobs;
+pub mod object_abilities;
 pub mod object_reset_contents;
 pub mod object_resets;
 pub mod objects;

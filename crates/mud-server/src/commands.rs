@@ -8103,14 +8103,16 @@ fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, "You are nowhere.\r\n");
             return;
         };
-        // Try actor (mob/player) first, then item.
+        // Try actor (mob/player) first, then item (room or carried).
         let needle = arg.to_ascii_lowercase();
         let actor = find_actor_in_room(world, arg, located.0, player);
         let item = actor.or_else(|| {
             let mut q = world
                 .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
             q.iter(world)
-                .find(|(_, l, n, kw)| l.0 == located.0 && matches(&needle, n, *kw))
+                .find(|(_, l, n, kw)| {
+                    (l.0 == located.0 || l.0 == player) && matches(&needle, n, *kw)
+                })
                 .map(|(e, _, _, _)| e)
         });
         let Some(found) = item else {
@@ -8142,17 +8144,42 @@ fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         // Resolve through the prototype catalog for weight / level /
         // type. Synthetic seed items lack a WorldKey and so fall
         // through silently.
-        if let Some(wk) = world.get::<WorldKey>(target).copied()
-            && let Some(proto) = world
+        if let Some(wk) = world.get::<WorldKey>(target).copied() {
+            if let Some(proto) = world
                 .resource::<ObjectPrototypes>()
                 .by_key
                 .get(&(wk.zone, wk.id))
                 .cloned()
-        {
-            out.push_str(&format!(
-                "proto:         weight {:.1}, level {}, type {:?}\r\n",
-                proto.weight, proto.level, proto.r#type,
-            ));
+            {
+                out.push_str(&format!(
+                    "proto:         weight {:.1}, level {}, type {:?}\r\n",
+                    proto.weight, proto.level, proto.r#type,
+                ));
+            }
+            // Bound abilities (scrolls / wands / staves).
+            if let Some(abilities) = world
+                .resource::<mud_world::ObjectAbilityCatalog>()
+                .by_key
+                .get(&(wk.zone, wk.id))
+                .cloned()
+            {
+                let catalog = world.resource::<AbilityCatalog>();
+                for b in &abilities {
+                    let name = catalog
+                        .by_name
+                        .values()
+                        .find(|d| d.id == b.ability_id)
+                        .map_or_else(
+                            || format!("(id {})", b.ability_id),
+                            |d| d.plain_name.clone(),
+                        );
+                    let ch = b.charges.map_or_else(|| "∞".to_string(), |c| c.to_string());
+                    out.push_str(&format!(
+                        "ability:       {name} (level {}, charges {ch})\r\n",
+                        b.level,
+                    ));
+                }
+            }
         }
     } else {
         out.push_str("kind:          (other)\r\n");
