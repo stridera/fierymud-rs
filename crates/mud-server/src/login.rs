@@ -531,6 +531,20 @@ fn spawn_inventory(world: &mut World, player: Entity, rows: &[CharacterItemRow])
         {
             e.insert(EquippedSlot(slot));
         }
+        // Restore Charges from the ObjectAbilities binding's
+        // charges value. CharacterItems doesn't store per-instance
+        // charges yet, so wand/staff items reset to full on
+        // reconnect — generous but consistent with how loadobj
+        // spawns. Logged in SUGGESTIONS for proper persistence.
+        if let Some(charges) = world
+            .resource::<mud_world::ObjectAbilityCatalog>()
+            .by_key
+            .get(&(proto.zone_id, proto.id))
+            .and_then(|v| v.first().and_then(|b| b.charges))
+            && let Ok(mut e) = world.get_entity_mut(item_entity)
+        {
+            e.insert(mud_world::Charges(charges));
+        }
         spawned += 1;
     }
     spawned
