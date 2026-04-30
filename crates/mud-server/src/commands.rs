@@ -5358,6 +5358,14 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     if world.get::<mud_world::Flying>(target).is_some() {
         out.push_str(&format!("{name_rendered} hovers in mid-air.\r\n"));
     }
+    if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(target).copied() {
+        let mount_name = name_or(world, mount, "<unknown>");
+        out.push_str(&format!("{name_rendered} is riding {mount_name}.\r\n"));
+    }
+    if let Some(mud_world::RiddenBy(rider)) = world.get::<mud_world::RiddenBy>(target).copied() {
+        let rider_name = name_or(world, rider, "<unknown>");
+        out.push_str(&format!("{rider_name} is riding {name_rendered}.\r\n"));
+    }
     if world.get::<Stealth>(target).is_some() && target == player {
         // Self-only — others shouldn't see your stealth marker.
         out.push_str("You are hidden.\r\n");
@@ -15206,7 +15214,13 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
         &format!("{mover_name} fades away in a flash of light.\r\n"),
     );
 
+    let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);
     if let Some(mut l) = world.get_mut::<Located>(player) {
+        l.0 = target;
+    }
+    if let Some(mount) = mount
+        && let Some(mut l) = world.get_mut::<Located>(mount)
+    {
         l.0 = target;
     }
 
@@ -15412,7 +15426,15 @@ fn cmd_goto(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("No room ({zone}, {room_id}).\r\n"));
         return;
     };
+    let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);
     if let Some(mut l) = world.get_mut::<Located>(player) {
+        l.0 = target;
+    }
+    // Bring the mount along on goto / recall — otherwise the mount
+    // is orphaned in the old room with a stale RiddenBy link.
+    if let Some(mount) = mount
+        && let Some(mut l) = world.get_mut::<Located>(mount)
+    {
         l.0 = target;
     }
     cmd_look(world, player, "");
