@@ -8,7 +8,7 @@ pub use components::{
     FromMobReset, Frozen, Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt,
     LastTeller, Lit, Located, LoggedInAt, Mob, Named, Online, Player, PlayerFlags, Posture,
     PostureKind, Profile, Prompt, RecallPoint, Room, RoomSector, Slot, Stamina, Stealth,
-    Stunned, TellLog, Title, UiStyle, WearableIn, WimpyThreshold, WorldKey, Zone,
+    Stunned, TellLog, Title, UiStyle, Wealth, WearableIn, WimpyThreshold, WorldKey, Zone,
 };
 pub use loader::{LoadStats, load_from_db, wear_flags_primary_slot};
 pub use resources::{

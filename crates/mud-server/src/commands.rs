@@ -19,7 +19,7 @@ use mud_world::{
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, TellLog, Title, UiStyle,
-    WearableIn, WorldKey, WorldKeyIndex,
+    Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, info_span};
 
@@ -156,6 +156,20 @@ const COMMANDS: &[Command] = &[
                    readout will land with the levelling system.",
         },
         run: cmd_experience,
+    },
+    Command {
+        names: &["wealth", "gold", "money"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "wealth",
+            summary: "Show your on-hand coin in platinum/gold/silver/copper.",
+            long: "Prints the current coin total split across the four \
+                   denominations (1 platinum = 10 gold = 100 silver = \
+                   1000 copper). Bank balance has no command yet.",
+        },
+        run: cmd_wealth,
     },
     Command {
         names: &["title"],
@@ -4024,6 +4038,45 @@ fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
         world,
         player,
         format!("\r\nLevel {}    Experience: {}\r\n", p.level, p.experience),
+    );
+}
+
+/// `wealth` / `gold` / `money`: split the on-hand copper total into
+/// platinum/gold/silver/copper denominations. The schema's per-race
+/// `copperFactor` is reserved for shop/trade math; raw display uses
+/// the standard 100/10/1 ratio (1 platinum = 10 gold = 100 silver =
+/// 1000 copper) so the four-coin breakdown matches `FieryMUD`'s score
+/// sheet. Zero-value coins are skipped; "no coin" prints when broke.
+fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
+    let total = world.get::<Wealth>(player).map_or(0, |w| w.0);
+    if total <= 0 {
+        send_to(world, player, "\r\nYou have no coin to your name.\r\n");
+        return;
+    }
+    let mut remainder = total;
+    let platinum = remainder / 1000;
+    remainder %= 1000;
+    let gold = remainder / 100;
+    remainder %= 100;
+    let silver = remainder / 10;
+    let copper = remainder % 10;
+    let mut parts: Vec<String> = Vec::new();
+    if platinum > 0 {
+        parts.push(format!("{platinum} platinum"));
+    }
+    if gold > 0 {
+        parts.push(format!("{gold} gold"));
+    }
+    if silver > 0 {
+        parts.push(format!("{silver} silver"));
+    }
+    if copper > 0 {
+        parts.push(format!("{copper} copper"));
+    }
+    send_to(
+        world,
+        player,
+        format!("\r\nYou have {}.\r\n", parts.join(", ")),
     );
 }
 

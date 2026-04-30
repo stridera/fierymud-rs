@@ -47,6 +47,11 @@ pub struct CharacterRow {
     pub intelligence: i32,
     pub wisdom: i32,
     pub charisma: i32,
+    /// On-hand wealth in copper units. Schema is a Postgres BIGINT;
+    /// per-race `copperFactor` converts to display denominations at
+    /// render time.
+    pub wealth: i64,
+    pub bank_wealth: i64,
 }
 
 // One UPDATE-per-column-set is the simplest call site for this many fields;
@@ -65,6 +70,7 @@ pub async fn save_state(
     prompt: &str,
     title: Option<&str>,
     description: Option<&str>,
+    wealth: i64,
 ) -> sqlx::Result<()> {
     sqlx::query!(
         r#"
@@ -79,8 +85,9 @@ pub async fn save_state(
             prompt = $8,
             title = $9,
             description = $10,
+            wealth = $11,
             last_login = NOW()
-        WHERE id = $11
+        WHERE id = $12
         "#,
         hit_points,
         stamina,
@@ -92,6 +99,7 @@ pub async fn save_state(
         prompt,
         title,
         description,
+        wealth,
         character_id,
     )
     .execute(pool)
@@ -133,7 +141,9 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             constitution,
             intelligence,
             wisdom,
-            charisma
+            charisma,
+            wealth,
+            bank_wealth
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

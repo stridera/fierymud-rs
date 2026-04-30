@@ -8,7 +8,7 @@ use mud_world::{
     Account, AccountSummary, CombatStats, CoreStats, Description, EquippedSlot, Health, Item,
     Keywords, KnownAbilities, Located, LoggedInAt, Named, Online, ObjectPrototypes, Player,
     PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title,
-    WorldKey, WorldKeyIndex,
+    Wealth, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -343,12 +343,15 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 PlayerFlags(c.player_flags.clone()),
                 Prompt(c.prompt.clone()),
                 LoggedInAt(std::time::Instant::now()),
-                Profile {
-                    level: c.level,
-                    class_id: c.class_id,
-                    race: c.race.clone(),
-                    experience: c.experience,
-                },
+                (
+                    Profile {
+                        level: c.level,
+                        class_id: c.class_id,
+                        race: c.race.clone(),
+                        experience: c.experience,
+                    },
+                    Wealth(c.wealth),
+                ),
             ))
             .id();
         if let Some(re) = recall_entity
@@ -387,12 +390,15 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             PlayerFlags(c.player_flags.clone()),
             Prompt(c.prompt.clone()),
             LoggedInAt(std::time::Instant::now()),
-            Profile {
-                level: c.level,
-                class_id: c.class_id,
-                race: c.race.clone(),
-                experience: c.experience,
-            },
+            (
+                Profile {
+                    level: c.level,
+                    class_id: c.class_id,
+                    race: c.race.clone(),
+                    experience: c.experience,
+                },
+                Wealth(c.wealth),
+            ),
         ))
         .id();
     if let Some(re) = recall_entity
@@ -423,6 +429,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         .unwrap_or_default();
     let title = world.get::<Title>(entity).map(|t| t.0.clone());
     let description = world.get::<Description>(entity).map(|d| d.0.clone());
+    let wealth = world.get::<Wealth>(entity).map_or(0, |w| w.0);
     let (recall_zone, recall_room) = world
         .get::<RecallPoint>(entity)
         .and_then(|r| world.get::<WorldKey>(r.0).copied())
@@ -458,6 +465,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         &prompt,
         title.as_deref(),
         description.as_deref(),
+        wealth,
     )
     .await
     {
@@ -599,6 +607,8 @@ mod tests {
             intelligence: 13,
             wisdom: 13,
             charisma: 13,
+            wealth: 0,
+            bank_wealth: 0,
         }
     }
 
