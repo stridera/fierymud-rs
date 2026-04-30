@@ -1563,6 +1563,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_lasttells,
     },
     Command {
+        names: &["mailbox"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "mailbox",
+            summary: "List inbound mail for your account.",
+            long: "Mail is account-scoped — every character on your \
+                   account shares one inbox. Each line shows the \
+                   slot index, an unread marker (`*`), the sender, \
+                   and the subject. Use `readmail <#>` to read; \
+                   `delmail <#>` to delete.",
+        },
+        run: cmd_mailbox_stub,
+    },
+    Command {
         names: &["gossip", "/"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2452,6 +2468,34 @@ static REGISTRY: LazyLock<HashMap<&'static str, &'static Command>> = LazyLock::n
 // ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
+
+/// Async pre-dispatch hook for commands that need DB access. Today
+/// this is just the mail commands (`mailbox` / `readmail` / `delmail`
+/// / `mail`). Returns true when the input was handled here; false
+/// to fall through to the sync `dispatch`.
+pub async fn try_dispatch_async(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    line: &str,
+) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let head = parts.next().unwrap_or("").to_ascii_lowercase();
+    let _args = parts.next().unwrap_or("").trim();
+    match head.as_str() {
+        "mailbox" | "mailboxes" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_mailbox(world, player, pool).await;
+            true
+        }
+        _ => false,
+    }
+}
 
 pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     // Whatever happens (success, error, unknown command, empty input), the
@@ -9938,6 +9982,53 @@ fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {
     for (name, secs_ago) in &entries {
         out.push_str(&format!("  {:<20} ({} ago)\r\n", name, format_idle(*secs_ago)));
     }
+    send_to(world, player, out);
+}
+
+/// Stub for the help/registry path — `mailbox` is intercepted by the
+/// async pre-dispatch hook before this ever runs. If somehow it does
+/// (a future refactor moves dispatch order around), bail loudly.
+fn cmd_mailbox_stub(world: &mut World, player: Entity, _args: &str) {
+    send_to(
+        world,
+        player,
+        "Mail subsystem error: sync dispatch reached an async-only \
+         command. Please report.\r\n",
+    );
+}
+
+/// `mailbox`: list inbound non-deleted mail for the player's account,
+/// newest first. Each line shows `# unread? sender — subject`.
+/// `readmail <#>` reads the body and marks the row read.
+pub(crate) async fn cmd_mailbox(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
+    let user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
+    let Some(user_id) = user_id else {
+        send_to(world, player, "No account info; can't fetch mail.\r\n");
+        return;
+    };
+    let rows = match mud_db::mail::inbox_for(pool, &user_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            send_to(world, player, format!("Mail fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    if rows.is_empty() {
+        send_to(world, player, "\r\nYour mailbox is empty.\r\n");
+        return;
+    }
+    let mut out = format!("\r\nMailbox ({} message(s)):\r\n", rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let unread = if row.read_at.is_some() { " " } else { "*" };
+        let when = row.sent_at.format("%Y-%m-%d %H:%M");
+        out.push_str(&format!(
+            "  {:<3} {unread} {when}  {:<24} {}\r\n",
+            i + 1,
+            row.sender_display_name,
+            row.subject,
+        ));
+    }
+    out.push_str("\r\n* = unread.   Use `readmail <#>` to read, `delmail <#>` to delete.\r\n");
     send_to(world, player, out);
 }
 

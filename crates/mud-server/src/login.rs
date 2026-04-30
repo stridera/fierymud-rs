@@ -93,7 +93,12 @@ impl ConnRouter {
         if self.login.contains_key(&conn_id) {
             self.advance_login(conn_id, text, pool, world).await;
         } else if let Some(&entity) = self.playing.get(&conn_id) {
-            commands::dispatch(world, entity, &text);
+            // Async pre-dispatch: a tight allow-list of commands that
+            // need DB access (mail today). Returns true when handled
+            // here; falls through to the sync dispatcher otherwise.
+            if !commands::try_dispatch_async(world, entity, pool, &text).await {
+                commands::dispatch(world, entity, &text);
+            }
             // dispatch marks the player for prompt at its start; flush
             // sends one prompt each to the player and to everyone else
             // who received output during the turn.
