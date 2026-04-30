@@ -4441,6 +4441,9 @@ struct ScoreData<'a> {
     /// On-hand copper total. Rendered as a `wealth`-style platinum/
     /// gold/silver/copper line. Zero is omitted from the score sheet.
     wealth: i64,
+    /// Bank-stored copper total. Rendered as a separate `Bank:` line
+    /// when nonzero so players can tell on-hand vs. saved at a glance.
+    bank: i64,
 }
 
 fn cmd_score(world: &mut World, player: Entity, _args: &str) {
@@ -4476,6 +4479,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         });
 
     let wealth = world.get::<Wealth>(player).map_or(0, |w| w.0);
+    let bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
     let data = ScoreData {
         name: &name,
         hp,
@@ -4489,6 +4493,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .as_ref()
             .map(|(lvl, cls, race, xp)| (*lvl, cls.as_str(), race.as_str(), *xp)),
         wealth,
+        bank,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
@@ -4522,6 +4527,9 @@ fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(coin) = format_wealth(d.wealth) {
         out.push_str(&format!("  Wealth: {coin}\r\n"));
+    }
+    if let Some(coin) = format_wealth(d.bank) {
+        out.push_str(&format!("  Bank:   {coin}\r\n"));
     }
     if let Some(l) = d.logged_in {
         out.push_str(&format!("  Online for: {}\r\n", format_idle(l.0.elapsed().as_secs())));
@@ -4569,6 +4577,9 @@ fn render_score_fancy(d: &ScoreData) -> String {
     if let Some(coin) = format_wealth(d.wealth) {
         row(format!("Wealth:    {coin}"));
     }
+    if let Some(coin) = format_wealth(d.bank) {
+        row(format!("Bank:      {coin}"));
+    }
     if let Some(l) = d.logged_in {
         row(format!("Online:    {}", format_idle(l.0.elapsed().as_secs())));
     }
@@ -4602,6 +4613,9 @@ fn render_score_minimal(d: &ScoreData) -> String {
     }
     if d.wealth > 0 {
         parts.push(format!("c:{}", d.wealth));
+    }
+    if d.bank > 0 {
+        parts.push(format!("bank:{}", d.bank));
     }
     if let Some(target) = d.fight_target {
         parts.push(format!("vs:{target}"));
