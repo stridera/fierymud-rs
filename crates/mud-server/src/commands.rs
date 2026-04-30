@@ -8034,7 +8034,6 @@ const ATTACK_COST: i32 = 2;
 const KICK_COST: i32 = 5;
 const BASH_COST: i32 = 8;
 const BANDAGE_COST: i32 = 4;
-const BANDAGE_HEAL: i32 = 10;
 const LAYHANDS_COST: i32 = 12;
 const RESCUE_COST: i32 = 6;
 const DISARM_COST: i32 = 5;
@@ -9379,81 +9378,58 @@ fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-/// `bandage [<target>]`: apply first aid for a small heal. Out-of-
-/// combat only. Self-target by default; arg-form finds someone in
-/// the same room.
+/// `bandage` — Phase C migration: shimmed over the `BANDAGE`
+/// data path. Out-of-combat first aid; staunches bleeds in the
+/// shim until the BANDAGE row gets a second `AbilityEffect`
+/// mapping for `cleanse(condition=["bleed"])` — see
+/// `SUGGESTIONS.md`.
+/// Heal amount comes from the data formula `skill / 5`; admin
+/// gets 0 HP from that until the formula gains a baseline (also
+/// in `SUGGESTIONS.md`) — until then the staunch is the only
+/// visible effect for an untrained caster.
 fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
     if world.get::<Fighting>(player).is_some() {
         send_to(world, player, "You can't bandage in combat.\r\n");
         return;
     }
-    let arg = args.trim();
-    let target = if arg.is_empty() || arg.eq_ignore_ascii_case("me")
-        || arg.eq_ignore_ascii_case("self")
-    {
-        player
-    } else {
-        let Some(located) = world.get::<Located>(player).copied() else {
-            send_to(world, player, "You are nowhere.\r\n");
-            return;
-        };
-        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
-            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
-            return;
-        };
-        t
-    };
     if !check_stamina(world, player, BANDAGE_COST, "bandage") {
         return;
     }
-    let Some(target_hp) = world.get::<Health>(target).copied() else {
-        send_to(world, player, "There's nothing to bandage there.\r\n");
-        return;
-    };
-    if target_hp.hp >= target_hp.max {
-        let target_name = name_or(world, target, "<unknown>");
-        send_to(
-            world,
-            player,
-            if target == player {
-                "You're not hurt.\r\n".to_string()
-            } else {
-                format!("{target_name} isn't hurt.\r\n")
-            },
-        );
-        return;
-    }
     drain_stamina(world, player, BANDAGE_COST);
-    let new_hp = (target_hp.hp + BANDAGE_HEAL).min(target_hp.max);
-    if let Some(mut h) = world.get_mut::<Health>(target) {
-        h.hp = new_hp;
-    }
-    let healed = new_hp - target_hp.hp;
-    // Bandage staunches active bleeding as part of the same action.
-    let staunched = remove_effect_named(world, target, "bleed") > 0;
-    let target_name = name_or(world, target, "<unknown>");
-    let bleed_suffix = if staunched { " Bleeding stops." } else { "" };
-    if target == player {
-        send_to(
-            world,
-            player,
-            format!("You bandage your wounds. (+{healed} HP){bleed_suffix}\r\n"),
-        );
+    // Resolve target (for the bleed staunch — invoke_ability also
+    // resolves it but we need access to call remove_effect_named).
+    let arg = args.trim();
+    let target = if arg.is_empty()
+        || arg.eq_ignore_ascii_case("me")
+        || arg.eq_ignore_ascii_case("self")
+    {
+        Some(player)
+    } else if let Some(located) = world.get::<Located>(player).copied() {
+        find_actor_in_room(world, arg, located.0, player)
     } else {
-        send_to(
-            world,
-            player,
-            format!("You bandage {target_name}. (+{healed} HP){bleed_suffix}\r\n"),
-        );
-        send_rendered(
-            world,
-            target,
-            &format!(
-                "{} bandages your wounds. (+{healed} HP){bleed_suffix}\r\n",
-                name_of(world, player),
-            ),
-        );
+        None
+    };
+    if let Some(t) = target {
+        let staunched = remove_effect_named(world, t, "bleed") > 0;
+        if staunched {
+            send_to(world, player, "Bleeding stops.\r\n");
+            if t != player {
+                send_rendered(world, t, "Your bleeding stops.\r\n");
+            }
+        }
     }
+    let dispatched = if arg.is_empty() {
+        String::from("bandage")
+    } else {
+        format!("bandage {arg}")
+    };
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
 }
 
 fn cmd_follow(world: &mut World, player: Entity, args: &str) {
