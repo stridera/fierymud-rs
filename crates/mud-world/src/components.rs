@@ -511,6 +511,7 @@ impl PlayerFlags {
 pub enum PostureKind {
     Standing,
     Sitting,
+    Kneeling,
     Resting,
     Sleeping,
 }
@@ -521,6 +522,7 @@ impl PostureKind {
         match self {
             Self::Standing => "standing",
             Self::Sitting => "sitting",
+            Self::Kneeling => "kneeling",
             Self::Resting => "resting",
             Self::Sleeping => "sleeping",
         }
@@ -530,13 +532,15 @@ impl PostureKind {
     /// (SLEEPING=6 .. STANDING=9). Used by ability gating: `cast`
     /// refuses if `current_rank < ability.min_posture_rank`. The
     /// schema's lower ranks (DEAD .. STUNNED) aren't modeled here, so
-    /// any rank ≤ 6 passes for every runtime posture.
+    /// any rank ≤ 6 passes for every runtime posture. `Kneeling`
+    /// shares rank 8 with `Sitting` — most ability gates that allow
+    /// sitting allow kneeling, and vice versa.
     #[must_use]
     pub fn rank(self) -> i32 {
         match self {
             Self::Sleeping => 6,
             Self::Resting => 7,
-            Self::Sitting => 8,
+            Self::Sitting | Self::Kneeling => 8,
             Self::Standing => 9,
         }
     }

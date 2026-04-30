@@ -6,10 +6,11 @@ use crate::TickCount;
 /// One regen tick = one second.
 const REGEN_PERIOD_TICKS: u64 = 10;
 
-/// Stamina recovered per second by posture.
+/// Stamina recovered per second by posture. Kneeling regens like
+/// standing — it's an alert posture, just lower-profile.
 fn stamina_per_tick(p: PostureKind) -> i32 {
     match p {
-        PostureKind::Standing => 1,
+        PostureKind::Standing | PostureKind::Kneeling => 1,
         PostureKind::Sitting => 2,
         PostureKind::Resting => 4,
         PostureKind::Sleeping => 8,
@@ -17,10 +18,10 @@ fn stamina_per_tick(p: PostureKind) -> i32 {
 }
 
 /// HP recovered per second by posture. Standing players don't auto-heal —
-/// resting/sleeping does the work, like classic MUDs.
+/// resting/sleeping does the work, like classic MUDs. Kneeling = standing.
 fn health_per_tick(p: PostureKind) -> i32 {
     match p {
-        PostureKind::Standing => 0,
+        PostureKind::Standing | PostureKind::Kneeling => 0,
         PostureKind::Sitting => 1,
         PostureKind::Resting => 2,
         PostureKind::Sleeping => 4,

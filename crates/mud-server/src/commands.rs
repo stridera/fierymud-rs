@@ -1814,6 +1814,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_sit,
     },
     Command {
+        names: &["kneel"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "kneel",
+            summary: "Kneel — lower-profile but still alert.",
+            long: "Changes your posture to kneeling. Ranks the same as \
+                   sitting for ability gating, but regenerates like \
+                   standing — useful for guards, prayer, or showing \
+                   respect.",
+        },
+        run: cmd_kneel,
+    },
+    Command {
         names: &["rest"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5162,6 +5177,9 @@ fn cmd_stand(world: &mut World, player: Entity, _args: &str) {
 fn cmd_sit(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Sitting);
 }
+fn cmd_kneel(world: &mut World, player: Entity, _args: &str) {
+    set_posture(world, player, PostureKind::Kneeling);
+}
 fn cmd_rest(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Resting);
 }
@@ -5219,6 +5237,7 @@ fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
     let verb = match new {
         PostureKind::Standing => "stand up",
         PostureKind::Sitting => "sit down",
+        PostureKind::Kneeling => "kneel",
         PostureKind::Resting => "begin resting",
         PostureKind::Sleeping => "lie down and sleep",
     };
@@ -5232,6 +5251,7 @@ fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
     let third = match new {
         PostureKind::Standing => "stands up",
         PostureKind::Sitting => "sits down",
+        PostureKind::Kneeling => "kneels",
         PostureKind::Resting => "begins resting",
         PostureKind::Sleeping => "lies down and sleeps",
     };
@@ -9819,7 +9839,7 @@ fn require_alert_posture(world: &mut World, player: Entity, action: &str) -> boo
             send_to(world, player, format!("You can't {action} while sleeping.\r\n"));
             false
         }
-        Some(PostureKind::Sitting | PostureKind::Resting) => {
+        Some(PostureKind::Sitting | PostureKind::Kneeling | PostureKind::Resting) => {
             // Auto-stand.
             try_insert(world, player, Posture(PostureKind::Standing));
             send_to(world, player, "You stand up.\r\n");
