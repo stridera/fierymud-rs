@@ -169,6 +169,24 @@ pub struct AbilityCatalog {
     /// `invoke_ability` after target resolution to refuse casts that
     /// don't match the schema's valid target list.
     pub targeting: HashMap<i32, TargetingRule>,
+    /// Per-ability saving-throw rules. 2 rows in the schema today
+    /// (`BASH` FORTITUDE, `TRIP_UP` REFLEX). Read by `invoke_ability`
+    /// before effect application; on a successful save the
+    /// `on_save_action` branches the dispatcher (`NEGATE` skips
+    /// effects, `HALF_DURATION` halves spawned `EffectInstance`
+    /// durations).
+    pub saves: HashMap<i32, SavingThrow>,
+}
+
+/// Per-ability saving-throw rule loaded from the
+/// `AbilitySavingThrow` table. `dc_formula` is a string evaluated
+/// against the caster's `FormulaCtx`; `on_save_action` is the raw
+/// JSON value (string or object) describing what happens on success.
+#[derive(Debug, Clone, Default)]
+pub struct SavingThrow {
+    pub save_type: String,
+    pub dc_formula: String,
+    pub on_save_action: serde_json::Value,
 }
 
 /// Per-ability targeting rule loaded from the `AbilityTargeting`

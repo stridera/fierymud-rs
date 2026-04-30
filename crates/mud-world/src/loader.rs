@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_effects, ability_messages, ability_restrictions, ability_targeting, classes, effects, mob_reset_equipment,
+    abilities, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, classes, effects, mob_reset_equipment,
     mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
     rooms, socials, sqlx::PgPool, zones,
 };
@@ -15,7 +15,8 @@ use crate::components::{
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, EffectCatalog,
     EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog,
-    ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry, TargetingRule, WorldKeyIndex,
+    ObjectProto, ObjectPrototypes, SavingThrow, SocialDef, SocialRegistry, TargetingRule,
+    WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -313,6 +314,19 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 scope: row.scope,
                 max_targets: row.max_targets,
                 require_los: row.require_los,
+            },
+        );
+    }
+
+    // Per-ability saving-throw rules. UNIQUE per ability_id.
+    let save_rows = ability_saving_throw::list_all(pool).await?;
+    for row in save_rows {
+        ability_catalog.saves.insert(
+            row.ability_id,
+            SavingThrow {
+                save_type: row.save_type,
+                dc_formula: row.dc_formula,
+                on_save_action: row.on_save_action,
             },
         );
     }

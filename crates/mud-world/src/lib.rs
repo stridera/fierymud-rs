@@ -14,6 +14,6 @@ pub use loader::{LoadStats, load_from_db, wear_flags_primary_slot};
 pub use resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, EffectCatalog,
     EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityBinding,
-    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry,
+    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow, SocialDef, SocialRegistry,
     TargetingRule, WorldKeyIndex,
 };

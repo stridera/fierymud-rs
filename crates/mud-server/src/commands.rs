@@ -6277,6 +6277,43 @@ fn invoke_ability(
     } else {
         name_or(world, target_entity, "<unknown>")
     };
+    // Saving-throw resolution. If the ability has a row in
+    // AbilitySavingThrow, evaluate the DC against caster's
+    // FormulaCtx, roll d20 + target's level (proxy for save bonus
+    // until full per-stat save calc lands), and branch on
+    // on_save_action: NEGATE → skip all effects; HALF_DURATION →
+    // halve the duration that's spawned for status/modify/knockdown
+    // arms. Self-targeted saves auto-fail (caster doesn't resist
+    // their own buff).
+    let save_action = if target_entity == player {
+        SaveOutcome::Failed
+    } else {
+        save_action_for(world, &def, target_entity, &formula_ctx)
+    };
+    if matches!(save_action, SaveOutcome::Negated) {
+        let target_name = if target_entity == player {
+            actor_name_pre.clone()
+        } else {
+            name_or(world, target_entity, "<unknown>")
+        };
+        send_to(
+            world,
+            player,
+            format!("{target_name} resists your {}.\r\n", def.plain_name),
+        );
+        if target_entity != player {
+            send_rendered(
+                world,
+                target_entity,
+                &format!(
+                    "You resist {}'s {}.\r\n",
+                    actor_name_pre, def.plain_name,
+                ),
+            );
+        }
+        return;
+    }
+    let halve_duration = matches!(save_action, SaveOutcome::HalfDuration);
     let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
     let mut spawn_count: usize = 0;
     for spec in &effect_specs {
@@ -6390,11 +6427,14 @@ fn invoke_ability(
                 // `effects_tick` removes the Stunned marker once the
                 // last "stun" EffectInstance on the target expires.
                 crate::commands::try_insert(world, target_entity, Stunned);
-                let dur_secs = resolve_effect_duration(
+                let mut dur_secs = resolve_effect_duration(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
                     &formula_ctx,
                 );
+                if halve_duration {
+                    dur_secs = (dur_secs / 2).max(1);
+                }
                 world.spawn((
                     EffectInstance {
                         kind: spec.id,
@@ -6497,11 +6537,14 @@ fn invoke_ability(
                     Some(&spec.default_params),
                 );
                 let toppled = apply_knockdown_posture(world, target_entity, posture);
-                let dur_secs = resolve_effect_duration(
+                let mut dur_secs = resolve_effect_duration(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
                     &formula_ctx,
                 );
+                if halve_duration {
+                    dur_secs = (dur_secs / 2).max(1);
+                }
                 world.spawn((
                     EffectInstance {
                         kind: spec.id,
@@ -6521,11 +6564,14 @@ fn invoke_ability(
                 });
             }
             _ => {
-                let dur_secs = resolve_effect_duration(
+                let mut dur_secs = resolve_effect_duration(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
                     &formula_ctx,
                 );
+                if halve_duration {
+                    dur_secs = (dur_secs / 2).max(1);
+                }
                 world.spawn((
                     EffectInstance {
                         kind: spec.id,
@@ -6656,6 +6702,68 @@ fn invoke_ability(
 /// Other types (`CORPSE`, `OBJECT_INV`, `RIDER`, `UNCONSCIOUS`) pass
 /// silently — they need entity categories the runtime doesn't model
 /// yet.
+/// What happens when a target makes a saving throw.
+#[derive(Debug, Clone, Copy)]
+enum SaveOutcome {
+    /// No save was rolled, or the target failed it. Effects apply
+    /// normally.
+    Failed,
+    /// Target made the save and the action is `NEGATE` — skip all
+    /// effect application, send a "resists" message.
+    Negated,
+    /// Target made the save and the action is `HALF_DURATION` —
+    /// effects still apply but spawn with half their normal
+    /// duration.
+    HalfDuration,
+}
+
+/// Roll a saving throw against an ability's `AbilitySavingThrow`
+/// row when one exists. Returns `Failed` (effects apply normally)
+/// when there's no row, the formula doesn't resolve, or the roll
+/// misses the DC. The save bonus is target's `Profile.level`
+/// today — full per-stat save calc is a follow-up that needs mob
+/// `CoreStats` first.
+fn save_action_for(
+    world: &mut World,
+    def: &mud_world::AbilityDef,
+    target: Entity,
+    formula_ctx: &FormulaCtx,
+) -> SaveOutcome {
+    let Some(save) = world
+        .resource::<AbilityCatalog>()
+        .saves
+        .get(&def.id)
+        .cloned()
+    else {
+        return SaveOutcome::Failed;
+    };
+    let Some(dc) = evaluate_simple_formula_ctx(&save.dc_formula, formula_ctx) else {
+        return SaveOutcome::Failed;
+    };
+    let target_level = world
+        .get::<Profile>(target)
+        .map_or(1, |p| p.level.max(1));
+    // Roll a d20 plus target's level. Save succeeds if total ≥ DC.
+    let roll = rand::random_range(1..=20);
+    let total = roll + target_level;
+    if total < dc {
+        return SaveOutcome::Failed;
+    }
+    let action = save
+        .on_save_action
+        .as_str()
+        .map(str::to_ascii_uppercase)
+        .unwrap_or_default();
+    match action.as_str() {
+        "NEGATE" => SaveOutcome::Negated,
+        "HALF_DURATION" => SaveOutcome::HalfDuration,
+        // Unknown / unsupported action: effects apply at full
+        // strength as if the save failed. The runtime grows
+        // interpretation incrementally.
+        _ => SaveOutcome::Failed,
+    }
+}
+
 fn check_target_type(
     world: &mut World,
     caster: Entity,
