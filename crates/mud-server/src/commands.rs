@@ -2685,6 +2685,7 @@ static REGISTRY: LazyLock<HashMap<&'static str, &'static Command>> = LazyLock::n
 /// this is just the mail commands (`mailbox` / `readmail` / `delmail`
 /// / `mail`). Returns true when the input was handled here; false
 /// to fall through to the sync `dispatch`.
+#[allow(clippy::too_many_lines)]
 pub async fn try_dispatch_async(
     world: &mut World,
     player: Entity,
@@ -2744,6 +2745,28 @@ pub async fn try_dispatch_async(
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_qload(world, player, pool, args).await;
             true
+        }
+        // Numeric `read <#>` while standing near a board → render
+        // that board's message body. Non-numeric `read <item>`
+        // falls through to the sync handler that looks at item
+        // Description.
+        "read" if args.trim().parse::<usize>().is_ok() => {
+            let target_room = world.get::<Located>(player).map(|l| l.0);
+            let board_id_in_room = target_room.and_then(|room| {
+                let mut q = world
+                    .query_filtered::<(&Located, &BoardLink), With<Item>>();
+                q.iter(world)
+                    .find(|(l, _)| l.0 == room)
+                    .map(|(_, b)| b.0)
+            });
+            if let Some(board_id) = board_id_in_room {
+                mark_for_prompt(player);
+                try_insert(world, player, LastInputAt(std::time::Instant::now()));
+                cmd_read_board_msg(world, player, pool, board_id, args).await;
+                true
+            } else {
+                false
+            }
         }
         "board" => {
             mark_for_prompt(player);
@@ -11216,6 +11239,69 @@ pub(crate) async fn cmd_abandon(
             send_to(world, player, format!("Abandon failed: {e}\r\n"));
         }
     }
+}
+
+/// `read <#>` while standing near a board: render that board's
+/// message body. Routed here from the async pre-dispatch when the
+/// argument is a positive integer and the player's room contains a
+/// `BoardLink`-tagged item. Out-of-range / fetch errors fall back
+/// to friendly messages without re-dispatching.
+pub(crate) async fn cmd_read_board_msg(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    board_id: i32,
+    args: &str,
+) {
+    let Ok(slot) = args.trim().parse::<usize>() else {
+        return;
+    };
+    if slot == 0 {
+        send_to(world, player, "Slots are 1-based.\r\n");
+        return;
+    }
+    let summary = world
+        .get_resource::<BoardCatalog>()
+        .and_then(|c| c.by_id.get(&board_id))
+        .cloned();
+    let Some(summary) = summary else {
+        send_to(world, player, "That board's catalog entry is missing.\r\n");
+        return;
+    };
+    let messages = match mud_db::boards::messages_for_board(pool, board_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            send_to(world, player, format!("Message fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    let Some(msg) = messages.get(slot - 1) else {
+        send_to(
+            world,
+            player,
+            format!(
+                "No message at slot {slot} on {} (it has {} message{}).\r\n",
+                summary.title,
+                messages.len(),
+                if messages.len() == 1 { "" } else { "s" },
+            ),
+        );
+        return;
+    };
+    let mut out = format!(
+        "\r\n[{}] message {}/{}\r\n",
+        summary.title, slot, messages.len()
+    );
+    out.push_str(&format!("From:    {} (level {})\r\n", msg.poster, msg.poster_level));
+    out.push_str(&format!("Subject: {}\r\n", msg.subject));
+    out.push_str(&format!("Posted:  {}\r\n", msg.posted_at.format("%Y-%m-%d %H:%M")));
+    if msg.sticky {
+        out.push_str("(sticky)\r\n");
+    }
+    out.push_str("---\r\n");
+    out.push_str(msg.content.trim_end());
+    out.push_str("\r\n---\r\n");
+    send_to(world, player, out);
 }
 
 /// `boards`: list every available board with its alias and title.
