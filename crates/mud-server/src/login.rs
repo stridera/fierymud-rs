@@ -5,10 +5,10 @@ use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::U
 use mud_net::{ConnId, Outbound};
 use mud_db::character_items::CharacterItemRow;
 use mud_world::{
-    Account, AccountSummary, CombatStats, Description, EquippedSlot, Health, Item, Keywords,
-    KnownAbilities, Located, LoggedInAt, Named, Online, ObjectPrototypes, Player, PlayerFlags,
-    Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title, WorldKey,
-    WorldKeyIndex,
+    Account, AccountSummary, CombatStats, CoreStats, Description, EquippedSlot, Health, Item,
+    Keywords, KnownAbilities, Located, LoggedInAt, Named, Online, ObjectPrototypes, Player,
+    PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title,
+    WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -309,6 +309,14 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
         ac: c.armor_class,
         alignment: c.alignment,
     };
+    let core_stats = CoreStats {
+        strength: c.strength,
+        dexterity: c.dexterity,
+        constitution: c.constitution,
+        intelligence: c.intelligence,
+        wisdom: c.wisdom,
+        charisma: c.charisma,
+    };
 
     let Some(room_entity) = room_entity else {
         let _ = outbound.send(format!(
@@ -330,6 +338,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 health,
                 stamina,
                 combat,
+                core_stats,
                 Posture(PostureKind::Standing),
                 PlayerFlags(c.player_flags.clone()),
                 Prompt(c.prompt.clone()),
@@ -373,6 +382,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             health,
             stamina,
             combat,
+            core_stats,
             Posture(PostureKind::Standing),
             PlayerFlags(c.player_flags.clone()),
             Prompt(c.prompt.clone()),
@@ -569,6 +579,12 @@ mod tests {
             experience: 0,
             title: None,
             description: None,
+            strength: 13,
+            dexterity: 13,
+            constitution: 13,
+            intelligence: 13,
+            wisdom: 13,
+            charisma: 13,
         }
     }
 

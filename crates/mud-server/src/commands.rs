@@ -15,7 +15,7 @@ use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRo
 use mud_net::Outbound;
 use mud_world::{
     AbilityCatalog, Account, AccountSummary, AppliedTo, ClassCatalog, CombatStats, Cooldowns,
-    Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
+    CoreStats, Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stunned, TellLog, Title, UiStyle,
@@ -6098,10 +6098,17 @@ fn invoke_ability(
         .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).map(|(_, p, _)| *p))
         .unwrap_or(0);
     let caster_weapon_damage = caster_weapon_damage(world, player);
+    let caster_stats = world.get::<CoreStats>(player).copied().unwrap_or_default();
     let formula_ctx = FormulaCtx {
         level: caster_level,
         skill: caster_skill,
         weapon_damage: caster_weapon_damage,
+        str_bonus: CoreStats::bonus(caster_stats.strength),
+        dex_bonus: CoreStats::bonus(caster_stats.dexterity),
+        con_bonus: CoreStats::bonus(caster_stats.constitution),
+        int_bonus: CoreStats::bonus(caster_stats.intelligence),
+        wis_bonus: CoreStats::bonus(caster_stats.wisdom),
+        cha_bonus: CoreStats::bonus(caster_stats.charisma),
     };
     let effect_specs: Vec<EffectSpec> = {
         let mappings = world
@@ -7183,6 +7190,12 @@ struct FormulaCtx {
     level: i32,
     skill: i32,
     weapon_damage: i32,
+    str_bonus: i32,
+    dex_bonus: i32,
+    con_bonus: i32,
+    int_bonus: i32,
+    wis_bonus: i32,
+    cha_bonus: i32,
 }
 
 impl FormulaCtx {
@@ -7191,7 +7204,11 @@ impl FormulaCtx {
     /// directly so they can supply caster-derived symbols.
     #[cfg(test)]
     fn base(level: i32, skill: i32) -> Self {
-        Self { level, skill, weapon_damage: 0 }
+        Self {
+            level,
+            skill,
+            ..Self::default()
+        }
     }
 
     fn lookup(self, name: &str) -> Option<i32> {
@@ -7199,6 +7216,12 @@ impl FormulaCtx {
             "level" => Some(self.level),
             "skill" => Some(self.skill),
             "weapon_damage" => Some(self.weapon_damage),
+            "str_bonus" | "str" => Some(self.str_bonus),
+            "dex_bonus" | "dex" => Some(self.dex_bonus),
+            "con_bonus" | "con" => Some(self.con_bonus),
+            "int_bonus" | "int" => Some(self.int_bonus),
+            "wis_bonus" | "wis" => Some(self.wis_bonus),
+            "cha_bonus" | "cha" => Some(self.cha_bonus),
             _ => None,
         }
     }

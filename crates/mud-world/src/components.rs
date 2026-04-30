@@ -183,6 +183,30 @@ pub struct CombatStats {
     pub alignment: i32,
 }
 
+/// `D&D`-style ability scores (3..=25 in classic `CircleMUD`; schema
+/// defaults to 13). Bonus computed as `(score - 10) / 2`. Loaded
+/// from `Characters` on player spawn; not yet on mobs (their stats
+/// aren't in the schema yet).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct CoreStats {
+    pub strength: i32,
+    pub dexterity: i32,
+    pub constitution: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub charisma: i32,
+}
+
+impl CoreStats {
+    /// Standard `(score - 10) / 2` bonus, integer-truncated. Negative
+    /// for sub-10 scores. Used by ability formulas (`str_bonus`,
+    /// `dex_bonus`, etc.).
+    #[must_use]
+    pub fn bonus(score: i32) -> i32 {
+        (score - 10) / 2
+    }
+}
+
 /// Combat state: this entity is currently fighting the target. Removed when
 /// combat ends (death, flee, room mismatch).
 #[derive(Component, Debug, Clone, Copy)]

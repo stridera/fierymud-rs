@@ -38,6 +38,15 @@ pub struct CharacterRow {
     /// character. None when unset; rendered with XML-Lite color tags
     /// like room descriptions.
     pub description: Option<String>,
+    /// Core attribute scores. Schema default is 13 so freshly-rolled
+    /// characters always have something. Bonuses derive `(stat - 10) / 2`
+    /// at use sites; the runtime stores the raw scores.
+    pub strength: i32,
+    pub dexterity: i32,
+    pub constitution: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub charisma: i32,
 }
 
 // One UPDATE-per-column-set is the simplest call site for this many fields;
@@ -118,7 +127,13 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             race::text AS "race!: String",
             experience,
             title,
-            description
+            description,
+            strength,
+            dexterity,
+            constitution,
+            intelligence,
+            wisdom,
+            charisma
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

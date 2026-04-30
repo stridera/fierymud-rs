@@ -3,11 +3,12 @@ pub mod loader;
 pub mod resources;
 
 pub use components::{
-    Account, AccountSummary, AppliedTo, CombatStats, Cooldowns, Description, EffectInstance,
-    EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, FromMobReset, Frozen, Health,
-    IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Lit, Located, LoggedInAt,
-    Mob, Named, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint,
-    Room, RoomSector, Slot, Stamina, Stunned, TellLog, Title, UiStyle, WearableIn, WorldKey, Zone,
+    Account, AccountSummary, AppliedTo, CombatStats, Cooldowns, CoreStats, Description,
+    EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower,
+    FromMobReset, Frozen, Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt,
+    LastTeller, Lit, Located, LoggedInAt, Mob, Named, Online, Player, PlayerFlags, Posture,
+    PostureKind, Profile, Prompt, RecallPoint, Room, RoomSector, Slot, Stamina, Stunned,
+    TellLog, Title, UiStyle, WearableIn, WorldKey, Zone,
 };
 pub use loader::{LoadStats, load_from_db, wear_flags_primary_slot};
 pub use resources::{
