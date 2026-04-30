@@ -1093,6 +1093,71 @@ const COMMANDS: &[Command] = &[
         run: cmd_autosplit,
     },
     Command {
+        names: &["brief"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "brief",
+            summary: "Toggle terse room descriptions.",
+            long: "When on, `look` skips the full room description \
+                   and shows just the title + exits + occupants.",
+        },
+        run: cmd_brief,
+    },
+    Command {
+        names: &["compact"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "compact",
+            summary: "Toggle compact output (suppresses leading blank lines).",
+            long: "Sets COMPACT. Renderers that respect it tighten \
+                   their leading whitespace.",
+        },
+        run: cmd_compact,
+    },
+    Command {
+        names: &["norepeat"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "norepeat",
+            summary: "Suppress consecutive duplicate output lines.",
+            long: "Sets NO_REPEAT. Renderers that respect it collapse \
+                   identical back-to-back lines into one.",
+        },
+        run: cmd_norepeat,
+    },
+    Command {
+        names: &["nosummon"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "nosummon",
+            summary: "Refuse incoming summon spells.",
+            long: "Sets NO_SUMMON. Once summon-class spells land, this \
+                   blocks remote teleport effects targeting you.",
+        },
+        run: cmd_nosummon,
+    },
+    Command {
+        names: &["dice", "showdicerolls"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "dice",
+            summary: "Toggle showing per-swing dice rolls in combat.",
+            long: "Sets SHOW_DICE_ROLLS. Combat output surfaces hit/dmg \
+                   rolls when the flag is set.",
+        },
+        run: cmd_dicerolls,
+    },
+    Command {
         names: &["holylight"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -4814,6 +4879,58 @@ fn cmd_autosplit(world: &mut World, player: Entity, _args: &str) {
         PlayerFlag::AutoSplit,
         "Auto-split enabled.",
         "Auto-split disabled.",
+    );
+}
+
+fn cmd_brief(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::Brief,
+        "Room descriptions will now be terse on `look`.",
+        "Full room descriptions restored.",
+    );
+}
+
+fn cmd_compact(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::Compact,
+        "Compact mode enabled.",
+        "Compact mode disabled.",
+    );
+}
+
+fn cmd_norepeat(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::NoRepeat,
+        "Suppressing duplicate consecutive lines.",
+        "All output lines will be shown.",
+    );
+}
+
+fn cmd_nosummon(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::NoSummon,
+        "You can no longer be summoned by spells.",
+        "You can again be summoned by spells.",
+    );
+}
+
+// `dice` is the legacy verb for SHOW_DICE_ROLLS — when on, combat
+// surfaces hit/damage rolls in the output.
+fn cmd_dicerolls(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::ShowDiceRolls,
+        "Showing dice rolls.",
+        "Hiding dice rolls.",
     );
 }
 
