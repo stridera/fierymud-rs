@@ -6216,11 +6216,10 @@ fn invoke_ability(
         match spec.effect_type.as_str() {
             "damage" => {
                 // Resolve `amount` from override → default params and
-                // apply via `apply_damage`. Most schema formulas use
-                // unsupported tokens (`pow`, `weapon_damage`,
-                // `str_bonus`, ...) and return None — those casts
-                // do 0 damage today and a follow-up extends the
-                // formula evaluator. No EffectInstance spawned.
+                // apply via `apply_damage`. The remaining unsupported
+                // formulas (area/multihit/percent/damage_dealt) return
+                // None and resolve to 0 here — the evaluator will
+                // grow those mechanics later. No EffectInstance spawned.
                 let amount = resolve_effect_amount(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
@@ -6228,8 +6227,19 @@ fn invoke_ability(
                 )
                 .unwrap_or(0);
                 if amount > 0 {
-                    let (dead, _) =
+                    let (dead, threshold_msg) =
                         crate::commands::apply_damage(world, target_entity, amount);
+                    // Surface the apply_damage threshold message
+                    // ("You are hurt." / "...badly hurt!" / "...near
+                    // death!") to the target so they get the same
+                    // feedback melee combat already provides.
+                    // Always to the target — even for self-cast damage,
+                    // the caster benefits from the threshold cue.
+                    if !dead
+                        && let Some(line) = threshold_msg
+                    {
+                        send_to(world, target_entity, line.to_string());
+                    }
                     if dead
                         && let Some(located) = world.get::<Located>(target_entity).copied()
                     {
