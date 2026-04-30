@@ -123,3 +123,66 @@ pub async fn delete_message(pool: &PgPool, message_id: i32) -> sqlx::Result<u64>
     .await?;
     Ok(result.rows_affected())
 }
+
+/// Look up a single message by id. Used by edit flows to confirm
+/// the row still exists and to seed the composition draft with the
+/// current body.
+pub async fn get_message(pool: &PgPool, message_id: i32) -> sqlx::Result<Option<BoardMessage>> {
+    sqlx::query_as!(
+        BoardMessage,
+        r#"
+        SELECT
+            id,
+            board_id,
+            poster,
+            poster_level AS "poster_level!: i32",
+            posted_at AS "posted_at!: chrono::NaiveDateTime",
+            subject,
+            content,
+            sticky
+        FROM "BoardMessage"
+        WHERE id = $1
+        "#,
+        message_id,
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Update a message's subject and body; record an audit row in
+/// `BoardMessageEdit` with the editor's name. Both writes happen in
+/// a single transaction so partial updates can't get into the audit
+/// trail.
+pub async fn update_message(
+    pool: &PgPool,
+    message_id: i32,
+    subject: &str,
+    content: &str,
+    editor: &str,
+) -> sqlx::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let result = sqlx::query!(
+        r#"
+        UPDATE "BoardMessage"
+        SET subject = $1, content = $2, updated_at = NOW()
+        WHERE id = $3
+        "#,
+        subject,
+        content,
+        message_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        r#"
+        INSERT INTO "BoardMessageEdit" (message_id, editor, edited_at)
+        VALUES ($1, $2, NOW())
+        "#,
+        message_id,
+        editor,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected())
+}

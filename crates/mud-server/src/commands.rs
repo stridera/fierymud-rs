@@ -1640,6 +1640,24 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["editpost"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "editpost <board-alias> <#>",
+            summary: "Re-open a board post for editing.",
+            long: "Pre-loads the existing subject and body into a \
+                   composition session. Add lines to append, or \
+                   `.clear` to wipe and re-type from scratch. \
+                   `.send` commits (and records an audit row in \
+                   `BoardMessageEdit`); `.abort` discards. Players \
+                   can only edit their own posts; Builder+ can edit \
+                   any.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["mailbox"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2674,6 +2692,12 @@ pub async fn try_dispatch_async(
             cmd_post(world, player, pool, args).await;
             true
         }
+        "editpost" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_editpost(world, player, pool, args).await;
+            true
+        }
         "delpost" => {
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
@@ -2853,6 +2877,18 @@ async fn compose_board_step(
         send_to(world, player, "Board post aborted.\r\n");
         return;
     }
+    if trimmed.eq_ignore_ascii_case(".clear") {
+        if let Some(mut draft) = world.get_mut::<BoardDraft>(player) {
+            draft.subject = None;
+            draft.body.clear();
+        }
+        send_to(
+            world,
+            player,
+            "Cleared. Type a new subject, then the body.\r\n",
+        );
+        return;
+    }
     if trimmed.eq_ignore_ascii_case(".preview") {
         let Some(draft) = world.get::<BoardDraft>(player).cloned() else {
             return;
@@ -2895,29 +2931,36 @@ async fn compose_board_step(
         let body = draft.body.join("\n");
         let poster = name_of(world, player);
         let level = world.get::<Profile>(player).map_or(1, |p| p.level);
-        match mud_db::boards::post_message(
-            pool,
-            draft.board_id,
-            &poster,
-            level,
-            &subject,
-            &body,
-        )
-        .await
-        {
+        let result = if let Some(edit_id) = draft.edit_message_id {
+            mud_db::boards::update_message(pool, edit_id, &subject, &body, &poster)
+                .await
+                .map(|_| edit_id)
+        } else {
+            mud_db::boards::post_message(
+                pool,
+                draft.board_id,
+                &poster,
+                level,
+                &subject,
+                &body,
+            )
+            .await
+        };
+        match result {
             Ok(_id) => {
                 try_remove::<BoardDraft>(world, player);
+                let verb = if draft.edit_message_id.is_some() { "Updated" } else { "Posted" };
                 send_to(
                     world,
                     player,
                     format!(
-                        "Posted to {} ({}).\r\n",
+                        "{verb} on {} ({}).\r\n",
                         draft.board_title, draft.board_alias
                     ),
                 );
             }
             Err(e) => {
-                send_to(world, player, format!("Post failed: {e}\r\n"));
+                send_to(world, player, format!("Save failed: {e}\r\n"));
             }
         }
         return;
@@ -3089,6 +3132,7 @@ pub(crate) async fn cmd_post(
             board_title: board.title.clone(),
             subject: None,
             body: Vec::new(),
+            edit_message_id: None,
         },
     );
     send_to(
@@ -3098,6 +3142,112 @@ pub(crate) async fn cmd_post(
             "Posting to {} ({}).\r\n\
              First line is the subject. Then type the body, one line at a time.\r\n\
              `.send` ships it; `.abort` cancels; `.preview` shows the draft.\r\n",
+            board.title, board.alias,
+        ),
+    );
+}
+
+/// `editpost <alias> <#>`: re-open one of your posts (or any if
+/// Builder+) for editing. Pre-loads the existing subject and body
+/// into a `BoardDraft`; `.send` triggers `update_message` (which
+/// inserts a `BoardMessageEdit` audit row in the same transaction).
+pub(crate) async fn cmd_editpost(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let mut parts = args.split_whitespace();
+    let Some(alias) = parts.next() else {
+        send_to(world, player, "Usage: editpost <board-alias> <#>\r\n");
+        return;
+    };
+    let Some(slot_raw) = parts.next() else {
+        send_to(world, player, "Usage: editpost <board-alias> <#>\r\n");
+        return;
+    };
+    let Ok(slot) = slot_raw.parse::<usize>() else {
+        send_to(world, player, "Slot number must be a positive integer.\r\n");
+        return;
+    };
+    if slot == 0 {
+        send_to(world, player, "Slots are 1-based.\r\n");
+        return;
+    }
+    let board = match mud_db::boards::find_board_by_alias(pool, alias).await {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            send_to(world, player, format!("No board called '{alias}'.\r\n"));
+            return;
+        }
+        Err(e) => {
+            send_to(world, player, format!("Board lookup failed: {e}\r\n"));
+            return;
+        }
+    };
+    if board.locked {
+        send_to(
+            world,
+            player,
+            format!("'{}' is locked; no edits accepted.\r\n", board.title),
+        );
+        return;
+    }
+    let messages = match mud_db::boards::messages_for_board(pool, board.id).await {
+        Ok(m) => m,
+        Err(e) => {
+            send_to(world, player, format!("Message fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    let Some(msg) = messages.get(slot - 1).cloned() else {
+        send_to(
+            world,
+            player,
+            format!("No message at slot {slot} on '{alias}'.\r\n"),
+        );
+        return;
+    };
+    let caller_name = name_of(world, player);
+    let is_builder = world
+        .get::<Account>(player)
+        .is_some_and(|a| a.role.at_least(UserRole::Builder));
+    let is_owner = msg.poster.eq_ignore_ascii_case(&caller_name);
+    if !is_owner && !is_builder {
+        send_to(
+            world,
+            player,
+            "You can only edit your own posts (builders+ can edit any).\r\n",
+        );
+        return;
+    }
+    // Seed the draft with the existing body, line-split. Subject is
+    // pre-set so the first input line goes straight to the body.
+    let body_lines: Vec<String> = msg
+        .content
+        .split('\n')
+        .map(str::to_string)
+        .collect();
+    try_insert(
+        world,
+        player,
+        BoardDraft {
+            board_id: board.id,
+            board_alias: board.alias.clone(),
+            board_title: board.title.clone(),
+            subject: Some(msg.subject.clone()),
+            body: body_lines,
+            edit_message_id: Some(msg.id),
+        },
+    );
+    send_to(
+        world,
+        player,
+        format!(
+            "Editing message #{slot} on {} ({}).\r\n\
+             Subject and existing body are preserved. Add lines to append \
+             (or `.abort` to bail without saving). Use `.preview` to see \
+             the current state, `.send` to commit (records an audit row).\r\n",
             board.title, board.alias,
         ),
     );

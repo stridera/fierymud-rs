@@ -283,9 +283,12 @@ pub struct MailDraft {
     pub body: Vec<String>,
 }
 
-/// In-flight message-board post. Same shape as `MailDraft` but
-/// addresses a `Board` row instead of a User. Resolved at `post
-/// <alias>` time; composition flow is identical.
+/// In-flight message-board post or edit. Same shape as `MailDraft`
+/// but addresses a `Board` row instead of a User. Resolved at
+/// `post`/`editpost` time; composition flow is identical.
+///
+/// `edit_message_id = Some` switches the `.send` path to UPDATE +
+/// audit-trail insert (`BoardMessageEdit`); `None` is a fresh post.
 #[derive(Component, Debug, Clone)]
 pub struct BoardDraft {
     pub board_id: i32,
@@ -293,6 +296,7 @@ pub struct BoardDraft {
     pub board_title: String,
     pub subject: Option<String>,
     pub body: Vec<String>,
+    pub edit_message_id: Option<i32>,
 }
 
 /// Bank balance in copper units, mirrored from `Characters.bank_wealth`.
