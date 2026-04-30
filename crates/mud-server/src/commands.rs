@@ -4539,6 +4539,9 @@ fn render_score_fancy(d: &ScoreData) -> String {
     if let Some(p) = d.posture {
         row(format!("Posture:   {}", p.0.label()));
     }
+    if let Some(coin) = format_wealth(d.wealth) {
+        row(format!("Wealth:    {coin}"));
+    }
     if let Some(l) = d.logged_in {
         row(format!("Online:    {}", format_idle(l.0.elapsed().as_secs())));
     }
@@ -4569,6 +4572,9 @@ fn render_score_minimal(d: &ScoreData) -> String {
     }
     if let Some(p) = d.posture {
         parts.push(format!("p:{}", p.0.label()));
+    }
+    if d.wealth > 0 {
+        parts.push(format!("c:{}", d.wealth));
     }
     if let Some(target) = d.fight_target {
         parts.push(format!("vs:{target}"));
