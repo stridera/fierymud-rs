@@ -5706,11 +5706,11 @@ fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
 }
 
 fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
-    let active: Vec<(String, i32)> = {
+    let active: Vec<(String, i32, Option<i32>)> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         q.iter(world)
             .filter(|(_, a)| a.0 == player)
-            .map(|(inst, _)| (inst.name.clone(), inst.remaining_secs))
+            .map(|(inst, _)| (inst.name.clone(), inst.remaining_secs, inst.ability_id))
             .collect()
     };
     let mut out = if active.is_empty() {
@@ -5718,11 +5718,23 @@ fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     } else {
         format!("\r\n{} active effect(s):\r\n", active.len())
     };
-    for (name, remaining) in active {
+    let catalog = world.resource::<AbilityCatalog>();
+    for (name, remaining, ability_id) in active {
+        // Look up the spawning ability's plain_name when known so
+        // players can see "bleed (45s) — from REND" instead of
+        // just the bare effect tag.
+        let from = ability_id.and_then(|id| {
+            catalog
+                .by_name
+                .values()
+                .find(|d| d.id == id)
+                .map(|d| d.plain_name.clone())
+        });
+        let suffix = from.as_deref().map_or(String::new(), |n| format!(" — from {n}"));
         if remaining < 0 {
-            out.push_str(&format!("  {name} (permanent)\r\n"));
+            out.push_str(&format!("  {name} (permanent){suffix}\r\n"));
         } else {
-            out.push_str(&format!("  {name} ({remaining}s remaining)\r\n"));
+            out.push_str(&format!("  {name} ({remaining}s remaining){suffix}\r\n"));
         }
     }
     send_to(world, player, out);
