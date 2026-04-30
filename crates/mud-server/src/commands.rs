@@ -8811,8 +8811,12 @@ fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-/// `springleap <target>`: out-of-combat leaping kick for 1.5x
-/// damage. Same engagement gates as `backstab`.
+/// `springleap <target>` — Phase C migration: shimmed over the
+/// `SPRINGLEAP` data path (damage formula `"skill"`). Out-of-combat
+/// engagement opener: rejects when caster is already fighting or
+/// when target is already engaged. After dispatching the data
+/// effect, manually engages Fighting on both sides so subsequent
+/// combat ticks fire (the data path doesn't auto-engage targets).
 fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "springleap") {
         return;
@@ -8826,6 +8830,12 @@ fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Springleap whom?\r\n");
         return;
     }
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        send_to(world, player, "You can't springleap yourself.\r\n");
+        return;
+    }
+    // Resolve the target up front so we can read its Fighting and
+    // know the entity for the post-dispatch auto-engage.
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
@@ -8834,10 +8844,6 @@ fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
         return;
     };
-    if target == player {
-        send_to(world, player, "You can't springleap yourself.\r\n");
-        return;
-    }
     if world.get::<Fighting>(target).is_some() {
         send_to(world, player, "They're already fighting; no surprise.\r\n");
         return;
@@ -8845,36 +8851,19 @@ fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
     if !check_stamina(world, player, SPRINGLEAP_COST, "springleap") {
         return;
     }
-
-    // 1.5x dmg_roll, integer-truncated.
-    let base_dmg = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
-    let dmg = ((base_dmg * 3) / 2).max(1);
     drain_stamina(world, player, SPRINGLEAP_COST);
-
-    let player_name = name_of(world, player);
-    let target_name = name_or(world, target, "<unknown>");
-    let (dead, _) = apply_damage(world, target, dmg);
-
-    send_to(world, player, format!(
-        "You leap and kick {target_name} for {dmg} damage!\r\n"
-    ));
-    if !dead {
-        send_rendered(
-            world,
-            target,
-            &format!("{player_name} springs in and kicks you for {dmg} damage!\r\n"),
-        );
-    }
-    broadcast_room_except_rendered(
+    let target_name = name_of(world, target);
+    invoke_ability(
         world,
-        located.0,
-        &[player, target],
-        &format!("{player_name} springs in and kicks {target_name}!\r\n"),
+        player,
+        &format!("springleap {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
-
-    if dead {
-        crate::combat::handle_death(world, target, &target_name, located.0);
-    } else {
+    // Auto-engage if the target survived. The data path doesn't model
+    // engagement; springleap's gameplay contract is "open combat with
+    // a leap kick".
+    if world.get_entity(target).is_ok() {
         try_insert(world, player, Fighting(target));
         if world.get::<CombatStats>(target).is_some()
             && let Ok(mut e) = world.get_entity_mut(target)
