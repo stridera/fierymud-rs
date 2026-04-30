@@ -2381,6 +2381,47 @@ const COMMANDS: &[Command] = &[
         run: cmd_disband,
     },
     Command {
+        names: &["invite"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "invite <player>",
+            summary: "Send a group invite to another player.",
+            long: "Target gets a pending `GroupInvite`; they can \
+                   `accept` or `decline`. Invites expire after \
+                   5 minutes. Players already following you (in your \
+                   group) can't be re-invited.",
+        },
+        run: cmd_invite,
+    },
+    Command {
+        names: &["accept"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "accept",
+            summary: "Accept a pending group invite.",
+            long: "Installs Follower(inviter) on you, joining their \
+                   group. No-op if you have no pending invite.",
+        },
+        run: cmd_accept,
+    },
+    Command {
+        names: &["decline"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "decline",
+            summary: "Decline a pending group invite.",
+            long: "Clears the pending invite without joining. \
+                   No-op if you have no pending invite.",
+        },
+        run: cmd_decline,
+    },
+    Command {
         names: &["gsay", "gtell", "gecho", "gt"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -13511,6 +13552,134 @@ fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
         mud_db::abilities::AbilityKind::Skill,
         "use",
     );
+}
+
+/// `invite <player>`: send a group invite. Recipient gets a
+/// `GroupInvite` component carrying the inviter's entity; their
+/// `accept` will install Follower(self) for the sender.
+fn cmd_invite(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Invite whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "You can't invite yourself.\r\n");
+        return;
+    }
+    if world.get::<Player>(target).is_none() {
+        send_to(world, player, "You can only invite other players.\r\n");
+        return;
+    }
+    if world.get::<Follower>(target).is_some_and(|f| f.0 == player) {
+        let n = name_of(world, target);
+        send_rendered(
+            world,
+            player,
+            &format!("{n} is already in your group.\r\n"),
+        );
+        return;
+    }
+    try_insert(
+        world,
+        target,
+        mud_world::GroupInvite {
+            from: player,
+            at: std::time::Instant::now(),
+        },
+    );
+    let inviter = name_of(world, player);
+    let target_name = name_of(world, target);
+    send_rendered(
+        world,
+        player,
+        &format!("You invite {target_name} to your group.\r\n"),
+    );
+    send_rendered(
+        world,
+        target,
+        &format!(
+            "{inviter} invites you to a group. Type `accept` to join, \
+             `decline` to refuse.\r\n"
+        ),
+    );
+}
+
+/// `accept`: accept the most recent group invite. Installs a
+/// `Follower(inviter)` on the caller (matching the existing
+/// follow-chain group model). Refused if the invite has expired
+/// (older than 5 minutes), the inviter has disconnected, or no
+/// invite exists.
+fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
+    let Some(invite) = world.get::<mud_world::GroupInvite>(player).copied() else {
+        send_to(
+            world,
+            player,
+            "You have no pending group invites.\r\n",
+        );
+        return;
+    };
+    // 5-minute expiry on invites — keeps the marker from sticking
+    // around indefinitely.
+    if invite.at.elapsed() > std::time::Duration::from_secs(300) {
+        try_remove::<mud_world::GroupInvite>(world, player);
+        send_to(world, player, "Your invite has expired.\r\n");
+        return;
+    }
+    if world.get_entity(invite.from).is_err() {
+        try_remove::<mud_world::GroupInvite>(world, player);
+        send_to(world, player, "The inviter has gone away.\r\n");
+        return;
+    }
+    if would_create_cycle(world, invite.from, player) {
+        try_remove::<mud_world::GroupInvite>(world, player);
+        send_to(
+            world,
+            player,
+            "Joining that group would create a follow cycle — refused.\r\n",
+        );
+        return;
+    }
+    try_insert(world, player, Follower(invite.from));
+    try_remove::<mud_world::GroupInvite>(world, player);
+    let inviter_name = name_of(world, invite.from);
+    let player_name = name_of(world, player);
+    send_rendered(
+        world,
+        player,
+        &format!("You join {inviter_name}'s group.\r\n"),
+    );
+    send_rendered(
+        world,
+        invite.from,
+        &format!("{player_name} joins your group.\r\n"),
+    );
+}
+
+/// `decline`: discard the pending group invite without joining.
+fn cmd_decline(world: &mut World, player: Entity, _args: &str) {
+    let Some(invite) = world.get::<mud_world::GroupInvite>(player).copied() else {
+        send_to(world, player, "You have no pending group invites.\r\n");
+        return;
+    };
+    try_remove::<mud_world::GroupInvite>(world, player);
+    let inviter_alive = world.get_entity(invite.from).is_ok();
+    send_to(world, player, "You decline the invite.\r\n");
+    if inviter_alive {
+        let player_name = name_of(world, player);
+        send_rendered(
+            world,
+            invite.from,
+            &format!("{player_name} declines your group invite.\r\n"),
+        );
+    }
 }
 
 /// Find the root of a follow chain — walks `Follower` upward until

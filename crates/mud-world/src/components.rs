@@ -280,6 +280,16 @@ pub struct BoardLink(pub i32);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Flying;
 
+/// Pending group invite from another player. Set on the recipient
+/// when an inviter runs `invite <name>`. `accept` triggers the
+/// follow link; `decline` clears the marker. Cleared automatically
+/// on disconnect since the component is session-scoped.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GroupInvite {
+    pub from: Entity,
+    pub at: std::time::Instant,
+}
+
 /// Component on spawned DRINKCONTAINER-typed items: per-instance
 /// liquid state mirrored from `Objects.values`. `remaining` mutates
 /// on `drink`/`sip`/`pour`/`fill`; the proto values are the
