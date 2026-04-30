@@ -2838,9 +2838,9 @@ mod tests {
     fn formula_eval_pow_with_float_exp() {
         let mut det = |_name: &str, _n: i32, _m: i32| 0;
         // Integer base, float exp: pow(8, 2) = 64
-        assert_eq!(evaluate_formula("pow(skill, 2)", 0, 8, &mut det), Some(64));
+        assert_eq!(evaluate_formula("pow(skill, 2)", &super::FormulaCtx::base(0, 8), &mut det), Some(64));
         // Float exp: pow(50, 1.44) ≈ 50^1.44 ≈ 297.something
-        let r = evaluate_formula("pow(skill, 1.44)", 0, 50, &mut det).unwrap();
+        let r = evaluate_formula("pow(skill, 1.44)", &super::FormulaCtx::base(0, 50), &mut det).unwrap();
         #[allow(clippy::cast_possible_truncation)]
         let expected = (50f64).powf(1.44).round() as i32;
         assert_eq!(r, expected);
@@ -2848,20 +2848,20 @@ mod tests {
         // deterministic dice. dice closure returns 0; 0 + pow(0, 1.44) = 0
         // (0^anything = 0 by convention).
         assert_eq!(
-            evaluate_formula("roll_dice(8, 25) + pow(skill, 1.44)", 0, 0, &mut det),
+            evaluate_formula("roll_dice(8, 25) + pow(skill, 1.44)", &super::FormulaCtx::base(0, 0), &mut det),
             Some(0)
         );
         // amount_from_blob uses the live RNG for roll_dice; verify it
         // returns *something* in the plausible range for skill=0
         // (8d25 = 8..200, pow(0, 1.44) = 0).
         let blob = serde_json::json!({"amount": "roll_dice(8, 25) + pow(skill, 1.44)"});
-        let v = amount_from_blob(Some(&blob), 0, 0).expect("formula resolves");
+        let v = amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0)).expect("formula resolves");
         assert!((8..=200).contains(&v), "8d25 result {v} in range");
         // Float literal outside pow → unsupported, returns None.
-        assert_eq!(evaluate_formula("1.5 + skill", 0, 5, &mut det), None);
+        assert_eq!(evaluate_formula("1.5 + skill", &super::FormulaCtx::base(0, 5), &mut det), None);
         // Malformed pow (missing exp) → None.
-        assert_eq!(evaluate_formula("pow(skill,)", 0, 5, &mut det), None);
-        assert_eq!(evaluate_formula("pow(skill", 0, 5, &mut det), None);
+        assert_eq!(evaluate_formula("pow(skill,)", &super::FormulaCtx::base(0, 5), &mut det), None);
+        assert_eq!(evaluate_formula("pow(skill", &super::FormulaCtx::base(0, 5), &mut det), None);
     }
 
     #[test]
@@ -2870,16 +2870,16 @@ mod tests {
         let mut stub = |name: &str, _a: i32, _b: i32| {
             if name == "random" { 42 } else { 0 }
         };
-        assert_eq!(evaluate_formula("random(1, 10)", 0, 0, &mut stub), Some(42));
+        assert_eq!(evaluate_formula("random(1, 10)", &super::FormulaCtx::base(0, 0), &mut stub), Some(42));
         // Composite: skill + random(1, skill*2). With skill=10:
         // 10 + 42 = 52 (stub returns 42 for any random).
         assert_eq!(
-            evaluate_formula("skill + random(1, skill * 2)", 0, 10, &mut stub),
+            evaluate_formula("skill + random(1, skill * 2)", &super::FormulaCtx::base(0, 10), &mut stub),
             Some(52)
         );
         // Backwards range refused → falls through.
         let mut zero = |_name: &str, _a: i32, _b: i32| 0;
-        assert_eq!(evaluate_formula("random(10, 5)", 0, 0, &mut zero), None);
+        assert_eq!(evaluate_formula("random(10, 5)", &super::FormulaCtx::base(0, 0), &mut zero), None);
     }
 
     #[test]
@@ -2888,29 +2888,28 @@ mod tests {
         // Deterministic stub: roll_dice/random both return n * m so
         // tests are reproducible.
         let mut det = |_name: &str, n: i32, m: i32| n * m;
-        assert_eq!(evaluate_formula("roll_dice(2, 9)", 0, 0, &mut det), Some(18));
+        assert_eq!(evaluate_formula("roll_dice(2, 9)", &super::FormulaCtx::base(0, 0), &mut det), Some(18));
         // Precedence: roll_dice + skill / 5 with skill=25 → 18 + 5 = 23
         assert_eq!(
-            evaluate_formula("roll_dice(2, 9) + skill / 5", 0, 25, &mut det),
+            evaluate_formula("roll_dice(2, 9) + skill / 5", &super::FormulaCtx::base(0, 25), &mut det),
             Some(23)
         );
         // The dice-notation normalizer rewrites NdM → roll_dice(N, M)
         // before evaluation. `1d8` with the same stub is 8.
-        assert_eq!(amount_blob_eval("1d8", 0, 0, &mut det), Some(8));
+        assert_eq!(amount_blob_eval("1d8", &super::FormulaCtx::base(0, 0), &mut det), Some(8));
         // Constant `100 + 1d8 + skill / 5` with skill=20 is 100 + 8 + 4 = 112.
         assert_eq!(
-            amount_blob_eval("100 + 1d8 + skill / 5", 0, 20, &mut det),
+            amount_blob_eval("100 + 1d8 + skill / 5", &super::FormulaCtx::base(0, 20), &mut det),
             Some(112)
         );
     }
 
     fn amount_blob_eval(
         s: &str,
-        level: i32,
-        skill: i32,
+        ctx: &super::FormulaCtx,
         rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
     ) -> Option<i32> {
-        evaluate_formula(&normalize_dice_notation(s), level, skill, rng_call)
+        evaluate_formula(&normalize_dice_notation(s), ctx, rng_call)
     }
 
     #[test]
@@ -2929,13 +2928,13 @@ mod tests {
     fn amount_from_blob_reads_override_then_default() {
         // Override-priority: amount=42 wins.
         let blob = serde_json::json!({"amount": 42});
-        assert_eq!(amount_from_blob(Some(&blob), 0, 0), Some(42));
+        assert_eq!(amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0)), Some(42));
         // String formula with skill substitution.
         let blob = serde_json::json!({"amount": "skill / 4"});
-        assert_eq!(amount_from_blob(Some(&blob), 0, 100), Some(25));
+        assert_eq!(amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 100)), Some(25));
         // Missing field → None (caller falls through).
         let blob = serde_json::json!({"duration": 5});
-        assert_eq!(amount_from_blob(Some(&blob), 0, 0), None);
+        assert_eq!(amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0)), None);
     }
 
     use mud_world::{AppliedTo, EffectInstance, EffectSource};
@@ -6098,6 +6097,12 @@ fn invoke_ability(
         .get::<KnownAbilities>(player)
         .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).map(|(_, p, _)| *p))
         .unwrap_or(0);
+    let caster_weapon_damage = caster_weapon_damage(world, player);
+    let formula_ctx = FormulaCtx {
+        level: caster_level,
+        skill: caster_skill,
+        weapon_damage: caster_weapon_damage,
+    };
     let effect_specs: Vec<EffectSpec> = {
         let mappings = world
             .resource::<AbilityCatalog>()
@@ -6149,8 +6154,7 @@ fn invoke_ability(
                 let amount = resolve_effect_amount(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
-                    caster_level,
-                    caster_skill,
+                    &formula_ctx,
                 )
                 .unwrap_or(0);
                 if amount > 0 {
@@ -6174,8 +6178,7 @@ fn invoke_ability(
                 let amount = resolve_effect_amount(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
-                    caster_level,
-                    caster_skill,
+                    &formula_ctx,
                 );
                 let Some(amount) = amount else {
                     applied_msgs.push(format!("{} (no amount resolved)", spec.name));
@@ -6230,8 +6233,7 @@ fn invoke_ability(
                 let dur_secs = resolve_effect_duration(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
-                    caster_level,
-                    caster_skill,
+                    &formula_ctx,
                 );
                 world.spawn((
                     EffectInstance {
@@ -6338,8 +6340,7 @@ fn invoke_ability(
                 let dur_secs = resolve_effect_duration(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
-                    caster_level,
-                    caster_skill,
+                    &formula_ctx,
                 );
                 world.spawn((
                     EffectInstance {
@@ -6363,8 +6364,7 @@ fn invoke_ability(
                 let dur_secs = resolve_effect_duration(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
-                    caster_level,
-                    caster_skill,
+                    &formula_ctx,
                 );
                 world.spawn((
                     EffectInstance {
@@ -6680,6 +6680,33 @@ fn caster_has_equipped(world: &mut World, caster: Entity, slot: Slot) -> bool {
     let mut q = world.query::<(&Located, &EquippedSlot)>();
     q.iter(world)
         .any(|(loc, eq)| loc.0 == caster && eq.0 == slot)
+}
+
+/// Read a weapon-damage proxy for the caster's wielded item. v1
+/// returns the wielded `ObjectProto.level` because `damage_dice`
+/// isn't plumbed through `ObjectProto` yet (it lives in the JSONB
+/// `values` column in the schema — see `SUGGESTIONS.md` for the full
+/// fix). Returns 0 if nothing is equipped in `Slot::Wield`.
+/// Resolves the `weapon_damage` symbol in damage formulas
+/// (e.g. `BACKSTAB`'s `weapon_damage * (2 + skill / 25)`).
+fn caster_weapon_damage(world: &mut World, caster: Entity) -> i32 {
+    let weapon: Option<Entity> = {
+        let mut q = world.query::<(Entity, &Located, &EquippedSlot)>();
+        q.iter(world)
+            .find(|(_, loc, eq)| loc.0 == caster && eq.0 == Slot::Wield)
+            .map(|(e, _, _)| e)
+    };
+    let Some(weapon) = weapon else {
+        return 0;
+    };
+    let Some(key) = world.get::<WorldKey>(weapon).copied() else {
+        return 0;
+    };
+    world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .get(&(key.zone, key.id))
+        .map_or(0, |p| p.level)
 }
 
 /// Substitute `{actor.X}` / `{target.X}` placeholders in an
@@ -7016,13 +7043,12 @@ fn remove_all_effects_on(world: &mut World, target: Entity) -> usize {
 fn resolve_effect_duration(
     override_params: Option<&serde_json::Value>,
     default_params: Option<&serde_json::Value>,
-    level: i32,
-    skill: i32,
+    ctx: &FormulaCtx,
 ) -> i32 {
-    if let Some(secs) = duration_from_blob(override_params, level, skill) {
+    if let Some(secs) = duration_from_blob(override_params, ctx) {
         return secs;
     }
-    if let Some(secs) = duration_from_blob(default_params, level, skill) {
+    if let Some(secs) = duration_from_blob(default_params, ctx) {
         return secs;
     }
     APPLIED_EFFECT_DURATION_SECS
@@ -7037,27 +7063,26 @@ fn resolve_effect_duration(
 fn resolve_effect_amount(
     override_params: Option<&serde_json::Value>,
     default_params: Option<&serde_json::Value>,
-    level: i32,
-    skill: i32,
+    ctx: &FormulaCtx,
 ) -> Option<i32> {
-    if let Some(v) = amount_from_blob(override_params, level, skill) {
+    if let Some(v) = amount_from_blob(override_params, ctx) {
         return Some(v);
     }
-    amount_from_blob(default_params, level, skill)
+    amount_from_blob(default_params, ctx)
 }
 
 /// Try to extract an amount from one JSONB blob. The `amount` field
 /// can be an integer literal, a formula string the evaluator
 /// understands (e.g. `"roll_dice(2,9) + skill / 5"`), or a plain dice
 /// notation like `"1d8"` which is normalized to `roll_dice(N, M)`.
-fn amount_from_blob(params: Option<&serde_json::Value>, level: i32, skill: i32) -> Option<i32> {
+fn amount_from_blob(params: Option<&serde_json::Value>, ctx: &FormulaCtx) -> Option<i32> {
     let p = params?;
     let v = p.get("amount")?;
     match v {
         serde_json::Value::Number(n) => i32::try_from(n.as_i64()?).ok(),
         serde_json::Value::String(s) => {
             let normalized = normalize_dice_notation(s);
-            evaluate_simple_formula(&normalized, level, skill)
+            evaluate_simple_formula_ctx(&normalized, ctx)
         }
         _ => None,
     }
@@ -7116,13 +7141,13 @@ fn normalize_dice_notation(expr: &str) -> String {
 /// Returns None if the blob is missing, has no `duration`, or the
 /// formula is too complex for the simple evaluator (parens, multi-op,
 /// `pow()`, etc.) — caller falls through to the next fallback.
-fn duration_from_blob(params: Option<&serde_json::Value>, level: i32, skill: i32) -> Option<i32> {
+fn duration_from_blob(params: Option<&serde_json::Value>, ctx: &FormulaCtx) -> Option<i32> {
     const SECS_PER_MUD_HOUR: i32 = 75;
     let p = params?;
     let d = p.get("duration")?;
     let raw = match d {
         serde_json::Value::Number(n) => i32::try_from(n.as_i64()?).ok()?,
-        serde_json::Value::String(s) => evaluate_simple_formula(s, level, skill)?,
+        serde_json::Value::String(s) => evaluate_simple_formula_ctx(s, ctx)?,
         _ => return None,
     };
     let unit_seconds = match p.get("durationUnit").and_then(serde_json::Value::as_str) {
@@ -7147,8 +7172,50 @@ fn duration_from_blob(params: Option<&serde_json::Value>, level: i32, skill: i32
 /// by zero so callers can fall through to the next fallback. Calls the
 /// live RNG via `rand::random_range`; deterministic cases (no dice)
 /// are reproducible.
+/// Caster context passed to the formula evaluator. Holds the named
+/// symbols the grammar can reference (`level`, `skill`,
+/// `weapon_damage`, ...). Stack-allocated; expand with new fields as
+/// the runtime grows the symbols it can resolve. Defaults are
+/// 0-everywhere via `FormulaCtx::base(level, skill)` for legacy
+/// callsites and tests that don't have weapon/stat context.
+#[derive(Debug, Clone, Copy, Default)]
+struct FormulaCtx {
+    level: i32,
+    skill: i32,
+    weapon_damage: i32,
+}
+
+impl FormulaCtx {
+    /// Test/legacy helper: build a context with only `level` and
+    /// `skill` set. Production callsites construct the struct
+    /// directly so they can supply caster-derived symbols.
+    #[cfg(test)]
+    fn base(level: i32, skill: i32) -> Self {
+        Self { level, skill, weapon_damage: 0 }
+    }
+
+    fn lookup(self, name: &str) -> Option<i32> {
+        match name {
+            "level" => Some(self.level),
+            "skill" => Some(self.skill),
+            "weapon_damage" => Some(self.weapon_damage),
+            _ => None,
+        }
+    }
+}
+
+/// Test/legacy entry point — production callsites take the full
+/// `FormulaCtx` via `evaluate_simple_formula_ctx`.
+#[cfg(test)]
 fn evaluate_simple_formula(expr: &str, level: i32, skill: i32) -> Option<i32> {
-    evaluate_formula(expr, level, skill, &mut |name, a, b| match name {
+    evaluate_simple_formula_ctx(expr, &FormulaCtx::base(level, skill))
+}
+
+/// Live-RNG entry point that takes the full `FormulaCtx` — used by
+/// `invoke_ability` when caster-derived symbols (`weapon_damage` etc.)
+/// matter.
+fn evaluate_simple_formula_ctx(expr: &str, ctx: &FormulaCtx) -> Option<i32> {
+    evaluate_formula(expr, ctx, &mut |name, a, b| match name {
         "roll_dice" => roll_dice(a, b),
         "random" if a <= b => rand::random_range(a..=b),
         _ => 0,
@@ -7172,13 +7239,12 @@ fn roll_dice(num: i32, sides: i32) -> i32 {
 /// callback is injectable so tests can pass a deterministic stub.
 fn evaluate_formula(
     expr: &str,
-    level: i32,
-    skill: i32,
+    ctx: &FormulaCtx,
     rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
 ) -> Option<i32> {
     let tokens = tokenize_formula(expr)?;
     let mut p = FormulaParser { tokens: &tokens, idx: 0 };
-    let v = p.parse_expr(level, skill, rng_call)?;
+    let v = p.parse_expr(ctx, rng_call)?;
     if p.idx != tokens.len() {
         return None;
     }
@@ -7303,21 +7369,20 @@ impl FormulaParser<'_> {
     }
     fn parse_expr(
         &mut self,
-        level: i32,
-        skill: i32,
+        ctx: &FormulaCtx,
         rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
     ) -> Option<i32> {
-        let mut lhs = self.parse_term(level, skill, rng_call)?;
+        let mut lhs = self.parse_term(ctx, rng_call)?;
         loop {
             match self.peek() {
                 Some(FormulaToken::Plus) => {
                     self.advance();
-                    let rhs = self.parse_term(level, skill, rng_call)?;
+                    let rhs = self.parse_term(ctx, rng_call)?;
                     lhs = lhs.saturating_add(rhs);
                 }
                 Some(FormulaToken::Minus) => {
                     self.advance();
-                    let rhs = self.parse_term(level, skill, rng_call)?;
+                    let rhs = self.parse_term(ctx, rng_call)?;
                     lhs = lhs.saturating_sub(rhs);
                 }
                 _ => break,
@@ -7327,21 +7392,20 @@ impl FormulaParser<'_> {
     }
     fn parse_term(
         &mut self,
-        level: i32,
-        skill: i32,
+        ctx: &FormulaCtx,
         rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
     ) -> Option<i32> {
-        let mut lhs = self.parse_factor(level, skill, rng_call)?;
+        let mut lhs = self.parse_factor(ctx, rng_call)?;
         loop {
             match self.peek() {
                 Some(FormulaToken::Star) => {
                     self.advance();
-                    let rhs = self.parse_factor(level, skill, rng_call)?;
+                    let rhs = self.parse_factor(ctx, rng_call)?;
                     lhs = lhs.saturating_mul(rhs);
                 }
                 Some(FormulaToken::Slash) => {
                     self.advance();
-                    let rhs = self.parse_factor(level, skill, rng_call)?;
+                    let rhs = self.parse_factor(ctx, rng_call)?;
                     if rhs == 0 {
                         return None;
                     }
@@ -7354,18 +7418,17 @@ impl FormulaParser<'_> {
     }
     fn parse_factor(
         &mut self,
-        level: i32,
-        skill: i32,
+        ctx: &FormulaCtx,
         rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
     ) -> Option<i32> {
         match self.advance()? {
             FormulaToken::Num(n) => Some(*n),
             FormulaToken::Minus => {
-                let v = self.parse_factor(level, skill, rng_call)?;
+                let v = self.parse_factor(ctx, rng_call)?;
                 Some(v.saturating_neg())
             }
             FormulaToken::LParen => {
-                let v = self.parse_expr(level, skill, rng_call)?;
+                let v = self.parse_expr(ctx, rng_call)?;
                 if !matches!(self.advance(), Some(FormulaToken::RParen)) {
                     return None;
                 }
@@ -7379,7 +7442,7 @@ impl FormulaParser<'_> {
                     // can be a Float literal — the rest of the grammar
                     // is integer-only.
                     if n == "pow" {
-                        let base = self.parse_expr(level, skill, rng_call)?;
+                        let base = self.parse_expr(ctx, rng_call)?;
                         if !matches!(self.advance(), Some(FormulaToken::Comma)) {
                             return None;
                         }
@@ -7407,10 +7470,10 @@ impl FormulaParser<'_> {
                     }
                     let mut args: Vec<i32> = Vec::new();
                     if !matches!(self.peek(), Some(FormulaToken::RParen)) {
-                        args.push(self.parse_expr(level, skill, rng_call)?);
+                        args.push(self.parse_expr(ctx, rng_call)?);
                         while matches!(self.peek(), Some(FormulaToken::Comma)) {
                             self.advance();
-                            args.push(self.parse_expr(level, skill, rng_call)?);
+                            args.push(self.parse_expr(ctx, rng_call)?);
                         }
                     }
                     if !matches!(self.advance(), Some(FormulaToken::RParen)) {
@@ -7426,11 +7489,7 @@ impl FormulaParser<'_> {
                         _ => None,
                     }
                 } else {
-                    match n.as_str() {
-                        "level" => Some(level),
-                        "skill" => Some(skill),
-                        _ => None,
-                    }
+                    ctx.lookup(&n)
                 }
             }
             _ => None,
