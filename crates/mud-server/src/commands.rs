@@ -7722,11 +7722,10 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
     }
 }
 
-/// `report`: announce your current HP/stamina to everyone in the room.
-/// Legacy MUDs targeted this at the speaker's group; without a group
-/// system, the room is the next-best blast radius and matches how
-/// players actually use it ("everyone, my HP is low"). Format mirrors
-/// the score sheet's vital-stat lines.
+/// `report`: announce your current HP/stamina to your group (when
+/// you're in one) or to everyone in the room (when solo). Group
+/// reports cross rooms — useful for healers in adjacent rooms; room
+/// reports stay local to encourage situational coordination.
 fn cmd_report(world: &mut World, player: Entity, _args: &str) {
     let hp = world.get::<Health>(player).copied();
     let stamina = world.get::<Stamina>(player).copied();
@@ -7743,18 +7742,25 @@ fn cmd_report(world: &mut World, player: Entity, _args: &str) {
         (None, Some(s)) => format!("stamina {}/{}", s.current, s.max),
         (None, None) => "(no vital stats)".to_string(),
     };
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
+    let root = group_root(world, player);
+    let group = group_members(world, root);
+    let (targets, self_label, third_label) = if group.len() > 1 {
+        (group, "your group", "the group")
+    } else {
+        let in_room: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+            q.iter(world)
+                .filter(|(_, l)| l.0 == located.0)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        (in_room, "the room", "the room")
     };
     for target in targets {
         let line = if target == player {
-            format!("You report: {body}.\r\n")
+            format!("You report to {self_label}: {body}.\r\n")
         } else {
-            format!("{speaker} reports: {body}.\r\n")
+            format!("{speaker} reports to {third_label}: {body}.\r\n")
         };
         send_rendered(world, target, &line);
     }
