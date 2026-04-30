@@ -18,8 +18,8 @@ use mud_world::{
     CoreStats, Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
-    BankWealth, RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth,
-    Stunned, TellLog, Title, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    BankWealth, RecallPoint, RoomSector, ShopCatalog, Shopkeeper, Slot, SocialDef, SocialRegistry,
+    Stamina, Stealth, Stunned, TellLog, Title, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, info_span};
 
@@ -199,6 +199,20 @@ const COMMANDS: &[Command] = &[
                    pay some fraction of this on sell once that lands.",
         },
         run: cmd_value,
+    },
+    Command {
+        names: &["list"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "list",
+            summary: "Show what the shopkeeper here is selling.",
+            long: "Looks for a `Shopkeeper`-tagged mob in your room, \
+                   then prints the keeper's catalog with prices and \
+                   stock. `buy <#|name>` and `sell <item>` land next.",
+        },
+        run: cmd_list,
     },
     Command {
         names: &["title"],
@@ -4098,6 +4112,89 @@ fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
         "\r\nYou have no coin to your name.\r\n".to_string()
     };
     send_to(world, player, msg);
+}
+
+/// `list`: find a shopkeeper in the player's room and dump the catalog
+/// as `# | item | price | stock`. Stock `unlimited` for `-1`. Price
+/// falls back to the proto's base `cost * buy_profit` when the row's
+/// override is `0`. No-op when no shopkeeper present.
+fn cmd_list(world: &mut World, player: Entity, _args: &str) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let keeper: Option<(Entity, Shopkeeper)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
+        q.iter(world)
+            .find(|(_, l, _)| l.0 == located.0)
+            .map(|(e, _, s)| (e, *s))
+    };
+    let Some((keeper_entity, keeper_marker)) = keeper else {
+        send_to(world, player, "No one here is selling anything.\r\n");
+        return;
+    };
+    let keeper_name = name_of(world, keeper_entity);
+    let shop_def = world
+        .resource::<ShopCatalog>()
+        .by_key
+        .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
+        .cloned();
+    let Some(shop) = shop_def else {
+        send_to(
+            world,
+            player,
+            format!(
+                "{keeper_name} fumbles, looking for the inventory ledger... but it's blank.\r\n"
+            ),
+        );
+        return;
+    };
+    if shop.items.is_empty() {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} has nothing to sell right now.\r\n"),
+        );
+        return;
+    }
+
+    let buy_profit = shop.buy_profit;
+    let object_protos = world.resource::<ObjectPrototypes>().by_key.clone();
+
+    let mut out = format!("\r\n{keeper_name} offers:\r\n");
+    out.push_str(&format!(
+        "  {:<3} {:<40} {:<28} {}\r\n",
+        "#", "Item", "Price", "Stock"
+    ));
+    for (i, offer) in shop.items.iter().enumerate() {
+        let proto = object_protos.get(&(offer.object_zone_id, offer.object_id));
+        let item_name = proto.map_or_else(
+            || format!("(missing {}/{})", offer.object_zone_id, offer.object_id),
+            |p| p.name.clone(),
+        );
+        let base_cost = proto.map_or(0, |p| p.cost);
+        // override price wins; otherwise base_cost * buy_profit (rounded)
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let price_copper: i64 = if offer.price > 0 {
+            i64::from(offer.price)
+        } else {
+            (f64::from(base_cost) * buy_profit).round() as i64
+        };
+        let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
+        let stock_str = if offer.amount < 0 {
+            "unlimited".to_string()
+        } else {
+            offer.amount.to_string()
+        };
+        out.push_str(&format!(
+            "  {:<3} {:<40} {:<28} {}\r\n",
+            i + 1,
+            item_name,
+            price_str,
+            stock_str
+        ));
+    }
+    send_rendered(world, player, &out);
 }
 
 /// `value <item>`: appraise an item against its proto's `cost`. Renders
