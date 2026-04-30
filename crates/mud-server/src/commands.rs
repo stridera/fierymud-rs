@@ -8440,6 +8440,8 @@ fn check_target_type(
     let target_is_player = world.get::<Player>(target).is_some();
     let target_is_mob = world.get::<Mob>(target).is_some();
     let target_is_self = caster == target;
+    let target_is_item_in_inv = world.get::<Item>(target).is_some()
+        && world.get::<Located>(target).is_some_and(|l| l.0 == caster);
     for kind in valid_targets {
         match kind.as_str() {
             "ENEMY_PC" => {
@@ -8451,6 +8453,12 @@ fn check_target_type(
             "ENEMY_NPC" => {
                 any_recognized = true;
                 if target_is_mob {
+                    return None;
+                }
+            }
+            "OBJECT_INV" => {
+                any_recognized = true;
+                if target_is_item_in_inv {
                     return None;
                 }
             }
