@@ -6033,6 +6033,21 @@ fn invoke_ability(
         return;
     }
 
+    // Combat-state gates (Ability.in_combat_only / combat_ok).
+    // `in_combat_only` refuses casts when the caster has no Fighting;
+    // `combat_ok=false` refuses while engaged. Both flags are
+    // displayed in the cast/skill output today; this turns them into
+    // live gates.
+    let caster_in_combat = world.get::<Fighting>(player).is_some();
+    if def.in_combat_only && !caster_in_combat {
+        send_to(world, player, format!("You can only {verb} {} in combat.\r\n", def.plain_name));
+        return;
+    }
+    if !def.combat_ok && caster_in_combat {
+        send_to(world, player, format!("You can't {verb} {} while fighting.\r\n", def.plain_name));
+        return;
+    }
+
     // Posture gate (Ability.minPosition). Most abilities require STANDING;
     // a few are SITTING-OK. Anything below the runtime's modeled postures
     // (rank ≤ 6 SLEEPING) passes for every alive player.
