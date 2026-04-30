@@ -535,6 +535,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_close,
     },
     Command {
+        names: &["lock"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "lock <direction>",
+            summary: "Lock a closed door using a key in your inventory.",
+            long: "Mirror of `unlock`: requires the exit to be closed \
+                   (not already locked, not open) and to have a key \
+                   requirement, and that you carry that key. On match, \
+                   the door is locked.",
+        },
+        run: cmd_lock,
+    },
+    Command {
         names: &["read"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5164,6 +5179,86 @@ fn cmd_close(world: &mut World, player: Entity, args: &str) {
         room,
         &[player],
         &format!("{player_name} closes the door {}.\r\n", direction_name(dir)),
+    );
+}
+
+/// `lock <direction>`: mirror of `unlock`. Requires a Closed exit
+/// with a key requirement, and that the player carries that key.
+/// Already-locked / open / no-keyhole / no-key cases all refuse.
+fn cmd_lock(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let Some(dir) = parse_direction(arg) else {
+        send_to(world, player, "Lock which way?\r\n");
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let Some((state, key_req)) = world
+        .get::<Exits>(room)
+        .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key)))
+    else {
+        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        return;
+    };
+    match state {
+        ExitState::Open => {
+            send_to(
+                world,
+                player,
+                format!("You'll need to close it first {}.\r\n", direction_name(dir)),
+            );
+            return;
+        }
+        ExitState::Locked => {
+            send_to(
+                world,
+                player,
+                format!("It's already locked {}.\r\n", direction_name(dir)),
+            );
+            return;
+        }
+        ExitState::Closed => {}
+    }
+    let Some(key_req) = key_req else {
+        send_to(
+            world,
+            player,
+            format!("There's no keyhole {}.\r\n", direction_name(dir)),
+        );
+        return;
+    };
+    let has_key = {
+        let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
+        q.iter(world)
+            .any(|(l, k)| l.0 == player && k.zone == key_req.0 && k.id == key_req.1)
+    };
+    if !has_key {
+        let hint = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&key_req)
+            .and_then(|p| p.keywords.first().cloned())
+            .unwrap_or_else(|| format!("({}, {})", key_req.0, key_req.1));
+        send_to(world, player, format!("You need '{hint}' to lock that.\r\n"));
+        return;
+    }
+    flip_door_both_sides(world, room, dir, ExitState::Locked);
+    send_to(
+        world,
+        player,
+        format!("You lock the way {}.\r\n", direction_name(dir)),
+    );
+    let player_name = name_of(world, player);
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!(
+            "{player_name} locks the door {}.\r\n",
+            direction_name(dir)
+        ),
     );
 }
 
