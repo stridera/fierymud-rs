@@ -993,7 +993,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_color,
     },
     Command {
-        names: &["wimpy"],
+        names: &["wimpy", "wi"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
