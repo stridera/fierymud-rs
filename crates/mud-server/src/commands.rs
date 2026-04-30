@@ -1581,6 +1581,34 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["boards"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "boards",
+            summary: "List every public message board.",
+            long: "Each board has an alias (`mortal`, `god`, `quest`, \
+                   etc.) and a title. Use `board <alias>` to list \
+                   messages on one.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
+        names: &["board"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "board <alias> [#]",
+            summary: "List or read messages on a board.",
+            long: "With just an alias, lists messages newest first \
+                   (sticky-marked entries float to the top). Append \
+                   a slot number to read that message's body.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["mailbox"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2590,6 +2618,18 @@ pub async fn try_dispatch_async(
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_mail(world, player, pool, args).await;
+            true
+        }
+        "boards" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_boards(world, player, pool).await;
+            true
+        }
+        "board" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_board(world, player, pool, args).await;
             true
         }
         "mailbox" | "mailboxes" => {
@@ -10421,6 +10461,117 @@ pub(crate) async fn cmd_readmail(
     if let Err(e) = mud_db::mail::mark_read(pool, row.id).await {
         tracing::warn!(error = %e, mail_id = row.id, "mark_read failed");
     }
+}
+
+/// `boards`: list every available board with its alias and title.
+/// Lock state is shown — locked boards refuse posts.
+pub(crate) async fn cmd_boards(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
+    let rows = match mud_db::boards::list_boards(pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            send_to(world, player, format!("Board fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    if rows.is_empty() {
+        send_to(world, player, "\r\nNo boards exist.\r\n");
+        return;
+    }
+    let mut out = format!("\r\nBoards ({}):\r\n", rows.len());
+    for b in &rows {
+        let lock = if b.locked { "[locked]" } else { "        " };
+        out.push_str(&format!("  {:<10} {} {}\r\n", b.alias, lock, b.title));
+    }
+    out.push_str("\r\nUse `board <alias>` to list messages, `board <alias> <#>` to read one.\r\n");
+    send_to(world, player, out);
+}
+
+/// `board <alias> [#]`: list messages on a board, or read a specific
+/// one if a slot number is appended. Sticky messages float to the top
+/// of the listing and are flagged.
+pub(crate) async fn cmd_board(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let mut parts = args.split_whitespace();
+    let Some(alias) = parts.next() else {
+        send_to(world, player, "Usage: board <alias> [#]\r\n");
+        return;
+    };
+    let slot = parts.next().and_then(|s| s.parse::<usize>().ok());
+    let board = match mud_db::boards::find_board_by_alias(pool, alias).await {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            send_to(world, player, format!("No board called '{alias}'.\r\n"));
+            return;
+        }
+        Err(e) => {
+            send_to(world, player, format!("Board fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    let messages = match mud_db::boards::messages_for_board(pool, board.id).await {
+        Ok(m) => m,
+        Err(e) => {
+            send_to(world, player, format!("Message fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    if let Some(slot) = slot {
+        if slot == 0 {
+            send_to(world, player, "Message slots are 1-based.\r\n");
+            return;
+        }
+        let Some(msg) = messages.get(slot - 1) else {
+            send_to(
+                world,
+                player,
+                format!("No message at slot {slot} on '{alias}'.\r\n"),
+            );
+            return;
+        };
+        let mut out = format!("\r\n[{}] message {}/{}\r\n", board.title, slot, messages.len());
+        out.push_str(&format!("From:    {} (level {})\r\n", msg.poster, msg.poster_level));
+        out.push_str(&format!("Subject: {}\r\n", msg.subject));
+        out.push_str(&format!("Posted:  {}\r\n", msg.posted_at.format("%Y-%m-%d %H:%M")));
+        if msg.sticky {
+            out.push_str("(sticky)\r\n");
+        }
+        out.push_str("---\r\n");
+        out.push_str(msg.content.trim_end());
+        out.push_str("\r\n---\r\n");
+        send_to(world, player, out);
+        return;
+    }
+    if messages.is_empty() {
+        send_to(
+            world,
+            player,
+            format!("\r\n{} has no messages.\r\n", board.title),
+        );
+        return;
+    }
+    let mut out = format!(
+        "\r\n{} ({} message{}):\r\n",
+        board.title,
+        messages.len(),
+        if messages.len() == 1 { "" } else { "s" },
+    );
+    for (i, msg) in messages.iter().enumerate() {
+        let stickymark = if msg.sticky { "*" } else { " " };
+        let when = msg.posted_at.format("%Y-%m-%d");
+        out.push_str(&format!(
+            "  {:<3} {} {when}  {:<20} {}\r\n",
+            i + 1,
+            stickymark,
+            msg.poster,
+            msg.subject,
+        ));
+    }
+    out.push_str(&format!("\r\nUse `board {alias} <#>` to read a message.\r\n"));
+    send_to(world, player, out);
 }
 
 /// `delmail <#>`: soft-delete the slot-numbered mail.
