@@ -82,6 +82,26 @@ pub async fn abandon(pool: &PgPool, character_quest_id: &str) -> sqlx::Result<u6
     Ok(result.rows_affected())
 }
 
+/// Force a `CharacterQuest` row from `IN_PROGRESS` to `COMPLETED`,
+/// stamping `completed_at` and incrementing `completion_count`. Used
+/// by admin tooling for testing — real completion comes from quest
+/// objective resolution.
+pub async fn admin_complete(pool: &PgPool, character_quest_id: &str) -> sqlx::Result<u64> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE "CharacterQuest"
+        SET status = 'COMPLETED'::"QuestStatus",
+            completed_at = NOW(),
+            completion_count = completion_count + 1
+        WHERE id = $1 AND status = 'IN_PROGRESS'::"QuestStatus"
+        "#,
+        character_quest_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Active (and recently completed) quests for one character. The
 /// `Quest` join supplies the display name + short description so the
 /// listing render doesn't need a second query. Sorted with active
