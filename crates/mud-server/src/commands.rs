@@ -5284,6 +5284,13 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             "{name_rendered} is a merchant — try `list` to see their wares.\r\n"
         ));
     }
+    if world.get::<mud_world::Flying>(target).is_some() {
+        out.push_str(&format!("{name_rendered} hovers in mid-air.\r\n"));
+    }
+    if world.get::<Stealth>(target).is_some() && target == player {
+        // Self-only — others shouldn't see your stealth marker.
+        out.push_str("You are hidden.\r\n");
+    }
     if let Some(BoardLink(board_id)) = world.get::<BoardLink>(target).copied()
         && let Some(summary) = world
             .get_resource::<BoardCatalog>()
