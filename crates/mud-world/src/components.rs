@@ -265,6 +265,13 @@ pub struct Shopkeeper {
     pub shop_id: i32,
 }
 
+/// Component on spawned BOARD-typed items: the `Board.id` they
+/// connect to (parsed from `Objects.values.Pages`). Examine renders
+/// a hint pointing the player at `board <alias>` — the actual board
+/// listing comes from a live DB query.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct BoardLink(pub i32);
+
 /// In-flight mail composition. Attached when the player runs
 /// `mail <recipient>`; while present, every line of input is routed
 /// to the mail-composition handler instead of normal dispatch. The

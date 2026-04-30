@@ -108,6 +108,11 @@ pub struct ObjectProto {
     /// non-portal protos and for portals with no/zero destination.
     /// Decode via `WorldKeyIndex.legacy_vnums`.
     pub portal_destination_vnum: Option<i32>,
+    /// `Board`-typed objects only: the `Board.id` they reference,
+    /// pulled from `Objects.values.Pages` (legacy convention — that
+    /// field doubles as the board id). `None` for non-boards or
+    /// when the value is missing/zero.
+    pub board_id: Option<i32>,
 }
 
 impl ObjectProto {
@@ -171,6 +176,27 @@ pub struct ShopDef {
     /// row in `ShopAccepts` for this shop). Non-empty = the item must
     /// match at least one rule for `sell` to succeed.
     pub accepts: Vec<ShopAcceptRule>,
+}
+
+/// One row from the `Board` table cached at load time. Used by the
+/// in-room board-object renderer: when a player examines a
+/// BOARD-typed item, its `BoardLink(id)` looks up here for the
+/// alias/title to print in the hint.
+#[derive(Debug, Clone)]
+pub struct BoardSummary {
+    pub id: i32,
+    pub alias: String,
+    pub title: String,
+    pub locked: bool,
+}
+
+/// Catalog of every message board, keyed by `Board.id`. Snapshot
+/// taken at startup; message counts and edit state aren't cached
+/// here because they change at runtime — the actual `board <alias>`
+/// command queries live data.
+#[derive(Resource, Debug, Default)]
+pub struct BoardCatalog {
+    pub by_id: HashMap<i32, BoardSummary>,
 }
 
 /// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.

@@ -3,8 +3,8 @@ pub mod loader;
 pub mod resources;
 
 pub use components::{
-    Account, AccountSummary, AppliedTo, BankWealth, BoardDraft, Charges, CombatStats, Cooldowns,
-    CoreStats, Description, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting,
+    Account, AccountSummary, AppliedTo, BankWealth, BoardDraft, BoardLink, Charges, CombatStats,
+    Cooldowns, CoreStats, Description, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting,
     Follower, FromMobReset, Frozen, Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt,
     LastTeller, Lit, Located, LoggedInAt, MailDraft, Mob, Named, Online, Player, PlayerFlags,
     Posture, PostureKind, Profile, Prompt, RecallPoint, Room, RoomSector, Shopkeeper, Slot, Stamina,
@@ -13,9 +13,9 @@ pub use components::{
 };
 pub use loader::{LoadStats, load_from_db, wear_flags_primary_slot};
 pub use resources::{
-    AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, DamageComponent,
-    EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry,
-    ObjectAbilityBinding, ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow,
-    ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, SocialDef, SocialRegistry, TargetingRule,
-    WorldKeyIndex,
+    AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
+    ClassDef, DamageComponent, EffectCatalog, EffectDef, MobProto, MobPrototypes,
+    MobResetCatalog, MobResetEntry, ObjectAbilityBinding, ObjectAbilityCatalog, ObjectProto,
+    ObjectPrototypes, SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, SocialDef,
+    SocialRegistry, TargetingRule, WorldKeyIndex,
 };

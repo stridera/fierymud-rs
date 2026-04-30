@@ -2,22 +2,23 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, classes, effects, mob_reset_equipment,
+    abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, boards, classes, effects, mob_reset_equipment,
     mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
     rooms, shops, socials, sqlx::PgPool, zones,
 };
 use tracing::{info, warn};
 
 use crate::components::{
-    CombatStats, Description, EquippedSlot, ExitData, Exits, FromMobReset, Health, Item, Keywords,
-    Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone,
-    ZoneClimate,
+    BoardLink, CombatStats, Description, EquippedSlot, ExitData, Exits, FromMobReset, Health, Item,
+    Keywords, Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Shopkeeper, Slot,
+    WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
-    AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, DamageComponent,
-    EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry,
-    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow, ShopAcceptRule, ShopCatalog,
-    ShopDef, ShopOffering, SocialDef, SocialRegistry, TargetingRule, WorldKeyIndex,
+    AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
+    ClassDef, DamageComponent, EffectCatalog, EffectDef, MobProto, MobPrototypes,
+    MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto, ObjectPrototypes,
+    SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, SocialDef, SocialRegistry,
+    TargetingRule, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -187,6 +188,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         } else {
             None
         };
+        let board_id = if matches!(row.r#type, mud_db::enums::ObjectType::Board) {
+            parse_board_id(&row.values)
+        } else {
+            None
+        };
         object_prototypes.by_key.insert(
             (row.zone_id, row.id),
             ObjectProto {
@@ -205,6 +211,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 weapon_dice_bonus,
                 cost: row.cost,
                 portal_destination_vnum,
+                board_id,
             },
         );
     }
@@ -493,6 +500,24 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(object_ability_catalog);
     world.insert_resource(shop_catalog);
 
+    // Pass 4.6: load Board catalog. Just metadata (id/alias/title/lock) —
+    // message rows are queried live so post/edit/delete shows up.
+    let board_rows = boards::list_boards(pool).await?;
+    let mut board_catalog = BoardCatalog::default();
+    for row in &board_rows {
+        board_catalog.by_id.insert(
+            row.id,
+            BoardSummary {
+                id: row.id,
+                alias: row.alias.clone(),
+                title: row.title.clone(),
+                locked: row.locked,
+            },
+        );
+    }
+    info!(boards = board_catalog.by_id.len(), "board catalog loaded");
+    world.insert_resource(board_catalog);
+
     // Pass 5: spawn live entities from MobResets / ObjectResets. Resources
     // were inserted above so the spawners can read them. Probability gating
     // and respawn timing belong to a future tick system; for now we always
@@ -610,6 +635,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             }
             if let Some(s) = primary_slot {
                 bundle.insert(crate::components::WearableIn(s));
+            }
+            if let Some(board_id) = proto.board_id {
+                bundle.insert(BoardLink(board_id));
             }
             spawned_for_reset.push(bundle.id());
             stats.object_resets_spawned += 1;
@@ -807,6 +835,20 @@ fn parse_weapon_dice(values: &serde_json::Value) -> (i32, i32, i32) {
 /// non-portal) is treated as "no destination".
 fn parse_portal_destination(values: &serde_json::Value) -> Option<i32> {
     let v = values.get("Destination")?;
+    let raw = match v {
+        serde_json::Value::Number(n) => i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0),
+        serde_json::Value::String(s) => s.parse().unwrap_or(0),
+        _ => 0,
+    };
+    if raw <= 0 { None } else { Some(raw) }
+}
+
+/// Pull `Pages` from a Board-typed object's `values` JSONB. Legacy
+/// `CircleMUD` convention has `Pages` doubling as the `Board.id` —
+/// every imported BOARD row carries this field, and matches
+/// 1..=8 for the eight known boards. `0` / missing → None.
+fn parse_board_id(values: &serde_json::Value) -> Option<i32> {
+    let v = values.get("Pages")?;
     let raw = match v {
         serde_json::Value::Number(n) => i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0),
         serde_json::Value::String(s) => s.parse().unwrap_or(0),

@@ -18,9 +18,9 @@ use mud_world::{
     CoreStats, Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
-    BankWealth, BoardDraft, MailDraft, RecallPoint, RoomSector, ShopCatalog, Shopkeeper, Slot,
-    SocialDef, SocialRegistry, Stamina, Stealth, Stunned, TellLog, Title, UiStyle, Wealth,
-    WearableIn, WorldKey, WorldKeyIndex, ZoneClimate,
+    BankWealth, BoardCatalog, BoardDraft, BoardLink, MailDraft, RecallPoint, RoomSector,
+    ShopCatalog, Shopkeeper, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, TellLog,
+    Title, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex, ZoneClimate,
 };
 use tracing::{info, info_span};
 
@@ -5110,6 +5110,26 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     if world.get::<Shopkeeper>(target).is_some() {
         out.push_str(&format!(
             "{name_rendered} is a merchant — try `list` to see their wares.\r\n"
+        ));
+    }
+    if let Some(BoardLink(board_id)) = world.get::<BoardLink>(target).copied()
+        && let Some(summary) = world
+            .get_resource::<BoardCatalog>()
+            .and_then(|c| c.by_id.get(&board_id))
+            .cloned()
+    {
+        let lock = if summary.locked { " (locked)" } else { "" };
+        // Many board titles already end in "Board"; avoid the awkward
+        // "Mortal Board board".
+        let title_lc = summary.title.to_ascii_lowercase();
+        let suffix = if title_lc.ends_with(" board") || title_lc.ends_with("boards") {
+            ""
+        } else {
+            " board"
+        };
+        out.push_str(&format!(
+            "It's the {}{}{}; type `board {}` to read it.\r\n",
+            summary.title, suffix, lock, summary.alias,
         ));
     }
     send_to(world, player, out);
