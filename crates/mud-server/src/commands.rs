@@ -574,6 +574,37 @@ const COMMANDS: &[Command] = &[
         run: cmd_taste,
     },
     Command {
+        names: &["pour"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "pour <container> [target]",
+            summary: "Transfer liquid between containers, or empty.",
+            long: "With no target, dumps the source's liquid on the \
+                   ground. With a target container, transfers as much \
+                   as the target can accept; refuses on liquid-type \
+                   mismatch unless the target is empty (in which case \
+                   the target adopts the source's liquid + poison \
+                   flag).",
+        },
+        run: cmd_pour,
+    },
+    Command {
+        names: &["fill"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "fill <container> <source>",
+            summary: "Top up a container from another container.",
+            long: "Inverse-arg `pour`: same liquid-match rules, \
+                   transfers up to the destination's remaining \
+                   capacity.",
+        },
+        run: cmd_fill,
+    },
+    Command {
         names: &["recite"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -8099,6 +8130,123 @@ fn cmd_drink(world: &mut World, player: Entity, args: &str) {
 
 fn cmd_sip(world: &mut World, player: Entity, args: &str) {
     drink_amount(world, player, args, 1, "sip");
+}
+
+/// `pour <container> [target]`: transfer liquid from a held
+/// container. With no target, empties to the floor. With a target
+/// container, transfers as much as the target can accept (limited
+/// by capacity − remaining). Liquid types must match — pouring
+/// water into wine refuses.
+#[allow(clippy::too_many_lines)]
+fn cmd_pour(world: &mut World, player: Entity, args: &str) {
+    let mut parts = args.split_whitespace();
+    let Some(src_word) = parts.next() else {
+        send_to(world, player, "Usage: pour <container> [target]\r\n");
+        return;
+    };
+    let target_word = parts.next();
+    let Some(src) = find_carried_by(world, src_word, player, EquipFilter::Anywhere) else {
+        send_to(world, player, format!("You aren't carrying '{src_word}'.\r\n"));
+        return;
+    };
+    let src_name = name_of(world, src);
+    let Some(src_state) = world.get::<mud_world::LiquidContainer>(src).cloned() else {
+        send_rendered(
+            world,
+            player,
+            &format!("{src_name} isn't a drink container.\r\n"),
+        );
+        return;
+    };
+    if src_state.remaining <= 0 {
+        send_rendered(world, player, &format!("{src_name} is already empty.\r\n"));
+        return;
+    }
+    // No target: empty the source onto the floor.
+    let Some(target_word) = target_word else {
+        if let Some(mut lc) = world.get_mut::<mud_world::LiquidContainer>(src) {
+            lc.remaining = 0;
+        }
+        let liquid_lc = src_state.liquid.to_ascii_lowercase();
+        send_rendered(
+            world,
+            player,
+            &format!("You pour the {liquid_lc} from {src_name} onto the ground.\r\n"),
+        );
+        return;
+    };
+    let Some(dest) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
+        send_to(world, player, format!("You aren't carrying '{target_word}'.\r\n"));
+        return;
+    };
+    if dest == src {
+        send_to(world, player, "You can't pour something into itself.\r\n");
+        return;
+    }
+    let dest_name = name_of(world, dest);
+    let Some(dest_state) = world.get::<mud_world::LiquidContainer>(dest).cloned() else {
+        send_rendered(
+            world,
+            player,
+            &format!("{dest_name} isn't a drink container.\r\n"),
+        );
+        return;
+    };
+    let dest_room = dest_state.capacity - dest_state.remaining;
+    if dest_room <= 0 {
+        send_rendered(world, player, &format!("{dest_name} is full.\r\n"));
+        return;
+    }
+    // Empty destination: takes the source's liquid type and any
+    // poison flag. Non-empty: must match liquid type, refuse on
+    // mismatch.
+    let same_liquid = dest_state.remaining == 0
+        || dest_state.liquid.eq_ignore_ascii_case(&src_state.liquid);
+    if !same_liquid {
+        send_rendered(
+            world,
+            player,
+            &format!("{dest_name} already holds something else.\r\n"),
+        );
+        return;
+    }
+    let amount = dest_room.min(src_state.remaining);
+    if let Some(mut s) = world.get_mut::<mud_world::LiquidContainer>(src) {
+        s.remaining -= amount;
+    }
+    if let Some(mut d) = world.get_mut::<mud_world::LiquidContainer>(dest) {
+        if d.remaining == 0 {
+            d.liquid.clone_from(&src_state.liquid);
+            d.poisoned = src_state.poisoned;
+        } else if src_state.poisoned {
+            // Poisoning spreads when topping up a non-poisoned with
+            // poisoned: any bad liquid contaminates the lot.
+            d.poisoned = true;
+        }
+        d.remaining += amount;
+    }
+    let liquid_lc = src_state.liquid.to_ascii_lowercase();
+    send_rendered(
+        world,
+        player,
+        &format!("You pour {amount} units of {liquid_lc} from {src_name} into {dest_name}.\r\n"),
+    );
+}
+
+/// `fill <container> <source>`: top up the destination from the
+/// source. Inverse of `pour`. Same liquid-match rules apply.
+fn cmd_fill(world: &mut World, player: Entity, args: &str) {
+    let mut parts = args.split_whitespace();
+    let Some(dest_word) = parts.next() else {
+        send_to(world, player, "Usage: fill <container> <source>\r\n");
+        return;
+    };
+    let Some(src_word) = parts.next() else {
+        send_to(world, player, "Fill from what?\r\n");
+        return;
+    };
+    // Reuse pour's exact logic (source first arg) by swapping order.
+    cmd_pour(world, player, &format!("{src_word} {dest_word}"));
 }
 
 /// `taste <container>`: identify the liquid without drinking. No
