@@ -384,6 +384,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_drop,
     },
     Command {
+        names: &["donate"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "donate <item>",
+            summary: "Charitably leave an item for someone else.",
+            long: "Drops the item in the current room with a giving \
+                   message. A real donation-room flag lands later — \
+                   for now, donated items sit on the floor.",
+        },
+        run: cmd_donate,
+    },
+    Command {
         names: &["junk", "trash"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6660,6 +6674,47 @@ fn cmd_junk(world: &mut World, player: Entity, args: &str) {
         located.0,
         &[player],
         &format!("{player_name} destroys {item_name}.\r\n"),
+    );
+}
+
+/// `donate <item>`: drop an item with a charitable flavor. Without a
+/// dedicated donation-room flag, donated items just land at the
+/// player's feet — but the message reads as a giving gesture rather
+/// than a discard, so admins / quest-givers can wire pickup
+/// behavior on top later.
+fn cmd_donate(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Donate what?\r\n");
+        return;
+    }
+    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
+        send_rendered(
+            world,
+            player,
+            &format!("You aren't carrying '{target_word}'.\r\n"),
+        );
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let item_name = name_of(world, item);
+    let player_name = name_of(world, player);
+    if let Some(mut l) = world.get_mut::<Located>(item) {
+        l.0 = room;
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("You leave {item_name} for whoever might need it.\r\n"),
+    );
+    broadcast_room_except_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} donates {item_name}.\r\n"),
     );
 }
 
