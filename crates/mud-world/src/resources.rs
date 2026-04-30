@@ -91,6 +91,10 @@ pub struct ObjectProto {
     pub weapon_dice_num: i32,
     pub weapon_dice_size: i32,
     pub weapon_dice_bonus: i32,
+    /// Base value in copper (the schema's `Objects.cost`). Shops will
+    /// pay some fraction of this on sell; appraisal commands surface
+    /// the raw number split into denominations.
+    pub cost: i32,
 }
 
 impl ObjectProto {

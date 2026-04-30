@@ -186,6 +186,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_balance,
     },
     Command {
+        names: &["value", "appraise"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "value <item>",
+            summary: "Show an item's catalog value in coin.",
+            long: "Searches your inventory and the room for the named \
+                   item, then prints its base value (the schema's \
+                   `Objects.cost`) split into denominations. Shops will \
+                   pay some fraction of this on sell once that lands.",
+        },
+        run: cmd_value,
+    },
+    Command {
         names: &["title"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4069,6 +4084,57 @@ fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
         "\r\nYou have no coin to your name.\r\n".to_string()
     };
     send_to(world, player, msg);
+}
+
+/// `value <item>`: appraise an item against its proto's `cost`. Renders
+/// the raw value in denominations. Real shop sell-price math (some
+/// fraction, race-specific copperFactor, durability modifier) lands
+/// with the shop system; this is the bare informational version.
+fn cmd_value(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(world, player, "Value what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let lc = needle.to_ascii_lowercase();
+    let target = {
+        let mut q =
+            world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+        q.iter(world)
+            .find(|(_, l, n, kw)| {
+                (l.0 == player || l.0 == located.0) && matches(&lc, n, *kw)
+            })
+            .map(|(e, _, _, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(
+            world,
+            player,
+            format!("You can't find anything called '{needle}' to value.\r\n"),
+        );
+        return;
+    };
+    let cost = world
+        .get::<WorldKey>(target)
+        .and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| p.cost)
+        })
+        .unwrap_or(0);
+    let item_name = name_of(world, target);
+    let msg = if let Some(parts) = format_wealth(i64::from(cost)) {
+        format!("{item_name} is worth {parts}.\r\n")
+    } else {
+        format!("{item_name} is worthless.\r\n")
+    };
+    send_rendered(world, player, &msg);
 }
 
 /// `balance` / `bal`: show the bank-stored balance separate from

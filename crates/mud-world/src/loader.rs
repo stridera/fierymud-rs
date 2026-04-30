@@ -196,6 +196,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 weapon_dice_num,
                 weapon_dice_size,
                 weapon_dice_bonus,
+                cost: row.cost,
             },
         );
     }
