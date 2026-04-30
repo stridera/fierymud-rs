@@ -8558,14 +8558,12 @@ fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-/// `roundhouse`: heavier kick variant. Costs 7 stamina, deals
-/// 1.5x `dmg_roll` on the current Fighting target. Requires being
-/// in combat (no auto-engage).
+/// `roundhouse` — Phase C migration: shimmed over the `ROUNDHOUSE`
+/// data path (damage formula `"skill"`; falls back to default `1d6`
+/// for untrained casters). Posture / stamina / fighting / dead-target
+/// gates stay; messaging via `invoke_ability`.
 fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "roundhouse") {
-        return;
-    }
-    if !check_stamina(world, player, ROUNDHOUSE_COST, "roundhouse") {
         return;
     }
     let Some(Fighting(target)) = world.get::<Fighting>(player).copied() else {
@@ -8577,29 +8575,18 @@ fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "Your target is gone.\r\n");
         return;
     }
-    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
+    if !check_stamina(world, player, ROUNDHOUSE_COST, "roundhouse") {
         return;
-    };
-    let dmg = world.get::<CombatStats>(player).map_or(1, |c| ((c.dmg_roll * 3) / 2).max(1));
+    }
     drain_stamina(world, player, ROUNDHOUSE_COST);
-    let player_name = name_of(world, player);
-    let target_name = name_or(world, target, "<unknown>");
-    let (dead, _) = apply_damage(world, target, dmg);
-    send_to(world, player, format!(
-        "You roundhouse-kick {target_name} for {dmg} damage!\r\n"
-    ));
-    if !dead {
-        send_rendered(world, target, &format!(
-            "{player_name} lands a roundhouse kick on you for {dmg} damage!\r\n"
-        ));
-    }
-    broadcast_room_except_rendered(
-        world, target_room, &[player, target],
-        &format!("{player_name} roundhouse-kicks {target_name}!\r\n"),
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("roundhouse {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
-    if dead {
-        crate::combat::handle_death(world, target, &target_name, target_room);
-    }
 }
 
 /// `roar` / `howl`: room-wide fear application to mobs.
