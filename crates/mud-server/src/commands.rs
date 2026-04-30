@@ -8873,8 +8873,9 @@ fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-/// `throatcut <target>`: heavier backstab variant. 2.5x `dmg_roll`
-/// on the opening swing, 8 stamina.
+/// `throatcut <target>` — Phase C migration: shimmed over the
+/// `THROATCUT` data path (damage formula `"skill"`). Out-of-combat
+/// opener like springleap; auto-engages on success.
 fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "throatcut") {
         return;
@@ -8888,6 +8889,10 @@ fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Throatcut whom?\r\n");
         return;
     }
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        send_to(world, player, "You can't throatcut yourself.\r\n");
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
@@ -8895,10 +8900,6 @@ fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
         return;
     };
-    if target == player {
-        send_to(world, player, "You can't throatcut yourself.\r\n");
-        return;
-    }
     if world.get::<Fighting>(target).is_some() {
         send_to(world, player, "They're too alert.\r\n");
         return;
@@ -8906,28 +8907,16 @@ fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
     if !check_stamina(world, player, THROATCUT_COST, "throatcut") {
         return;
     }
-
-    let base = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
-    let dmg = ((base * 5) / 2).max(1);
     drain_stamina(world, player, THROATCUT_COST);
-    let player_name = name_of(world, player);
-    let target_name = name_or(world, target, "<unknown>");
-    let (dead, _) = apply_damage(world, target, dmg);
-    send_to(world, player, format!(
-        "You slash {target_name}'s throat for {dmg} damage!\r\n"
-    ));
-    if !dead {
-        send_rendered(world, target, &format!(
-            "{player_name} slashes your throat for {dmg} damage!\r\n"
-        ));
-    }
-    broadcast_room_except_rendered(
-        world, located.0, &[player, target],
-        &format!("{player_name} silently slashes {target_name}'s throat!\r\n"),
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("throatcut {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
-    if dead {
-        crate::combat::handle_death(world, target, &target_name, located.0);
-    } else {
+    if world.get_entity(target).is_ok() {
         try_insert(world, player, Fighting(target));
         if world.get::<CombatStats>(target).is_some()
             && let Ok(mut e) = world.get_entity_mut(target)
