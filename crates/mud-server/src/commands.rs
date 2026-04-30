@@ -1260,6 +1260,45 @@ const COMMANDS: &[Command] = &[
         run: cmd_dicerolls,
     },
     Command {
+        names: &["pk"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "pk",
+            summary: "Toggle player-kill participation.",
+            long: "Sets PK_ENABLED. Once the PK gate lands, this is the \
+                   self-elected switch for inter-player combat.",
+        },
+        run: cmd_pk,
+    },
+    Command {
+        names: &["quest"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "quest",
+            summary: "Toggle quest mode (placeholder; gates quest zones).",
+            long: "Sets QUEST. The quest system is unimplemented; this \
+                   ensures the flag persists for content that gates on it.",
+        },
+        run: cmd_quest_flag,
+    },
+    Command {
+        names: &["consent"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "consent",
+            summary: "Toggle consent for group/share interactions.",
+            long: "Sets CONSENT. Group invites and certain shared-effect \
+                   spells will check this flag once those systems land.",
+        },
+        run: cmd_consent,
+    },
+    Command {
         names: &["holylight"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -1829,7 +1868,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_kneel,
     },
     Command {
-        names: &["rest"],
+        names: &["rest", "recline"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
@@ -5578,6 +5617,36 @@ fn cmd_dicerolls(world: &mut World, player: Entity, _args: &str) {
         PlayerFlag::ShowDiceRolls,
         "Showing dice rolls.",
         "Hiding dice rolls.",
+    );
+}
+
+fn cmd_pk(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::PkEnabled,
+        "PK is now enabled — you may attack and be attacked by other players.",
+        "PK is now disabled.",
+    );
+}
+
+fn cmd_quest_flag(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::Quest,
+        "Quest mode enabled — you'll be flagged for quest-only zones once those land.",
+        "Quest mode disabled.",
+    );
+}
+
+fn cmd_consent(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::Consent,
+        "You consent to group/share interactions.",
+        "You revoke group/share consent.",
     );
 }
 
