@@ -645,7 +645,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_world,
     },
     Command {
-        names: &["time", "uptime"],
+        names: &["time", "date", "uptime"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
@@ -1078,7 +1078,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_autosplit,
     },
     Command {
-        names: &["effects", "affects"],
+        names: &["effects", "affects", "aff"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
