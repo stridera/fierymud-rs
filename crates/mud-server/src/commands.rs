@@ -231,6 +231,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_buy,
     },
     Command {
+        names: &["sell"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "sell <item>",
+            summary: "Sell a carried item to the shopkeeper here.",
+            long: "Pays `proto.cost * sell_profit` rounded for any \
+                   carried item with positive cost. Equipped items \
+                   are refused (`remove` first). Item-type filters \
+                   (`ShopAccepts`) are not enforced yet.",
+        },
+        run: cmd_sell,
+    },
+    Command {
         names: &["title"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4333,6 +4348,98 @@ fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         located.0,
         &[player],
         &format!("{player_name} buys {item_name}.\r\n"),
+    );
+}
+
+/// `sell <item>`: hand a carried item to the shopkeeper here, get coin.
+/// Pays `proto.cost * sell_profit` rounded; despawns the item; adds
+/// the coin to the player's `Wealth`. Refuses on equipped items
+/// (`remove` first), zero-value items, and rooms without a keeper.
+/// `ShopAccepts` filtering (per-shop item-type whitelist) is deferred
+/// until the table is loaded — for now any keeper buys anything.
+fn cmd_sell(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Sell what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let keeper: Option<(Entity, Shopkeeper)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
+        q.iter(world)
+            .find(|(_, l, _)| l.0 == located.0)
+            .map(|(e, _, s)| (e, *s))
+    };
+    let Some((keeper_entity, keeper_marker)) = keeper else {
+        send_to(world, player, "No one here is buying anything.\r\n");
+        return;
+    };
+    let keeper_name = name_of(world, keeper_entity);
+    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
+        send_rendered(
+            world,
+            player,
+            &format!("You aren't carrying '{target_word}'.\r\n"),
+        );
+        return;
+    };
+    let item_name = name_of(world, item);
+    let Some(shop) = world
+        .resource::<ShopCatalog>()
+        .by_key
+        .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
+        .cloned()
+    else {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} isn't running a shop.\r\n"),
+        );
+        return;
+    };
+    let base_cost = world
+        .get::<WorldKey>(item)
+        .and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| p.cost)
+        })
+        .unwrap_or(0);
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let pay_copper: i64 = (f64::from(base_cost) * shop.sell_profit).round() as i64;
+    if pay_copper <= 0 {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} chuckles. \"That's worthless to me.\"\r\n"),
+        );
+        return;
+    }
+    if let Some(mut w) = world.get_mut::<Wealth>(player) {
+        w.0 = w.0.saturating_add(pay_copper);
+    } else {
+        try_insert(world, player, Wealth(pay_copper));
+    }
+    if let Ok(e) = world.get_entity_mut(item) {
+        e.despawn();
+    }
+    let pay_str = format_wealth(pay_copper).unwrap_or_else(|| "no coin".to_string());
+    send_rendered(
+        world,
+        player,
+        &format!("You sell {item_name} for {pay_str}.\r\n"),
+    );
+    let player_name = name_of(world, player);
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player],
+        &format!("{player_name} sells {item_name}.\r\n"),
     );
 }
 
