@@ -235,6 +235,14 @@ pub struct Stealth;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Charges(pub i32);
 
+/// Per-character wimpy threshold: when the WIMPY flag is set and
+/// the character's HP falls below this percentage of max, the
+/// combat tick auto-flees them. Default 25 (matches legacy
+/// `FieryMUD`'s hardcoded value); the `wimpy <pct>` command sets a
+/// different one.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WimpyThreshold(pub i32);
+
 /// Per-character ability cooldown table. Maps `Ability.id` → the
 /// `Instant` at which the cooldown expires (i.e. the ability becomes
 /// usable again). Inserted lazily on first cooldown set; entries past

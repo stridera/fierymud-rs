@@ -993,6 +993,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_color,
     },
     Command {
+        names: &["wimpy"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "wimpy [pct|off]",
+            summary: "Set the HP percentage at which combat auto-flees you.",
+            long: "`wimpy 30` enables wimpy mode and panics you out of \
+                   combat when your HP drops below 30% of max. `wimpy off` \
+                   (or `wimpy 0`) clears it. With no argument, prints the \
+                   current setting. Default threshold when no number was \
+                   set is 25%.",
+        },
+        run: cmd_wimpy,
+    },
+    Command {
         names: &["autoexit"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4625,6 +4641,87 @@ fn cmd_color(world: &mut World, player: Entity, _args: &str) {
         PlayerFlag::ColorBlind,
         "Colors are now OFF.",
         "Colors are now ON.",
+    );
+}
+
+// `wimpy` doubles as a toggle-with-threshold command. Three forms:
+//   `wimpy`         — show current state.
+//   `wimpy off|0`   — clear the WIMPY flag and threshold.
+//   `wimpy <1..99>` — set threshold and ensure the flag is on.
+// Combat checks `WimpyThreshold` (default 25%) only when the flag is
+// also set, so clearing the flag is sufficient to disable; we still
+// drop the component on `off` to keep state tidy.
+fn cmd_wimpy(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+
+    let currently_on = world
+        .get::<PlayerFlags>(player)
+        .is_some_and(|pf| pf.has(PlayerFlag::Wimpy));
+    let current_pct = world
+        .get::<mud_world::WimpyThreshold>(player)
+        .map_or(25, |w| w.0);
+
+    if arg.is_empty() {
+        let msg = if currently_on {
+            format!(
+                "Wimpy mode is on at {current_pct}% — you'll try to flee \
+                 when your HP drops below that.\r\n"
+            )
+        } else {
+            "Wimpy mode is off. Use `wimpy <pct>` (1-99) to enable.\r\n"
+                .to_string()
+        };
+        send_to(world, player, msg);
+        return;
+    }
+
+    if arg.eq_ignore_ascii_case("off") || arg == "0" {
+        if currently_on
+            && let Some(mut pf) = world.get_mut::<PlayerFlags>(player)
+        {
+            pf.toggle(PlayerFlag::Wimpy);
+        }
+        try_remove::<mud_world::WimpyThreshold>(world, player);
+        send_to(
+            world,
+            player,
+            "Okay, you'll now stand and fight to the bitter end.\r\n",
+        );
+        return;
+    }
+
+    let pct = match arg.parse::<i32>() {
+        Ok(n) if (1..=99).contains(&n) => n,
+        Ok(_) => {
+            send_to(
+                world,
+                player,
+                "Wimpy percent must be between 1 and 99 (or `off` to disable).\r\n",
+            );
+            return;
+        }
+        Err(_) => {
+            send_to(
+                world,
+                player,
+                "Usage: `wimpy <pct>` (1-99) or `wimpy off`.\r\n",
+            );
+            return;
+        }
+    };
+
+    if !currently_on
+        && let Some(mut pf) = world.get_mut::<PlayerFlags>(player)
+    {
+        pf.toggle(PlayerFlag::Wimpy);
+    }
+    try_insert(world, player, mud_world::WimpyThreshold(pct));
+    send_to(
+        world,
+        player,
+        format!(
+            "You'll panic and try to flee when your HP drops below {pct}%.\r\n"
+        ),
     );
 }
 

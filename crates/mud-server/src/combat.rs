@@ -247,8 +247,9 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
 
     // Wimpy auto-flee: if the defender is a player with the WIMPY flag and
-    // their HP just dropped below 25% of max, attempt to flee. Done after
-    // the threshold message so the dramatic order reads:
+    // their HP just dropped below the configured percentage of max,
+    // attempt to flee. Default 25% if no `WimpyThreshold` component is
+    // set; the `wimpy <pct>` command writes one.
     //
     //   X hits you for 12 damage.
     //   You are badly hurt!
@@ -259,10 +260,14 @@ fn apply_swing(world: &mut World, s: &Swing) {
     let wimpy_set = world
         .get::<PlayerFlags>(s.target)
         .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::Wimpy));
+    let wimpy_pct = world
+        .get::<mud_world::WimpyThreshold>(s.target)
+        .map_or(25, |w| w.0)
+        .clamp(1, 99);
     if target_is_player && wimpy_set
         && let Some(hp) = world.get::<Health>(s.target).copied()
         && hp.hp > 0
-        && hp.hp * 4 < hp.max
+        && hp.hp * 100 < hp.max * wimpy_pct
     {
         // Look for any open exit before announcing the panic — otherwise
         // we'd print "You panic!" and then immediately "There's nowhere
