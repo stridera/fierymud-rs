@@ -338,6 +338,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_drop,
     },
     Command {
+        names: &["junk", "trash"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "junk <item>",
+            summary: "Permanently destroy a carried item.",
+            long: "The item is despawned; nothing is dropped on the \
+                   floor and no coin is awarded. Refuses on equipped \
+                   gear — `remove` first.",
+        },
+        run: cmd_junk,
+    },
+    Command {
         names: &["give"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5963,6 +5977,40 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
         room,
         &[player],
         &format!("{player_name} picks up {item_name}.\r\n"),
+    );
+}
+
+/// `junk <item>` / `trash <item>`: destroy a carried item. Equipped
+/// items are refused — `remove` first. No coin is awarded; if the
+/// player is throwing it away, they're throwing it away.
+fn cmd_junk(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Junk what?\r\n");
+        return;
+    }
+    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
+        send_rendered(
+            world,
+            player,
+            &format!("You aren't carrying '{target_word}'.\r\n"),
+        );
+        return;
+    };
+    let item_name = name_of(world, item);
+    let player_name = name_of(world, player);
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    if let Ok(e) = world.get_entity_mut(item) {
+        e.despawn();
+    }
+    send_rendered(world, player, &format!("You destroy {item_name}.\r\n"));
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player],
+        &format!("{player_name} destroys {item_name}.\r\n"),
     );
 }
 
