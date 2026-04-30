@@ -11982,7 +11982,25 @@ fn group_members(world: &mut World, root: Entity) -> Vec<Entity> {
 /// chain's top. The leader is shown first, followed by members
 /// indented. With a single entity (no followers / not following),
 /// reports "you're not in a group."
-fn cmd_group(world: &mut World, player: Entity, _args: &str) {
+///
+/// `group dismiss <name>`: remove a single direct follower (the
+/// surgical version of `disband`). The named player must currently
+/// be following the caller.
+fn cmd_group(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if let Some(rest) = arg.strip_prefix("dismiss") {
+        let target_word = rest.trim();
+        group_dismiss_one(world, player, target_word);
+        return;
+    }
+    if !arg.is_empty() {
+        send_to(
+            world,
+            player,
+            "Usage: `group` (list) or `group dismiss <player>`.\r\n",
+        );
+        return;
+    }
     let root = group_root(world, player);
     let members = group_members(world, root);
     if members.len() <= 1 {
@@ -12008,6 +12026,48 @@ fn cmd_group(world: &mut World, player: Entity, _args: &str) {
         out.push_str(&format!("  [{role:<6}] {name:<20} {hp:<14} ({here})\r\n"));
     }
     send_to(world, player, out);
+}
+
+/// Remove one direct follower by name. Used by `group dismiss`. The
+/// named player must currently be following `dismisser` (Follower
+/// component pointing at them); deeper-chain members can't be
+/// dismissed without their direct leader's cooperation.
+fn group_dismiss_one(world: &mut World, dismisser: Entity, target_name: &str) {
+    if target_name.is_empty() {
+        send_to(world, dismisser, "Dismiss whom?\r\n");
+        return;
+    }
+    let needle = target_name.to_ascii_lowercase();
+    let target: Option<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Follower, &Named), With<Player>>();
+        q.iter(world)
+            .find(|(_, f, n)| f.0 == dismisser && n.name.to_ascii_lowercase().contains(&needle))
+            .map(|(e, _, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(
+            world,
+            dismisser,
+            format!(
+                "Nobody named '{target_name}' is following you. \
+                 Use `group` to see who is.\r\n"
+            ),
+        );
+        return;
+    };
+    let target_name_canonical = name_of(world, target);
+    let dismisser_name = name_of(world, dismisser);
+    try_remove::<Follower>(world, target);
+    send_rendered(
+        world,
+        dismisser,
+        &format!("You dismiss {target_name_canonical} from the group.\r\n"),
+    );
+    send_rendered(
+        world,
+        target,
+        &format!("{dismisser_name} dismisses you from the group.\r\n"),
+    );
 }
 
 /// `gsay <msg>` / `gtell` / `gecho`: broadcast a message to every
