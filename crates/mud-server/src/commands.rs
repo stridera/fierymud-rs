@@ -1625,6 +1625,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["abandon"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "abandon <#>",
+            summary: "Drop an in-progress quest.",
+            long: "Argument is the slot number from the in-progress \
+                   section of `quests`. Marks the row ABANDONED \
+                   rather than deleting it, preserving the audit \
+                   trail and the (char, zone, id) unique key.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["post"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2700,6 +2715,12 @@ pub async fn try_dispatch_async(
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_quests(world, player, pool).await;
+            true
+        }
+        "abandon" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_abandon(world, player, pool, args).await;
             true
         }
         "board" => {
@@ -11025,6 +11046,74 @@ pub(crate) async fn cmd_quests(
         }
     }
     send_to(world, player, out);
+}
+
+/// `abandon <#>`: drop an in-progress quest. Slot is 1-based against
+/// the in-progress section of the `quests` listing. Marks the row
+/// `ABANDONED` rather than deleting it, so the audit trail and
+/// `(char, zone, id)` unique key are preserved.
+pub(crate) async fn cmd_abandon(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let arg = args.trim();
+    let Ok(slot) = arg.parse::<usize>() else {
+        send_to(
+            world,
+            player,
+            "Abandon which quest? Pick a number from `quests`.\r\n",
+        );
+        return;
+    };
+    if slot == 0 {
+        send_to(world, player, "Quest slots are 1-based.\r\n");
+        return;
+    }
+    let character_id = world.get::<Account>(player).map(|a| a.character_id.clone());
+    let Some(character_id) = character_id else {
+        send_to(world, player, "No account info; can't fetch quests.\r\n");
+        return;
+    };
+    let rows = match mud_db::quests::list_for_character(pool, &character_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            send_to(world, player, format!("Quest fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    let active: Vec<&mud_db::quests::CharacterQuestRow> = rows
+        .iter()
+        .filter(|r| r.status == "IN_PROGRESS")
+        .collect();
+    let Some(target) = active.get(slot - 1) else {
+        send_to(
+            world,
+            player,
+            format!("No in-progress quest at slot {slot}.\r\n"),
+        );
+        return;
+    };
+    match mud_db::quests::abandon(pool, &target.id).await {
+        Ok(0) => {
+            send_to(
+                world,
+                player,
+                "That quest isn't in-progress; nothing to abandon.\r\n",
+            );
+        }
+        Ok(_) => {
+            send_to(
+                world,
+                player,
+                format!("Abandoned quest: {}.\r\n", target.quest_name),
+            );
+        }
+        Err(e) => {
+            send_to(world, player, format!("Abandon failed: {e}\r\n"));
+        }
+    }
 }
 
 /// `boards`: list every available board with its alias and title.

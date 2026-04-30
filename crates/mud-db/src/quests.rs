@@ -17,6 +17,26 @@ pub struct CharacterQuestRow {
     pub short_description: Option<String>,
 }
 
+/// Set a `CharacterQuest` row's status to `ABANDONED`. Used by the
+/// `abandon` command. Doesn't delete the row — keeps the audit
+/// trail and respects the `(character_id, quest_zone_id, quest_id)`
+/// unique key (so the player can't immediately re-accept the same
+/// quest when its row is still around with a non-IN_PROGRESS state).
+pub async fn abandon(pool: &PgPool, character_quest_id: &str) -> sqlx::Result<u64> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE "CharacterQuest"
+        SET status = 'ABANDONED'::"QuestStatus",
+            completed_at = NOW()
+        WHERE id = $1 AND status = 'IN_PROGRESS'::"QuestStatus"
+        "#,
+        character_quest_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Active (and recently completed) quests for one character. The
 /// `Quest` join supplies the display name + short description so the
 /// listing render doesn't need a second query. Sorted with active
