@@ -22,6 +22,7 @@ pub mod object_resets;
 pub mod objects;
 pub mod room_exits;
 pub mod rooms;
+pub mod shops;
 pub mod socials;
 pub mod users;
 pub mod zones;

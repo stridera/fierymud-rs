@@ -120,6 +120,43 @@ pub struct MobPrototypes {
     pub by_key: HashMap<(i32, i32), MobProto>,
 }
 
+/// Per-shop offering: an item the keeper sells, with stock and the
+/// override price (`0` = use the object's base cost).
+#[derive(Debug, Clone, Copy)]
+pub struct ShopOffering {
+    pub object_zone_id: i32,
+    pub object_id: i32,
+    /// `-1` = unlimited stock.
+    pub amount: i32,
+    /// Override price in copper; `0` falls back to the proto's base
+    /// cost multiplied by the shop's `buy_profit`.
+    pub price: i32,
+}
+
+/// One entry in `ShopCatalog`. Keyed by the shop's `(zone_id, id)`;
+/// resolved from a keeper mob via `keeper_index`.
+#[derive(Debug, Clone)]
+pub struct ShopDef {
+    pub zone_id: i32,
+    pub id: i32,
+    pub keeper_zone_id: i32,
+    pub keeper_id: i32,
+    pub buy_profit: f64,
+    pub sell_profit: f64,
+    pub items: Vec<ShopOffering>,
+}
+
+/// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.
+/// `keeper_index` maps a keeper mob's `(zone, id)` to the
+/// `(shop_zone, shop_id)` that fronts it; `by_key` carries the actual
+/// definition. Spawn-time mob resets attach a `Shopkeeper` component
+/// pointing at the shop's `(zone, id)`.
+#[derive(Resource, Debug, Default)]
+pub struct ShopCatalog {
+    pub by_key: HashMap<(i32, i32), ShopDef>,
+    pub keeper_index: HashMap<(i32, i32), (i32, i32)>,
+}
+
 /// Catalog of every player class, keyed by `Class.id`. Loaded once at
 /// startup; the runtime reads from this when rendering character info
 /// (score, who, etc.).

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_world::{
     CombatStats, Description, FromMobReset, Health, Keywords, Located, Mob, MobPrototypes,
-    MobResetCatalog, Named, Posture, PostureKind, WorldKey,
+    MobResetCatalog, Named, Posture, PostureKind, ShopCatalog, Shopkeeper, WorldKey,
 };
 use tracing::info;
 
@@ -64,8 +64,13 @@ pub fn respawn_tick(world: &mut World) {
         let Some(proto) = proto else { continue };
         let hp = proto.rolled_hp();
         let dmg = proto.avg_damage();
+        let shop_key = world
+            .resource::<ShopCatalog>()
+            .keeper_index
+            .get(&(proto.zone_id, proto.id))
+            .copied();
         for _ in 0..(want - live) {
-            world.spawn((
+            let mut em = world.spawn((
                 Mob,
                 Named { name: proto.name.clone() },
                 Keywords(proto.keywords.clone()),
@@ -82,6 +87,9 @@ pub fn respawn_tick(world: &mut World) {
                 Posture(PostureKind::Standing),
                 FromMobReset(entry.reset_id),
             ));
+            if let Some((shop_zone_id, shop_id)) = shop_key {
+                em.insert(Shopkeeper { shop_zone_id, shop_id });
+            }
             refilled += 1;
         }
     }

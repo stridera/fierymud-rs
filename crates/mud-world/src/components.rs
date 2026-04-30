@@ -250,6 +250,15 @@ pub struct WimpyThreshold(pub i32);
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Wealth(pub i64);
 
+/// Marks a mob as fronting a shop. The `(zone, id)` pair is the key
+/// into `ShopCatalog.by_key`. Attached at mob-reset spawn time when
+/// the mob's proto matches a row in the `keeper_index` lookup.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Shopkeeper {
+    pub shop_zone_id: i32,
+    pub shop_id: i32,
+}
+
 /// Bank balance in copper units, mirrored from `Characters.bank_wealth`.
 /// Loaded at spawn, displayed by `cmd_balance`. No deposit/withdraw
 /// commands are wired yet; once they land they'll need to round-trip

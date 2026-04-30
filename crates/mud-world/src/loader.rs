@@ -4,19 +4,19 @@ use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, classes, effects, mob_reset_equipment,
     mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
-    rooms, socials, sqlx::PgPool, zones,
+    rooms, shops, socials, sqlx::PgPool, zones,
 };
 use tracing::{info, warn};
 
 use crate::components::{
     CombatStats, Description, EquippedSlot, ExitData, Exits, FromMobReset, Health, Item, Keywords,
-    Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Slot, WorldKey, Zone,
+    Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, DamageComponent,
     EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry,
-    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow, SocialDef, SocialRegistry,
-    TargetingRule, WorldKeyIndex,
+    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow, ShopCatalog, ShopDef,
+    ShopOffering, SocialDef, SocialRegistry, TargetingRule, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -411,6 +411,45 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             });
     }
 
+    // Pass 4.5: load Shop catalog. Each shop maps to a keeper mob via
+    // (keeper_zone_id, keeper_id); the spawn pass below attaches a
+    // Shopkeeper component to each spawned mob whose proto matches.
+    let shop_rows = shops::list_shops(pool).await?;
+    let item_rows = shops::list_shop_items(pool).await?;
+    let mut shop_catalog = ShopCatalog::default();
+    for row in &shop_rows {
+        shop_catalog
+            .keeper_index
+            .insert((row.keeper_zone_id, row.keeper_id), (row.zone_id, row.id));
+        shop_catalog.by_key.insert(
+            (row.zone_id, row.id),
+            ShopDef {
+                zone_id: row.zone_id,
+                id: row.id,
+                keeper_zone_id: row.keeper_zone_id,
+                keeper_id: row.keeper_id,
+                buy_profit: row.buy_profit,
+                sell_profit: row.sell_profit,
+                items: Vec::new(),
+            },
+        );
+    }
+    for row in &item_rows {
+        if let Some(def) = shop_catalog.by_key.get_mut(&(row.shop_zone_id, row.shop_id)) {
+            def.items.push(ShopOffering {
+                object_zone_id: row.object_zone_id,
+                object_id: row.object_id,
+                amount: row.amount,
+                price: row.price,
+            });
+        }
+    }
+    info!(
+        shops = shop_catalog.by_key.len(),
+        items = item_rows.len(),
+        "shop catalog loaded"
+    );
+
     world.insert_resource(WorldKeyIndex {
         zones: zone_index,
         rooms: room_index,
@@ -422,6 +461,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(ability_catalog);
     world.insert_resource(class_catalog);
     world.insert_resource(object_ability_catalog);
+    world.insert_resource(shop_catalog);
 
     // Pass 5: spawn live entities from MobResets / ObjectResets. Resources
     // were inserted above so the spawners can read them. Probability gating
@@ -455,28 +495,35 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         };
         let hp = proto.rolled_hp();
         let dmg = proto.avg_damage();
+        let shop_key = world
+            .resource::<ShopCatalog>()
+            .keeper_index
+            .get(&(proto.zone_id, proto.id))
+            .copied();
         let mut spawned_for_reset: Vec<Entity> =
             Vec::with_capacity(usize::try_from(r.max_instances.max(1)).unwrap_or(1));
         for _ in 0..r.max_instances.max(1) {
-            let e = world
-                .spawn((
-                    Mob,
-                    Named { name: proto.name.clone() },
-                    Keywords(proto.keywords.clone()),
-                    Description(proto.room_description.clone()),
-                    WorldKey { zone: proto.zone_id, id: proto.id },
-                    Located(room_entity),
-                    Health { hp, max: hp },
-                    CombatStats {
-                        hit_roll: proto.hit_roll,
-                        dmg_roll: dmg,
-                        ac: proto.armor_class,
-                        alignment: proto.alignment,
-                    },
-                    Posture(PostureKind::Standing),
-                    FromMobReset(r.id),
-                ))
-                .id();
+            let mut em = world.spawn((
+                Mob,
+                Named { name: proto.name.clone() },
+                Keywords(proto.keywords.clone()),
+                Description(proto.room_description.clone()),
+                WorldKey { zone: proto.zone_id, id: proto.id },
+                Located(room_entity),
+                Health { hp, max: hp },
+                CombatStats {
+                    hit_roll: proto.hit_roll,
+                    dmg_roll: dmg,
+                    ac: proto.armor_class,
+                    alignment: proto.alignment,
+                },
+                Posture(PostureKind::Standing),
+                FromMobReset(r.id),
+            ));
+            if let Some((shop_zone_id, shop_id)) = shop_key {
+                em.insert(Shopkeeper { shop_zone_id, shop_id });
+            }
+            let e = em.id();
             spawned_for_reset.push(e);
             stats.mob_resets_spawned += 1;
         }
