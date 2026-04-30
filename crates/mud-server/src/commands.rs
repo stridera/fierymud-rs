@@ -2768,6 +2768,34 @@ pub async fn try_dispatch_async(
                 false
             }
         }
+        // `look <keyword>` / `examine <keyword>` where the keyword
+        // resolves to a BOARD-tagged item in the room → render the
+        // board's full listing inline. Falls through when no such
+        // item is matched, so plain look/examine on non-board
+        // targets goes through the sync handler.
+        "look" | "examine" | "exa" => {
+            let target_room = world.get::<Located>(player).map(|l| l.0);
+            let needle = args.trim().to_ascii_lowercase();
+            let board_id = target_room.and_then(|room| {
+                let mut q = world
+                    .query_filtered::<(&Located, &Named, Option<&Keywords>, &BoardLink), With<Item>>();
+                q.iter(world)
+                    .find(|(l, n, kw, _)| {
+                        l.0 == room && (needle.is_empty() || matches(&needle, n, *kw))
+                    })
+                    .map(|(_, _, _, b)| b.0)
+            });
+            if !needle.is_empty()
+                && let Some(board_id) = board_id
+            {
+                mark_for_prompt(player);
+                try_insert(world, player, LastInputAt(std::time::Instant::now()));
+                cmd_look_board(world, player, pool, board_id).await;
+                true
+            } else {
+                false
+            }
+        }
         "board" => {
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
@@ -11301,6 +11329,59 @@ pub(crate) async fn cmd_read_board_msg(
     out.push_str("---\r\n");
     out.push_str(msg.content.trim_end());
     out.push_str("\r\n---\r\n");
+    send_to(world, player, out);
+}
+
+/// `look <board>` / `examine <board>`: render the board's message
+/// listing inline. Routed here from the async pre-dispatch when the
+/// argument matches a BOARD-tagged item in the player's room.
+pub(crate) async fn cmd_look_board(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    board_id: i32,
+) {
+    let summary = world
+        .get_resource::<BoardCatalog>()
+        .and_then(|c| c.by_id.get(&board_id))
+        .cloned();
+    let Some(summary) = summary else {
+        send_to(world, player, "That board's catalog entry is missing.\r\n");
+        return;
+    };
+    let messages = match mud_db::boards::messages_for_board(pool, board_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            send_to(world, player, format!("Message fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    if messages.is_empty() {
+        send_to(
+            world,
+            player,
+            format!("\r\n{} has no messages.\r\n", summary.title),
+        );
+        return;
+    }
+    let mut out = format!(
+        "\r\n{} ({} message{}):\r\n",
+        summary.title,
+        messages.len(),
+        if messages.len() == 1 { "" } else { "s" },
+    );
+    for (i, msg) in messages.iter().enumerate() {
+        let stickymark = if msg.sticky { "*" } else { " " };
+        let when = msg.posted_at.format("%Y-%m-%d");
+        out.push_str(&format!(
+            "  {:<3} {} {when}  {:<20} {}\r\n",
+            i + 1,
+            stickymark,
+            msg.poster,
+            msg.subject,
+        ));
+    }
+    out.push_str("\r\nUse `read <#>` to read a message, or `post` to add one.\r\n");
     send_to(world, player, out);
 }
 
