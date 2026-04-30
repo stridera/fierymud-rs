@@ -180,6 +180,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     for row in object_rows {
         let (weapon_dice_num, weapon_dice_size, weapon_dice_bonus) =
             parse_weapon_dice(&row.values);
+        let portal_destination_vnum = if matches!(row.r#type, mud_db::enums::ObjectType::Portal) {
+            parse_portal_destination(&row.values)
+        } else {
+            None
+        };
         object_prototypes.by_key.insert(
             (row.zone_id, row.id),
             ObjectProto {
@@ -197,6 +202,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 weapon_dice_size,
                 weapon_dice_bonus,
                 cost: row.cost,
+                portal_destination_vnum,
             },
         );
     }
@@ -461,9 +467,20 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         "shop catalog loaded"
     );
 
+    let mut legacy_vnums = HashMap::with_capacity(room_index.len());
+    for &(zone, id) in room_index.keys() {
+        // CircleMUD vnum encoding: zone * 100 + id. Zones with > 100
+        // rooms (zone 30: id 0..499) overflow into the next zone's
+        // namespace; with the last-write-wins insert here, the higher
+        // zones' rooms 0..99 win the slot. Acceptable for portal
+        // resolution since portal targets typically point at low-id
+        // rooms in the destination zone.
+        legacy_vnums.insert(zone * 100 + id, (zone, id));
+    }
     world.insert_resource(WorldKeyIndex {
         zones: zone_index,
         rooms: room_index,
+        legacy_vnums,
     });
     world.insert_resource(mob_prototypes);
     world.insert_resource(object_prototypes);
@@ -781,6 +798,19 @@ fn parse_weapon_dice(values: &serde_json::Value) -> (i32, i32, i32) {
         parse(dice.get("size")),
         parse(dice.get("bonus")),
     )
+}
+
+/// Pull `Destination` from a Portal's `values` JSONB. Stored either
+/// as a number or a string in the legacy data; `0` (or missing /
+/// non-portal) is treated as "no destination".
+fn parse_portal_destination(values: &serde_json::Value) -> Option<i32> {
+    let v = values.get("Destination")?;
+    let raw = match v {
+        serde_json::Value::Number(n) => i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0),
+        serde_json::Value::String(s) => s.parse().unwrap_or(0),
+        _ => 0,
+    };
+    if raw <= 0 { None } else { Some(raw) }
 }
 
 /// Map the schema `Position` enum label to the rank used by ability

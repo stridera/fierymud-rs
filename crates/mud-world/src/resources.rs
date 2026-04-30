@@ -8,6 +8,14 @@ use bevy_ecs::prelude::*;
 pub struct WorldKeyIndex {
     pub zones: HashMap<i32, Entity>,
     pub rooms: HashMap<(i32, i32), Entity>,
+    /// Legacy `CircleMUD` vnum → composite (zone, id) lookup for rooms.
+    /// Built at load time as `zone_id * 100 + room.id` → (zone, id).
+    /// Used to decode `Portal.values.Destination` integers (which the
+    /// import preserves in the legacy form). Collisions exist for
+    /// zones with > 100 rooms (zone 30 goes up to id 499); the last
+    /// loaded wins. `cmd_enter` falls back gracefully when a vnum
+    /// resolves to nothing.
+    pub legacy_vnums: HashMap<i32, (i32, i32)>,
 }
 
 /// Catalog of effect *types* loaded from the Effect table at startup.
@@ -95,6 +103,11 @@ pub struct ObjectProto {
     /// pay some fraction of this on sell; appraisal commands surface
     /// the raw number split into denominations.
     pub cost: i32,
+    /// `Portal`-typed objects only: the legacy `CircleMUD` vnum of the
+    /// destination room (`Objects.values.Destination`). `None` for
+    /// non-portal protos and for portals with no/zero destination.
+    /// Decode via `WorldKeyIndex.legacy_vnums`.
+    pub portal_destination_vnum: Option<i32>,
 }
 
 impl ObjectProto {
