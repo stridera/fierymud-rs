@@ -10,12 +10,12 @@ use tracing::{info, warn};
 
 use crate::components::{
     BoardLink, CombatStats, Description, EquippedSlot, ExitData, Exits, FromMobReset, Health, Item,
-    Keywords, Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Shopkeeper, Slot,
-    WorldKey, Zone, ZoneClimate,
+    Keywords, LiquidContainer, Located, Mob, Named, Posture, PostureKind, Room, RoomSector,
+    Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
-    ClassDef, DamageComponent, EffectCatalog, EffectDef, MobProto, MobPrototypes,
+    ClassDef, DamageComponent, EffectCatalog, EffectDef, LiquidProto, MobProto, MobPrototypes,
     MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto, ObjectPrototypes,
     SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, SocialDef, SocialRegistry,
     TargetingRule, WorldKeyIndex,
@@ -193,6 +193,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         } else {
             None
         };
+        let liquid = if matches!(row.r#type, mud_db::enums::ObjectType::Drinkcontainer) {
+            parse_liquid(&row.values)
+        } else {
+            None
+        };
         object_prototypes.by_key.insert(
             (row.zone_id, row.id),
             ObjectProto {
@@ -212,6 +217,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 cost: row.cost,
                 portal_destination_vnum,
                 board_id,
+                liquid,
             },
         );
     }
@@ -639,6 +645,14 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             if let Some(board_id) = proto.board_id {
                 bundle.insert(BoardLink(board_id));
             }
+            if let Some(liq) = proto.liquid.clone() {
+                bundle.insert(LiquidContainer {
+                    liquid: liq.liquid,
+                    capacity: liq.capacity,
+                    remaining: liq.remaining,
+                    poisoned: liq.poisoned,
+                });
+            }
             spawned_for_reset.push(bundle.id());
             stats.object_resets_spawned += 1;
         }
@@ -841,6 +855,35 @@ fn parse_portal_destination(values: &serde_json::Value) -> Option<i32> {
         _ => 0,
     };
     if raw <= 0 { None } else { Some(raw) }
+}
+
+/// Parse a `DrinkContainer`'s liquid state from its `values` JSONB.
+/// Schema shape: `{Liquid: "WATER", Capacity: 256, Poisoned: false,
+/// Remaining: 256}`. Numbers come as either Number or String; bools
+/// come as Bool or String. Missing fields default to safe values
+/// (capacity 0 means uninitialized — runtime treats it as empty).
+fn parse_liquid(values: &serde_json::Value) -> Option<LiquidProto> {
+    let liquid = values.get("Liquid")?.as_str().unwrap_or("WATER").to_string();
+    let parse_int = |v: Option<&serde_json::Value>| -> i32 {
+        match v {
+            Some(serde_json::Value::Number(n)) => i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0),
+            Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
+            _ => 0,
+        }
+    };
+    let parse_bool = |v: Option<&serde_json::Value>| -> bool {
+        match v {
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("true"),
+            _ => false,
+        }
+    };
+    Some(LiquidProto {
+        liquid,
+        capacity: parse_int(values.get("Capacity")),
+        remaining: parse_int(values.get("Remaining")),
+        poisoned: parse_bool(values.get("Poisoned")),
+    })
 }
 
 /// Pull `Pages` from a Board-typed object's `values` JSONB. Legacy

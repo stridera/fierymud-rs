@@ -272,6 +272,23 @@ pub struct Shopkeeper {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct BoardLink(pub i32);
 
+/// Component on spawned DRINKCONTAINER-typed items: per-instance
+/// liquid state mirrored from `Objects.values`. `remaining` mutates
+/// on `drink`/`sip`/`pour`/`fill`; the proto values are the
+/// initial-spawn defaults only. Capacity caps `remaining` on `fill`.
+#[derive(Component, Debug, Clone)]
+pub struct LiquidContainer {
+    /// Schema's `Liquid` enum label — `WATER` / `WINE` / `BEER` /
+    /// etc. Stored as a string because the runtime only displays it.
+    pub liquid: String,
+    pub capacity: i32,
+    pub remaining: i32,
+    /// `true` when the schema's `Poisoned` flag was set; consumers
+    /// (drink/sip) emit a poison line and can wire a real effect
+    /// once `Effect`'s poison row is applied.
+    pub poisoned: bool,
+}
+
 /// In-flight mail composition. Attached when the player runs
 /// `mail <recipient>`; while present, every line of input is routed
 /// to the mail-composition handler instead of normal dispatch. The

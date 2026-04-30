@@ -113,6 +113,22 @@ pub struct ObjectProto {
     /// field doubles as the board id). `None` for non-boards or
     /// when the value is missing/zero.
     pub board_id: Option<i32>,
+    /// `DrinkContainer`-typed objects only: initial liquid state at
+    /// spawn time. Each spawned instance gets a fresh
+    /// `LiquidContainer` component built from these values; mutation
+    /// happens per-instance (drink/sip/pour/fill) without touching
+    /// the proto.
+    pub liquid: Option<LiquidProto>,
+}
+
+/// Static initial-spawn data for a `DrinkContainer` proto. Mirrors
+/// the schema's `Objects.values` shape for these items.
+#[derive(Debug, Clone)]
+pub struct LiquidProto {
+    pub liquid: String,
+    pub capacity: i32,
+    pub remaining: i32,
+    pub poisoned: bool,
 }
 
 impl ObjectProto {

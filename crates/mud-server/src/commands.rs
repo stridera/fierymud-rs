@@ -5546,6 +5546,14 @@ fn cmd_buy(world: &mut World, player: Entity, args: &str) {
     if let Some(s) = primary_slot {
         bundle.insert(WearableIn(s));
     }
+    if let Some(liq) = proto.liquid.clone() {
+        bundle.insert(mud_world::LiquidContainer {
+            liquid: liq.liquid,
+            capacity: liq.capacity,
+            remaining: liq.remaining,
+            poisoned: liq.poisoned,
+        });
+    }
     let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
     let item_name = proto.name.clone();
     send_rendered(
@@ -14273,6 +14281,17 @@ fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     }
     if let Some(s) = primary_slot {
         bundle.insert(WearableIn(s));
+    }
+    if let Some(board_id) = proto.board_id {
+        bundle.insert(mud_world::BoardLink(board_id));
+    }
+    if let Some(liq) = proto.liquid.clone() {
+        bundle.insert(mud_world::LiquidContainer {
+            liquid: liq.liquid,
+            capacity: liq.capacity,
+            remaining: liq.remaining,
+            poisoned: liq.poisoned,
+        });
     }
     let item = bundle.id();
     // Populate Charges from the first ObjectAbilities binding
