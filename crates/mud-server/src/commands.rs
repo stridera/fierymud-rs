@@ -995,7 +995,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_typo,
     },
     Command {
-        names: &["prompt"],
+        names: &["prompt", "display"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
