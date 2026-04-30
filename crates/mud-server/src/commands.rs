@@ -18,7 +18,7 @@ use mud_world::{
     CoreStats, Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
-    RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stunned, TellLog, Title, UiStyle,
+    RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, TellLog, Title, UiStyle,
     WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, info_span};
@@ -2910,6 +2910,27 @@ mod tests {
         assert_eq!(
             evaluate_formula("base_damage + 5", &ctx, &mut zero),
             None
+        );
+        // hidden symbol resolves from ctx.hidden (0/1 from Stealth marker presence).
+        let mut ctx_hidden = FormulaCtx {
+            level: 10,
+            skill: 50,
+            ..FormulaCtx::default()
+        };
+        ctx_hidden.hidden = 1;
+        // BACKSTAB's bonusIfHidden formula: hidden * 0.5 — but our
+        // evaluator is integer-only; use multiplicative integer form.
+        assert_eq!(evaluate_formula("hidden", &ctx_hidden, &mut zero), Some(1));
+        assert_eq!(
+            evaluate_formula("skill * hidden", &ctx_hidden, &mut zero),
+            Some(50)
+        );
+        // Without Stealth marker, hidden=0.
+        let ctx_open = FormulaCtx { level: 10, skill: 50, ..FormulaCtx::default() };
+        assert_eq!(evaluate_formula("hidden", &ctx_open, &mut zero), Some(0));
+        assert_eq!(
+            evaluate_formula("skill * hidden", &ctx_open, &mut zero),
+            Some(0)
         );
     }
 
@@ -6174,6 +6195,7 @@ fn invoke_ability(
         .unwrap_or(0);
     let caster_weapon_damage = caster_weapon_damage(world, player);
     let caster_stats = world.get::<CoreStats>(player).copied().unwrap_or_default();
+    let caster_hidden = i32::from(world.get::<Stealth>(player).is_some());
     let formula_ctx = FormulaCtx {
         level: caster_level,
         skill: caster_skill,
@@ -6184,6 +6206,7 @@ fn invoke_ability(
         int_bonus: CoreStats::bonus(caster_stats.intelligence),
         wis_bonus: CoreStats::bonus(caster_stats.wisdom),
         cha_bonus: CoreStats::bonus(caster_stats.charisma),
+        hidden: caster_hidden,
     };
     let effect_specs: Vec<EffectSpec> = {
         let mappings = world
@@ -7280,6 +7303,9 @@ struct FormulaCtx {
     int_bonus: i32,
     wis_bonus: i32,
     cha_bonus: i32,
+    /// 1 when the caster has the `Stealth` marker, 0 otherwise.
+    /// Used by rogue abilities (BACKSTAB's `bonusIfHidden`).
+    hidden: i32,
 }
 
 impl FormulaCtx {
@@ -7306,6 +7332,7 @@ impl FormulaCtx {
             "int_bonus" | "int" => Some(self.int_bonus),
             "wis_bonus" | "wis" => Some(self.wis_bonus),
             "cha_bonus" | "cha" => Some(self.cha_bonus),
+            "hidden" => Some(self.hidden),
             _ => None,
         }
     }

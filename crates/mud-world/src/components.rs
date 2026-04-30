@@ -219,6 +219,14 @@ pub struct Fighting(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Stunned;
 
+/// Marker: this entity is hidden / sneaking. Resolves the `hidden`
+/// symbol in formula expressions to 1 (vs 0 when absent). Used by
+/// rogue-style abilities (BACKSTAB's `bonusIfHidden`, future
+/// THROATCUT bonus). No `hide` command yet — admin tooling /
+/// future content sets the marker.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Stealth;
+
 /// Per-character ability cooldown table. Maps `Ability.id` → the
 /// `Instant` at which the cooldown expires (i.e. the ability becomes
 /// usable again). Inserted lazily on first cooldown set; entries past
