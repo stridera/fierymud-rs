@@ -1576,7 +1576,34 @@ const COMMANDS: &[Command] = &[
                    and the subject. Use `readmail <#>` to read; \
                    `delmail <#>` to delete.",
         },
-        run: cmd_mailbox_stub,
+        run: cmd_mail_stub,
+    },
+    Command {
+        names: &["readmail"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "readmail <#>",
+            summary: "Read a message from your mailbox.",
+            long: "Argument is the slot number from `mailbox`. Renders \
+                   the body, marks the row read.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
+        names: &["delmail"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "delmail <#>",
+            summary: "Soft-delete a message from your mailbox.",
+            long: "Argument is the slot number from `mailbox`. Hides \
+                   the row from future listings (audit trail keeps it \
+                   in the table).",
+        },
+        run: cmd_mail_stub,
     },
     Command {
         names: &["gossip", "/"],
@@ -2485,12 +2512,24 @@ pub async fn try_dispatch_async(
     }
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("").to_ascii_lowercase();
-    let _args = parts.next().unwrap_or("").trim();
+    let args = parts.next().unwrap_or("").trim();
     match head.as_str() {
         "mailbox" | "mailboxes" => {
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_mailbox(world, player, pool).await;
+            true
+        }
+        "readmail" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_readmail(world, player, pool, args).await;
+            true
+        }
+        "delmail" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_delmail(world, player, pool, args).await;
             true
         }
         _ => false,
@@ -9985,10 +10024,10 @@ fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-/// Stub for the help/registry path — `mailbox` is intercepted by the
-/// async pre-dispatch hook before this ever runs. If somehow it does
-/// (a future refactor moves dispatch order around), bail loudly.
-fn cmd_mailbox_stub(world: &mut World, player: Entity, _args: &str) {
+/// Stub for the help/registry path — mail commands are intercepted by
+/// the async pre-dispatch hook before this ever runs. If somehow it
+/// does (a future refactor moves dispatch order around), bail loudly.
+fn cmd_mail_stub(world: &mut World, player: Entity, _args: &str) {
     send_to(
         world,
         player,
@@ -10030,6 +10069,103 @@ pub(crate) async fn cmd_mailbox(world: &mut World, player: Entity, pool: &mud_db
     }
     out.push_str("\r\n* = unread.   Use `readmail <#>` to read, `delmail <#>` to delete.\r\n");
     send_to(world, player, out);
+}
+
+/// `readmail <#>`: print the body of the slot-numbered mail (1-based,
+/// matching the `mailbox` listing). Marks the row read on success.
+pub(crate) async fn cmd_readmail(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let arg = args.trim();
+    let Ok(slot) = arg.parse::<usize>() else {
+        send_to(
+            world,
+            player,
+            "Read which mail? Pick a number from `mailbox`.\r\n",
+        );
+        return;
+    };
+    if slot == 0 {
+        send_to(world, player, "Mail slots are 1-based.\r\n");
+        return;
+    }
+    let user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
+    let Some(user_id) = user_id else {
+        send_to(world, player, "No account info; can't fetch mail.\r\n");
+        return;
+    };
+    let rows = match mud_db::mail::inbox_for(pool, &user_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            send_to(world, player, format!("Mail fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    let Some(row) = rows.get(slot - 1) else {
+        send_to(world, player, format!("No mail at slot {slot}.\r\n"));
+        return;
+    };
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("From:    {}\r\n", row.sender_display_name));
+    out.push_str(&format!("Subject: {}\r\n", row.subject));
+    out.push_str(&format!("Sent:    {}\r\n", row.sent_at.format("%Y-%m-%d %H:%M")));
+    out.push_str("---\r\n");
+    out.push_str(row.body.trim_end());
+    out.push_str("\r\n---\r\n");
+    send_to(world, player, out);
+    if let Err(e) = mud_db::mail::mark_read(pool, row.id).await {
+        tracing::warn!(error = %e, mail_id = row.id, "mark_read failed");
+    }
+}
+
+/// `delmail <#>`: soft-delete the slot-numbered mail.
+pub(crate) async fn cmd_delmail(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let arg = args.trim();
+    let Ok(slot) = arg.parse::<usize>() else {
+        send_to(
+            world,
+            player,
+            "Delete which mail? Pick a number from `mailbox`.\r\n",
+        );
+        return;
+    };
+    if slot == 0 {
+        send_to(world, player, "Mail slots are 1-based.\r\n");
+        return;
+    }
+    let user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
+    let Some(user_id) = user_id else {
+        send_to(world, player, "No account info; can't fetch mail.\r\n");
+        return;
+    };
+    let rows = match mud_db::mail::inbox_for(pool, &user_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            send_to(world, player, format!("Mail fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    let Some(row) = rows.get(slot - 1) else {
+        send_to(world, player, format!("No mail at slot {slot}.\r\n"));
+        return;
+    };
+    if let Err(e) = mud_db::mail::soft_delete(pool, row.id).await {
+        send_to(world, player, format!("Delete failed: {e}\r\n"));
+        return;
+    }
+    send_to(
+        world,
+        player,
+        format!("Deleted mail #{slot}: \"{}\".\r\n", row.subject),
+    );
 }
 
 fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
