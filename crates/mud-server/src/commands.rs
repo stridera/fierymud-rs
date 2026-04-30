@@ -1609,6 +1609,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["quests", "qstat", "qlist"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "quests",
+            summary: "List your accepted quests.",
+            long: "In-progress quests appear first with their short \
+                   description; completed/abandoned quests follow with \
+                   their final status. The Quest table is empty in the \
+                   current world; this verb is wired so it'll surface \
+                   content the moment builders add it.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["post"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2678,6 +2694,12 @@ pub async fn try_dispatch_async(
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_boards(world, player, pool).await;
+            true
+        }
+        "quests" | "qstat" | "qlist" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_quests(world, player, pool).await;
             true
         }
         "board" => {
@@ -10938,6 +10960,71 @@ pub(crate) async fn cmd_readmail(
     if let Err(e) = mud_db::mail::mark_read(pool, row.id).await {
         tracing::warn!(error = %e, mail_id = row.id, "mark_read failed");
     }
+}
+
+/// `quests` / `qstat` / `qlist`: list quests the current character has
+/// accepted, in-progress first then recently completed. Active rows
+/// show the quest name + short description; completed rows show
+/// completion count. Empty inbox = "no quests accepted."
+pub(crate) async fn cmd_quests(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+) {
+    let character_id = world.get::<Account>(player).map(|a| a.character_id.clone());
+    let Some(character_id) = character_id else {
+        send_to(world, player, "No account info; can't fetch quests.\r\n");
+        return;
+    };
+    let rows = match mud_db::quests::list_for_character(pool, &character_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            send_to(world, player, format!("Quest fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    if rows.is_empty() {
+        send_to(world, player, "\r\nYou have no active or completed quests.\r\n");
+        return;
+    }
+    let active: Vec<&mud_db::quests::CharacterQuestRow> = rows
+        .iter()
+        .filter(|r| r.status == "IN_PROGRESS")
+        .collect();
+    let other: Vec<&mud_db::quests::CharacterQuestRow> = rows
+        .iter()
+        .filter(|r| r.status != "IN_PROGRESS")
+        .collect();
+    let mut out = String::from("\r\n");
+    if !active.is_empty() {
+        out.push_str(&format!("In progress ({}):\r\n", active.len()));
+        for q in &active {
+            out.push_str(&format!(
+                "  ({}, {})  {}\r\n",
+                q.quest_zone_id, q.quest_id, q.quest_name
+            ));
+            if let Some(desc) = &q.short_description
+                && !desc.trim().is_empty()
+            {
+                out.push_str(&format!("        {}\r\n", desc.trim()));
+            }
+        }
+        out.push_str("\r\n");
+    }
+    if !other.is_empty() {
+        out.push_str(&format!("Other ({}):\r\n", other.len()));
+        for q in &other {
+            out.push_str(&format!(
+                "  [{}] ({}, {})  {}",
+                q.status, q.quest_zone_id, q.quest_id, q.quest_name,
+            ));
+            if q.completion_count > 1 {
+                out.push_str(&format!(" ×{}", q.completion_count));
+            }
+            out.push_str("\r\n");
+        }
+    }
+    send_to(world, player, out);
 }
 
 /// `boards`: list every available board with its alias and title.
