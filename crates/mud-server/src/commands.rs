@@ -994,6 +994,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_effects,
     },
     Command {
+        names: &["cooldowns", "cd"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "cooldowns",
+            summary: "List abilities currently on cooldown.",
+            long: "Each line shows an ability name and its remaining \
+                   cooldown in seconds, sorted longest-first. Empty \
+                   when nothing is on cooldown.",
+        },
+        run: cmd_cooldowns,
+    },
+    Command {
         names: &["quit"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5586,6 +5600,47 @@ fn find_actor_in_room(
             *e != exclude && l.0 == room && item.is_none() && matches(&needle, n, *kw)
         })
         .map(|(e, _, _, _, _)| e)
+}
+
+/// `cooldowns` / `cd`: list active ability cooldowns for the player.
+/// Reads the `Cooldowns` component (set by `invoke_ability` after a
+/// successful cast). Stale entries (`ready_at` in the past) are
+/// skipped — they're effectively expired even if not pruned yet.
+fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
+    let now = std::time::Instant::now();
+    let mut active: Vec<(String, f32)> = {
+        let Some(cd) = world.get::<Cooldowns>(player) else {
+            send_to(world, player, "\r\nNo abilities are on cooldown.\r\n");
+            return;
+        };
+        let catalog = world.resource::<AbilityCatalog>();
+        cd.ready_at
+            .iter()
+            .filter(|(_, ready)| **ready > now)
+            .map(|(id, ready)| {
+                let name = catalog
+                    .by_name
+                    .values()
+                    .find(|d| d.id == *id)
+                    .map_or_else(|| format!("ability #{id}"), |d| d.plain_name.clone());
+                let remaining = ready.saturating_duration_since(now).as_secs_f32();
+                (name, remaining)
+            })
+            .collect()
+    };
+    if active.is_empty() {
+        send_to(world, player, "\r\nNo abilities are on cooldown.\r\n");
+        return;
+    }
+    // Sort by descending remaining time so the longest is on top —
+    // matches what players want to see ("how long until I can do this
+    // big thing again?").
+    active.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out = format!("\r\n{} ability/abilities on cooldown:\r\n", active.len());
+    for (name, remaining) in active {
+        out.push_str(&format!("  {name:<24} {remaining:.1}s remaining\r\n"));
+    }
+    send_to(world, player, out);
 }
 
 fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
