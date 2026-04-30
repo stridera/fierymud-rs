@@ -8315,11 +8315,13 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
     cmd_look(world, player, "");
 }
 
+/// `kick` — Phase C migration: shimmed over the `KICK` data path
+/// (damage effect, formula `level + dex_bonus + skill / 4` —
+/// `dex_bonus` unmodeled, falls back to default `1d6`). Posture and
+/// stamina gates stay; target/effect/messaging via `invoke_ability`.
+/// Empty arg uses caster's current Fighting target.
 fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "kick") {
-        return;
-    }
-    if !check_stamina(world, player, KICK_COST, "kick") {
         return;
     }
     let Some(fighting) = world.get::<Fighting>(player).copied() else {
@@ -8328,52 +8330,22 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     };
     let target = fighting.0;
     if world.get_entity(target).is_err() {
-        // Target has been despawned; clean up our stale Fighting.
         try_remove::<Fighting>(world, player);
         send_to(world, player, "Your target is gone.\r\n");
         return;
     }
-    let Some(player_room) = world.get::<Located>(player).map(|l| l.0) else {
-        return;
-    };
-    let Some(target_room) = world.get::<Located>(target).map(|l| l.0) else {
-        return;
-    };
-    if player_room != target_room {
-        send_to(world, player, "Your target isn't here.\r\n");
+    if !check_stamina(world, player, KICK_COST, "kick") {
         return;
     }
-
-    let dmg_roll = world
-        .get::<CombatStats>(player)
-        .map_or(1, |cs| cs.dmg_roll);
-    let damage = (dmg_roll + 4).max(1);
     drain_stamina(world, player, KICK_COST);
-
     let target_name = name_of(world, target);
-    let player_name = name_of(world, player);
-
-    let (dead, threshold_msg) = apply_damage(world, target, damage);
-
-    send_rendered(world, player, &format!("You kick {target_name} for {damage} damage!\r\n"));
-    send_rendered(
+    invoke_ability(
         world,
-        target,
-        &format!("{player_name} kicks you for {damage} damage!\r\n"),
+        player,
+        &format!("kick {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
-    if let Some(m) = threshold_msg {
-        send_to(world, target, m);
-    }
-    broadcast_room_except_rendered(
-        world,
-        player_room,
-        &[player, target],
-        &format!("{player_name} kicks {target_name}.\r\n"),
-    );
-
-    if dead {
-        crate::combat::handle_death(world, target, &target_name, player_room);
-    }
 }
 
 /// `berserk`: self-buff applying a `berserk` `EffectInstance` for 60s.
