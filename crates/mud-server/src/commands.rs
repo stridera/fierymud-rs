@@ -5332,37 +5332,68 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 
+struct WhoRow {
+    entity: Entity,
+    name: String,
+    title: Option<String>,
+    afk: bool,
+    idle: Option<u64>,
+}
+
 fn cmd_who(world: &mut World, player: Entity, _args: &str) {
-    let rows: Vec<(String, Option<String>, bool, Option<u64>)> = {
+    // Two-pass: first collect rows, then resolve group roots so we
+    // can mark grouped players with [G].
+    let raw: Vec<WhoRow> = {
         let mut q = world.query_filtered::<(
+            Entity,
             &Named,
             Option<&Title>,
             Option<&PlayerFlags>,
             Option<&LastInputAt>,
         ), (With<Player>, With<Online>)>();
         q.iter(world)
-            .map(|(n, t, f, last)| {
-                let afk = f.is_some_and(|pf| pf.has(PlayerFlag::Afk));
-                let idle = last.map(|l| l.0.elapsed().as_secs());
-                (n.name.clone(), t.map(|t| t.0.clone()), afk, idle)
+            .map(|(e, n, t, f, last)| WhoRow {
+                entity: e,
+                name: n.name.clone(),
+                title: t.map(|t| t.0.clone()),
+                afk: f.is_some_and(|pf| pf.has(PlayerFlag::Afk)),
+                idle: last.map(|l| l.0.elapsed().as_secs()),
             })
             .collect()
     };
-    let mut out = format!("\r\n{} online:\r\n", rows.len());
-    for (name, title, afk, idle) in &rows {
+    // Per-entity group root, so grouped players can be marked. A
+    // non-singleton group root means the entity has at least one
+    // groupmate.
+    let mut roots: std::collections::HashMap<Entity, Entity> =
+        std::collections::HashMap::with_capacity(raw.len());
+    for r in &raw {
+        roots.insert(r.entity, group_root(world, r.entity));
+    }
+    let mut group_size: std::collections::HashMap<Entity, usize> = std::collections::HashMap::new();
+    for root in roots.values() {
+        *group_size.entry(*root).or_insert(0) += 1;
+    }
+
+    let mut out = format!("\r\n{} online:\r\n", raw.len());
+    for r in &raw {
+        let root = roots.get(&r.entity).copied().unwrap_or(r.entity);
+        let in_group = group_size.get(&root).copied().unwrap_or(0) > 1;
         out.push_str("  ");
-        out.push_str(name);
-        if let Some(t) = title {
+        out.push_str(&r.name);
+        if let Some(t) = &r.title {
             out.push(' ');
             out.push_str(t);
         }
-        if *afk {
+        if in_group {
+            out.push_str(" [G]");
+        }
+        if r.afk {
             out.push_str(" [AFK]");
         }
-        if let Some(secs) = idle
-            && *secs >= 60
+        if let Some(secs) = r.idle
+            && secs >= 60
         {
-            out.push_str(&format!(" [idle {}]", format_idle(*secs)));
+            out.push_str(&format!(" [idle {}]", format_idle(secs)));
         }
         out.push_str("\r\n");
     }
