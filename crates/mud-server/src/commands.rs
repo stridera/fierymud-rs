@@ -5330,6 +5330,7 @@ fn visible(cmd: &Command, role: UserRole, perms: &[Permission]) -> bool {
     role.at_least(cmd.min_role) && cmd.required_perm.is_none_or(|p| perms.contains(&p))
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
@@ -5342,10 +5343,24 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let needle = target_word.to_ascii_lowercase();
 
-    // Self-target.
+    // Self-target. Surfaces the same state lines as examining
+    // another player would — Stealth (only visible to self anyway),
+    // Flying, Mounted — so a player can confirm their state without
+    // running multiple commands.
     if needle == "me" || needle == "self" {
         let name = name_of(world, player);
-        send_to(world, player, format!("\r\nYou look at yourself: {name}.\r\n"));
+        let mut out = format!("\r\nYou look at yourself: {name}.\r\n");
+        if world.get::<mud_world::Flying>(player).is_some() {
+            out.push_str("You're hovering in mid-air.\r\n");
+        }
+        if world.get::<Stealth>(player).is_some() {
+            out.push_str("You are hidden.\r\n");
+        }
+        if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(player).copied() {
+            let mount_name = name_or(world, mount, "<unknown>");
+            out.push_str(&format!("You're riding {mount_name}.\r\n"));
+        }
+        send_to(world, player, out);
         return;
     }
 
