@@ -2405,8 +2405,8 @@ fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 mod tests {
     use super::{
         ColorMode, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
-        apply_knockdown_posture, check_ability_restrictions, condition_label, direction_name,
-        evaluate_formula, evaluate_simple_formula, format_idle, has_effect_named,
+        apply_knockdown_posture, check_ability_restrictions, check_target_type, condition_label,
+        direction_name, evaluate_formula, evaluate_simple_formula, format_idle, has_effect_named,
         is_being_attacked, is_immobilized, normalize_dice_notation, parse_direction,
         remove_effect_named, render_color_tags, render_prompt, resolve_dispel_filter,
         resolve_dispel_scope, resolve_effect_conditions, resolve_effect_resource,
@@ -3111,6 +3111,74 @@ mod tests {
         // Non-bool aggro field → falls through to default.
         let bogus = serde_json::json!({"aggro": "yes"});
         assert!(resolve_redirect_aggro(Some(&bogus), Some(&default_p)));
+    }
+
+    #[test]
+    fn target_type_enemy_pc_refuses_self_and_mob() {
+        use mud_world::{Mob, Player};
+        let mut world = World::new();
+        let caster = world.spawn(Player).id();
+        let other_player = world.spawn(Player).id();
+        let mob = world.spawn(Mob).id();
+        let valid: Vec<String> = vec!["ENEMY_PC".to_string()];
+        // Other player → passes.
+        assert_eq!(check_target_type(&mut world, caster, other_player, &valid), None);
+        // Self → refused.
+        assert!(check_target_type(&mut world, caster, caster, &valid).is_some());
+        // Mob → refused (not a Player).
+        assert!(check_target_type(&mut world, caster, mob, &valid).is_some());
+    }
+
+    #[test]
+    fn target_type_enemy_npc_refuses_player() {
+        use mud_world::{Mob, Player};
+        let mut world = World::new();
+        let caster = world.spawn(Player).id();
+        let other_player = world.spawn(Player).id();
+        let mob = world.spawn(Mob).id();
+        let valid: Vec<String> = vec!["ENEMY_NPC".to_string()];
+        // Mob → passes.
+        assert_eq!(check_target_type(&mut world, caster, mob, &valid), None);
+        // Other player → refused.
+        assert!(check_target_type(&mut world, caster, other_player, &valid).is_some());
+    }
+
+    #[test]
+    fn target_type_or_semantics() {
+        use mud_world::{Mob, Player};
+        let mut world = World::new();
+        let caster = world.spawn(Player).id();
+        let other_player = world.spawn(Player).id();
+        let mob = world.spawn(Mob).id();
+        let valid: Vec<String> = vec!["ENEMY_PC".to_string(), "ENEMY_NPC".to_string()];
+        // Either passes.
+        assert_eq!(check_target_type(&mut world, caster, mob, &valid), None);
+        assert_eq!(check_target_type(&mut world, caster, other_player, &valid), None);
+        // Self still refused (ENEMY_PC excludes self; ENEMY_NPC requires Mob).
+        assert!(check_target_type(&mut world, caster, caster, &valid).is_some());
+    }
+
+    #[test]
+    fn target_type_unrecognized_kind_passes_silently() {
+        let mut world = World::new();
+        let caster = world.spawn(()).id();
+        let target = world.spawn(()).id();
+        // Unrecognized kinds get a free pass — DRAG, PALM, RESURRECT,
+        // BUCK shouldn't be blocked while their target categories are
+        // unmodeled.
+        let valid: Vec<String> = vec!["CORPSE".to_string()];
+        assert_eq!(check_target_type(&mut world, caster, target, &valid), None);
+        let valid: Vec<String> = vec!["RIDER".to_string(), "OBJECT_INV".to_string()];
+        assert_eq!(check_target_type(&mut world, caster, target, &valid), None);
+    }
+
+    #[test]
+    fn target_type_empty_list_passes() {
+        let mut world = World::new();
+        let caster = world.spawn(()).id();
+        let target = world.spawn(()).id();
+        let valid: Vec<String> = vec![];
+        assert_eq!(check_target_type(&mut world, caster, target, &valid), None);
     }
 
     #[test]
