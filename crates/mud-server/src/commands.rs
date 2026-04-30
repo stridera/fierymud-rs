@@ -20,6 +20,7 @@ use mud_world::{
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
     BankWealth, RecallPoint, RoomSector, ShopCatalog, Shopkeeper, Slot, SocialDef, SocialRegistry,
     Stamina, Stealth, Stunned, TellLog, Title, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    ZoneClimate,
 };
 use tracing::{info, info_span};
 
@@ -801,6 +802,21 @@ const COMMANDS: &[Command] = &[
                    and the current world tick.",
         },
         run: cmd_time,
+    },
+    Command {
+        names: &["weather"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "weather",
+            summary: "Atmospheric flavor for your zone's climate.",
+            long: "Renders a single line based on your current zone's \
+                   `Climate` and the in-game time of day. Rule-of-thumb \
+                   only — no per-tick weather simulation yet, so the \
+                   same input produces the same output.",
+        },
+        run: cmd_weather,
     },
     Command {
         names: &["version"],
@@ -6471,6 +6487,61 @@ fn cmd_time(world: &mut World, player: Entity, _args: &str) {
         "  Game time:   day {mud_day}, {mud_hour:02}:00 ({period})\r\n",
     ));
     send_to(world, player, out);
+}
+
+/// `weather`: render an atmospheric flavor line based on the player's
+/// current zone's `Climate` and the in-game time of day. The
+/// underlying weather model is rule-of-thumb only — there's no
+/// per-tick simulation; same input gives the same output. Players
+/// pull this when they want to feel the world's character; admins
+/// could also use it as a quick climate-tag readout.
+fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
+    use mud_db::enums::Climate;
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere; the sky is blank.\r\n");
+        return;
+    };
+    let room = located.0;
+    let zone = world
+        .get::<WorldKey>(room)
+        .and_then(|k| world.resource::<WorldKeyIndex>().zones.get(&k.zone).copied());
+    let climate = zone.and_then(|z| world.get::<ZoneClimate>(z).map(|c| c.0));
+    let tick = world.resource::<TickCount>().0;
+    let mud_hour = (tick / 750) % 24;
+    let day = match mud_hour {
+        0..=4 | 21..=23 => "night",
+        5..=8 => "dawn",
+        9..=11 | 14..=17 => "day",
+        12..=13 => "midday",
+        _ => "evening",
+    };
+    let line = match (climate, day) {
+        (Some(Climate::Arid), "day" | "midday") => "Heat shimmers off the parched ground; the air is dry as bone.",
+        (Some(Climate::Arid), _) => "The desert chill cuts through cloaks; stars wheel sharply overhead.",
+        (Some(Climate::Semiarid), "day" | "midday") => "Dust dances on a warm wind; the sun bears down without mercy.",
+        (Some(Climate::Semiarid), _) => "The scrub cools rapidly; far-off coyotes call.",
+        (Some(Climate::Tropical), "day" | "midday") => "Humid air clings to your skin; a green-tinted sun hangs heavy.",
+        (Some(Climate::Tropical), _) => "Frogs and night-birds compete in the dripping dark.",
+        (Some(Climate::Subtropical), "day" | "midday") => "Warm gusts carry distant rain; cumulus clouds tower in lazy stacks.",
+        (Some(Climate::Subtropical), _) => "Crickets thicken the air; warm mist drifts through the night.",
+        (Some(Climate::Temperate), "dawn") => "A cool breeze rustles the leaves; dew glistens on every blade.",
+        (Some(Climate::Temperate), "day" | "midday") => "Mild sun and a clean breeze; pleasant traveling weather.",
+        (Some(Climate::Temperate), _) => "Stars glitter through clear, cool air.",
+        (Some(Climate::Oceanic), "day" | "midday") => "Salt spray rides a steady wind; gulls wheel and complain.",
+        (Some(Climate::Oceanic), _) => "Distant surf and sea-mist mute the night.",
+        (Some(Climate::Subarctic), "day" | "midday") => "Pale sun glints off stubborn frost; your breath fogs the air.",
+        (Some(Climate::Subarctic), _) => "Bitter cold seeps through every seam; aurora flickers overhead.",
+        (Some(Climate::Arctic), "day" | "midday") => "Wind-driven snow blurs the horizon; the sun is a pale disc.",
+        (Some(Climate::Arctic), _) => "The cold is absolute; ice creaks in the dark.",
+        (Some(Climate::Alpine), "day" | "midday") => "Thin, sharp air bites at your lungs; the sun is fierce off the snow.",
+        (Some(Climate::Alpine), _) => "The wind howls down the slopes; stars are knife-bright at altitude.",
+        (Some(Climate::None) | None, _) => "The air is still and unremarkable.",
+    };
+    send_to(
+        world,
+        player,
+        format!("\r\n{line}\r\n"),
+    );
 }
 
 fn cmd_version(world: &mut World, player: Entity, _args: &str) {

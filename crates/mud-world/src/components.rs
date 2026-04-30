@@ -7,6 +7,12 @@ use mud_db::enums::{Direction, ExitState, Sector};
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Zone;
 
+/// Per-zone climate. Loaded from `Zones.climate` at startup. Used by
+/// `cmd_weather` to render atmospheric flavor for the player's
+/// current zone (snowfall in subarctic, dust storms in arid, etc.).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ZoneClimate(pub mud_db::enums::Climate);
+
 /// Marker: this entity is a room.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Room;

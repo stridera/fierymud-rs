@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use crate::components::{
     CombatStats, Description, EquippedSlot, ExitData, Exits, FromMobReset, Health, Item, Keywords,
     Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone,
+    ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, DamageComponent,
@@ -73,6 +74,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 Named {
                     name: z.name.clone(),
                 },
+                ZoneClimate(z.climate),
             ))
             .id();
         zone_index.insert(z.id, entity);
