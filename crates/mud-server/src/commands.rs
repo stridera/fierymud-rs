@@ -8495,69 +8495,45 @@ fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
 
 /// `tripup` / `trip`: lighter version of stomp. Costs 5 stamina,
 /// deals 1/4 `dmg_roll`, leaves target Resting (rather than Sitting).
+/// `tripup` / `trip` — Phase C migration: shimmed over the `TRIP_UP`
+/// data path (knockdown + damage effects, 8s cooldown). Posture and
+/// stamina gates stay in the shim; target/effect/messaging flow
+/// through `invoke_ability`. Empty arg falls back to the caster's
+/// current `Fighting` target so legacy `trip` (no arg) keeps working.
 fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "tripup") {
         return;
     }
-    if !check_stamina(world, player, TRIPUP_COST, "tripup") {
-        return;
-    }
     let arg = args.trim();
-    let target = if arg.is_empty() {
+    // Empty-arg shortcut: current Fighting target. The data path
+    // doesn't synthesize this; we resolve it here and pass the name
+    // through.
+    let dispatched = if arg.is_empty() {
         let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
             send_to(world, player, "Trip up whom? You aren't fighting.\r\n");
             return;
         };
-        t
-    } else {
-        let Some(located) = world.get::<Located>(player).copied() else {
-            return;
-        };
-        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
-            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
-            return;
-        };
-        t
-    };
-    if target == player {
+        let target_name = name_of(world, t);
+        format!("trip_up {target_name}")
+    } else if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        // Targeting gate would also catch this, but refusing here
+        // skips wasted stamina.
         send_to(world, player, "You can't trip yourself.\r\n");
         return;
-    }
-    let cur = world.get::<Posture>(target).map(|p| p.0);
-    if !matches!(cur, Some(PostureKind::Standing)) {
-        let target_name = name_or(world, target, "<unknown>");
-        send_to(world, player, format!("{target_name} is already on the ground.\r\n"));
-        return;
-    }
-    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
-        return;
+    } else {
+        format!("trip_up {arg}")
     };
-
-    let dmg = world.get::<CombatStats>(player).map_or(1, |c| (c.dmg_roll / 4).max(1));
+    if !check_stamina(world, player, TRIPUP_COST, "tripup") {
+        return;
+    }
     drain_stamina(world, player, TRIPUP_COST);
-    let player_name = name_of(world, player);
-    let target_name = name_or(world, target, "<unknown>");
-    let (dead, _) = apply_damage(world, target, dmg);
-    if !dead
-        && let Ok(mut e) = world.get_entity_mut(target)
-    {
-        e.insert(Posture(PostureKind::Resting));
-    }
-    send_to(world, player, format!(
-        "You sweep {target_name}'s legs out for {dmg} damage; they fall.\r\n"
-    ));
-    if !dead {
-        send_rendered(world, target, &format!(
-            "{player_name} sweeps your legs out from under you!\r\n"
-        ));
-    }
-    broadcast_room_except_rendered(
-        world, target_room, &[player, target],
-        &format!("{player_name} trips {target_name} to the ground.\r\n"),
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
-    if dead {
-        crate::combat::handle_death(world, target, &target_name, target_room);
-    }
 }
 
 /// `sweep`: room-wide kick — knock every standing mob in the room
