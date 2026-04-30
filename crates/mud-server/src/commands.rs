@@ -247,6 +247,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_sell,
     },
     Command {
+        names: &["hire"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "hire <#|name>",
+            summary: "Hire a pet from a pet-shop keeper.",
+            long: "Spawns a fresh mob as your follower. Coin from \
+                   `wealth`. Pet is renamed to `<you>'s <mob>` so \
+                   it doesn't blend with wild mobs of the same kind.",
+        },
+        run: cmd_hire,
+    },
+    Command {
         names: &["title"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5518,6 +5532,7 @@ fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
 /// as `# | item | price | stock`. Stock `unlimited` for `-1`. Price
 /// falls back to the proto's base `cost * buy_profit` when the row's
 /// override is `0`. No-op when no shopkeeper present.
+#[allow(clippy::too_many_lines)]
 fn cmd_list(world: &mut World, player: Entity, _args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
@@ -5549,44 +5564,82 @@ fn cmd_list(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     };
-    if shop.items.is_empty() {
+    let buy_profit = shop.buy_profit;
+    let object_protos = world.resource::<ObjectPrototypes>().by_key.clone();
+    let mob_protos = world.resource::<MobPrototypes>().by_key.clone();
+
+    let mut out = String::new();
+    if !shop.items.is_empty() {
+        out.push_str(&format!("\r\n{keeper_name} offers:\r\n"));
+        out.push_str(&format!(
+            "  {:<3} {:<40} {:<28} {}\r\n",
+            "#", "Item", "Price", "Stock"
+        ));
+        for (i, offer) in shop.items.iter().enumerate() {
+            let proto = object_protos.get(&(offer.object_zone_id, offer.object_id));
+            let item_name = proto.map_or_else(
+                || format!("(missing {}/{})", offer.object_zone_id, offer.object_id),
+                |p| p.name.clone(),
+            );
+            let base_cost = proto.map_or(0, |p| p.cost);
+            let price_copper = shop_offer_price(offer, base_cost, buy_profit);
+            let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
+            let stock_str = if offer.amount < 0 {
+                "unlimited".to_string()
+            } else {
+                offer.amount.to_string()
+            };
+            out.push_str(&format!(
+                "  {:<3} {:<40} {:<28} {}\r\n",
+                i + 1,
+                item_name,
+                price_str,
+                stock_str
+            ));
+        }
+    }
+    if !shop.pets.is_empty() {
+        out.push_str(&format!("\r\n{keeper_name} also has pets for hire:\r\n"));
+        out.push_str(&format!(
+            "  {:<3} {:<40} {:<28} {}\r\n",
+            "#", "Mob", "Price", "Stock"
+        ));
+        for (i, offer) in shop.pets.iter().enumerate() {
+            let proto = mob_protos.get(&(offer.mob_zone_id, offer.mob_id));
+            let mob_name = proto.map_or_else(
+                || format!("(missing {}/{})", offer.mob_zone_id, offer.mob_id),
+                |p| p.name.clone(),
+            );
+            // Pet price: override wins; else mob.level * 100 (legacy
+            // CircleMUD convention).
+            let price_copper: i64 = if offer.price > 0 {
+                i64::from(offer.price)
+            } else {
+                proto.map_or(0, |p| i64::from(p.level) * 100)
+            };
+            let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
+            let stock_str = if offer.amount < 0 {
+                "unlimited".to_string()
+            } else {
+                offer.amount.to_string()
+            };
+            out.push_str(&format!(
+                "  {:<3} {:<40} {:<28} {}\r\n",
+                i + 1,
+                mob_name,
+                price_str,
+                stock_str
+            ));
+        }
+        out.push_str("\r\nUse `hire <#|name>` to hire one as a pet.\r\n");
+    }
+    if shop.items.is_empty() && shop.pets.is_empty() {
         send_rendered(
             world,
             player,
             &format!("{keeper_name} has nothing to sell right now.\r\n"),
         );
         return;
-    }
-
-    let buy_profit = shop.buy_profit;
-    let object_protos = world.resource::<ObjectPrototypes>().by_key.clone();
-
-    let mut out = format!("\r\n{keeper_name} offers:\r\n");
-    out.push_str(&format!(
-        "  {:<3} {:<40} {:<28} {}\r\n",
-        "#", "Item", "Price", "Stock"
-    ));
-    for (i, offer) in shop.items.iter().enumerate() {
-        let proto = object_protos.get(&(offer.object_zone_id, offer.object_id));
-        let item_name = proto.map_or_else(
-            || format!("(missing {}/{})", offer.object_zone_id, offer.object_id),
-            |p| p.name.clone(),
-        );
-        let base_cost = proto.map_or(0, |p| p.cost);
-        let price_copper = shop_offer_price(offer, base_cost, buy_profit);
-        let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
-        let stock_str = if offer.amount < 0 {
-            "unlimited".to_string()
-        } else {
-            offer.amount.to_string()
-        };
-        out.push_str(&format!(
-            "  {:<3} {:<40} {:<28} {}\r\n",
-            i + 1,
-            item_name,
-            price_str,
-            stock_str
-        ));
     }
     send_rendered(world, player, &out);
 }
@@ -5753,6 +5806,161 @@ fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         located.0,
         &[player],
         &format!("{player_name} buys {item_name}.\r\n"),
+    );
+}
+
+/// `hire <#|name>`: hire a pet from a pet-shop keeper. Spawns a fresh
+/// mob from the keeper's `ShopMobs` offerings, ties it as a follower
+/// of the player, and tags its name with the player's possessive
+/// (`AdminChar's wolf`). Cost is the offer's `price` or
+/// `mob.level * 100` when 0.
+#[allow(clippy::too_many_lines)]
+fn cmd_hire(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Hire what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let keeper: Option<(Entity, Shopkeeper)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
+        q.iter(world)
+            .find(|(_, l, _)| l.0 == located.0)
+            .map(|(e, _, s)| (e, *s))
+    };
+    let Some((keeper_entity, keeper_marker)) = keeper else {
+        send_to(world, player, "No one here is hiring out pets.\r\n");
+        return;
+    };
+    let keeper_name = name_of(world, keeper_entity);
+    let Some(shop) = world
+        .resource::<ShopCatalog>()
+        .by_key
+        .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
+        .cloned()
+    else {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} has nothing to hire.\r\n"),
+        );
+        return;
+    };
+    if shop.pets.is_empty() {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} doesn't deal in pets.\r\n"),
+        );
+        return;
+    }
+    let mob_protos = world.resource::<MobPrototypes>().by_key.clone();
+    let offer_idx: Option<usize> = if let Ok(n) = arg.parse::<usize>() {
+        if n == 0 || n > shop.pets.len() {
+            None
+        } else {
+            Some(n - 1)
+        }
+    } else {
+        let lc = arg.to_ascii_lowercase();
+        shop.pets.iter().position(|o| {
+            mob_protos
+                .get(&(o.mob_zone_id, o.mob_id))
+                .is_some_and(|p| p.name.to_ascii_lowercase().contains(&lc))
+        })
+    };
+    let Some(idx) = offer_idx else {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} doesn't have '{arg}' for hire.\r\n"),
+        );
+        return;
+    };
+    let offer = shop.pets[idx];
+    if offer.amount == 0 {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} is out of those.\r\n"),
+        );
+        return;
+    }
+    let Some(proto) = mob_protos.get(&(offer.mob_zone_id, offer.mob_id)).cloned() else {
+        send_to(world, player, "That mob's prototype is missing.\r\n");
+        return;
+    };
+    let price_copper: i64 = if offer.price > 0 {
+        i64::from(offer.price)
+    } else {
+        i64::from(proto.level) * 100
+    };
+    let on_hand = world.get::<Wealth>(player).map_or(0, |w| w.0);
+    if on_hand < price_copper {
+        let need = price_copper - on_hand;
+        let need_msg = format_wealth(need).unwrap_or_else(|| "more coin".to_string());
+        send_rendered(
+            world,
+            player,
+            &format!(
+                "{keeper_name} eyes you. \"You need {need_msg} more for that.\"\r\n"
+            ),
+        );
+        return;
+    }
+    if let Some(mut w) = world.get_mut::<Wealth>(player) {
+        w.0 = w.0.saturating_sub(price_copper);
+    }
+    if offer.amount > 0
+        && let Some(def) = world
+            .resource_mut::<ShopCatalog>()
+            .by_key
+            .get_mut(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
+        && let Some(off) = def.pets.get_mut(idx)
+    {
+        off.amount = (off.amount - 1).max(0);
+    }
+    // Spawn the pet as a fresh mob attached as a Follower(player).
+    // Name is renamed to "<player>'s <mob_name>" so room listings
+    // disambiguate from wild mobs of the same proto.
+    let player_name = name_of(world, player);
+    let pet_name = format!("{player_name}'s {}", proto.name);
+    let hp = proto.rolled_hp();
+    let dmg = proto.avg_damage();
+    let pet_entity = world
+        .spawn((
+            Mob,
+            Named { name: pet_name.clone() },
+            Keywords(proto.keywords.clone()),
+            Description(proto.room_description.clone()),
+            WorldKey { zone: proto.zone_id, id: proto.id },
+            Located(located.0),
+            Health { hp, max: hp },
+            CombatStats {
+                hit_roll: proto.hit_roll,
+                dmg_roll: dmg,
+                ac: proto.armor_class,
+                alignment: proto.alignment,
+            },
+            Posture(PostureKind::Standing),
+            Follower(player),
+        ))
+        .id();
+    let _ = pet_entity;
+    let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
+    send_rendered(
+        world,
+        player,
+        &format!("You hire {} for {price_str}.\r\n", proto.name),
+    );
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player],
+        &format!("{player_name} hires {}.\r\n", proto.name),
     );
 }
 

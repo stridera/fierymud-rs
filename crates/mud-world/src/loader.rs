@@ -17,8 +17,8 @@ use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, DamageComponent, EffectCatalog, EffectDef, LiquidProto, MobProto, MobPrototypes,
     MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto, ObjectPrototypes,
-    SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, SocialDef, SocialRegistry,
-    TargetingRule, WorldKeyIndex,
+    SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef,
+    SocialRegistry, TargetingRule, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -438,6 +438,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let shop_rows = shops::list_shops(pool).await?;
     let item_rows = shops::list_shop_items(pool).await?;
     let accept_rows = shops::list_shop_accepts(pool).await?;
+    let pet_rows = shops::list_shop_mobs(pool).await?;
     let mut shop_catalog = ShopCatalog::default();
     for row in &shop_rows {
         shop_catalog
@@ -454,6 +455,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 sell_profit: row.sell_profit,
                 items: Vec::new(),
                 accepts: Vec::new(),
+                pets: Vec::new(),
             },
         );
     }
@@ -475,10 +477,21 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             });
         }
     }
+    for row in &pet_rows {
+        if let Some(def) = shop_catalog.by_key.get_mut(&(row.shop_zone_id, row.shop_id)) {
+            def.pets.push(ShopPetOffering {
+                mob_zone_id: row.mob_zone_id,
+                mob_id: row.mob_id,
+                amount: row.amount,
+                price: row.price,
+            });
+        }
+    }
     info!(
         shops = shop_catalog.by_key.len(),
         items = item_rows.len(),
         accepts = accept_rows.len(),
+        pets = pet_rows.len(),
         "shop catalog loaded"
     );
 

@@ -17,6 +17,6 @@ pub use resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, DamageComponent, EffectCatalog, EffectDef, LiquidProto, MobProto, MobPrototypes,
     MobResetCatalog, MobResetEntry, ObjectAbilityBinding, ObjectAbilityCatalog, ObjectProto,
-    ObjectPrototypes, SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, SocialDef,
-    SocialRegistry, TargetingRule, WorldKeyIndex,
+    ObjectPrototypes, SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering,
+    ShopPetOffering, SocialDef, SocialRegistry, TargetingRule, WorldKeyIndex,
 };

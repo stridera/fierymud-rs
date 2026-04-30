@@ -84,6 +84,35 @@ pub struct ShopAccept {
     pub keywords: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShopMob {
+    pub shop_zone_id: i32,
+    pub shop_id: i32,
+    pub mob_zone_id: i32,
+    pub mob_id: i32,
+    pub amount: i32,
+    pub price: i32,
+}
+
+pub async fn list_shop_mobs(pool: &PgPool) -> sqlx::Result<Vec<ShopMob>> {
+    sqlx::query_as!(
+        ShopMob,
+        r#"
+        SELECT
+            shop_zone_id,
+            shop_id,
+            mob_zone_id,
+            mob_id,
+            amount,
+            price
+        FROM "ShopMobs"
+        ORDER BY shop_zone_id, shop_id, mob_zone_id, mob_id
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn list_shop_accepts(pool: &PgPool) -> sqlx::Result<Vec<ShopAccept>> {
     sqlx::query_as!(
         ShopAccept,

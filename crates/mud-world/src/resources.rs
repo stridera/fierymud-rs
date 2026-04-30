@@ -177,6 +177,18 @@ pub struct ShopAcceptRule {
     pub keywords: Vec<String>,
 }
 
+/// Pet-shop offering: a mob the keeper sells. Mirrors `ShopMobs`.
+/// Pet shops list mobs the player can `hire`, becoming following
+/// pets. `price = 0` means "use mob.level * 100" by schema convention.
+#[derive(Debug, Clone, Copy)]
+pub struct ShopPetOffering {
+    pub mob_zone_id: i32,
+    pub mob_id: i32,
+    /// `-1` = unlimited stock.
+    pub amount: i32,
+    pub price: i32,
+}
+
 /// One entry in `ShopCatalog`. Keyed by the shop's `(zone_id, id)`;
 /// resolved from a keeper mob via `keeper_index`.
 #[derive(Debug, Clone)]
@@ -192,6 +204,9 @@ pub struct ShopDef {
     /// row in `ShopAccepts` for this shop). Non-empty = the item must
     /// match at least one rule for `sell` to succeed.
     pub accepts: Vec<ShopAcceptRule>,
+    /// Pet shop offerings (see `ShopPetOffering`). Empty for non-pet
+    /// shops; populated only for shops with `ShopMobs` rows.
+    pub pets: Vec<ShopPetOffering>,
 }
 
 /// One row from the `Board` table cached at load time. Used by the
