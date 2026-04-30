@@ -304,6 +304,9 @@ pub struct MobProto {
     pub damage_dice_bonus: i32,
     pub hit_roll: i32,
     pub armor_class: i32,
+    /// Coin awarded to the killer (or dropped) on death, in copper.
+    /// Mirrors `Mobs.wealth`.
+    pub wealth: i64,
 }
 
 impl MobProto {

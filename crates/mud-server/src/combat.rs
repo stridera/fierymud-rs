@@ -1,8 +1,8 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AppliedTo, CombatStats, Description, EffectInstance, Exits, Fighting, Health, Item, Keywords,
-    Located, Mob, Named, Player, PlayerFlags, Posture, PostureKind, Slot, Stunned, WearableIn,
-    WorldKeyIndex,
+    Located, Mob, MobPrototypes, Named, Player, PlayerFlags, Posture, PostureKind, Slot, Stunned,
+    Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -336,12 +336,79 @@ pub(crate) fn handle_death(
             &[],
             &format!("{victim_name} dies.\r\n"),
         );
+        award_kill_coin(world, victim, victim_name);
         disengage_attackers_of(world, victim);
         if let Ok(e) = world.get_entity_mut(victim) {
             e.despawn();
         }
         info!(?victim, name = %victim_name, "mob despawned");
     }
+}
+
+/// On mob death: look up the proto's `wealth`, find the first player
+/// engaged with the victim, and add the coin to their `Wealth`. Emits
+/// a personal "you collect" line plus a room broadcast. No-op when the
+/// mob has no wealth, no proto, or no player attacker. `AUTO_GOLD` will
+/// gate this once a corpse model exists; today it always pays out.
+fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
+    let coin = world
+        .get::<WorldKey>(victim)
+        .and_then(|k| {
+            world
+                .get_resource::<MobPrototypes>()
+                .and_then(|p| p.by_key.get(&(k.zone, k.id)).map(|proto| proto.wealth))
+        })
+        .unwrap_or(0);
+    if coin <= 0 {
+        return;
+    }
+    let killer: Option<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
+        q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
+    };
+    let Some(killer) = killer else { return };
+    if let Some(mut w) = world.get_mut::<Wealth>(killer) {
+        w.0 = w.0.saturating_add(coin);
+    } else {
+        try_insert(world, killer, Wealth(coin));
+    }
+    let msg = format_payout(coin);
+    send_to(
+        world,
+        killer,
+        format!("You collect {msg} from the corpse of {victim_name}.\r\n"),
+    );
+}
+
+/// Render a copper total as "X platinum, Y gold, Z silver, W copper",
+/// skipping zero-valued denominations. Mirrors `format_wealth` in
+/// `commands.rs` but is duplicated here because that helper is not
+/// crate-public; the eventual home for both is a shared util module.
+fn format_payout(total: i64) -> String {
+    if total <= 0 {
+        return "no coin".to_string();
+    }
+    let mut remainder = total;
+    let platinum = remainder / 1000;
+    remainder %= 1000;
+    let gold = remainder / 100;
+    remainder %= 100;
+    let silver = remainder / 10;
+    let copper = remainder % 10;
+    let mut parts: Vec<String> = Vec::new();
+    if platinum > 0 {
+        parts.push(format!("{platinum} platinum"));
+    }
+    if gold > 0 {
+        parts.push(format!("{gold} gold"));
+    }
+    if silver > 0 {
+        parts.push(format!("{silver} silver"));
+    }
+    if copper > 0 {
+        parts.push(format!("{copper} copper"));
+    }
+    parts.join(", ")
 }
 
 #[cfg(test)]

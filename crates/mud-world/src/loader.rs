@@ -169,6 +169,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 damage_dice_bonus: row.damage_dice_bonus,
                 hit_roll: row.hit_roll,
                 armor_class: row.armor_class,
+                wealth: row.wealth,
             },
         );
     }

@@ -10870,10 +10870,7 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
     }
     let target_name = name_or(world, target, "<unknown>");
 
-    // End any combat against this mob — attackers stop swinging.
-    disengage_attackers_of(world, target);
-
-    // Notify the room before despawn.
+    // Notify the room before death.
     let admin_name = name_of(world, player);
     broadcast_room_except_players_rendered(
         world,
@@ -10884,9 +10881,11 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
     send_rendered(world, player, &format!("{target_name} crumbles to dust at your gesture.\r\n"),
     );
 
-    if let Ok(e) = world.get_entity_mut(target) {
-        e.despawn();
-    }
+    // Briefly point the admin at the target so the kill payout's
+    // first-Player-attacker walk credits them. handle_death sweeps
+    // the Fighting component on the way out.
+    try_insert(world, player, Fighting(target));
+    crate::combat::handle_death(world, target, &target_name, located.0);
 }
 
 /// Builder+ room cleanup. Despawns every Mob and every non-equipped

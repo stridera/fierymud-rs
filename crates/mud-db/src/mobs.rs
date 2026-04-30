@@ -21,6 +21,9 @@ pub struct Mob {
     pub damage_dice_bonus: i32,
     pub hit_roll: i32,
     pub armor_class: i32,
+    /// On-hand wealth in copper units, paid to the killer on death.
+    /// Schema column is BIGINT; default 0.
+    pub wealth: i64,
 }
 
 pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
@@ -43,7 +46,8 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             damage_dice_size,
             damage_dice_bonus,
             hit_roll,
-            armor_class
+            armor_class,
+            wealth
         FROM "Mobs"
         ORDER BY zone_id, id
         "#
