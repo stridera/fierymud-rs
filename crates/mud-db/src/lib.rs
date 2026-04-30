@@ -4,6 +4,7 @@ pub mod abilities;
 pub mod ability_effects;
 pub mod ability_messages;
 pub mod ability_restrictions;
+pub mod ability_targeting;
 pub mod character_abilities;
 pub mod character_items;
 pub mod characters;

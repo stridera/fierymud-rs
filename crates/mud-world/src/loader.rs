@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_effects, ability_messages, ability_restrictions, classes, effects, mob_reset_equipment,
+    abilities, ability_effects, ability_messages, ability_restrictions, ability_targeting, classes, effects, mob_reset_equipment,
     mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
     rooms, socials, sqlx::PgPool, zones,
 };
@@ -15,7 +15,7 @@ use crate::components::{
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, EffectCatalog,
     EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog,
-    ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry, WorldKeyIndex,
+    ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry, TargetingRule, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -295,6 +295,21 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .entry(row.ability_id)
             .or_default()
             .push((row.effect_id, row.override_params));
+    }
+
+    // Per-ability targeting rules (valid target types, scope,
+    // range, LOS). Keyed by ability_id; UNIQUE per ability.
+    let targeting_rows = ability_targeting::list_all(pool).await?;
+    for row in targeting_rows {
+        ability_catalog.targeting.insert(
+            row.ability_id,
+            TargetingRule {
+                valid_targets: row.valid_targets,
+                scope: row.scope,
+                max_targets: row.max_targets,
+                require_los: row.require_los,
+            },
+        );
     }
 
     // Templated message strings (success/fail/wearoff text). Keyed by

@@ -14,5 +14,5 @@ pub use resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, EffectCatalog,
     EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityBinding,
     ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SocialDef, SocialRegistry,
-    WorldKeyIndex,
+    TargetingRule, WorldKeyIndex,
 };

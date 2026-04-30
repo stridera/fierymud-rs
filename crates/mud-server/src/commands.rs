@@ -5917,6 +5917,22 @@ fn invoke_ability(
             render_color_tags(&target_name, mode),
         ));
     }
+    // AbilityTargeting gate: refuse if the resolved target doesn't
+    // match the schema's `valid_targets` list. Only enforces the
+    // recognized types (ENEMY_PC, ENEMY_NPC); CORPSE / RIDER /
+    // OBJECT_INV / UNCONSCIOUS pass silently until those entity
+    // categories are modeled. Abilities without a row pass through.
+    if let Some(rule) = world
+        .resource::<AbilityCatalog>()
+        .targeting
+        .get(&def.id)
+        .cloned()
+        && let Some(refusal) =
+            check_target_type(world, player, target_entity, &rule.valid_targets)
+    {
+        send_to(world, player, format!("{refusal}\r\n"));
+        return;
+    }
     // Live gate: walk AbilityRestrictions and refuse the cast on the
     // first failing rule, emitting that rule's `message` to the
     // caster. Unknown rule types pass — the runtime grows interpretation
@@ -6343,6 +6359,58 @@ fn invoke_ability(
         crate::commands::try_insert(world, player, cd);
     }
     let _ = spawn_count;
+}
+
+/// Validate that `target` matches at least one entry in
+/// `valid_targets`. Returns Some(message) on refusal, None on pass
+/// (including when no recognized type can be evaluated — partially
+/// modeled abilities pass rather than break).
+///
+/// Recognized target types in v1:
+/// - `ENEMY_PC`  : target is a `Player` and ≠ caster
+/// - `ENEMY_NPC` : target is a `Mob`
+///
+/// Other types (`CORPSE`, `OBJECT_INV`, `RIDER`, `UNCONSCIOUS`) pass
+/// silently — they need entity categories the runtime doesn't model
+/// yet.
+fn check_target_type(
+    world: &mut World,
+    caster: Entity,
+    target: Entity,
+    valid_targets: &[String],
+) -> Option<String> {
+    if valid_targets.is_empty() {
+        return None;
+    }
+    // The list is OR — target matches if any entry matches. Any
+    // unrecognized entry counts as a free pass so abilities like
+    // DRAG (CORPSE/UNCONSCIOUS) don't get blocked.
+    let mut any_recognized = false;
+    let target_is_player = world.get::<Player>(target).is_some();
+    let target_is_mob = world.get::<Mob>(target).is_some();
+    let target_is_self = caster == target;
+    for kind in valid_targets {
+        match kind.as_str() {
+            "ENEMY_PC" => {
+                any_recognized = true;
+                if target_is_player && !target_is_self {
+                    return None;
+                }
+            }
+            "ENEMY_NPC" => {
+                any_recognized = true;
+                if target_is_mob {
+                    return None;
+                }
+            }
+            // Unrecognized types: free pass via the early-return below.
+            _ => return None,
+        }
+    }
+    if !any_recognized {
+        return None;
+    }
+    Some("That's not a valid target for this ability.".to_string())
 }
 
 /// Walk an ability's restriction rules and return the first failing

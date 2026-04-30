@@ -140,6 +140,23 @@ pub struct AbilityCatalog {
     /// `invoke_ability` to emit caster/target/room flavor text in
     /// place of the dispatcher's terse defaults.
     pub messages: HashMap<i32, AbilityMessageSet>,
+    /// Per-ability target-validation rules. 9 of 408 abilities have
+    /// a row today (BACKSTAB, BASH, KICK, etc.). Read by
+    /// `invoke_ability` after target resolution to refuse casts that
+    /// don't match the schema's valid target list.
+    pub targeting: HashMap<i32, TargetingRule>,
+}
+
+/// Per-ability targeting rule loaded from the `AbilityTargeting`
+/// table. Acceptable target types (`ENEMY_PC`, `ENEMY_NPC`, `CORPSE`,
+/// etc.) are kept as strings so the runtime can interpret them
+/// incrementally — types it doesn't recognize pass silently.
+#[derive(Debug, Clone, Default)]
+pub struct TargetingRule {
+    pub valid_targets: Vec<String>,
+    pub scope: String,
+    pub max_targets: i32,
+    pub require_los: bool,
 }
 
 /// Templated message strings for one ability, post-rendering decisions.
