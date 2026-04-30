@@ -2873,33 +2873,38 @@ mod tests {
         let st = Some(Stamina { current: 7, max: 50 });
         let name = Some("Strider");
         let room = Some("The Void");
-        assert_eq!(render_prompt("<%h/%H>", hp, st, name, room), "<42/100> ");
-        assert_eq!(render_prompt("<%v/%V mv>", hp, st, name, room), "<7/50 mv> ");
+        let g = Some(12345i64);
+        assert_eq!(render_prompt("<%h/%H>", hp, st, name, room, g), "<42/100> ");
+        assert_eq!(render_prompt("<%v/%V mv>", hp, st, name, room, g), "<7/50 mv> ");
         assert_eq!(
-            render_prompt("<%h/%H %v/%V>", hp, st, name, room),
+            render_prompt("<%h/%H %v/%V>", hp, st, name, room, g),
             "<42/100 7/50> "
         );
         // Trailing space already present — don't double-add.
-        assert_eq!(render_prompt("<%h> ", hp, st, name, room), "<42> ");
+        assert_eq!(render_prompt("<%h> ", hp, st, name, room, g), "<42> ");
         // Literal percent.
-        assert_eq!(render_prompt("100%%", hp, st, name, room), "100% ");
+        assert_eq!(render_prompt("100%%", hp, st, name, room, g), "100% ");
         // Name substitution.
-        assert_eq!(render_prompt("[%n]", hp, st, name, room), "[Strider] ");
+        assert_eq!(render_prompt("[%n]", hp, st, name, room, g), "[Strider] ");
         // Room substitution.
-        assert_eq!(render_prompt("[%r]", hp, st, name, room), "[The Void] ");
+        assert_eq!(render_prompt("[%r]", hp, st, name, room, g), "[The Void] ");
+        // Wealth substitution: raw copper.
+        assert_eq!(render_prompt("[%g cp]", hp, st, name, room, g), "[12345 cp] ");
         // Unknown variable: pass through literally so the player sees they
         // typed something we don't implement.
-        assert_eq!(render_prompt("[%z]", hp, st, name, room), "[%z] ");
+        assert_eq!(render_prompt("[%z]", hp, st, name, room, g), "[%z] ");
         // Missing Health: question marks.
-        assert_eq!(render_prompt("<%h/%H>", None, st, name, room), "<?/?> ");
+        assert_eq!(render_prompt("<%h/%H>", None, st, name, room, g), "<?/?> ");
         // Missing Stamina: question marks for v/V.
-        assert_eq!(render_prompt("<%v/%V>", hp, None, name, room), "<?/?> ");
+        assert_eq!(render_prompt("<%v/%V>", hp, None, name, room, g), "<?/?> ");
         // Missing name: question mark.
-        assert_eq!(render_prompt("[%n]", hp, st, None, room), "[?] ");
+        assert_eq!(render_prompt("[%n]", hp, st, None, room, g), "[?] ");
         // Missing room: question mark.
-        assert_eq!(render_prompt("[%r]", hp, st, name, None), "[?] ");
+        assert_eq!(render_prompt("[%r]", hp, st, name, None, g), "[?] ");
+        // Missing wealth: question mark.
+        assert_eq!(render_prompt("[%g]", hp, st, name, room, None), "[?] ");
         // Empty template still gets a trailing space.
-        assert_eq!(render_prompt("", hp, st, name, room), " ");
+        assert_eq!(render_prompt("", hp, st, name, room, g), " ");
     }
 
     #[test]
@@ -3828,7 +3833,8 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
         .get::<Located>(target)
         .and_then(|l| world.get::<Named>(l.0))
         .map(|n| n.name.as_str());
-    let rendered = render_prompt(template, hp, stamina, name, room);
+    let wealth = world.get::<Wealth>(target).map(|w| w.0);
+    let rendered = render_prompt(template, hp, stamina, name, room, wealth);
     // Prompts can carry color tags both directly in the template
     // (`prompt <red>%h</>`) and indirectly via %r / %n (room and player
     // names that may have embedded tags). render_color_tags handles
@@ -3844,6 +3850,7 @@ fn render_prompt(
     stamina: Option<Stamina>,
     name: Option<&str>,
     room: Option<&str>,
+    wealth: Option<i64>,
 ) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let mut chars = template.chars();
@@ -3872,6 +3879,13 @@ fn render_prompt(
                 },
                 Some('r') => match room {
                     Some(r) => out.push_str(r),
+                    None => out.push('?'),
+                },
+                // %g = on-hand wealth in copper (raw integer; players
+                // do their own math). Skipped denomination split here
+                // because the prompt is a tight one-line readout.
+                Some('g') => match wealth {
+                    Some(w) => out.push_str(&w.to_string()),
                     None => out.push('?'),
                 },
                 Some('%') | None => out.push('%'),
@@ -5263,7 +5277,8 @@ fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
             format!(
                 "Your prompt is: {current}\r\n\
                  Variables: %h current HP, %H max HP, %v current stamina, \
-                 %V max stamina, %% literal %.\r\n"
+                 %V max stamina, %n character name, %r room name, \
+                 %g on-hand wealth (copper), %% literal %.\r\n"
             ),
         );
         return;
