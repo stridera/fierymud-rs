@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, classes, effects, mob_reset_equipment,
+    abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, classes, effects, mob_reset_equipment,
     mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
     rooms, socials, sqlx::PgPool, zones,
 };
@@ -13,10 +13,10 @@ use crate::components::{
     Located, Mob, Named, Posture, PostureKind, Room, RoomSector, Slot, WorldKey, Zone,
 };
 use crate::resources::{
-    AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, EffectCatalog,
-    EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog,
-    ObjectProto, ObjectPrototypes, SavingThrow, SocialDef, SocialRegistry, TargetingRule,
-    WorldKeyIndex,
+    AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, DamageComponent,
+    EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry,
+    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow, SocialDef, SocialRegistry,
+    TargetingRule, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -329,6 +329,23 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 on_save_action: row.on_save_action,
             },
         );
+    }
+
+    // Multi-element damage components — append per-ability
+    // ordered by sequence. The damage arm sums these when present
+    // and otherwise falls back to override_params.amount.
+    let dc_rows = ability_damage_components::list_all(pool).await?;
+    for row in dc_rows {
+        ability_catalog
+            .damage_components
+            .entry(row.ability_id)
+            .or_default()
+            .push(DamageComponent {
+                element: row.element,
+                damage_formula: row.damage_formula,
+                percentage: row.percentage,
+                sequence: row.sequence,
+            });
     }
 
     // Templated message strings (success/fail/wearoff text). Keyed by

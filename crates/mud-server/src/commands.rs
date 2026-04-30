@@ -6512,17 +6512,40 @@ fn invoke_ability(
     for spec in &effect_specs {
         match spec.effect_type.as_str() {
             "damage" => {
-                // Resolve `amount` from override → default params and
-                // apply via `apply_damage`. The remaining unsupported
-                // formulas (area/multihit/percent/damage_dealt) return
-                // None and resolve to 0 here — the evaluator will
-                // grow those mechanics later. No EffectInstance spawned.
-                let mut amount = resolve_effect_amount(
-                    spec.override_params.as_ref(),
-                    Some(&spec.default_params),
-                    &formula_ctx,
-                )
-                .unwrap_or(0);
+                // Resolve `amount`. If the ability has
+                // AbilityDamageComponent rows, sum each component's
+                // formula scaled by its percentage — that's the
+                // multi-element damage path used by spells like
+                // CONE_OF_COLD (90% COLD, 10% FORCE). Otherwise
+                // fall back to override_params.amount.
+                // Per-element resistance application is a follow-up
+                // that needs Resistances components on entities.
+                let components = world
+                    .resource::<AbilityCatalog>()
+                    .damage_components
+                    .get(&def.id)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut amount = if components.is_empty() {
+                    resolve_effect_amount(
+                        spec.override_params.as_ref(),
+                        Some(&spec.default_params),
+                        &formula_ctx,
+                    )
+                    .unwrap_or(0)
+                } else {
+                    let mut total = 0i32;
+                    for c in &components {
+                        let raw = evaluate_simple_formula_ctx(
+                            &normalize_dice_notation(&c.damage_formula),
+                            &formula_ctx,
+                        )
+                        .unwrap_or(0);
+                        let scaled = raw.saturating_mul(c.percentage) / 100;
+                        total = total.saturating_add(scaled);
+                    }
+                    total
+                };
                 // BACKSTAB-style `bonusIfHidden` — extra damage when
                 // the caster has the Stealth marker. Field lives on
                 // the AbilityEffect override; reads as either a

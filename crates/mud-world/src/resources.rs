@@ -176,6 +176,23 @@ pub struct AbilityCatalog {
     /// effects, `HALF_DURATION` halves spawned `EffectInstance`
     /// durations).
     pub saves: HashMap<i32, SavingThrow>,
+    /// Per-ability multi-element damage breakdown. 32 rows today
+    /// across ~16 spells. The damage arm sums each component
+    /// `evaluate(formula) * percentage / 100` to derive total
+    /// damage when components exist; otherwise falls back to the
+    /// single `override_params.amount` path.
+    pub damage_components: HashMap<i32, Vec<DamageComponent>>,
+}
+
+/// One element of an ability's damage breakdown loaded from
+/// `AbilityDamageComponent`. Element is held as a raw text label
+/// since the runtime doesn't model per-element resistances yet.
+#[derive(Debug, Clone)]
+pub struct DamageComponent {
+    pub element: String,
+    pub damage_formula: String,
+    pub percentage: i32,
+    pub sequence: i32,
 }
 
 /// Per-ability saving-throw rule loaded from the
