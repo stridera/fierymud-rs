@@ -131,6 +131,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_scan,
     },
     Command {
+        names: &["track", "hunt"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "track <target>",
+            summary: "Find the direction toward a named target.",
+            long: "BFS through open exits up to 50 rooms looking for \
+                   a mob or player matching the name. Reports the \
+                   direction and distance. Closed or locked doors \
+                   block the scan. No perception check yet — hidden \
+                   targets are tracked the same as visible ones.",
+        },
+        run: cmd_track,
+    },
+    Command {
         names: &["glance"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6189,6 +6205,110 @@ pub(crate) fn format_wealth(total: i64) -> Option<String> {
         parts.push(format!("{copper} copper"));
     }
     Some(parts.join(", "))
+}
+
+/// `track <target>` / `hunt <target>`: BFS through open exits up to
+/// 50 rooms looking for a player or mob whose name matches.
+/// Reports the first direction to head and the distance.
+/// Closed/locked exits block the scan; flying / hidden mobs are
+/// matched normally (no perception roll yet).
+fn cmd_track(world: &mut World, player: Entity, args: &str) {
+    use std::collections::{HashSet, VecDeque};
+    const MAX_DEPTH: i32 = 50;
+    let needle = args.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        send_to(world, player, "Track whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let start = located.0;
+
+    // Collect every room->target candidate in one pass: any entity
+    // with Named matching the needle (excluding the player), keyed
+    // by their current room. Then BFS rooms until we hit one in the
+    // candidate map.
+    let candidate_rooms: HashSet<Entity> = {
+        let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>)>();
+        q.iter(world)
+            .filter(|(e, _, n, kw)| {
+                *e != player
+                    && (n.name.to_ascii_lowercase().contains(&needle)
+                        || kw.is_some_and(|k| {
+                            k.0.iter().any(|w| w.to_ascii_lowercase().contains(&needle))
+                        }))
+            })
+            .map(|(_, l, _, _)| l.0)
+            .collect()
+    };
+    if candidate_rooms.is_empty() {
+        send_rendered(
+            world,
+            player,
+            &format!("You sense no trace of '{needle}' nearby.\r\n"),
+        );
+        return;
+    }
+    if candidate_rooms.contains(&start) {
+        send_rendered(
+            world,
+            player,
+            &format!("You see '{needle}' right here.\r\n"),
+        );
+        return;
+    }
+
+    // BFS: queue carries (room, first_direction_taken, distance).
+    let mut visited: HashSet<Entity> = HashSet::new();
+    visited.insert(start);
+    let mut queue: VecDeque<(Entity, Direction, i32)> = VecDeque::new();
+    if let Some(exits) = world.get::<Exits>(start) {
+        for (dir, ed) in &exits.0 {
+            if ed.state != ExitState::Open {
+                continue;
+            }
+            let Some(to) = ed.to else { continue };
+            if visited.insert(to) {
+                queue.push_back((to, *dir, 1));
+            }
+        }
+    }
+
+    while let Some((room, first_dir, dist)) = queue.pop_front() {
+        if candidate_rooms.contains(&room) {
+            send_rendered(
+                world,
+                player,
+                &format!(
+                    "You catch a trail leading {} ({} room{} away).\r\n",
+                    direction_name(first_dir),
+                    dist,
+                    if dist == 1 { "" } else { "s" },
+                ),
+            );
+            return;
+        }
+        if dist >= MAX_DEPTH {
+            continue;
+        }
+        if let Some(exits) = world.get::<Exits>(room) {
+            for ed in exits.0.values() {
+                if ed.state != ExitState::Open {
+                    continue;
+                }
+                let Some(to) = ed.to else { continue };
+                if visited.insert(to) {
+                    queue.push_back((to, first_dir, dist + 1));
+                }
+            }
+        }
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("'{needle}' is too far away to track.\r\n"),
+    );
 }
 
 /// `scan`: walk this room's exits and print one line per direction
