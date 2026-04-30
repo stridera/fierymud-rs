@@ -1395,6 +1395,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_whisper,
     },
     Command {
+        names: &["report"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "report",
+            summary: "Announce your HP/stamina to the room.",
+            long: "Broadcasts a single line to everyone present: \
+                   `You report: HP 50/100, stamina 7/50.` Useful for \
+                   coordinating with healers / groupmates before the \
+                   group system lands.",
+        },
+        run: cmd_report,
+    },
+    Command {
         names: &["tell", "t"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -7157,6 +7172,44 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
             format!("You say, \"{message}\"\r\n")
         } else {
             format!("{speaker} says, \"{message}\"\r\n")
+        };
+        send_rendered(world, target, &line);
+    }
+}
+
+/// `report`: announce your current HP/stamina to everyone in the room.
+/// Legacy MUDs targeted this at the speaker's group; without a group
+/// system, the room is the next-best blast radius and matches how
+/// players actually use it ("everyone, my HP is low"). Format mirrors
+/// the score sheet's vital-stat lines.
+fn cmd_report(world: &mut World, player: Entity, _args: &str) {
+    let hp = world.get::<Health>(player).copied();
+    let stamina = world.get::<Stamina>(player).copied();
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let speaker = name_of(world, player);
+    let body = match (hp, stamina) {
+        (Some(h), Some(s)) => format!(
+            "HP {}/{}, stamina {}/{}",
+            h.hp, h.max, s.current, s.max
+        ),
+        (Some(h), None) => format!("HP {}/{}", h.hp, h.max),
+        (None, Some(s)) => format!("stamina {}/{}", s.current, s.max),
+        (None, None) => "(no vital stats)".to_string(),
+    };
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(_, l)| l.0 == located.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for target in targets {
+        let line = if target == player {
+            format!("You report: {body}.\r\n")
+        } else {
+            format!("{speaker} reports: {body}.\r\n")
         };
         send_rendered(world, target, &line);
     }
