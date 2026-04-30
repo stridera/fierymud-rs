@@ -2822,7 +2822,7 @@ mod tests {
 
     #[test]
     fn formula_eval_pow_with_float_exp() {
-        let mut det = |_n: i32, _m: i32| 0;
+        let mut det = |_name: &str, _n: i32, _m: i32| 0;
         // Integer base, float exp: pow(8, 2) = 64
         assert_eq!(evaluate_formula("pow(skill, 2)", 0, 8, &mut det), Some(64));
         // Float exp: pow(50, 1.44) ≈ 50^1.44 ≈ 297.something
@@ -2851,9 +2851,29 @@ mod tests {
     }
 
     #[test]
+    fn formula_eval_random_dispatched_by_name() {
+        // Deterministic stub by name: random → 42, everything else 0.
+        let mut stub = |name: &str, _a: i32, _b: i32| {
+            if name == "random" { 42 } else { 0 }
+        };
+        assert_eq!(evaluate_formula("random(1, 10)", 0, 0, &mut stub), Some(42));
+        // Composite: skill + random(1, skill*2). With skill=10:
+        // 10 + 42 = 52 (stub returns 42 for any random).
+        assert_eq!(
+            evaluate_formula("skill + random(1, skill * 2)", 0, 10, &mut stub),
+            Some(52)
+        );
+        // Backwards range refused → falls through.
+        let mut zero = |_name: &str, _a: i32, _b: i32| 0;
+        assert_eq!(evaluate_formula("random(10, 5)", 0, 0, &mut zero), None);
+    }
+
+    #[test]
     fn formula_eval_roll_dice_uses_callback() {
         // Deterministic dice closure: every roll_dice(N, M) returns N * M.
-        let mut det = |n: i32, m: i32| n * m;
+        // Deterministic stub: roll_dice/random both return n * m so
+        // tests are reproducible.
+        let mut det = |_name: &str, n: i32, m: i32| n * m;
         assert_eq!(evaluate_formula("roll_dice(2, 9)", 0, 0, &mut det), Some(18));
         // Precedence: roll_dice + skill / 5 with skill=25 → 18 + 5 = 23
         assert_eq!(
@@ -2874,9 +2894,9 @@ mod tests {
         s: &str,
         level: i32,
         skill: i32,
-        dice: &mut dyn FnMut(i32, i32) -> i32,
+        rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
     ) -> Option<i32> {
-        evaluate_formula(&normalize_dice_notation(s), level, skill, dice)
+        evaluate_formula(&normalize_dice_notation(s), level, skill, rng_call)
     }
 
     #[test]
@@ -6921,7 +6941,11 @@ fn duration_from_blob(params: Option<&serde_json::Value>, level: i32, skill: i32
 /// live RNG via `rand::random_range`; deterministic cases (no dice)
 /// are reproducible.
 fn evaluate_simple_formula(expr: &str, level: i32, skill: i32) -> Option<i32> {
-    evaluate_formula(expr, level, skill, &mut |n, s| roll_dice(n, s))
+    evaluate_formula(expr, level, skill, &mut |name, a, b| match name {
+        "roll_dice" => roll_dice(a, b),
+        "random" if a <= b => rand::random_range(a..=b),
+        _ => 0,
+    })
 }
 
 /// Roll `num` dice with `sides` sides each and sum them. Both args
@@ -6943,11 +6967,11 @@ fn evaluate_formula(
     expr: &str,
     level: i32,
     skill: i32,
-    dice: &mut dyn FnMut(i32, i32) -> i32,
+    rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
 ) -> Option<i32> {
     let tokens = tokenize_formula(expr)?;
     let mut p = FormulaParser { tokens: &tokens, idx: 0 };
-    let v = p.parse_expr(level, skill, dice)?;
+    let v = p.parse_expr(level, skill, rng_call)?;
     if p.idx != tokens.len() {
         return None;
     }
@@ -7074,19 +7098,19 @@ impl FormulaParser<'_> {
         &mut self,
         level: i32,
         skill: i32,
-        dice: &mut dyn FnMut(i32, i32) -> i32,
+        rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
     ) -> Option<i32> {
-        let mut lhs = self.parse_term(level, skill, dice)?;
+        let mut lhs = self.parse_term(level, skill, rng_call)?;
         loop {
             match self.peek() {
                 Some(FormulaToken::Plus) => {
                     self.advance();
-                    let rhs = self.parse_term(level, skill, dice)?;
+                    let rhs = self.parse_term(level, skill, rng_call)?;
                     lhs = lhs.saturating_add(rhs);
                 }
                 Some(FormulaToken::Minus) => {
                     self.advance();
-                    let rhs = self.parse_term(level, skill, dice)?;
+                    let rhs = self.parse_term(level, skill, rng_call)?;
                     lhs = lhs.saturating_sub(rhs);
                 }
                 _ => break,
@@ -7098,19 +7122,19 @@ impl FormulaParser<'_> {
         &mut self,
         level: i32,
         skill: i32,
-        dice: &mut dyn FnMut(i32, i32) -> i32,
+        rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
     ) -> Option<i32> {
-        let mut lhs = self.parse_factor(level, skill, dice)?;
+        let mut lhs = self.parse_factor(level, skill, rng_call)?;
         loop {
             match self.peek() {
                 Some(FormulaToken::Star) => {
                     self.advance();
-                    let rhs = self.parse_factor(level, skill, dice)?;
+                    let rhs = self.parse_factor(level, skill, rng_call)?;
                     lhs = lhs.saturating_mul(rhs);
                 }
                 Some(FormulaToken::Slash) => {
                     self.advance();
-                    let rhs = self.parse_factor(level, skill, dice)?;
+                    let rhs = self.parse_factor(level, skill, rng_call)?;
                     if rhs == 0 {
                         return None;
                     }
@@ -7125,16 +7149,16 @@ impl FormulaParser<'_> {
         &mut self,
         level: i32,
         skill: i32,
-        dice: &mut dyn FnMut(i32, i32) -> i32,
+        rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
     ) -> Option<i32> {
         match self.advance()? {
             FormulaToken::Num(n) => Some(*n),
             FormulaToken::Minus => {
-                let v = self.parse_factor(level, skill, dice)?;
+                let v = self.parse_factor(level, skill, rng_call)?;
                 Some(v.saturating_neg())
             }
             FormulaToken::LParen => {
-                let v = self.parse_expr(level, skill, dice)?;
+                let v = self.parse_expr(level, skill, rng_call)?;
                 if !matches!(self.advance(), Some(FormulaToken::RParen)) {
                     return None;
                 }
@@ -7148,7 +7172,7 @@ impl FormulaParser<'_> {
                     // can be a Float literal — the rest of the grammar
                     // is integer-only.
                     if n == "pow" {
-                        let base = self.parse_expr(level, skill, dice)?;
+                        let base = self.parse_expr(level, skill, rng_call)?;
                         if !matches!(self.advance(), Some(FormulaToken::Comma)) {
                             return None;
                         }
@@ -7176,17 +7200,22 @@ impl FormulaParser<'_> {
                     }
                     let mut args: Vec<i32> = Vec::new();
                     if !matches!(self.peek(), Some(FormulaToken::RParen)) {
-                        args.push(self.parse_expr(level, skill, dice)?);
+                        args.push(self.parse_expr(level, skill, rng_call)?);
                         while matches!(self.peek(), Some(FormulaToken::Comma)) {
                             self.advance();
-                            args.push(self.parse_expr(level, skill, dice)?);
+                            args.push(self.parse_expr(level, skill, rng_call)?);
                         }
                     }
                     if !matches!(self.advance(), Some(FormulaToken::RParen)) {
                         return None;
                     }
                     match (n.as_str(), args.as_slice()) {
-                        ("roll_dice", [num, sides]) => Some(dice(*num, *sides)),
+                        ("roll_dice", [num, sides]) if *num > 0 && *sides > 0 => {
+                            Some(rng_call("roll_dice", *num, *sides))
+                        }
+                        ("random", [lo, hi]) if lo <= hi => {
+                            Some(rng_call("random", *lo, *hi))
+                        }
                         _ => None,
                     }
                 } else {
