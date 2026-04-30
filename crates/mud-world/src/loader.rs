@@ -176,6 +176,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let object_rows = objects::list_objects(pool).await?;
     let mut object_prototypes = ObjectPrototypes::default();
     for row in object_rows {
+        let (weapon_dice_num, weapon_dice_size, weapon_dice_bonus) =
+            parse_weapon_dice(&row.values);
         object_prototypes.by_key.insert(
             (row.zone_id, row.id),
             ObjectProto {
@@ -189,6 +191,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 weight: row.weight,
                 level: row.level,
                 wear_flags: row.wear_flags,
+                weapon_dice_num,
+                weapon_dice_size,
+                weapon_dice_bonus,
             },
         );
     }
@@ -661,6 +666,30 @@ pub fn wear_flags_primary_slot(flags: &[mud_db::enums::WearFlag]) -> Option<crat
         }
     }
     None
+}
+
+/// Pull weapon dice out of an Object's `values` JSONB blob. Schema
+/// shape: `{"Hit Dice": {"num": "N", "size": "M", "bonus": B}, ...}`
+/// where num/size are typed as strings (not numbers) in the legacy
+/// data — we accept either form. Returns `(num, size, bonus)` zeros
+/// for non-weapons or malformed rows so the formula evaluator falls
+/// through cleanly.
+fn parse_weapon_dice(values: &serde_json::Value) -> (i32, i32, i32) {
+    let Some(dice) = values.get("Hit Dice") else {
+        return (0, 0, 0);
+    };
+    let parse = |v: Option<&serde_json::Value>| -> i32 {
+        match v {
+            Some(serde_json::Value::Number(n)) => i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0),
+            Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
+            _ => 0,
+        }
+    };
+    (
+        parse(dice.get("num")),
+        parse(dice.get("size")),
+        parse(dice.get("bonus")),
+    )
 }
 
 /// Map the schema `Position` enum label to the rank used by ability

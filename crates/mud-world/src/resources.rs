@@ -82,6 +82,30 @@ pub struct ObjectProto {
     /// primary `WearableIn` from the first relevant flag (see
     /// `wear_flags_to_slot`).
     pub wear_flags: Vec<mud_db::enums::WearFlag>,
+    /// Weapon damage dice extracted from `Objects.values`'s
+    /// `Hit Dice` field (`{"num": "N", "size": "M", "bonus": B}`).
+    /// Zeros for non-weapons (or weapons with malformed values).
+    /// `avg_damage()` uses these to resolve the formula evaluator's
+    /// `weapon_damage` symbol when this proto is the caster's
+    /// wielded item.
+    pub weapon_dice_num: i32,
+    pub weapon_dice_size: i32,
+    pub weapon_dice_bonus: i32,
+}
+
+impl ObjectProto {
+    /// Average damage roll: `N * (M + 1) / 2 + B`. Returns 0 for
+    /// non-weapons (zero dice) so callers can use it directly.
+    #[must_use]
+    pub fn avg_damage(&self) -> i32 {
+        let n = self.weapon_dice_num;
+        let m = self.weapon_dice_size;
+        let b = self.weapon_dice_bonus;
+        if n <= 0 || m <= 0 {
+            return b.max(0);
+        }
+        n * (m + 1) / 2 + b
+    }
 }
 
 /// Catalog of mob prototypes loaded from the Mobs table at startup. The

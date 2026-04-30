@@ -6689,13 +6689,12 @@ fn caster_has_equipped(world: &mut World, caster: Entity, slot: Slot) -> bool {
         .any(|(loc, eq)| loc.0 == caster && eq.0 == slot)
 }
 
-/// Read a weapon-damage proxy for the caster's wielded item. v1
-/// returns the wielded `ObjectProto.level` because `damage_dice`
-/// isn't plumbed through `ObjectProto` yet (it lives in the JSONB
-/// `values` column in the schema — see `SUGGESTIONS.md` for the full
-/// fix). Returns 0 if nothing is equipped in `Slot::Wield`.
-/// Resolves the `weapon_damage` symbol in damage formulas
-/// (e.g. `BACKSTAB`'s `weapon_damage * (2 + skill / 25)`).
+/// Read the caster's wielded weapon's average damage for the
+/// formula evaluator's `weapon_damage` symbol. Reads
+/// `ObjectProto.avg_damage()` which derives from the `Hit Dice`
+/// JSONB extracted at load time. Returns 0 if nothing is equipped
+/// in `Slot::Wield`, the equipped item lacks a `WorldKey`, or the
+/// proto has no weapon dice.
 fn caster_weapon_damage(world: &mut World, caster: Entity) -> i32 {
     let weapon: Option<Entity> = {
         let mut q = world.query::<(Entity, &Located, &EquippedSlot)>();
@@ -6713,7 +6712,7 @@ fn caster_weapon_damage(world: &mut World, caster: Entity) -> i32 {
         .resource::<ObjectPrototypes>()
         .by_key
         .get(&(key.zone, key.id))
-        .map_or(0, |p| p.level)
+        .map_or(0, mud_world::ObjectProto::avg_damage)
 }
 
 /// Substitute `{actor.X}` / `{target.X}` placeholders in an

@@ -16,6 +16,12 @@ pub struct Object {
     pub weight: f64,
     pub cost: i32,
     pub wear_flags: Vec<WearFlag>,
+    /// Schema's free-form `values` JSONB. Per-type interpretation:
+    /// weapons carry `{"Hit Dice": {"num": "N", "size": "M",
+    /// "bonus": B}, "Damage Type": "...", "Average": ...}`; lights
+    /// carry hours; potions carry levels and spell ids; etc. The
+    /// runtime reads only what each consumer needs.
+    pub values: serde_json::Value,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -33,7 +39,8 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             level,
             weight,
             cost,
-            "wearFlags" AS "wear_flags!: Vec<WearFlag>"
+            "wearFlags" AS "wear_flags!: Vec<WearFlag>",
+            values AS "values!: serde_json::Value"
         FROM "Objects"
         ORDER BY zone_id, id
         "#
