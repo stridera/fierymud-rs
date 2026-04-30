@@ -5310,10 +5310,28 @@ fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     let m = (secs % 3600) / 60;
     let s = secs % 60;
 
+    // MUD time. Tick rate is 10 Hz; 1 MUD hour = 75 real seconds =
+    // 750 ticks; 24 hours = 1 day = 18000 ticks. Day 0 / hour 0
+    // starts at server boot.
+    let mud_hour = (tick / 750) % 24;
+    let mud_day = tick / 18000;
+    let period = match mud_hour {
+        0..=4 => "deep night",
+        5..=7 => "early morning",
+        8..=11 => "morning",
+        12..=13 => "midday",
+        14..=17 => "afternoon",
+        18..=20 => "evening",
+        _ => "night",
+    };
+
     let mut out = String::from("\r\n");
     out.push_str(&format!("  Server time: {}\r\n", now.format("%Y-%m-%d %H:%M:%S UTC")));
     out.push_str(&format!("  Uptime:      {h}h {m}m {s}s\r\n"));
     out.push_str(&format!("  World tick:  {tick}\r\n"));
+    out.push_str(&format!(
+        "  Game time:   day {mud_day}, {mud_hour:02}:00 ({period})\r\n",
+    ));
     send_to(world, player, out);
 }
 
