@@ -6255,12 +6255,25 @@ fn invoke_ability(
                 // formulas (area/multihit/percent/damage_dealt) return
                 // None and resolve to 0 here — the evaluator will
                 // grow those mechanics later. No EffectInstance spawned.
-                let amount = resolve_effect_amount(
+                let mut amount = resolve_effect_amount(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
                     &formula_ctx,
                 )
                 .unwrap_or(0);
+                // BACKSTAB-style `bonusIfHidden` — extra damage when
+                // the caster has the Stealth marker. Field lives on
+                // the AbilityEffect override; reads as either a
+                // literal int or a formula string (e.g. `hidden * 0.5`).
+                // Skipped when caster.hidden == 0.
+                if formula_ctx.hidden > 0
+                    && let Some(bonus) = bonus_if_hidden_from_blob(
+                        spec.override_params.as_ref(),
+                        &formula_ctx,
+                    )
+                {
+                    amount = amount.saturating_add(bonus);
+                }
                 if amount > 0 {
                     let (dead, threshold_msg) =
                         crate::commands::apply_damage(world, target_entity, amount);
@@ -7192,6 +7205,25 @@ fn resolve_effect_amount(
 fn amount_from_blob(params: Option<&serde_json::Value>, ctx: &FormulaCtx) -> Option<i32> {
     let p = params?;
     let v = p.get("amount")?;
+    numeric_or_formula(v, ctx)
+}
+
+/// Pull a `bonusIfHidden` field — schema convention for "extra damage
+/// when the caster has the Stealth marker". Same numeric/formula
+/// shape as `amount`. Returns None when the field is absent.
+fn bonus_if_hidden_from_blob(
+    params: Option<&serde_json::Value>,
+    ctx: &FormulaCtx,
+) -> Option<i32> {
+    let p = params?;
+    let v = p.get("bonusIfHidden")?;
+    numeric_or_formula(v, ctx)
+}
+
+/// Shared parser for amount-shaped JSON fields: integer literal,
+/// formula string, or the dice-notation shorthand normalized to
+/// `roll_dice(N, M)` before eval.
+fn numeric_or_formula(v: &serde_json::Value, ctx: &FormulaCtx) -> Option<i32> {
     match v {
         serde_json::Value::Number(n) => i32::try_from(n.as_i64()?).ok(),
         serde_json::Value::String(s) => {
