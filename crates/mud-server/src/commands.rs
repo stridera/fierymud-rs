@@ -4315,6 +4315,14 @@ fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let offer = shop.items[idx];
+    if offer.amount == 0 {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} is out of those.\r\n"),
+        );
+        return;
+    }
     let Some(proto) = object_protos.get(&(offer.object_zone_id, offer.object_id)).cloned() else {
         send_to(world, player, "That item's prototype is missing.\r\n");
         return;
@@ -4333,9 +4341,18 @@ fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    // Deduct coin and spawn the item into the player's inventory.
+    // Deduct coin, decrement stock (if finite), and spawn the item.
     if let Some(mut w) = world.get_mut::<Wealth>(player) {
         w.0 = w.0.saturating_sub(price_copper);
+    }
+    if offer.amount > 0
+        && let Some(def) = world
+            .resource_mut::<ShopCatalog>()
+            .by_key
+            .get_mut(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
+        && let Some(off) = def.items.get_mut(idx)
+    {
+        off.amount = (off.amount - 1).max(0);
     }
     let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
     let mut bundle = world.spawn((
