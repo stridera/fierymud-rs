@@ -275,10 +275,11 @@ impl ConnRouter {
     }
 }
 
-// Two near-identical spawn paths (room-resolved vs stranded) — splitting
-// them into helpers would just shuffle the bundle literals around without
-// reducing duplication. Allow the line count here.
-#[allow(clippy::too_many_lines)]
+/// Single spawn path for a player entity. The `Located(room_entity)`
+/// component is added in a follow-up insert (after spawn) only when
+/// the starting room resolved — keeping the core bundle one place
+/// avoids the recurring "did I update both branches?" bug we hit
+/// three times before consolidating.
 fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outbound) -> Entity {
     let (zone, room) = pick_starting_room(c);
 
@@ -318,57 +319,18 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
         charisma: c.charisma,
     };
 
-    let Some(room_entity) = room_entity else {
+    // Welcome line — only when we have a room to land in.
+    if let Some(room_entity) = room_entity {
+        let room_name = commands::name_or(world, room_entity, "<unknown>");
+        let _ = outbound.send(format!(
+            "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",
+            name = c.name,
+        ));
+    } else {
         let _ = outbound.send(format!(
             "No starting room available (tried ({zone},{room}) and fallback {FALLBACK_START:?}).\r\n",
         ));
-        // Spawn a "stranded" player without a Located so they don't crash later.
-        let stranded = world
-            .spawn((
-                Player,
-                Online,
-                Named { name: c.name.clone() },
-                Account {
-                user_id: user.id.clone(),
-                character_id: c.id.clone(),
-                role: user.role,
-                perms: c.permissions.clone(),
-            },
-                Connection(outbound),
-                health,
-                stamina,
-                combat,
-                core_stats,
-                Posture(PostureKind::Standing),
-                PlayerFlags(c.player_flags.clone()),
-                Prompt(c.prompt.clone()),
-                LoggedInAt(std::time::Instant::now()),
-                (
-                    Profile {
-                        level: c.level,
-                        class_id: c.class_id,
-                        race: c.race.clone(),
-                        experience: c.experience,
-                    },
-                    Wealth(c.wealth),
-                    BankWealth(c.bank_wealth),
-                ),
-            ))
-            .id();
-        if let Some(re) = recall_entity
-            && let Ok(mut e) = world.get_entity_mut(stranded)
-        {
-            e.insert(RecallPoint(re));
-        }
-        return stranded;
-    };
-
-    let room_name = commands::name_or(world, room_entity, "<unknown>");
-
-    let _ = outbound.send(format!(
-        "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",
-        name = c.name,
-    ));
+    }
 
     let entity = world
         .spawn((
@@ -381,7 +343,6 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 role: user.role,
                 perms: c.permissions.clone(),
             },
-            Located(room_entity),
             Connection(outbound),
             health,
             stamina,
@@ -403,10 +364,13 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
             ),
         ))
         .id();
-    if let Some(re) = recall_entity
-        && let Ok(mut e) = world.get_entity_mut(entity)
-    {
-        e.insert(RecallPoint(re));
+    if let Ok(mut e) = world.get_entity_mut(entity) {
+        if let Some(re) = room_entity {
+            e.insert(Located(re));
+        }
+        if let Some(re) = recall_entity {
+            e.insert(RecallPoint(re));
+        }
     }
     entity
 }
