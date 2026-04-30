@@ -1625,6 +1625,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["delpost"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "delpost <board-alias> <#>",
+            summary: "Delete a board message (yours, or any if Builder+).",
+            long: "Hard-deletes the row at the given slot. Players \
+                   can only delete posts they made (case-insensitive \
+                   poster-name match); Builder-and-above can delete \
+                   anyone's. Edit history (`BoardMessageEdit`) cascades.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["mailbox"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2659,6 +2674,12 @@ pub async fn try_dispatch_async(
             cmd_post(world, player, pool, args).await;
             true
         }
+        "delpost" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_delpost(world, player, pool, args).await;
+            true
+        }
         "mailbox" | "mailboxes" => {
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
@@ -2929,6 +2950,99 @@ async fn compose_board_step(
              `.send` to ship, `.abort` to cancel, `.preview` to review.\r\n",
         ),
         ComposeStep::BodyAdded => {}
+    }
+}
+
+/// `delpost <board> <#>`: delete one of your own posts on a board.
+/// Builders+ can delete anyone's posts (matches the legacy "moderator
+/// can edit/remove any" privilege; refining via `Board.privileges`
+/// JSON is a follow-up). The `poster` column is a string compare
+/// against the caller's current character `Named`.
+pub(crate) async fn cmd_delpost(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let mut parts = args.split_whitespace();
+    let Some(alias) = parts.next() else {
+        send_to(world, player, "Usage: delpost <board-alias> <#>\r\n");
+        return;
+    };
+    let Some(slot_raw) = parts.next() else {
+        send_to(world, player, "Usage: delpost <board-alias> <#>\r\n");
+        return;
+    };
+    let Ok(slot) = slot_raw.parse::<usize>() else {
+        send_to(world, player, "Slot number must be a positive integer.\r\n");
+        return;
+    };
+    if slot == 0 {
+        send_to(world, player, "Slots are 1-based.\r\n");
+        return;
+    }
+    let board = match mud_db::boards::find_board_by_alias(pool, alias).await {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            send_to(world, player, format!("No board called '{alias}'.\r\n"));
+            return;
+        }
+        Err(e) => {
+            send_to(world, player, format!("Board lookup failed: {e}\r\n"));
+            return;
+        }
+    };
+    let messages = match mud_db::boards::messages_for_board(pool, board.id).await {
+        Ok(m) => m,
+        Err(e) => {
+            send_to(world, player, format!("Message fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    let Some(msg) = messages.get(slot - 1) else {
+        send_to(
+            world,
+            player,
+            format!("No message at slot {slot} on '{alias}'.\r\n"),
+        );
+        return;
+    };
+    let caller_name = name_of(world, player);
+    let is_builder = world
+        .get::<Account>(player)
+        .is_some_and(|a| a.role.at_least(UserRole::Builder));
+    let is_owner = msg.poster.eq_ignore_ascii_case(&caller_name);
+    if !is_owner && !is_builder {
+        send_to(
+            world,
+            player,
+            "You can only delete your own posts (builders+ can delete any).\r\n",
+        );
+        return;
+    }
+    let preview_subject = msg.subject.clone();
+    let preview_poster = msg.poster.clone();
+    match mud_db::boards::delete_message(pool, msg.id).await {
+        Ok(0) => {
+            send_to(
+                world,
+                player,
+                "Message was already gone — nothing deleted.\r\n",
+            );
+        }
+        Ok(_) => {
+            send_to(
+                world,
+                player,
+                format!(
+                    "Deleted '{preview_subject}' by {preview_poster} from {}.\r\n",
+                    board.title,
+                ),
+            );
+        }
+        Err(e) => {
+            send_to(world, player, format!("Delete failed: {e}\r\n"));
+        }
     }
 }
 

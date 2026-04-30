@@ -107,3 +107,19 @@ pub async fn post_message(
     .await?;
     Ok(row.id)
 }
+
+/// Delete a single board message. Caller checks ownership /
+/// privilege; this is a hard delete (the schema doesn't model
+/// soft-delete on board messages — `BoardMessageEdit` rows that
+/// reference this message will cascade per the FK).
+pub async fn delete_message(pool: &PgPool, message_id: i32) -> sqlx::Result<u64> {
+    let result = sqlx::query!(
+        r#"
+        DELETE FROM "BoardMessage" WHERE id = $1
+        "#,
+        message_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
