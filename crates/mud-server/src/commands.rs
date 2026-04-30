@@ -1576,7 +1576,7 @@ const COMMANDS: &[Command] = &[
                    first non-blank line is the subject, subsequent \
                    lines accumulate as body. Control verbs: `.send` \
                    ships the draft, `.abort` discards it, `.preview` \
-                   shows what's queued.",
+                   shows what's queued, `.clear` wipes the draft.",
         },
         run: cmd_mail_stub,
     },
@@ -2755,6 +2755,18 @@ async fn compose_mail_step(
         send_to(world, player, "Mail composition aborted.\r\n");
         return;
     }
+    if trimmed.eq_ignore_ascii_case(".clear") {
+        if let Some(mut draft) = world.get_mut::<MailDraft>(player) {
+            draft.subject = None;
+            draft.body.clear();
+        }
+        send_to(
+            world,
+            player,
+            "Cleared. Type a new subject, then the body.\r\n",
+        );
+        return;
+    }
     if trimmed.eq_ignore_ascii_case(".preview") {
         let Some(draft) = world.get::<MailDraft>(player).cloned() else {
             return;
@@ -3300,7 +3312,8 @@ pub(crate) async fn cmd_mail(
         format!(
             "Composing mail to {name}.\r\n\
              First line is the subject. Then type the body, one line at a time.\r\n\
-             `.send` ships it; `.abort` cancels; `.preview` shows the draft.\r\n"
+             `.send` ships it; `.abort` cancels; `.preview` shows the draft; \
+             `.clear` wipes and starts over.\r\n"
         ),
     );
 }
