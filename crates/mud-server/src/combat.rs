@@ -346,10 +346,14 @@ pub(crate) fn handle_death(
 }
 
 /// On mob death: look up the proto's `wealth`, find the first player
-/// engaged with the victim, and add the coin to their `Wealth`. Emits
-/// a personal "you collect" line plus a room broadcast. No-op when the
-/// mob has no wealth, no proto, or no player attacker. `AUTO_GOLD` will
-/// gate this once a corpse model exists; today it always pays out.
+/// engaged with the victim, and (when `AUTO_GOLD` is set) add the coin
+/// to their `Wealth`. No-op when the mob has no wealth, no proto, or
+/// no player attacker.
+///
+/// When `AUTO_GOLD` is *not* set, the coin is forfeited and the player
+/// is told as much. A real corpse model that survives the despawn
+/// would let players `get coin from corpse` instead of forfeiting;
+/// until then, the toggle is the only knob.
 fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
     let coin = world
         .get::<WorldKey>(victim)
@@ -367,17 +371,31 @@ fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
         q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
     };
     let Some(killer) = killer else { return };
-    if let Some(mut w) = world.get_mut::<Wealth>(killer) {
-        w.0 = w.0.saturating_add(coin);
-    } else {
-        try_insert(world, killer, Wealth(coin));
-    }
+    let auto_gold = world
+        .get::<PlayerFlags>(killer)
+        .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::AutoGold));
     let msg = crate::commands::format_wealth(coin).unwrap_or_else(|| "no coin".to_string());
-    send_to(
-        world,
-        killer,
-        format!("You collect {msg} from the corpse of {victim_name}.\r\n"),
-    );
+    if auto_gold {
+        if let Some(mut w) = world.get_mut::<Wealth>(killer) {
+            w.0 = w.0.saturating_add(coin);
+        } else {
+            try_insert(world, killer, Wealth(coin));
+        }
+        send_to(
+            world,
+            killer,
+            format!("You collect {msg} from the corpse of {victim_name}.\r\n"),
+        );
+    } else {
+        send_to(
+            world,
+            killer,
+            format!(
+                "You leave {msg} scattered around the corpse of {victim_name}. \
+                 (Set `autogold` to collect automatically.)\r\n"
+            ),
+        );
+    }
 }
 
 #[cfg(test)]
