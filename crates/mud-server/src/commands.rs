@@ -8019,7 +8019,6 @@ const DISARM_COST: i32 = 5;
 const HITALL_COST: i32 = 10;
 const DOORBASH_COST: i32 = 10;
 const BACKSTAB_COST: i32 = 6;
-const BACKSTAB_MULT: i32 = 2;
 const SPRINGLEAP_COST: i32 = 7;
 const GOUGE_COST: i32 = 7;
 const GOUGE_BLIND_SECS: i32 = 30;
@@ -8985,10 +8984,13 @@ fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-/// `backstab <target>`: out-of-combat opener for 2x damage. Engages
-/// after the strike. Refused when the player is already fighting or
-/// when the target is already in combat with anyone (no surprise to
-/// be had).
+/// `backstab <target>` — Phase C migration: shimmed over the
+/// `BACKSTAB` data path. Damage formula
+/// `weapon_damage * (2 + skill / 25)` resolves now that
+/// `FormulaCtx.weapon_damage` is plumbed (b4e166e); needs a
+/// piercing weapon equipped to pass the `weapon_type` restriction
+/// (logged in SUGGESTIONS — runtime currently passes any rule it
+/// can't evaluate). Out-of-combat opener with auto-engage.
 fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "backstab") {
         return;
@@ -9002,6 +9004,10 @@ fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Backstab whom?\r\n");
         return;
     }
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        send_to(world, player, "You can't backstab yourself.\r\n");
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
@@ -9010,10 +9016,6 @@ fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
         return;
     };
-    if target == player {
-        send_to(world, player, "You can't backstab yourself.\r\n");
-        return;
-    }
     if world.get::<Fighting>(target).is_some() {
         send_to(world, player, "They're too alert to backstab.\r\n");
         return;
@@ -9021,36 +9023,16 @@ fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
     if !check_stamina(world, player, BACKSTAB_COST, "backstab") {
         return;
     }
-
-    let base_dmg = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
-    let dmg = (base_dmg * BACKSTAB_MULT).max(1);
     drain_stamina(world, player, BACKSTAB_COST);
-
-    let player_name = name_of(world, player);
-    let target_name = name_or(world, target, "<unknown>");
-    let (dead, _) = apply_damage(world, target, dmg);
-
-    send_to(world, player, format!(
-        "You backstab {target_name} for {dmg} damage!\r\n"
-    ));
-    if !dead {
-        send_rendered(
-            world,
-            target,
-            &format!("{player_name} backstabs you for {dmg} damage!\r\n"),
-        );
-    }
-    broadcast_room_except_rendered(
+    let target_name = name_of(world, target);
+    invoke_ability(
         world,
-        located.0,
-        &[player, target],
-        &format!("{player_name} drives a blade into {target_name}'s back!\r\n"),
+        player,
+        &format!("backstab {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
-
-    if dead {
-        crate::combat::handle_death(world, target, &target_name, located.0);
-    } else {
-        // Engage standard combat.
+    if world.get_entity(target).is_ok() {
         try_insert(world, player, Fighting(target));
         if world.get::<CombatStats>(target).is_some()
             && let Ok(mut e) = world.get_entity_mut(target)
