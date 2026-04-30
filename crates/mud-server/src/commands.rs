@@ -4021,6 +4021,11 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             condition = condition_label(hp)
         ));
     }
+    if world.get::<Shopkeeper>(target).is_some() {
+        out.push_str(&format!(
+            "{name_rendered} is a merchant — try `list` to see their wares.\r\n"
+        ));
+    }
     send_to(world, player, out);
 }
 
