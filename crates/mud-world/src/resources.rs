@@ -365,11 +365,20 @@ pub struct MobProto {
 }
 
 impl MobProto {
-    /// Max-roll HP from the dice expression `NdM+B`. Deterministic; combat
-    /// damage will be rolled per-tick later.
+    /// Average-roll HP from the dice expression `NdM+B`: `N*(M+1)/2 + B`,
+    /// matching `avg_damage`'s shape. Deterministic — boss mobs spawn
+    /// at expected HP rather than the max-roll. Per-instance random
+    /// rolls (when content authors mark them) wait on a content
+    /// flag; until then this is the stable default.
     #[must_use]
     pub fn rolled_hp(&self) -> i32 {
-        (self.hp_dice_num * self.hp_dice_size + self.hp_dice_bonus).max(1)
+        let n = self.hp_dice_num;
+        let m = self.hp_dice_size;
+        let b = self.hp_dice_bonus;
+        if n <= 0 || m <= 0 {
+            return (b).max(1);
+        }
+        (n * (m + 1) / 2 + b).max(1)
     }
 
     /// Average roll for `damage_dice`; gives a stable `dmg_roll` for `CombatStats`.
