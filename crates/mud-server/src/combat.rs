@@ -372,43 +372,12 @@ fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
     } else {
         try_insert(world, killer, Wealth(coin));
     }
-    let msg = format_payout(coin);
+    let msg = crate::commands::format_wealth(coin).unwrap_or_else(|| "no coin".to_string());
     send_to(
         world,
         killer,
         format!("You collect {msg} from the corpse of {victim_name}.\r\n"),
     );
-}
-
-/// Render a copper total as "X platinum, Y gold, Z silver, W copper",
-/// skipping zero-valued denominations. Mirrors `format_wealth` in
-/// `commands.rs` but is duplicated here because that helper is not
-/// crate-public; the eventual home for both is a shared util module.
-fn format_payout(total: i64) -> String {
-    if total <= 0 {
-        return "no coin".to_string();
-    }
-    let mut remainder = total;
-    let platinum = remainder / 1000;
-    remainder %= 1000;
-    let gold = remainder / 100;
-    remainder %= 100;
-    let silver = remainder / 10;
-    let copper = remainder % 10;
-    let mut parts: Vec<String> = Vec::new();
-    if platinum > 0 {
-        parts.push(format!("{platinum} platinum"));
-    }
-    if gold > 0 {
-        parts.push(format!("{gold} gold"));
-    }
-    if silver > 0 {
-        parts.push(format!("{silver} silver"));
-    }
-    if copper > 0 {
-        parts.push(format!("{copper} copper"));
-    }
-    parts.join(", ")
 }
 
 #[cfg(test)]

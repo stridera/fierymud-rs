@@ -4088,7 +4088,7 @@ fn cmd_balance(world: &mut World, player: Entity, _args: &str) {
 /// render as `"X platinum, Y gold, Z silver, W copper"`. Returns
 /// None when the total is zero or negative so callers can render
 /// the empty case differently.
-fn format_wealth(total: i64) -> Option<String> {
+pub(crate) fn format_wealth(total: i64) -> Option<String> {
     if total <= 0 {
         return None;
     }
