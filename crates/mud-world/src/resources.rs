@@ -133,6 +133,16 @@ pub struct ShopOffering {
     pub price: i32,
 }
 
+/// Per-shop sell whitelist: an `ObjectType` plus an optional keyword
+/// filter. Empty `keywords` means "accept any item of this type";
+/// non-empty means at least one of these keywords must match the
+/// item's `Keywords`.
+#[derive(Debug, Clone)]
+pub struct ShopAcceptRule {
+    pub object_type: String,
+    pub keywords: Vec<String>,
+}
+
 /// One entry in `ShopCatalog`. Keyed by the shop's `(zone_id, id)`;
 /// resolved from a keeper mob via `keeper_index`.
 #[derive(Debug, Clone)]
@@ -144,6 +154,10 @@ pub struct ShopDef {
     pub buy_profit: f64,
     pub sell_profit: f64,
     pub items: Vec<ShopOffering>,
+    /// Sell-side filter rows. Empty Vec = accept anything (no filter
+    /// row in `ShopAccepts` for this shop). Non-empty = the item must
+    /// match at least one rule for `sell` to succeed.
+    pub accepts: Vec<ShopAcceptRule>,
 }
 
 /// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.

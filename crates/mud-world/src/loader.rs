@@ -15,8 +15,8 @@ use crate::components::{
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, ClassCatalog, ClassDef, DamageComponent,
     EffectCatalog, EffectDef, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry,
-    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow, ShopCatalog, ShopDef,
-    ShopOffering, SocialDef, SocialRegistry, TargetingRule, WorldKeyIndex,
+    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow, ShopAcceptRule, ShopCatalog,
+    ShopDef, ShopOffering, SocialDef, SocialRegistry, TargetingRule, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -416,6 +416,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // Shopkeeper component to each spawned mob whose proto matches.
     let shop_rows = shops::list_shops(pool).await?;
     let item_rows = shops::list_shop_items(pool).await?;
+    let accept_rows = shops::list_shop_accepts(pool).await?;
     let mut shop_catalog = ShopCatalog::default();
     for row in &shop_rows {
         shop_catalog
@@ -431,6 +432,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 buy_profit: row.buy_profit,
                 sell_profit: row.sell_profit,
                 items: Vec::new(),
+                accepts: Vec::new(),
             },
         );
     }
@@ -444,9 +446,18 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             });
         }
     }
+    for row in &accept_rows {
+        if let Some(def) = shop_catalog.by_key.get_mut(&(row.shop_zone_id, row.shop_id)) {
+            def.accepts.push(ShopAcceptRule {
+                object_type: row.object_type.clone(),
+                keywords: row.keywords.clone(),
+            });
+        }
+    }
     info!(
         shops = shop_catalog.by_key.len(),
         items = item_rows.len(),
+        accepts = accept_rows.len(),
         "shop catalog loaded"
     );
 

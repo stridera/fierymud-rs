@@ -4222,6 +4222,17 @@ fn cmd_list(world: &mut World, player: Entity, _args: &str) {
     send_rendered(world, player, &out);
 }
 
+/// Render an `ObjectType` as the token shape used by `ShopAccepts.type`
+/// and the underlying enum (uppercase, no underscores). The schema's
+/// `Objects.type` uses sqlx-encoded `SCREAMING_SNAKE_CASE`, but
+/// `ShopAccepts.type` is a free-form text column where some legacy
+/// entries use underscores (e.g. `DRINK_CONTAINER`). Normalizing both
+/// sides to uppercase + underscore-stripped lets matches succeed
+/// across both spellings.
+fn object_type_token(t: mud_db::enums::ObjectType) -> String {
+    format!("{t:?}").to_ascii_uppercase()
+}
+
 /// Compute the copper price of one shop offering: override wins,
 /// otherwise `proto.cost * shop.buy_profit` rounded.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -4354,9 +4365,9 @@ fn cmd_buy(world: &mut World, player: Entity, args: &str) {
 /// `sell <item>`: hand a carried item to the shopkeeper here, get coin.
 /// Pays `proto.cost * sell_profit` rounded; despawns the item; adds
 /// the coin to the player's `Wealth`. Refuses on equipped items
-/// (`remove` first), zero-value items, and rooms without a keeper.
-/// `ShopAccepts` filtering (per-shop item-type whitelist) is deferred
-/// until the table is loaded — for now any keeper buys anything.
+/// (`remove` first), zero-value items, rooms without a keeper, and
+/// items the keeper's `ShopAccepts` rules reject.
+#[allow(clippy::too_many_lines)]
 fn cmd_sell(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
@@ -4400,16 +4411,56 @@ fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    let base_cost = world
+    let item_proto = world
         .get::<WorldKey>(item)
         .and_then(|k| {
             world
                 .resource::<ObjectPrototypes>()
                 .by_key
                 .get(&(k.zone, k.id))
-                .map(|p| p.cost)
-        })
-        .unwrap_or(0);
+                .cloned()
+        });
+    let base_cost = item_proto.as_ref().map_or(0, |p| p.cost);
+    // Sell-side filter: if `accepts` is empty, anything goes; otherwise
+    // the item must match at least one rule. Type tokens normalize to
+    // upper + no-underscore on both sides so DRINK_CONTAINER matches
+    // the schema's DRINKCONTAINER. Keyword filter is empty = no extra
+    // gate; non-empty = at least one keyword must appear in the
+    // item's `Keywords`.
+    if !shop.accepts.is_empty() {
+        let item_type_norm = item_proto
+            .as_ref()
+            .map(|p| object_type_token(p.r#type))
+            .unwrap_or_default();
+        let item_kws: Vec<String> = world
+            .get::<Keywords>(item)
+            .map(|k| {
+                k.0.iter()
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let accepted = shop.accepts.iter().any(|rule| {
+            let rule_type = rule.object_type.replace('_', "").to_ascii_uppercase();
+            if rule_type != item_type_norm {
+                return false;
+            }
+            if rule.keywords.is_empty() {
+                return true;
+            }
+            rule.keywords
+                .iter()
+                .any(|k| item_kws.iter().any(|ik| ik.contains(&k.to_ascii_lowercase())))
+        });
+        if !accepted {
+            send_rendered(
+                world,
+                player,
+                &format!("{keeper_name} isn't interested in {item_name}.\r\n"),
+            );
+            return;
+        }
+    }
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let pay_copper: i64 = (f64::from(base_cost) * shop.sell_profit).round() as i64;
     if pay_copper <= 0 {

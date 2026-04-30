@@ -69,3 +69,34 @@ pub async fn list_shop_items(pool: &PgPool) -> sqlx::Result<Vec<ShopItem>> {
     .fetch_all(pool)
     .await
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShopAccept {
+    pub shop_zone_id: i32,
+    pub shop_id: i32,
+    /// `ObjectType` enum label (`WEAPON`, `ARMOR`, etc.). Compared as
+    /// a string because the runtime's `ObjectType::label()` returns
+    /// the matching token.
+    pub object_type: String,
+    /// Optional keyword whitelist. Empty means "any item of that
+    /// type is accepted"; non-empty means at least one keyword from
+    /// the item's `Keywords` must match (case-insensitive).
+    pub keywords: Vec<String>,
+}
+
+pub async fn list_shop_accepts(pool: &PgPool) -> sqlx::Result<Vec<ShopAccept>> {
+    sqlx::query_as!(
+        ShopAccept,
+        r#"
+        SELECT
+            shop_zone_id,
+            shop_id,
+            type AS "object_type!: String",
+            keywords AS "keywords!: Vec<String>"
+        FROM "ShopAccepts"
+        ORDER BY shop_zone_id, shop_id
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}
