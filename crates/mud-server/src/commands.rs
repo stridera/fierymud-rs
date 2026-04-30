@@ -147,6 +147,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_track,
     },
     Command {
+        names: &["practice", "prac"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "practice",
+            summary: "List your trained abilities and proficiencies.",
+            long: "Renders KnownAbilities (skills/spells/songs/chants) \
+                   with proficiency 0-100% and a tier label \
+                   (untrained/novice/apprentice/skilled/expert/master). \
+                   Empty list when no CharacterAbilities rows exist; \
+                   training commands that mutate proficiency haven't \
+                   landed yet.",
+        },
+        run: cmd_practice,
+    },
+    Command {
         names: &["glance"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6205,6 +6222,61 @@ pub(crate) fn format_wealth(total: i64) -> Option<String> {
         parts.push(format!("{copper} copper"));
     }
     Some(parts.join(", "))
+}
+
+/// `practice` / `prac`: list the player's `KnownAbilities` with
+/// proficiency rendered as a tier label. Sorted by ability kind
+/// (Skill / Spell / Song / Chant) then name. Empty list reports
+/// "you haven't trained any abilities yet" — common since
+/// `CharacterAbilities` only gets populated by training commands
+/// that haven't landed.
+fn cmd_practice(world: &mut World, player: Entity, _args: &str) {
+    let known = world
+        .get::<KnownAbilities>(player)
+        .map(|k| k.entries.clone())
+        .unwrap_or_default();
+    if known.is_empty() {
+        send_to(
+            world,
+            player,
+            "\r\nYou haven't trained any abilities yet.\r\n",
+        );
+        return;
+    }
+    let catalog = world.resource::<AbilityCatalog>();
+    let mut rows: Vec<(String, String, i32, bool)> = Vec::with_capacity(known.len());
+    for (id, prof, learned) in &known {
+        let def = catalog.by_name.values().find(|d| d.id == *id);
+        let name = def.map_or_else(|| format!("ability #{id}"), |d| d.plain_name.clone());
+        let kind = def.map_or("?", |d| match d.kind {
+            mud_db::abilities::AbilityKind::Skill => "skill",
+            mud_db::abilities::AbilityKind::Spell => "spell",
+            mud_db::abilities::AbilityKind::Song => "song",
+            mud_db::abilities::AbilityKind::Chant => "chant",
+        });
+        rows.push((name, kind.to_string(), *prof, *learned));
+    }
+    rows.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let mut out = format!("\r\nKnown abilities ({}):\r\n", rows.len());
+    for (name, kind, prof, learned) in &rows {
+        // Proficiency 0-1000 in schema; render as 0-100% with a tier
+        // label that legacy MUDs use.
+        let pct = (*prof / 10).clamp(0, 100);
+        let tier = match pct {
+            0 => "untrained",
+            1..=25 => "novice",
+            26..=50 => "apprentice",
+            51..=75 => "skilled",
+            76..=99 => "expert",
+            _ => "master",
+        };
+        let learn_mark = if *learned { " " } else { "*" };
+        out.push_str(&format!(
+            "  {learn_mark}{kind:<8} {name:<24} {pct:>3}% ({tier})\r\n"
+        ));
+    }
+    out.push_str("\r\n* = learning (not yet mastered).\r\n");
+    send_to(world, player, out);
 }
 
 /// `track <target>` / `hunt <target>`: BFS through open exits up to
