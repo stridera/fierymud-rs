@@ -13,6 +13,7 @@ pub mod characters;
 pub mod classes;
 pub mod effects;
 pub mod enums;
+pub mod mail;
 pub mod mob_reset_equipment;
 pub mod mob_resets;
 pub mod mobs;
