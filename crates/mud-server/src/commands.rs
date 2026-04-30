@@ -2112,6 +2112,49 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_unfollow,
     },
+    Command {
+        names: &["group"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "group",
+            summary: "List your current group (follow chain).",
+            long: "Shows the chain leader and every member, with HP \
+                   and same-room indicator. Group membership today is \
+                   informally derived from `follow` chains; an \
+                   explicit invite/consent system can land later.",
+        },
+        run: cmd_group,
+    },
+    Command {
+        names: &["disband"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "disband",
+            summary: "Dismiss everyone directly following you.",
+            long: "Breaks the group apart at your level. Followers' \
+                   own followers stay attached unless they too \
+                   `disband` or `unfollow`.",
+        },
+        run: cmd_disband,
+    },
+    Command {
+        names: &["gsay", "gtell", "gecho", "gt"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "gsay <message>",
+            summary: "Speak to your group regardless of location.",
+            long: "Reaches every member of your follow-chain group — \
+                   leader and all transitive followers — even across \
+                   rooms. Players outside the group don't hear it.",
+        },
+        run: cmd_gsay,
+    },
     // ----- Movement -----
     Command {
         names: &["north", "n"],
@@ -11886,6 +11929,143 @@ fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
         mud_db::abilities::AbilityKind::Skill,
         "use",
     );
+}
+
+/// Find the root of a follow chain — walks `Follower` upward until
+/// it hits an entity with no `Follower` component. Returns `start`
+/// itself if it's already a root.
+fn group_root(world: &World, start: Entity) -> Entity {
+    let mut current = start;
+    let mut steps = 0;
+    while let Some(f) = world.get::<Follower>(current) {
+        // Cycle guard — `cmd_follow` rejects cycles, but defend in
+        // case data drifts.
+        if steps > 32 {
+            return start;
+        }
+        current = f.0;
+        steps += 1;
+    }
+    current
+}
+
+/// Walk every entity transitively following `root` (directly or via
+/// chain). Includes `root` itself in the returned vec. The order is
+/// breadth-first; the leader is always position 0.
+fn group_members(world: &mut World, root: Entity) -> Vec<Entity> {
+    let mut group = vec![root];
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        let children: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Follower), With<Player>>();
+            q.iter(world)
+                .filter(|(e, f)| f.0 == parent && !group.contains(e))
+                .map(|(e, _)| e)
+                .collect()
+        };
+        for c in &children {
+            group.push(*c);
+            frontier.push(*c);
+        }
+    }
+    group
+}
+
+/// `group` (no args): list the player's current group — everyone
+/// transitively connected via `Follower` chains rooted at the
+/// chain's top. The leader is shown first, followed by members
+/// indented. With a single entity (no followers / not following),
+/// reports "you're not in a group."
+fn cmd_group(world: &mut World, player: Entity, _args: &str) {
+    let root = group_root(world, player);
+    let members = group_members(world, root);
+    if members.len() <= 1 {
+        send_to(world, player, "You're not in a group.\r\n");
+        return;
+    }
+    let mut out = format!("\r\nGroup ({} members):\r\n", members.len());
+    for (i, m) in members.iter().enumerate() {
+        let name = name_of(world, *m);
+        let role = if i == 0 { "leader" } else { "member" };
+        let hp = world
+            .get::<Health>(*m)
+            .map(|h| format!("HP {}/{}", h.hp, h.max))
+            .unwrap_or_default();
+        let here = if let (Some(my_room), Some(their_room)) = (
+            world.get::<Located>(player).map(|l| l.0),
+            world.get::<Located>(*m).map(|l| l.0),
+        ) {
+            if my_room == their_room { "here" } else { "elsewhere" }
+        } else {
+            "elsewhere"
+        };
+        out.push_str(&format!("  [{role:<6}] {name:<20} {hp:<14} ({here})\r\n"));
+    }
+    send_to(world, player, out);
+}
+
+/// `gsay <msg>` / `gtell` / `gecho`: broadcast a message to every
+/// member of the player's group, regardless of what room they're in.
+/// Players outside the group don't see it. Empty group = no-op with
+/// helpful message.
+fn cmd_gsay(world: &mut World, player: Entity, args: &str) {
+    let message = args.trim();
+    if message.is_empty() {
+        send_to(world, player, "Group-say what?\r\n");
+        return;
+    }
+    let root = group_root(world, player);
+    let members = group_members(world, root);
+    if members.len() <= 1 {
+        send_to(
+            world,
+            player,
+            "You're not in a group — nobody to say that to.\r\n",
+        );
+        return;
+    }
+    let speaker = name_of(world, player);
+    for m in members {
+        let line = if m == player {
+            format!("You group-say, \"{message}\"\r\n")
+        } else {
+            format!("({speaker} group-says) \"{message}\"\r\n")
+        };
+        send_rendered(world, m, &line);
+    }
+}
+
+/// `disband`: clear every direct `Follower(self)` link, breaking the
+/// group apart. Members deeper in the chain stay connected to each
+/// other unless they too disband. Self has no Follower component to
+/// touch — only entities pointing at self.
+fn cmd_disband(world: &mut World, player: Entity, _args: &str) {
+    let to_release: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Follower), With<Player>>();
+        q.iter(world)
+            .filter(|(_, f)| f.0 == player)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    if to_release.is_empty() {
+        send_to(world, player, "Nobody is following you.\r\n");
+        return;
+    }
+    let player_name = name_of(world, player);
+    for member in &to_release {
+        try_remove::<Follower>(world, *member);
+        let m_name = name_of(world, *member);
+        send_rendered(
+            world,
+            *member,
+            &format!("{player_name} dismisses you from the group.\r\n"),
+        );
+        send_rendered(
+            world,
+            player,
+            &format!("You dismiss {m_name} from the group.\r\n"),
+        );
+    }
 }
 
 fn cmd_follow(world: &mut World, player: Entity, args: &str) {
