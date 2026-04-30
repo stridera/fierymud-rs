@@ -9040,11 +9040,11 @@ fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-/// `rescue <player>`: redirect the ally's attacker onto yourself.
-/// Requires the ally is in your room and currently has a `Fighting`
-/// target. The attacker's Fighting flips to the rescuer; the ally's
-/// Fighting is cleared so they're free to flee or rest. Cost: 6
-/// stamina.
+/// `rescue <player>` — Phase C migration: shimmed over the RESCUE
+/// data path. Posture, "already fighting" and stamina-cost gates
+/// stay here (the data path doesn't model them yet); target
+/// resolution + Fighting-swap + room broadcast all flow through
+/// `invoke_ability` (redirect effect-type with `aggro=true`).
 fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "rescue") {
         return;
@@ -9058,59 +9058,23 @@ fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Rescue whom?\r\n");
         return;
     }
-    let Some(located) = world.get::<Located>(player).copied() else {
-        send_to(world, player, "You are nowhere.\r\n");
-        return;
-    };
-    let Some(ally) = find_actor_in_room(world, arg, located.0, player) else {
-        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
-        return;
-    };
-    if ally == player {
+    // Self-target shortcut: refuse before draining stamina (the
+    // redirect arm in invoke_ability also refuses, but we'd waste
+    // the cost otherwise).
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
         send_to(world, player, "You can't rescue yourself.\r\n");
-        return;
-    }
-    let Some(Fighting(attacker)) = world.get::<Fighting>(ally).copied() else {
-        let ally_name = name_or(world, ally, "<unknown>");
-        send_to(world, player, format!("{ally_name} isn't being attacked.\r\n"));
-        return;
-    };
-    if world.get_entity(attacker).is_err() {
-        send_to(world, player, "Their attacker has vanished.\r\n");
         return;
     }
     if !check_stamina(world, player, RESCUE_COST, "rescue") {
         return;
     }
     drain_stamina(world, player, RESCUE_COST);
-
-    // Flip the targets: ally is freed, attacker now targets player,
-    // player targets attacker.
-    try_remove::<Fighting>(world, ally);
-    try_insert(world, attacker, Fighting(player));
-    try_insert(world, player, Fighting(attacker));
-
-    let player_name = name_of(world, player);
-    let ally_name = name_of(world, ally);
-    let attacker_name = name_or(world, attacker, "<unknown>");
-    send_to(world, player, format!(
-        "You rescue {ally_name} from {attacker_name}!\r\n"
-    ));
-    send_rendered(world, ally, &format!(
-        "{player_name} rescues you from {attacker_name}!\r\n"
-    ));
-    if attacker != player {
-        send_rendered(
-            world,
-            attacker,
-            &format!("{player_name} steps in to defend {ally_name}!\r\n"),
-        );
-    }
-    broadcast_room_except_rendered(
+    invoke_ability(
         world,
-        located.0,
-        &[player, ally, attacker],
-        &format!("{player_name} rescues {ally_name} from {attacker_name}.\r\n"),
+        player,
+        &format!("rescue {arg}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
 }
 
