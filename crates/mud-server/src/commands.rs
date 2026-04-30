@@ -7748,7 +7748,6 @@ const BASH_COST: i32 = 8;
 const BANDAGE_COST: i32 = 4;
 const BANDAGE_HEAL: i32 = 10;
 const LAYHANDS_COST: i32 = 12;
-const LAYHANDS_HEAL: i32 = 30;
 const RESCUE_COST: i32 = 6;
 const DISARM_COST: i32 = 5;
 const HITALL_COST: i32 = 10;
@@ -9208,71 +9207,29 @@ fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
 
 /// `layhands [<target>]`: in-combat self/ally heal (30 HP, 12 stam).
 /// Same shape as bandage but works while fighting and heals more.
+/// `layhands` / `lay` aliases — Phase C migration: the actual heal
+/// logic now lives in the data path (`Ability.LAY_HANDS` →
+/// `AbilityEffect` heal effect with formula `level * 2`). This shim
+/// preserves the stamina cost and the legacy command names; the rest
+/// flows through `invoke_ability`.
 fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
-    let arg = args.trim();
-    let target = if arg.is_empty() || arg.eq_ignore_ascii_case("me")
-        || arg.eq_ignore_ascii_case("self")
-    {
-        player
-    } else {
-        let Some(located) = world.get::<Located>(player).copied() else {
-            send_to(world, player, "You are nowhere.\r\n");
-            return;
-        };
-        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
-            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
-            return;
-        };
-        t
-    };
     if !check_stamina(world, player, LAYHANDS_COST, "lay hands") {
         return;
     }
-    let Some(target_hp) = world.get::<Health>(target).copied() else {
-        send_to(world, player, "There's nothing to heal there.\r\n");
-        return;
-    };
-    if target_hp.hp >= target_hp.max {
-        let target_name = name_or(world, target, "<unknown>");
-        send_to(
-            world,
-            player,
-            if target == player {
-                "You're not hurt.\r\n".to_string()
-            } else {
-                format!("{target_name} isn't hurt.\r\n")
-            },
-        );
-        return;
-    }
     drain_stamina(world, player, LAYHANDS_COST);
-    let new_hp = (target_hp.hp + LAYHANDS_HEAL).min(target_hp.max);
-    if let Some(mut h) = world.get_mut::<Health>(target) {
-        h.hp = new_hp;
-    }
-    let healed = new_hp - target_hp.hp;
-    let target_name = name_or(world, target, "<unknown>");
-    if target == player {
-        send_to(
-            world,
-            player,
-            format!("You lay hands on yourself, healing {healed} HP.\r\n"),
-        );
+    let arg = args.trim();
+    let dispatched = if arg.is_empty() {
+        String::from("lay_hands")
     } else {
-        send_to(
-            world,
-            player,
-            format!("You lay hands on {target_name}, healing {healed} HP.\r\n"),
-        );
-        send_rendered(
-            world,
-            target,
-            &format!(
-                "{} lays hands on you, healing {healed} HP.\r\n",
-                name_of(world, player),
-            ),
-        );
-    }
+        format!("lay_hands {arg}")
+    };
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
 }
 
 /// `bandage [<target>]`: apply first aid for a small heal. Out-of-
