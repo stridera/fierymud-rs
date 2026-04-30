@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Pre-commit hook → runs the same gate scripts/check.sh enforces in the loop.
+# Install with: bash scripts/install-hooks.sh
+
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# Skip when there are no staged Rust changes — formatting-only / docs commits
+# don't need to pay the build cost.
+if ! git diff --cached --name-only | grep -qE '\.rs$|Cargo\.(toml|lock)$'; then
+    exit 0
+fi
+
+bash scripts/check.sh
