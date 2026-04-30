@@ -520,7 +520,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_eat,
     },
     Command {
-        names: &["quaff", "drink"],
+        names: &["quaff"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
@@ -531,6 +531,47 @@ const COMMANDS: &[Command] = &[
                    Effect application (ConsumableEffects) is deferred.",
         },
         run: cmd_quaff,
+    },
+    Command {
+        names: &["drink"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "drink <container>",
+            summary: "Take a swig from a drink container.",
+            long: "Decrements the container's `remaining` liquid by \
+                   4 units. Empty containers refuse. Use `quaff` for \
+                   potions, `sip` for a smaller swig (1 unit), \
+                   `taste` to identify the liquid without drinking.",
+        },
+        run: cmd_drink,
+    },
+    Command {
+        names: &["sip"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "sip <container>",
+            summary: "Sip 1 unit from a drink container.",
+            long: "Lighter than `drink` (4 units). Same refusal on \
+                   empty containers; same poison handling.",
+        },
+        run: cmd_sip,
+    },
+    Command {
+        names: &["taste"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "taste <container>",
+            summary: "Identify a liquid without drinking it.",
+            long: "Reveals the liquid name; on poisoned containers, \
+                   adds an off-taste hint. No consumption.",
+        },
+        run: cmd_taste,
     },
     Command {
         names: &["recite"],
@@ -7994,6 +8035,115 @@ fn cmd_eat(world: &mut World, player: Entity, args: &str) {
 
 fn cmd_quaff(world: &mut World, player: Entity, args: &str) {
     consume_item(world, player, args, mud_db::enums::ObjectType::Potion, "quaff");
+}
+
+/// `drink <container>` / `sip <container>`: take a swig from a
+/// DRINKCONTAINER. `drink` consumes 4 units, `sip` consumes 1.
+/// Empty containers refuse; reaching 0 mid-action leaves the
+/// container empty for next time but still completes the swig.
+/// Poisoned containers print a warning line — a real poison effect
+/// can wire later.
+fn drink_amount(world: &mut World, player: Entity, args: &str, units: i32, verb: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, format!("{} from what?\r\n", capitalize(verb)));
+        return;
+    }
+    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
+        send_to(world, player, format!("You aren't carrying '{target_word}'.\r\n"));
+        return;
+    };
+    let item_name = name_of(world, item);
+    let Some(state) = world.get::<mud_world::LiquidContainer>(item).cloned() else {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} isn't a drink container.\r\n"),
+        );
+        return;
+    };
+    if state.remaining <= 0 {
+        send_rendered(world, player, &format!("{item_name} is empty.\r\n"));
+        return;
+    }
+    let drank = state.remaining.min(units);
+    let liquid_lc = state.liquid.to_ascii_lowercase();
+    if let Some(mut lc) = world.get_mut::<mud_world::LiquidContainer>(item) {
+        lc.remaining -= drank;
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("You {verb} some {liquid_lc} from {item_name}.\r\n"),
+    );
+    if state.poisoned {
+        send_to(
+            world,
+            player,
+            "You feel a sudden burning in your gut — that was poisoned!\r\n",
+        );
+    }
+    let was_last = state.remaining == drank;
+    if was_last {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} is empty now.\r\n"),
+        );
+    }
+}
+
+fn cmd_drink(world: &mut World, player: Entity, args: &str) {
+    drink_amount(world, player, args, 4, "drink");
+}
+
+fn cmd_sip(world: &mut World, player: Entity, args: &str) {
+    drink_amount(world, player, args, 1, "sip");
+}
+
+/// `taste <container>`: identify the liquid without drinking. No
+/// state mutation, no consumption. On poisoned containers, gives a
+/// "tastes off" hint.
+fn cmd_taste(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Taste what?\r\n");
+        return;
+    }
+    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
+        send_to(world, player, format!("You aren't carrying '{target_word}'.\r\n"));
+        return;
+    };
+    let item_name = name_of(world, item);
+    let Some(state) = world.get::<mud_world::LiquidContainer>(item).cloned() else {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} isn't a drink container.\r\n"),
+        );
+        return;
+    };
+    let liquid_lc = state.liquid.to_ascii_lowercase();
+    if state.remaining <= 0 {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} is empty — nothing to taste.\r\n"),
+        );
+        return;
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("It tastes like {liquid_lc}.\r\n"),
+    );
+    if state.poisoned {
+        send_to(
+            world,
+            player,
+            "...with an unpleasant aftertaste. Probably poisoned.\r\n",
+        );
+    }
 }
 
 fn cmd_recite(world: &mut World, player: Entity, args: &str) {
