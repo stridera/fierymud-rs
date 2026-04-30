@@ -10,8 +10,8 @@ use tracing::{info, warn};
 
 use crate::components::{
     BoardLink, CombatStats, Description, EquippedSlot, ExitData, Exits, FromMobReset, Health, Item,
-    Keywords, LiquidContainer, Located, Mob, Named, Posture, PostureKind, Room, RoomSector,
-    Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
+    Keywords, LiquidContainer, Located, Mob, Mountable, Named, Posture, PostureKind, Room,
+    RoomSector, Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
@@ -583,6 +583,21 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             ));
             if let Some((shop_zone_id, shop_id)) = shop_key {
                 em.insert(Shopkeeper { shop_zone_id, shop_id });
+            }
+            // Mountable inference: keywords containing horse/steed/mount
+            // get the marker. Builders can refine via richer mount data
+            // later; for now this catches every horse/warhorse/donkey
+            // in the imported world.
+            if proto.keywords.iter().any(|k| {
+                let lc = k.to_ascii_lowercase();
+                lc.contains("horse")
+                    || lc.contains("steed")
+                    || lc.contains("mount")
+                    || lc.contains("donkey")
+                    || lc.contains("mare")
+                    || lc.contains("nightmare")
+            }) {
+                em.insert(Mountable);
             }
             let e = em.id();
             spawned_for_reset.push(e);

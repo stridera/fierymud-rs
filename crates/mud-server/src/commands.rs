@@ -479,6 +479,36 @@ const COMMANDS: &[Command] = &[
         run: cmd_extinguish,
     },
     Command {
+        names: &["mount"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "mount <mob>",
+            summary: "Climb onto a mountable mob.",
+            long: "Target must be `Mountable` (auto-applied to mobs \
+                   whose keywords contain horse / steed / mount / \
+                   donkey / mare). When you move, your mount comes \
+                   with you. Refused on already-mounted you, on \
+                   already-ridden mounts, or on mobs in combat.",
+        },
+        run: cmd_mount,
+    },
+    Command {
+        names: &["dismount"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "dismount",
+            summary: "Get off your current mount.",
+            long: "Clears the `Mounted` link on you and the \
+                   `RiddenBy` link on the mount. No-op when not \
+                   mounted.",
+        },
+        run: cmd_dismount,
+    },
+    Command {
         names: &["fly"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -8078,6 +8108,77 @@ fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
     send_rendered(world, player, &format!("You extinguish {item_name}.\r\n"));
 }
 
+/// `mount <mob>`: climb onto a mountable mob in the room. Installs
+/// `Mounted(mob)` on the rider and `RiddenBy(rider)` on the mount;
+/// movement (when the rider walks) carries the mount along. Refused
+/// on non-mountable mobs, on already-ridden mounts, when the rider
+/// is already mounted, or when the mob is in combat.
+fn cmd_mount(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Mount what?\r\n");
+        return;
+    }
+    if world.get::<mud_world::Mounted>(player).is_some() {
+        send_to(world, player, "You're already mounted.\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if world.get::<mud_world::Mountable>(target).is_none() {
+        let n = name_of(world, target);
+        send_rendered(world, player, &format!("You can't ride {n}.\r\n"));
+        return;
+    }
+    if world.get::<mud_world::RiddenBy>(target).is_some() {
+        let n = name_of(world, target);
+        send_rendered(world, player, &format!("{n} is already being ridden.\r\n"));
+        return;
+    }
+    if world.get::<Fighting>(target).is_some() {
+        send_to(world, player, "It's struggling too much to mount.\r\n");
+        return;
+    }
+    try_insert(world, player, mud_world::Mounted(target));
+    try_insert(world, target, mud_world::RiddenBy(player));
+    let mover = name_of(world, player);
+    let mount_name = name_of(world, target);
+    send_rendered(world, player, &format!("You mount {mount_name}.\r\n"));
+    broadcast_room_except_players_rendered(
+        world,
+        located.0,
+        &[player],
+        &format!("{mover} mounts {mount_name}.\r\n"),
+    );
+}
+
+/// `dismount`: get off your current mount. Clears `Mounted` /
+/// `RiddenBy` on both sides. No-op when not mounted.
+fn cmd_dismount(world: &mut World, player: Entity, _args: &str) {
+    let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(player).copied() else {
+        send_to(world, player, "You aren't riding anything.\r\n");
+        return;
+    };
+    try_remove::<mud_world::Mounted>(world, player);
+    try_remove::<mud_world::RiddenBy>(world, mount);
+    let mount_name = name_of(world, mount);
+    let mover = name_of(world, player);
+    send_rendered(world, player, &format!("You dismount from {mount_name}.\r\n"));
+    if let Some(located) = world.get::<Located>(player).copied() {
+        broadcast_room_except_players_rendered(
+            world,
+            located.0,
+            &[player],
+            &format!("{mover} dismounts from {mount_name}.\r\n"),
+        );
+    }
+}
+
 /// `fly`: take to the air. Inserts the `Flying` marker. While flying,
 /// movement charges a flat 2 stamina per move (sector-cost flattens
 /// to 1, plus a +1 wing-flap) — great over water/swamp, slightly
@@ -14146,9 +14247,18 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         );
     }
 
-    // Move everyone.
+    // Move everyone — and any mounts they're riding go with them.
+    let mounts: Vec<Entity> = movers
+        .iter()
+        .filter_map(|m| world.get::<mud_world::Mounted>(*m).map(|x| x.0))
+        .collect();
     for &mover in &movers {
         if let Some(mut l) = world.get_mut::<Located>(mover) {
+            l.0 = target;
+        }
+    }
+    for mount in mounts {
+        if let Some(mut l) = world.get_mut::<Located>(mount) {
             l.0 = target;
         }
     }

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_world::{
     CombatStats, Description, FromMobReset, Health, Keywords, Located, Mob, MobPrototypes,
-    MobResetCatalog, Named, Posture, PostureKind, ShopCatalog, Shopkeeper, WorldKey,
+    MobResetCatalog, Mountable, Named, Posture, PostureKind, ShopCatalog, Shopkeeper, WorldKey,
 };
 use tracing::info;
 
@@ -89,6 +89,17 @@ pub fn respawn_tick(world: &mut World) {
             ));
             if let Some((shop_zone_id, shop_id)) = shop_key {
                 em.insert(Shopkeeper { shop_zone_id, shop_id });
+            }
+            if proto.keywords.iter().any(|k| {
+                let lc = k.to_ascii_lowercase();
+                lc.contains("horse")
+                    || lc.contains("steed")
+                    || lc.contains("mount")
+                    || lc.contains("donkey")
+                    || lc.contains("mare")
+                    || lc.contains("nightmare")
+            }) {
+                em.insert(Mountable);
             }
             refilled += 1;
         }

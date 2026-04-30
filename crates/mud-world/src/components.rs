@@ -280,6 +280,25 @@ pub struct BoardLink(pub i32);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Flying;
 
+/// Marker: this mob is mountable. Set on horse/warhorse-style mobs
+/// at content time (currently auto-applied to mobs whose proto
+/// keywords contain "horse" / "mount"; richer content metadata can
+/// override later). `mount <mob>` only succeeds on Mountable mobs.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Mountable;
+
+/// Component on a rider: which mount they're on. Movement updates
+/// the mount's `Located` whenever the rider moves; the mount's own
+/// movement is otherwise locked. Cleared by `dismount`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Mounted(pub Entity);
+
+/// Component on a mount: which rider is on top. Mostly for symmetry
+/// (so we can render "X rides Y" / refuse double-mounting); the
+/// real movement plumbing reads `Mounted` on the rider.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RiddenBy(pub Entity);
+
 /// Pending group invite from another player. Set on the recipient
 /// when an inviter runs `invite <name>`. `accept` triggers the
 /// follow link; `decline` clears the marker. Cleared automatically
