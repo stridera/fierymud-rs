@@ -17,6 +17,51 @@ pub struct CharacterQuestRow {
     pub short_description: Option<String>,
 }
 
+/// Look up a Quest definition by its `(zone_id, id)` composite. Used
+/// by admin tooling that needs to confirm a quest exists before
+/// mutating `CharacterQuest`.
+pub async fn quest_exists(pool: &PgPool, zone_id: i32, id: i32) -> sqlx::Result<bool> {
+    let row = sqlx::query!(
+        r#"
+        SELECT 1 AS found FROM "Quest"
+        WHERE zone_id = $1 AND id = $2
+        LIMIT 1
+        "#,
+        zone_id,
+        id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
+/// Insert a fresh `IN_PROGRESS` `CharacterQuest` row for testing /
+/// admin tooling. Skips if the unique `(character_id, zone_id, id)`
+/// row already exists. Returns the row id when inserted, None when
+/// already present.
+pub async fn admin_assign(
+    pool: &PgPool,
+    character_id: &str,
+    zone_id: i32,
+    quest_id: i32,
+) -> sqlx::Result<Option<String>> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO "CharacterQuest"
+            (id, character_id, quest_zone_id, quest_id, status)
+        VALUES (gen_random_uuid()::text, $1, $2, $3, 'IN_PROGRESS'::"QuestStatus")
+        ON CONFLICT (character_id, quest_zone_id, quest_id) DO NOTHING
+        RETURNING id
+        "#,
+        character_id,
+        zone_id,
+        quest_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.id))
+}
+
 /// Set a `CharacterQuest` row's status to `ABANDONED`. Used by the
 /// `abandon` command. Doesn't delete the row — keeps the audit
 /// trail and respects the `(character_id, quest_zone_id, quest_id)`

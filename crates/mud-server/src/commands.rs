@@ -1640,6 +1640,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["qload"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "qload <zone> <quest-id>",
+            summary: "Admin: assign a quest to your character (testing).",
+            long: "Inserts a CharacterQuest row with status \
+                   IN_PROGRESS for the caller's character. No-op if \
+                   that quest is already assigned to you. Useful for \
+                   exercising the quests / abandon loop without the \
+                   full trigger-acceptance flow.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["post"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2721,6 +2737,12 @@ pub async fn try_dispatch_async(
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_abandon(world, player, pool, args).await;
+            true
+        }
+        "qload" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_qload(world, player, pool, args).await;
             true
         }
         "board" => {
@@ -11046,6 +11068,66 @@ pub(crate) async fn cmd_quests(
         }
     }
     send_to(world, player, out);
+}
+
+/// `qload <zone> <id>`: admin command — assign a quest to the caller's
+/// character with status `IN_PROGRESS`. Skips if the row already
+/// exists. Useful for testing the quest listing/abandon loop without
+/// the full trigger-acceptance flow.
+pub(crate) async fn cmd_qload(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let mut parts = args.split_whitespace();
+    let zone_raw = parts.next();
+    let id_raw = parts.next();
+    let (Some(zone_raw), Some(id_raw)) = (zone_raw, id_raw) else {
+        send_to(world, player, "Usage: qload <zone> <quest-id>\r\n");
+        return;
+    };
+    let Ok(zone) = zone_raw.parse::<i32>() else {
+        send_to(world, player, "Zone must be an integer.\r\n");
+        return;
+    };
+    let Ok(id) = id_raw.parse::<i32>() else {
+        send_to(world, player, "Quest id must be an integer.\r\n");
+        return;
+    };
+    let exists = match mud_db::quests::quest_exists(pool, zone, id).await {
+        Ok(b) => b,
+        Err(e) => {
+            send_to(world, player, format!("Quest lookup failed: {e}\r\n"));
+            return;
+        }
+    };
+    if !exists {
+        send_to(
+            world,
+            player,
+            format!("No Quest defined at ({zone}, {id}).\r\n"),
+        );
+        return;
+    }
+    let character_id = world.get::<Account>(player).map(|a| a.character_id.clone());
+    let Some(character_id) = character_id else {
+        send_to(world, player, "No account info; can't assign.\r\n");
+        return;
+    };
+    match mud_db::quests::admin_assign(pool, &character_id, zone, id).await {
+        Ok(Some(_)) => send_to(
+            world,
+            player,
+            format!("Assigned Quest ({zone}, {id}) to your character.\r\n"),
+        ),
+        Ok(None) => send_to(
+            world,
+            player,
+            format!("Already have Quest ({zone}, {id}).\r\n"),
+        ),
+        Err(e) => send_to(world, player, format!("Assign failed: {e}\r\n")),
+    }
 }
 
 /// `abandon <#>`: drop an in-progress quest. Slot is 1-based against
