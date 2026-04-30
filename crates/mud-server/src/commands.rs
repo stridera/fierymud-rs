@@ -2865,6 +2865,69 @@ mod tests {
     }
 
     #[test]
+    fn formula_eval_recognizes_caster_symbols() {
+        use super::FormulaCtx;
+        let mut zero = |_name: &str, _a: i32, _b: i32| 0;
+        // weapon_damage symbol resolves from ctx.
+        let ctx = FormulaCtx {
+            level: 10,
+            skill: 50,
+            weapon_damage: 12,
+            ..FormulaCtx::default()
+        };
+        // BACKSTAB-style: weapon_damage * (2 + skill / 25)
+        // = 12 * (2 + 2) = 48
+        assert_eq!(
+            evaluate_formula("weapon_damage * (2 + skill / 25)", &ctx, &mut zero),
+            Some(48)
+        );
+        // Stat bonuses + their short aliases.
+        let ctx = FormulaCtx {
+            level: 10,
+            skill: 30,
+            str_bonus: 3,
+            dex_bonus: 2,
+            con_bonus: 1,
+            int_bonus: 4,
+            wis_bonus: 5,
+            cha_bonus: -1,
+            ..FormulaCtx::default()
+        };
+        // BASH-style: skill / 3 + str_bonus = 10 + 3 = 13
+        assert_eq!(
+            evaluate_formula("skill / 3 + str_bonus", &ctx, &mut zero),
+            Some(13)
+        );
+        // KICK-style: level + dex_bonus + skill / 4 = 10 + 2 + 7 = 19
+        assert_eq!(
+            evaluate_formula("level + dex_bonus + skill / 4", &ctx, &mut zero),
+            Some(19)
+        );
+        // Short aliases match.
+        assert_eq!(evaluate_formula("str + dex", &ctx, &mut zero), Some(5));
+        assert_eq!(evaluate_formula("wis + cha", &ctx, &mut zero), Some(4));
+        // Unrecognized symbol still returns None.
+        assert_eq!(
+            evaluate_formula("base_damage + 5", &ctx, &mut zero),
+            None
+        );
+    }
+
+    #[test]
+    fn core_stats_bonus_d_n_d_style() {
+        use mud_world::CoreStats;
+        // Standard D&D bonuses: (score - 10) / 2 with truncation toward 0.
+        assert_eq!(CoreStats::bonus(10), 0);
+        assert_eq!(CoreStats::bonus(11), 0);
+        assert_eq!(CoreStats::bonus(12), 1);
+        assert_eq!(CoreStats::bonus(13), 1);
+        assert_eq!(CoreStats::bonus(18), 4);
+        assert_eq!(CoreStats::bonus(20), 5);
+        assert_eq!(CoreStats::bonus(8), -1);
+        assert_eq!(CoreStats::bonus(3), -3);
+    }
+
+    #[test]
     fn formula_eval_random_dispatched_by_name() {
         // Deterministic stub by name: random → 42, everything else 0.
         let mut stub = |name: &str, _a: i32, _b: i32| {
