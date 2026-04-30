@@ -628,7 +628,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_account,
     },
     Command {
-        names: &["world", "users"],
+        names: &["world", "users", "stats"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
@@ -638,8 +638,9 @@ const COMMANDS: &[Command] = &[
             long: "Snapshot of the world state right now: how many zones \
                    and rooms loaded, how many live mobs and items \
                    spawned, how many players online, server tick + \
-                   uptime. The aliases `users` mirrors `world` since \
-                   player count is the most-asked piece.",
+                   uptime, and active effect-instance count. Aliases \
+                   `users` and `stats` mirror `world` since the player \
+                   count and per-system load are the most-asked pieces.",
         },
         run: cmd_world,
     },
@@ -5239,6 +5240,7 @@ fn cmd_world(world: &mut World, player: Entity, _args: &str) {
         .query_filtered::<Entity, (With<Player>, With<Online>)>()
         .iter(world)
         .count();
+    let effects = world.query::<&EffectInstance>().iter(world).count();
     let tick = world.resource::<TickCount>().0;
     let uptime_secs = world.resource::<ServerStart>().0.elapsed().as_secs();
     let h = uptime_secs / 3600;
@@ -5251,6 +5253,7 @@ fn cmd_world(world: &mut World, player: Entity, _args: &str) {
     out.push_str(&format!("  Mobs spawned:    {mobs}\r\n"));
     out.push_str(&format!("  Items spawned:   {items}\r\n"));
     out.push_str(&format!("  Players online:  {players_online}\r\n"));
+    out.push_str(&format!("  Active effects:  {effects}\r\n"));
     out.push_str(&format!("  Server tick:     {tick}\r\n"));
     out.push_str(&format!("  Uptime:          {h}h {m}m {s}s\r\n"));
     send_to(world, player, out);
