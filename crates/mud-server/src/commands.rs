@@ -397,10 +397,36 @@ const COMMANDS: &[Command] = &[
             summary: "Read a magic scroll, casting its inscribed spells.",
             long: "Looks up the bound abilities via ObjectAbilities and \
                    dispatches each through the cast pipeline. Despawns the \
-                   scroll regardless of outcome (single-use). Wand/staff \
-                   support with Charges decrement is a follow-up.",
+                   scroll regardless of outcome (single-use).",
         },
         run: cmd_recite,
+    },
+    Command {
+        names: &["wave"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "wave <wand> [<target>]",
+            summary: "Wave a wand to cast its bound spell.",
+            long: "Decrements the wand's Charges component on each use; \
+                   wand crumbles when charges hit 0. Refused on depleted \
+                   wands. Item type must be WAND.",
+        },
+        run: cmd_wave,
+    },
+    Command {
+        names: &["tap"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "tap <staff> [<target>]",
+            summary: "Tap a staff to invoke its bound abilities.",
+            long: "Same charge mechanic as wave but for STAFF items. \
+                   Useful for buff staves and AOE-style staff effects.",
+        },
+        run: cmd_tap,
     },
     Command {
         names: &["hold", "grab"],
@@ -5522,26 +5548,69 @@ fn cmd_quaff(world: &mut World, player: Entity, args: &str) {
     consume_item(world, player, args, mud_db::enums::ObjectType::Potion, "quaff");
 }
 
-/// `recite <scroll> [<target>]` — Phase E: invoke the abilities
-/// bound to a Scroll item via `ObjectAbilities`, then despawn the
-/// scroll (single-use). Each binding's ability is dispatched
-/// through `invoke_ability` so all the existing gates apply.
-/// Future wand/staff variants will use the same helper but
-/// decrement Charges instead of always despawning.
 fn cmd_recite(world: &mut World, player: Entity, args: &str) {
+    invoke_object_abilities(
+        world,
+        player,
+        args,
+        mud_db::enums::ObjectType::Scroll,
+        "recite",
+        "You read aloud from",
+        true,
+    );
+}
+
+fn cmd_wave(world: &mut World, player: Entity, args: &str) {
+    invoke_object_abilities(
+        world,
+        player,
+        args,
+        mud_db::enums::ObjectType::Wand,
+        "wave",
+        "You wave",
+        false,
+    );
+}
+
+fn cmd_tap(world: &mut World, player: Entity, args: &str) {
+    invoke_object_abilities(
+        world,
+        player,
+        args,
+        mud_db::enums::ObjectType::Staff,
+        "tap",
+        "You tap",
+        false,
+    );
+}
+
+/// Shared body for `recite` / `wave` / `tap`: look up the held
+/// item's `ObjectAbilities` bindings, dispatch each through the
+/// cast pipeline, then either despawn (`single_use=true`, scrolls)
+/// or decrement `Charges` (`single_use=false`, wands/staves —
+/// despawn at 0).
+fn invoke_object_abilities(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    expected_type: mud_db::enums::ObjectType,
+    verb: &str,
+    intro_phrase: &str,
+    single_use: bool,
+) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
-    let scroll_word = parts.first().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let item_word = parts.first().map(|s| s.trim()).filter(|s| !s.is_empty());
     let target_word = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
-    let Some(scroll_word) = scroll_word else {
-        send_to(world, player, "Recite what?\r\n");
+    let Some(item_word) = item_word else {
+        send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
         return;
     };
-    let item = find_carried_by(world, scroll_word, player, EquipFilter::Inventory);
+    let item = find_carried_by(world, item_word, player, EquipFilter::Inventory);
     let Some(item) = item else {
         send_to(
             world,
             player,
-            format!("You aren't carrying '{scroll_word}'.\r\n"),
+            format!("You aren't carrying '{item_word}'.\r\n"),
         );
         return;
     };
@@ -5556,9 +5625,24 @@ fn cmd_recite(world: &mut World, player: Entity, args: &str) {
         .by_key
         .get(&(key.zone, key.id))
         .map(|p| p.r#type);
-    if kind != Some(mud_db::enums::ObjectType::Scroll) {
-        send_rendered(world, player, &format!("You can't recite {item_name}.\r\n"));
+    if kind != Some(expected_type) {
+        send_rendered(
+            world,
+            player,
+            &format!("You can't {verb} {item_name}.\r\n"),
+        );
         return;
+    }
+    // Empty Charges → refuse before any output. Without a Charges
+    // component, treat as unlimited (covers freshly-spawned items
+    // until `Charges` populates from binding.charges on every
+    // spawn site).
+    if !single_use {
+        let charges = world.get::<mud_world::Charges>(item).copied();
+        if matches!(charges, Some(mud_world::Charges(0))) {
+            send_rendered(world, player, &format!("{item_name} is depleted.\r\n"));
+            return;
+        }
     }
     let bindings: Vec<i32> = world
         .resource::<mud_world::ObjectAbilityCatalog>()
@@ -5570,14 +5654,11 @@ fn cmd_recite(world: &mut World, player: Entity, args: &str) {
         send_rendered(
             world,
             player,
-            &format!("{item_name} has no inscribed magic.\r\n"),
+            &format!("{item_name} has no bound magic.\r\n"),
         );
         return;
     }
-    send_rendered(world, player, &format!("You read aloud from {item_name}.\r\n"));
-    // Dispatch every bound ability. invoke_ability resolves names
-    // via AbilityCatalog.by_name, so look up the def to get the
-    // canonical key.
+    send_rendered(world, player, &format!("{intro_phrase} {item_name}.\r\n"));
     for ability_id in bindings {
         let ability_name = world
             .resource::<AbilityCatalog>()
@@ -5601,10 +5682,21 @@ fn cmd_recite(world: &mut World, player: Entity, args: &str) {
             "cast",
         );
     }
-    // Scroll consumed regardless of cast outcome — no Charges
-    // tracking yet for finite-use items, that's the next slice.
-    if let Ok(e) = world.get_entity_mut(item) {
-        e.despawn();
+    if single_use {
+        if let Ok(e) = world.get_entity_mut(item) {
+            e.despawn();
+        }
+    } else if let Some(mut c) = world.get_mut::<mud_world::Charges>(item) {
+        if c.0 > 0 {
+            c.0 -= 1;
+        }
+        let depleted = c.0 == 0;
+        if depleted {
+            send_rendered(world, player, &format!("{item_name} crumbles to dust.\r\n"));
+            if let Ok(e) = world.get_entity_mut(item) {
+                e.despawn();
+            }
+        }
     }
 }
 
@@ -10765,6 +10857,18 @@ fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
         bundle.insert(WearableIn(s));
     }
     let item = bundle.id();
+    // Populate Charges from the first ObjectAbilities binding
+    // (wands and staves carry finite-use charges in the schema's
+    // `charges` column). Items without a binding or without
+    // charges set get no Charges component → treated as unlimited.
+    if let Some(charges) = world
+        .resource::<mud_world::ObjectAbilityCatalog>()
+        .by_key
+        .get(&(proto.zone_id, proto.id))
+        .and_then(|v| v.first().and_then(|b| b.charges))
+    {
+        crate::commands::try_insert(world, item, mud_world::Charges(charges));
+    }
 
     send_to(
         world,

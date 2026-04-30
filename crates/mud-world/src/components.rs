@@ -227,6 +227,14 @@ pub struct Stunned;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Stealth;
 
+/// Per-item finite charges for `ObjectAbilities`-bound items
+/// (wands, staves). `-1` means unlimited (never decremented).
+/// `0` means depleted — the item should despawn or refuse to
+/// activate. The runtime decrements on each successful invocation
+/// via `wave` / `tap`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Charges(pub i32);
+
 /// Per-character ability cooldown table. Maps `Ability.id` → the
 /// `Instant` at which the cooldown expires (i.e. the ability becomes
 /// usable again). Inserted lazily on first cooldown set; entries past
