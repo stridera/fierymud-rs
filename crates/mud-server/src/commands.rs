@@ -4934,12 +4934,11 @@ mod tests {
         let mut world = World::new();
         let caster = world.spawn(()).id();
         let target = world.spawn(()).id();
-        // Unrecognized kinds get a free pass — DRAG, PALM, RESURRECT,
-        // BUCK shouldn't be blocked while their target categories are
-        // unmodeled.
+        // CORPSE / UNCONSCIOUS aren't yet modeled; they pass silently
+        // so DRAG / RESURRECT aren't blocked.
         let valid: Vec<String> = vec!["CORPSE".to_string()];
         assert_eq!(check_target_type(&mut world, caster, target, &valid), None);
-        let valid: Vec<String> = vec!["RIDER".to_string(), "OBJECT_INV".to_string()];
+        let valid: Vec<String> = vec!["UNCONSCIOUS".to_string()];
         assert_eq!(check_target_type(&mut world, caster, target, &valid), None);
     }
 
@@ -10488,6 +10487,10 @@ fn check_target_type(
     let target_is_self = caster == target;
     let target_is_item_in_inv = world.get::<Item>(target).is_some()
         && world.get::<Located>(target).is_some_and(|l| l.0 == caster);
+    // RIDER target is the caster's current mount.
+    let target_is_caster_mount = world
+        .get::<mud_world::Mounted>(caster)
+        .is_some_and(|m| m.0 == target);
     for kind in valid_targets {
         match kind.as_str() {
             "ENEMY_PC" => {
@@ -10505,6 +10508,12 @@ fn check_target_type(
             "OBJECT_INV" => {
                 any_recognized = true;
                 if target_is_item_in_inv {
+                    return None;
+                }
+            }
+            "RIDER" => {
+                any_recognized = true;
+                if target_is_caster_mount {
                     return None;
                 }
             }
