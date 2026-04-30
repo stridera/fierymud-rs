@@ -4,8 +4,9 @@ pub mod resources;
 
 pub use components::{
     Account, AccountSummary, AppliedTo, BankWealth, BoardDraft, BoardLink, Charges, CombatStats,
-    Cooldowns, CoreStats, Description, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting,
-    Follower, FromMobReset, Frozen, Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt,
+    Cooldowns, CoreStats, Description, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits,
+    Fighting, Flying, Follower, FromMobReset, Frozen, Health, IgnoreList, Item, Keywords,
+    KnownAbilities, LastInputAt,
     LastTeller, LiquidContainer, Lit, Located, LoggedInAt, MailDraft, Mob, Named, Online, Player,
     PlayerFlags,
     Posture, PostureKind, Profile, Prompt, RecallPoint, Room, RoomSector, Shopkeeper, Slot, Stamina,

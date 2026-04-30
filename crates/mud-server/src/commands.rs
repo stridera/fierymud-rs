@@ -479,6 +479,34 @@ const COMMANDS: &[Command] = &[
         run: cmd_extinguish,
     },
     Command {
+        names: &["fly"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "fly",
+            summary: "Take to the air (sets the Flying marker).",
+            long: "Movement charges a flat 2 stamina per move while \
+                   flying — great savings over water/swamp (4-6 \
+                   normally), slightly pricier on roads (1). Use \
+                   `walk` or `land` to come back down.",
+        },
+        run: cmd_fly,
+    },
+    Command {
+        names: &["walk", "land"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "walk",
+            summary: "Stop flying and walk again.",
+            long: "Clears the Flying marker. No-op when already \
+                   walking.",
+        },
+        run: cmd_walk,
+    },
+    Command {
         names: &["hide"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -8002,6 +8030,47 @@ fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
     send_rendered(world, player, &format!("You extinguish {item_name}.\r\n"));
 }
 
+/// `fly`: take to the air. Inserts the `Flying` marker. While flying,
+/// movement charges a flat 2 stamina per move (sector-cost flattens
+/// to 1, plus a +1 wing-flap) — great over water/swamp, slightly
+/// pricier on roads. `walk` / `land` clears the marker.
+fn cmd_fly(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<mud_world::Flying>(player).is_some() {
+        send_to(world, player, "You're already flying.\r\n");
+        return;
+    }
+    try_insert(world, player, mud_world::Flying);
+    let mover_name = name_of(world, player);
+    send_to(world, player, "You spread your wings and take to the air.\r\n");
+    if let Some(located) = world.get::<Located>(player).copied() {
+        broadcast_room_except_players_rendered(
+            world,
+            located.0,
+            &[player],
+            &format!("{mover_name} takes to the air.\r\n"),
+        );
+    }
+}
+
+/// `walk` / `land`: clear the `Flying` marker.
+fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<mud_world::Flying>(player).is_none() {
+        send_to(world, player, "You're already on the ground.\r\n");
+        return;
+    }
+    try_remove::<mud_world::Flying>(world, player);
+    let mover_name = name_of(world, player);
+    send_to(world, player, "You touch down and start walking again.\r\n");
+    if let Some(located) = world.get::<Located>(player).copied() {
+        broadcast_room_except_players_rendered(
+            world,
+            located.0,
+            &[player],
+            &format!("{mover_name} lands and starts walking.\r\n"),
+        );
+    }
+}
+
 /// `hide`: set the `Stealth` marker on the player. Today this just
 /// flips the `hidden` symbol in damage formulas (BACKSTAB's bonus
 /// reads it) — there's no auto-fail on noisy actions, no skill check,
@@ -13844,11 +13913,17 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 
     // Stamina pre-flight: cost depends on the target room's sector.
     // Followers along for the ride aren't checked — they go where the leader
-    // goes; the leader pays the cost.
+    // goes; the leader pays the cost. `Flying` flattens sector cost to
+    // 1 but adds a +1 wing-flap charge on top.
     let target_sector = world
         .get::<RoomSector>(target)
         .map_or(Sector::Field, |s| s.0);
-    let stamina_cost = sector_movement_cost(target_sector);
+    let is_flying = world.get::<mud_world::Flying>(player).is_some();
+    let stamina_cost = if is_flying {
+        1 + 1
+    } else {
+        sector_movement_cost(target_sector)
+    };
     if let Some(s) = world.get::<Stamina>(player).copied()
         && s.current < stamina_cost
     {

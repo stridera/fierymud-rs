@@ -272,6 +272,14 @@ pub struct Shopkeeper {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct BoardLink(pub i32);
 
+/// Marker: the player is flying. Movement treats every sector as
+/// equally easy (sector cost 1 instead of 4-6 for water etc.) but
+/// adds a flat +1 stamina per move on top — flying is great over
+/// difficult terrain, mildly costly on roads. `walk` / `land` clear
+/// the marker.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Flying;
+
 /// Component on spawned DRINKCONTAINER-typed items: per-instance
 /// liquid state mirrored from `Objects.values`. `remaining` mutates
 /// on `drink`/`sip`/`pour`/`fill`; the proto values are the
