@@ -18,9 +18,9 @@ use mud_world::{
     CoreStats, Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
-    BankWealth, MailDraft, RecallPoint, RoomSector, ShopCatalog, Shopkeeper, Slot, SocialDef,
-    SocialRegistry, Stamina, Stealth, Stunned, TellLog, Title, UiStyle, Wealth, WearableIn,
-    WorldKey, WorldKeyIndex, ZoneClimate,
+    BankWealth, BoardDraft, MailDraft, RecallPoint, RoomSector, ShopCatalog, Shopkeeper, Slot,
+    SocialDef, SocialRegistry, Stamina, Stealth, Stunned, TellLog, Title, UiStyle, Wealth,
+    WearableIn, WorldKey, WorldKeyIndex, ZoneClimate,
 };
 use tracing::{info, info_span};
 
@@ -1609,6 +1609,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["post"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "post <board-alias>",
+            summary: "Compose a new message on a board.",
+            long: "Opens a multi-line composition session: first \
+                   non-blank line is the subject, subsequent lines \
+                   accumulate as body. `.send` ships, `.abort` \
+                   cancels, `.preview` shows the draft. Locked \
+                   boards refuse the open.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["mailbox"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2599,14 +2615,19 @@ pub async fn try_dispatch_async(
     if trimmed.is_empty() {
         return false;
     }
-    // Composition mode: when the player has a `MailDraft` component,
-    // every line is routed to the mail composer (control commands
-    // start with `.`; everything else is text). Bypasses normal
-    // dispatch entirely until `.send` / `.abort` clears the draft.
+    // Composition mode: when the player has a `MailDraft` or
+    // `BoardDraft` component, every line is routed to the matching
+    // composer until `.send` / `.abort` clears it.
     if world.get::<MailDraft>(player).is_some() {
         mark_for_prompt(player);
         try_insert(world, player, LastInputAt(std::time::Instant::now()));
         compose_mail_step(world, player, pool, trimmed).await;
+        return true;
+    }
+    if world.get::<BoardDraft>(player).is_some() {
+        mark_for_prompt(player);
+        try_insert(world, player, LastInputAt(std::time::Instant::now()));
+        compose_board_step(world, player, pool, trimmed).await;
         return true;
     }
 
@@ -2630,6 +2651,12 @@ pub async fn try_dispatch_async(
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_board(world, player, pool, args).await;
+            true
+        }
+        "post" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_post(world, player, pool, args).await;
             true
         }
         "mailbox" | "mailboxes" => {
@@ -2787,6 +2814,179 @@ async fn compose_mail_step(
         // already; an echo on every line would feel chatty.
         ComposeStep::BodyAdded => {}
     }
+}
+
+/// Process one line of input from a player who has an active
+/// `BoardDraft`. Same control verbs as mail (`.send` / `.abort` /
+/// `.preview`), same first-line-is-subject rule.
+#[allow(clippy::too_many_lines)]
+async fn compose_board_step(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    line: &str,
+) {
+    let trimmed = line.trim();
+    if trimmed.eq_ignore_ascii_case(".abort") {
+        try_remove::<BoardDraft>(world, player);
+        send_to(world, player, "Board post aborted.\r\n");
+        return;
+    }
+    if trimmed.eq_ignore_ascii_case(".preview") {
+        let Some(draft) = world.get::<BoardDraft>(player).cloned() else {
+            return;
+        };
+        let mut out = String::from("\r\n--- DRAFT ---\r\n");
+        out.push_str(&format!("Board:   {} ({})\r\n", draft.board_title, draft.board_alias));
+        out.push_str(&format!(
+            "Subject: {}\r\n",
+            draft.subject.as_deref().unwrap_or("(none yet)"),
+        ));
+        out.push_str("---\r\n");
+        if draft.body.is_empty() {
+            out.push_str("(empty body)\r\n");
+        } else {
+            for ln in &draft.body {
+                out.push_str(ln);
+                out.push_str("\r\n");
+            }
+        }
+        out.push_str("--- end of draft ---\r\n");
+        send_to(world, player, out);
+        return;
+    }
+    if trimmed.eq_ignore_ascii_case(".send") {
+        let Some(draft) = world.get::<BoardDraft>(player).cloned() else {
+            return;
+        };
+        let Some(subject) = draft.subject else {
+            send_to(
+                world,
+                player,
+                "No subject set yet — type a subject line first.\r\n",
+            );
+            return;
+        };
+        if draft.body.is_empty() {
+            send_to(world, player, "Body is empty — type some lines first.\r\n");
+            return;
+        }
+        let body = draft.body.join("\n");
+        let poster = name_of(world, player);
+        let level = world.get::<Profile>(player).map_or(1, |p| p.level);
+        match mud_db::boards::post_message(
+            pool,
+            draft.board_id,
+            &poster,
+            level,
+            &subject,
+            &body,
+        )
+        .await
+        {
+            Ok(_id) => {
+                try_remove::<BoardDraft>(world, player);
+                send_to(
+                    world,
+                    player,
+                    format!(
+                        "Posted to {} ({}).\r\n",
+                        draft.board_title, draft.board_alias
+                    ),
+                );
+            }
+            Err(e) => {
+                send_to(world, player, format!("Post failed: {e}\r\n"));
+            }
+        }
+        return;
+    }
+    let step = if let Some(mut draft) = world.get_mut::<BoardDraft>(player) {
+        if draft.subject.is_none() {
+            if trimmed.is_empty() {
+                ComposeStep::Nudge
+            } else {
+                draft.subject = Some(trimmed.to_string());
+                ComposeStep::SubjectSet
+            }
+        } else {
+            draft.body.push(line.to_string());
+            ComposeStep::BodyAdded
+        }
+    } else {
+        return;
+    };
+    match step {
+        ComposeStep::Nudge => send_to(
+            world,
+            player,
+            "Type a subject line, then the body. `.send` to ship; `.abort` to cancel.\r\n",
+        ),
+        ComposeStep::SubjectSet => send_to(
+            world,
+            player,
+            "Subject set. Type the body, one line at a time. \
+             `.send` to ship, `.abort` to cancel, `.preview` to review.\r\n",
+        ),
+        ComposeStep::BodyAdded => {}
+    }
+}
+
+/// `post <board>`: open a board-composition draft. Locked boards
+/// refuse the open. Resolves the alias, attaches `BoardDraft`, and
+/// prompts for a subject. Subsequent input flows through
+/// `compose_board_step` until `.send` / `.abort` clears the draft.
+pub(crate) async fn cmd_post(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let alias = args.trim();
+    if alias.is_empty() {
+        send_to(world, player, "Usage: post <board-alias>\r\n");
+        return;
+    }
+    let board = match mud_db::boards::find_board_by_alias(pool, alias).await {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            send_to(world, player, format!("No board called '{alias}'.\r\n"));
+            return;
+        }
+        Err(e) => {
+            send_to(world, player, format!("Board lookup failed: {e}\r\n"));
+            return;
+        }
+    };
+    if board.locked {
+        send_to(
+            world,
+            player,
+            format!("'{}' is locked; no posts accepted.\r\n", board.title),
+        );
+        return;
+    }
+    try_insert(
+        world,
+        player,
+        BoardDraft {
+            board_id: board.id,
+            board_alias: board.alias.clone(),
+            board_title: board.title.clone(),
+            subject: None,
+            body: Vec::new(),
+        },
+    );
+    send_to(
+        world,
+        player,
+        format!(
+            "Posting to {} ({}).\r\n\
+             First line is the subject. Then type the body, one line at a time.\r\n\
+             `.send` ships it; `.abort` cancels; `.preview` shows the draft.\r\n",
+            board.title, board.alias,
+        ),
+    );
 }
 
 /// `mail <character>`: open a mail-composition draft addressed to

@@ -283,6 +283,18 @@ pub struct MailDraft {
     pub body: Vec<String>,
 }
 
+/// In-flight message-board post. Same shape as `MailDraft` but
+/// addresses a `Board` row instead of a User. Resolved at `post
+/// <alias>` time; composition flow is identical.
+#[derive(Component, Debug, Clone)]
+pub struct BoardDraft {
+    pub board_id: i32,
+    pub board_alias: String,
+    pub board_title: String,
+    pub subject: Option<String>,
+    pub body: Vec<String>,
+}
+
 /// Bank balance in copper units, mirrored from `Characters.bank_wealth`.
 /// Loaded at spawn, displayed by `cmd_balance`. No deposit/withdraw
 /// commands are wired yet; once they land they'll need to round-trip
