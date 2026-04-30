@@ -6234,12 +6234,29 @@ fn invoke_ability(
         mappings
             .iter()
             .filter_map(|(id, override_params)| {
-                effect_catalog.by_id.get(id).map(|e| EffectSpec {
-                    id: *id,
-                    name: e.name.clone(),
-                    effect_type: e.effect_type.clone(),
-                    override_params: override_params.clone(),
-                    default_params: e.default_params.clone(),
+                effect_catalog.by_id.get(id).map(|e| {
+                    // Per-instance name: prefer `flag` from
+                    // override_params (the schema's per-mapping label
+                    // — BERSERK sets flag="berserk" on a generic
+                    // `status` effect). Fall back to the EffectDef's
+                    // name. Without this, BERSERK / BLESS / BLUR /
+                    // CHARM all spawn EffectInstance.name="status",
+                    // which loses meaningful identity for the
+                    // effects-list display, the combat tick's
+                    // berserk damage bonus, and cleanse/dispel
+                    // matching.
+                    let flag = override_params
+                        .as_ref()
+                        .and_then(|p| p.get("flag"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    EffectSpec {
+                        id: *id,
+                        name: flag.unwrap_or_else(|| e.name.clone()),
+                        effect_type: e.effect_type.clone(),
+                        override_params: override_params.clone(),
+                        default_params: e.default_params.clone(),
+                    }
                 })
             })
             .collect()
