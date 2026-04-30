@@ -4049,9 +4049,21 @@ fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
 /// sheet. Zero-value coins are skipped; "no coin" prints when broke.
 fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
     let total = world.get::<Wealth>(player).map_or(0, |w| w.0);
+    let msg = if let Some(parts) = format_wealth(total) {
+        format!("\r\nYou have {parts}.\r\n")
+    } else {
+        "\r\nYou have no coin to your name.\r\n".to_string()
+    };
+    send_to(world, player, msg);
+}
+
+/// Split an on-hand copper total into the four denominations and
+/// render as `"X platinum, Y gold, Z silver, W copper"`. Returns
+/// None when the total is zero or negative so callers can render
+/// the empty case differently.
+fn format_wealth(total: i64) -> Option<String> {
     if total <= 0 {
-        send_to(world, player, "\r\nYou have no coin to your name.\r\n");
-        return;
+        return None;
     }
     let mut remainder = total;
     let platinum = remainder / 1000;
@@ -4073,11 +4085,7 @@ fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
     if copper > 0 {
         parts.push(format!("{copper} copper"));
     }
-    send_to(
-        world,
-        player,
-        format!("\r\nYou have {}.\r\n", parts.join(", ")),
-    );
+    Some(parts.join(", "))
 }
 
 /// `scan`: walk this room's exits and print one line per direction
@@ -4403,6 +4411,9 @@ struct ScoreData<'a> {
     /// `class_label` is the catalog `name` (with color tags) when the
     /// character has a class assigned, "Classless" otherwise.
     profile: Option<(i32, &'a str, &'a str, i32)>,
+    /// On-hand copper total. Rendered as a `wealth`-style platinum/
+    /// gold/silver/copper line. Zero is omitted from the score sheet.
+    wealth: i64,
 }
 
 fn cmd_score(world: &mut World, player: Entity, _args: &str) {
@@ -4437,6 +4448,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             (prof.level, class_label, prof.race.clone(), prof.experience)
         });
 
+    let wealth = world.get::<Wealth>(player).map_or(0, |w| w.0);
     let data = ScoreData {
         name: &name,
         hp,
@@ -4449,6 +4461,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         profile: profile_owned
             .as_ref()
             .map(|(lvl, cls, race, xp)| (*lvl, cls.as_str(), race.as_str(), *xp)),
+        wealth,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
@@ -4479,6 +4492,9 @@ fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(p) = d.posture {
         out.push_str(&format!("  Posture: {}\r\n", p.0.label()));
+    }
+    if let Some(coin) = format_wealth(d.wealth) {
+        out.push_str(&format!("  Wealth: {coin}\r\n"));
     }
     if let Some(l) = d.logged_in {
         out.push_str(&format!("  Online for: {}\r\n", format_idle(l.0.elapsed().as_secs())));
