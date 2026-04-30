@@ -265,6 +265,24 @@ pub struct Shopkeeper {
     pub shop_id: i32,
 }
 
+/// In-flight mail composition. Attached when the player runs
+/// `mail <recipient>`; while present, every line of input is routed
+/// to the mail-composition handler instead of normal dispatch. The
+/// first non-blank line becomes the subject; subsequent lines append
+/// to the body. `.send` finalizes (DB insert + remove component);
+/// `.abort` discards; `.preview` echoes the current draft.
+#[derive(Component, Debug, Clone)]
+pub struct MailDraft {
+    /// User id of the addressed account (resolved at `mail` time
+    /// from the recipient character name).
+    pub recipient_user_id: String,
+    /// Human-readable label for the recipient — usually the
+    /// character name as the player typed it. Echoed in messages.
+    pub recipient_label: String,
+    pub subject: Option<String>,
+    pub body: Vec<String>,
+}
+
 /// Bank balance in copper units, mirrored from `Characters.bank_wealth`.
 /// Loaded at spawn, displayed by `cmd_balance`. No deposit/withdraw
 /// commands are wired yet; once they land they'll need to round-trip

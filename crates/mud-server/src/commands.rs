@@ -18,9 +18,9 @@ use mud_world::{
     CoreStats, Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
-    BankWealth, RecallPoint, RoomSector, ShopCatalog, Shopkeeper, Slot, SocialDef, SocialRegistry,
-    Stamina, Stealth, Stunned, TellLog, Title, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex,
-    ZoneClimate,
+    BankWealth, MailDraft, RecallPoint, RoomSector, ShopCatalog, Shopkeeper, Slot, SocialDef,
+    SocialRegistry, Stamina, Stealth, Stunned, TellLog, Title, UiStyle, Wealth, WearableIn,
+    WorldKey, WorldKeyIndex, ZoneClimate,
 };
 use tracing::{info, info_span};
 
@@ -1563,6 +1563,24 @@ const COMMANDS: &[Command] = &[
         run: cmd_lasttells,
     },
     Command {
+        names: &["mail"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "mail <character>",
+            summary: "Compose and send mail to another player.",
+            long: "Mail is account-scoped — addressing a character \
+                   delivers to whichever account owns them. After \
+                   `mail <name>`, your input enters compose mode: \
+                   first non-blank line is the subject, subsequent \
+                   lines accumulate as body. Control verbs: `.send` \
+                   ships the draft, `.abort` discards it, `.preview` \
+                   shows what's queued.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["mailbox"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2510,10 +2528,27 @@ pub async fn try_dispatch_async(
     if trimmed.is_empty() {
         return false;
     }
+    // Composition mode: when the player has a `MailDraft` component,
+    // every line is routed to the mail composer (control commands
+    // start with `.`; everything else is text). Bypasses normal
+    // dispatch entirely until `.send` / `.abort` clears the draft.
+    if world.get::<MailDraft>(player).is_some() {
+        mark_for_prompt(player);
+        try_insert(world, player, LastInputAt(std::time::Instant::now()));
+        compose_mail_step(world, player, pool, trimmed).await;
+        return true;
+    }
+
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("").to_ascii_lowercase();
     let args = parts.next().unwrap_or("").trim();
     match head.as_str() {
+        "mail" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_mail(world, player, pool, args).await;
+            true
+        }
         "mailbox" | "mailboxes" => {
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
@@ -2534,6 +2569,193 @@ pub async fn try_dispatch_async(
         }
         _ => false,
     }
+}
+
+/// State summary of one composition step — needed because we have to
+/// release the `Mut<MailDraft>` borrow before sending feedback to the
+/// player (`send_to` re-borrows the world).
+enum ComposeStep {
+    Nudge,
+    SubjectSet,
+    BodyAdded,
+}
+
+/// Process one line of input from a player who has an active
+/// `MailDraft`. Recognized control verbs:
+///   `.send`    — finalize and persist the mail
+///   `.abort`   — discard the draft
+///   `.preview` — show the current draft so far
+/// Anything else is a content line: first non-blank line becomes
+/// the subject, subsequent lines append to the body.
+#[allow(clippy::too_many_lines)]
+async fn compose_mail_step(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    line: &str,
+) {
+    let trimmed = line.trim();
+    if trimmed.eq_ignore_ascii_case(".abort") {
+        try_remove::<MailDraft>(world, player);
+        send_to(world, player, "Mail composition aborted.\r\n");
+        return;
+    }
+    if trimmed.eq_ignore_ascii_case(".preview") {
+        let Some(draft) = world.get::<MailDraft>(player).cloned() else {
+            return;
+        };
+        let mut out = String::from("\r\n--- DRAFT ---\r\n");
+        out.push_str(&format!("To:      {}\r\n", draft.recipient_label));
+        out.push_str(&format!(
+            "Subject: {}\r\n",
+            draft.subject.as_deref().unwrap_or("(none yet)"),
+        ));
+        out.push_str("---\r\n");
+        if draft.body.is_empty() {
+            out.push_str("(empty body)\r\n");
+        } else {
+            for ln in &draft.body {
+                out.push_str(ln);
+                out.push_str("\r\n");
+            }
+        }
+        out.push_str("--- end of draft ---\r\n");
+        send_to(world, player, out);
+        return;
+    }
+    if trimmed.eq_ignore_ascii_case(".send") {
+        let Some(draft) = world.get::<MailDraft>(player).cloned() else {
+            return;
+        };
+        let Some(subject) = draft.subject else {
+            send_to(
+                world,
+                player,
+                "No subject set yet — type a subject line first.\r\n",
+            );
+            return;
+        };
+        if draft.body.is_empty() {
+            send_to(world, player, "Body is empty — type some lines first.\r\n");
+            return;
+        }
+        let body = draft.body.join("\n");
+        let sender_user_id = world
+            .get::<Account>(player)
+            .map(|a| a.user_id.clone());
+        let Some(sender_user_id) = sender_user_id else {
+            send_to(world, player, "No account info; can't send.\r\n");
+            return;
+        };
+        match mud_db::mail::send(
+            pool,
+            &sender_user_id,
+            &draft.recipient_user_id,
+            &subject,
+            &body,
+        )
+        .await
+        {
+            Ok(_id) => {
+                try_remove::<MailDraft>(world, player);
+                send_to(
+                    world,
+                    player,
+                    format!("Mail sent to {}.\r\n", draft.recipient_label),
+                );
+            }
+            Err(e) => {
+                send_to(world, player, format!("Send failed: {e}\r\n"));
+            }
+        }
+        return;
+    }
+    // Plain content line: first non-blank line is the subject; rest
+    // accumulate as body. Compute what to do under the mutable
+    // borrow, then release before sending feedback.
+    let step = if let Some(mut draft) = world.get_mut::<MailDraft>(player) {
+        if draft.subject.is_none() {
+            if trimmed.is_empty() {
+                ComposeStep::Nudge
+            } else {
+                draft.subject = Some(trimmed.to_string());
+                ComposeStep::SubjectSet
+            }
+        } else {
+            draft.body.push(line.to_string());
+            ComposeStep::BodyAdded
+        }
+    } else {
+        return;
+    };
+    match step {
+        ComposeStep::Nudge => send_to(
+            world,
+            player,
+            "Type a subject line, then the body. `.send` to ship; `.abort` to cancel.\r\n",
+        ),
+        ComposeStep::SubjectSet => send_to(
+            world,
+            player,
+            "Subject set. Type the body, one line at a time. \
+             `.send` to ship, `.abort` to cancel, `.preview` to review.\r\n",
+        ),
+        // Body lines: silent acceptance — the player sees their own typing
+        // already; an echo on every line would feel chatty.
+        ComposeStep::BodyAdded => {}
+    }
+}
+
+/// `mail <character>`: open a mail-composition draft addressed to
+/// the named character's account. Resolves the recipient via DB
+/// (case-insensitive name match), attaches a `MailDraft` component,
+/// and prompts the player for a subject. Subsequent input is routed
+/// to `compose_mail_step` until `.send` / `.abort` clears the draft.
+pub(crate) async fn cmd_mail(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: mail <character>\r\n");
+        return;
+    }
+    let resolved = match mud_db::mail::user_for_character_name(pool, arg).await {
+        Ok(r) => r,
+        Err(e) => {
+            send_to(world, player, format!("Lookup failed: {e}\r\n"));
+            return;
+        }
+    };
+    let Some((user_id, name)) = resolved else {
+        send_to(
+            world,
+            player,
+            format!("No character named '{arg}' on this realm.\r\n"),
+        );
+        return;
+    };
+    try_insert(
+        world,
+        player,
+        MailDraft {
+            recipient_user_id: user_id,
+            recipient_label: name.clone(),
+            subject: None,
+            body: Vec::new(),
+        },
+    );
+    send_to(
+        world,
+        player,
+        format!(
+            "Composing mail to {name}.\r\n\
+             First line is the subject. Then type the body, one line at a time.\r\n\
+             `.send` ships it; `.abort` cancels; `.preview` shows the draft.\r\n"
+        ),
+    );
 }
 
 pub fn dispatch(world: &mut World, player: Entity, line: &str) {
