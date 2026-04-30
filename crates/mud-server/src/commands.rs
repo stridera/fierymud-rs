@@ -18,8 +18,8 @@ use mud_world::{
     CoreStats, Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
     Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
-    RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, TellLog, Title, UiStyle,
-    Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    BankWealth, RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth,
+    Stunned, TellLog, Title, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, info_span};
 
@@ -167,9 +167,23 @@ const COMMANDS: &[Command] = &[
             summary: "Show your on-hand coin in platinum/gold/silver/copper.",
             long: "Prints the current coin total split across the four \
                    denominations (1 platinum = 10 gold = 100 silver = \
-                   1000 copper). Bank balance has no command yet.",
+                   1000 copper). Use `balance` for bank-stored coin.",
         },
         run: cmd_wealth,
+    },
+    Command {
+        names: &["balance", "bal"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "balance",
+            summary: "Show your bank-stored coin.",
+            long: "Read-only display of the `bank_wealth` column from \
+                   your character row. `deposit` / `withdraw` land with \
+                   the banker NPC component and shop economy.",
+        },
+        run: cmd_balance,
     },
     Command {
         names: &["title"],
@@ -4053,6 +4067,19 @@ fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
         format!("\r\nYou have {parts}.\r\n")
     } else {
         "\r\nYou have no coin to your name.\r\n".to_string()
+    };
+    send_to(world, player, msg);
+}
+
+/// `balance` / `bal`: show the bank-stored balance separate from
+/// on-hand wealth. Read-only today — `deposit` / `withdraw` will
+/// land with the banker NPC component and shop economy.
+fn cmd_balance(world: &mut World, player: Entity, _args: &str) {
+    let total = world.get::<BankWealth>(player).map_or(0, |b| b.0);
+    let msg = if let Some(parts) = format_wealth(total) {
+        format!("\r\nYour bank balance is {parts}.\r\n")
+    } else {
+        "\r\nYour bank balance is empty.\r\n".to_string()
     };
     send_to(world, player, msg);
 }

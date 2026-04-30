@@ -246,11 +246,16 @@ pub struct WimpyThreshold(pub i32);
 /// On-hand wealth in copper units. The schema column is BIGINT; we
 /// keep it as `i64` so massive merchant-mob loot doesn't overflow.
 /// Display denominations (platinum / gold / silver / copper) are
-/// computed at render time by `cmd_wealth`. Bank balance is tracked
-/// separately on the character row but not yet mirrored as a
-/// component (no in-game banking commands today).
+/// computed at render time by `cmd_wealth`.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Wealth(pub i64);
+
+/// Bank balance in copper units, mirrored from `Characters.bank_wealth`.
+/// Loaded at spawn, displayed by `cmd_balance`. No deposit/withdraw
+/// commands are wired yet; once they land they'll need to round-trip
+/// through `save_state`.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct BankWealth(pub i64);
 
 /// Per-character ability cooldown table. Maps `Ability.id` → the
 /// `Instant` at which the cooldown expires (i.e. the ability becomes

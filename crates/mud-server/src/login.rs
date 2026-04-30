@@ -7,8 +7,8 @@ use mud_db::character_items::CharacterItemRow;
 use mud_world::{
     Account, AccountSummary, CombatStats, CoreStats, Description, EquippedSlot, Health, Item,
     Keywords, KnownAbilities, Located, LoggedInAt, Named, Online, ObjectPrototypes, Player,
-    PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title,
-    Wealth, WorldKey, WorldKeyIndex,
+    BankWealth, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina,
+    Title, Wealth, WorldKey, WorldKeyIndex,
 };
 use tracing::{info, warn};
 
@@ -351,6 +351,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                         experience: c.experience,
                     },
                     Wealth(c.wealth),
+                    BankWealth(c.bank_wealth),
                 ),
             ))
             .id();
@@ -398,6 +399,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                     experience: c.experience,
                 },
                 Wealth(c.wealth),
+                BankWealth(c.bank_wealth),
             ),
         ))
         .id();
