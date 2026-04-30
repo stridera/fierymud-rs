@@ -464,6 +464,34 @@ const COMMANDS: &[Command] = &[
         run: cmd_extinguish,
     },
     Command {
+        names: &["hide"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "hide",
+            summary: "Slip into the shadows (sets the Stealth marker).",
+            long: "Currently a marker toggle — combat formulas that \
+                   reference `hidden` (e.g. BACKSTAB's bonus) read \
+                   the marker. The full rogue skill check, noise \
+                   gating, and look-time visibility filtering land \
+                   with the skill system.",
+        },
+        run: cmd_hide,
+    },
+    Command {
+        names: &["visible", "vis"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "visible",
+            summary: "Stop hiding (clears the Stealth marker).",
+            long: "Removes the `Stealth` marker — back to normal visibility.",
+        },
+        run: cmd_visible,
+    },
+    Command {
         names: &["eat"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6698,6 +6726,34 @@ fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
         e.remove::<mud_world::Lit>();
     }
     send_rendered(world, player, &format!("You extinguish {item_name}.\r\n"));
+}
+
+/// `hide`: set the `Stealth` marker on the player. Today this just
+/// flips the `hidden` symbol in damage formulas (BACKSTAB's bonus
+/// reads it) — there's no auto-fail on noisy actions, no skill check,
+/// and no visibility filtering in `look` yet. Those land with the
+/// rogue skill tree. The verb works so muscle memory is preserved.
+fn cmd_hide(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<Stealth>(player).is_some() {
+        send_to(world, player, "You're already hidden.\r\n");
+        return;
+    }
+    try_insert(world, player, Stealth);
+    send_to(
+        world,
+        player,
+        "You attempt to slip into the shadows.\r\n",
+    );
+}
+
+/// `visible` / `vis`: clear the `Stealth` marker. Always succeeds.
+fn cmd_visible(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<Stealth>(player).is_none() {
+        send_to(world, player, "You're already visible.\r\n");
+        return;
+    }
+    try_remove::<Stealth>(world, player);
+    send_to(world, player, "You stop hiding.\r\n");
 }
 
 /// `eat <item>` / `quaff <item>`: consume a Food / Potion. Looks up
