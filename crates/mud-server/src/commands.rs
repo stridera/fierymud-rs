@@ -730,6 +730,46 @@ const COMMANDS: &[Command] = &[
         run: cmd_spells,
     },
     Command {
+        names: &["skills"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "skills [filter]",
+            summary: "List skills (kind=Skill abilities).",
+            long: "Like `spells` but filtered to skills only. Honors \
+                   KnownAbilities — shows only what you know when set. \
+                   Optional filter narrows by case-insensitive substring.",
+        },
+        run: cmd_skills,
+    },
+    Command {
+        names: &["songs"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "songs [filter]",
+            summary: "List bardic songs (kind=Song abilities).",
+            long: "Like `spells` but filtered to songs only. Use \
+                   `perform <song>` to invoke them.",
+        },
+        run: cmd_songs,
+    },
+    Command {
+        names: &["chants"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "chants [filter]",
+            summary: "List chants (kind=Chant abilities).",
+            long: "Like `spells` but filtered to chants only. Use \
+                   `chant <name>` to invoke them.",
+        },
+        run: cmd_chants,
+    },
+    Command {
         names: &["cast", "c"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6136,6 +6176,80 @@ fn cmd_spells(world: &mut World, player: Entity, args: &str) {
         }
     }
     send_to(world, player, out);
+}
+
+/// Kind-filtered listing for `skills` / `songs` / `chants`. Walks
+/// the ability catalog like `cmd_spells` but restricts to a single
+/// `AbilityKind`. Honors `KnownAbilities` gating and the optional
+/// substring filter (passed as `args`).
+fn cmd_abilities_kind(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    kind: mud_db::abilities::AbilityKind,
+) {
+    let filter = args.trim().to_ascii_lowercase();
+    let mode = color_mode_for(world, player);
+    let known: Option<std::collections::HashSet<i32>> = world
+        .get::<KnownAbilities>(player)
+        .filter(|k| !k.entries.is_empty())
+        .map(|k| k.entries.iter().map(|(id, _, _)| *id).collect());
+    let mut names: Vec<String> = Vec::new();
+    for def in world.resource::<AbilityCatalog>().by_name.values() {
+        if def.kind != kind {
+            continue;
+        }
+        if let Some(set) = &known
+            && !set.contains(&def.id)
+        {
+            continue;
+        }
+        if !filter.is_empty() && !def.plain_name.to_ascii_lowercase().contains(&filter) {
+            continue;
+        }
+        names.push(def.name.clone());
+    }
+    if names.is_empty() {
+        let scope = if known.is_some() { "you know" } else { "loaded" };
+        let kind_label = kind.label();
+        if filter.is_empty() {
+            send_to(world, player, format!("\r\nNo {kind_label}s {scope}.\r\n"));
+        } else {
+            send_rendered(
+                world,
+                player,
+                &format!("\r\nNo {kind_label}s matching '{filter}' {scope}.\r\n"),
+            );
+        }
+        return;
+    }
+    names.sort_unstable();
+    let header = if known.is_some() {
+        format!("{}s you know", capitalize(kind.label()))
+    } else {
+        format!("All loaded {}s", kind.label())
+    };
+    let mut out = format!("\r\n{header} ({}):\r\n", names.len());
+    for chunk in names.chunks(3) {
+        out.push_str("  ");
+        for n in chunk {
+            out.push_str(&format!("{:<26}", render_color_tags(n, mode)));
+        }
+        out.push_str("\r\n");
+    }
+    send_to(world, player, out);
+}
+
+fn cmd_skills(world: &mut World, player: Entity, args: &str) {
+    cmd_abilities_kind(world, player, args, mud_db::abilities::AbilityKind::Skill);
+}
+
+fn cmd_songs(world: &mut World, player: Entity, args: &str) {
+    cmd_abilities_kind(world, player, args, mud_db::abilities::AbilityKind::Song);
+}
+
+fn cmd_chants(world: &mut World, player: Entity, args: &str) {
+    cmd_abilities_kind(world, player, args, mud_db::abilities::AbilityKind::Chant);
 }
 
 fn cmd_cast(world: &mut World, player: Entity, args: &str) {
