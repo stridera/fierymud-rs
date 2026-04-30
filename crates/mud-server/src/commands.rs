@@ -6353,8 +6353,10 @@ fn invoke_ability(
 /// - `alignment` — `value`: "good"|"evil"|"neutral", `target`: "caster"|"victim",
 ///   `prohibited`/`required`: bool. Threshold: ±350.
 /// - `target_standing` / `position` — target's `Posture` is `Standing`.
-/// - `not_blind` — target lacks any `EffectInstance` named "blind".
-/// - `in_combat` / `not_in_combat` — target has / lacks `Fighting`.
+/// - `not_blind` — caster lacks any `EffectInstance` named "blind"
+///   (override with `"target": "victim"` to check the target instead).
+/// - `in_combat` / `not_in_combat` — caster has / lacks `Fighting`
+///   (override with `"target": "victim"` to check the target).
 /// - `not_tanking` — caster has no attackers (no entity Fighting them).
 /// - `not_immobilized` — caster lacks the `Stunned` marker and any
 ///   recognized immobilizing effect (`paralysis`, `web`, `hold_person`, ...).
@@ -6379,9 +6381,23 @@ fn check_ability_restrictions(
         let passed = match rule_type {
             "alignment" => check_rule_alignment(world, resolved_target, rule),
             "target_standing" | "position" => check_rule_standing(world, target),
-            "not_blind" => !has_effect_named(world, resolved_target, "blind"),
-            "in_combat" => world.get::<Fighting>(resolved_target).is_some(),
-            "not_in_combat" => world.get::<Fighting>(resolved_target).is_none(),
+            // Self-state rules: schema convention is for these to refer
+            // to the caster (rule messages like "You can't see a thing!"
+            // and "You're not in combat!" are written from the caster's
+            // POV). An explicit `"target": "victim"` overrides via
+            // `resolved_target`.
+            "not_blind" => {
+                let who = if target_kind == Some("victim") { target } else { caster };
+                !has_effect_named(world, who, "blind")
+            }
+            "in_combat" => {
+                let who = if target_kind == Some("victim") { target } else { caster };
+                world.get::<Fighting>(who).is_some()
+            }
+            "not_in_combat" => {
+                let who = if target_kind == Some("victim") { target } else { caster };
+                world.get::<Fighting>(who).is_none()
+            }
             "not_tanking" => !is_being_attacked(world, caster),
             "not_immobilized" => !is_immobilized(world, caster),
             "npc_only" => world.get::<Mob>(resolved_target).is_some(),
