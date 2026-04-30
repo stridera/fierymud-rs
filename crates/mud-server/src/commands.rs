@@ -1078,6 +1078,33 @@ const COMMANDS: &[Command] = &[
         run: cmd_autosplit,
     },
     Command {
+        names: &["holylight"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "holylight",
+            summary: "Toggle holy-light vision (admin/builder).",
+            long: "Sets HOLY_LIGHT. Renderer plumbing for invisibility \
+                   and darkness is pending; the flag persists so it's \
+                   live the moment those land.",
+        },
+        run: cmd_holylight,
+    },
+    Command {
+        names: &["showids"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "showids",
+            summary: "Toggle showing (zone, id) on entities you can see.",
+            long: "Sets SHOW_IDS. Look/inventory renderers that want to \
+                   surface coordinates check the flag.",
+        },
+        run: cmd_showids,
+    },
+    Command {
         names: &["effects", "affects", "aff"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4772,6 +4799,34 @@ fn cmd_autosplit(world: &mut World, player: Entity, _args: &str) {
         PlayerFlag::AutoSplit,
         "Auto-split enabled.",
         "Auto-split disabled.",
+    );
+}
+
+// `holylight` is admin/builder-only in legacy FieryMUD: with the flag
+// on you can see invisible/dark/hidden things in `look`. The flag is
+// set, but no behaviour is wired into the renderer yet — this command
+// exists so the muscle-memory toggle works and lands the flag for
+// later renderer plumbing.
+fn cmd_holylight(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::HolyLight,
+        "Holy light surrounds you — the unseen is now seen.",
+        "Holy light fades.",
+    );
+}
+
+// `showids` exposes (zone, id) coordinates in command output for
+// builders/admins. The flag is set; renderers that want to surface
+// IDs check it.
+fn cmd_showids(world: &mut World, player: Entity, _args: &str) {
+    toggle_player_flag(
+        world,
+        player,
+        PlayerFlag::ShowIds,
+        "Showing entity IDs.",
+        "Hiding entity IDs.",
     );
 }
 
