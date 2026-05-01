@@ -658,18 +658,20 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     world.insert_resource(trigger_catalog);
 
-    // Pass 5: spawn live entities from MobResets / ObjectResets. Resources
-    // were inserted above so the spawners can read them. Probability gating
-    // and respawn timing belong to a future tick system; for now we always
-    // spawn when probability is non-zero, capping at max_instances per
-    // reset row.
+    // Pass 5: spawn live entities from MobResets / ObjectResets. Each
+    // reset row spawns *exactly one* entity, only when the world's
+    // count of that proto is below the row's `max_instances` (the
+    // legacy CircleMUD `max_existing` semantic — a global cap, not a
+    // per-row count). Several reset rows may reference the same
+    // proto across different rooms; the cap applies across all.
     //
-    // Track each spawned mob entity by its reset_id so the equipment pass
-    // below can attach gear to the right instances.
+    // Track each spawned mob entity by its reset_id so the equipment
+    // pass below can attach gear to the right instances.
     let mob_reset_rows = mob_resets::list_all(pool).await?;
     let mut mobs_by_reset: HashMap<i32, Vec<Entity>> =
         HashMap::with_capacity(mob_reset_rows.len());
     let mut reset_catalog_entries: Vec<MobResetEntry> = Vec::with_capacity(mob_reset_rows.len());
+    let mut mob_world_count: HashMap<(i32, i32), i32> = HashMap::new();
     for r in &mob_reset_rows {
         if r.probability <= 0.0 {
             continue;
@@ -688,67 +690,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             stats.mob_resets_skipped += 1;
             continue;
         };
-        let hp = proto.rolled_hp();
-        let dmg = proto.avg_damage();
-        let shop_key = world
-            .resource::<ShopCatalog>()
-            .keeper_index
-            .get(&(proto.zone_id, proto.id))
-            .copied();
-        let trigger_keys = world
-            .resource::<TriggerCatalog>()
-            .mob_attachments
-            .get(&(proto.zone_id, proto.id))
-            .cloned();
-        let mut spawned_for_reset: Vec<Entity> =
-            Vec::with_capacity(usize::try_from(r.max_instances.max(1)).unwrap_or(1));
-        for _ in 0..r.max_instances.max(1) {
-            let mut em = world.spawn((
-                Mob,
-                Named { name: proto.name.clone() },
-                Keywords(proto.keywords.clone()),
-                Description(proto.room_description.clone()),
-                WorldKey { zone: proto.zone_id, id: proto.id },
-                Located(room_entity),
-                Health { hp, max: hp },
-                CombatStats {
-                    hit_roll: proto.hit_roll,
-                    dmg_roll: dmg,
-                    ac: proto.armor_class,
-                    alignment: proto.alignment,
-                },
-                Posture(PostureKind::Standing),
-                FromMobReset(r.id),
-            ));
-            if let Some((shop_zone_id, shop_id)) = shop_key {
-                em.insert(Shopkeeper { shop_zone_id, shop_id });
-            }
-            if let Some(ref keys) = trigger_keys {
-                em.insert(AttachedTriggers(keys.clone()));
-            }
-            // Mountable inference: keywords containing horse/steed/mount
-            // get the marker. Builders can refine via richer mount data
-            // later; for now this catches every horse/warhorse/donkey
-            // in the imported world.
-            if proto.keywords.iter().any(|k| {
-                let lc = k.to_ascii_lowercase();
-                lc.contains("horse")
-                    || lc.contains("steed")
-                    || lc.contains("mount")
-                    || lc.contains("donkey")
-                    || lc.contains("mare")
-                    || lc.contains("nightmare")
-            }) {
-                em.insert(Mountable);
-            }
-            let e = em.id();
-            spawned_for_reset.push(e);
-            stats.mob_resets_spawned += 1;
-        }
-        mobs_by_reset.insert(r.id, spawned_for_reset);
-        // Cache enough to refill: the respawn system reads this resource
-        // and re-uses the existing MobPrototypes / WorldKeyIndex resources
-        // to materialize fresh mobs.
+        // Always cache the catalog row so the respawn system can
+        // refill this reset later, even if the cap is exhausted now.
         reset_catalog_entries.push(MobResetEntry {
             reset_id: r.id,
             mob_zone_id: r.mob_zone_id,
@@ -756,6 +699,69 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             room_entity,
             max_instances: r.max_instances,
         });
+        // Skip the spawn if this proto has already hit its global cap
+        // via earlier reset rows. The cap is a max on world-wide
+        // count, not per-row count — older code spawned
+        // `max_instances` copies per row, which over-populated rooms.
+        let proto_key = (proto.zone_id, proto.id);
+        let current = *mob_world_count.get(&proto_key).unwrap_or(&0);
+        if current >= r.max_instances.max(1) {
+            continue;
+        }
+        let hp = proto.rolled_hp();
+        let dmg = proto.avg_damage();
+        let shop_key = world
+            .resource::<ShopCatalog>()
+            .keeper_index
+            .get(&proto_key)
+            .copied();
+        let trigger_keys = world
+            .resource::<TriggerCatalog>()
+            .mob_attachments
+            .get(&proto_key)
+            .cloned();
+        let mut em = world.spawn((
+            Mob,
+            Named { name: proto.name.clone() },
+            Keywords(proto.keywords.clone()),
+            Description(proto.room_description.clone()),
+            WorldKey { zone: proto.zone_id, id: proto.id },
+            Located(room_entity),
+            Health { hp, max: hp },
+            CombatStats {
+                hit_roll: proto.hit_roll,
+                dmg_roll: dmg,
+                ac: proto.armor_class,
+                alignment: proto.alignment,
+            },
+            Posture(PostureKind::Standing),
+            FromMobReset(r.id),
+        ));
+        if let Some((shop_zone_id, shop_id)) = shop_key {
+            em.insert(Shopkeeper { shop_zone_id, shop_id });
+        }
+        if let Some(ref keys) = trigger_keys {
+            em.insert(AttachedTriggers(keys.clone()));
+        }
+        // Mountable inference: keywords containing horse/steed/mount
+        // get the marker. Builders can refine via richer mount data
+        // later; for now this catches every horse/warhorse/donkey
+        // in the imported world.
+        if proto.keywords.iter().any(|k| {
+            let lc = k.to_ascii_lowercase();
+            lc.contains("horse")
+                || lc.contains("steed")
+                || lc.contains("mount")
+                || lc.contains("donkey")
+                || lc.contains("mare")
+                || lc.contains("nightmare")
+        }) {
+            em.insert(Mountable);
+        }
+        let e = em.id();
+        mobs_by_reset.insert(r.id, vec![e]);
+        *mob_world_count.entry(proto_key).or_insert(0) += 1;
+        stats.mob_resets_spawned += 1;
     }
     world.insert_resource(MobResetCatalog { entries: reset_catalog_entries });
 
@@ -764,6 +770,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // entity belongs to a given reset_id.
     let mut objects_by_reset: HashMap<i32, Vec<Entity>> =
         HashMap::with_capacity(object_reset_rows.len());
+    let mut object_world_count: HashMap<(i32, i32), i32> = HashMap::new();
     for r in &object_reset_rows {
         if r.probability <= 0.0 {
             continue;
@@ -782,15 +789,21 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             stats.object_resets_skipped += 1;
             continue;
         };
+        // Same global-cap semantic as mob resets: spawn at most one
+        // per row, only if the world's count of this proto is below
+        // the row's `max_instances`.
+        let proto_key = (proto.zone_id, proto.id);
+        let current = *object_world_count.get(&proto_key).unwrap_or(&0);
+        if current >= r.max_instances.max(1) {
+            continue;
+        }
         let trigger_keys = world
             .resource::<TriggerCatalog>()
             .object_attachments
-            .get(&(proto.zone_id, proto.id))
+            .get(&proto_key)
             .cloned();
-        let mut spawned_for_reset: Vec<Entity> =
-            Vec::with_capacity(usize::try_from(r.max_instances.max(1)).unwrap_or(1));
         let primary_slot = wear_flags_primary_slot(&proto.wear_flags);
-        for _ in 0..r.max_instances.max(1) {
+        {
             let mut bundle = world.spawn((
                 Item,
                 Named { name: proto.name.clone() },
@@ -818,10 +831,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             if let Some(ref keys) = trigger_keys {
                 bundle.insert(AttachedTriggers(keys.clone()));
             }
-            spawned_for_reset.push(bundle.id());
+            objects_by_reset.insert(r.id, vec![bundle.id()]);
             stats.object_resets_spawned += 1;
         }
-        objects_by_reset.insert(r.id, spawned_for_reset);
+        *object_world_count.entry(proto_key).or_insert(0) += 1;
     }
 
     // Pass 6: equip mobs spawned by Pass 5 according to MobResetEquipment.
