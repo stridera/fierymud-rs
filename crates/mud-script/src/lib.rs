@@ -447,6 +447,21 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:teleport(room)` updates the actor's `Located` to
+        // point at the room entity. Used by mob LOAD bodies to
+        // shuffle spawned mobs into specific rooms without going
+        // through movement triggers. Silently no-ops if either side
+        // is missing the expected components — corrupted data
+        // shouldn't crash the body.
+        methods.add_method("teleport", |lua, this, target: AnyUserData| -> mlua::Result<()> {
+            let room_entity = target.borrow::<LuaRoom>()?.entity;
+            world_mut_from_lua(lua, |world| {
+                if let Some(mut loc) = world.get_mut::<Located>(this.entity) {
+                    loc.0 = room_entity;
+                }
+            })
+        });
+
         // Field access (`self.room`, `self.id`, `self.zone_id`,
         // `self.name`, `self.hp`, `self.max_hp`). The DG-Script-converted
         // corpus uses `obj.field` syntax, not `obj:field()`. Returning
