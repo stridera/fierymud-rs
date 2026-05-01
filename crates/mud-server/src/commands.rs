@@ -12133,6 +12133,23 @@ fn invoke_ability(
                 ));
                 applied_msgs.push(format!("{} ({} appears)", spec.name, proto.name));
             }
+            "intercept" => {
+                // GUARD's bodyguard semantics: install
+                // `Guarding(target)` on the caster so the existing
+                // combat tick redirects ally-targeted swings to the
+                // caster. Refuses self-target — guarding yourself is
+                // a no-op the schema doesn't model.
+                if target_entity == player {
+                    applied_msgs.push(format!("{} (can't guard yourself)", spec.name));
+                    continue;
+                }
+                if world.get_entity(target_entity).is_err() {
+                    applied_msgs.push(format!("{} (target has vanished)", spec.name));
+                    continue;
+                }
+                try_insert(world, player, mud_world::Guarding(target_entity));
+                applied_msgs.push(format!("{} (guarding {})", spec.name, name_of(world, target_entity)));
+            }
             "extract" => {
                 // Remove the target from the world. Used by Banish
                 // (and any future "send back to home plane" /
