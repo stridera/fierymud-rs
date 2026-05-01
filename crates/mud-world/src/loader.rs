@@ -460,6 +460,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         spell_slot_data
             .ability_circle
             .insert((r.class_id, r.ability_id), r.circle);
+        spell_slot_data
+            .ability_cap
+            .insert((r.class_id, r.ability_id), r.proficiency_cap);
     }
     world.insert_resource(spell_slot_data);
 

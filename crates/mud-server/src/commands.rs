@@ -153,14 +153,14 @@ const COMMANDS: &[Command] = &[
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "practice",
-            summary: "List your trained abilities and proficiencies.",
-            long: "Renders KnownAbilities (skills/spells/songs/chants) \
-                   with proficiency 0-100% and a tier label \
-                   (untrained/novice/apprentice/skilled/expert/master). \
-                   Empty list when no CharacterAbilities rows exist; \
-                   training commands that mutate proficiency haven't \
-                   landed yet.",
+            usage: "practice [<ability>]",
+            summary: "List trained abilities, or improve proficiency.",
+            long: "Without an argument, renders KnownAbilities with \
+                   proficiency 0-1000 and a tier label. With an \
+                   ability name, raises that ability's proficiency \
+                   by 5 (capped at the class's `proficiency_cap` \
+                   from `ClassAbilities`). Persists across \
+                   reconnect via `CharacterAbilities`.",
         },
         run: cmd_practice,
     },
@@ -6692,13 +6692,15 @@ pub(crate) fn format_wealth(total: i64) -> Option<String> {
     Some(parts.join(", "))
 }
 
-/// `practice` / `prac`: list the player's `KnownAbilities` with
-/// proficiency rendered as a tier label. Sorted by ability kind
-/// (Skill / Spell / Song / Chant) then name. Empty list reports
-/// "you haven't trained any abilities yet" — common since
-/// `CharacterAbilities` only gets populated by training commands
-/// that haven't landed.
-fn cmd_practice(world: &mut World, player: Entity, _args: &str) {
+/// `practice` / `prac`: with no arg, list `KnownAbilities` with
+/// proficiency rendered as a tier label. With an ability name,
+/// raise that ability's proficiency by 5 (capped at the class's
+/// `proficiency_cap` from `ClassAbilities`).
+fn cmd_practice(world: &mut World, player: Entity, args: &str) {
+    let trimmed = args.trim();
+    if !trimmed.is_empty() {
+        return practice_one(world, player, trimmed);
+    }
     let known = world
         .get::<KnownAbilities>(player)
         .map(|k| k.entries.clone())
@@ -6745,6 +6747,76 @@ fn cmd_practice(world: &mut World, player: Entity, _args: &str) {
     }
     out.push_str("\r\n* = learning (not yet mastered).\r\n");
     send_to(world, player, out);
+}
+
+/// `practice <ability>`: bump proficiency by 5, capped at the
+/// class's `proficiency_cap`. Refuses unknown abilities, abilities
+/// off the player's class list, abilities not in `KnownAbilities`,
+/// and abilities already at the cap.
+fn practice_one(world: &mut World, player: Entity, name: &str) {
+    let Some(profile) = world.get::<Profile>(player).cloned() else {
+        send_to(world, player, "You have no profile.\r\n");
+        return;
+    };
+    let Some(class_id) = profile.class_id else {
+        send_to(world, player, "You have no class.\r\n");
+        return;
+    };
+    let key = name.trim().to_ascii_lowercase();
+    let Some(def) = world.resource::<AbilityCatalog>().by_name.get(&key).cloned() else {
+        send_to(world, player, format!("'{name}' isn't a known ability.\r\n"));
+        return;
+    };
+    let cap = world
+        .resource::<mud_world::SpellSlotData>()
+        .ability_cap
+        .get(&(class_id, def.id))
+        .copied();
+    let Some(cap) = cap else {
+        send_to(
+            world,
+            player,
+            format!("{} isn't on your class's list.\r\n", def.plain_name),
+        );
+        return;
+    };
+    let Some(mut known) = world.get_mut::<KnownAbilities>(player) else {
+        send_to(
+            world,
+            player,
+            format!("You haven't learned {} yet — `study` it first.\r\n", def.plain_name),
+        );
+        return;
+    };
+    let Some(slot) = known.entries.iter_mut().find(|(id, _, _)| *id == def.id) else {
+        send_to(
+            world,
+            player,
+            format!("You haven't learned {} yet — `study` it first.\r\n", def.plain_name),
+        );
+        return;
+    };
+    if slot.1 >= cap {
+        send_to(
+            world,
+            player,
+            format!(
+                "Your {} is already at its class cap of {cap}.\r\n",
+                def.plain_name
+            ),
+        );
+        return;
+    }
+    slot.1 = (slot.1 + 5).min(cap);
+    let new_prof = slot.1;
+    send_to(
+        world,
+        player,
+        format!(
+            "You practice {} — proficiency now {new_prof} / {cap}.\r\n",
+            def.plain_name
+        ),
+    );
 }
 
 /// `track <target>` / `hunt <target>`: BFS through open exits up to

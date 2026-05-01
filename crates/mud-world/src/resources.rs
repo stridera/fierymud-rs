@@ -363,14 +363,15 @@ impl LevelTable {
 /// `(level, circle)` → max slot count; `class_circles` maps
 /// `class_id` → list of `(circle, min_level)` the class can access;
 /// `ability_circle` maps `(class_id, ability_id)` → circle the
-/// spell occupies for that class. Together they answer "how many
-/// circle-N slots does this level-L character of class C have
-/// available, and what circle does spell X memorize into?"
+/// spell occupies for that class; `ability_cap` maps the same key
+/// → that class's `proficiency_cap` for that ability (`practice`
+/// uses it to gate proficiency gains).
 #[derive(Resource, Debug, Default)]
 pub struct SpellSlotData {
     pub progression: HashMap<(i32, i32), i32>,
     pub class_circles: HashMap<i32, Vec<(i32, i32)>>,
     pub ability_circle: HashMap<(i32, i32), i32>,
+    pub ability_cap: HashMap<(i32, i32), i32>,
 }
 
 impl SpellSlotData {
