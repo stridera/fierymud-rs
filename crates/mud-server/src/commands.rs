@@ -3073,6 +3073,24 @@ const COMMANDS: &[Command] = &[
         run: cmd_scripterrors,
     },
     Command {
+        names: &["syslog"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "syslog [<count>] [<filter>]",
+            summary: "Recent tracing log lines.",
+            long: "Builder+. Walks the in-memory syslog ring buffer \
+                   (most-recent first) and prints each entry with \
+                   wall-clock seconds-ago, level, target, and message. \
+                   `filter` (case-insensitive) matches level \
+                   (TRACE/DEBUG/INFO/WARN/ERROR) or any substring of \
+                   target/message. Capped at 512 entries; default \
+                   `count` is 30.",
+        },
+        run: cmd_syslog,
+    },
+    Command {
         names: &["astat"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -16996,6 +17014,61 @@ fn cmd_scripterrors(world: &mut World, player: Entity, args: &str) {
             event = entry.event,
             name = entry.trigger_name,
             msg = entry.message,
+        ));
+    }
+    send_to(world, player, out);
+}
+
+/// `syslog [<count>] [<filter>]`: list the most recent tracing log
+/// lines captured into the in-memory ring buffer.
+fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
+    let mut tokens = args.split_whitespace();
+    let count: usize = tokens
+        .next()
+        .and_then(|s| s.parse().ok())
+        .map_or(30, |n: usize| n.clamp(1, 500));
+    let filter = tokens.next().map(str::to_ascii_uppercase);
+
+    let entries = crate::syslog::snapshot();
+    if entries.is_empty() {
+        send_to(world, player, "Syslog buffer is empty.\r\n");
+        return;
+    }
+
+    let matches = |e: &crate::syslog::SyslogEntry| -> bool {
+        let Some(f) = filter.as_deref() else { return true };
+        e.level.as_str().eq_ignore_ascii_case(f)
+            || e.target.to_ascii_uppercase().contains(f)
+            || e.message.to_ascii_uppercase().contains(f)
+    };
+
+    let mut picked: Vec<&crate::syslog::SyslogEntry> = Vec::new();
+    for entry in entries.iter().rev() {
+        if matches(entry) {
+            picked.push(entry);
+            if picked.len() >= count {
+                break;
+            }
+        }
+    }
+    let total = entries.len();
+    let shown = picked.len();
+    picked.reverse();
+
+    let mut out = format!("\r\nSyslog: showing {shown} of {total} entry(s)");
+    if let Some(f) = filter.as_deref() {
+        out.push_str(&format!(" matching '{f}'"));
+    }
+    out.push_str(":\r\n");
+    let now = std::time::SystemTime::now();
+    for e in &picked {
+        let secs_ago = now.duration_since(e.at).map(|d| d.as_secs()).unwrap_or(0);
+        out.push_str(&format!(
+            "  {ago:>5}s  {lvl:<5}  {target:<24}  {msg}\r\n",
+            ago = secs_ago,
+            lvl = e.level.as_str(),
+            target = e.target,
+            msg = e.message,
         ));
     }
     send_to(world, player, out);

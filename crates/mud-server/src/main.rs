@@ -5,6 +5,7 @@ mod login;
 mod memorize;
 mod regen;
 mod respawn;
+mod syslog;
 mod triggers;
 
 use std::time::{Duration, Instant};
@@ -16,6 +17,8 @@ use tokio::sync::mpsc;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info, info_span};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::login::ConnRouter;
 
@@ -73,8 +76,10 @@ fn mud_clock_tick(tick: Res<TickCount>, mut clock: ResMut<mud_world::MudClock>) 
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .with(syslog::SyslogLayer)
         .init();
 
     let _ = dotenvy::dotenv();
