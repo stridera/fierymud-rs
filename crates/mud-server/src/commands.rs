@@ -2559,6 +2559,39 @@ const COMMANDS: &[Command] = &[
         run: cmd_retreat,
     },
     Command {
+        names: &["sneak"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "sneak",
+            summary: "Move silently — stealth that survives footsteps.",
+            long: "Drains 3 stamina and dispatches the SNEAK skill \
+                   via the data path. Spawns a `sneak` status effect \
+                   and installs the Stealth marker (same gate as \
+                   `hide`). Movement-stealth-break logic isn't wired \
+                   yet, so sneak is functionally identical to hide \
+                   until that lands.",
+        },
+        run: cmd_sneak,
+    },
+    Command {
+        names: &["conceal"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "conceal",
+            summary: "Magical concealment — improved hiding.",
+            long: "Drains 4 stamina and dispatches the CONCEAL skill \
+                   via the data path. Spawns a `hidden` status effect \
+                   and installs the Stealth marker. Difference vs. \
+                   `hide` is in the schema (different proficiency \
+                   curve, longer duration), not in the runtime path.",
+        },
+        run: cmd_conceal,
+    },
+    Command {
         names: &["firstaid"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -16075,6 +16108,41 @@ fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
 /// gets 0 HP from that until the formula gains a baseline (also
 /// in `SUGGESTIONS.md`) — until then the staunch is the only
 /// visible effect for an untrained caster.
+/// `sneak`: data-path SNEAK skill shim. Stealth marker installation
+/// happens in the status effect-type arm via the runtime wired in
+/// 404fa6c.
+fn cmd_sneak(world: &mut World, player: Entity, _args: &str) {
+    const SNEAK_COST: i32 = 3;
+    if !check_stamina(world, player, SNEAK_COST, "sneak") {
+        return;
+    }
+    drain_stamina(world, player, SNEAK_COST);
+    invoke_ability(
+        world,
+        player,
+        "sneak",
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+
+/// `conceal`: data-path CONCEAL skill shim. Same pattern as sneak;
+/// catalog separates the two only by proficiency curve / duration.
+fn cmd_conceal(world: &mut World, player: Entity, _args: &str) {
+    const CONCEAL_COST: i32 = 4;
+    if !check_stamina(world, player, CONCEAL_COST, "conceal") {
+        return;
+    }
+    drain_stamina(world, player, CONCEAL_COST);
+    invoke_ability(
+        world,
+        player,
+        "conceal",
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+
 /// `firstaid [<target>]`: rogue/scout heal-self skill. Same pattern
 /// as `bandage` but dispatches `FIRST_AID` instead of `BANDAGE`; no
 /// hardcoded bleed-staunch (`first_aid` only carries the heal
