@@ -612,6 +612,25 @@ pub struct MobResetEntry {
     pub max_instances: i32,
 }
 
+/// Object resets cached for the respawn tick. Same shape as
+/// `MobResetCatalog`: each entry is a top-level (no
+/// `parent_content_id`) reset row whose target room and proto are
+/// already resolved. Nested-content resets (chest contents) are
+/// not refilled — they spawn once at boot and stay.
+#[derive(Resource, Debug, Default)]
+pub struct ObjectResetCatalog {
+    pub entries: Vec<ObjectResetEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectResetEntry {
+    pub reset_id: i32,
+    pub object_zone_id: i32,
+    pub object_id: i32,
+    pub room_entity: bevy_ecs::prelude::Entity,
+    pub max_instances: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct MobProto {
     pub zone_id: i32,

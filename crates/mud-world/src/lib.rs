@@ -17,8 +17,8 @@ pub use resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, DamageComponent, EffectCatalog, EffectDef, LiquidProto, LuaOutbox, MobProto,
     MobPrototypes, MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding,
-    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow, ScriptError, ScriptErrorLog,
-    ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef,
-    SocialRegistry, SpellSlotData, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef,
-    TriggerEvent, WorldKeyIndex,
+    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
+    SavingThrow, ScriptError, ScriptErrorLog, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering,
+    ShopPetOffering, SocialDef, SocialRegistry, SpellSlotData, TargetingRule, TriggerAttach,
+    TriggerCatalog, TriggerDef, TriggerEvent, WorldKeyIndex,
 };

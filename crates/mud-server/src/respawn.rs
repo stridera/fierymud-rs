@@ -14,9 +14,9 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AttachedTriggers, CombatStats, Description, Health, Keywords, Located, Mob, MobPrototypes,
-    MobResetCatalog, Mountable, Named, Posture, PostureKind, ShopCatalog, Shopkeeper,
-    TriggerCatalog, WorldKey,
+    AttachedTriggers, CombatStats, Description, Health, Item, Keywords, LiquidContainer, Located,
+    Mob, MobPrototypes, MobResetCatalog, Mountable, Named, ObjectPrototypes, ObjectResetCatalog,
+    Posture, PostureKind, ShopCatalog, Shopkeeper, TriggerCatalog, WorldKey,
 };
 use mud_world::FromMobReset;
 use tracing::info;
@@ -29,7 +29,7 @@ use crate::TickCount;
 /// per reset so the cadence just controls how snappy a kill feels.
 const RESPAWN_PERIOD_TICKS: u64 = 60;
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn respawn_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(RESPAWN_PERIOD_TICKS) {
@@ -131,5 +131,72 @@ pub fn respawn_tick(world: &mut World) {
     // firing here (after the loop ends) keeps World borrows simple.
     for e in load_fire_queue {
         crate::triggers::fire_event(world, e, mud_world::TriggerEvent::Load);
+    }
+
+    // Object respawn: same shape as the mob loop. Items get picked
+    // up, looted off corpses, or destroyed; once world-count of
+    // their proto drops below the reset row's cap, refill one.
+    let mut object_world_counts: std::collections::HashMap<(i32, i32), i32> =
+        std::collections::HashMap::new();
+    {
+        let mut q = world.query_filtered::<&WorldKey, With<Item>>();
+        for wk in q.iter(world) {
+            *object_world_counts.entry((wk.zone, wk.id)).or_insert(0) += 1;
+        }
+    }
+    let object_entries: Vec<mud_world::ObjectResetEntry> =
+        world.resource::<ObjectResetCatalog>().entries.clone();
+    let mut object_refilled = 0usize;
+    for entry in &object_entries {
+        let proto_key = (entry.object_zone_id, entry.object_id);
+        let live = object_world_counts.get(&proto_key).copied().unwrap_or(0);
+        let cap = entry.max_instances.max(1);
+        if live >= cap {
+            continue;
+        }
+        let proto = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&proto_key)
+            .cloned();
+        let Some(proto) = proto else { continue };
+        let trigger_keys = world
+            .resource::<TriggerCatalog>()
+            .object_attachments
+            .get(&proto_key)
+            .cloned();
+        let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
+        let mut bundle = world.spawn((
+            Item,
+            Named { name: proto.name.clone() },
+            Keywords(proto.keywords.clone()),
+            WorldKey { zone: proto.zone_id, id: proto.id },
+            Located(entry.room_entity),
+        ));
+        if let Some(desc) = proto.examine_description.clone() {
+            bundle.insert(Description(desc));
+        }
+        if let Some(s) = primary_slot {
+            bundle.insert(mud_world::WearableIn(s));
+        }
+        if let Some(board_id) = proto.board_id {
+            bundle.insert(mud_world::BoardLink(board_id));
+        }
+        if let Some(liq) = proto.liquid.clone() {
+            bundle.insert(LiquidContainer {
+                liquid: liq.liquid,
+                capacity: liq.capacity,
+                remaining: liq.remaining,
+                poisoned: liq.poisoned,
+            });
+        }
+        if let Some(keys) = trigger_keys {
+            bundle.insert(AttachedTriggers(keys));
+        }
+        *object_world_counts.entry(proto_key).or_insert(0) += 1;
+        object_refilled += 1;
+    }
+    if object_refilled > 0 {
+        info!(object_refilled, "object respawn tick");
     }
 }

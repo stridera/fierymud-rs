@@ -17,9 +17,9 @@ use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, DamageComponent, EffectCatalog, EffectDef, LiquidProto, MobProto, MobPrototypes,
     MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto, ObjectPrototypes,
-    SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef,
-    SocialRegistry, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent,
-    WorldKeyIndex,
+    ObjectResetCatalog, ObjectResetEntry, SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef,
+    ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, TargetingRule, TriggerAttach,
+    TriggerCatalog, TriggerDef, TriggerEvent, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -798,6 +798,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let mut objects_by_reset: HashMap<i32, Vec<Entity>> =
         HashMap::with_capacity(object_reset_rows.len());
     let mut object_world_count: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut object_reset_catalog: Vec<ObjectResetEntry> =
+        Vec::with_capacity(object_reset_rows.len());
     for r in &object_reset_rows {
         if r.probability <= 0.0 {
             continue;
@@ -816,6 +818,17 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             stats.object_resets_skipped += 1;
             continue;
         };
+        // Catalog the reset row so the respawn tick can refill if
+        // the spawn ever despawns. Mirrors the `MobReset` catalog
+        // shape — `ObjectResetContents` (nested chest contents)
+        // are a separate table and don't refill independently.
+        object_reset_catalog.push(ObjectResetEntry {
+            reset_id: r.id,
+            object_zone_id: r.object_zone_id,
+            object_id: r.object_id,
+            room_entity,
+            max_instances: r.max_instances,
+        });
         // Same global-cap semantic as mob resets: spawn at most one
         // per row, only if the world's count of this proto is below
         // the row's `max_instances`.
@@ -863,6 +876,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
         *object_world_count.entry(proto_key).or_insert(0) += 1;
     }
+    world.insert_resource(ObjectResetCatalog {
+        entries: object_reset_catalog,
+    });
 
     // Pass 6: equip mobs spawned by Pass 5 according to MobResetEquipment.
     // Each row attaches one Item to every mob spawned for its reset_id.
