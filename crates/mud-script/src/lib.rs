@@ -956,6 +956,18 @@ impl UserData for LuaActor {
             },
         );
 
+        // `actor:spawn_object(zone, id)` materializes an object proto
+        // directly into this actor's inventory. Used by mob LOAD
+        // bodies to give NPCs starter equipment via
+        // `find_actor("name"):spawn_object(zone, id)`. Returns a
+        // LuaActor on the new item entity, or nil.
+        methods.add_method(
+            "spawn_object",
+            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                spawn_obj_proto(lua, this.entity, zone, id)
+            },
+        );
+
         // `actor:command(line)` queues `line` to be dispatched as if
         // the actor typed it. 2106 corpus refs — used by mob bodies
         // to drive themselves through standard commands ("emote",
