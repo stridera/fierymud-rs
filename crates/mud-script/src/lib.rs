@@ -1232,18 +1232,6 @@ impl UserData for LuaActor {
                     "is_fighting" => world_from_lua(lua, |w| {
                         Value::Boolean(w.get::<mud_world::Fighting>(this.entity).is_some())
                     }),
-                    // 64 corpus refs — DG-Script `vnum` field. Legacy
-                    // CircleMUD encoding: zone * 100 + id. Triggers
-                    // converted from DG sometimes still reference
-                    // `self.vnum` instead of (zone_id, id) — return
-                    // the encoded form so they keep working.
-                    "vnum" => world_from_lua(lua, |w| {
-                        Value::Integer(
-                            w.get::<WorldKey>(this.entity)
-                                .map_or(0, |wk| wk.zone * 100 + wk.id)
-                                .into(),
-                        )
-                    }),
                     // 62 corpus refs — gender-keyed pronoun ("his" /
                     // "her" / "its"). Sourced from Profile.gender
                     // (players); mobs return "its" by default.
