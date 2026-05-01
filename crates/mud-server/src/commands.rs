@@ -2974,6 +2974,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_setweather,
     },
     Command {
+        names: &["set"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "set <target|me> <field> <value>",
+            summary: "Mutate a numeric stat on a character.",
+            long: "Builder+. `target` is `me` for self or a keyword \
+                   matching a player in the current room. `field` is \
+                   one of: level, xp, hp, maxhp, stamina, maxstamina, \
+                   gold (= copper), alignment. Session-only — \
+                   persists on disconnect via the normal save path \
+                   for the level/xp/hp/stamina/gold subset.",
+        },
+        run: cmd_set,
+    },
+    Command {
         names: &["scripterrors", "scripterr"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -16311,6 +16328,116 @@ fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
         player,
         format!("Set climate of zone {zone_id} ({zone_name}) to {climate:?}.\r\n"),
     );
+}
+
+/// `set <target> <field> <value>`: admin mutation of a numeric
+/// character stat. v1 supports level / xp / hp / maxhp / stamina /
+/// maxstamina / gold / alignment. Session-only — the existing
+/// disconnect save handles a subset; full persistence (across all
+/// fields) follows when each field's column round-trips.
+#[allow(clippy::too_many_lines)]
+fn cmd_set(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.splitn(3, char::is_whitespace).collect();
+    if parts.len() != 3 || parts[1].trim().is_empty() || parts[2].trim().is_empty() {
+        send_to(world, player, "Usage: set <target|me> <field> <value>\r\n");
+        return;
+    }
+    let target_word = parts[0].trim();
+    let field = parts[1].trim().to_ascii_lowercase();
+    let value_word = parts[2].trim();
+
+    let target = if target_word.eq_ignore_ascii_case("me") || target_word == "self" {
+        player
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You're nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, target_word, located.0, player) else {
+            send_to(world, player, format!("No '{target_word}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    let target_name = name_of(world, target);
+
+    // All supported fields are integer-typed for now.
+    let Ok(value_i32) = value_word.parse::<i32>() else {
+        send_to(world, player, "Value must be an integer.\r\n");
+        return;
+    };
+    let value_i64 = i64::from(value_i32);
+
+    let applied = match field.as_str() {
+        "level" => world
+            .get_mut::<Profile>(target)
+            .map(|mut p| p.level = value_i32.max(1))
+            .is_some(),
+        "xp" | "exp" | "experience" => world
+            .get_mut::<Profile>(target)
+            .map(|mut p| p.experience = value_i32.max(0))
+            .is_some(),
+        "hp" => world
+            .get_mut::<Health>(target)
+            .map(|mut h| h.hp = value_i32.max(0).min(h.max))
+            .is_some(),
+        "maxhp" => {
+            world
+                .get_mut::<Health>(target)
+                .map(|mut h| {
+                    h.max = value_i32.max(1);
+                    h.hp = h.hp.min(h.max);
+                })
+                .is_some()
+        }
+        "stamina" | "stam" => world
+            .get_mut::<Stamina>(target)
+            .map(|mut s| s.current = value_i32.max(0).min(s.max))
+            .is_some(),
+        "maxstamina" | "maxstam" => {
+            world
+                .get_mut::<Stamina>(target)
+                .map(|mut s| {
+                    s.max = value_i32.max(1);
+                    s.current = s.current.min(s.max);
+                })
+                .is_some()
+        }
+        "gold" | "copper" | "wealth" => {
+            if let Some(mut w) = world.get_mut::<Wealth>(target) {
+                w.0 = value_i64.max(0);
+                true
+            } else {
+                world.entity_mut(target).insert(Wealth(value_i64.max(0)));
+                true
+            }
+        }
+        "alignment" | "align" => world
+            .get_mut::<CombatStats>(target)
+            .map(|mut c| c.alignment = value_i32)
+            .is_some(),
+        other => {
+            send_to(
+                world,
+                player,
+                format!("Unknown field '{other}'. Try: level, xp, hp, maxhp, stamina, maxstamina, gold, alignment.\r\n"),
+            );
+            return;
+        }
+    };
+    if applied {
+        send_to(
+            world,
+            player,
+            format!("Set {target_name}.{field} = {value_word}.\r\n"),
+        );
+    } else {
+        send_to(
+            world,
+            player,
+            format!("{target_name} has no component for {field}.\r\n"),
+        );
+    }
 }
 
 /// `scripterrors [<n>]`: list the most recent Lua trigger fire
