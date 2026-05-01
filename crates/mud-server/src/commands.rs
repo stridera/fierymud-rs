@@ -2880,6 +2880,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_tstat,
     },
     Command {
+        names: &["setweather"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "setweather <climate> [<zone_id>]",
+            summary: "Override the climate for a zone (current zone by default).",
+            long: "Builder+. Mutates the zone's `ZoneClimate` \
+                   component. Climate is one of: none / semiarid / \
+                   arid / oceanic / temperate / subtropical / \
+                   tropical / subarctic / arctic / alpine. Persists \
+                   only in-memory until the next world load.",
+        },
+        run: cmd_setweather,
+    },
+    Command {
         names: &["scripterrors", "scripterr"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -15771,6 +15787,78 @@ fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
     out.push_str(&format!("triggers:      {trig_count}\r\n"));
     out.push_str(&format!("live count:    {live}\r\n"));
     send_to(world, player, out);
+}
+
+/// `setweather <climate> [<zone_id>]`: override the climate for a
+/// zone. Without a zone arg, mutates the player's current zone.
+fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
+    use mud_db::enums::Climate;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        send_to(world, player, "Usage: setweather <climate> [<zone_id>]\r\n");
+        return;
+    }
+    let climate = match parts[0].to_ascii_lowercase().as_str() {
+        "none" => Climate::None,
+        "semiarid" => Climate::Semiarid,
+        "arid" => Climate::Arid,
+        "oceanic" => Climate::Oceanic,
+        "temperate" => Climate::Temperate,
+        "subtropical" => Climate::Subtropical,
+        "tropical" => Climate::Tropical,
+        "subarctic" => Climate::Subarctic,
+        "arctic" => Climate::Arctic,
+        "alpine" => Climate::Alpine,
+        other => {
+            send_to(
+                world,
+                player,
+                format!(
+                    "Unknown climate '{other}'. Try: none, semiarid, arid, oceanic, temperate, subtropical, tropical, subarctic, arctic, alpine.\r\n"
+                ),
+            );
+            return;
+        }
+    };
+    let zone_id = if parts.len() >= 2 {
+        let Ok(z) = parts[1].parse::<i32>() else {
+            send_to(world, player, "zone_id must be an integer.\r\n");
+            return;
+        };
+        z
+    } else {
+        let Some(zone) = world
+            .get::<Located>(player)
+            .and_then(|l| world.get::<WorldKey>(l.0))
+            .map(|wk| wk.zone)
+        else {
+            send_to(world, player, "Can't find your zone.\r\n");
+            return;
+        };
+        zone
+    };
+    let Some(zone_entity) = world
+        .resource::<WorldKeyIndex>()
+        .zones
+        .get(&zone_id)
+        .copied()
+    else {
+        send_to(world, player, format!("No zone {zone_id} loaded.\r\n"));
+        return;
+    };
+    if let Some(mut zc) = world.get_mut::<ZoneClimate>(zone_entity) {
+        zc.0 = climate;
+    } else {
+        world
+            .entity_mut(zone_entity)
+            .insert(ZoneClimate(climate));
+    }
+    let zone_name = name_of(world, zone_entity);
+    send_to(
+        world,
+        player,
+        format!("Set climate of zone {zone_id} ({zone_name}) to {climate:?}.\r\n"),
+    );
 }
 
 /// `scripterrors [<n>]`: list the most recent Lua trigger fire
