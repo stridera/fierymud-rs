@@ -381,6 +381,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
     entity
 }
 
+#[allow(clippy::too_many_lines)]
 async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
     let Some(account) = world.get::<Account>(entity).cloned() else {
         return;
@@ -454,6 +455,31 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
     .await
     {
         warn!(error = %e, character_id = %account.character_id, "items save failed");
+    }
+
+    // Persist KnownAbilities → CharacterAbilities so `study`-acquired
+    // spells round-trip across reconnect.
+    let ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow> = world
+        .get::<KnownAbilities>(entity)
+        .map(|ka| {
+            ka.entries
+                .iter()
+                .map(|(id, prof, known)| mud_db::character_abilities::CharacterAbilityRow {
+                    ability_id: *id,
+                    known: *known,
+                    proficiency: *prof,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Err(e) = mud_db::character_abilities::save_for(
+        pool,
+        &account.character_id,
+        &ability_rows,
+    )
+    .await
+    {
+        warn!(error = %e, character_id = %account.character_id, "abilities save failed");
         return;
     }
     info!(

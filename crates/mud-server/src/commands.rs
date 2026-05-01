@@ -1145,6 +1145,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_slots,
     },
     Command {
+        names: &["study"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "study <spell>",
+            summary: "Permanently learn a spell from your class list.",
+            long: "Adds the spell to your `KnownAbilities` at the \
+                   minimum proficiency tier (`known=true`, \
+                   proficiency=1). Refuses unknown abilities, \
+                   already-known spells, or off-class spells. \
+                   Persists across reconnect via `CharacterAbilities`.",
+        },
+        run: cmd_study,
+    },
+    Command {
         names: &["memorize", "mem"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -10150,6 +10166,69 @@ fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
         }
     }
     send_to(world, player, out);
+}
+
+/// `study <spell>`: permanently add a spell to the player's
+/// `KnownAbilities` at proficiency=1, gated on the spell being on
+/// the player's class list. Persisted to `CharacterAbilities` on
+/// disconnect.
+fn cmd_study(world: &mut World, player: Entity, args: &str) {
+    use mud_world::SpellSlotData;
+    let Some(profile) = world.get::<Profile>(player).cloned() else {
+        send_to(world, player, "You have no profile.\r\n");
+        return;
+    };
+    let Some(class_id) = profile.class_id else {
+        send_to(world, player, "You have no class.\r\n");
+        return;
+    };
+    let key = args.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        send_to(world, player, "Study what?\r\n");
+        return;
+    }
+    let Some(def) = world.resource::<AbilityCatalog>().by_name.get(&key).cloned() else {
+        send_to(world, player, format!("'{key}' isn't a known ability.\r\n"));
+        return;
+    };
+    if !world
+        .resource::<SpellSlotData>()
+        .ability_circle
+        .contains_key(&(class_id, def.id))
+    {
+        send_to(
+            world,
+            player,
+            format!("{} isn't on your class's list.\r\n", def.plain_name),
+        );
+        return;
+    }
+    if let Some(known) = world.get::<KnownAbilities>(player)
+        && known.has_any(def.id)
+    {
+        send_to(
+            world,
+            player,
+            format!("You already know {}.\r\n", def.plain_name),
+        );
+        return;
+    }
+    if let Some(mut known) = world.get_mut::<KnownAbilities>(player) {
+        known.entries.push((def.id, 1, true));
+        known.entries.sort_by_key(|(id, _, _)| *id);
+    } else {
+        world.entity_mut(player).insert(KnownAbilities {
+            entries: vec![(def.id, 1, true)],
+        });
+    }
+    send_to(
+        world,
+        player,
+        format!(
+            "You commit {} to memory. (proficiency 1)\r\n",
+            def.plain_name
+        ),
+    );
 }
 
 /// Resolve a spell name to (`ability_id`, circle) for the player's
