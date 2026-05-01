@@ -2576,6 +2576,25 @@ const COMMANDS: &[Command] = &[
         run: cmd_train,
     },
     Command {
+        names: &["tame"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "tame <target>",
+            summary: "Befriend an animal mob into following you.",
+            long: "Drains 4 stamina and dispatches the TAME skill at \
+                   the named target. The schema's `charmed` status \
+                   effect spawns on the mob; the runtime also installs \
+                   `Follower(you)` so existing pet-handling treats it \
+                   as your follower. Mob charm persists until dismiss \
+                   or the mob dies — animal-control checks against \
+                   the will save aren't modeled yet, so v1 always \
+                   succeeds at the schema-formula amount.",
+        },
+        run: cmd_tame,
+    },
+    Command {
         names: &["lure"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -12108,6 +12127,20 @@ fn invoke_ability(
                 {
                     try_insert(world, target_entity, mud_world::Stealth);
                 }
+                // Charmed-flag status effects (TAME, CHARM-PERSON,
+                // SUMMON-FAMILIAR, etc.) install `Follower(caster)`
+                // on a Mob target so the existing pet-handling and
+                // group-walk code treats it as the player's pet. Not
+                // applied to Player targets since charming a player
+                // through Follower would corrupt their group state.
+                // No auto-remove on expiry — mob charm in legacy
+                // MUDs persists until dismiss / death.
+                if spec.name.eq_ignore_ascii_case("charmed")
+                    && world.get::<Mob>(target_entity).is_some()
+                    && world.get::<Player>(target_entity).is_none()
+                {
+                    try_insert(world, target_entity, Follower(player));
+                }
                 applied_msgs.push(spec.name.clone());
             }
         }
@@ -16251,6 +16284,46 @@ fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
 /// gets 0 HP from that until the formula gains a baseline (also
 /// in `SUGGESTIONS.md`) — until then the staunch is the only
 /// visible effect for an untrained caster.
+/// `tame <target>`: animal-control skill shim. Drains stamina,
+/// dispatches via the data path. Combat is NOT engaged on tame —
+/// the charmed effect's runtime installs `Follower(player)` on the
+/// mob so it joins the caster's group instead.
+fn cmd_tame(world: &mut World, player: Entity, args: &str) {
+    const TAME_COST: i32 = 4;
+    if !require_alert_posture(world, player, "tame") {
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Tame what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if world.get::<Mob>(target).is_none() {
+        send_to(world, player, "You can only tame animals.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, TAME_COST, "tame") {
+        return;
+    }
+    drain_stamina(world, player, TAME_COST);
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("tame {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+
 /// `lure <target>` / `corner <target>` shared shim: target arg
 /// resolves to an actor in the room, drains stamina, dispatches the
 /// named skill via the data path, and engages combat (mutual
