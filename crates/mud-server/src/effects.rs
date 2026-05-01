@@ -1,6 +1,6 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AbilityCatalog, AppliedTo, EffectInstance, Item, Located, Stealth, Stunned,
+    AbilityCatalog, AppliedTo, EffectInstance, Item, Located, ModifyDelta, Stealth, Stunned,
 };
 use tracing::info;
 
@@ -105,6 +105,21 @@ pub fn effects_tick(world: &mut World) {
                     located.0,
                     &[target],
                     &format!("{rendered}\r\n"),
+                );
+            }
+            // Reverse a `ModifyDelta` companion before despawning the
+            // effect — for `modify` effect-type EffectInstances. The
+            // delta records what stat was bumped and by how much; we
+            // subtract it back here so stacking buffs from each
+            // other's expiries don't double-clear the bonus.
+            if let Some(delta) = world.get::<ModifyDelta>(eff_entity).cloned()
+                && world.get_entity(target).is_ok()
+            {
+                crate::commands::reverse_modify_delta(
+                    world,
+                    target,
+                    &delta.target,
+                    delta.amount,
                 );
             }
             if let Ok(e) = world.get_entity_mut(eff_entity) {

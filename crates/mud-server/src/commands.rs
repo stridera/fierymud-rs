@@ -12133,6 +12133,81 @@ fn invoke_ability(
                 ));
                 applied_msgs.push(format!("{} ({} appears)", spec.name, proto.name));
             }
+            "modify" => {
+                // Stat-bonus stacking. Read `target` (which stat) and
+                // `amount` (signed delta) from params; resolve the
+                // amount through the formula evaluator. Apply the
+                // delta to the target's component now and stash a
+                // `ModifyDelta` companion on the effect entity so the
+                // tick can subtract the same delta on expiry — that
+                // keeps stacking buffs from each other's expiries.
+                //
+                // Supported stat targets (see `apply_modify_delta`):
+                //   - CoreStats:    str/dex/con/int/wis/cha
+                //   - CombatStats:  hitroll, damroll, ward (lower
+                //                   AC = better; ward+N → ac-=N)
+                //   - Maxes:        max_hp, max_move/max_stamina
+                // Unsupported targets (eva, acc, focus, size,
+                // unarmed_damage, weapon_hitroll, save_spell, ...)
+                // spawn a labeled effect without applying anything.
+                let target_stat = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("target"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_ascii_lowercase);
+                let amount = resolve_effect_amount(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    &formula_ctx,
+                );
+                let mut dur_secs = resolve_effect_duration(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    &formula_ctx,
+                );
+                if halve_duration {
+                    dur_secs = (dur_secs / 2).max(1);
+                }
+                let applied_amount = match (target_stat.as_deref(), amount) {
+                    (Some(t), Some(a)) if a != 0 => {
+                        if apply_modify_delta(world, target_entity, t, a) {
+                            Some(a)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                let mut bundle = world.spawn((
+                    EffectInstance {
+                        kind: spec.id,
+                        name: target_stat
+                            .clone()
+                            .unwrap_or_else(|| spec.name.clone()),
+                        strength: applied_amount.unwrap_or(0),
+                        remaining_secs: dur_secs,
+                        source: EffectSource::Spell,
+                        ability_id: Some(def.id),
+                    },
+                    AppliedTo(target_entity),
+                ));
+                if let (Some(t), Some(a)) = (target_stat.as_deref(), applied_amount) {
+                    bundle.insert(mud_world::ModifyDelta {
+                        target: t.to_string(),
+                        amount: a,
+                    });
+                }
+                spawn_count += 1;
+                applied_msgs.push(match (target_stat.as_deref(), applied_amount) {
+                    (Some(t), Some(a)) => {
+                        let sign = if a >= 0 { "+" } else { "" };
+                        format!("{} ({sign}{a} {t})", spec.name)
+                    }
+                    (Some(t), None) => format!("{} ({t}: unsupported target)", spec.name),
+                    (None, _) => format!("{} (no target specified)", spec.name),
+                });
+            }
             "intercept" => {
                 // GUARD's bodyguard semantics: install
                 // `Guarding(target)` on the caster so the existing
@@ -12994,6 +13069,104 @@ fn resolve_effect_conditions(
 /// Add `amount` to `target.Health.hp`, capped at `max`. Returns the
 /// HP actually restored (0 if `target` has no Health, already full,
 /// or `amount <= 0`).
+/// Mutate the named stat on `target` by `amount` (signed). Returns
+/// true when the change was applied (target is supported), false
+/// when the target name doesn't map to anything we model — caller
+/// uses the bool to decide whether to record a `ModifyDelta` for
+/// later reversal. Pairs with `reverse_modify_delta` (same mapping
+/// flipped).
+fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, amount: i32) -> bool {
+    match stat {
+        "str" | "strength" => {
+            if let Some(mut s) = world.get_mut::<CoreStats>(target) {
+                s.strength = s.strength.saturating_add(amount);
+            }
+            true
+        }
+        "dex" | "dexterity" => {
+            if let Some(mut s) = world.get_mut::<CoreStats>(target) {
+                s.dexterity = s.dexterity.saturating_add(amount);
+            }
+            true
+        }
+        "con" | "constitution" => {
+            if let Some(mut s) = world.get_mut::<CoreStats>(target) {
+                s.constitution = s.constitution.saturating_add(amount);
+            }
+            true
+        }
+        "int" | "intelligence" => {
+            if let Some(mut s) = world.get_mut::<CoreStats>(target) {
+                s.intelligence = s.intelligence.saturating_add(amount);
+            }
+            true
+        }
+        "wis" | "wisdom" => {
+            if let Some(mut s) = world.get_mut::<CoreStats>(target) {
+                s.wisdom = s.wisdom.saturating_add(amount);
+            }
+            true
+        }
+        "cha" | "charisma" => {
+            if let Some(mut s) = world.get_mut::<CoreStats>(target) {
+                s.charisma = s.charisma.saturating_add(amount);
+            }
+            true
+        }
+        "hitroll" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.hit_roll = cs.hit_roll.saturating_add(amount);
+            }
+            true
+        }
+        "damroll" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.dmg_roll = cs.dmg_roll.saturating_add(amount);
+            }
+            true
+        }
+        // Lower AC = better in CircleMUD lineage; the schema's
+        // `ward` is positive-buff so subtract from ac.
+        "ward" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.ac = cs.ac.saturating_sub(amount);
+            }
+            true
+        }
+        "max_hp" => {
+            if let Some(mut h) = world.get_mut::<Health>(target) {
+                h.max = h.max.saturating_add(amount);
+                if amount > 0 {
+                    h.hp = h.hp.saturating_add(amount);
+                }
+            }
+            true
+        }
+        "max_move" | "max_stamina" => {
+            if let Some(mut s) = world.get_mut::<Stamina>(target) {
+                s.max = s.max.saturating_add(amount);
+                if amount > 0 {
+                    s.current = s.current.saturating_add(amount);
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Inverse of `apply_modify_delta` — subtracts the recorded delta
+/// from the same stat. Used by `effects_tick` when a `ModifyDelta`
+/// companion records a stat change made on spawn.
+pub(crate) fn reverse_modify_delta(
+    world: &mut World,
+    target: Entity,
+    stat: &str,
+    amount: i32,
+) {
+    apply_modify_delta(world, target, stat, -amount);
+}
+
 fn apply_heal_hp(world: &mut World, target: Entity, amount: i32) -> i32 {
     if amount <= 0 {
         return 0;

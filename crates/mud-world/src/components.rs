@@ -804,6 +804,17 @@ pub struct EffectInstance {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct AppliedTo(pub Entity);
 
+/// Per-effect "what stat did I bump and by how much" companion record
+/// for `modify`-effect-type `EffectInstance`s. Lives on the effect
+/// entity alongside `EffectInstance` and `AppliedTo`. Used by the
+/// effects tick to subtract the same delta back when the effect
+/// fades — keeps stacking buffs from each other's expiries cleanly.
+#[derive(Component, Debug, Clone)]
+pub struct ModifyDelta {
+    pub target: String,
+    pub amount: i32,
+}
+
 /// Composite (zone, id) identity for entities loaded from the schema.
 /// Lets the runtime round-trip an entity back to its DB row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
