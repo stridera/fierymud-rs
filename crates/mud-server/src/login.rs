@@ -528,6 +528,26 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         return;
     }
 
+    // Persist mutable CoreStats (changes via `train`, future stat
+    // adjusters). Skipped silently if the entity has no CoreStats —
+    // shouldn't happen for a fully-spawned player but defensive.
+    if let Some(stats) = world.get::<CoreStats>(entity).copied()
+        && let Err(e) = characters::save_core_stats(
+            pool,
+            &account.character_id,
+            stats.strength,
+            stats.dexterity,
+            stats.constitution,
+            stats.intelligence,
+            stats.wisdom,
+            stats.charisma,
+        )
+        .await
+    {
+        warn!(error = %e, character_id = %account.character_id, "core_stats save failed");
+        return;
+    }
+
     info!(
         character_id = %account.character_id,
         hp,

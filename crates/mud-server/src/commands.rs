@@ -2559,6 +2559,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_retreat,
     },
     Command {
+        names: &["train"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "train [<stat>]",
+            summary: "Spend a practice point to bump a CoreStat by 1.",
+            long: "With no arg, lists your current six stats and \
+                   available practice points. With `train <stat>`, \
+                   spends 1 point from `SkillPoints` to raise the \
+                   named stat (str/dex/con/int/wis/cha) by 1. Refuses \
+                   on stats already at 18 (the trainable cap), and on \
+                   no points available. Persists across reconnect.",
+        },
+        run: cmd_train,
+    },
+    Command {
         names: &["lure"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -7236,6 +7253,100 @@ fn practice_one(world: &mut World, player: Entity, name: &str) {
             "You practice {} — proficiency now {new_prof} / {cap}. \
              ({remaining} practice point(s) remaining.)\r\n",
             def.plain_name
+        ),
+    );
+}
+
+/// `train [<stat>]`: bump a `CoreStat` by 1 in exchange for one
+/// `SkillPoints`. Hard-capped at 18 per legacy `CircleMUD`
+/// convention — characters with rolled stats above 18 (e.g. magical
+/// bonuses) can't be trained higher than 18, but their existing
+/// values aren't clamped.
+const TRAIN_STAT_CAP: i32 = 18;
+
+fn cmd_train(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim().to_ascii_lowercase();
+    let stats = world
+        .get::<CoreStats>(player)
+        .copied()
+        .unwrap_or_default();
+    let points = world
+        .get::<mud_world::SkillPoints>(player)
+        .map_or(0, |s| s.0);
+    if arg.is_empty() {
+        let mut out = format!("\r\nCurrent stats (cap {TRAIN_STAT_CAP}):\r\n");
+        out.push_str(&format!(
+            "  str {:>2}   dex {:>2}   con {:>2}   int {:>2}   wis {:>2}   cha {:>2}\r\n",
+            stats.strength,
+            stats.dexterity,
+            stats.constitution,
+            stats.intelligence,
+            stats.wisdom,
+            stats.charisma,
+        ));
+        out.push_str(&format!("Practice points: {points}\r\n"));
+        out.push_str("Use `train <stat>` to spend one.\r\n");
+        send_to(world, player, out);
+        return;
+    }
+
+    let (label, current) = match arg.as_str() {
+        "str" | "strength" => ("strength", stats.strength),
+        "dex" | "dexterity" => ("dexterity", stats.dexterity),
+        "con" | "constitution" => ("constitution", stats.constitution),
+        "int" | "intelligence" => ("intelligence", stats.intelligence),
+        "wis" | "wisdom" => ("wisdom", stats.wisdom),
+        "cha" | "charisma" => ("charisma", stats.charisma),
+        _ => {
+            send_to(
+                world,
+                player,
+                "Train which stat? str / dex / con / int / wis / cha.\r\n",
+            );
+            return;
+        }
+    };
+    if current >= TRAIN_STAT_CAP {
+        send_to(
+            world,
+            player,
+            format!(
+                "Your {label} is at the trainable cap of {TRAIN_STAT_CAP}.\r\n"
+            ),
+        );
+        return;
+    }
+    if points <= 0 {
+        send_to(
+            world,
+            player,
+            "You have no practice points to spend. Earn more by leveling up.\r\n",
+        );
+        return;
+    }
+    if let Some(mut s) = world.get_mut::<CoreStats>(player) {
+        match arg.as_str() {
+            "str" | "strength" => s.strength += 1,
+            "dex" | "dexterity" => s.dexterity += 1,
+            "con" | "constitution" => s.constitution += 1,
+            "int" | "intelligence" => s.intelligence += 1,
+            "wis" | "wisdom" => s.wisdom += 1,
+            "cha" | "charisma" => s.charisma += 1,
+            _ => unreachable!(),
+        }
+    }
+    if let Some(mut sp) = world.get_mut::<mud_world::SkillPoints>(player) {
+        sp.0 -= 1;
+    }
+    let remaining = world
+        .get::<mud_world::SkillPoints>(player)
+        .map_or(0, |s| s.0);
+    send_to(
+        world,
+        player,
+        format!(
+            "You train your {label} — now {new}. ({remaining} practice point(s) remaining.)\r\n",
+            new = current + 1,
         ),
     );
 }
