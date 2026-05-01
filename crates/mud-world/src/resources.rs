@@ -349,6 +349,14 @@ impl LevelTable {
             .and_then(|r| r.name.clone())
             .unwrap_or_else(|| format!("Level {level}"))
     }
+
+    /// Snapshot of the underlying rows. Used by callers that need
+    /// to mutate the world while inspecting level data without
+    /// holding a `Res<LevelTable>` borrow.
+    #[must_use]
+    pub fn clone_rows(&self) -> Vec<LevelRow> {
+        self.rows.clone()
+    }
 }
 
 /// Spell-slot tables loaded once at startup. `progression` maps
