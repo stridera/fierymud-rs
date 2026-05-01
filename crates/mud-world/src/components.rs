@@ -518,25 +518,51 @@ pub struct Profile {
     pub gender: String,
 }
 
+/// One prepared spell slot in a player's memorize list. `ready`
+/// flips to true once `prep_secs_remaining` decrements to 0 (the
+/// rest-tick handles that under Sleeping/Resting/Sitting postures).
+/// `cast` consumes only `ready=true` entries.
+#[derive(Debug, Clone, Copy)]
+pub struct MemEntry {
+    pub ability_id: i32,
+    pub circle: i32,
+    pub ready: bool,
+    pub prep_secs_remaining: i32,
+}
+
 /// Session-only spell memorization list — one entry per memorized
 /// instance. Caster classes (Sorcerer/Cleric/etc.) populate this
-/// via `memorize <spell>`; `cast` will gate on it once real
-/// memorization-aware casting lands. Not persisted across
-/// disconnect (no schema column today); v1 expects players to
-/// re-memorize on reconnect.
+/// via `memorize <spell>`; `cast` gates on `ready=true`. Not
+/// persisted across disconnect (no schema column today); v1
+/// expects players to re-memorize on reconnect.
 #[derive(Component, Debug, Clone, Default)]
 pub struct MemorizedSpells {
-    /// `(ability_id, circle)` per slot occupied. Order matters:
-    /// `forget <name>` removes the first matching entry, mirroring
-    /// `FieryMUD`'s stack-of-prepared-spells semantics.
-    pub entries: Vec<(i32, i32)>,
+    /// Order matters: `forget <name>` removes the first matching
+    /// entry (preferring not-yet-ready), mirroring `FieryMUD`'s
+    /// stack-of-prepared-spells semantics.
+    pub entries: Vec<MemEntry>,
 }
 
 impl MemorizedSpells {
-    /// Count how many slots in `circle` are currently used.
+    /// Count how many slots in `circle` are currently in use
+    /// (whether or not they're ready). Used by the `slots`
+    /// readout's `used / max` line.
     #[must_use]
     pub fn used_in_circle(&self, circle: i32) -> i32 {
-        i32::try_from(self.entries.iter().filter(|(_, c)| *c == circle).count()).unwrap_or(0)
+        i32::try_from(self.entries.iter().filter(|e| e.circle == circle).count())
+            .unwrap_or(0)
+    }
+
+    /// Count how many entries are ready (memorized) in `circle`.
+    #[must_use]
+    pub fn ready_in_circle(&self, circle: i32) -> i32 {
+        i32::try_from(
+            self.entries
+                .iter()
+                .filter(|e| e.circle == circle && e.ready)
+                .count(),
+        )
+        .unwrap_or(0)
     }
 }
 

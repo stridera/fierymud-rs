@@ -10061,7 +10061,17 @@ fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
     let mut out = format!("\r\nLevel {level} {class_name} spell slots:\r\n");
     for (circle, max) in slots {
         let used = mem.used_in_circle(circle);
-        out.push_str(&format!("  Circle {circle:>2}: {used:>2} / {max:>2}\r\n"));
+        let ready = mem.ready_in_circle(circle);
+        let preparing = used - ready;
+        if preparing > 0 {
+            out.push_str(&format!(
+                "  Circle {circle:>2}: {ready:>2} ready + {preparing} preparing / {max:>2}\r\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "  Circle {circle:>2}: {ready:>2} ready / {max:>2}\r\n"
+            ));
+        }
     }
     send_to(world, player, out);
 }
@@ -10145,17 +10155,26 @@ fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
         .values()
         .find(|d| d.id == ability_id)
         .map_or_else(String::new, |d| d.plain_name.clone());
+    let prep_secs = (circle * 5).max(5); // default 5s/circle until Ability.memorization_time is seeded
+    let entry = mud_world::MemEntry {
+        ability_id,
+        circle,
+        ready: false,
+        prep_secs_remaining: prep_secs,
+    };
     if let Some(mut mem) = world.get_mut::<MemorizedSpells>(player) {
-        mem.entries.push((ability_id, circle));
+        mem.entries.push(entry);
     } else {
-        world.entity_mut(player).insert(MemorizedSpells {
-            entries: vec![(ability_id, circle)],
-        });
+        world
+            .entity_mut(player)
+            .insert(MemorizedSpells { entries: vec![entry] });
     }
     send_to(
         world,
         player,
-        format!("You memorize {plain_name} (circle {circle}).\r\n"),
+        format!(
+            "You begin memorizing {plain_name} (circle {circle}, ~{prep_secs}s while resting).\r\n"
+        ),
     );
 }
 
@@ -10183,7 +10202,13 @@ fn cmd_forget(world: &mut World, player: Entity, args: &str) {
         .find(|d| d.id == ability_id)
         .map_or_else(String::new, |d| d.plain_name.clone());
     let removed = if let Some(mut mem) = world.get_mut::<MemorizedSpells>(player) {
-        if let Some(idx) = mem.entries.iter().position(|(id, _)| *id == ability_id) {
+        // Prefer dropping a not-yet-ready entry (cheaper to lose).
+        let idx = mem
+            .entries
+            .iter()
+            .position(|e| e.ability_id == ability_id && !e.ready)
+            .or_else(|| mem.entries.iter().position(|e| e.ability_id == ability_id));
+        if let Some(idx) = idx {
             mem.entries.remove(idx);
             true
         } else {
@@ -10452,9 +10477,16 @@ fn invoke_ability(
                 .ability_circle
                 .contains_key(&(class_id, def.id))
         {
+            // Find the first READY entry for this ability. A
+            // not-ready entry doesn't satisfy the gate — bodies
+            // that are still preparing don't count.
             let memorized_idx = world
                 .get::<mud_world::MemorizedSpells>(player)
-                .and_then(|m| m.entries.iter().position(|(id, _)| *id == def.id));
+                .and_then(|m| {
+                    m.entries
+                        .iter()
+                        .position(|e| e.ability_id == def.id && e.ready)
+                });
             let Some(idx) = memorized_idx else {
                 send_to(
                     world,
