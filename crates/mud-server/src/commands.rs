@@ -10361,6 +10361,28 @@ fn apply_consumable_object_effects(world: &mut World, player: Entity, item: Enti
     }
 }
 
+/// Same as `apply_consumable_object_effects` but for a Liquid name.
+/// Resolves the name through `LiquidIndex` to the schema's id, then
+/// fans out to the catalog's per-liquid bindings.
+fn apply_consumable_liquid_effects(world: &mut World, player: Entity, liquid_name: &str) {
+    let needle = liquid_name.to_ascii_lowercase();
+    let liquid_id = world
+        .resource::<mud_world::LiquidIndex>()
+        .by_name
+        .get(&needle)
+        .copied();
+    let Some(liquid_id) = liquid_id else { return };
+    let bindings = world
+        .resource::<mud_world::ConsumableEffectCatalog>()
+        .by_liquid
+        .get(&liquid_id)
+        .cloned()
+        .unwrap_or_default();
+    for b in bindings {
+        spawn_consumable_effect(world, player, &b);
+    }
+}
+
 fn spawn_consumable_effect(
     world: &mut World,
     player: Entity,
@@ -10454,6 +10476,7 @@ fn drink_amount(world: &mut World, player: Entity, args: &str, units: i32, verb:
             "You feel a sudden burning in your gut — that was poisoned!\r\n",
         );
     }
+    apply_consumable_liquid_effects(world, player, &state.liquid);
     let was_last = state.remaining == drank;
     if was_last {
         send_rendered(

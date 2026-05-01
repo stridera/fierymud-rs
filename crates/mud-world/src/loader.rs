@@ -17,7 +17,7 @@ use crate::components::{
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog, DamageComponent, EffectCatalog,
-    EffectDef, LiquidProto, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry,
+    EffectDef, LiquidIndex, LiquidProto, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry,
     ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
     SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef,
     SocialRegistry, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent,
@@ -548,6 +548,23 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         "consumable effect catalog loaded"
     );
 
+    // Liquids name → id index for the drink path's per-liquid
+    // ConsumableEffects lookup. `LiquidContainer` stores the name;
+    // this resolves to the schema's id.
+    let mut liquid_index = LiquidIndex::default();
+    let liquid_rows = sqlx::query!(r#"SELECT id, name FROM "Liquids""#)
+        .fetch_all(pool)
+        .await?;
+    for row in liquid_rows {
+        liquid_index
+            .by_name
+            .insert(row.name.to_ascii_lowercase(), row.id);
+    }
+    info!(
+        liquids = liquid_index.by_name.len(),
+        "liquid index loaded"
+    );
+
     // Pass 4.5: load Shop catalog. Each shop maps to a keeper mob via
     // (keeper_zone_id, keeper_id); the spawn pass below attaches a
     // Shopkeeper component to each spawned mob whose proto matches.
@@ -634,6 +651,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(class_catalog);
     world.insert_resource(object_ability_catalog);
     world.insert_resource(consumable_catalog);
+    world.insert_resource(liquid_index);
     world.insert_resource(shop_catalog);
 
     // Pass 4.6: load Board catalog. Just metadata (id/alias/title/lock) —

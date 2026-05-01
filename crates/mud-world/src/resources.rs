@@ -93,6 +93,14 @@ pub struct ConsumableEffectBinding {
     pub duration_secs: Option<i32>,
 }
 
+/// Lightweight catalog of `Liquids` rows — name → id mapping used
+/// by the drink path to look up `ConsumableEffects` per-liquid
+/// bindings. Names are normalized to lowercase at insert.
+#[derive(Resource, Debug, Default)]
+pub struct LiquidIndex {
+    pub by_name: HashMap<String, i32>,
+}
+
 /// Catalog of `ConsumableEffects` rows: which effects fire on
 /// eat/drink/quaff for a given object proto or liquid. Read by
 /// `consume_item` and the drink handlers right before the
