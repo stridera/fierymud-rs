@@ -10332,12 +10332,72 @@ fn consume_item(world: &mut World, player: Entity, args: &str, expected: mud_db:
         return;
     }
     send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
+    // Apply ConsumableEffects bound to this object proto. Per-row
+    // chance gate, EffectInstance spawned with the row's duration
+    // (or the EffectDef's default_params.duration when null).
+    apply_consumable_object_effects(world, player, item);
     // Fire CONSUME on the item before despawn so the body can read
     // self.id / self.name and emit a final flavor line.
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Consume);
     if let Ok(e) = world.get_entity_mut(item) {
         e.despawn();
     }
+}
+
+/// Spawn ConsumableEffect-bound effects on `player` for object
+/// proto behind `item`. No-op when `ConsumableEffects` has no rows
+/// for the proto. Per-row `chance` (0.0–1.0) gates spawning.
+fn apply_consumable_object_effects(world: &mut World, player: Entity, item: Entity) {
+    let key = world.get::<WorldKey>(item).copied();
+    let Some(key) = key else { return };
+    let bindings = world
+        .resource::<mud_world::ConsumableEffectCatalog>()
+        .by_object
+        .get(&(key.zone, key.id))
+        .cloned()
+        .unwrap_or_default();
+    for b in bindings {
+        spawn_consumable_effect(world, player, &b);
+    }
+}
+
+fn spawn_consumable_effect(
+    world: &mut World,
+    player: Entity,
+    binding: &mud_world::ConsumableEffectBinding,
+) {
+    if binding.chance < 1.0 {
+        let roll = f64::from(rand::random_range(0..1000)) / 1000.0;
+        if roll > binding.chance {
+            return;
+        }
+    }
+    let effect_def = world
+        .resource::<EffectCatalog>()
+        .by_id
+        .get(&binding.effect_id)
+        .cloned();
+    let Some(def) = effect_def else {
+        return;
+    };
+    // Duration: explicit binding > effect default_params.duration > 30s
+    let dur_secs = binding.duration_secs.unwrap_or_else(|| {
+        def.default_params
+            .get("duration")
+            .and_then(serde_json::Value::as_i64)
+            .map_or(30, |v| i32::try_from(v).unwrap_or(30))
+    });
+    world.spawn((
+        EffectInstance {
+            kind: def.id,
+            name: def.name.clone(),
+            strength: 1,
+            remaining_secs: dur_secs,
+            source: EffectSource::Item,
+            ability_id: None,
+        },
+        AppliedTo(player),
+    ));
 }
 
 fn cmd_eat(world: &mut World, player: Entity, args: &str) {

@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, boards, classes, effects, levels, mob_reset_equipment,
-    mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
-    rooms, shops, socials, spell_slots, sqlx::PgPool, triggers, zones,
+    abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions,
+    ability_saving_throw, ability_targeting, boards, classes, effects, levels,
+    mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
+    objects, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool, triggers, zones,
 };
 use tracing::{info, warn};
 
@@ -15,11 +16,12 @@ use crate::components::{
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
-    ClassDef, DamageComponent, EffectCatalog, EffectDef, LiquidProto, MobProto, MobPrototypes,
-    MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto, ObjectPrototypes,
-    ObjectResetCatalog, ObjectResetEntry, SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef,
-    ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, TargetingRule, TriggerAttach,
-    TriggerCatalog, TriggerDef, TriggerEvent, WorldKeyIndex,
+    ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog, DamageComponent, EffectCatalog,
+    EffectDef, LiquidProto, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry,
+    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
+    SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef,
+    SocialRegistry, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent,
+    WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -486,6 +488,66 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             });
     }
 
+    // ConsumableEffects: per-object and per-liquid bindings consumed
+    // by `consume_item` (eat / quaff / drink). The schema's row picks
+    // exactly one binding shape — split into two maps for O(1)
+    // lookup at consume time.
+    let mut consumable_catalog = ConsumableEffectCatalog::default();
+    {
+        let object_bindings_query = sqlx::query!(
+            r#"
+            SELECT effect_id, chance, level, duration, object_zone_id, object_id
+            FROM "ConsumableEffects"
+            WHERE object_zone_id IS NOT NULL AND object_id IS NOT NULL
+            "#
+        )
+        .fetch_all(pool)
+        .await?;
+        for r in object_bindings_query {
+            let (Some(zone), Some(id)) = (r.object_zone_id, r.object_id) else {
+                continue;
+            };
+            consumable_catalog
+                .by_object
+                .entry((zone, id))
+                .or_default()
+                .push(ConsumableEffectBinding {
+                    effect_id: r.effect_id,
+                    chance: r.chance,
+                    level: r.level,
+                    duration_secs: r.duration,
+                });
+        }
+        // Per-liquid bindings: one query, walk all liquid IDs.
+        let liquid_bindings_query = sqlx::query!(
+            r#"
+            SELECT effect_id, chance, level, duration, liquid_id
+            FROM "ConsumableEffects"
+            WHERE liquid_id IS NOT NULL
+            "#
+        )
+        .fetch_all(pool)
+        .await?;
+        for r in liquid_bindings_query {
+            let Some(lid) = r.liquid_id else { continue };
+            consumable_catalog
+                .by_liquid
+                .entry(lid)
+                .or_default()
+                .push(ConsumableEffectBinding {
+                    effect_id: r.effect_id,
+                    chance: r.chance,
+                    level: r.level,
+                    duration_secs: r.duration,
+                });
+        }
+    }
+    info!(
+        objects = consumable_catalog.by_object.len(),
+        liquids = consumable_catalog.by_liquid.len(),
+        "consumable effect catalog loaded"
+    );
+
     // Pass 4.5: load Shop catalog. Each shop maps to a keeper mob via
     // (keeper_zone_id, keeper_id); the spawn pass below attaches a
     // Shopkeeper component to each spawned mob whose proto matches.
@@ -571,6 +633,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(ability_catalog);
     world.insert_resource(class_catalog);
     world.insert_resource(object_ability_catalog);
+    world.insert_resource(consumable_catalog);
     world.insert_resource(shop_catalog);
 
     // Pass 4.6: load Board catalog. Just metadata (id/alias/title/lock) —

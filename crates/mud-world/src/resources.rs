@@ -81,6 +81,28 @@ pub struct ObjectAbilityCatalog {
     pub by_key: HashMap<(i32, i32), Vec<ObjectAbilityBinding>>,
 }
 
+/// One row from `ConsumableEffects`. The schema binds either a
+/// specific Object proto (zone+id) OR a Liquid (id) — not both — so
+/// this catalog stores both maps and the consume handler queries
+/// the appropriate one.
+#[derive(Debug, Clone, Copy)]
+pub struct ConsumableEffectBinding {
+    pub effect_id: i32,
+    pub chance: f64,
+    pub level: i32,
+    pub duration_secs: Option<i32>,
+}
+
+/// Catalog of `ConsumableEffects` rows: which effects fire on
+/// eat/drink/quaff for a given object proto or liquid. Read by
+/// `consume_item` and the drink handlers right before the
+/// despawn / liquid-decrement.
+#[derive(Resource, Debug, Default)]
+pub struct ConsumableEffectCatalog {
+    pub by_object: HashMap<(i32, i32), Vec<ConsumableEffectBinding>>,
+    pub by_liquid: HashMap<i32, Vec<ConsumableEffectBinding>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ObjectProto {
     pub zone_id: i32,
