@@ -392,6 +392,14 @@ pub struct Cooldowns {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Follower(pub Entity);
 
+/// Bodyguard pairing: this entity intercepts incoming swings that
+/// were aimed at the target. Combat snapshots redirect swing.target
+/// from `Guarding.0` onto the guarder when both are in the same
+/// room. Set via `guard <target>`; cleared via `guard off`. The
+/// Mounted/RiddenBy split is similar but for mount semantics.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Guarding(pub Entity);
+
 /// Most recent sender of a `tell` to this entity. Used by `reply` to find
 /// the previous correspondent. Cleared (or stale-checked) on the receiver
 /// side, not the sender side.

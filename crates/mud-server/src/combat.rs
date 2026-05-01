@@ -1,8 +1,8 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AppliedTo, CombatStats, Description, EffectInstance, Exits, Fighting, Health, Item, Keywords,
-    Located, Mob, MobPrototypes, Named, Player, PlayerFlags, Posture, PostureKind, Slot, Stunned,
-    Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    AppliedTo, CombatStats, Description, EffectInstance, Exits, Fighting, Guarding, Health, Item,
+    Keywords, Located, Mob, MobPrototypes, Named, Player, PlayerFlags, Posture, PostureKind,
+    Slot, Stunned, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -116,6 +116,21 @@ pub fn combat_tick(world: &mut World) {
     // (they're alert by default). `Stunned` attackers also skip — the
     // marker is added by the stun effect-type and removed by
     // `effects_tick` once every backing stun EffectInstance expires.
+    // Pre-pass: collect (guarder, defended) pairs whose guarder is in
+    // the same room as the defended target. The swing-snapshot uses
+    // this to redirect attacker hits onto the bodyguard.
+    let guards: Vec<(Entity, Entity)> = {
+        let mut q = world.query::<(Entity, &Guarding, &Located)>();
+        q.iter(world)
+            .filter_map(|(g, guarded, loc)| {
+                let target_loc = world.get::<Located>(guarded.0).map(|l| l.0)?;
+                if target_loc != loc.0 {
+                    return None;
+                }
+                Some((g, guarded.0))
+            })
+            .collect()
+    };
     let swings: Vec<Swing> = {
         let mut q = world
             .query::<(
@@ -138,9 +153,16 @@ pub fn combat_tick(world: &mut World) {
                 } else {
                     base
                 };
+                // Redirect swing onto a bodyguard if any guarder is
+                // protecting the original target. First-match wins;
+                // self-guard (guarder == target) is filtered out.
+                let target = guards
+                    .iter()
+                    .find(|(g, defended)| *defended == fighting.0 && *g != fighting.0 && *g != attacker)
+                    .map_or(fighting.0, |(g, _)| *g);
                 Swing {
                     attacker,
-                    target: fighting.0,
+                    target,
                     damage,
                     attacker_name: name.name.clone(),
                 }

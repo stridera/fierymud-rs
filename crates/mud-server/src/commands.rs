@@ -2345,6 +2345,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_rescue,
     },
     Command {
+        names: &["guard"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "guard <player|off>",
+            summary: "Stand bodyguard — intercept incoming swings on a target.",
+            long: "Sets a `Guarding` link from you onto the named \
+                   player; while you're in the same room, attackers \
+                   targeting them swing at you instead. `guard off` \
+                   clears the link. `guard` with no arg reports \
+                   the current target.",
+        },
+        run: cmd_guard,
+    },
+    Command {
         names: &["assist"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -14921,6 +14937,56 @@ fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
 /// stay here (the data path doesn't model them yet); target
 /// resolution + Fighting-swap + room broadcast all flow through
 /// `invoke_ability` (redirect effect-type with `aggro=true`).
+/// `guard <player|off>`: insert a `Guarding(target)` component on
+/// the player so combat-tick redirects swings against the target
+/// onto the guard. Bare `guard` reports the current target.
+fn cmd_guard(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        if let Some(g) = world.get::<mud_world::Guarding>(player) {
+            let n = name_of(world, g.0);
+            send_to(world, player, format!("You are guarding {n}.\r\n"));
+        } else {
+            send_to(world, player, "You aren't guarding anyone.\r\n");
+        }
+        return;
+    }
+    if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("none") {
+        let had = world.get::<mud_world::Guarding>(player).is_some();
+        try_remove::<mud_world::Guarding>(world, player);
+        if had {
+            send_to(world, player, "You stop guarding.\r\n");
+        } else {
+            send_to(world, player, "You aren't guarding anyone.\r\n");
+        }
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_rendered(world, player, &format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "You can't guard yourself.\r\n");
+        return;
+    }
+    world
+        .entity_mut(player)
+        .insert(mud_world::Guarding(target));
+    let n = name_of(world, target);
+    send_to(world, player, format!("You begin guarding {n}.\r\n"));
+    send_rendered(
+        world,
+        target,
+        &format!(
+            "{} stands ready to defend you.\r\n",
+            name_of(world, player)
+        ),
+    );
+}
+
 fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "rescue") {
         return;
