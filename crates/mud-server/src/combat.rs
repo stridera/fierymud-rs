@@ -352,6 +352,7 @@ pub(crate) fn handle_death(
             &format!("{victim_name} dies.\r\n"),
         );
         award_kill_coin(world, victim, victim_name);
+        award_kill_xp(world, victim, victim_name);
         // Fire DEATH triggers BEFORE despawn so the body can read
         // self.room, broadcast last words, etc. The trigger
         // dispatcher takes a snapshot of bodies up front, so even if
@@ -417,6 +418,53 @@ fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
             ),
         );
     }
+}
+
+/// On mob death: compute kill XP from the proto's `level` × role
+/// multiplier and add it to the killer's `Profile.experience`.
+/// Formula: `base_xp = level * 50`, scaled by role:
+///   Trash 0.5x / Normal 1.0x / Elite 2.0x / Miniboss 5.0x /
+///   Boss 10.0x / `RaidBoss` 20.0x.
+/// No-op when the killer has no Profile (admin testing path) or
+/// the mob has no proto.
+fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
+    use mud_db::enums::MobRole;
+    let proto = world
+        .get::<WorldKey>(victim)
+        .and_then(|k| {
+            world
+                .get_resource::<MobPrototypes>()
+                .and_then(|p| p.by_key.get(&(k.zone, k.id)).cloned())
+        });
+    let Some(proto) = proto else { return };
+    let multiplier_pct = match proto.role {
+        MobRole::Trash => 50,
+        MobRole::Normal => 100,
+        MobRole::Elite => 200,
+        MobRole::Miniboss => 500,
+        MobRole::Boss => 1000,
+        MobRole::RaidBoss => 2000,
+    };
+    let base = proto.level.max(1) * 50;
+    let xp = (base * multiplier_pct) / 100;
+    if xp <= 0 {
+        return;
+    }
+    let killer: Option<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
+        q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
+    };
+    let Some(killer) = killer else { return };
+    if let Some(mut p) = world.get_mut::<mud_world::Profile>(killer) {
+        p.experience = p.experience.saturating_add(xp);
+    } else {
+        return;
+    }
+    send_to(
+        world,
+        killer,
+        format!("You gain {xp} experience for the kill of {victim_name}.\r\n"),
+    );
 }
 
 #[cfg(test)]

@@ -75,6 +75,7 @@ pub async fn save_state(
     title: Option<&str>,
     description: Option<&str>,
     wealth: i64,
+    experience: i32,
 ) -> sqlx::Result<()> {
     sqlx::query!(
         r#"
@@ -90,8 +91,9 @@ pub async fn save_state(
             title = $9,
             description = $10,
             wealth = $11,
+            experience = $12,
             last_login = NOW()
-        WHERE id = $12
+        WHERE id = $13
         "#,
         hit_points,
         stamina,
@@ -104,6 +106,7 @@ pub async fn save_state(
         title,
         description,
         wealth,
+        experience,
         character_id,
     )
     .execute(pool)
