@@ -313,6 +313,16 @@ pub struct TriggerCatalog {
     pub room_attachments: HashMap<(i32, i32), Vec<(i32, i32)>>,
 }
 
+/// One queued line of output produced by a Lua trigger body —
+/// `room.send(msg)` enqueues `(room, msg)`. The dispatcher (mud-server)
+/// drains and emits to every Connection in the room after the Lua
+/// call returns. mud-script writes; mud-server reads, decoupling the
+/// scripting host from the network layer.
+#[derive(Resource, Debug, Default)]
+pub struct LuaOutbox {
+    pub messages: Vec<(Entity, String)>,
+}
+
 /// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.
 /// `keeper_index` maps a keeper mob's `(zone, id)` to the
 /// `(shop_zone, shop_id)` that fronts it; `by_key` carries the actual

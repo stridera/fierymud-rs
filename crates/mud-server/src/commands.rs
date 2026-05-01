@@ -3821,6 +3821,36 @@ thread_local! {
         = std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
+/// Drain `LuaOutbox` queued by `room.send(msg)` calls during a Lua
+/// trigger fire. Each `(room_entity, msg)` is broadcast to every
+/// player whose `Located.0 == room_entity`. Called from
+/// command handlers (`cmd_lua`, `cmd_firetrig`) and the trigger
+/// dispatcher after each `exec_for_actor` returns.
+pub(crate) fn drain_lua_outbox(world: &mut World) {
+    use mud_world::LuaOutbox;
+    let messages: Vec<(Entity, String)> = if world.contains_resource::<LuaOutbox>() {
+        std::mem::take(&mut world.resource_mut::<LuaOutbox>().messages)
+    } else {
+        Vec::new()
+    };
+    if messages.is_empty() {
+        return;
+    }
+    // Snapshot recipients per room once so the inner loop is stable.
+    for (room, msg) in messages {
+        let mut recipients: Vec<Entity> = Vec::new();
+        let mut q = world.query_filtered::<(Entity, &Located), With<Connection>>();
+        for (e, l) in q.iter(world) {
+            if l.0 == room {
+                recipients.push(e);
+            }
+        }
+        for r in recipients {
+            send_to(world, r, format!("{msg}\r\n"));
+        }
+    }
+}
+
 /// Add an entity to the pending-prompt set without sending output. Used by
 /// `dispatch` so the typing player always gets a prompt — even when the
 /// command produced no output (e.g., empty input, silent commands).
@@ -15012,6 +15042,7 @@ fn cmd_lua(world: &mut World, player: Entity, args: &str) {
     let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
         host.exec_for_actor(world, player, code)
     });
+    drain_lua_outbox(world);
     match result {
         Ok(out) => {
             if out.is_empty() {
@@ -15189,6 +15220,7 @@ fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
     let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
         host.exec_for_actor(world, actor, &code)
     });
+    drain_lua_outbox(world);
     match result {
         Ok(out) => {
             if out.is_empty() {

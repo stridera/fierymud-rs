@@ -15,9 +15,9 @@ pub use components::{
 pub use loader::{LoadStats, load_from_db, wear_flags_primary_slot};
 pub use resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
-    ClassDef, DamageComponent, EffectCatalog, EffectDef, LiquidProto, MobProto, MobPrototypes,
-    MobResetCatalog, MobResetEntry, ObjectAbilityBinding, ObjectAbilityCatalog, ObjectProto,
-    ObjectPrototypes, SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering,
-    ShopPetOffering, SocialDef, SocialRegistry, TargetingRule, TriggerAttach, TriggerCatalog,
-    TriggerDef, TriggerEvent, WorldKeyIndex,
+    ClassDef, DamageComponent, EffectCatalog, EffectDef, LiquidProto, LuaOutbox, MobProto,
+    MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityBinding, ObjectAbilityCatalog,
+    ObjectProto, ObjectPrototypes, SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef,
+    ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, TargetingRule, TriggerAttach,
+    TriggerCatalog, TriggerDef, TriggerEvent, WorldKeyIndex,
 };

@@ -11,7 +11,9 @@ use std::ptr::NonNull;
 
 use bevy_ecs::prelude::*;
 use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
-use mud_world::{AbilityCatalog, Health, KnownAbilities, Located, Mob, Named, Player};
+use mud_world::{
+    AbilityCatalog, Health, KnownAbilities, Located, LuaOutbox, Mob, Named, Player, WorldKey,
+};
 
 /// Bevy resource wrapping the Lua interpreter.
 #[derive(Resource)]
@@ -229,13 +231,12 @@ pub struct LuaActor {
 
 impl UserData for LuaActor {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("name", |lua, this, ()| {
-            world_from_lua(lua, |w| {
-                w.get::<Named>(this.entity)
-                    .map(|n| n.name.clone())
-                    .unwrap_or_default()
-            })
-        });
+        // Note: `name` intentionally lives only as a field
+        // (via MetaMethod::Index below) — the imported corpus uses
+        // `self.name` exclusively, never `self:name()`. Method
+        // registration for `name` would shadow the __index field
+        // resolution and return the function value instead of the
+        // string.
         methods.add_method("hp", |lua, this, ()| {
             world_from_lua(lua, |w| {
                 w.get::<Health>(this.entity).map_or(0, |h| h.hp)
@@ -269,6 +270,92 @@ impl UserData for LuaActor {
                 format!("Actor({name})")
             })
         });
+
+        // Field access (`self.room`, `self.id`, `self.zone_id`,
+        // `self.name`, `self.hp`, `self.max_hp`). The DG-Script-converted
+        // corpus uses `obj.field` syntax, not `obj:field()`. Returning
+        // nil for unknown fields is intentional — the trigger's intent
+        // is unfulfilled but the body doesn't crash.
+        methods.add_meta_method(
+            MetaMethod::Index,
+            |lua, this, key: String| -> mlua::Result<Value> {
+                match key.as_str() {
+                    "room" => {
+                        let room_entity = world_from_lua(lua, |w| {
+                            w.get::<Located>(this.entity).map(|l| l.0)
+                        })?;
+                        match room_entity {
+                            Some(e) => Ok(Value::UserData(
+                                lua.create_userdata(LuaRoom { entity: e })?,
+                            )),
+                            None => Ok(Value::Nil),
+                        }
+                    }
+                    "id" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<WorldKey>(this.entity).map_or(0, |wk| wk.id).into(),
+                        )
+                    }),
+                    "zone_id" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<WorldKey>(this.entity).map_or(0, |wk| wk.zone).into(),
+                        )
+                    }),
+                    "name" => {
+                        let s = world_from_lua(lua, |w| {
+                            w.get::<Named>(this.entity)
+                                .map(|n| n.name.clone())
+                                .unwrap_or_default()
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    "hp" => world_from_lua(lua, |w| {
+                        Value::Integer(w.get::<Health>(this.entity).map_or(0, |h| h.hp).into())
+                    }),
+                    "max_hp" => world_from_lua(lua, |w| {
+                        Value::Integer(w.get::<Health>(this.entity).map_or(0, |h| h.max).into())
+                    }),
+                    _ => Ok(Value::Nil),
+                }
+            },
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LuaRoom userdata
+// ---------------------------------------------------------------------------
+
+/// A reference to a Room entity, returned by `actor.room`. Today its
+/// only method is `:send(msg)` — broadcast a line to every player in
+/// the room. Bodies enqueue into `LuaOutbox`; mud-server drains and
+/// emits after the Lua call returns.
+#[derive(Clone, Copy)]
+pub struct LuaRoom {
+    pub entity: Entity,
+}
+
+impl UserData for LuaRoom {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("send", |lua, this, msg: String| -> mlua::Result<()> {
+            world_mut_from_lua(lua, |world| {
+                if !world.contains_resource::<LuaOutbox>() {
+                    world.insert_resource(LuaOutbox::default());
+                }
+                world
+                    .resource_mut::<LuaOutbox>()
+                    .messages
+                    .push((this.entity, msg));
+            })
+        });
+        methods.add_meta_method(MetaMethod::ToString, |lua, this, ()| {
+            world_from_lua(lua, |w| {
+                let name = w
+                    .get::<Named>(this.entity)
+                    .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
+                format!("Room({name})")
+            })
+        });
     }
 }
 
@@ -293,7 +380,7 @@ mod tests {
         let (mut world, actor) = make_world_with_actor();
         let host = LuaHost::new();
         let out = host
-            .exec_for_actor(&mut world, actor, "print(actor:name())")
+            .exec_for_actor(&mut world, actor, "print(actor.name)")
             .expect("ok");
         assert_eq!(out, "TestActor\r\n");
     }
@@ -383,9 +470,9 @@ mod tests {
         // First call binds actor; second should rebind, but if the first
         // somehow leaked, the second call could still see the first's actor.
         // Both calls should print the SAME actor's name (TestActor).
-        let _ = host.exec_for_actor(&mut world, actor, "print(actor:name())").unwrap();
+        let _ = host.exec_for_actor(&mut world, actor, "print(actor.name)").unwrap();
         let out2 = host
-            .exec_for_actor(&mut world, actor, "print(actor:name())")
+            .exec_for_actor(&mut world, actor, "print(actor.name)")
             .expect("ok");
         assert_eq!(out2, "TestActor\r\n");
     }
@@ -475,7 +562,7 @@ mod tests {
         let (mut world, actor) = make_world_with_actor();
         let host = LuaHost::new();
         let out = host
-            .exec_for_actor(&mut world, actor, "print(self:name())")
+            .exec_for_actor(&mut world, actor, "print(self.name)")
             .expect("ok");
         assert_eq!(out, "TestActor\r\n");
     }
@@ -488,7 +575,7 @@ mod tests {
         let actor = world.spawn_empty().id();
         let host = LuaHost::new();
         let name = host
-            .exec_for_actor(&mut world, actor, "print(actor:name())")
+            .exec_for_actor(&mut world, actor, "print(actor.name)")
             .expect("ok");
         // Missing Named → empty string, print emits a bare "\r\n" line.
         assert_eq!(name, "\r\n");
