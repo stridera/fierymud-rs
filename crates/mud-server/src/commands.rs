@@ -2559,6 +2559,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_retreat,
     },
     Command {
+        names: &["firstaid"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "firstaid [<target>]",
+            summary: "Quick self/ally heal — wisdom-scaling.",
+            long: "Drains 4 stamina and dispatches the FIRST_AID \
+                   skill via the data path. Heal amount comes from \
+                   the schema formula `skill / 4` scaled by wisdom. \
+                   Defaults to self when no target given. The shim \
+                   gates `Fighting` since first aid isn't an in-combat \
+                   action.",
+        },
+        run: cmd_firstaid,
+    },
+    Command {
         names: &["bandage"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -16058,6 +16075,35 @@ fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
 /// gets 0 HP from that until the formula gains a baseline (also
 /// in `SUGGESTIONS.md`) — until then the staunch is the only
 /// visible effect for an untrained caster.
+/// `firstaid [<target>]`: rogue/scout heal-self skill. Same pattern
+/// as `bandage` but dispatches `FIRST_AID` instead of `BANDAGE`; no
+/// hardcoded bleed-staunch (`first_aid` only carries the heal
+/// effect in the schema).
+fn cmd_firstaid(world: &mut World, player: Entity, args: &str) {
+    const FIRSTAID_COST: i32 = 4;
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You can't apply first aid in combat.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, FIRSTAID_COST, "firstaid") {
+        return;
+    }
+    drain_stamina(world, player, FIRSTAID_COST);
+    let arg = args.trim();
+    let dispatched = if arg.is_empty() {
+        String::from("first_aid")
+    } else {
+        format!("first_aid {arg}")
+    };
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+
 fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
     if world.get::<Fighting>(player).is_some() {
         send_to(world, player, "You can't bandage in combat.\r\n");
