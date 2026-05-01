@@ -396,19 +396,8 @@ fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
     let auto_gold = world
         .get::<PlayerFlags>(killer)
         .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::AutoGold));
-    let msg = crate::commands::format_wealth(coin).unwrap_or_else(|| "no coin".to_string());
-    if auto_gold {
-        if let Some(mut w) = world.get_mut::<Wealth>(killer) {
-            w.0 = w.0.saturating_add(coin);
-        } else {
-            try_insert(world, killer, Wealth(coin));
-        }
-        send_to(
-            world,
-            killer,
-            format!("You collect {msg} from the corpse of {victim_name}.\r\n"),
-        );
-    } else {
+    if !auto_gold {
+        let msg = crate::commands::format_wealth(coin).unwrap_or_else(|| "no coin".to_string());
         send_to(
             world,
             killer,
@@ -417,6 +406,51 @@ fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
                  (Set `autogold` to collect automatically.)\r\n"
             ),
         );
+        return;
+    }
+
+    // AutoSplit: divide the coin among in-room group members.
+    // Killer's flag drives the policy — if they don't have AutoSplit,
+    // they keep the full take.
+    let auto_split = world
+        .get::<PlayerFlags>(killer)
+        .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::AutoSplit));
+    let killer_room = world.get::<mud_world::Located>(killer).map(|l| l.0);
+    let recipients: Vec<Entity> = if auto_split && killer_room.is_some() {
+        let root = crate::commands::group_root(world, killer);
+        let members = crate::commands::group_members(world, root);
+        members
+            .into_iter()
+            .filter(|m| world.get::<mud_world::Located>(*m).map(|l| l.0) == killer_room)
+            .collect()
+    } else {
+        vec![killer]
+    };
+    let recipients = if recipients.is_empty() {
+        vec![killer]
+    } else {
+        recipients
+    };
+    let n = i64::try_from(recipients.len()).unwrap_or(1).max(1);
+    let share = (coin / n).max(1);
+    for r in &recipients {
+        if let Some(mut w) = world.get_mut::<Wealth>(*r) {
+            w.0 = w.0.saturating_add(share);
+        } else {
+            try_insert(world, *r, Wealth(share));
+        }
+        let line = if recipients.len() == 1 {
+            let msg =
+                crate::commands::format_wealth(coin).unwrap_or_else(|| "no coin".to_string());
+            format!("You collect {msg} from the corpse of {victim_name}.\r\n")
+        } else {
+            let msg =
+                crate::commands::format_wealth(share).unwrap_or_else(|| "no coin".to_string());
+            format!(
+                "You collect {msg} (group share) from the corpse of {victim_name}.\r\n"
+            )
+        };
+        send_to(world, *r, line);
     }
 }
 
