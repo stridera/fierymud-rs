@@ -315,13 +315,16 @@ pub struct TriggerCatalog {
 
 /// Spell-slot tables loaded once at startup. `progression` maps
 /// `(level, circle)` → max slot count; `class_circles` maps
-/// `class_id` → list of `(circle, min_level)` the class can access.
-/// Together they answer "how many circle-N slots does this
-/// level-L character of class C have available."
+/// `class_id` → list of `(circle, min_level)` the class can access;
+/// `ability_circle` maps `(class_id, ability_id)` → circle the
+/// spell occupies for that class. Together they answer "how many
+/// circle-N slots does this level-L character of class C have
+/// available, and what circle does spell X memorize into?"
 #[derive(Resource, Debug, Default)]
 pub struct SpellSlotData {
     pub progression: HashMap<(i32, i32), i32>,
     pub class_circles: HashMap<i32, Vec<(i32, i32)>>,
+    pub ability_circle: HashMap<(i32, i32), i32>,
 }
 
 impl SpellSlotData {

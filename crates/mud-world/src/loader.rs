@@ -419,13 +419,15 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         );
     }
 
-    // Pass 4c.5: spell slot data. Two tables joined into one
-    // resource — `SpellSlotProgression` (level × circle → slots)
-    // and `ClassAbilityCircles` (which circles each class can
-    // access at which min level). Read by the `slots` command and
-    // the eventual memorize/forget cycle.
+    // Pass 4c.5: spell slot data. Three tables joined into one
+    // resource — `SpellSlotProgression` (level × circle → slots),
+    // `ClassAbilityCircles` (which circles each class can access at
+    // which min level), and `ClassAbilities` ((class, ability) →
+    // circle for memorize/forget gating). Read by the `slots` /
+    // `memorize` / `forget` commands.
     let progression_rows = spell_slots::list_slot_progression(pool).await?;
     let class_circle_rows = spell_slots::list_class_circles(pool).await?;
+    let class_ability_rows = spell_slots::list_class_abilities(pool).await?;
     let mut spell_slot_data = crate::resources::SpellSlotData::default();
     for r in progression_rows {
         spell_slot_data.progression.insert((r.level, r.circle), r.slots);
@@ -436,6 +438,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .entry(r.class_id)
             .or_default()
             .push((r.circle, r.min_level));
+    }
+    for r in class_ability_rows {
+        spell_slot_data
+            .ability_circle
+            .insert((r.class_id, r.ability_id), r.circle);
     }
     world.insert_resource(spell_slot_data);
 

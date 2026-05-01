@@ -36,3 +36,19 @@ pub async fn list_class_circles(pool: &PgPool) -> sqlx::Result<Vec<ClassCircleRo
     .fetch_all(pool)
     .await
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ClassAbilityRow {
+    pub class_id: i32,
+    pub ability_id: i32,
+    pub circle: i32,
+}
+
+pub async fn list_class_abilities(pool: &PgPool) -> sqlx::Result<Vec<ClassAbilityRow>> {
+    sqlx::query_as!(
+        ClassAbilityRow,
+        r#"SELECT class_id, ability_id, circle FROM "ClassAbilities""#
+    )
+    .fetch_all(pool)
+    .await
+}

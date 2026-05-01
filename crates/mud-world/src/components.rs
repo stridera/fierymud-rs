@@ -518,6 +518,28 @@ pub struct Profile {
     pub gender: String,
 }
 
+/// Session-only spell memorization list — one entry per memorized
+/// instance. Caster classes (Sorcerer/Cleric/etc.) populate this
+/// via `memorize <spell>`; `cast` will gate on it once real
+/// memorization-aware casting lands. Not persisted across
+/// disconnect (no schema column today); v1 expects players to
+/// re-memorize on reconnect.
+#[derive(Component, Debug, Clone, Default)]
+pub struct MemorizedSpells {
+    /// `(ability_id, circle)` per slot occupied. Order matters:
+    /// `forget <name>` removes the first matching entry, mirroring
+    /// `FieryMUD`'s stack-of-prepared-spells semantics.
+    pub entries: Vec<(i32, i32)>,
+}
+
+impl MemorizedSpells {
+    /// Count how many slots in `circle` are currently used.
+    #[must_use]
+    pub fn used_in_circle(&self, circle: i32) -> i32 {
+        i32::try_from(self.entries.iter().filter(|(_, c)| *c == circle).count()).unwrap_or(0)
+    }
+}
+
 /// What abilities (spells / chants / songs / skills) a character has
 /// learned, plus their proficiency. Loaded from `CharacterAbilities`
 /// at login. The `known` flag mirrors the schema column — `true` for

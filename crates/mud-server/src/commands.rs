@@ -1122,12 +1122,42 @@ const COMMANDS: &[Command] = &[
             usage: "slots",
             summary: "Show your spell-slot allotment per circle.",
             long: "Read-only readout of how many slots per circle \
-                   your class+level grants you, sourced from the \
-                   `SpellSlotProgression` and `ClassAbilityCircles` \
-                   tables. Memorization tracking (refilling on rest) \
-                   is not yet implemented; slots show as available.",
+                   your class+level grants you. Format `used / max`. \
+                   Refill-on-rest tick not yet implemented; memorize \
+                   only consumes slots, forget releases them.",
         },
         run: cmd_slots,
+    },
+    Command {
+        names: &["memorize", "mem"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "memorize <spell>",
+            summary: "Prepare a spell into one of your circle slots.",
+            long: "Looks up the spell by name in your class's circle \
+                   list (via `ClassAbilities`), checks slot availability \
+                   for that circle (via `SpellSlotProgression`), and \
+                   appends the spell to your `MemorizedSpells` list. \
+                   Refuses unknown spells, off-class spells, or full \
+                   circles. Session-only — re-memorize on reconnect.",
+        },
+        run: cmd_memorize,
+    },
+    Command {
+        names: &["forget"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "forget <spell>",
+            summary: "Drop a memorized spell from your prepared list.",
+            long: "Removes the first matching memorized spell, freeing \
+                   that circle slot for a new memorize. No-op if the \
+                   spell isn't currently memorized.",
+        },
+        run: cmd_forget,
     },
     Command {
         names: &["skills"],
@@ -10000,10 +10030,10 @@ fn submit_feedback(world: &mut World, player: Entity, kind: &'static str, args: 
     );
 }
 
-/// `slots`: read-only display of the player's available
-/// spell-slot count per circle, sourced from `SpellSlotData`.
+/// `slots`: display the player's per-circle slot count along with
+/// how many are currently memorized. Format: `Circle N: used/max`.
 fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
-    use mud_world::SpellSlotData;
+    use mud_world::{MemorizedSpells, SpellSlotData};
     let Some(profile) = world.get::<Profile>(player) else {
         send_to(world, player, "You have no profile.\r\n");
         return;
@@ -10027,11 +10057,150 @@ fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     }
+    let mem = world.get::<MemorizedSpells>(player).cloned().unwrap_or_default();
     let mut out = format!("\r\nLevel {level} {class_name} spell slots:\r\n");
-    for (circle, count) in slots {
-        out.push_str(&format!("  Circle {circle:>2}: {count}\r\n"));
+    for (circle, max) in slots {
+        let used = mem.used_in_circle(circle);
+        out.push_str(&format!("  Circle {circle:>2}: {used:>2} / {max:>2}\r\n"));
     }
     send_to(world, player, out);
+}
+
+/// Resolve a spell name to (`ability_id`, circle) for the player's
+/// class. Returns Err with a player-facing message on failure.
+fn resolve_spell_for_class(
+    world: &World,
+    class_id: i32,
+    name: &str,
+) -> Result<(i32, i32), String> {
+    let key = name.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return Err("Memorize what?".into());
+    }
+    let Some(def) = world.resource::<AbilityCatalog>().by_name.get(&key) else {
+        return Err(format!("'{name}' isn't a known ability."));
+    };
+    if !matches!(def.kind, mud_db::abilities::AbilityKind::Spell) {
+        return Err(format!("{} isn't a memorizable spell.", def.plain_name));
+    }
+    let Some(&circle) = world
+        .resource::<mud_world::SpellSlotData>()
+        .ability_circle
+        .get(&(class_id, def.id))
+    else {
+        return Err(format!(
+            "{} isn't on your class's spell list.",
+            def.plain_name
+        ));
+    };
+    Ok((def.id, circle))
+}
+
+/// `memorize <spell>`: prepare a spell into one of your circle slots.
+fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
+    use mud_world::{MemorizedSpells, SpellSlotData};
+    let Some(profile) = world.get::<Profile>(player).cloned() else {
+        send_to(world, player, "You have no profile.\r\n");
+        return;
+    };
+    let Some(class_id) = profile.class_id else {
+        send_to(world, player, "You have no class.\r\n");
+        return;
+    };
+    let (ability_id, circle) = match resolve_spell_for_class(world, class_id, args) {
+        Ok(t) => t,
+        Err(e) => {
+            send_to(world, player, format!("{e}\r\n"));
+            return;
+        }
+    };
+    let max = world
+        .resource::<SpellSlotData>()
+        .progression
+        .get(&(profile.level, circle))
+        .copied()
+        .unwrap_or(0);
+    if max <= 0 {
+        send_to(
+            world,
+            player,
+            format!("You can't memorize circle {circle} spells yet.\r\n"),
+        );
+        return;
+    }
+    let used = world
+        .get::<MemorizedSpells>(player)
+        .map_or(0, |m| m.used_in_circle(circle));
+    if used >= max {
+        send_to(
+            world,
+            player,
+            format!("All circle {circle} slots ({used}/{max}) are already prepared.\r\n"),
+        );
+        return;
+    }
+    let plain_name = world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .values()
+        .find(|d| d.id == ability_id)
+        .map_or_else(String::new, |d| d.plain_name.clone());
+    if let Some(mut mem) = world.get_mut::<MemorizedSpells>(player) {
+        mem.entries.push((ability_id, circle));
+    } else {
+        world.entity_mut(player).insert(MemorizedSpells {
+            entries: vec![(ability_id, circle)],
+        });
+    }
+    send_to(
+        world,
+        player,
+        format!("You memorize {plain_name} (circle {circle}).\r\n"),
+    );
+}
+
+/// `forget <spell>`: drop the first matching memorized spell.
+fn cmd_forget(world: &mut World, player: Entity, args: &str) {
+    use mud_world::MemorizedSpells;
+    let Some(profile) = world.get::<Profile>(player).cloned() else {
+        return;
+    };
+    let Some(class_id) = profile.class_id else {
+        send_to(world, player, "You have no class.\r\n");
+        return;
+    };
+    let (ability_id, _) = match resolve_spell_for_class(world, class_id, args) {
+        Ok(t) => t,
+        Err(e) => {
+            send_to(world, player, format!("{e}\r\n"));
+            return;
+        }
+    };
+    let plain_name = world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .values()
+        .find(|d| d.id == ability_id)
+        .map_or_else(String::new, |d| d.plain_name.clone());
+    let removed = if let Some(mut mem) = world.get_mut::<MemorizedSpells>(player) {
+        if let Some(idx) = mem.entries.iter().position(|(id, _)| *id == ability_id) {
+            mem.entries.remove(idx);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if removed {
+        send_to(world, player, format!("You forget {plain_name}.\r\n"));
+    } else {
+        send_to(
+            world,
+            player,
+            format!("{plain_name} isn't currently memorized.\r\n"),
+        );
+    }
 }
 
 fn cmd_spells(world: &mut World, player: Entity, args: &str) {
