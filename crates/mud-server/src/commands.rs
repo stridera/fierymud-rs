@@ -12057,6 +12057,55 @@ fn invoke_ability(
                     applied_msgs.push(format!("{} (not in combat)", spec.name));
                 }
             }
+            "teleport" => {
+                // Move the target to a destination resolved from
+                // params. v1 handles:
+                //   - "recall" / "home" → target's RecallPoint
+                //   - "caster"          → the ability's caster's room
+                //   - "target"          → the *original* target's room
+                //                         (only meaningful when the
+                //                         caller passes another entity)
+                // Other destinations ("random", "object") fall through
+                // to a log message — nothing teleports.
+                let destination = resolve_teleport_destination(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                );
+                let dest_room: Option<Entity> = match destination.as_deref() {
+                    Some("recall" | "home") => {
+                        world.get::<RecallPoint>(target_entity).map(|r| r.0)
+                    }
+                    Some("caster") => world.get::<Located>(player).map(|l| l.0),
+                    Some("target") => {
+                        // For caster-target, the schema's "target" usually
+                        // means the targeted entity from the cast. Since
+                        // target_entity is already that entity, this is a
+                        // no-op (target already there).
+                        if target_entity == player {
+                            None
+                        } else {
+                            world.get::<Located>(target_entity).map(|l| l.0)
+                        }
+                    }
+                    _ => None,
+                };
+                let Some(dest_room) = dest_room else {
+                    applied_msgs.push(format!(
+                        "{} (destination {:?} not resolvable)",
+                        spec.name, destination
+                    ));
+                    continue;
+                };
+                let cur_room = world.get::<Located>(target_entity).map(|l| l.0);
+                if cur_room == Some(dest_room) {
+                    applied_msgs.push(format!("{} (already there)", spec.name));
+                    continue;
+                }
+                if let Some(mut l) = world.get_mut::<Located>(target_entity) {
+                    l.0 = dest_room;
+                }
+                applied_msgs.push(format!("{} (teleported)", spec.name));
+            }
             "knockdown" => {
                 // Knockdown has two parts: an immediate posture
                 // mutation (so the target is on the ground *now*) and
@@ -12641,6 +12690,22 @@ fn resolve_dispel_filter(
     pick(override_params)
         .or_else(|| pick(default_params))
         .unwrap_or_default()
+}
+
+/// Read `destination` from a teleport effect's params (e.g. "recall",
+/// "random", "caster", "target", "home", "object"). Returns the
+/// raw value lowercased, or None if neither override nor default
+/// carries one.
+fn resolve_teleport_destination(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> Option<String> {
+    let pick = |p: Option<&serde_json::Value>| -> Option<String> {
+        p?.get("destination")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    pick(override_params).or_else(|| pick(default_params))
 }
 
 /// Read `scope` ("first" or "all") from a dispel effect's params.
