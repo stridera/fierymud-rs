@@ -12,10 +12,10 @@ use std::ptr::NonNull;
 use bevy_ecs::prelude::*;
 use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
 use mud_world::{
-    AbilityCatalog, AppliedTo, AttachedTriggers, CombatStats, Description, EffectCatalog,
-    EffectInstance, EquippedSlot, Follower, Health, Item, Keywords, KnownAbilities, Located,
-    LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player, Posture, PostureKind,
-    TriggerCatalog, WorldKey, WorldKeyIndex,
+    AbilityCatalog, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats, Description,
+    EffectCatalog, EffectInstance, EquippedSlot, Follower, Health, Item, Keywords, KnownAbilities,
+    Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player, Posture, PostureKind,
+    Profile, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 
 /// Bevy resource wrapping the Lua interpreter.
@@ -763,6 +763,36 @@ impl UserData for LuaActor {
                     "max_hp" => world_from_lua(lua, |w| {
                         Value::Integer(w.get::<Health>(this.entity).map_or(0, |h| h.max).into())
                     }),
+                    "level" => world_from_lua(lua, |w| {
+                        Value::Integer(w.get::<Profile>(this.entity).map_or(0, |p| p.level).into())
+                    }),
+                    // `actor.class` returns the plain_name of the
+                    // actor's class (e.g. "warrior") via Profile +
+                    // ClassCatalog. Empty string when no class is
+                    // assigned (mobs typically) — the corpus uses
+                    // string compares ("if actor.class == 'Paladin'").
+                    "class" => {
+                        let s = world_from_lua(lua, |w| {
+                            let id = w.get::<Profile>(this.entity).and_then(|p| p.class_id);
+                            id.and_then(|id| {
+                                w.resource::<ClassCatalog>().by_id.get(&id).map(|c| c.plain_name.clone())
+                            })
+                            .unwrap_or_default()
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    // `actor.shortdesc` returns the third-person room
+                    // description used in look output. Falls back to
+                    // the actor's name when missing. 207 corpus refs.
+                    "shortdesc" => {
+                        let s = world_from_lua(lua, |w| {
+                            w.get::<Description>(this.entity)
+                                .map(|d| d.0.clone())
+                                .or_else(|| w.get::<Named>(this.entity).map(|n| n.name.clone()))
+                                .unwrap_or_default()
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
                     _ => Ok(Value::Nil),
                 }
             },
