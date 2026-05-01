@@ -1014,6 +1014,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_account,
     },
     Command {
+        names: &["clientinfo"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "clientinfo",
+            summary: "Show this session's connection info.",
+            long: "Reports your active character, role, session \
+                   uptime (since login), and idle time (since the \
+                   last command typed). Terminal capabilities — \
+                   color depth, dimensions, MCCP — aren't tracked \
+                   in the runtime today; the full RFC-1408 telnet \
+                   negotiation would lift them off the wire.",
+        },
+        run: cmd_clientinfo,
+    },
+    Command {
         names: &["world", "users", "stats"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -9327,6 +9344,46 @@ fn cmd_policies(world: &mut World, player: Entity, _args: &str) {
 /// `account`: read-only summary from the `AccountSummary` component
 /// inserted at login. Active character is the one with the same name
 /// as the entity's Named component (which is unique per player).
+/// `clientinfo`: per-session connection summary. Quick check that
+/// surfaces what the runtime tracks today (idle, uptime, role) — the
+/// proper terminal-capability split (color depth, dimensions, MCCP)
+/// needs the telnet negotiation parsing that mud-net hasn't grown
+/// yet.
+fn cmd_clientinfo(world: &mut World, player: Entity, _args: &str) {
+    let now = std::time::Instant::now();
+    let uptime_secs = world
+        .get::<LoggedInAt>(player)
+        .map_or(0, |l| now.duration_since(l.0).as_secs());
+    let idle_secs = world
+        .get::<LastInputAt>(player)
+        .map_or(0, |l| now.duration_since(l.0).as_secs());
+    let role = world
+        .get::<Account>(player)
+        .map_or(UserRole::Player, |a| a.role);
+    let char_name = name_of(world, player);
+    let format_dur = |secs: u64| -> String {
+        if secs < 60 {
+            format!("{secs}s")
+        } else if secs < 3600 {
+            format!("{}m {}s", secs / 60, secs % 60)
+        } else {
+            format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+        }
+    };
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("  Character: {char_name}\r\n"));
+    out.push_str(&format!("  Role:      {}\r\n", role.label()));
+    out.push_str(&format!(
+        "  Uptime:    {} (since login)\r\n",
+        format_dur(uptime_secs)
+    ));
+    out.push_str(&format!(
+        "  Idle:      {} (since last input)\r\n",
+        format_dur(idle_secs)
+    ));
+    send_to(world, player, out);
+}
+
 fn cmd_account(world: &mut World, player: Entity, _args: &str) {
     let Some(summary) = world.get::<AccountSummary>(player).cloned() else {
         send_to(world, player, "No account info available.\r\n");
