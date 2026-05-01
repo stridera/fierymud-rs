@@ -71,12 +71,27 @@ impl LuaHost {
     /// listener) and references another (the actor entering / giving /
     /// attacking). For LOAD/SPEECH/etc. callers where listener IS the
     /// actor, `exec_for_actor_with_extras` is the simpler entry.
-    #[allow(clippy::too_many_lines)]
     pub fn exec_for_listener_with_extras(
         &self,
         world: &mut World,
         listener: Entity,
         acting_entity: Entity,
+        code: &str,
+        extras: &[(&str, &str)],
+    ) -> Result<String, String> {
+        self.exec_for_event(world, listener, acting_entity, None, code, extras)
+    }
+
+    /// Full event dispatcher entry: `self` = listener, `actor` =
+    /// `acting_entity`, `object` = the optional item entity (nil when
+    /// `None`). Used by RECEIVE / GIVE / GET / DROP / WEAR / etc.
+    #[allow(clippy::too_many_lines)]
+    pub fn exec_for_event(
+        &self,
+        world: &mut World,
+        listener: Entity,
+        acting_entity: Entity,
+        object_entity: Option<Entity>,
         code: &str,
         extras: &[(&str, &str)],
     ) -> Result<String, String> {
@@ -100,6 +115,13 @@ impl LuaHost {
             // as an ordinary identifier outside of `:` method
             // definitions.
             globals.set("self", LuaActor { entity: listener })?;
+            // `object` is the item-context binding for RECEIVE / GIVE
+            // / GET / DROP / WEAR / etc. Nil when the event doesn't
+            // carry an object (LOAD, SPEECH, GREET, DEATH).
+            match object_entity {
+                Some(e) => globals.set("object", LuaActor { entity: e })?,
+                None => globals.set("object", Value::Nil)?,
+            }
 
             // Override print so output flows back to the caller.
             globals.set(
@@ -278,6 +300,7 @@ impl LuaHost {
         // Unbind globals to avoid leaking actor between calls.
         let _ = self.lua.globals().raw_remove("actor");
         let _ = self.lua.globals().raw_remove("self");
+        let _ = self.lua.globals().raw_remove("object");
         let _ = self.lua.globals().raw_remove("globals");
         let _ = self.lua.globals().raw_remove("skills");
         let _ = self.lua.globals().raw_remove("world");

@@ -8550,6 +8550,10 @@ fn cmd_give(world: &mut World, player: Entity, args: &str) {
         &[player, target],
         &format!("{player_name} gives {item_name} to {target_name}.\r\n"),
     );
+
+    // Fire RECEIVE triggers on the recipient. Bodies typically gate
+    // on `object.id` to handle quest item turn-ins.
+    crate::triggers::fire_receive(world, target, player, item);
 }
 
 fn cmd_wear(world: &mut World, player: Entity, args: &str) {
