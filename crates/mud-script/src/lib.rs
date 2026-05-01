@@ -1019,7 +1019,19 @@ impl UserData for LuaActor {
                         Value::Integer(w.get::<Health>(this.entity).map_or(0, |h| h.max).into())
                     }),
                     "level" => world_from_lua(lua, |w| {
-                        Value::Integer(w.get::<Profile>(this.entity).map_or(0, |p| p.level).into())
+                        let level = if let Some(p) = w.get::<Profile>(this.entity) {
+                            p.level
+                        } else if let Some(wk) = w.get::<WorldKey>(this.entity) {
+                            // Mobs: source level from the proto catalog
+                            // since they don't carry Profile.
+                            w.resource::<MobPrototypes>()
+                                .by_key
+                                .get(&(wk.zone, wk.id))
+                                .map_or(0, |p| p.level)
+                        } else {
+                            0
+                        };
+                        Value::Integer(level.into())
                     }),
                     // `actor.class` returns the plain_name of the
                     // actor's class (e.g. "warrior"). Players source
