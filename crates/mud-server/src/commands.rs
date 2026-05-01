@@ -860,6 +860,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_open,
     },
     Command {
+        names: &["pick"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "pick <direction>",
+            summary: "Pick a locked door open with rogue tools.",
+            long: "Skill check against your `PICK_LOCK` proficiency. \
+                   Refuses on unlocked exits, exits without a keyhole, \
+                   and players who haven't trained pick lock. Costs \
+                   5 stamina whether you succeed or fail. On success \
+                   the door flips Locked → Closed (same as `unlock`); \
+                   on failure you get a fumble line.",
+        },
+        run: cmd_pick,
+    },
+    Command {
         names: &["unlock"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -8576,6 +8593,113 @@ fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
 /// `unlock <direction>`: find a key item in inventory whose name or
 /// keyword matches the exit's `key` and flip Locked → Closed (still
 /// needs `open` afterward). Two-sided sync.
+/// `pick <direction>`: rogue lock-pick. Refuses if the exit isn't
+/// locked, lacks a keyhole, the player hasn't trained `PICK_LOCK`,
+/// or they're out of stamina. Costs 5 stamina either way; success
+/// flips Locked → Closed.
+fn cmd_pick(world: &mut World, player: Entity, args: &str) {
+    const STAMINA_COST: i32 = 5;
+    let arg = args.trim();
+    let Some(dir) = parse_direction(arg) else {
+        send_to(world, player, "Pick which way?\r\n");
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let Some((state, key_req)) = world
+        .get::<Exits>(room)
+        .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key)))
+    else {
+        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        return;
+    };
+    if state != ExitState::Locked {
+        send_to(
+            world,
+            player,
+            format!("It's not locked {}.\r\n", direction_name(dir)),
+        );
+        return;
+    }
+    if key_req.is_none() {
+        send_to(
+            world,
+            player,
+            format!("There's no keyhole {}.\r\n", direction_name(dir)),
+        );
+        return;
+    }
+
+    // PICK_LOCK ability id 272.
+    let proficiency = world
+        .get::<KnownAbilities>(player)
+        .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == 272).copied())
+        .map(|(_, p, _)| p);
+    let Some(proficiency) = proficiency else {
+        send_to(
+            world,
+            player,
+            "You don't know how to pick locks.\r\n",
+        );
+        return;
+    };
+
+    let stamina_ok = world
+        .get::<Stamina>(player)
+        .is_some_and(|s| s.current >= STAMINA_COST);
+    if !stamina_ok {
+        send_to(
+            world,
+            player,
+            "You don't have the stamina for a steady hand.\r\n",
+        );
+        return;
+    }
+    if let Some(mut s) = world.get_mut::<Stamina>(player) {
+        s.current = (s.current - STAMINA_COST).max(0);
+    }
+
+    // d100 roll vs proficiency. Proficiency is 0–1000 in the schema;
+    // divide by 10 to get a 0–100 chance.
+    let roll = rand::random_range(1..=100);
+    let chance = (proficiency / 10).clamp(0, 100);
+    let player_name = name_of(world, player);
+    if roll <= chance {
+        flip_door_both_sides(world, room, dir, ExitState::Closed);
+        send_to(
+            world,
+            player,
+            format!(
+                "*click* The lock {} yields to your tools.\r\n",
+                direction_name(dir)
+            ),
+        );
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} picks the lock {}.\r\n", direction_name(dir)),
+        );
+    } else {
+        send_to(
+            world,
+            player,
+            format!(
+                "Your tools slip — the lock {} stays shut.\r\n",
+                direction_name(dir)
+            ),
+        );
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} fumbles with the lock {}.\r\n", direction_name(dir)),
+        );
+    }
+}
+
 fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Some(dir) = parse_direction(arg) else {
