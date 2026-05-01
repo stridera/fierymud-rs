@@ -3821,14 +3821,16 @@ thread_local! {
         = std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
-/// Drain `LuaOutbox` queued by `room.send(msg)` calls during a Lua
-/// trigger fire. Each `(room_entity, msg)` is broadcast to every
-/// player whose `Located.0 == room_entity`. Called from
+/// Drain `LuaOutbox` queued by `room.send(msg)` /
+/// `room.send_except(target, msg)` calls during a Lua trigger fire.
+/// Each `(room, msg, except)` is broadcast to every player whose
+/// `Located.0 == room`, skipping `except` if set. Called from
 /// command handlers (`cmd_lua`, `cmd_firetrig`) and the trigger
 /// dispatcher after each `exec_for_actor` returns.
 pub(crate) fn drain_lua_outbox(world: &mut World) {
     use mud_world::LuaOutbox;
-    let messages: Vec<(Entity, String)> = if world.contains_resource::<LuaOutbox>() {
+    let messages: Vec<(Entity, String, Option<Entity>)> = if world.contains_resource::<LuaOutbox>()
+    {
         std::mem::take(&mut world.resource_mut::<LuaOutbox>().messages)
     } else {
         Vec::new()
@@ -3837,11 +3839,11 @@ pub(crate) fn drain_lua_outbox(world: &mut World) {
         return;
     }
     // Snapshot recipients per room once so the inner loop is stable.
-    for (room, msg) in messages {
+    for (room, msg, except) in messages {
         let mut recipients: Vec<Entity> = Vec::new();
         let mut q = world.query_filtered::<(Entity, &Located), With<Connection>>();
         for (e, l) in q.iter(world) {
-            if l.0 == room {
+            if l.0 == room && Some(e) != except {
                 recipients.push(e);
             }
         }

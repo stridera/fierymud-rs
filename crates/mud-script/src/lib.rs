@@ -326,7 +326,10 @@ fn actor_emit(
         if !world.contains_resource::<LuaOutbox>() {
             world.insert_resource(LuaOutbox::default());
         }
-        world.resource_mut::<LuaOutbox>().messages.push((room, line));
+        world
+            .resource_mut::<LuaOutbox>()
+            .messages
+            .push((room, line, None));
     })
 }
 
@@ -595,9 +598,32 @@ impl UserData for LuaRoom {
                 world
                     .resource_mut::<LuaOutbox>()
                     .messages
-                    .push((this.entity, msg));
+                    .push((this.entity, msg, None));
             })
         });
+
+        // `room:send_except(target, msg)` broadcasts to every player
+        // in the room except `target`. 791 corpus refs — typically
+        // used to give the player a different view than everyone
+        // else of the same scene (e.g. "X looks at you" vs "X looks
+        // at Bob"). Both messages get sent in pairs, one to the
+        // target via `actor:send` and the rest of the room via
+        // `room:send_except`.
+        methods.add_method(
+            "send_except",
+            |lua, this, (target, msg): (AnyUserData, String)| -> mlua::Result<()> {
+                let except = target.borrow::<LuaActor>()?.entity;
+                world_mut_from_lua(lua, |world| {
+                    if !world.contains_resource::<LuaOutbox>() {
+                        world.insert_resource(LuaOutbox::default());
+                    }
+                    world
+                        .resource_mut::<LuaOutbox>()
+                        .messages
+                        .push((this.entity, msg, Some(except)));
+                })
+            },
+        );
 
         // `room:spawn_mobile(zone, id)` materializes a fresh Mob from
         // the prototype catalog into this room. Returns a LuaActor on

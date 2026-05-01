@@ -314,13 +314,15 @@ pub struct TriggerCatalog {
 }
 
 /// One queued line of output produced by a Lua trigger body —
-/// `room.send(msg)` enqueues `(room, msg)`. The dispatcher (mud-server)
-/// drains and emits to every Connection in the room after the Lua
-/// call returns. mud-script writes; mud-server reads, decoupling the
-/// scripting host from the network layer.
+/// `room.send(msg)` enqueues `(room, msg, None)`,
+/// `room.send_except(target, msg)` enqueues `(room, msg, Some(target))`
+/// so the dispatcher knows to skip that recipient. mud-server drains
+/// and emits after the Lua call returns. mud-script writes;
+/// mud-server reads, decoupling the scripting host from the network
+/// layer.
 #[derive(Resource, Debug, Default)]
 pub struct LuaOutbox {
-    pub messages: Vec<(Entity, String)>,
+    pub messages: Vec<(Entity, String, Option<Entity>)>,
 }
 
 /// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.
