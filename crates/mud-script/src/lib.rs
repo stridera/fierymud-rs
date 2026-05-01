@@ -186,6 +186,32 @@ impl LuaHost {
                 self.lua.create_function(|_, _: Value| -> mlua::Result<()> { Ok(()) })?,
             )?;
 
+            // `random(low, high)` returns a uniform integer in
+            // `[low, high]`. Distinct from Lua's stdlib
+            // `math.random` because the corpus uses bare `random(...)`
+            // exclusively. 859 corpus refs.
+            globals.set(
+                "random",
+                self.lua.create_function(
+                    |_, (low, high): (i64, i64)| -> mlua::Result<i64> {
+                        if low > high {
+                            return Ok(low);
+                        }
+                        Ok(rand::random_range(low..=high))
+                    },
+                )?,
+            )?;
+
+            // `percent_chance(N)` returns true with N% probability.
+            // 629 corpus refs — typically gates flavor emotes,
+            // random combat moves, or ambient room behavior.
+            globals.set(
+                "percent_chance",
+                self.lua.create_function(|_, n: i64| -> mlua::Result<bool> {
+                    Ok(rand::random_range(1i64..=100) <= n.clamp(0, 100))
+                })?,
+            )?;
+
             // `get_room(zone, id)` returns a LuaRoom by lookup against
             // `WorldKeyIndex.rooms`, or nil if not found. 1019 corpus
             // refs — quest hints, scripted teleports, room reset
@@ -218,6 +244,8 @@ impl LuaHost {
         let _ = self.lua.globals().raw_remove("combat");
         let _ = self.lua.globals().raw_remove("wait");
         let _ = self.lua.globals().raw_remove("get_room");
+        let _ = self.lua.globals().raw_remove("random");
+        let _ = self.lua.globals().raw_remove("percent_chance");
 
         match result {
             Ok(()) => {

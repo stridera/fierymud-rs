@@ -1274,6 +1274,7 @@ dependencies = [
  "bevy_ecs",
  "mlua",
  "mud-world",
+ "rand 0.10.1",
  "tracing",
 ]
 
