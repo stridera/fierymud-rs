@@ -272,6 +272,15 @@ pub struct Shopkeeper {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct BoardLink(pub i32);
 
+/// Lua trigger keys attached to a mob / object / room entity at
+/// spawn time. Each tuple is the `(zone_id, id)` of a row in the
+/// `TriggerCatalog` resource. The trigger dispatcher (not yet
+/// wired) reads this list when an entity-relevant event fires —
+/// movement into a room, mob kill, item use, etc. — and runs the
+/// matching trigger bodies through `mlua`.
+#[derive(Component, Debug, Clone, Default)]
+pub struct AttachedTriggers(pub Vec<(i32, i32)>);
+
 /// Marker: the player is flying. Movement treats every sector as
 /// equally easy (sector cost 1 instead of 4-6 for water etc.) but
 /// adds a flat +1 stamina per move on top — flying is great over

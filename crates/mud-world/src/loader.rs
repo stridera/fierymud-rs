@@ -4,21 +4,22 @@ use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, boards, classes, effects, mob_reset_equipment,
     mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
-    rooms, shops, socials, sqlx::PgPool, zones,
+    rooms, shops, socials, sqlx::PgPool, triggers, zones,
 };
 use tracing::{info, warn};
 
 use crate::components::{
-    BoardLink, CombatStats, Description, EquippedSlot, ExitData, Exits, FromMobReset, Health, Item,
-    Keywords, LiquidContainer, Located, Mob, Mountable, Named, Posture, PostureKind, Room,
-    RoomSector, Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
+    AttachedTriggers, BoardLink, CombatStats, Description, EquippedSlot, ExitData, Exits,
+    FromMobReset, Health, Item, Keywords, LiquidContainer, Located, Mob, Mountable, Named, Posture,
+    PostureKind, Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, DamageComponent, EffectCatalog, EffectDef, LiquidProto, MobProto, MobPrototypes,
     MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto, ObjectPrototypes,
     SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef,
-    SocialRegistry, TargetingRule, WorldKeyIndex,
+    SocialRegistry, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent,
+    WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -47,6 +48,8 @@ pub struct LoadStats {
     pub object_contents_spawned: usize,
     /// Content rows whose parent or proto couldn't be resolved.
     pub object_contents_skipped: usize,
+    /// Lua trigger rows in the `Triggers` table.
+    pub triggers_loaded: usize,
 }
 
 /// Load the persistent world from the database into the ECS World:
@@ -537,6 +540,123 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     info!(boards = board_catalog.by_id.len(), "board catalog loaded");
     world.insert_resource(board_catalog);
 
+    // Pass 4.7: load Lua trigger catalog + per-prototype attachment
+    // indexes. Triggers fire from junction tables (MobTriggers /
+    // ObjectTriggers / RoomTriggers); spawn paths copy the relevant
+    // list onto fresh entities. The dispatcher (not yet wired) reads
+    // `commands` lazily by `(zone, id)` when an entity-relevant event
+    // fires.
+    let trigger_rows = triggers::list_triggers(pool).await?;
+    let mut trigger_catalog = TriggerCatalog::default();
+    for row in trigger_rows {
+        let attach = match row.attach_type {
+            triggers::ScriptType::Mob => TriggerAttach::Mob,
+            triggers::ScriptType::Object => TriggerAttach::Object,
+            triggers::ScriptType::World => TriggerAttach::World,
+        };
+        let flags = row
+            .flags
+            .unwrap_or_default()
+            .iter()
+            .map(|f| match f {
+                triggers::TriggerFlag::Global => TriggerEvent::Global,
+                triggers::TriggerFlag::Random => TriggerEvent::Random,
+                triggers::TriggerFlag::Command => TriggerEvent::Command,
+                triggers::TriggerFlag::Load => TriggerEvent::Load,
+                triggers::TriggerFlag::Cast => TriggerEvent::Cast,
+                triggers::TriggerFlag::Leave => TriggerEvent::Leave,
+                triggers::TriggerFlag::Time => TriggerEvent::Time,
+                triggers::TriggerFlag::Speech => TriggerEvent::Speech,
+                triggers::TriggerFlag::Act => TriggerEvent::Act,
+                triggers::TriggerFlag::Death => TriggerEvent::Death,
+                triggers::TriggerFlag::Greet => TriggerEvent::Greet,
+                triggers::TriggerFlag::GreetAll => TriggerEvent::GreetAll,
+                triggers::TriggerFlag::Entry => TriggerEvent::Entry,
+                triggers::TriggerFlag::Receive => TriggerEvent::Receive,
+                triggers::TriggerFlag::Fight => TriggerEvent::Fight,
+                triggers::TriggerFlag::HitPercent => TriggerEvent::HitPercent,
+                triggers::TriggerFlag::Bribe => TriggerEvent::Bribe,
+                triggers::TriggerFlag::Memory => TriggerEvent::Memory,
+                triggers::TriggerFlag::Door => TriggerEvent::Door,
+                triggers::TriggerFlag::SpeechTo => TriggerEvent::SpeechTo,
+                triggers::TriggerFlag::Look => TriggerEvent::Look,
+                triggers::TriggerFlag::Auto => TriggerEvent::Auto,
+                triggers::TriggerFlag::Attack => TriggerEvent::Attack,
+                triggers::TriggerFlag::Defend => TriggerEvent::Defend,
+                triggers::TriggerFlag::Timer => TriggerEvent::Timer,
+                triggers::TriggerFlag::Get => TriggerEvent::Get,
+                triggers::TriggerFlag::Drop => TriggerEvent::Drop,
+                triggers::TriggerFlag::Give => TriggerEvent::Give,
+                triggers::TriggerFlag::Wear => TriggerEvent::Wear,
+                triggers::TriggerFlag::Remove => TriggerEvent::Remove,
+                triggers::TriggerFlag::Use => TriggerEvent::Use,
+                triggers::TriggerFlag::Consume => TriggerEvent::Consume,
+                triggers::TriggerFlag::Reset => TriggerEvent::Reset,
+                triggers::TriggerFlag::Preentry => TriggerEvent::Preentry,
+                triggers::TriggerFlag::Postentry => TriggerEvent::Postentry,
+            })
+            .collect();
+        trigger_catalog.by_key.insert(
+            (row.zone_id, row.id),
+            TriggerDef {
+                zone_id: row.zone_id,
+                id: row.id,
+                name: row.name,
+                attach_type: attach,
+                commands: row.commands,
+                flags,
+                arg_list: row.arg_list.unwrap_or_default(),
+                num_args: row.num_args,
+            },
+        );
+    }
+    for link in triggers::list_mob_triggers(pool).await? {
+        trigger_catalog
+            .mob_attachments
+            .entry((link.mob_zone_id, link.mob_id))
+            .or_default()
+            .push((link.trigger_zone_id, link.trigger_id));
+    }
+    for link in triggers::list_object_triggers(pool).await? {
+        trigger_catalog
+            .object_attachments
+            .entry((link.object_zone_id, link.object_id))
+            .or_default()
+            .push((link.trigger_zone_id, link.trigger_id));
+    }
+    for link in triggers::list_room_triggers(pool).await? {
+        trigger_catalog
+            .room_attachments
+            .entry((link.room_zone_id, link.room_id))
+            .or_default()
+            .push((link.trigger_zone_id, link.trigger_id));
+    }
+    stats.triggers_loaded = trigger_catalog.by_key.len();
+    info!(
+        triggers = trigger_catalog.by_key.len(),
+        mob_links = trigger_catalog.mob_attachments.len(),
+        object_links = trigger_catalog.object_attachments.len(),
+        room_links = trigger_catalog.room_attachments.len(),
+        "trigger catalog loaded"
+    );
+    // Pass 4.7b: room trigger attachment. Done now (before the mob/
+    // object spawn pass) since room entities already exist after
+    // Pass 2 — no need to defer. `room_index` was moved into
+    // `WorldKeyIndex` above, so re-borrow from the resource.
+    {
+        let mut room_to_attach: Vec<(Entity, Vec<(i32, i32)>)> = Vec::new();
+        let rooms_lookup = &world.resource::<WorldKeyIndex>().rooms;
+        for (key, list) in &trigger_catalog.room_attachments {
+            if let Some(&room_entity) = rooms_lookup.get(key) {
+                room_to_attach.push((room_entity, list.clone()));
+            }
+        }
+        for (room_entity, list) in room_to_attach {
+            world.entity_mut(room_entity).insert(AttachedTriggers(list));
+        }
+    }
+    world.insert_resource(trigger_catalog);
+
     // Pass 5: spawn live entities from MobResets / ObjectResets. Resources
     // were inserted above so the spawners can read them. Probability gating
     // and respawn timing belong to a future tick system; for now we always
@@ -574,6 +694,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .keeper_index
             .get(&(proto.zone_id, proto.id))
             .copied();
+        let trigger_keys = world
+            .resource::<TriggerCatalog>()
+            .mob_attachments
+            .get(&(proto.zone_id, proto.id))
+            .cloned();
         let mut spawned_for_reset: Vec<Entity> =
             Vec::with_capacity(usize::try_from(r.max_instances.max(1)).unwrap_or(1));
         for _ in 0..r.max_instances.max(1) {
@@ -596,6 +721,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             ));
             if let Some((shop_zone_id, shop_id)) = shop_key {
                 em.insert(Shopkeeper { shop_zone_id, shop_id });
+            }
+            if let Some(ref keys) = trigger_keys {
+                em.insert(AttachedTriggers(keys.clone()));
             }
             // Mountable inference: keywords containing horse/steed/mount
             // get the marker. Builders can refine via richer mount data
@@ -653,6 +781,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             stats.object_resets_skipped += 1;
             continue;
         };
+        let trigger_keys = world
+            .resource::<TriggerCatalog>()
+            .object_attachments
+            .get(&(proto.zone_id, proto.id))
+            .cloned();
         let mut spawned_for_reset: Vec<Entity> =
             Vec::with_capacity(usize::try_from(r.max_instances.max(1)).unwrap_or(1));
         let primary_slot = wear_flags_primary_slot(&proto.wear_flags);
@@ -681,6 +814,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                     poisoned: liq.poisoned,
                 });
             }
+            if let Some(ref keys) = trigger_keys {
+                bundle.insert(AttachedTriggers(keys.clone()));
+            }
             spawned_for_reset.push(bundle.id());
             stats.object_resets_spawned += 1;
         }
@@ -707,6 +843,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             continue;
         };
         let slot = eq.wear_location.as_deref().and_then(Slot::from_label);
+        let trigger_keys = world
+            .resource::<TriggerCatalog>()
+            .object_attachments
+            .get(&(proto.zone_id, proto.id))
+            .cloned();
         for &mob in &mob_entities {
             let mut bundle = world.spawn((
                 Item,
@@ -720,6 +861,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             }
             if let Some(s) = slot {
                 bundle.insert(EquippedSlot(s));
+            }
+            if let Some(ref keys) = trigger_keys {
+                bundle.insert(AttachedTriggers(keys.clone()));
             }
             stats.mob_equipment_spawned += 1;
         }
@@ -765,6 +909,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 continue;
             };
             let qty = usize::try_from(row.quantity.max(1)).unwrap_or(1);
+            let trigger_keys = world
+                .resource::<TriggerCatalog>()
+                .object_attachments
+                .get(&(proto.zone_id, proto.id))
+                .cloned();
             let mut spawned_for_content: Vec<Entity> =
                 Vec::with_capacity(parents.len() * qty);
             for parent in parents {
@@ -778,6 +927,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                     ));
                     if let Some(desc) = proto.examine_description.clone() {
                         bundle.insert(Description(desc));
+                    }
+                    if let Some(ref keys) = trigger_keys {
+                        bundle.insert(AttachedTriggers(keys.clone()));
                     }
                     spawned_for_content.push(bundle.id());
                     stats.object_contents_spawned += 1;

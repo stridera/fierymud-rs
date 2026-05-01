@@ -230,6 +230,89 @@ pub struct BoardCatalog {
     pub by_id: HashMap<i32, BoardSummary>,
 }
 
+/// Lua trigger body + metadata cached by `(zone_id, id)`. Loaded
+/// once at startup. The runtime never compiles these eagerly —
+/// the dispatcher reads `commands` lazily per-fire when the entity
+/// the trigger is attached to needs to run it.
+#[derive(Debug, Clone)]
+pub struct TriggerDef {
+    pub zone_id: i32,
+    pub id: i32,
+    pub name: String,
+    pub attach_type: TriggerAttach,
+    pub commands: String,
+    pub flags: Vec<TriggerEvent>,
+    pub arg_list: Vec<String>,
+    pub num_args: i32,
+}
+
+/// What kind of entity a trigger can attach to. Mirrors the
+/// `ScriptType` enum in the schema; lifted into the world layer so
+/// catalogs / dispatchers don't need a `mud-db` import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TriggerAttach {
+    Mob,
+    Object,
+    World,
+}
+
+/// Event flag a trigger fires on. Mirrors the `TriggerFlag` Postgres
+/// enum verbatim — kept in the same order so `enumsortorder`-style
+/// debugging stays consistent across layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TriggerEvent {
+    Global,
+    Random,
+    Command,
+    Load,
+    Cast,
+    Leave,
+    Time,
+    Speech,
+    Act,
+    Death,
+    Greet,
+    GreetAll,
+    Entry,
+    Receive,
+    Fight,
+    HitPercent,
+    Bribe,
+    Memory,
+    Door,
+    SpeechTo,
+    Look,
+    Auto,
+    Attack,
+    Defend,
+    Timer,
+    Get,
+    Drop,
+    Give,
+    Wear,
+    Remove,
+    Use,
+    Consume,
+    Reset,
+    Preentry,
+    Postentry,
+}
+
+/// Catalog of every Lua trigger, plus the per-prototype mob/object
+/// and per-room (zone, id) → list of trigger keys. Spawn paths copy
+/// the per-proto list onto fresh entities as `AttachedTriggers`;
+/// rooms get the same treatment in Pass 2 of the loader.
+#[derive(Resource, Debug, Default)]
+pub struct TriggerCatalog {
+    pub by_key: HashMap<(i32, i32), TriggerDef>,
+    /// `(mob_zone, mob_id)` → list of `(trigger_zone, trigger_id)`.
+    pub mob_attachments: HashMap<(i32, i32), Vec<(i32, i32)>>,
+    /// `(object_zone, object_id)` → list of trigger keys.
+    pub object_attachments: HashMap<(i32, i32), Vec<(i32, i32)>>,
+    /// `(room_zone, room_id)` → list of trigger keys.
+    pub room_attachments: HashMap<(i32, i32), Vec<(i32, i32)>>,
+}
+
 /// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.
 /// `keeper_index` maps a keeper mob's `(zone, id)` to the
 /// `(shop_zone, shop_id)` that fronts it; `by_key` carries the actual

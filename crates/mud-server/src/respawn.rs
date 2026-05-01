@@ -12,8 +12,9 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    CombatStats, Description, FromMobReset, Health, Keywords, Located, Mob, MobPrototypes,
-    MobResetCatalog, Mountable, Named, Posture, PostureKind, ShopCatalog, Shopkeeper, WorldKey,
+    AttachedTriggers, CombatStats, Description, FromMobReset, Health, Keywords, Located, Mob,
+    MobPrototypes, MobResetCatalog, Mountable, Named, Posture, PostureKind, ShopCatalog,
+    Shopkeeper, TriggerCatalog, WorldKey,
 };
 use tracing::info;
 
@@ -69,6 +70,11 @@ pub fn respawn_tick(world: &mut World) {
             .keeper_index
             .get(&(proto.zone_id, proto.id))
             .copied();
+        let trigger_keys = world
+            .resource::<TriggerCatalog>()
+            .mob_attachments
+            .get(&(proto.zone_id, proto.id))
+            .cloned();
         for _ in 0..(want - live) {
             let mut em = world.spawn((
                 Mob,
@@ -89,6 +95,9 @@ pub fn respawn_tick(world: &mut World) {
             ));
             if let Some((shop_zone_id, shop_id)) = shop_key {
                 em.insert(Shopkeeper { shop_zone_id, shop_id });
+            }
+            if let Some(ref keys) = trigger_keys {
+                em.insert(AttachedTriggers(keys.clone()));
             }
             if proto.keywords.iter().any(|k| {
                 let lc = k.to_ascii_lowercase();
