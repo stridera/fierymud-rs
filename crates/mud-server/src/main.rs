@@ -40,6 +40,36 @@ fn log_heartbeat(tick: Res<TickCount>) {
     }
 }
 
+/// Advance the in-game clock. One game hour every 750 ticks
+/// (~75s real time at 10 Hz = 1.25 minutes per game hour, ~32
+/// game days per real hour). Wraps month → year on the 30th day,
+/// year on the 12th month.
+#[allow(clippy::needless_pass_by_value)]
+fn mud_clock_tick(tick: Res<TickCount>, mut clock: ResMut<mud_world::MudClock>) {
+    // Refresh wall-clock stamp every tick — cheap and lets Lua
+    // `time.stamp` reads stay current without a separate system.
+    clock.stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
+        .unwrap_or(0);
+    if !tick.0.is_multiple_of(750) {
+        return;
+    }
+    clock.hour += 1;
+    if clock.hour >= 24 {
+        clock.hour = 0;
+        clock.day += 1;
+    }
+    if clock.day > 30 {
+        clock.day = 1;
+        clock.month += 1;
+    }
+    if clock.month > 12 {
+        clock.month = 1;
+        clock.year += 1;
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     tracing_subscriber::fmt()
@@ -65,6 +95,7 @@ async fn main() {
     let mut world = World::new();
     world.insert_resource(TickCount::default());
     world.insert_resource(ServerStart(Instant::now()));
+    world.insert_resource(mud_world::MudClock::default());
     world.insert_resource(mud_script::LuaHost::default());
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
@@ -97,6 +128,7 @@ async fn main() {
     schedule.add_systems(
         (
             advance_tick,
+            mud_clock_tick,
             combat::combat_tick,
             effects::effects_tick,
             regen::regen_tick,

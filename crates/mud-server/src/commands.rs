@@ -8417,8 +8417,7 @@ fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
         .get::<WorldKey>(room)
         .and_then(|k| world.resource::<WorldKeyIndex>().zones.get(&k.zone).copied());
     let climate = zone.and_then(|z| world.get::<ZoneClimate>(z).map(|c| c.0));
-    let tick = world.resource::<TickCount>().0;
-    let mud_hour = (tick / 750) % 24;
+    let mud_hour = world.resource::<mud_world::MudClock>().hour;
     let day = match mud_hour {
         0..=4 | 21..=23 => "night",
         5..=8 => "dawn",

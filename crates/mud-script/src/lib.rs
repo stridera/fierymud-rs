@@ -347,19 +347,15 @@ impl LuaHost {
             // `time` namespace — read-only clock fields. `time.stamp`
             // is Unix epoch seconds (used by FIGHT bodies to throttle
             // their "every 5s" actions); `.hour`/`.day`/`.month`/
-            // `.year` are MUD-time fields that we currently bridge
-            // to real time (since there's no in-game clock yet).
-            // Total ~32 corpus refs.
+            // `.year` come from `MudClock` — advanced one game hour
+            // every 750 ticks (~75s real). Total ~32 corpus refs.
             let time_tbl = self.lua.create_table()?;
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
-                .unwrap_or(0);
-            time_tbl.set("stamp", now_secs)?;
-            time_tbl.set("hour", 12i64)?; // mid-day stub
-            time_tbl.set("day", 1i64)?;
-            time_tbl.set("month", 1i64)?;
-            time_tbl.set("year", 2025i64)?;
+            let clock = world.get_resource::<mud_world::MudClock>().cloned().unwrap_or_default();
+            time_tbl.set("stamp", clock.stamp)?;
+            time_tbl.set("hour", i64::from(clock.hour))?;
+            time_tbl.set("day", i64::from(clock.day))?;
+            time_tbl.set("month", i64::from(clock.month))?;
+            time_tbl.set("year", i64::from(clock.year))?;
             globals.set("time", time_tbl)?;
 
             // `find_actor(keyword)` searches the entire world for the

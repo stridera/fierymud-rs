@@ -313,6 +313,36 @@ pub struct TriggerCatalog {
     pub room_attachments: HashMap<(i32, i32), Vec<(i32, i32)>>,
 }
 
+/// In-game time. Advances on a tick system that mirrors the legacy
+/// `FieryMUD` pulse cadence: ~75 real seconds per game hour, so a
+/// real hour is ~48 game hours (≈ 2 game days). Read by Lua
+/// `time.hour` etc., the `weather` flavor lines, and any future
+/// day/night-gated systems. Stored as i64 for the wall-clock
+/// `stamp` (Unix epoch seconds).
+#[derive(Resource, Debug, Clone)]
+pub struct MudClock {
+    pub year: i32,
+    pub month: i32,
+    pub day: i32,
+    pub hour: i32,
+    /// Wall-clock seconds since UNIX epoch — refreshed on each
+    /// `MudClock` advance so `time.stamp` Lua reads are coherent
+    /// with the rest of the system.
+    pub stamp: i64,
+}
+
+impl Default for MudClock {
+    fn default() -> Self {
+        Self {
+            year: 2025,
+            month: 1,
+            day: 1,
+            hour: 12,
+            stamp: 0,
+        }
+    }
+}
+
 /// One entry in the in-memory script error log. Push-only; the
 /// reader (admin `scripterrors` command) walks the buffer in
 /// reverse chronological order. No DB persistence yet — the
