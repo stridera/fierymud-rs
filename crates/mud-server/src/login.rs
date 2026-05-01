@@ -231,6 +231,15 @@ impl ConnRouter {
                             Vec::new()
                         }
                     };
+                // Saved command aliases.
+                let alias_rows =
+                    match mud_db::character_aliases::list_for(pool, &char_row.id).await {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            warn!(conn_id, error = %e, "character_aliases load failed");
+                            Vec::new()
+                        }
+                    };
                 // Drop the &mut ctx borrow by removing — the LoginCtx and its
                 // outbound move into the Player entity's Connection component.
                 let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
@@ -243,6 +252,13 @@ impl ConnRouter {
                         .collect(),
                 };
                 let ability_count = known_abilities.entries.len();
+                let aliases = mud_world::Aliases {
+                    entries: alias_rows
+                        .iter()
+                        .map(|r| (r.alias.clone(), r.command.clone()))
+                        .collect(),
+                };
+                let alias_count = aliases.entries.len();
                 let summary = AccountSummary {
                     email: user.email.clone(),
                     display_name: user.display_name.clone(),
@@ -253,6 +269,7 @@ impl ConnRouter {
                 };
                 if let Ok(mut e) = world.get_entity_mut(entity) {
                     e.insert(known_abilities);
+                    e.insert(aliases);
                     e.insert(summary);
                     if let Some(t) = char_row.title.as_deref()
                         && !t.trim().is_empty()
@@ -273,6 +290,7 @@ impl ConnRouter {
                     char_level = char_row.level,
                     item_count,
                     ability_count,
+                    alias_count,
                     "player spawned"
                 );
             }
@@ -482,6 +500,29 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         warn!(error = %e, character_id = %account.character_id, "abilities save failed");
         return;
     }
+
+    // Persist Aliases → CharacterAliases so user-defined shortcuts
+    // round-trip across reconnect.
+    let alias_rows: Vec<mud_db::character_aliases::CharacterAliasRow> = world
+        .get::<mud_world::Aliases>(entity)
+        .map(|al| {
+            al.entries
+                .iter()
+                .map(|(alias, command)| mud_db::character_aliases::CharacterAliasRow {
+                    alias: alias.clone(),
+                    command: command.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let alias_count = alias_rows.len();
+    if let Err(e) =
+        mud_db::character_aliases::save_for(pool, &account.character_id, &alias_rows).await
+    {
+        warn!(error = %e, character_id = %account.character_id, "aliases save failed");
+        return;
+    }
+
     info!(
         character_id = %account.character_id,
         hp,
@@ -491,6 +532,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         recall_room,
         flag_count = flags.len(),
         item_count,
+        alias_count,
         "player saved"
     );
 }

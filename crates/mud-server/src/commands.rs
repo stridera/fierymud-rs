@@ -1416,6 +1416,37 @@ const COMMANDS: &[Command] = &[
         run: cmd_afk,
     },
     Command {
+        names: &["alias"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "alias [<name> [<command>]]",
+            summary: "Define a command shortcut.",
+            long: "With no args, lists every alias you've defined. With \
+                   `alias <name>`, shows that alias's expansion. With \
+                   `alias <name> <command>`, sets the alias — typing \
+                   `<name> [args]` will be rewritten to \
+                   `<command> [args]` before dispatch. Aliases persist \
+                   across sessions. v1 expands once (no $1/$* yet) and \
+                   the first token is replaced wholesale.",
+        },
+        run: cmd_alias,
+    },
+    Command {
+        names: &["unalias"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "unalias <name>",
+            summary: "Remove a defined alias.",
+            long: "Drops the named alias from your list. No-op if no \
+                   alias by that name exists.",
+        },
+        run: cmd_unalias,
+    },
+    Command {
         names: &["notell"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4039,6 +4070,13 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         return;
     }
 
+    // Per-character alias expansion: rewrite `<alias> <args>` to
+    // `<command> <args>` once before lookup. v1 is plain prefix
+    // replacement (no $1/$* substitution). One pass only — no recursion
+    // into a chain of aliases.
+    let expanded = expand_alias(world, player, trimmed);
+    let trimmed = expanded.as_deref().unwrap_or(trimmed);
+
     // Lower-case the input so the registry (which is case-sensitive) matches
     // however the player typed it.
     let lower = trimmed.to_ascii_lowercase();
@@ -4097,6 +4135,25 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     let _g = span.enter();
     let args = skip_n_tokens(trimmed, n_consumed);
     (cmd.run)(world, player, args);
+}
+
+/// If the first whitespace-delimited token of `line` matches one of
+/// the player's defined aliases, return a new line with the alias
+/// replaced by its expansion. Returns `None` if no expansion applies.
+fn expand_alias(world: &World, player: Entity, line: &str) -> Option<String> {
+    let aliases = world.get::<mud_world::Aliases>(player)?;
+    if aliases.entries.is_empty() {
+        return None;
+    }
+    let mut parts = line.splitn(2, char::is_whitespace);
+    let head = parts.next()?;
+    let expansion = aliases.get(head)?;
+    let rest = parts.next().unwrap_or("");
+    if rest.is_empty() {
+        Some(expansion.to_string())
+    } else {
+        Some(format!("{expansion} {rest}"))
+    }
 }
 
 fn longest_prefix_match(tokens: &[&str]) -> Option<(&'static Command, usize)> {
@@ -7727,6 +7784,104 @@ fn cmd_afk(world: &mut World, player: Entity, _args: &str) {
         PlayerFlag::Afk,
         "You are now marked AFK.",
         "You're back from AFK.",
+    );
+}
+
+/// Names that would lock the player out of dispatch entirely if
+/// allowed as aliases. `quit` is the always-allowed escape hatch and
+/// must never be aliased away. `alias` and `unalias` themselves can't
+/// be redirected or the player can't reach them after one bad set.
+const RESERVED_ALIAS_NAMES: &[&str] = &["quit", "alias", "unalias"];
+
+fn cmd_alias(world: &mut World, player: Entity, args: &str) {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        // List
+        let Some(aliases) = world.get::<mud_world::Aliases>(player) else {
+            send_to(world, player, "You have no aliases defined.\r\n");
+            return;
+        };
+        if aliases.entries.is_empty() {
+            send_to(world, player, "You have no aliases defined.\r\n");
+            return;
+        }
+        let mut out = format!("\r\n{} alias(es):\r\n", aliases.entries.len());
+        for (alias, command) in &aliases.entries {
+            out.push_str(&format!("  {alias:<12}  {command}\r\n"));
+        }
+        send_to(world, player, out);
+        return;
+    }
+
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let expansion = parts.next().map_or("", str::trim);
+
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        send_to(world, player, "Usage: alias <name> [<command>]\r\n");
+        return;
+    }
+
+    if expansion.is_empty() {
+        // Show single
+        let Some(aliases) = world.get::<mud_world::Aliases>(player) else {
+            send_to(world, player, format!("No alias '{name}'.\r\n"));
+            return;
+        };
+        if let Some(cmd) = aliases.get(&name) {
+            send_to(world, player, format!("alias {name} = {cmd}\r\n"));
+        } else {
+            send_to(world, player, format!("No alias '{name}'.\r\n"));
+        }
+        return;
+    }
+
+    if RESERVED_ALIAS_NAMES.contains(&name.as_str()) {
+        send_to(
+            world,
+            player,
+            format!("'{name}' can't be aliased — reserved.\r\n"),
+        );
+        return;
+    }
+
+    let Ok(mut entity_mut) = world.get_entity_mut(player) else {
+        return;
+    };
+    let mut aliases = entity_mut.take::<mud_world::Aliases>().unwrap_or_default();
+    let replaced = aliases.set(&name, expansion.to_string());
+    entity_mut.insert(aliases);
+    send_to(
+        world,
+        player,
+        if replaced {
+            format!("Alias '{name}' updated.\r\n")
+        } else {
+            format!("Alias '{name}' set.\r\n")
+        },
+    );
+}
+
+fn cmd_unalias(world: &mut World, player: Entity, args: &str) {
+    let name = args.trim().to_ascii_lowercase();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        send_to(world, player, "Usage: unalias <name>\r\n");
+        return;
+    }
+    let Ok(mut entity_mut) = world.get_entity_mut(player) else {
+        return;
+    };
+    let mut aliases = entity_mut.take::<mud_world::Aliases>().unwrap_or_default();
+    let removed = aliases.remove(&name);
+    entity_mut.insert(aliases);
+    send_to(
+        world,
+        player,
+        if removed {
+            format!("Alias '{name}' removed.\r\n")
+        } else {
+            format!("No alias '{name}'.\r\n")
+        },
     );
 }
 

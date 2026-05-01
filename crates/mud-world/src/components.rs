@@ -596,6 +596,50 @@ impl KnownAbilities {
     }
 }
 
+/// Per-character command aliases. Each entry is `(alias, command)`
+/// — the dispatcher rewrites `<alias> [args]` to `<command> [args]`
+/// before lookup. Persisted to `CharacterAliases`. Sorted by alias
+/// at load to match the table's ORDER BY.
+#[derive(Component, Debug, Clone, Default)]
+pub struct Aliases {
+    pub entries: Vec<(String, String)>,
+}
+
+impl Aliases {
+    /// Look up the expansion for `alias`, case-insensitive.
+    #[must_use]
+    pub fn get(&self, alias: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|(a, _)| a.eq_ignore_ascii_case(alias))
+            .map(|(_, c)| c.as_str())
+    }
+
+    /// Insert or replace an alias. Returns true if a previous entry
+    /// with the same alias was overwritten.
+    pub fn set(&mut self, alias: &str, command: String) -> bool {
+        let existing = self
+            .entries
+            .iter_mut()
+            .find(|(a, _)| a.eq_ignore_ascii_case(alias));
+        if let Some(entry) = existing {
+            entry.1 = command;
+            return true;
+        }
+        self.entries.push((alias.to_string(), command));
+        self.entries.sort_by(|a, b| a.0.cmp(&b.0));
+        false
+    }
+
+    /// Remove an alias. Returns true if it existed.
+    pub fn remove(&mut self, alias: &str) -> bool {
+        let before = self.entries.len();
+        self.entries
+            .retain(|(a, _)| !a.eq_ignore_ascii_case(alias));
+        before != self.entries.len()
+    }
+}
+
 /// Admin sanction marker: the player's command dispatch is refused
 /// (with a message) until the marker is removed. Session-scoped — does
 /// not persist across disconnect/reconnect.

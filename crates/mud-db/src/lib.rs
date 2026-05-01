@@ -9,6 +9,7 @@ pub mod ability_restrictions;
 pub mod ability_saving_throw;
 pub mod ability_targeting;
 pub mod character_abilities;
+pub mod character_aliases;
 pub mod character_items;
 pub mod characters;
 pub mod classes;
