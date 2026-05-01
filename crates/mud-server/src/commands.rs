@@ -3039,6 +3039,24 @@ const COMMANDS: &[Command] = &[
         run: cmd_set,
     },
     Command {
+        names: &["show"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "show <subsystem>",
+            summary: "Diagnostic dump for a runtime subsystem.",
+            long: "Builder+. Subsystems: \
+                   `players` (online list with role/level/room), \
+                   `triggers` (catalog totals + per-event tally), \
+                   `effects` (active EffectInstance count by tag), \
+                   `clock` (MudClock + TickCount), \
+                   `resets` (mob/object refresh counts). \
+                   `show` with no arg lists the subsystems.",
+        },
+        run: cmd_show,
+    },
+    Command {
         names: &["scripterrors", "scripterr"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -16796,6 +16814,152 @@ fn cmd_set(world: &mut World, player: Entity, args: &str) {
             format!("{target_name} has no component for {field}.\r\n"),
         );
     }
+}
+
+/// `show <subsystem>`: diagnostic dumps. Builder+ admin tool —
+/// the long-form alternative to the per-kind `*stat` commands
+/// when the goal is "summarize everything in this category."
+#[allow(clippy::too_many_lines)]
+fn cmd_show(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim().to_ascii_lowercase();
+    let mut out = String::from("\r\n");
+    match arg.as_str() {
+        "" => {
+            out.push_str("Usage: show <subsystem>. Available:\r\n");
+            out.push_str("  players   online list with role/level/room\r\n");
+            out.push_str("  triggers  catalog totals and per-event tally\r\n");
+            out.push_str("  effects   active EffectInstance counts\r\n");
+            out.push_str("  clock     MudClock + TickCount\r\n");
+            out.push_str("  resets    mob/object reset catalog counts\r\n");
+        }
+        "players" => {
+            let mut rows: Vec<(String, String, i32, String)> = {
+                let mut q = world
+                    .query_filtered::<(&Named, &Account, Option<&Profile>, &Located), (With<Player>, With<Online>)>();
+                q.iter(world)
+                    .map(|(n, acct, prof, loc)| {
+                        let role = acct.role.label().to_string();
+                        let level = prof.map_or(0, |p| p.level);
+                        let room = name_or(world, loc.0, "<unknown>");
+                        (n.name.clone(), role, level, room)
+                    })
+                    .collect()
+            };
+            rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+            out.push_str(&format!("{} player(s) online:\r\n", rows.len()));
+            for (name, role, level, room) in &rows {
+                out.push_str(&format!(
+                    "  {name:<24} L{level:>3} {role:<12} @ {room}\r\n"
+                ));
+            }
+        }
+        "triggers" => {
+            use mud_world::TriggerEvent;
+            let cat = world.resource::<TriggerCatalog>();
+            out.push_str(&format!("Trigger catalog: {} rows\r\n", cat.by_key.len()));
+            out.push_str(&format!(
+                "  mob attachments:    {}\r\n",
+                cat.mob_attachments.len()
+            ));
+            out.push_str(&format!(
+                "  object attachments: {}\r\n",
+                cat.object_attachments.len()
+            ));
+            out.push_str(&format!(
+                "  room attachments:   {}\r\n",
+                cat.room_attachments.len()
+            ));
+            let mut tally: HashMap<&'static str, usize> = HashMap::new();
+            let label = |e: &TriggerEvent| match e {
+                TriggerEvent::Global => "GLOBAL",
+                TriggerEvent::Random => "RANDOM",
+                TriggerEvent::Command => "COMMAND",
+                TriggerEvent::Load => "LOAD",
+                TriggerEvent::Cast => "CAST",
+                TriggerEvent::Leave => "LEAVE",
+                TriggerEvent::Time => "TIME",
+                TriggerEvent::Speech => "SPEECH",
+                TriggerEvent::Act => "ACT",
+                TriggerEvent::Death => "DEATH",
+                TriggerEvent::Greet => "GREET",
+                TriggerEvent::GreetAll => "GREET_ALL",
+                TriggerEvent::Entry => "ENTRY",
+                TriggerEvent::Receive => "RECEIVE",
+                TriggerEvent::Fight => "FIGHT",
+                TriggerEvent::HitPercent => "HIT_PERCENT",
+                TriggerEvent::Bribe => "BRIBE",
+                TriggerEvent::Memory => "MEMORY",
+                TriggerEvent::Door => "DOOR",
+                TriggerEvent::SpeechTo => "SPEECH_TO",
+                TriggerEvent::Look => "LOOK",
+                TriggerEvent::Auto => "AUTO",
+                TriggerEvent::Attack => "ATTACK",
+                TriggerEvent::Defend => "DEFEND",
+                TriggerEvent::Timer => "TIMER",
+                TriggerEvent::Get => "GET",
+                TriggerEvent::Drop => "DROP",
+                TriggerEvent::Give => "GIVE",
+                TriggerEvent::Wear => "WEAR",
+                TriggerEvent::Remove => "REMOVE",
+                TriggerEvent::Use => "USE",
+                TriggerEvent::Consume => "CONSUME",
+                TriggerEvent::Reset => "RESET",
+                TriggerEvent::Preentry => "PREENTRY",
+                TriggerEvent::Postentry => "POSTENTRY",
+            };
+            for def in cat.by_key.values() {
+                for f in &def.flags {
+                    *tally.entry(label(f)).or_insert(0) += 1;
+                }
+            }
+            let mut entries: Vec<(&str, usize)> = tally.into_iter().collect();
+            entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+            out.push_str("  per-event tally:\r\n");
+            for (name, n) in entries {
+                out.push_str(&format!("    {name:<14} {n:>5}\r\n"));
+            }
+        }
+        "effects" => {
+            let mut tally: HashMap<String, i32> = HashMap::new();
+            let mut q = world.query::<&EffectInstance>();
+            for e in q.iter(world) {
+                *tally.entry(e.name.clone()).or_insert(0) += 1;
+            }
+            let total: i32 = tally.values().sum();
+            out.push_str(&format!("{total} active EffectInstance(s):\r\n"));
+            let mut rows: Vec<(String, i32)> = tally.into_iter().collect();
+            rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            for (name, n) in rows.iter().take(20) {
+                out.push_str(&format!("  {name:<24} {n:>5}\r\n"));
+            }
+            if rows.len() > 20 {
+                out.push_str(&format!("  ... ({} more)\r\n", rows.len() - 20));
+            }
+        }
+        "clock" => {
+            let tick = world.resource::<TickCount>().0;
+            let clock = world.resource::<mud_world::MudClock>().clone();
+            out.push_str(&format!("Tick:   {tick}\r\n"));
+            out.push_str(&format!(
+                "Clock:  year {}  month {}  day {}  hour {}\r\n",
+                clock.year, clock.month, clock.day, clock.hour
+            ));
+            out.push_str(&format!("Stamp:  {} (Unix epoch seconds)\r\n", clock.stamp));
+        }
+        "resets" => {
+            use mud_world::{MobResetCatalog, ObjectResetCatalog};
+            let mob_count = world.resource::<MobResetCatalog>().entries.len();
+            let obj_count = world.resource::<ObjectResetCatalog>().entries.len();
+            out.push_str(&format!("Mob reset rows:    {mob_count}\r\n"));
+            out.push_str(&format!("Object reset rows: {obj_count}\r\n"));
+        }
+        other => {
+            out.push_str(&format!(
+                "Unknown subsystem '{other}'. Try `show` for the list.\r\n"
+            ));
+        }
+    }
+    send_to(world, player, out);
 }
 
 /// `scripterrors [<n>]`: list the most recent Lua trigger fire
