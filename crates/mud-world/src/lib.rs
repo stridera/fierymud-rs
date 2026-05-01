@@ -19,6 +19,6 @@ pub use resources::{
     MobPrototypes, MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding,
     ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, SavingThrow, ScriptError, ScriptErrorLog,
     ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef,
-    SocialRegistry, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent,
-    WorldKeyIndex,
+    SocialRegistry, SpellSlotData, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef,
+    TriggerEvent, WorldKeyIndex,
 };

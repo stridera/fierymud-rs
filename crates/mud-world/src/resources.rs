@@ -313,6 +313,39 @@ pub struct TriggerCatalog {
     pub room_attachments: HashMap<(i32, i32), Vec<(i32, i32)>>,
 }
 
+/// Spell-slot tables loaded once at startup. `progression` maps
+/// `(level, circle)` → max slot count; `class_circles` maps
+/// `class_id` → list of `(circle, min_level)` the class can access.
+/// Together they answer "how many circle-N slots does this
+/// level-L character of class C have available."
+#[derive(Resource, Debug, Default)]
+pub struct SpellSlotData {
+    pub progression: HashMap<(i32, i32), i32>,
+    pub class_circles: HashMap<i32, Vec<(i32, i32)>>,
+}
+
+impl SpellSlotData {
+    /// Maximum slots for `class_id` at character `level`, broken
+    /// down by circle. Includes only circles whose `min_level <=
+    /// level`. Returns `Vec<(circle, slots)>` sorted by circle.
+    #[must_use]
+    pub fn slots_for(&self, class_id: i32, level: i32) -> Vec<(i32, i32)> {
+        let Some(circles) = self.class_circles.get(&class_id) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(i32, i32)> = circles
+            .iter()
+            .filter(|(_, min)| *min <= level)
+            .map(|(c, _)| {
+                let slots = self.progression.get(&(level, *c)).copied().unwrap_or(0);
+                (*c, slots)
+            })
+            .collect();
+        out.sort_by_key(|(c, _)| *c);
+        out
+    }
+}
+
 /// In-game time. Advances on a tick system that mirrors the legacy
 /// `FieryMUD` pulse cadence: ~75 real seconds per game hour, so a
 /// real hour is ~48 game hours (≈ 2 game days). Read by Lua

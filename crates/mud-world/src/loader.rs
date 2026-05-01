@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, boards, classes, effects, mob_reset_equipment,
     mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
-    rooms, shops, socials, sqlx::PgPool, triggers, zones,
+    rooms, shops, socials, spell_slots, sqlx::PgPool, triggers, zones,
 };
 use tracing::{info, warn};
 
@@ -418,6 +418,26 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             },
         );
     }
+
+    // Pass 4c.5: spell slot data. Two tables joined into one
+    // resource — `SpellSlotProgression` (level × circle → slots)
+    // and `ClassAbilityCircles` (which circles each class can
+    // access at which min level). Read by the `slots` command and
+    // the eventual memorize/forget cycle.
+    let progression_rows = spell_slots::list_slot_progression(pool).await?;
+    let class_circle_rows = spell_slots::list_class_circles(pool).await?;
+    let mut spell_slot_data = crate::resources::SpellSlotData::default();
+    for r in progression_rows {
+        spell_slot_data.progression.insert((r.level, r.circle), r.slots);
+    }
+    for r in class_circle_rows {
+        spell_slot_data
+            .class_circles
+            .entry(r.class_id)
+            .or_default()
+            .push((r.circle, r.min_level));
+    }
+    world.insert_resource(spell_slot_data);
 
     // Pass 4d: object-ability catalog (scrolls / wands / staves
     // bound abilities). Lookups are by `(zone, id)` matching an item

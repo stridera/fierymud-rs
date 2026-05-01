@@ -1114,6 +1114,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_spells,
     },
     Command {
+        names: &["slots"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "slots",
+            summary: "Show your spell-slot allotment per circle.",
+            long: "Read-only readout of how many slots per circle \
+                   your class+level grants you, sourced from the \
+                   `SpellSlotProgression` and `ClassAbilityCircles` \
+                   tables. Memorization tracking (refilling on rest) \
+                   is not yet implemented; slots show as available.",
+        },
+        run: cmd_slots,
+    },
+    Command {
         names: &["skills"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -9982,6 +9998,40 @@ fn submit_feedback(world: &mut World, player: Entity, kind: &'static str, args: 
         player,
         format!("Thanks. Your {kind} report has been logged.\r\n"),
     );
+}
+
+/// `slots`: read-only display of the player's available
+/// spell-slot count per circle, sourced from `SpellSlotData`.
+fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
+    use mud_world::SpellSlotData;
+    let Some(profile) = world.get::<Profile>(player) else {
+        send_to(world, player, "You have no profile.\r\n");
+        return;
+    };
+    let level = profile.level;
+    let Some(class_id) = profile.class_id else {
+        send_to(world, player, "You have no class — no spell slots.\r\n");
+        return;
+    };
+    let class_name = world
+        .resource::<ClassCatalog>()
+        .by_id
+        .get(&class_id)
+        .map_or_else(|| format!("class {class_id}"), |c| c.plain_name.clone());
+    let slots = world.resource::<SpellSlotData>().slots_for(class_id, level);
+    if slots.is_empty() {
+        send_to(
+            world,
+            player,
+            format!("\r\nLevel {level} {class_name} — no accessible spell circles.\r\n"),
+        );
+        return;
+    }
+    let mut out = format!("\r\nLevel {level} {class_name} spell slots:\r\n");
+    for (circle, count) in slots {
+        out.push_str(&format!("  Circle {circle:>2}: {count}\r\n"));
+    }
+    send_to(world, player, out);
 }
 
 fn cmd_spells(world: &mut World, player: Entity, args: &str) {
