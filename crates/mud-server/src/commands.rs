@@ -3829,16 +3829,17 @@ thread_local! {
 /// dispatcher after each `exec_for_actor` returns.
 pub(crate) fn drain_lua_outbox(world: &mut World) {
     use mud_world::LuaOutbox;
-    let messages: Vec<(Entity, String, Option<Entity>)> = if world.contains_resource::<LuaOutbox>()
-    {
-        std::mem::take(&mut world.resource_mut::<LuaOutbox>().messages)
+    let (messages, direct) = if world.contains_resource::<LuaOutbox>() {
+        let mut out = world.resource_mut::<LuaOutbox>();
+        (std::mem::take(&mut out.messages), std::mem::take(&mut out.direct))
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
-    if messages.is_empty() {
+    if messages.is_empty() && direct.is_empty() {
         return;
     }
-    // Snapshot recipients per room once so the inner loop is stable.
+    // Room broadcasts: snapshot recipients per room so the inner loop
+    // doesn't re-borrow World mid-send.
     for (room, msg, except) in messages {
         let mut recipients: Vec<Entity> = Vec::new();
         let mut q = world.query_filtered::<(Entity, &Located), With<Connection>>();
@@ -3850,6 +3851,12 @@ pub(crate) fn drain_lua_outbox(world: &mut World) {
         for r in recipients {
             send_to(world, r, format!("{msg}\r\n"));
         }
+    }
+    // Direct one-to-one delivery (actor:send). send_to silently no-ops
+    // if the target has no Connection (mob targets, disconnected
+    // players) — that's the desired behavior.
+    for (target, msg) in direct {
+        send_to(world, target, format!("{msg}\r\n"));
     }
 }
 

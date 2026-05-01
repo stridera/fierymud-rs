@@ -476,6 +476,23 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:send(msg)` sends a single private line to this
+        // entity. Paired with `room:send_except(actor, ...)` for the
+        // per-recipient framing pattern (10901 corpus refs). Pushed
+        // into `LuaOutbox.direct` and drained directly to the
+        // entity's Connection by mud-server.
+        methods.add_method("send", |lua, this, msg: String| -> mlua::Result<()> {
+            world_mut_from_lua(lua, |world| {
+                if !world.contains_resource::<LuaOutbox>() {
+                    world.insert_resource(LuaOutbox::default());
+                }
+                world
+                    .resource_mut::<LuaOutbox>()
+                    .direct
+                    .push((this.entity, msg));
+            })
+        });
+
         // `actor:follow(leader)` makes the actor follow `leader`. Used
         // by mob-pack LOAD bodies (e.g. wolf pack) where one alpha
         // spawns followers that move with it. Self-follow and follow-
