@@ -10909,11 +10909,22 @@ fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
-    let active: Vec<(String, i32, Option<i32>)> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+    // Snapshot effects on the player; pull the optional ModifyDelta
+    // companion in the same query so the renderer can show
+    // "ward (+60) (2245s)" for stat-bonus effects.
+    let active: Vec<(String, i32, Option<i32>, Option<i32>)> = {
+        let mut q =
+            world.query::<(&EffectInstance, &AppliedTo, Option<&mud_world::ModifyDelta>)>();
         q.iter(world)
-            .filter(|(_, a)| a.0 == player)
-            .map(|(inst, _)| (inst.name.clone(), inst.remaining_secs, inst.ability_id))
+            .filter(|(_, a, _)| a.0 == player)
+            .map(|(inst, _, delta)| {
+                (
+                    inst.name.clone(),
+                    inst.remaining_secs,
+                    inst.ability_id,
+                    delta.map(|d| d.amount),
+                )
+            })
             .collect()
     };
     let mut out = if active.is_empty() {
@@ -10922,7 +10933,7 @@ fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
         format!("\r\n{} active effect(s):\r\n", active.len())
     };
     let catalog = world.resource::<AbilityCatalog>();
-    for (name, remaining, ability_id) in active {
+    for (name, remaining, ability_id, delta_amount) in active {
         // Look up the spawning ability's plain_name when known so
         // players can see "bleed (45s) — from REND" instead of
         // just the bare effect tag.
@@ -10933,11 +10944,19 @@ fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
                 .find(|d| d.id == id)
                 .map(|d| d.plain_name.clone())
         });
-        let suffix = from.as_deref().map_or(String::new(), |n| format!(" — from {n}"));
+        let suffix = from
+            .as_deref()
+            .map_or(String::new(), |n| format!(" — from {n}"));
+        let delta_label = delta_amount.map_or(String::new(), |a| {
+            let sign = if a >= 0 { "+" } else { "" };
+            format!(" ({sign}{a})")
+        });
         if remaining < 0 {
-            out.push_str(&format!("  {name} (permanent){suffix}\r\n"));
+            out.push_str(&format!("  {name}{delta_label} (permanent){suffix}\r\n"));
         } else {
-            out.push_str(&format!("  {name} ({remaining}s remaining){suffix}\r\n"));
+            out.push_str(&format!(
+                "  {name}{delta_label} ({remaining}s remaining){suffix}\r\n"
+            ));
         }
     }
     send_to(world, player, out);
