@@ -14314,6 +14314,10 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Usage: tell <player> <message>\r\n");
         return;
     }
+    if effect_prevents(world, player, Prevent::Speaking) {
+        send_to(world, player, "Your voice is silenced.\r\n");
+        return;
+    }
     let target_name = parts[0].trim();
     let message = parts[1].trim();
     let target_lower = target_name.to_ascii_lowercase();
@@ -15324,6 +15328,10 @@ fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Gossip what?\r\n");
         return;
     }
+    if effect_prevents(world, player, Prevent::Speaking) {
+        send_to(world, player, "Your voice is silenced.\r\n");
+        return;
+    }
     let player_name = name_of(world, player);
 
     let targets: Vec<Entity> = {
@@ -15359,6 +15367,10 @@ fn cmd_music(world: &mut World, player: Entity, args: &str) {
     let message = args.trim();
     if message.is_empty() {
         send_to(world, player, "Sing what?\r\n");
+        return;
+    }
+    if effect_prevents(world, player, Prevent::Speaking) {
+        send_to(world, player, "Your voice is silenced.\r\n");
         return;
     }
     let player_name = name_of(world, player);
@@ -15403,6 +15415,10 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "You feel insulted.\r\n");
+        return;
+    }
+    if effect_prevents(world, player, Prevent::Speaking) {
+        send_to(world, player, "Your voice is silenced.\r\n");
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {
@@ -15454,6 +15470,10 @@ fn cmd_petition(world: &mut World, player: Entity, args: &str) {
             player,
             "Petition what? Use this to ask online immortals for help.\r\n",
         );
+        return;
+    }
+    if effect_prevents(world, player, Prevent::Speaking) {
+        send_to(world, player, "Your voice is silenced.\r\n");
         return;
     }
     let player_name = name_of(world, player);
@@ -15530,6 +15550,10 @@ fn cmd_shout(world: &mut World, player: Entity, args: &str) {
     let message = args.trim();
     if message.is_empty() {
         send_to(world, player, "Shout what?\r\n");
+        return;
+    }
+    if effect_prevents(world, player, Prevent::Speaking) {
+        send_to(world, player, "Your voice is silenced.\r\n");
         return;
     }
     let player_name = name_of(world, player);
