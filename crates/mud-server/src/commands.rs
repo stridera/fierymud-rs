@@ -2942,6 +2942,24 @@ const COMMANDS: &[Command] = &[
         run: cmd_group,
     },
     Command {
+        names: &["order"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "order <follower|all> <command>",
+            summary: "Issue a command to one or all of your followers.",
+            long: "Forwards `<command>` to a named mob follower (must \
+                   be in the same room and have `Follower(you)` set), \
+                   or `all` for every same-room follower at once. The \
+                   mob runs the command through the normal dispatcher \
+                   under its own identity, so target lookups, costs, \
+                   and triggers fire as if it had typed the line. \
+                   Admin commands are off-limits to mobs.",
+        },
+        run: cmd_order,
+    },
+    Command {
         names: &["dismiss"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4546,11 +4564,19 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         return;
     };
 
-    // Permission gate
-    let allowed = world.get::<Account>(player).is_some_and(|a| {
+    // Permission gate. Players check Account.role; mobs (no Account)
+    // are allowed Player-level commands only — that's the path used
+    // by `order <mob> <cmd>` and by `actor:command()` queued from Lua
+    // triggers running on a mob. Admin commands always require an
+    // account at the right role + perms.
+    let allowed = if let Some(a) = world.get::<Account>(player) {
         a.role.at_least(cmd.min_role)
             && cmd.required_perm.is_none_or(|p| a.perms.contains(&p))
-    });
+    } else if world.get::<Mob>(player).is_some() {
+        cmd.min_role == UserRole::Player && cmd.required_perm.is_none()
+    } else {
+        false
+    };
     if !allowed {
         send_to(world, player, "You can't do that.\r\n");
         return;
@@ -17388,6 +17414,90 @@ fn group_dismiss_one(world: &mut World, dismisser: Entity, target_name: &str) {
         target,
         &format!("{dismisser_name} dismisses you from the group.\r\n"),
     );
+}
+
+/// `order <follower|all> <command>`: forwards a command to a mob
+/// follower of the caller. Resolves the named mob (must be in the
+/// same room and pointing `Follower(player)` at the caller); `all`
+/// reaches every same-room mob follower. The mob runs the command
+/// via the normal dispatcher — admin gates still apply (mobs only
+/// reach Player-level commands).
+fn cmd_order(world: &mut World, player: Entity, args: &str) {
+    let mut parts = args.trim().splitn(2, char::is_whitespace);
+    let target_word = parts.next().unwrap_or("");
+    let cmd_text = parts.next().unwrap_or("").trim();
+    if target_word.is_empty() || cmd_text.is_empty() {
+        send_to(
+            world,
+            player,
+            "Usage: order <follower|all> <command>\r\n",
+        );
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You're nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+
+    // Mob followers in the same room pointing Follower(player) at
+    // the caller. Players following you are NOT touched; `order` is
+    // a charm/pet thing.
+    let followers: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &Follower), With<Mob>>();
+        q.iter(world)
+            .filter(|(_, l, f)| l.0 == room && f.0 == player)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    if followers.is_empty() {
+        send_to(world, player, "You have no followers here to order.\r\n");
+        return;
+    }
+
+    let chosen: Vec<Entity> = if target_word.eq_ignore_ascii_case("all")
+        || target_word.eq_ignore_ascii_case("followers")
+    {
+        followers
+    } else {
+        let needle = target_word.to_ascii_lowercase();
+        let one = followers
+            .into_iter()
+            .find(|e| {
+                world
+                    .get::<Named>(*e)
+                    .is_some_and(|n| n.name.to_ascii_lowercase().contains(&needle))
+                    || world.get::<Keywords>(*e).is_some_and(|k| {
+                        k.0.iter().any(|w| w.to_ascii_lowercase().contains(&needle))
+                    })
+            });
+        let Some(one) = one else {
+            send_to(
+                world,
+                player,
+                format!("'{target_word}' isn't a follower of yours here.\r\n"),
+            );
+            return;
+        };
+        vec![one]
+    };
+
+    let player_name = name_of(world, player);
+    for mob in &chosen {
+        let mob_name = name_of(world, *mob);
+        send_to(
+            world,
+            player,
+            format!("You order {mob_name} to: {cmd_text}\r\n"),
+        );
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} orders {mob_name} to: {cmd_text}\r\n"),
+        );
+        dispatch(world, *mob, cmd_text);
+    }
 }
 
 /// `dismiss <player>`: top-level alias for `group dismiss <player>`.
