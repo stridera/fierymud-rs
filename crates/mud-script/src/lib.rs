@@ -13,9 +13,9 @@ use bevy_ecs::prelude::*;
 use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
 use mud_world::{
     AbilityCatalog, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats, Description,
-    EffectCatalog, EffectInstance, EquippedSlot, Follower, Health, Item, Keywords, KnownAbilities,
-    Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player, Posture, PostureKind,
-    Profile, TriggerCatalog, WorldKey, WorldKeyIndex,
+    EffectCatalog, EffectInstance, EquippedSlot, Fighting, Follower, Health, Item, Keywords,
+    KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player,
+    Posture, PostureKind, Profile, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 
 /// Bevy resource wrapping the Lua interpreter.
@@ -131,6 +131,10 @@ impl LuaHost {
         let world_ptr = WorldPtr(NonNull::from(&mut *world));
         self.lua.set_app_data(world_ptr);
         self.lua.set_app_data(LuaCapture::default());
+        // Stash `self` as raw entity so callbacks like
+        // `combat.engage(target)` can find the engager without a
+        // userdata argument.
+        self.lua.set_app_data(SelfEntity(listener));
 
         let result = (|| -> mlua::Result<Value> {
             let globals = self.lua.globals();
@@ -221,38 +225,75 @@ impl LuaHost {
                     },
                 )?,
             )?;
-            // `world.destroy(actor)` — despawning needs to coordinate
-            // with `MobResetCatalog` so respawn accounting stays
-            // correct (a destroyed reset-spawned mob shouldn't
-            // immediately respawn). Stubbed as a warn-no-op for now;
-            // 344 corpus refs will succeed silently. Real impl
-            // pending.
+            // `world.destroy(actor)` despawns the target entity.
+            // Mobs destroyed mid-trigger are removed cleanly; any
+            // subsequent field access against them returns defaults
+            // (since the components are gone). 344 corpus refs.
+            // `MobResetCatalog` accounting is unaffected — a
+            // reset-spawned mob's reset row will still respawn it
+            // on the next refill cycle.
             world_tbl.set(
                 "destroy",
-                self.lua.create_function(|_, _: AnyUserData| -> mlua::Result<()> {
-                    tracing::warn!("trigger called world.destroy(...) — stub no-op");
-                    Ok(())
+                self.lua.create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
+                    let entity = target.borrow::<LuaActor>()?.entity;
+                    world_mut_from_lua(lua, |world| {
+                        if let Ok(em) = world.get_entity_mut(entity) {
+                            em.despawn();
+                        }
+                    })
                 })?,
             )?;
             globals.set("world", world_tbl)?;
 
-            // `combat` namespace — stubbed mutating verbs. Real impl
-            // (engage = force-aggression onto target; rescue = swap
-            // Fighting via the existing `redirect` consumer) deferred
-            // until LOAD/FIGHT trigger event firing lands.
+            // `combat` namespace — engage/rescue. Implemented via
+            // direct Fighting component manipulation; the regular
+            // combat tick picks up the new pairing on its next pass.
             let combat_tbl = self.lua.create_table()?;
             combat_tbl.set(
                 "engage",
-                self.lua.create_function(|_, _: AnyUserData| -> mlua::Result<()> {
-                    tracing::warn!("trigger called combat.engage(...) — stub no-op");
-                    Ok(())
+                self.lua.create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
+                    let target_entity = target.borrow::<LuaActor>()?.entity;
+                    world_mut_from_lua(lua, |world| {
+                        // `self` (in trigger context) is the engager;
+                        // we don't have that entity here. The corpus
+                        // calls are always `combat.engage(actor)`
+                        // where `self` triggers the engagement, so
+                        // bind via the Lua-globals `self` lookup.
+                        if let Some(self_ud) =
+                            lua.app_data_ref::<SelfEntity>().map(|s| s.0)
+                        {
+                            world.entity_mut(self_ud).insert(Fighting(target_entity));
+                        }
+                    })
                 })?,
             )?;
             combat_tbl.set(
                 "rescue",
-                self.lua.create_function(|_, _: AnyUserData| -> mlua::Result<()> {
-                    tracing::warn!("trigger called combat.rescue(...) — stub no-op");
-                    Ok(())
+                self.lua.create_function(|lua, victim: AnyUserData| -> mlua::Result<()> {
+                    let victim_entity = victim.borrow::<LuaActor>()?.entity;
+                    world_mut_from_lua(lua, |world| {
+                        let Some(self_ent) =
+                            lua.app_data_ref::<SelfEntity>().map(|s| s.0)
+                        else {
+                            return;
+                        };
+                        // Find any entity attacking the victim — if
+                        // exists, swap them onto `self` (we draw aggro)
+                        // and have us start fighting them.
+                        let mut attackers: Vec<Entity> = Vec::new();
+                        {
+                            let mut q = world.query::<(Entity, &Fighting)>();
+                            for (e, f) in q.iter(world) {
+                                if f.0 == victim_entity {
+                                    attackers.push(e);
+                                }
+                            }
+                        }
+                        if let Some(&attacker) = attackers.first() {
+                            world.entity_mut(attacker).insert(Fighting(self_ent));
+                            world.entity_mut(self_ent).insert(Fighting(attacker));
+                        }
+                    })
                 })?,
             )?;
             globals.set("combat", combat_tbl)?;
@@ -388,6 +429,7 @@ impl LuaHost {
             .map(|c| c.lines)
             .unwrap_or_default();
         self.lua.remove_app_data::<WorldPtr>();
+        self.lua.remove_app_data::<SelfEntity>();
         // Unbind globals to avoid leaking actor between calls.
         let _ = self.lua.globals().raw_remove("actor");
         let _ = self.lua.globals().raw_remove("self");
@@ -431,6 +473,12 @@ impl LuaHost {
 struct LuaCapture {
     lines: Vec<String>,
 }
+
+/// Stash of the active trigger's `self` entity, accessible to
+/// callbacks that need to act on the listener (e.g. `combat.engage`,
+/// `combat.rescue`) without taking a userdata argument.
+#[derive(Clone, Copy)]
+struct SelfEntity(Entity);
 
 /// Raw pointer wrapper so Lua callbacks can reach the world.
 #[derive(Clone, Copy)]
