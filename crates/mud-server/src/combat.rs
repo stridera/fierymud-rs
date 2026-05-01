@@ -151,6 +151,21 @@ pub fn combat_tick(world: &mut World) {
     for s in &swings {
         apply_swing(world, s);
     }
+    // Fire FIGHT triggers on every still-living target after the
+    // swing pass. Each fire binds `self` to the target and `actor`
+    // to the attacker. Bodies typically self-throttle via
+    // `time.stamp` deltas; the dispatcher just checks the flag.
+    for s in &swings {
+        if world.get_entity(s.target).is_err() {
+            continue;
+        }
+        crate::triggers::fire_event_with_actor(
+            world,
+            s.target,
+            s.attacker,
+            mud_world::TriggerEvent::Fight,
+        );
+    }
     // Prompts for combatants and bystanders are handled centrally by
     // commands::flush_prompts after schedule.run — every send_to here
     // already registers the recipient.

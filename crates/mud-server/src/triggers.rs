@@ -264,6 +264,46 @@ pub fn fire_item_event(
     }
 }
 
+/// Fire `event`-flagged triggers on `listener` with a separate
+/// `actor` binding for the acting entity. Used by FIGHT / ATTACK
+/// where the listener is the target and the actor is the attacker.
+pub fn fire_event_with_actor(
+    world: &mut World,
+    listener: Entity,
+    acting: Entity,
+    event: TriggerEvent,
+) {
+    let to_fire: Vec<(i32, i32, String, String)> = {
+        let Some(at) = world.get::<AttachedTriggers>(listener) else {
+            return;
+        };
+        let keys = at.0.clone();
+        let catalog = world.resource::<TriggerCatalog>();
+        keys.into_iter()
+            .filter_map(|(zone, id)| {
+                let def = catalog.by_key.get(&(zone, id))?;
+                if def.flags.contains(&event) {
+                    Some((zone, id, def.name.clone(), def.commands.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    if to_fire.is_empty() {
+        return;
+    }
+    for (zone, id, name, body) in to_fire {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+            host.exec_for_listener_with_extras(world, listener, acting, &body, &[])
+        });
+        drain_lua_outbox(world);
+        if let Err(e) = result {
+            record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
+        }
+    }
+}
+
 /// Fire `RECEIVE`-flagged triggers on `recipient` when `giver` hands
 /// them `item`. Each fire binds `self` to recipient, `actor` to giver,
 /// `object` to the item. RECEIVE bodies typically inspect `object.id`
