@@ -586,11 +586,18 @@ fn check_level_up(world: &mut World, entity: Entity) {
             s.max = s.max.saturating_add(next_row.stamina_gain);
             s.current = s.max;
         }
+        // Grant 1 practice point per level gained. The runtime
+        // formula isn't carried by `LevelDefinition` today; bumping
+        // the schema is logged in SUGGESTIONS for the user.
+        if let Some(mut sp) = world.get_mut::<mud_world::SkillPoints>(entity) {
+            sp.0 = sp.0.saturating_add(1);
+        }
         send_to(
             world,
             entity,
             format!(
-                "*** You have advanced to level {next}{}! ***\r\n",
+                "*** You have advanced to level {next}{}! ***\r\n\
+                 You gained 1 practice point.\r\n",
                 next_row
                     .name
                     .as_deref()

@@ -9,8 +9,9 @@ pub use components::{
     GroupInvite, Guarding, Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt,
     LastTeller, LiquidContainer, Lit, Located, LoggedInAt, MailDraft, MemEntry, MemorizedSpells,
     Mob, Mountable, Mounted, Named, Online, Player, PlayerFlags, Posture, PostureKind, Profile,
-    Prompt, RecallPoint, RiddenBy, Room, RoomSector, Shopkeeper, Slot, Stamina, Stealth, Stunned,
-    TellLog, Title, UiStyle, Wealth, WearableIn, WimpyThreshold, WorldKey, Zone, ZoneClimate,
+    Prompt, RecallPoint, RiddenBy, Room, RoomSector, Shopkeeper, SkillPoints, Slot, Stamina,
+    Stealth, Stunned, TellLog, Title, UiStyle, Wealth, WearableIn, WimpyThreshold, WorldKey, Zone,
+    ZoneClimate,
 };
 pub use loader::{LoadStats, load_from_db, wear_flags_primary_slot};
 pub use resources::{

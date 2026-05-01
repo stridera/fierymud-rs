@@ -256,6 +256,12 @@ pub struct WimpyThreshold(pub i32);
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Wealth(pub i64);
 
+/// Practice-point pool. Spent by `practice <ability>` to bump
+/// proficiency. Awarded on level-up (handler grants `level` points
+/// per gain). Persisted to `Characters.skill_points`.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SkillPoints(pub i32);
+
 /// Marks a mob as fronting a shop. The `(zone, id)` pair is the key
 /// into `ShopCatalog.by_key`. Attached at mob-reset spawn time when
 /// the mob's proto matches a row in the `keeper_index` lookup.

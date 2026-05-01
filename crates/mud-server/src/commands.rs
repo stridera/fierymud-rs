@@ -6843,11 +6843,14 @@ fn cmd_practice(world: &mut World, player: Entity, args: &str) {
         .get::<KnownAbilities>(player)
         .map(|k| k.entries.clone())
         .unwrap_or_default();
+    let points = world
+        .get::<mud_world::SkillPoints>(player)
+        .map_or(0, |s| s.0);
     if known.is_empty() {
         send_to(
             world,
             player,
-            "\r\nYou haven't trained any abilities yet.\r\n",
+            format!("\r\nYou haven't trained any abilities yet. ({points} practice point(s) available.)\r\n"),
         );
         return;
     }
@@ -6884,6 +6887,7 @@ fn cmd_practice(world: &mut World, player: Entity, args: &str) {
         ));
     }
     out.push_str("\r\n* = learning (not yet mastered).\r\n");
+    out.push_str(&format!("Practice points: {points}\r\n"));
     send_to(world, player, out);
 }
 
@@ -6918,7 +6922,11 @@ fn practice_one(world: &mut World, player: Entity, name: &str) {
         );
         return;
     };
-    let Some(mut known) = world.get_mut::<KnownAbilities>(player) else {
+    let current_prof = world
+        .get::<KnownAbilities>(player)
+        .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).copied())
+        .map(|(_, p, _)| p);
+    let Some(current_prof) = current_prof else {
         send_to(
             world,
             player,
@@ -6926,15 +6934,7 @@ fn practice_one(world: &mut World, player: Entity, name: &str) {
         );
         return;
     };
-    let Some(slot) = known.entries.iter_mut().find(|(id, _, _)| *id == def.id) else {
-        send_to(
-            world,
-            player,
-            format!("You haven't learned {} yet — `study` it first.\r\n", def.plain_name),
-        );
-        return;
-    };
-    if slot.1 >= cap {
+    if current_prof >= cap {
         send_to(
             world,
             player,
@@ -6945,13 +6945,35 @@ fn practice_one(world: &mut World, player: Entity, name: &str) {
         );
         return;
     }
-    slot.1 = (slot.1 + 5).min(cap);
-    let new_prof = slot.1;
+    let points = world
+        .get::<mud_world::SkillPoints>(player)
+        .map_or(0, |s| s.0);
+    if points <= 0 {
+        send_to(
+            world,
+            player,
+            "You have no practice points to spend. Earn more by leveling up.\r\n",
+        );
+        return;
+    }
+    let new_prof = (current_prof + 5).min(cap);
+    if let Some(mut known) = world.get_mut::<KnownAbilities>(player)
+        && let Some(slot) = known.entries.iter_mut().find(|(id, _, _)| *id == def.id)
+    {
+        slot.1 = new_prof;
+    }
+    if let Some(mut sp) = world.get_mut::<mud_world::SkillPoints>(player) {
+        sp.0 -= 1;
+    }
+    let remaining = world
+        .get::<mud_world::SkillPoints>(player)
+        .map_or(0, |s| s.0);
     send_to(
         world,
         player,
         format!(
-            "You practice {} — proficiency now {new_prof} / {cap}.\r\n",
+            "You practice {} — proficiency now {new_prof} / {cap}. \
+             ({remaining} practice point(s) remaining.)\r\n",
             def.plain_name
         ),
     );

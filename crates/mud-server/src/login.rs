@@ -385,6 +385,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                 },
                 Wealth(c.wealth),
                 BankWealth(c.bank_wealth),
+                mud_world::SkillPoints(c.skill_points),
             ),
         ))
         .id();
@@ -422,6 +423,9 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
     let description = world.get::<Description>(entity).map(|d| d.0.clone());
     let wealth = world.get::<Wealth>(entity).map_or(0, |w| w.0);
     let experience = world.get::<Profile>(entity).map_or(0, |p| p.experience);
+    let skill_points = world
+        .get::<mud_world::SkillPoints>(entity)
+        .map_or(0, |s| s.0);
     let (recall_zone, recall_room) = world
         .get::<RecallPoint>(entity)
         .and_then(|r| world.get::<WorldKey>(r.0).copied())
@@ -459,6 +463,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         description.as_deref(),
         wealth,
         experience,
+        skill_points,
     )
     .await
     {
@@ -652,6 +657,7 @@ mod tests {
             wealth: 0,
             bank_wealth: 0,
             gender: "neutral".into(),
+            skill_points: 0,
         }
     }
 

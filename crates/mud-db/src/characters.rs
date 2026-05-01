@@ -56,6 +56,9 @@ pub struct CharacterRow {
     /// "neutral" (the "Sex" enum but stored as text). Used by Lua
     /// triggers via `actor.gender` for gendered gating.
     pub gender: String,
+    /// Practice points awarded on level-up; spent by `practice <ability>`
+    /// to bump proficiency. Defaults to 0 in the schema.
+    pub skill_points: i32,
 }
 
 // One UPDATE-per-column-set is the simplest call site for this many fields;
@@ -76,6 +79,7 @@ pub async fn save_state(
     description: Option<&str>,
     wealth: i64,
     experience: i32,
+    skill_points: i32,
 ) -> sqlx::Result<()> {
     sqlx::query!(
         r#"
@@ -92,8 +96,9 @@ pub async fn save_state(
             description = $10,
             wealth = $11,
             experience = $12,
+            skill_points = $13,
             last_login = NOW()
-        WHERE id = $13
+        WHERE id = $14
         "#,
         hit_points,
         stamina,
@@ -107,6 +112,7 @@ pub async fn save_state(
         description,
         wealth,
         experience,
+        skill_points,
         character_id,
     )
     .execute(pool)
@@ -151,7 +157,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             charisma,
             wealth,
             bank_wealth,
-            gender
+            gender,
+            skill_points
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name
