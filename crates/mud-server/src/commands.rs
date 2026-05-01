@@ -2644,6 +2644,25 @@ const COMMANDS: &[Command] = &[
         run: cmd_drag,
     },
     Command {
+        names: &["buck"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "buck <target>",
+            summary: "Throw a rider — dismount + knockdown.",
+            long: "Drains 5 stamina and dispatches the BUCK skill at \
+                   the named target. The schema's data path runs \
+                   `dismount` (forced=true) → clears Mounted/RiddenBy, \
+                   then `knockdown` (duration=1) → drops the target's \
+                   posture. v1 dispatches as a player skill so \
+                   characters with BUCK trained (Sorcerer/Druid/etc.) \
+                   can fire it; mob-AI usage waits for an autonomous \
+                   ability scheduler.",
+        },
+        run: cmd_buck,
+    },
+    Command {
         names: &["breathe"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -16887,6 +16906,13 @@ fn cmd_drag(world: &mut World, player: Entity, _args: &str) {
         mud_db::abilities::AbilityKind::Skill,
         "use",
     );
+}
+
+/// `buck <target>`: dispatches BUCK. Same engage-skill shim shape
+/// as `lure`/`corner`. Combat is engaged on use because the
+/// knockdown sub-effect is hostile.
+fn cmd_buck(world: &mut World, player: Entity, args: &str) {
+    engage_skill_shim(world, player, args, "buck", 5);
 }
 
 /// `breathe [<target>]`: dragonborn breath weapon shim. Looks up
