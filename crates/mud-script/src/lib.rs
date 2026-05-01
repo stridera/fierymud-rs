@@ -634,22 +634,12 @@ pub struct LuaActor {
 impl UserData for LuaActor {
     #[allow(clippy::too_many_lines)]
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // Note: `name` intentionally lives only as a field
-        // (via MetaMethod::Index below) — the imported corpus uses
-        // `self.name` exclusively, never `self:name()`. Method
-        // registration for `name` would shadow the __index field
-        // resolution and return the function value instead of the
-        // string.
-        methods.add_method("hp", |lua, this, ()| {
-            world_from_lua(lua, |w| {
-                w.get::<Health>(this.entity).map_or(0, |h| h.hp)
-            })
-        });
-        methods.add_method("max_hp", |lua, this, ()| {
-            world_from_lua(lua, |w| {
-                w.get::<Health>(this.entity).map_or(0, |h| h.max)
-            })
-        });
+        // `name`, `hp`, `max_hp`, `level`, `class`, `shortdesc`,
+        // `room`, `id`, `zone_id` are all exposed as fields via the
+        // MetaMethod::Index handler below — the imported corpus
+        // uses `self.X` exclusively. Adding them as methods would
+        // shadow the __index resolution and return the function
+        // value (`<function>`) instead of the bound value.
         methods.add_method("is_player", |lua, this, ()| {
             world_from_lua(lua, |w| w.get::<Player>(this.entity).is_some())
         });
@@ -803,6 +793,20 @@ impl UserData for LuaActor {
                 Ok(())
             },
         );
+
+        // `actor:damage(amount)` subtracts `amount` from this entity's
+        // `Health.hp`, capped at 0. 157 corpus refs — typically used
+        // by ATTACK / FIGHT triggers to apply scripted damage on top
+        // of the regular combat round. Does not trigger death
+        // handling here; the next combat tick or cmd_lethal_check
+        // picks up `hp <= 0`.
+        methods.add_method("damage", |lua, this, amount: i32| -> mlua::Result<()> {
+            world_mut_from_lua(lua, |world| {
+                if let Some(mut h) = world.get_mut::<Health>(this.entity) {
+                    h.hp = (h.hp - amount).max(0);
+                }
+            })
+        });
 
         // `actor:destroy_item(needle)` removes items from the actor's
         // inventory whose keywords match. `all.X` form despawns
@@ -1232,7 +1236,7 @@ mod tests {
             .exec_for_actor(
                 &mut world,
                 actor,
-                "print(actor:hp() .. '/' .. actor:max_hp())",
+                "print(actor.hp .. '/' .. actor.max_hp)",
             )
             .expect("ok");
         assert_eq!(out, "42/100\r\n");
@@ -1419,7 +1423,7 @@ mod tests {
         // Missing Named → empty string, print emits a bare "\r\n" line.
         assert_eq!(name, "\r\n");
         let hp = host
-            .exec_for_actor(&mut world, actor, "print(actor:hp() .. ',' .. actor:max_hp())")
+            .exec_for_actor(&mut world, actor, "print(actor.hp .. ',' .. actor.max_hp)")
             .expect("ok");
         assert_eq!(hp, "0,0\r\n");
         let tostring = host
