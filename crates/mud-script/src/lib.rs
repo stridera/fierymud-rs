@@ -241,6 +241,18 @@ impl LuaHost {
                 self.lua.create_function(|_, _: Value| -> mlua::Result<()> { Ok(()) })?,
             )?;
 
+            // `find_actor(keyword)` searches the entire world for the
+            // first actor (mob or player) whose Named or Keywords
+            // match. Returns a LuaActor or nil. 589 corpus refs —
+            // typically used by scripted summons that need to find
+            // a target by keyword.
+            globals.set(
+                "find_actor",
+                self.lua.create_function(|lua, needle: String| -> mlua::Result<Value> {
+                    find_actor(lua, &needle)
+                })?,
+            )?;
+
             // `Effect.<Name>` resolves to a lowercased name string,
             // so `actor:has_effect(Effect.Invisible)` matches the
             // EffectCatalog by case-insensitive name. The corpus
@@ -327,6 +339,7 @@ impl LuaHost {
         let _ = self.lua.globals().raw_remove("random");
         let _ = self.lua.globals().raw_remove("percent_chance");
         let _ = self.lua.globals().raw_remove("Effect");
+        let _ = self.lua.globals().raw_remove("find_actor");
         for (name, _) in extras {
             let _ = self.lua.globals().raw_remove(*name);
         }
@@ -443,6 +456,34 @@ fn actor_emit(
             .messages
             .push((room, line, None));
     })
+}
+
+/// Walk every non-Item entity in the world and return the first
+/// whose `Named` or `Keywords` match `needle` (case-insensitive
+/// substring). Returns nil if none.
+fn find_actor(lua: &Lua, needle: &str) -> mlua::Result<Value> {
+    let needle = needle.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return Ok(Value::Nil);
+    }
+    let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
+        let mut q = world.query_filtered::<
+            (Entity, &Named, Option<&Keywords>),
+            Without<Item>,
+        >();
+        q.iter(world)
+            .find(|(_, n, kw)| {
+                n.name.to_ascii_lowercase().contains(&needle)
+                    || kw.is_some_and(|k| {
+                        k.0.iter().any(|w| w.to_ascii_lowercase().contains(&needle))
+                    })
+            })
+            .map(|(e, _, _)| e)
+    })?;
+    match entity {
+        Some(e) => Ok(Value::UserData(lua.create_userdata(LuaActor { entity: e })?)),
+        None => Ok(Value::Nil),
+    }
 }
 
 /// Despawn items in `actor`'s inventory matching `needle`. The
@@ -1017,6 +1058,39 @@ impl UserData for LuaRoom {
             "spawn_mobile",
             |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
                 spawn_mob_proto(lua, this.entity, zone, id)
+            },
+        );
+
+        // `room:find_actor(keyword)` searches this room only for an
+        // actor matching `keyword`. Returns a LuaActor or nil.
+        methods.add_method(
+            "find_actor",
+            |lua, this, needle: String| -> mlua::Result<Value> {
+                let needle = needle.trim().to_ascii_lowercase();
+                if needle.is_empty() {
+                    return Ok(Value::Nil);
+                }
+                let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
+                    let mut q = world.query_filtered::<
+                        (Entity, &Located, &Named, Option<&Keywords>),
+                        Without<Item>,
+                    >();
+                    q.iter(world)
+                        .find(|(_, l, n, kw)| {
+                            l.0 == this.entity
+                                && (n.name.to_ascii_lowercase().contains(&needle)
+                                    || kw.is_some_and(|k| {
+                                        k.0.iter().any(|w| {
+                                            w.to_ascii_lowercase().contains(&needle)
+                                        })
+                                    }))
+                        })
+                        .map(|(e, _, _, _)| e)
+                })?;
+                match entity {
+                    Some(e) => Ok(Value::UserData(lua.create_userdata(LuaActor { entity: e })?)),
+                    None => Ok(Value::Nil),
+                }
             },
         );
 
