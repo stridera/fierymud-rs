@@ -13,6 +13,7 @@ use bevy_ecs::prelude::*;
 use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
 use mud_world::{
     AbilityCatalog, Health, KnownAbilities, Located, LuaOutbox, Mob, Named, Player, WorldKey,
+    WorldKeyIndex,
 };
 
 /// Bevy resource wrapping the Lua interpreter.
@@ -172,6 +173,31 @@ impl LuaHost {
             )?;
             globals.set("combat", combat_tbl)?;
 
+            // `wait(seconds)` is the legacy DG coroutine sleep —
+            // suspend the trigger body for N seconds and resume.
+            // The runtime doesn't have a coroutine scheduler yet, so
+            // v1 is a no-op: the body continues immediately. Most LOAD
+            // bodies that use `wait(1)` are just waiting for the spawn
+            // to settle, which has already happened by the time the
+            // dispatcher fires LOAD. 6198 corpus refs.
+            globals.set(
+                "wait",
+                self.lua.create_function(|_, _: Value| -> mlua::Result<()> { Ok(()) })?,
+            )?;
+
+            // `get_room(zone, id)` returns a LuaRoom by lookup against
+            // `WorldKeyIndex.rooms`, or nil if not found. 1019 corpus
+            // refs — quest hints, scripted teleports, room reset
+            // checks all use this.
+            globals.set(
+                "get_room",
+                self.lua.create_function(
+                    |lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                        get_room(lua, zone, id)
+                    },
+                )?,
+            )?;
+
             self.lua.load(code).exec()
         })();
 
@@ -189,6 +215,8 @@ impl LuaHost {
         let _ = self.lua.globals().raw_remove("skills");
         let _ = self.lua.globals().raw_remove("world");
         let _ = self.lua.globals().raw_remove("combat");
+        let _ = self.lua.globals().raw_remove("wait");
+        let _ = self.lua.globals().raw_remove("get_room");
 
         match result {
             Ok(()) => {
@@ -275,6 +303,18 @@ fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::
             known.entries.sort_by_key(|(id, _, _)| *id);
         }
     })
+}
+
+/// Look up a room by `(zone, id)` via `WorldKeyIndex.rooms` and
+/// return a `LuaRoom` userdata, or nil if not found.
+fn get_room(lua: &Lua, zone: i32, id: i32) -> mlua::Result<Value> {
+    let entity = world_from_lua(lua, |world| {
+        world.resource::<WorldKeyIndex>().rooms.get(&(zone, id)).copied()
+    })?;
+    match entity {
+        Some(e) => Ok(Value::UserData(lua.create_userdata(LuaRoom { entity: e })?)),
+        None => Ok(Value::Nil),
+    }
 }
 
 /// Filter for `world_count_kind` / `world_find_kind`. Distinguishes
