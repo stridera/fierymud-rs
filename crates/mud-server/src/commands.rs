@@ -2627,6 +2627,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_tame,
     },
     Command {
+        names: &["drag"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "drag",
+            summary: "Self-apply the DRAG speed penalty.",
+            long: "Drains 3 stamina and dispatches the DRAG skill via \
+                   the data path. The schema's `drag` effect doubles \
+                   movement stamina cost (speedPenalty 0.5). Legacy \
+                   `drag <body>` for hauling corpses isn't modeled — \
+                   we have no corpse mechanic — so v1 is a self-cast \
+                   that exercises the speed-penalty runtime.",
+        },
+        run: cmd_drag,
+    },
+    Command {
         names: &["breathe"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -16812,6 +16829,28 @@ fn cmd_tame(world: &mut World, player: Entity, args: &str) {
         world,
         player,
         &format!("tame {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+
+/// `drag`: self-cast DRAG skill. Applies the schema's drag effect
+/// (`speedPenalty: 0.5`) which the movement code already reads to
+/// double stamina cost. v1 is self-target — corpse-dragging needs
+/// a corpse system first.
+fn cmd_drag(world: &mut World, player: Entity, _args: &str) {
+    const DRAG_COST: i32 = 3;
+    if !require_alert_posture(world, player, "drag") {
+        return;
+    }
+    if !check_stamina(world, player, DRAG_COST, "drag") {
+        return;
+    }
+    drain_stamina(world, player, DRAG_COST);
+    invoke_ability(
+        world,
+        player,
+        "drag",
         mud_db::abilities::AbilityKind::Skill,
         "use",
     );
