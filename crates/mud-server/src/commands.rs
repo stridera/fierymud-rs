@@ -11904,6 +11904,17 @@ fn invoke_ability(
                     AppliedTo(target_entity),
                 ));
                 spawn_count += 1;
+                // Stealth-flag status effects (HIDE, SNEAK, CONCEAL,
+                // and a few buff spells) install the `Stealth` marker
+                // on the target so existing visibility gates fire. The
+                // marker is removed in `effects_tick` once the last
+                // backing EffectInstance fades — mirroring the
+                // Stunned tick pattern.
+                if spec.name.eq_ignore_ascii_case("hidden")
+                    || spec.name.eq_ignore_ascii_case("sneak")
+                {
+                    try_insert(world, target_entity, mud_world::Stealth);
+                }
                 applied_msgs.push(spec.name.clone());
             }
         }

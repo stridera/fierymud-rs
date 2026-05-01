@@ -1,5 +1,5 @@
 use bevy_ecs::prelude::*;
-use mud_world::{AbilityCatalog, AppliedTo, EffectInstance, Located, Stunned};
+use mud_world::{AbilityCatalog, AppliedTo, EffectInstance, Located, Stealth, Stunned};
 use tracing::info;
 
 use crate::TickCount;
@@ -15,6 +15,7 @@ const BLEED_DPS: i32 = 2;
 /// Decrement remaining duration on every active effect; despawn ones whose
 /// duration hit zero (with a "fades" message to the target if it has a
 /// connection); also despawn any effect whose target entity has gone away.
+#[allow(clippy::too_many_lines)]
 pub fn effects_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(EFFECT_PERIOD_TICKS) {
@@ -121,6 +122,25 @@ pub fn effects_tick(world: &mut World) {
                 };
                 if !still_stunned {
                     try_remove::<Stunned>(world, target);
+                }
+            }
+            // Stealth marker mirrors the stun pattern: it outlives only
+            // as long as at least one `hidden` / `sneak` EffectInstance
+            // is on the target. Manually-toggled `hide` / `visible`
+            // commands install/remove Stealth directly without a
+            // backing effect, so a target with manual stealth + no
+            // status effects is unaffected by this branch.
+            if name.eq_ignore_ascii_case("hidden") || name.eq_ignore_ascii_case("sneak") {
+                let still_hidden = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target
+                            && (eff.name.eq_ignore_ascii_case("hidden")
+                                || eff.name.eq_ignore_ascii_case("sneak"))
+                    })
+                };
+                if !still_hidden {
+                    try_remove::<Stealth>(world, target);
                 }
             }
         }
