@@ -1751,6 +1751,43 @@ const COMMANDS: &[Command] = &[
         run: cmd_showids,
     },
     Command {
+        names: &["abort"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "abort",
+            summary: "Cancel an in-progress cast or queued spell.",
+            long: "FieryMUD legacy: aborts the spell you're currently \
+                   casting and clears any spell queued behind it. \
+                   Today's runtime resolves casts immediately and \
+                   has no queue, so abort has nothing to do — kept \
+                   as a registered command name for muscle memory \
+                   and to provide a clear message instead of \
+                   'Unknown command'. Use `cancel` to drop a \
+                   non-permanent buff already on you.",
+        },
+        run: cmd_abort,
+    },
+    Command {
+        names: &["release"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Movement,
+        help: Help {
+            usage: "release",
+            summary: "Leave your corpse and respawn (ghost-only).",
+            long: "Used in legacy CircleMUD lineage to release a \
+                   ghost from its corpse and return to the recall \
+                   point. Today's death handler auto-revives in \
+                   place, so there's no ghost state and nothing to \
+                   release. Kept as a registered command name to \
+                   provide a clear message; `recall` covers the \
+                   manual return-to-base case.",
+        },
+        run: cmd_release,
+    },
+    Command {
         names: &["cancel"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -10916,6 +10953,29 @@ fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
 /// `cancel [<effect>]`: drop a non-permanent effect from yourself.
 /// Empty arg lists cancellable effects; named arg matches by
 /// case-insensitive substring on the effect's name.
+/// `abort`: stub for the legacy in-progress-cast / queued-spell
+/// mechanic — neither exists in this runtime today (casts resolve
+/// immediately, no queue), so the command's only job is to give a
+/// clearer-than-default response to `FieryMUD` veterans typing it.
+fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
+    send_to(
+        world,
+        player,
+        "You aren't casting anything. (Use `cancel <effect>` to drop an active buff.)\r\n",
+    );
+}
+
+/// `release`: stub for the legacy ghost-release-from-corpse flow.
+/// Today's death handler auto-revives the player in place, so the
+/// ghost state never arises. The stub stays for muscle memory.
+fn cmd_release(world: &mut World, player: Entity, _args: &str) {
+    send_to(
+        world,
+        player,
+        "You aren't dead. (Use `recall` to return to your home temple.)\r\n",
+    );
+}
+
 fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     let needle = args.trim().to_ascii_lowercase();
     let cancellable: Vec<(Entity, String, i32)> = {
