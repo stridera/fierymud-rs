@@ -815,7 +815,7 @@ impl UserData for LuaActor {
                                     w.resource::<ClassCatalog>()
                                         .by_id
                                         .get(&id)
-                                        .map(|c| c.plain_name.clone())
+                                        .map(|c| c.plain_name.to_ascii_lowercase())
                                 })
                                 .unwrap_or_default()
                         })?;
