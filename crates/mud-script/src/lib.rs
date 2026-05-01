@@ -43,12 +43,26 @@ impl LuaHost {
     /// Run `code` with `actor` bound to the supplied entity. Captured `print`
     /// output is returned as a single string (one line per print call,
     /// terminated with \r\n).
-    #[allow(clippy::too_many_lines)]
     pub fn exec_for_actor(
         &self,
         world: &mut World,
         actor: Entity,
         code: &str,
+    ) -> Result<String, String> {
+        self.exec_for_actor_with_extras(world, actor, code, &[])
+    }
+
+    /// Like `exec_for_actor`, but also binds the supplied
+    /// `(name, value)` pairs as Lua globals before the body runs.
+    /// Used by event-specific dispatchers (SPEECH binds `speech`,
+    /// GREET binds `actor` to the entering player, etc.).
+    #[allow(clippy::too_many_lines)]
+    pub fn exec_for_actor_with_extras(
+        &self,
+        world: &mut World,
+        actor: Entity,
+        code: &str,
+        extras: &[(&str, &str)],
     ) -> Result<String, String> {
         let span = tracing::info_span!("lua_exec");
         let _g = span.enter();
@@ -226,6 +240,13 @@ impl LuaHost {
                 )?,
             )?;
 
+            // Caller-supplied event-context globals (`speech` for
+            // SPEECH triggers, etc.). Cleaned up alongside the
+            // built-ins below.
+            for (name, value) in extras {
+                globals.set(*name, *value)?;
+            }
+
             self.lua.load(code).exec()
         })();
 
@@ -247,6 +268,9 @@ impl LuaHost {
         let _ = self.lua.globals().raw_remove("get_room");
         let _ = self.lua.globals().raw_remove("random");
         let _ = self.lua.globals().raw_remove("percent_chance");
+        for (name, _) in extras {
+            let _ = self.lua.globals().raw_remove(*name);
+        }
 
         match result {
             Ok(()) => {

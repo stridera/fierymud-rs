@@ -10,7 +10,7 @@
 //! gain dispatch points.
 
 use bevy_ecs::prelude::*;
-use mud_world::{AttachedTriggers, Mob, TriggerCatalog, TriggerEvent};
+use mud_world::{AttachedTriggers, Located, Mob, TriggerCatalog, TriggerEvent};
 use tracing::warn;
 
 use crate::commands::drain_lua_outbox;
@@ -52,6 +52,61 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
         drain_lua_outbox(world);
         if let Err(e) = result {
             warn!(zone, id, name = %name, error = %e, "trigger fire failed");
+        }
+    }
+}
+
+/// Fire SPEECH-flagged triggers for every entity in `room` (other
+/// than the speaker themselves) that carries `AttachedTriggers`.
+/// Each fire binds `speech` (the spoken text, lowercased) as a Lua
+/// global so trigger bodies can keyword-match against it.
+///
+/// SPEECH bodies do their own keyword filtering — the dispatcher
+/// fires every SPEECH trigger and lets the body decide whether to
+/// react. ~6900 corpus refs across `SPEECH`/`SPEECH_TO` triggers.
+pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, text: &str) {
+    let listeners: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located, &AttachedTriggers)>();
+        q.iter(world)
+            .filter(|(e, l, _)| *e != speaker && l.0 == room)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    if listeners.is_empty() {
+        return;
+    }
+    let lowered = text.to_ascii_lowercase();
+    for listener in listeners {
+        let to_fire: Vec<(i32, i32, String, String)> = {
+            let Some(at) = world.get::<AttachedTriggers>(listener) else {
+                continue;
+            };
+            let keys = at.0.clone();
+            let catalog = world.resource::<TriggerCatalog>();
+            keys.into_iter()
+                .filter_map(|(zone, id)| {
+                    let def = catalog.by_key.get(&(zone, id))?;
+                    if def.flags.contains(&TriggerEvent::Speech) {
+                        Some((zone, id, def.name.clone(), def.commands.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for (zone, id, name, body) in to_fire {
+            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+                host.exec_for_actor_with_extras(
+                    world,
+                    listener,
+                    &body,
+                    &[("speech", &lowered)],
+                )
+            });
+            drain_lua_outbox(world);
+            if let Err(e) = result {
+                warn!(zone, id, name = %name, error = %e, "SPEECH trigger fire failed");
+            }
         }
     }
 }

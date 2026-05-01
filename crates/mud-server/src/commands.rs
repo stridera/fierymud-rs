@@ -9457,6 +9457,12 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
         };
         send_rendered(world, target, &line);
     }
+
+    // Fire SPEECH-flagged triggers for every entity in the room
+    // that carries AttachedTriggers (skipping the speaker
+    // themselves). Bodies do their own keyword matching against
+    // the `speech` Lua global.
+    crate::triggers::fire_speech_in_room(world, player, located.0, message);
 }
 
 /// `report`: announce your current HP/stamina to your group (when
