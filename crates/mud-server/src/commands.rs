@@ -2850,6 +2850,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_tstat,
     },
     Command {
+        names: &["astat"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "astat [<target>]",
+            summary: "Detailed `affects` listing for any character in the room.",
+            long: "Builder+. Without an argument, dumps your own \
+                   `EffectInstance` rows in detail. With a keyword, \
+                   resolves to a player or mob in the same room. \
+                   Shows each effect's tag, remaining duration, \
+                   strength, source, and the ability that spawned \
+                   it (when known).",
+        },
+        run: cmd_astat,
+    },
+    Command {
         names: &["rstat"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -15554,6 +15571,66 @@ fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
     }
     out.push_str(&format!("triggers:      {trig_count}\r\n"));
     out.push_str(&format!("live count:    {live}\r\n"));
+    send_to(world, player, out);
+}
+
+/// `astat [<target>]`: detailed effect listing for any character.
+fn cmd_astat(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let target = if arg.is_empty() {
+        player
+    } else {
+        let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+            send_to(world, player, "You're nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, room, player) else {
+            send_to(world, player, format!("No '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    let target_name = name_of(world, target);
+    let active: Vec<(String, i32, i32, mud_world::EffectSource, Option<i32>)> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, a)| a.0 == target)
+            .map(|(inst, _)| {
+                (
+                    inst.name.clone(),
+                    inst.remaining_secs,
+                    inst.strength,
+                    inst.source.clone(),
+                    inst.ability_id,
+                )
+            })
+            .collect()
+    };
+    let mut out = format!("\r\nEffects on {target_name}:\r\n");
+    if active.is_empty() {
+        out.push_str("  (none)\r\n");
+        send_to(world, player, out);
+        return;
+    }
+    let catalog = world.resource::<AbilityCatalog>();
+    for (name, remaining, strength, source, ability_id) in active {
+        let from = ability_id.and_then(|id| {
+            catalog
+                .by_name
+                .values()
+                .find(|d| d.id == id)
+                .map(|d| d.plain_name.clone())
+        });
+        let from_str = from.as_deref().map_or(String::new(), |n| format!(" from {n}"));
+        let dur = if remaining < 0 {
+            "permanent".to_string()
+        } else {
+            format!("{remaining}s left")
+        };
+        out.push_str(&format!(
+            "  {name:<20} strength={strength:<3} {dur} source={source:?}{from_str}\r\n"
+        ));
+    }
     send_to(world, player, out);
 }
 
