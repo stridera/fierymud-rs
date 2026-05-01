@@ -1097,6 +1097,20 @@ impl UserData for LuaActor {
                     "max_hp" => world_from_lua(lua, |w| {
                         Value::Integer(w.get::<Health>(this.entity).map_or(0, |h| h.max).into())
                     }),
+                    // `actor.gender` reads `Profile.gender` for
+                    // players ("male" / "female" / "neutral"). Mobs
+                    // currently return empty since their schema
+                    // gender column isn't plumbed into MobProto yet
+                    // (most legacy mob bodies don't read it from
+                    // the mob anyway — they read it from the player).
+                    "gender" => {
+                        let s = world_from_lua(lua, |w| {
+                            w.get::<Profile>(this.entity)
+                                .map(|p| p.gender.clone())
+                                .unwrap_or_default()
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
                     "level" => world_from_lua(lua, |w| {
                         let level = if let Some(p) = w.get::<Profile>(this.entity) {
                             p.level

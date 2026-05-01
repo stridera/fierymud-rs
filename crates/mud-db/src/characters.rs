@@ -52,6 +52,10 @@ pub struct CharacterRow {
     /// render time.
     pub wealth: i64,
     pub bank_wealth: i64,
+    /// Schema column verbatim — typically "male" / "female" /
+    /// "neutral" (the "Sex" enum but stored as text). Used by Lua
+    /// triggers via `actor.gender` for gendered gating.
+    pub gender: String,
 }
 
 // One UPDATE-per-column-set is the simplest call site for this many fields;
@@ -143,7 +147,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             wisdom,
             charisma,
             wealth,
-            bank_wealth
+            bank_wealth,
+            gender
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

@@ -512,6 +512,10 @@ pub struct Profile {
     /// Schema enum value as a raw string — runtime renders it directly.
     pub race: String,
     pub experience: i32,
+    /// Schema column verbatim — typically "male" / "female" /
+    /// "neutral". Triggers gate on this via `actor.gender` for
+    /// gendered room/dialogue logic.
+    pub gender: String,
 }
 
 /// What abilities (spells / chants / songs / skills) a character has

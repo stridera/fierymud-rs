@@ -363,6 +363,7 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
                     class_id: c.class_id,
                     race: c.race.clone(),
                     experience: c.experience,
+                    gender: c.gender.clone(),
                 },
                 Wealth(c.wealth),
                 BankWealth(c.bank_wealth),
@@ -580,6 +581,7 @@ mod tests {
             charisma: 13,
             wealth: 0,
             bank_wealth: 0,
+            gender: "neutral".into(),
         }
     }
 
