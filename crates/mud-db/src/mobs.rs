@@ -24,6 +24,10 @@ pub struct Mob {
     /// On-hand wealth in copper units, paid to the killer on death.
     /// Schema column is BIGINT; default 0.
     pub wealth: i64,
+    /// FK to `Class.id`; None for classless mobs (most NPCs).
+    /// Read by triggers via `actor.class` to gate class-specific
+    /// dialogue (e.g. quest hint chains attached to guildmasters).
+    pub class_id: Option<i32>,
 }
 
 pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
@@ -47,7 +51,8 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             damage_dice_bonus,
             hit_roll,
             armor_class,
-            wealth
+            wealth,
+            class_id
         FROM "Mobs"
         ORDER BY zone_id, id
         "#

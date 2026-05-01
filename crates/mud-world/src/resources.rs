@@ -535,6 +535,9 @@ pub struct MobProto {
     /// Coin awarded to the killer (or dropped) on death, in copper.
     /// Mirrors `Mobs.wealth`.
     pub wealth: i64,
+    /// FK to `Class.id`; `None` for classless mobs. Used by Lua
+    /// trigger `actor.class` field access for class-gated dialogue.
+    pub class_id: Option<i32>,
 }
 
 impl MobProto {

@@ -791,17 +791,33 @@ impl UserData for LuaActor {
                         Value::Integer(w.get::<Profile>(this.entity).map_or(0, |p| p.level).into())
                     }),
                     // `actor.class` returns the plain_name of the
-                    // actor's class (e.g. "warrior") via Profile +
-                    // ClassCatalog. Empty string when no class is
-                    // assigned (mobs typically) — the corpus uses
-                    // string compares ("if actor.class == 'Paladin'").
+                    // actor's class (e.g. "warrior"). Players source
+                    // via Profile.class_id; mobs source via
+                    // MobPrototypes.by_key[WorldKey].class_id.
+                    // Empty string when no class is assigned. The
+                    // corpus uses string compares
+                    // ("if actor.class == 'Paladin'") and
+                    // string.find for substring matches.
                     "class" => {
                         let s = world_from_lua(lua, |w| {
-                            let id = w.get::<Profile>(this.entity).and_then(|p| p.class_id);
-                            id.and_then(|id| {
-                                w.resource::<ClassCatalog>().by_id.get(&id).map(|c| c.plain_name.clone())
-                            })
-                            .unwrap_or_default()
+                            let class_id = if let Some(p) = w.get::<Profile>(this.entity) {
+                                p.class_id
+                            } else if let Some(wk) = w.get::<WorldKey>(this.entity) {
+                                w.resource::<MobPrototypes>()
+                                    .by_key
+                                    .get(&(wk.zone, wk.id))
+                                    .and_then(|p| p.class_id)
+                            } else {
+                                None
+                            };
+                            class_id
+                                .and_then(|id| {
+                                    w.resource::<ClassCatalog>()
+                                        .by_id
+                                        .get(&id)
+                                        .map(|c| c.plain_name.clone())
+                                })
+                                .unwrap_or_default()
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
