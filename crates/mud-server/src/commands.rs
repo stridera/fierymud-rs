@@ -1161,7 +1161,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_study,
     },
     Command {
-        names: &["memorize", "mem"],
+        names: &["memorize", "mem", "pray"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Combat,
