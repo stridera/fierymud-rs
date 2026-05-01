@@ -1953,6 +1953,21 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_gossip,
     },
+    Command {
+        names: &["wiznet", ";"],
+        min_role: UserRole::Immortal,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "wiznet <message>",
+            summary: "Chat on the staff-only wiznet channel.",
+            long: "Immortal+. Sent to every online staff member \
+                   (Immortal or higher). Players never see wiznet \
+                   traffic. Convention: out-of-character coordination \
+                   between staff during play.",
+        },
+        run: cmd_wiznet,
+    },
     // ----- Combat -----
     Command {
         names: &["attack", "kill", "k", "hit", "murder"],
@@ -12806,6 +12821,33 @@ fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
             format!("You gossip, \"{message}\"\r\n")
         } else {
             format!("{player_name} gossips, \"{message}\"\r\n")
+        };
+        send_to(world, t, line);
+    }
+}
+
+/// `wiznet <message>`: staff-only chat. Reaches every online
+/// player whose Account.role is at least Immortal. Players never
+/// see wiznet traffic.
+fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
+    let message = args.trim();
+    if message.is_empty() {
+        send_to(world, player, "Wiznet what?\r\n");
+        return;
+    }
+    let player_name = name_of(world, player);
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Account), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .filter(|(_, a)| a.role.at_least(UserRole::Immortal))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        let line = if t == player {
+            format!("[wiznet] You: {message}\r\n")
+        } else {
+            format!("[wiznet] {player_name}: {message}\r\n")
         };
         send_to(world, t, line);
     }
