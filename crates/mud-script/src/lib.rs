@@ -476,6 +476,25 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:command(line)` queues `line` to be dispatched as if
+        // the actor typed it. 2106 corpus refs — used by mob bodies
+        // to drive themselves through standard commands ("emote",
+        // "wear", "follow", etc.). Queued rather than invoked
+        // synchronously: the dispatcher runs after the Lua body
+        // returns, avoiding re-entry into the LuaHost (which holds
+        // exclusive access to World during exec).
+        methods.add_method("command", |lua, this, line: String| -> mlua::Result<()> {
+            world_mut_from_lua(lua, |world| {
+                if !world.contains_resource::<LuaOutbox>() {
+                    world.insert_resource(LuaOutbox::default());
+                }
+                world
+                    .resource_mut::<LuaOutbox>()
+                    .commands
+                    .push((this.entity, line));
+            })
+        });
+
         // `actor:send(msg)` sends a single private line to this
         // entity. Paired with `room:send_except(actor, ...)` for the
         // per-recipient framing pattern (10901 corpus refs). Pushed

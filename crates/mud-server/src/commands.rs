@@ -3829,13 +3829,17 @@ thread_local! {
 /// dispatcher after each `exec_for_actor` returns.
 pub(crate) fn drain_lua_outbox(world: &mut World) {
     use mud_world::LuaOutbox;
-    let (messages, direct) = if world.contains_resource::<LuaOutbox>() {
+    let (messages, direct, commands) = if world.contains_resource::<LuaOutbox>() {
         let mut out = world.resource_mut::<LuaOutbox>();
-        (std::mem::take(&mut out.messages), std::mem::take(&mut out.direct))
+        (
+            std::mem::take(&mut out.messages),
+            std::mem::take(&mut out.direct),
+            std::mem::take(&mut out.commands),
+        )
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
-    if messages.is_empty() && direct.is_empty() {
+    if messages.is_empty() && direct.is_empty() && commands.is_empty() {
         return;
     }
     // Room broadcasts: snapshot recipients per room so the inner loop
@@ -3857,6 +3861,14 @@ pub(crate) fn drain_lua_outbox(world: &mut World) {
     // players) — that's the desired behavior.
     for (target, msg) in direct {
         send_to(world, target, format!("{msg}\r\n"));
+    }
+
+    // Queued `actor:command(text)` invocations. Re-enters dispatch as
+    // if the actor had typed each line. Bounded recursion: any Lua
+    // these commands fire pushes onto the outbox again, which is
+    // drained by THAT command handler before this loop continues.
+    for (actor, line) in commands {
+        dispatch(world, actor, &line);
     }
 }
 

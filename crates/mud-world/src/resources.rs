@@ -326,6 +326,11 @@ pub struct LuaOutbox {
     /// `(target, msg)` — direct one-to-one delivery to the target's
     /// Connection.
     pub direct: Vec<(Entity, String)>,
+    /// `(actor, line)` — queued commands that should be dispatched as
+    /// if `actor` had typed `line`. Drained by mud-server after the
+    /// current Lua call returns to avoid re-entering the dispatcher
+    /// while a trigger body is still executing.
+    pub commands: Vec<(Entity, String)>,
 }
 
 /// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.
