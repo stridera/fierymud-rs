@@ -10437,6 +10437,42 @@ fn invoke_ability(
         return;
     }
 
+    // Gate on memorization when the ability is a Spell AND the
+    // caster's class has it in `ClassAbilities` (i.e. it lands in
+    // a circle slot for this class). Off-class spells, non-Spell
+    // kinds (Skill / Chant / Song), and classless casters skip the
+    // gate. Successful gate consumes one entry from MemorizedSpells
+    // — failed dispatches downstream still pay the slot, mirroring
+    // legacy "fizzles burn the prep" semantics.
+    if matches!(def.kind, mud_db::abilities::AbilityKind::Spell) {
+        let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+        if let Some(class_id) = class_id
+            && world
+                .resource::<mud_world::SpellSlotData>()
+                .ability_circle
+                .contains_key(&(class_id, def.id))
+        {
+            let memorized_idx = world
+                .get::<mud_world::MemorizedSpells>(player)
+                .and_then(|m| m.entries.iter().position(|(id, _)| *id == def.id));
+            let Some(idx) = memorized_idx else {
+                send_to(
+                    world,
+                    player,
+                    format!(
+                        "You haven't memorized {}. Use `memorize {}` first.\r\n",
+                        def.plain_name,
+                        def.plain_name.to_ascii_lowercase()
+                    ),
+                );
+                return;
+            };
+            if let Some(mut mem) = world.get_mut::<mud_world::MemorizedSpells>(player) {
+                mem.entries.remove(idx);
+            }
+        }
+    }
+
     // Combat-state gates (Ability.in_combat_only / combat_ok).
     // `in_combat_only` refuses casts when the caster has no Fighting;
     // `combat_ok=false` refuses while engaged. Both flags are
