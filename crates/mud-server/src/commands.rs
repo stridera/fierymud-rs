@@ -12057,6 +12057,82 @@ fn invoke_ability(
                     applied_msgs.push(format!("{} (not in combat)", spec.name));
                 }
             }
+            "portal" => {
+                // Spawn a specific Object proto in the caster's room
+                // (Heavens Gate, Hell's Gate, Moonwell). The schema
+                // pins exact prototypes via objectZoneId/objectId; we
+                // also spawn a `decay`-named EffectInstance applied
+                // to the new object so `effects_tick` despawns it
+                // when the lifetime expires.
+                let proto_zone = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("objectZoneId"))
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|v| i32::try_from(v).unwrap_or(0));
+                let proto_id = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("objectId"))
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|v| i32::try_from(v).unwrap_or(0));
+                let (Some(proto_zone), Some(proto_id)) = (proto_zone, proto_id) else {
+                    applied_msgs.push(format!("{} (no object proto specified)", spec.name));
+                    continue;
+                };
+                let proto = world
+                    .resource::<ObjectPrototypes>()
+                    .by_key
+                    .get(&(proto_zone, proto_id))
+                    .cloned();
+                let Some(proto) = proto else {
+                    applied_msgs.push(format!(
+                        "{} (object proto ({proto_zone}, {proto_id}) not loaded)",
+                        spec.name
+                    ));
+                    continue;
+                };
+                let Some(located) = world.get::<Located>(player).copied() else {
+                    applied_msgs.push(format!("{} (caster has no room)", spec.name));
+                    continue;
+                };
+                let mut bundle = world.spawn((
+                    Item,
+                    Named { name: proto.name.clone() },
+                    Keywords(proto.keywords.clone()),
+                    WorldKey {
+                        zone: proto.zone_id,
+                        id: proto.id,
+                    },
+                    Located(located.0),
+                ));
+                if let Some(desc) = proto.examine_description.clone() {
+                    bundle.insert(Description(desc));
+                }
+                let portal_entity = bundle.id();
+                // Decay duration: the schema's `decay` is in hours
+                // (matches other duration units). Convert to seconds
+                // for the EffectInstance.
+                let decay_hours = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("decay"))
+                    .and_then(serde_json::Value::as_i64)
+                    .map_or(1, |v| i32::try_from(v).unwrap_or(1));
+                let decay_secs = decay_hours.saturating_mul(3600);
+                world.spawn((
+                    EffectInstance {
+                        kind: spec.id,
+                        name: "decay".to_string(),
+                        strength: 1,
+                        remaining_secs: decay_secs,
+                        source: EffectSource::Spell,
+                        ability_id: Some(def.id),
+                    },
+                    AppliedTo(portal_entity),
+                ));
+                applied_msgs.push(format!("{} ({} appears)", spec.name, proto.name));
+            }
             "extract" => {
                 // Remove the target from the world. Used by Banish
                 // (and any future "send back to home plane" /

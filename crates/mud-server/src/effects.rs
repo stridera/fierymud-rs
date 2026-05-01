@@ -1,5 +1,7 @@
 use bevy_ecs::prelude::*;
-use mud_world::{AbilityCatalog, AppliedTo, EffectInstance, Located, Stealth, Stunned};
+use mud_world::{
+    AbilityCatalog, AppliedTo, EffectInstance, Item, Located, Stealth, Stunned,
+};
 use tracing::info;
 
 use crate::TickCount;
@@ -123,6 +125,17 @@ pub fn effects_tick(world: &mut World) {
                 if !still_stunned {
                     try_remove::<Stunned>(world, target);
                 }
+            }
+            // Object-decay: an effect named "decay" applied to an
+            // Item entity acts as the object's lifetime gate (used
+            // by the `portal` effect-type for spawned gates,
+            // moonwells, etc.). When it fades, despawn the object
+            // itself so the portal closes.
+            if name.eq_ignore_ascii_case("decay")
+                && world.get::<Item>(target).is_some()
+                && let Ok(e) = world.get_entity_mut(target)
+            {
+                e.despawn();
             }
             // Stealth marker mirrors the stun pattern: it outlives only
             // as long as at least one `hidden` / `sneak` EffectInstance
