@@ -2660,6 +2660,38 @@ const COMMANDS: &[Command] = &[
         run: cmd_group,
     },
     Command {
+        names: &["dismiss"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "dismiss <player>",
+            summary: "Drop a single direct follower from your group.",
+            long: "Equivalent to `group dismiss <player>` — removes the \
+                   target's `Follower` link to you (must be following \
+                   you directly, not transitively). `disband` clears \
+                   everyone at once.",
+        },
+        run: cmd_dismiss,
+    },
+    Command {
+        names: &["split"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "split <amount>",
+            summary: "Divide coin evenly among same-room group members.",
+            long: "Pulls `<amount>` from your wealth and splits it \
+                   evenly across every group member in your room \
+                   (including you). Remainder stays with the splitter. \
+                   Refuses if you're not grouped, the only group \
+                   member here, or carrying less than `amount`. Coin \
+                   amount is in copper; use `wealth` to check yours.",
+        },
+        run: cmd_split,
+    },
+    Command {
         names: &["disband"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -15883,6 +15915,98 @@ fn group_dismiss_one(world: &mut World, dismisser: Entity, target_name: &str) {
         target,
         &format!("{dismisser_name} dismisses you from the group.\r\n"),
     );
+}
+
+/// `dismiss <player>`: top-level alias for `group dismiss <player>`.
+fn cmd_dismiss(world: &mut World, player: Entity, args: &str) {
+    group_dismiss_one(world, player, args.trim());
+}
+
+/// `split <amount>`: pull `<amount>` from the caller's `Wealth` and
+/// distribute it evenly across every group member currently in the
+/// same room (including the caller). Remainder stays with the caller.
+fn cmd_split(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let Ok(amount) = arg.parse::<i64>() else {
+        send_to(world, player, "Usage: split <amount>\r\n");
+        return;
+    };
+    if amount <= 0 {
+        send_to(world, player, "Split a positive amount.\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You're nowhere.\r\n");
+        return;
+    };
+    let wealth = world.get::<Wealth>(player).map_or(0, |w| w.0);
+    if amount > wealth {
+        send_to(
+            world,
+            player,
+            format!("You only have {wealth} coppers to split.\r\n"),
+        );
+        return;
+    }
+    let root = group_root(world, player);
+    let members = group_members(world, root);
+    let here: Vec<Entity> = members
+        .into_iter()
+        .filter(|m| world.get::<Located>(*m).is_some_and(|l| l.0 == located.0))
+        .collect();
+    if here.len() <= 1 {
+        send_to(
+            world,
+            player,
+            "There's nobody else from your group here.\r\n",
+        );
+        return;
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let count = here.len() as i64;
+    let share = amount / count;
+    if share <= 0 {
+        send_to(
+            world,
+            player,
+            "Splitting that few coppers across the group leaves nothing for anyone.\r\n",
+        );
+        return;
+    }
+    let mut total_given = 0_i64;
+    for m in &here {
+        if *m == player {
+            continue;
+        }
+        if let Some(mut w) = world.get_mut::<Wealth>(*m) {
+            w.0 = w.0.saturating_add(share);
+        } else if let Ok(mut e) = world.get_entity_mut(*m) {
+            e.insert(Wealth(share));
+        }
+        total_given += share;
+    }
+    if let Some(mut w) = world.get_mut::<Wealth>(player) {
+        w.0 = w.0.saturating_sub(total_given);
+    }
+    let player_name = name_of(world, player);
+    send_to(
+        world,
+        player,
+        format!(
+            "You split {amount} coppers among {} member(s); each receives {share}.\r\n",
+            here.len()
+        ),
+    );
+    for m in &here {
+        if *m == player {
+            continue;
+        }
+        send_to(
+            world,
+            *m,
+            format!("{player_name} splits coin with the group; you gain {share} copper(s).\r\n"),
+        );
+    }
 }
 
 /// `gsay <msg>` / `gtell` / `gecho`: broadcast a message to every
