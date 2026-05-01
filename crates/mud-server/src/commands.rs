@@ -2157,6 +2157,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_gossip,
     },
     Command {
+        names: &["music"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "music <message>",
+            summary: "Sing or hum on the music channel.",
+            long: "Global channel for music / song RP — same scope as \
+                   gossip, distinct prefix. Respects the `Deaf` toggle \
+                   and per-receiver ignore lists.",
+        },
+        run: cmd_music,
+    },
+    Command {
         names: &["insult"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -14240,6 +14254,40 @@ fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
             format!("You gossip, \"{message}\"\r\n")
         } else {
             format!("{player_name} gossips, \"{message}\"\r\n")
+        };
+        send_to(world, t, line);
+    }
+}
+
+/// `music <message>`: global RP-flavored channel. Same broadcast
+/// rules as gossip — every online player sees it unless they're
+/// `Deaf` or have ignored the speaker.
+fn cmd_music(world: &mut World, player: Entity, args: &str) {
+    let message = args.trim();
+    if message.is_empty() {
+        send_to(world, player, "Sing what?\r\n");
+        return;
+    }
+    let player_name = name_of(world, player);
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
+        q.iter(world).collect()
+    };
+    for t in targets {
+        if t != player && has_flag(world, t, PlayerFlag::Deaf) {
+            continue;
+        }
+        if t != player
+            && world
+                .get::<IgnoreList>(t)
+                .is_some_and(|l| l.contains(&player_name))
+        {
+            continue;
+        }
+        let line = if t == player {
+            format!("You sing, \"{message}\"\r\n")
+        } else {
+            format!("{player_name} sings, \"{message}\"\r\n")
         };
         send_to(world, t, line);
     }
