@@ -13292,6 +13292,16 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     // Auto-assist: anyone following `target` with AUTO_ASSIST set, in
     // the same room, not already fighting — they engage `player`.
     auto_assist_followers_of(world, target, player, located.0);
+
+    // Fire ATTACK trigger on the target. Bodies typically run
+    // initial-aggression flavor or counter-attacks. `self` = target,
+    // `actor` = attacker.
+    crate::triggers::fire_event_with_actor(
+        world,
+        target,
+        player,
+        mud_world::TriggerEvent::Attack,
+    );
 }
 
 /// When `defender` is attacked, find every entity with
