@@ -12057,6 +12057,35 @@ fn invoke_ability(
                     applied_msgs.push(format!("{} (not in combat)", spec.name));
                 }
             }
+            "dismount" => {
+                // Force-end the rider/mount relationship on the
+                // target entity. Works both directions: target might
+                // be the rider (Mounted → mount) or the mount itself
+                // (RiddenBy → rider). Either way, both sides clear.
+                // BUCK uses this with `forced: true` (the mount throws
+                // its rider); the explicit DISMOUNT skill uses
+                // `forced: false`. The schema flag is informational
+                // for now — both branches do the same removal.
+                let mut cleared = false;
+                if let Some(mud_world::Mounted(mount)) =
+                    world.get::<mud_world::Mounted>(target_entity).copied()
+                {
+                    try_remove::<mud_world::Mounted>(world, target_entity);
+                    try_remove::<mud_world::RiddenBy>(world, mount);
+                    cleared = true;
+                } else if let Some(mud_world::RiddenBy(rider)) =
+                    world.get::<mud_world::RiddenBy>(target_entity).copied()
+                {
+                    try_remove::<mud_world::RiddenBy>(world, target_entity);
+                    try_remove::<mud_world::Mounted>(world, rider);
+                    cleared = true;
+                }
+                applied_msgs.push(if cleared {
+                    format!("{} (dismounted)", spec.name)
+                } else {
+                    format!("{} (not mounted)", spec.name)
+                });
+            }
             "teleport" => {
                 // Move the target to a destination resolved from
                 // params. v1 handles:
