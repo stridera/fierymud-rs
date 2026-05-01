@@ -12,9 +12,10 @@ use std::ptr::NonNull;
 use bevy_ecs::prelude::*;
 use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
 use mud_world::{
-    AbilityCatalog, AttachedTriggers, CombatStats, Description, Follower, Health, Item, Keywords,
-    KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player,
-    Posture, PostureKind, TriggerCatalog, WorldKey, WorldKeyIndex,
+    AbilityCatalog, AppliedTo, AttachedTriggers, CombatStats, Description, EffectCatalog,
+    EffectInstance, EquippedSlot, Follower, Health, Item, Keywords, KnownAbilities, Located,
+    LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player, Posture, PostureKind,
+    TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 
 /// Bevy resource wrapping the Lua interpreter.
@@ -503,6 +504,80 @@ impl UserData for LuaActor {
                 format!("Actor({name})")
             })
         });
+
+        // `actor:has_skill(name)` — true if `KnownAbilities` has the
+        // ability identified by lowercased plain name. 77 corpus
+        // refs (gating combat moves on character class proficiency).
+        methods.add_method("has_skill", |lua, this, name: String| -> mlua::Result<bool> {
+            world_from_lua(lua, |w| {
+                let key = name.trim().to_ascii_lowercase();
+                let Some(id) = w.resource::<AbilityCatalog>().by_name.get(&key).map(|d| d.id)
+                else {
+                    return false;
+                };
+                w.get::<KnownAbilities>(this.entity)
+                    .is_some_and(|ka| ka.has_any(id))
+            })
+        });
+
+        // `actor:has_effect(name)` — true if any `EffectInstance`
+        // applied to this entity resolves through `EffectCatalog`
+        // to a definition whose name matches case-insensitively.
+        // 65 corpus refs.
+        methods.add_method("has_effect", |lua, this, name: String| -> mlua::Result<bool> {
+            world_mut_from_lua(lua, |w| {
+                let needle = name.trim().to_ascii_lowercase();
+                let mut effect_ids: Vec<i32> = Vec::new();
+                {
+                    let mut q = w.query::<(&EffectInstance, &AppliedTo)>();
+                    for (inst, applied) in q.iter(w) {
+                        if applied.0 == this.entity {
+                            effect_ids.push(inst.kind);
+                        }
+                    }
+                }
+                let catalog = w.resource::<EffectCatalog>();
+                effect_ids.iter().any(|id| {
+                    catalog
+                        .by_id
+                        .get(id)
+                        .is_some_and(|d| d.name.eq_ignore_ascii_case(&needle))
+                })
+            })
+        });
+
+        // `actor:has_item(zone, id)` — true if the actor has any
+        // entity in their inventory (Item Located on actor) whose
+        // `WorldKey == (zone, id)`. 65 corpus refs.
+        methods.add_method(
+            "has_item",
+            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<bool> {
+                world_mut_from_lua(lua, |w| {
+                    let mut q = w.query_filtered::<(&Located, &WorldKey), With<Item>>();
+                    q.iter(w).any(|(l, wk)| {
+                        l.0 == this.entity && wk.zone == zone && wk.id == id
+                    })
+                })
+            },
+        );
+
+        // `actor:has_equipped(zone, id)` — like has_item but the
+        // matching item also has an `EquippedSlot` component (worn,
+        // not just carried). 141 corpus refs.
+        methods.add_method(
+            "has_equipped",
+            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<bool> {
+                world_mut_from_lua(lua, |w| {
+                    let mut q = w.query_filtered::<
+                        (&Located, &WorldKey),
+                        (With<Item>, With<EquippedSlot>),
+                    >();
+                    q.iter(w).any(|(l, wk)| {
+                        l.0 == this.entity && wk.zone == zone && wk.id == id
+                    })
+                })
+            },
+        );
 
         // Quest API stubs. The corpus references these heavily
         // (get_quest_stage 2271, get_quest_var 2007, set_quest_var
