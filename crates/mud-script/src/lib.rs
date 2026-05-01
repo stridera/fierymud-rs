@@ -563,14 +563,17 @@ fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::
     })
 }
 
-/// Emit a line to every player in the actor's current room. The
-/// caller supplies a closure that produces the text given the actor's
-/// display name. Backed by `LuaOutbox`; mud-server drains and routes
-/// to Connections after the Lua call returns.
-fn actor_emit(
+/// Emit a per-recipient line: the speaker sees `self_line`, every
+/// other player in the room sees `room_line`. Backed by `LuaOutbox`'s
+/// `direct` queue (for the speaker) plus a `messages` push with
+/// the speaker as the except-recipient (for the room broadcast).
+/// Used by `actor:say` and `actor:emote` so the speaker reads
+/// "You say, '...'" rather than the third-person form.
+fn actor_emit_with_perspective(
     lua: &Lua,
     actor: Entity,
-    fmt: impl FnOnce(&str) -> String,
+    self_fmt: impl FnOnce(&str) -> String,
+    room_fmt: impl FnOnce(&str) -> String,
 ) -> mlua::Result<()> {
     world_mut_from_lua(lua, |world| {
         let Some(room) = world.get::<Located>(actor).map(|l| l.0) else {
@@ -579,14 +582,14 @@ fn actor_emit(
         let name = world
             .get::<Named>(actor)
             .map_or_else(|| "Someone".to_string(), |n| n.name.clone());
-        let line = fmt(&name);
+        let self_line = self_fmt(&name);
+        let room_line = room_fmt(&name);
         if !world.contains_resource::<LuaOutbox>() {
             world.insert_resource(LuaOutbox::default());
         }
-        world
-            .resource_mut::<LuaOutbox>()
-            .messages
-            .push((room, line, None));
+        let mut out = world.resource_mut::<LuaOutbox>();
+        out.direct.push((actor, self_line));
+        out.messages.push((room, room_line, Some(actor)));
     })
 }
 
@@ -1024,13 +1027,27 @@ impl UserData for LuaActor {
         // player in the actor's current room. 2390 corpus refs —
         // the dominant scripted-speech verb.
         methods.add_method("say", |lua, this, msg: String| -> mlua::Result<()> {
-            actor_emit(lua, this.entity, |name| format!("{name} says, '{msg}'"))
+            let m = msg.clone();
+            actor_emit_with_perspective(
+                lua,
+                this.entity,
+                move |_name| format!("You say, '{m}'"),
+                move |name| format!("{name} says, '{msg}'"),
+            )
         });
 
         // `actor:emote(msg)` broadcasts "<name> <msg>" to the actor's
-        // room — third-person free-form action text. 724 corpus refs.
+        // room — third-person free-form action text. Speaker sees
+        // "You <msg>" instead of the third-person form. 724 corpus
+        // refs.
         methods.add_method("emote", |lua, this, msg: String| -> mlua::Result<()> {
-            actor_emit(lua, this.entity, |name| format!("{name} {msg}"))
+            let m = msg.clone();
+            actor_emit_with_perspective(
+                lua,
+                this.entity,
+                move |_name| format!("You {m}"),
+                move |name| format!("{name} {msg}"),
+            )
         });
 
         // `actor:teleport(room)` updates the actor's `Located` to
