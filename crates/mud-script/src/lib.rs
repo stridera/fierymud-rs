@@ -12,7 +12,7 @@ use std::ptr::NonNull;
 use bevy_ecs::prelude::*;
 use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
 use mud_world::{
-    AbilityCatalog, AttachedTriggers, CombatStats, Description, Health, Item, Keywords,
+    AbilityCatalog, AttachedTriggers, CombatStats, Description, Follower, Health, Item, Keywords,
     KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player,
     Posture, PostureKind, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
@@ -431,6 +431,7 @@ pub struct LuaActor {
 }
 
 impl UserData for LuaActor {
+    #[allow(clippy::too_many_lines)]
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // Note: `name` intentionally lives only as a field
         // (via MetaMethod::Index below) — the imported corpus uses
@@ -471,6 +472,26 @@ impl UserData for LuaActor {
                 format!("Actor({name})")
             })
         });
+
+        // `actor:follow(leader)` makes the actor follow `leader`. Used
+        // by mob-pack LOAD bodies (e.g. wolf pack) where one alpha
+        // spawns followers that move with it. Self-follow and follow-
+        // already-set are no-ops; the upstream movement system reads
+        // `Follower(leader)` to chain movements.
+        methods.add_method(
+            "follow",
+            |lua, this, leader: AnyUserData| -> mlua::Result<()> {
+                let leader_entity = leader.borrow::<LuaActor>()?.entity;
+                if leader_entity == this.entity {
+                    return Ok(());
+                }
+                world_mut_from_lua(lua, |world| {
+                    world
+                        .entity_mut(this.entity)
+                        .insert(Follower(leader_entity));
+                })
+            },
+        );
 
         // `actor:say(msg)` broadcasts "<name> says, '<msg>'" to every
         // player in the actor's current room. 2390 corpus refs —
