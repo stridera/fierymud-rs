@@ -344,6 +344,24 @@ impl LuaHost {
             )?;
             globals.set("objects", objects_tbl)?;
 
+            // `time` namespace — read-only clock fields. `time.stamp`
+            // is Unix epoch seconds (used by FIGHT bodies to throttle
+            // their "every 5s" actions); `.hour`/`.day`/`.month`/
+            // `.year` are MUD-time fields that we currently bridge
+            // to real time (since there's no in-game clock yet).
+            // Total ~32 corpus refs.
+            let time_tbl = self.lua.create_table()?;
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
+                .unwrap_or(0);
+            time_tbl.set("stamp", now_secs)?;
+            time_tbl.set("hour", 12i64)?; // mid-day stub
+            time_tbl.set("day", 1i64)?;
+            time_tbl.set("month", 1i64)?;
+            time_tbl.set("year", 2025i64)?;
+            globals.set("time", time_tbl)?;
+
             // `find_actor(keyword)` searches the entire world for the
             // first actor (mob or player) whose Named or Keywords
             // match. Returns a LuaActor or nil. 589 corpus refs —
@@ -446,6 +464,7 @@ impl LuaHost {
         let _ = self.lua.globals().raw_remove("find_actor");
         let _ = self.lua.globals().raw_remove("mobiles");
         let _ = self.lua.globals().raw_remove("objects");
+        let _ = self.lua.globals().raw_remove("time");
         for (name, _) in extras {
             let _ = self.lua.globals().raw_remove(*name);
         }
