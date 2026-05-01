@@ -2094,6 +2094,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_gossip,
     },
     Command {
+        names: &["insult"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "insult <target>",
+            summary: "Hurl a random insult at someone in the room.",
+            long: "Picks a random insult and emits it to you, the \
+                   target, and the rest of the room. Self-targeting \
+                   leaves you feeling insulted at yourself.",
+        },
+        run: cmd_insult,
+    },
+    Command {
         names: &["petition"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -13844,6 +13858,64 @@ fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
             format!("{player_name} gossips, \"{message}\"\r\n")
         };
         send_to(world, t, line);
+    }
+}
+
+const INSULT_LINES: &[&str] = &[
+    "You smell like a troll's armpit!",
+    "Your mother was a bugbear!",
+    "You fight like a dairy farmer!",
+    "I've seen better-looking rust monsters!",
+    "Even a gelatinous cube has more personality!",
+    "Your sword is dull and your wits are duller!",
+    "I've met kobolds with sharper tongues!",
+    "Your aim is as bad as your cooking!",
+];
+
+/// `insult <target>`: random-line jab at another actor in the room.
+/// Self-target collapses to "You feel insulted." per legacy.
+fn cmd_insult(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "You feel insulted.\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "You feel insulted.\r\n");
+        return;
+    }
+    let line = INSULT_LINES[rand::random_range(0..INSULT_LINES.len())];
+    let actor_name = name_of(world, player);
+    let target_name = name_of(world, target);
+
+    send_to(
+        world,
+        player,
+        format!("You insult {target_name}: {line}\r\n"),
+    );
+    send_to(
+        world,
+        target,
+        format!("{actor_name} insults you: {line}\r\n"),
+    );
+
+    let bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == located.0 && *e != player && *e != target)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let line_room = format!("{actor_name} insults {target_name}.\r\n");
+    for e in bystanders {
+        send_to(world, e, line_room.clone());
     }
 }
 
