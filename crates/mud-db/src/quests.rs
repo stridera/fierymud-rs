@@ -17,6 +17,57 @@ pub struct CharacterQuestRow {
     pub short_description: Option<String>,
 }
 
+/// Quest catalog row read by `questinfo` for the per-quest detail view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct QuestRow {
+    pub zone_id: i32,
+    pub id: i32,
+    pub name: String,
+    pub plain_name: String,
+    pub description: Option<String>,
+    pub short_description: Option<String>,
+    pub min_level: i32,
+    pub max_level: i32,
+    pub repeatable: bool,
+    pub shareable: bool,
+    pub hidden: bool,
+    pub auto_accept: bool,
+}
+
+/// Read one Quest row by composite key. Returns None when the row
+/// doesn't exist.
+pub async fn get_quest(
+    pool: &PgPool,
+    zone_id: i32,
+    id: i32,
+) -> sqlx::Result<Option<QuestRow>> {
+    sqlx::query_as!(
+        QuestRow,
+        r#"
+        SELECT
+            zone_id,
+            id,
+            name,
+            plain_name,
+            description,
+            short_description,
+            min_level,
+            max_level,
+            repeatable,
+            shareable,
+            hidden,
+            auto_accept
+        FROM "Quest"
+        WHERE zone_id = $1 AND id = $2
+        "#,
+        zone_id,
+        id,
+    )
+    .fetch_optional(pool)
+    .await
+}
+
 /// Look up a Quest definition by its `(zone_id, id)` composite. Used
 /// by admin tooling that needs to confirm a quest exists before
 /// mutating `CharacterQuest`.

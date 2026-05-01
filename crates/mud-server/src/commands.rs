@@ -1974,6 +1974,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["questinfo"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "questinfo <zone> <id>",
+            summary: "Show details for a single quest definition.",
+            long: "Reads the `Quest` row for `(zone, id)` and prints \
+                   name, level range, flags (repeatable / shareable / \
+                   hidden / auto-accept), short description, and full \
+                   description. Doesn't check whether you've accepted \
+                   it — for your own quests, use `quests`.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["qload"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -3447,6 +3463,12 @@ pub async fn try_dispatch_async(
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_abandon(world, player, pool, args).await;
+            true
+        }
+        "questinfo" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_questinfo(world, player, pool, args).await;
             true
         }
         "qload" => {
@@ -13559,6 +13581,82 @@ pub(crate) async fn cmd_qload(
         ),
         Err(e) => send_to(world, player, format!("Assign failed: {e}\r\n")),
     }
+}
+
+/// `questinfo <zone> <id>`: read-only catalog view of one quest.
+/// Reads `Quest` directly (not `CharacterQuest`), so the row doesn't
+/// have to be assigned to anyone.
+pub(crate) async fn cmd_questinfo(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let mut parts = args.split_whitespace();
+    let (Some(zone_raw), Some(id_raw)) = (parts.next(), parts.next()) else {
+        send_to(world, player, "Usage: questinfo <zone> <id>\r\n");
+        return;
+    };
+    let Ok(zone) = zone_raw.parse::<i32>() else {
+        send_to(world, player, "Zone must be an integer.\r\n");
+        return;
+    };
+    let Ok(id) = id_raw.parse::<i32>() else {
+        send_to(world, player, "Id must be an integer.\r\n");
+        return;
+    };
+    let row = match mud_db::quests::get_quest(pool, zone, id).await {
+        Ok(r) => r,
+        Err(e) => {
+            send_to(world, player, format!("Quest fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    let Some(row) = row else {
+        send_to(
+            world,
+            player,
+            format!("No Quest defined at ({zone}, {id}).\r\n"),
+        );
+        return;
+    };
+    let mut out = format!("\r\nQuest ({}, {}) — {}\r\n", row.zone_id, row.id, row.name);
+    out.push_str(&format!(
+        "Level range: {} to {}\r\n",
+        row.min_level, row.max_level
+    ));
+    let mut flags: Vec<&'static str> = Vec::new();
+    if row.repeatable {
+        flags.push("repeatable");
+    }
+    if row.shareable {
+        flags.push("shareable");
+    }
+    if row.hidden {
+        flags.push("hidden");
+    }
+    if row.auto_accept {
+        flags.push("auto-accept");
+    }
+    out.push_str(&format!(
+        "Flags: {}\r\n",
+        if flags.is_empty() {
+            "none".to_string()
+        } else {
+            flags.join(", ")
+        }
+    ));
+    if let Some(short) = row.short_description.as_deref()
+        && !short.trim().is_empty()
+    {
+        out.push_str(&format!("\r\n{}\r\n", short.trim()));
+    }
+    if let Some(desc) = row.description.as_deref()
+        && !desc.trim().is_empty()
+    {
+        out.push_str(&format!("\r\n{}\r\n", desc.trim()));
+    }
+    send_to(world, player, out);
 }
 
 /// `qgive <player> <zone> <quest-id>`: admin command — assign a
