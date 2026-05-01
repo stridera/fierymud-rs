@@ -2821,6 +2821,35 @@ const COMMANDS: &[Command] = &[
         run: cmd_ostat,
     },
     Command {
+        names: &["sstat"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "sstat <zone> <id>",
+            summary: "Dump a Shop's catalog row.",
+            long: "Builder+. Looks up `ShopCatalog[(zone, id)]` and \
+                   prints keeper, buy/sell profit, item offerings, \
+                   accept-filter rules, and pet offerings.",
+        },
+        run: cmd_sstat,
+    },
+    Command {
+        names: &["tstat"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "tstat <zone> <id>",
+            summary: "Dump a Lua trigger row.",
+            long: "Builder+. Looks up `TriggerCatalog[(zone, id)]` \
+                   and prints attach type, event flags, arg list, and \
+                   the body (commands) text. Read-only — does not \
+                   fire the trigger.",
+        },
+        run: cmd_tstat,
+    },
+    Command {
         names: &["rstat"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -15525,6 +15554,84 @@ fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
     }
     out.push_str(&format!("triggers:      {trig_count}\r\n"));
     out.push_str(&format!("live count:    {live}\r\n"));
+    send_to(world, player, out);
+}
+
+/// `sstat <zone> <id>`: dump a Shop catalog row.
+fn cmd_sstat(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 2 {
+        send_to(world, player, "Usage: sstat <zone> <id>\r\n");
+        return;
+    }
+    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
+        send_to(world, player, "Zone and id must be integers.\r\n");
+        return;
+    };
+    let shop = world.resource::<ShopCatalog>().by_key.get(&(zone, id)).cloned();
+    let Some(s) = shop else {
+        send_to(world, player, format!("No shop ({zone}, {id}).\r\n"));
+        return;
+    };
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("(zone, id):    ({zone}, {id})\r\n"));
+    out.push_str(&format!(
+        "keeper:        ({}, {})\r\n",
+        s.keeper_zone_id, s.keeper_id
+    ));
+    out.push_str(&format!("buy_profit:    {:.2}\r\n", s.buy_profit));
+    out.push_str(&format!("sell_profit:   {:.2}\r\n", s.sell_profit));
+    out.push_str(&format!("items:         {}\r\n", s.items.len()));
+    for it in s.items.iter().take(20) {
+        out.push_str(&format!(
+            "  ({}, {}) amount={} price={}\r\n",
+            it.object_zone_id, it.object_id, it.amount, it.price
+        ));
+    }
+    if s.items.len() > 20 {
+        out.push_str(&format!("  ... ({} more)\r\n", s.items.len() - 20));
+    }
+    out.push_str(&format!("accepts rules: {}\r\n", s.accepts.len()));
+    out.push_str(&format!("pets:          {}\r\n", s.pets.len()));
+    send_to(world, player, out);
+}
+
+/// `tstat <zone> <id>`: dump a Lua trigger row.
+fn cmd_tstat(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 2 {
+        send_to(world, player, "Usage: tstat <zone> <id>\r\n");
+        return;
+    }
+    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
+        send_to(world, player, "Zone and id must be integers.\r\n");
+        return;
+    };
+    let def = world
+        .resource::<mud_world::TriggerCatalog>()
+        .by_key
+        .get(&(zone, id))
+        .cloned();
+    let Some(d) = def else {
+        send_to(world, player, format!("No trigger ({zone}, {id}).\r\n"));
+        return;
+    };
+    let flag_strs: Vec<String> = d.flags.iter().map(|f| format!("{f:?}")).collect();
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("(zone, id):    ({zone}, {id})\r\n"));
+    out.push_str(&format!("name:          {}\r\n", d.name));
+    out.push_str(&format!("attach:        {:?}\r\n", d.attach_type));
+    out.push_str(&format!("flags:         [{}]\r\n", flag_strs.join(", ")));
+    if !d.arg_list.is_empty() {
+        out.push_str(&format!("arg_list:      [{}]\r\n", d.arg_list.join(", ")));
+    }
+    out.push_str(&format!("num_args:      {}\r\n", d.num_args));
+    out.push_str("commands:\r\n");
+    for line in d.commands.lines() {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
     send_to(world, player, out);
 }
 
