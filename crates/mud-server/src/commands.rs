@@ -1014,6 +1014,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_account,
     },
     Command {
+        names: &["richtest"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "richtest",
+            summary: "Render a color-tag sampler.",
+            long: "Prints a sampler of every color and modifier the \
+                   XML-Lite renderer supports — handy for verifying \
+                   your client's color depth and for debugging \
+                   color-tag rendering.",
+        },
+        run: cmd_richtest,
+    },
+    Command {
         names: &["clientinfo"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -9361,6 +9376,28 @@ fn cmd_policies(world: &mut World, player: Entity, _args: &str) {
 /// `account`: read-only summary from the `AccountSummary` component
 /// inserted at login. Active character is the one with the same name
 /// as the entity's Named component (which is unique per player).
+/// `richtest`: sampler that exercises every named color and
+/// modifier the XML-Lite renderer supports. Useful for verifying
+/// terminal color rendering and for debugging tag handling — the
+/// output goes through `send_rendered` (same path as room
+/// descriptions) so what you see is what every other render path
+/// produces.
+fn cmd_richtest(world: &mut World, player: Entity, _args: &str) {
+    let body = "\r\nXML-Lite color sampler:\r\n\
+                <red>red</> <green>green</> <yellow>yellow</> <blue>blue</> \
+                <magenta>magenta</> <cyan>cyan</> <white>white</>\r\n\
+                <b:red>bright red</> <b:green>bright green</> \
+                <b:yellow>bright yellow</> <b:blue>bright blue</> \
+                <b:magenta>bright magenta</> <b:cyan>bright cyan</> \
+                <b:white>bright white</>\r\n\
+                Nested: <red>red <yellow>yellow inside</> back to red</>\r\n\
+                Anonymous: <red>red until close</> done\r\n\
+                Tag form: <name> opens a layer, </> closes the most \
+                recent. Use `b:` prefix for bright (e.g. <b:cyan>like \
+                this</>).\r\n";
+    send_rendered(world, player, body);
+}
+
 /// `clientinfo`: per-session connection summary. Quick check that
 /// surfaces what the runtime tracks today (idle, uptime, role) — the
 /// proper terminal-capability split (color depth, dimensions, MCCP)
