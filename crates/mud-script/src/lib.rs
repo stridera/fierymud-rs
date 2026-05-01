@@ -241,6 +241,23 @@ impl LuaHost {
                 self.lua.create_function(|_, _: Value| -> mlua::Result<()> { Ok(()) })?,
             )?;
 
+            // `Effect.<Name>` resolves to a lowercased name string,
+            // so `actor:has_effect(Effect.Invisible)` matches the
+            // EffectCatalog by case-insensitive name. The corpus
+            // uses these as effectively-typed enum constants
+            // (`Effect.Bless`, `Effect.Sanctuary`, ...). Implemented
+            // via metatable __index.
+            let effect_tbl = self.lua.create_table()?;
+            let effect_meta = self.lua.create_table()?;
+            effect_meta.set(
+                "__index",
+                self.lua.create_function(|_, (_t, key): (Value, String)| -> mlua::Result<String> {
+                    Ok(key.to_ascii_lowercase())
+                })?,
+            )?;
+            let _ = effect_tbl.set_metatable(Some(effect_meta));
+            globals.set("Effect", effect_tbl)?;
+
             // `random(low, high)` returns a uniform integer in
             // `[low, high]`. Distinct from Lua's stdlib
             // `math.random` because the corpus uses bare `random(...)`
@@ -309,6 +326,7 @@ impl LuaHost {
         let _ = self.lua.globals().raw_remove("get_room");
         let _ = self.lua.globals().raw_remove("random");
         let _ = self.lua.globals().raw_remove("percent_chance");
+        let _ = self.lua.globals().raw_remove("Effect");
         for (name, _) in extras {
             let _ = self.lua.globals().raw_remove(*name);
         }
