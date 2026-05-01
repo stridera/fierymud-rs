@@ -3527,6 +3527,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_stat,
     },
     Command {
+        names: &["load"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "load <obj|mob> <zone> <id>",
+            summary: "Unified spawn dispatcher for obj or mob protos.",
+            long: "Builder+. `load obj <z> <i>` is `loadobj` and \
+                   `load mob <z> <i>` is `summon`. Same prototype \
+                   lookups; same room target (your current room).",
+        },
+        run: cmd_load,
+    },
+    Command {
         names: &["loadobj", "loado"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -19553,6 +19567,33 @@ fn cmd_stat(world: &mut World, player: Entity, args: &str) {
 /// same component bundle the loader's reset pass produces (Item /
 /// Named / Keywords / `WorldKey` / `Located`, plus Description when
 /// the proto has an examine line).
+/// `load <obj|mob> <zone> <id>`: front-end for `loadobj` / `summon`.
+/// Splits the type token and forwards the rest of the args verbatim
+/// to the existing handlers.
+fn cmd_load(world: &mut World, player: Entity, args: &str) {
+    let trimmed = args.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let kind = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    if rest.is_empty() {
+        send_to(
+            world,
+            player,
+            "Usage: load <obj|mob> <zone> <id>\r\n",
+        );
+        return;
+    }
+    match kind.to_ascii_lowercase().as_str() {
+        "obj" | "object" | "item" => cmd_loadobj(world, player, rest),
+        "mob" | "mobile" | "npc" | "creature" => cmd_summon(world, player, rest),
+        other => send_to(
+            world,
+            player,
+            format!("Unknown load type '{other}'. Use obj or mob.\r\n"),
+        ),
+    }
+}
+
 fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
