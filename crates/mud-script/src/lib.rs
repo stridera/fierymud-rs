@@ -305,6 +305,30 @@ fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::
     })
 }
 
+/// Emit a line to every player in the actor's current room. The
+/// caller supplies a closure that produces the text given the actor's
+/// display name. Backed by `LuaOutbox`; mud-server drains and routes
+/// to Connections after the Lua call returns.
+fn actor_emit(
+    lua: &Lua,
+    actor: Entity,
+    fmt: impl FnOnce(&str) -> String,
+) -> mlua::Result<()> {
+    world_mut_from_lua(lua, |world| {
+        let Some(room) = world.get::<Located>(actor).map(|l| l.0) else {
+            return;
+        };
+        let name = world
+            .get::<Named>(actor)
+            .map_or_else(|| "Someone".to_string(), |n| n.name.clone());
+        let line = fmt(&name);
+        if !world.contains_resource::<LuaOutbox>() {
+            world.insert_resource(LuaOutbox::default());
+        }
+        world.resource_mut::<LuaOutbox>().messages.push((room, line));
+    })
+}
+
 /// Look up a room by `(zone, id)` via `WorldKeyIndex.rooms` and
 /// return a `LuaRoom` userdata, or nil if not found.
 fn get_room(lua: &Lua, zone: i32, id: i32) -> mlua::Result<Value> {
@@ -445,6 +469,19 @@ impl UserData for LuaActor {
                     .get::<Named>(this.entity).map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
                 format!("Actor({name})")
             })
+        });
+
+        // `actor:say(msg)` broadcasts "<name> says, '<msg>'" to every
+        // player in the actor's current room. 2390 corpus refs —
+        // the dominant scripted-speech verb.
+        methods.add_method("say", |lua, this, msg: String| -> mlua::Result<()> {
+            actor_emit(lua, this.entity, |name| format!("{name} says, '{msg}'"))
+        });
+
+        // `actor:emote(msg)` broadcasts "<name> <msg>" to the actor's
+        // room — third-person free-form action text. 724 corpus refs.
+        methods.add_method("emote", |lua, this, msg: String| -> mlua::Result<()> {
+            actor_emit(lua, this.entity, |name| format!("{name} {msg}"))
         });
 
         // `actor:teleport(room)` updates the actor's `Located` to
