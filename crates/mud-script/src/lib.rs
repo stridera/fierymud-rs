@@ -54,13 +54,29 @@ impl LuaHost {
 
     /// Like `exec_for_actor`, but also binds the supplied
     /// `(name, value)` pairs as Lua globals before the body runs.
-    /// Used by event-specific dispatchers (SPEECH binds `speech`,
-    /// GREET binds `actor` to the entering player, etc.).
-    #[allow(clippy::too_many_lines)]
+    /// `actor` and `self` are bound to the same entity.
     pub fn exec_for_actor_with_extras(
         &self,
         world: &mut World,
         actor: Entity,
+        code: &str,
+        extras: &[(&str, &str)],
+    ) -> Result<String, String> {
+        self.exec_for_listener_with_extras(world, actor, actor, code, extras)
+    }
+
+    /// Run `code` with `self` bound to `listener` and `actor` bound
+    /// to `acting_entity`. Used by event dispatchers (GREET, RECEIVE,
+    /// FIGHT, etc.) where the trigger fires on one entity (the
+    /// listener) and references another (the actor entering / giving /
+    /// attacking). For LOAD/SPEECH/etc. callers where listener IS the
+    /// actor, `exec_for_actor_with_extras` is the simpler entry.
+    #[allow(clippy::too_many_lines)]
+    pub fn exec_for_listener_with_extras(
+        &self,
+        world: &mut World,
+        listener: Entity,
+        acting_entity: Entity,
         code: &str,
         extras: &[(&str, &str)],
     ) -> Result<String, String> {
@@ -75,13 +91,15 @@ impl LuaHost {
 
         let result = (|| -> mlua::Result<()> {
             let globals = self.lua.globals();
-            globals.set("actor", LuaActor { entity: actor })?;
+            globals.set("actor", LuaActor { entity: acting_entity })?;
             // `self` is the canonical name in DG-Script-converted bodies
-            // ("set_level(self, ...)"). Bind it alongside `actor` so the
-            // imported corpus runs without rewriting; both point at the
-            // same entity. Lua treats `self` as an ordinary identifier
-            // outside of `:` method definitions.
-            globals.set("self", LuaActor { entity: actor })?;
+            // ("set_level(self, ...)"). For SPEECH / LOAD / etc. it
+            // points at the same entity as `actor`; for GREET / RECEIVE
+            // / FIGHT it points at the listener while `actor` is the
+            // entering / giving / attacking entity. Lua treats `self`
+            // as an ordinary identifier outside of `:` method
+            // definitions.
+            globals.set("self", LuaActor { entity: listener })?;
 
             // Override print so output flows back to the caller.
             globals.set(

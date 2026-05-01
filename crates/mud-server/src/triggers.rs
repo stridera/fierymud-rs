@@ -111,6 +111,54 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
     }
 }
 
+/// Fire `GREET` / `GREET_ALL` triggers for every entity in `room`
+/// (other than the entering actor) that carries `AttachedTriggers`.
+/// Used by the movement system after a player arrives in a new
+/// room. Each fire binds `self` to the listener and `actor` to the
+/// entering player.
+pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
+    let listeners: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located, &AttachedTriggers)>();
+        q.iter(world)
+            .filter(|(e, l, _)| *e != entering && l.0 == room)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    if listeners.is_empty() {
+        return;
+    }
+    for listener in listeners {
+        let to_fire: Vec<(i32, i32, String, String)> = {
+            let Some(at) = world.get::<AttachedTriggers>(listener) else {
+                continue;
+            };
+            let keys = at.0.clone();
+            let catalog = world.resource::<TriggerCatalog>();
+            keys.into_iter()
+                .filter_map(|(zone, id)| {
+                    let def = catalog.by_key.get(&(zone, id))?;
+                    if def.flags.contains(&TriggerEvent::Greet)
+                        || def.flags.contains(&TriggerEvent::GreetAll)
+                    {
+                        Some((zone, id, def.name.clone(), def.commands.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for (zone, id, name, body) in to_fire {
+            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+                host.exec_for_listener_with_extras(world, listener, entering, &body, &[])
+            });
+            drain_lua_outbox(world);
+            if let Err(e) = result {
+                warn!(zone, id, name = %name, error = %e, "GREET trigger fire failed");
+            }
+        }
+    }
+}
+
 /// Bulk-fire `LOAD` triggers for every Mob in the world that carries
 /// `AttachedTriggers`. Used once at boot after `load_from_db` so
 /// proto-attached mob triggers (e.g. `skills.set_level`) run before

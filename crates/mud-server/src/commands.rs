@@ -14812,6 +14812,14 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         }
         cmd_look(world, mover, "");
     }
+
+    // Fire GREET / GREET_ALL triggers for every entity in the
+    // destination room. Each mover triggers GREET on every existing
+    // entity. Done after look so the player sees the room before
+    // any scripted reaction text.
+    for &mover in &movers {
+        crate::triggers::fire_greet_in_room(world, mover, target);
+    }
 }
 
 // ---------------------------------------------------------------------------
