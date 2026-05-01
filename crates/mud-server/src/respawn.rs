@@ -51,6 +51,10 @@ pub fn respawn_tick(world: &mut World) {
         world.resource::<MobResetCatalog>().entries.clone();
 
     let mut refilled = 0usize;
+    // Track every freshly-spawned mob carrying triggers so the
+    // dispatcher can fire LOAD on them after the respawn loop
+    // exits — firing inside the loop would re-borrow World mid-spawn.
+    let mut load_fire_queue: Vec<Entity> = Vec::new();
     for entry in &entries {
         let live = counts.get(&entry.reset_id).copied().unwrap_or(0);
         let want = entry.max_instances.max(1);
@@ -98,6 +102,7 @@ pub fn respawn_tick(world: &mut World) {
             }
             if let Some(ref keys) = trigger_keys {
                 em.insert(AttachedTriggers(keys.clone()));
+                load_fire_queue.push(em.id());
             }
             if proto.keywords.iter().any(|k| {
                 let lc = k.to_ascii_lowercase();
@@ -116,5 +121,12 @@ pub fn respawn_tick(world: &mut World) {
 
     if refilled > 0 {
         info!(refilled, "respawn tick");
+    }
+
+    // Fire LOAD triggers for the just-spawned mobs. The respawn loop
+    // queued any mob that received an AttachedTriggers component;
+    // firing here (after the loop ends) keeps World borrows simple.
+    for e in load_fire_queue {
+        crate::triggers::fire_event(world, e, mud_world::TriggerEvent::Load);
     }
 }

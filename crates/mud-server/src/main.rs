@@ -4,6 +4,7 @@ mod effects;
 mod login;
 mod regen;
 mod respawn;
+mod triggers;
 
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,12 @@ async fn main() {
     combat::seed_test_mobs(&mut world);
     combat::seed_test_items(&mut world);
     commands::validate_registry();
+    // Fire LOAD-flagged triggers for every spawned mob now that the
+    // world is fully populated (catalogs, prototypes, mob entities,
+    // their AttachedTriggers). Bodies typically grant abilities or
+    // emit greeting flavor text; running them up-front matches the
+    // legacy "trigger on creation" semantics.
+    triggers::fire_load_for_all_mobs(&mut world);
 
     let listen_addr =
         std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into());
