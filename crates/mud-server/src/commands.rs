@@ -3342,6 +3342,24 @@ const COMMANDS: &[Command] = &[
         run: cmd_loadobj,
     },
     Command {
+        names: &["dumpworld"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "dumpworld [<path>]",
+            summary: "JSON snapshot of live world state to disk.",
+            long: "Implementor-only diagnostic. Writes a JSON file \
+                   with current tick, MudClock, online player roster \
+                   (name/level/role/room/hp/stamina/wealth), entity \
+                   counts (mobs/items/effects), and trigger catalog \
+                   stats. Default path is \
+                   /tmp/world_dump_<unix_ts>.json. The world keeps \
+                   running — this is a checkpoint, not a freeze.",
+        },
+        run: cmd_dumpworld,
+    },
+    Command {
         names: &["purge"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -16761,6 +16779,134 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
 /// despawned, the orphan handler... well actually `bevy_ecs` doesn't
 /// auto-cascade, so we walk and despawn explicitly). Players are
 /// never touched.
+/// `dumpworld [<path>]`: write a JSON checkpoint of live world state.
+/// Doesn't pause the tick — entity values are read in a single pass
+/// and serialized into a `serde_json::Value` tree before being
+/// written to disk. Default path is `/tmp/world_dump_<unix>.json`.
+#[allow(clippy::too_many_lines)]
+fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
+    let path = args.trim();
+    let path = if path.is_empty() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("/tmp/world_dump_{stamp}.json")
+    } else {
+        path.to_string()
+    };
+
+    let tick = world.resource::<TickCount>().0;
+    let clock = world.resource::<mud_world::MudClock>().clone();
+
+    // Online players roster.
+    let players: Vec<serde_json::Value> = {
+        let mut q = world.query_filtered::<
+            (
+                &Named,
+                &Account,
+                Option<&Profile>,
+                &Located,
+                Option<&Health>,
+                Option<&Stamina>,
+                Option<&Wealth>,
+            ),
+            (With<Player>, With<Online>),
+        >();
+        q.iter(world)
+            .map(|(name, acct, prof, loc, hp, st, wealth)| {
+                let room_name = name_or(world, loc.0, "<unknown>");
+                let room_key = world
+                    .get::<WorldKey>(loc.0)
+                    .map_or((-1, -1), |wk| (wk.zone, wk.id));
+                serde_json::json!({
+                    "name": name.name,
+                    "role": acct.role.label(),
+                    "level": prof.map_or(0, |p| p.level),
+                    "race": prof.map(|p| p.race.clone()).unwrap_or_default(),
+                    "room_name": room_name,
+                    "room_zone": room_key.0,
+                    "room_id": room_key.1,
+                    "hp": hp.map_or(0, |h| h.hp),
+                    "hp_max": hp.map_or(0, |h| h.max),
+                    "stamina": st.map_or(0, |s| s.current),
+                    "stamina_max": st.map_or(0, |s| s.max),
+                    "wealth_copper": wealth.map_or(0, |w| w.0),
+                })
+            })
+            .collect()
+    };
+
+    // Entity counts.
+    let mob_count = {
+        let mut q = world.query_filtered::<Entity, (With<Mob>, Without<Player>)>();
+        q.iter(world).count()
+    };
+    let item_count = {
+        let mut q = world.query::<&Item>();
+        q.iter(world).count()
+    };
+    let effect_count = {
+        let mut q = world.query::<&EffectInstance>();
+        q.iter(world).count()
+    };
+
+    let trigger_catalog = world.resource::<mud_world::TriggerCatalog>();
+    let triggers = serde_json::json!({
+        "rows": trigger_catalog.by_key.len(),
+        "mob_attachments": trigger_catalog.mob_attachments.len(),
+        "object_attachments": trigger_catalog.object_attachments.len(),
+        "room_attachments": trigger_catalog.room_attachments.len(),
+    });
+
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "captured_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        "tick": tick,
+        "clock": {
+            "year": clock.year,
+            "month": clock.month,
+            "day": clock.day,
+            "hour": clock.hour,
+            "stamp": clock.stamp,
+        },
+        "counts": {
+            "online_players": players.len(),
+            "mobs": mob_count,
+            "items": item_count,
+            "effect_instances": effect_count,
+        },
+        "players": players,
+        "triggers": triggers,
+    });
+
+    let serialized = match serde_json::to_string_pretty(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            send_to(world, player, format!("Serialization failed: {e}\r\n"));
+            return;
+        }
+    };
+
+    if let Err(e) = std::fs::write(&path, &serialized) {
+        send_to(world, player, format!("Write failed ({path}): {e}\r\n"));
+        return;
+    }
+
+    let bytes = serialized.len();
+    let player_count = payload["counts"]["online_players"].as_u64().unwrap_or(0);
+    send_to(
+        world,
+        player,
+        format!(
+            "World dumped to {path} ({bytes} bytes, {player_count} player(s)).\r\n"
+        ),
+    );
+    info!(path = %path, bytes, "dumpworld checkpoint written");
+}
+
 fn cmd_purge(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Some(located) = world.get::<Located>(player).copied() else {
