@@ -2790,6 +2790,37 @@ const COMMANDS: &[Command] = &[
         run: cmd_zstat,
     },
     Command {
+        names: &["mstat"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "mstat <zone> <id>",
+            summary: "Dump a Mob prototype's catalog data + live count.",
+            long: "Builder+. Looks up `MobPrototypes[(zone, id)]` and \
+                   prints name, level, alignment, role, hit/damage \
+                   dice, AC, hit_roll, wealth, attached trigger \
+                   count, and how many live instances of this proto \
+                   currently exist in the world.",
+        },
+        run: cmd_mstat,
+    },
+    Command {
+        names: &["ostat"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "ostat <zone> <id>",
+            summary: "Dump an Object prototype's catalog data + live count.",
+            long: "Builder+. Looks up `ObjectPrototypes[(zone, id)]` and \
+                   prints name, type, wear flags, examine description, \
+                   liquid/board metadata if present, attached trigger \
+                   count, and how many live instances exist.",
+        },
+        run: cmd_ostat,
+    },
+    Command {
         names: &["rstat"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -15384,6 +15415,116 @@ fn cmd_zstat(world: &mut World, player: Entity, args: &str) {
     out.push_str(&format!("obj_protos:    {obj_proto_count}\r\n"));
     out.push_str(&format!("live_mobs:     {live_mobs}\r\n"));
     out.push_str(&format!("live_items:    {live_items}\r\n"));
+    send_to(world, player, out);
+}
+
+/// `mstat <zone> <id>`: dump mob prototype + live count.
+fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 2 {
+        send_to(world, player, "Usage: mstat <zone> <id>\r\n");
+        return;
+    }
+    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
+        send_to(world, player, "Zone and id must be integers.\r\n");
+        return;
+    };
+    let proto = world
+        .resource::<MobPrototypes>()
+        .by_key
+        .get(&(zone, id))
+        .cloned();
+    let Some(p) = proto else {
+        send_to(world, player, format!("No mob proto ({zone}, {id}).\r\n"));
+        return;
+    };
+    let live = world
+        .query_filtered::<&WorldKey, With<Mob>>()
+        .iter(world)
+        .filter(|wk| wk.zone == zone && wk.id == id)
+        .count();
+    let trig_count = world
+        .resource::<mud_world::TriggerCatalog>()
+        .mob_attachments
+        .get(&(zone, id))
+        .map_or(0, Vec::len);
+
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("(zone, id):    ({zone}, {id})\r\n"));
+    out.push_str(&format!("name:          {}\r\n", p.name));
+    out.push_str(&format!("keywords:      {}\r\n", p.keywords.join(", ")));
+    out.push_str(&format!("room_desc:     {}\r\n", p.room_description));
+    out.push_str(&format!("level:         {}\r\n", p.level));
+    out.push_str(&format!("alignment:     {}\r\n", p.alignment));
+    out.push_str(&format!("role:          {:?}\r\n", p.role));
+    out.push_str(&format!(
+        "hp dice:       {}d{}+{}\r\n",
+        p.hp_dice_num, p.hp_dice_size, p.hp_dice_bonus
+    ));
+    out.push_str(&format!(
+        "damage dice:   {}d{}+{}\r\n",
+        p.damage_dice_num, p.damage_dice_size, p.damage_dice_bonus
+    ));
+    out.push_str(&format!("hit_roll:      {}\r\n", p.hit_roll));
+    out.push_str(&format!("armor_class:   {}\r\n", p.armor_class));
+    out.push_str(&format!("wealth:        {} cp\r\n", p.wealth));
+    out.push_str(&format!("class_id:      {:?}\r\n", p.class_id));
+    out.push_str(&format!("triggers:      {trig_count}\r\n"));
+    out.push_str(&format!("live count:    {live}\r\n"));
+    send_to(world, player, out);
+}
+
+/// `ostat <zone> <id>`: dump object prototype + live count.
+fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 2 {
+        send_to(world, player, "Usage: ostat <zone> <id>\r\n");
+        return;
+    }
+    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
+        send_to(world, player, "Zone and id must be integers.\r\n");
+        return;
+    };
+    let proto = world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .get(&(zone, id))
+        .cloned();
+    let Some(p) = proto else {
+        send_to(world, player, format!("No object proto ({zone}, {id}).\r\n"));
+        return;
+    };
+    let live = world
+        .query_filtered::<&WorldKey, With<Item>>()
+        .iter(world)
+        .filter(|wk| wk.zone == zone && wk.id == id)
+        .count();
+    let trig_count = world
+        .resource::<mud_world::TriggerCatalog>()
+        .object_attachments
+        .get(&(zone, id))
+        .map_or(0, Vec::len);
+
+    let mut out = String::from("\r\n");
+    out.push_str(&format!("(zone, id):    ({zone}, {id})\r\n"));
+    out.push_str(&format!("name:          {}\r\n", p.name));
+    out.push_str(&format!("keywords:      {}\r\n", p.keywords.join(", ")));
+    if let Some(desc) = &p.examine_description {
+        out.push_str(&format!("examine:       {desc}\r\n"));
+    }
+    out.push_str(&format!("type:          {:?}\r\n", p.r#type));
+    out.push_str(&format!("wear_flags:    {:?}\r\n", p.wear_flags));
+    if let Some(b) = p.board_id {
+        out.push_str(&format!("board_id:      {b}\r\n"));
+    }
+    if let Some(liq) = &p.liquid {
+        out.push_str(&format!(
+            "liquid:        {} ({}/{}, poisoned={})\r\n",
+            liq.liquid, liq.remaining, liq.capacity, liq.poisoned
+        ));
+    }
+    out.push_str(&format!("triggers:      {trig_count}\r\n"));
+    out.push_str(&format!("live count:    {live}\r\n"));
     send_to(world, player, out);
 }
 
