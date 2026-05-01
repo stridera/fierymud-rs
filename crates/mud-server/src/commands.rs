@@ -9062,6 +9062,9 @@ fn consume_item(world: &mut World, player: Entity, args: &str, expected: mud_db:
         return;
     }
     send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
+    // Fire CONSUME on the item before despawn so the body can read
+    // self.id / self.name and emit a final flavor line.
+    crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Consume);
     if let Ok(e) = world.get_entity_mut(item) {
         e.despawn();
     }
@@ -9412,6 +9415,9 @@ fn invoke_object_abilities(
         return;
     }
     send_rendered(world, player, &format!("{intro_phrase} {item_name}.\r\n"));
+    // Fire USE on the item before spell dispatch — bodies may
+    // gate (return false) or emit additional flavor.
+    crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Use);
     for ability_id in bindings {
         let ability_name = world
             .resource::<AbilityCatalog>()
