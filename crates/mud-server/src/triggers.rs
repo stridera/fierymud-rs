@@ -111,6 +111,42 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
     }
 }
 
+/// Fire `PREENTRY` / `POSTENTRY` triggers attached to `room`. Both
+/// fire from the room's perspective (`self` = room) with `actor`
+/// bound to the entering player. PREENTRY fires before the player's
+/// `Located` is changed; POSTENTRY fires after.
+pub fn fire_room_entry(world: &mut World, room: Entity, entering: Entity, event: TriggerEvent) {
+    let to_fire: Vec<(i32, i32, String, String)> = {
+        let Some(at) = world.get::<AttachedTriggers>(room) else {
+            return;
+        };
+        let keys = at.0.clone();
+        let catalog = world.resource::<TriggerCatalog>();
+        keys.into_iter()
+            .filter_map(|(zone, id)| {
+                let def = catalog.by_key.get(&(zone, id))?;
+                if def.flags.contains(&event) {
+                    Some((zone, id, def.name.clone(), def.commands.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    if to_fire.is_empty() {
+        return;
+    }
+    for (zone, id, name, body) in to_fire {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+            host.exec_for_listener_with_extras(world, room, entering, &body, &[])
+        });
+        drain_lua_outbox(world);
+        if let Err(e) = result {
+            warn!(zone, id, name = %name, event = ?event, error = %e, "room-entry trigger fire failed");
+        }
+    }
+}
+
 /// Fire `GREET` / `GREET_ALL` triggers for every entity in `room`
 /// (other than the entering actor) that carries `AttachedTriggers`.
 /// Used by the movement system after a player arrives in a new

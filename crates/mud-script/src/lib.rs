@@ -1051,8 +1051,20 @@ impl UserData for LuaActor {
             |lua, this, key: String| -> mlua::Result<Value> {
                 match key.as_str() {
                     "room" => {
+                        // For room-attached triggers (PREENTRY /
+                        // POSTENTRY / RESET), `self` IS the room and
+                        // the body uses `self.room:send(...)` to emit.
+                        // Returning Located(this).0 would give the
+                        // zone — wrong. So when `this` already has a
+                        // Room component, return self as a LuaRoom.
+                        // Otherwise resolve via Located as usual.
+                        use mud_world::Room;
                         let room_entity = world_from_lua(lua, |w| {
-                            w.get::<Located>(this.entity).map(|l| l.0)
+                            if w.get::<Room>(this.entity).is_some() {
+                                Some(this.entity)
+                            } else {
+                                w.get::<Located>(this.entity).map(|l| l.0)
+                            }
                         })?;
                         match room_entity {
                             Some(e) => Ok(Value::UserData(

@@ -14790,6 +14790,18 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         );
     }
 
+    // Fire PREENTRY triggers on the destination room before any
+    // movers' Located is updated. Bodies can read `actor` to inspect
+    // the entering player and emit flavor / gating text.
+    for &mover in &movers {
+        crate::triggers::fire_room_entry(
+            world,
+            target,
+            mover,
+            mud_world::TriggerEvent::Preentry,
+        );
+    }
+
     // Move everyone — and any mounts they're riding go with them.
     let mounts: Vec<Entity> = movers
         .iter()
@@ -14838,6 +14850,18 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // any scripted reaction text.
     for &mover in &movers {
         crate::triggers::fire_greet_in_room(world, mover, target);
+    }
+
+    // Fire POSTENTRY triggers attached to the destination room.
+    // `self` = room, `actor` = mover. Bodies typically run delayed
+    // flavor (the WORLD-trigger equivalent of "as you arrive...").
+    for &mover in &movers {
+        crate::triggers::fire_room_entry(
+            world,
+            target,
+            mover,
+            mud_world::TriggerEvent::Postentry,
+        );
     }
 }
 
