@@ -3741,6 +3741,17 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         return;
     }
 
+    // Fire COMMAND-flagged triggers in the player's room first.
+    // If any trigger returns `false`, the command is consumed (a
+    // mob intercepted it) and we stop dispatch here.
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let cmd_word = tokens[0].to_string();
+        let cmd_args = skip_n_tokens(trimmed, 1).to_string();
+        if crate::triggers::fire_command_in_room(world, player, located.0, &cmd_word, &cmd_args) {
+            return;
+        }
+    }
+
     let Some((cmd, n_consumed)) = longest_prefix_match(&tokens) else {
         // Fall through to socials before declaring unknown.
         if try_dispatch_social(world, player, tokens[0], skip_n_tokens(trimmed, 1)) {

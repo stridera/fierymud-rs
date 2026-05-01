@@ -195,6 +195,75 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
     }
 }
 
+/// Fire `COMMAND`-flagged triggers for every entity in the player's
+/// room (skipping the player themselves) that carries
+/// `AttachedTriggers`. Each fire binds `cmd` (command word) and
+/// `args` (rest of input) as Lua globals. Returns `true` if any
+/// trigger explicitly returned `false`, signaling the caller to
+/// stop dispatch (the command was consumed by the trigger).
+pub fn fire_command_in_room(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    cmd: &str,
+    args: &str,
+) -> bool {
+    let listeners: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located, &AttachedTriggers)>();
+        q.iter(world)
+            .filter(|(e, l, _)| *e != player && l.0 == room)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    if listeners.is_empty() {
+        return false;
+    }
+    let mut consumed = false;
+    for listener in listeners {
+        let to_fire: Vec<(i32, i32, String, String)> = {
+            let Some(at) = world.get::<AttachedTriggers>(listener) else {
+                continue;
+            };
+            let keys = at.0.clone();
+            let catalog = world.resource::<TriggerCatalog>();
+            keys.into_iter()
+                .filter_map(|(zone, id)| {
+                    let def = catalog.by_key.get(&(zone, id))?;
+                    if def.flags.contains(&TriggerEvent::Command) {
+                        Some((zone, id, def.name.clone(), def.commands.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for (zone, id, name, body) in to_fire {
+            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+                host.exec_for_event_with_value(
+                    world,
+                    listener,
+                    player,
+                    None,
+                    &body,
+                    &[("cmd", cmd), ("args", args)],
+                )
+            });
+            drain_lua_outbox(world);
+            match result {
+                Ok((_out, Some(false))) => {
+                    consumed = true;
+                }
+                Ok(_) => {}
+                Err(e) => warn!(zone, id, name = %name, error = %e, "COMMAND trigger fire failed"),
+            }
+        }
+        if consumed {
+            break;
+        }
+    }
+    consumed
+}
+
 /// Bulk-fire `LOAD` triggers for every Mob in the world that carries
 /// `AttachedTriggers`. Used once at boot after `load_from_db` so
 /// proto-attached mob triggers (e.g. `skills.set_level`) run before

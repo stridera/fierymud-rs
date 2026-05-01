@@ -85,7 +85,9 @@ impl LuaHost {
     /// Full event dispatcher entry: `self` = listener, `actor` =
     /// `acting_entity`, `object` = the optional item entity (nil when
     /// `None`). Used by RECEIVE / GIVE / GET / DROP / WEAR / etc.
-    #[allow(clippy::too_many_lines)]
+    /// Discards the body's return value; for COMMAND-style dispatch
+    /// where the return value gates whether to continue, see
+    /// `exec_for_event_with_value`.
     pub fn exec_for_event(
         &self,
         world: &mut World,
@@ -95,6 +97,32 @@ impl LuaHost {
         code: &str,
         extras: &[(&str, &str)],
     ) -> Result<String, String> {
+        self.exec_for_event_with_value(
+            world,
+            listener,
+            acting_entity,
+            object_entity,
+            code,
+            extras,
+        )
+        .map(|(out, _)| out)
+    }
+
+    /// Like `exec_for_event` but also captures the body's return
+    /// value as an optional boolean (true when the body ended with
+    /// `return true` or no return; false on `return false`; None
+    /// for non-boolean returns). Used by COMMAND dispatch to gate
+    /// whether the typed command continues to the default handler.
+    #[allow(clippy::too_many_lines)]
+    pub fn exec_for_event_with_value(
+        &self,
+        world: &mut World,
+        listener: Entity,
+        acting_entity: Entity,
+        object_entity: Option<Entity>,
+        code: &str,
+        extras: &[(&str, &str)],
+    ) -> Result<(String, Option<bool>), String> {
         let span = tracing::info_span!("lua_exec");
         let _g = span.enter();
 
@@ -104,7 +132,7 @@ impl LuaHost {
         self.lua.set_app_data(world_ptr);
         self.lua.set_app_data(LuaCapture::default());
 
-        let result = (|| -> mlua::Result<()> {
+        let result = (|| -> mlua::Result<Value> {
             let globals = self.lua.globals();
             globals.set("actor", LuaActor { entity: acting_entity })?;
             // `self` is the canonical name in DG-Script-converted bodies
@@ -350,7 +378,7 @@ impl LuaHost {
                 globals.set(*name, *value)?;
             }
 
-            self.lua.load(code).exec()
+            self.lua.load(code).eval::<Value>()
         })();
 
         // Clean up app data so a later call gets a fresh capture.
@@ -381,13 +409,18 @@ impl LuaHost {
         }
 
         match result {
-            Ok(()) => {
+            Ok(value) => {
                 let mut out = String::new();
                 for line in captured {
                     out.push_str(&line);
                     out.push_str("\r\n");
                 }
-                Ok(out)
+                let return_bool = if let Value::Boolean(b) = value {
+                    Some(b)
+                } else {
+                    None
+                };
+                Ok((out, return_bool))
             }
             Err(e) => Err(format!("lua error: {e}")),
         }
