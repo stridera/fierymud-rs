@@ -36,6 +36,7 @@ impl EffectCatalog {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct EffectDef {
     pub id: i32,
     pub name: String,
@@ -47,6 +48,13 @@ pub struct EffectDef {
     /// Used as the secondary fallback for duration/amount/etc. when an
     /// `AbilityEffect.override_params` row didn't supply them.
     pub default_params: serde_json::Value,
+    /// Mirror of the schema's prevent-flags. The dispatcher reads
+    /// these at command time to refuse silenced/held/anti-magic
+    /// actions. None of the seeded fierydev rows use them today; the
+    /// runtime is pre-wired so when content lands the gate works.
+    pub prevents_speaking: bool,
+    pub prevents_casting: bool,
+    pub prevents_movement: bool,
 }
 
 /// Catalog of object prototypes loaded from the Objects table at startup.

@@ -240,6 +240,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 tags: row.tags,
                 presence_override: row.presence_override,
                 default_params: row.default_params,
+                prevents_speaking: row.prevents_speaking,
+                prevents_casting: row.prevents_casting,
+                prevents_movement: row.prevents_movement,
             },
         );
     }

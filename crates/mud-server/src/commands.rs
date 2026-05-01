@@ -11091,6 +11091,10 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
         send_to(world, player, "Say what?\r\n");
         return;
     }
+    if effect_prevents(world, player, Prevent::Speaking) {
+        send_to(world, player, "Your voice is silenced.\r\n");
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
@@ -11750,6 +11754,15 @@ fn invoke_ability(
         );
         return;
     };
+
+    // Anti-magic / silence gate. SPELL/CHANT/SONG kinds are
+    // verbal-magical; SKILL bypasses the gate (pure-physical action).
+    if !matches!(kind, mud_db::abilities::AbilityKind::Skill)
+        && effect_prevents(world, player, Prevent::Casting)
+    {
+        send_to(world, player, "Your magic is suppressed.\r\n");
+        return;
+    }
 
     // Gate on KnownAbilities when the player has any. Empty/missing
     // component falls through (admin testing path).
@@ -13485,6 +13498,42 @@ fn has_effect_named(world: &mut World, target: Entity, name: &str) -> bool {
     let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
     q.iter(world).any(|(eff, applied)| {
         applied.0 == target && eff.name.eq_ignore_ascii_case(name)
+    })
+}
+
+/// Which prevent-flag the caller is checking on a target's active
+/// effects. Each maps to one of the schema's `Effect.prevents_*`
+/// columns surfaced through `EffectDef`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Prevent {
+    Speaking,
+    Casting,
+    Movement,
+}
+
+/// True iff any active `EffectInstance` on `target` was sourced
+/// from an `EffectDef` whose corresponding `prevents_*` flag is
+/// set. Looks up each effect's catalog row by `EffectInstance.kind`
+/// — admin-spawned effects without a real catalog mapping fall
+/// through cleanly.
+pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) -> bool {
+    let active_kinds: Vec<i32> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, a)| a.0 == target)
+            .map(|(eff, _)| eff.kind)
+            .collect()
+    };
+    if active_kinds.is_empty() {
+        return false;
+    }
+    let catalog = world.resource::<EffectCatalog>();
+    active_kinds.iter().any(|id| {
+        catalog.by_id.get(id).is_some_and(|def| match kind {
+            Prevent::Speaking => def.prevents_speaking,
+            Prevent::Casting => def.prevents_casting,
+            Prevent::Movement => def.prevents_movement,
+        })
     })
 }
 
@@ -17901,6 +17950,10 @@ mv!(cmd_out, Out);
 #[allow(clippy::too_many_lines)]
 fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     if !require_alert_posture(world, player, "move") {
+        return;
+    }
+    if effect_prevents(world, player, Prevent::Movement) {
+        send_to(world, player, "You can't move right now.\r\n");
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {
