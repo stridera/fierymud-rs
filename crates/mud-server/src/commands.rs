@@ -1702,6 +1702,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_showids,
     },
     Command {
+        names: &["cancel"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "cancel [<effect>]",
+            summary: "Drop a non-permanent buff from yourself.",
+            long: "With no arg, lists effects you can cancel \
+                   (anything not flagged permanent). With an effect \
+                   name, finds the matching `EffectInstance` on you \
+                   and despawns it. Permanent effects (e.g. innate \
+                   resistances) refuse to cancel.",
+        },
+        run: cmd_cancel,
+    },
+    Command {
         names: &["effects", "affects", "aff"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -10279,6 +10295,60 @@ fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
         out.push_str(&format!("  {name:<24} {remaining:.1}s remaining\r\n"));
     }
     send_to(world, player, out);
+}
+
+/// `cancel [<effect>]`: drop a non-permanent effect from yourself.
+/// Empty arg lists cancellable effects; named arg matches by
+/// case-insensitive substring on the effect's name.
+fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim().to_ascii_lowercase();
+    let cancellable: Vec<(Entity, String, i32)> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, inst, a)| a.0 == player && inst.remaining_secs >= 0)
+            .map(|(e, inst, _)| (e, inst.name.clone(), inst.remaining_secs))
+            .collect()
+    };
+    if cancellable.is_empty() {
+        send_to(
+            world,
+            player,
+            "You have no effects you can cancel.\r\n",
+        );
+        return;
+    }
+    if needle.is_empty() {
+        let mut out = format!("\r\n{} cancellable effect(s):\r\n", cancellable.len());
+        for (_, name, remaining) in &cancellable {
+            out.push_str(&format!("  {name} ({remaining}s)\r\n"));
+        }
+        out.push_str("\r\nUse `cancel <name>` to drop one.\r\n");
+        send_to(world, player, out);
+        return;
+    }
+    let target = cancellable
+        .iter()
+        .find(|(_, name, _)| name.to_ascii_lowercase().contains(&needle))
+        .map(|(e, _, _)| *e);
+    let Some(target_effect) = target else {
+        send_to(
+            world,
+            player,
+            format!("No cancellable effect matching '{needle}' on you.\r\n"),
+        );
+        return;
+    };
+    let removed_name = world
+        .get::<EffectInstance>(target_effect)
+        .map_or_else(|| "?".to_string(), |i| i.name.clone());
+    if let Ok(e) = world.get_entity_mut(target_effect) {
+        e.despawn();
+    }
+    send_to(
+        world,
+        player,
+        format!("You cancel {removed_name}.\r\n"),
+    );
 }
 
 fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
