@@ -1974,6 +1974,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["qgive"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "qgive <player> <zone> <quest-id>",
+            summary: "Admin: assign a quest to another online player.",
+            long: "Same as `qload` but targets a named online player \
+                   instead of the caller. Target must be currently \
+                   online (offline-character assignment is left for a \
+                   future iteration).",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["qcomplete"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -3390,6 +3405,12 @@ pub async fn try_dispatch_async(
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_qload(world, player, pool, args).await;
+            true
+        }
+        "qgive" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_qgive(world, player, pool, args).await;
             true
         }
         "qcomplete" => {
@@ -13433,6 +13454,86 @@ pub(crate) async fn cmd_qload(
             world,
             player,
             format!("Already have Quest ({zone}, {id}).\r\n"),
+        ),
+        Err(e) => send_to(world, player, format!("Assign failed: {e}\r\n")),
+    }
+}
+
+/// `qgive <player> <zone> <quest-id>`: admin command — assign a
+/// quest to another online player's character. Refuses if target
+/// isn't online; offline assignment isn't wired today.
+pub(crate) async fn cmd_qgive(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let mut parts = args.split_whitespace();
+    let target_word = parts.next();
+    let zone_raw = parts.next();
+    let id_raw = parts.next();
+    let (Some(target_word), Some(zone_raw), Some(id_raw)) = (target_word, zone_raw, id_raw) else {
+        send_to(world, player, "Usage: qgive <player> <zone> <quest-id>\r\n");
+        return;
+    };
+    let Ok(zone) = zone_raw.parse::<i32>() else {
+        send_to(world, player, "Zone must be an integer.\r\n");
+        return;
+    };
+    let Ok(id) = id_raw.parse::<i32>() else {
+        send_to(world, player, "Quest id must be an integer.\r\n");
+        return;
+    };
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(target_word))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{target_word}' isn't online.\r\n"));
+        return;
+    };
+    let exists = match mud_db::quests::quest_exists(pool, zone, id).await {
+        Ok(b) => b,
+        Err(e) => {
+            send_to(world, player, format!("Quest lookup failed: {e}\r\n"));
+            return;
+        }
+    };
+    if !exists {
+        send_to(
+            world,
+            player,
+            format!("No Quest defined at ({zone}, {id}).\r\n"),
+        );
+        return;
+    }
+    let target_char_id = world.get::<Account>(target).map(|a| a.character_id.clone());
+    let Some(target_char_id) = target_char_id else {
+        send_to(world, player, "Target has no account info.\r\n");
+        return;
+    };
+    let target_name = name_of(world, target);
+    match mud_db::quests::admin_assign(pool, &target_char_id, zone, id).await {
+        Ok(Some(_)) => {
+            send_to(
+                world,
+                player,
+                format!("Assigned Quest ({zone}, {id}) to {target_name}.\r\n"),
+            );
+            send_to(
+                world,
+                target,
+                format!(
+                    "An immortal grants you a quest: ({zone}, {id}). Type `quests` to view.\r\n"
+                ),
+            );
+        }
+        Ok(None) => send_to(
+            world,
+            player,
+            format!("{target_name} already has Quest ({zone}, {id}).\r\n"),
         ),
         Err(e) => send_to(world, player, format!("Assign failed: {e}\r\n")),
     }
