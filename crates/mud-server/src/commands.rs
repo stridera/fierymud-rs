@@ -1114,6 +1114,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_spells,
     },
     Command {
+        names: &["level"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "level",
+            summary: "XP-curve readout: current level, XP, distance to next.",
+            long: "Reads `Profile.level` and `Profile.experience` and \
+                   shows the cumulative XP for this level, the next \
+                   level's threshold, and how far you have to go. \
+                   Capped levels (max in `LevelDefinition`) print a \
+                   max-level note instead.",
+        },
+        run: cmd_level,
+    },
+    Command {
         names: &["slots"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -10028,6 +10044,33 @@ fn submit_feedback(world: &mut World, player: Entity, kind: &'static str, args: 
         player,
         format!("Thanks. Your {kind} report has been logged.\r\n"),
     );
+}
+
+/// `level`: print level / XP / next-level delta.
+fn cmd_level(world: &mut World, player: Entity, _args: &str) {
+    use mud_world::LevelTable;
+    let Some(p) = world.get::<Profile>(player) else {
+        send_to(world, player, "You have no profile.\r\n");
+        return;
+    };
+    let level = p.level;
+    let xp = p.experience;
+    let table = world.resource::<LevelTable>();
+    let level_name = table.name_for(level);
+    let next_threshold = table.exp_for(level + 1);
+    let mut out = format!("\r\n{level_name} (level {level})\r\n");
+    out.push_str(&format!("Experience: {xp}\r\n"));
+    if let Some(threshold) = next_threshold {
+        let to_go = (threshold - xp).max(0);
+        let next_name = table.name_for(level + 1);
+        out.push_str(&format!(
+            "Next level ({next_name}, level {next_level}) at {threshold} XP — {to_go} to go.\r\n",
+            next_level = level + 1
+        ));
+    } else {
+        out.push_str("You are at the maximum level.\r\n");
+    }
+    send_to(world, player, out);
 }
 
 /// `slots`: display the player's per-circle slot count along with

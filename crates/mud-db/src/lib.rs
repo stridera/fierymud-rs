@@ -26,6 +26,7 @@ pub mod quests;
 pub mod room_exits;
 pub mod rooms;
 pub mod shops;
+pub mod levels;
 pub mod socials;
 pub mod spell_slots;
 pub mod triggers;

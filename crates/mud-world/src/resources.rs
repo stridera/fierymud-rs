@@ -313,6 +313,44 @@ pub struct TriggerCatalog {
     pub room_attachments: HashMap<(i32, i32), Vec<(i32, i32)>>,
 }
 
+/// `LevelDefinition` rows ordered by level. Drives the `level`
+/// readout (current XP vs threshold for next level) and is the
+/// eventual source of HP/stamina gains for level-ups.
+#[derive(Resource, Debug, Default)]
+pub struct LevelTable {
+    pub rows: Vec<LevelRow>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LevelRow {
+    pub level: i32,
+    pub name: Option<String>,
+    pub exp_required: i32,
+    pub hp_gain: i32,
+    pub stamina_gain: i32,
+    pub is_immortal: bool,
+}
+
+impl LevelTable {
+    /// Cumulative XP needed to reach `level`, or `None` if the
+    /// level isn't in the table (above max).
+    #[must_use]
+    pub fn exp_for(&self, level: i32) -> Option<i32> {
+        self.rows.iter().find(|r| r.level == level).map(|r| r.exp_required)
+    }
+
+    /// Display label for `level` ("Apprentice", "Mage", ...) or
+    /// the bare numeric form when no name is set.
+    #[must_use]
+    pub fn name_for(&self, level: i32) -> String {
+        self.rows
+            .iter()
+            .find(|r| r.level == level)
+            .and_then(|r| r.name.clone())
+            .unwrap_or_else(|| format!("Level {level}"))
+    }
+}
+
 /// Spell-slot tables loaded once at startup. `progression` maps
 /// `(level, circle)` → max slot count; `class_circles` maps
 /// `class_id` → list of `(circle, min_level)` the class can access;

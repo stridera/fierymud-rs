@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, boards, classes, effects, mob_reset_equipment,
+    abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions, ability_saving_throw, ability_targeting, boards, classes, effects, levels, mob_reset_equipment,
     mob_resets, mobs, object_abilities, object_reset_contents, object_resets, objects, room_exits,
     rooms, shops, socials, spell_slots, sqlx::PgPool, triggers, zones,
 };
@@ -418,6 +418,23 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             },
         );
     }
+
+    // Pass 4c.4: level definition table — drives the `level`
+    // command's XP-curve readout and is the eventual source of
+    // per-level HP/stamina gains.
+    let level_rows = levels::list_all(pool).await?;
+    let mut level_table = crate::resources::LevelTable::default();
+    for r in level_rows {
+        level_table.rows.push(crate::resources::LevelRow {
+            level: r.level,
+            name: r.name,
+            exp_required: r.exp_required,
+            hp_gain: r.hp_gain,
+            stamina_gain: r.stamina_gain,
+            is_immortal: r.is_immortal,
+        });
+    }
+    world.insert_resource(level_table);
 
     // Pass 4c.5: spell slot data. Three tables joined into one
     // resource — `SpellSlotProgression` (level × circle → slots),
