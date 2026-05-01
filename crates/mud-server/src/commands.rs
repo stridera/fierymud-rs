@@ -15073,7 +15073,7 @@ fn cmd_decline(world: &mut World, player: Entity, _args: &str) {
 /// Find the root of a follow chain — walks `Follower` upward until
 /// it hits an entity with no `Follower` component. Returns `start`
 /// itself if it's already a root.
-fn group_root(world: &World, start: Entity) -> Entity {
+pub(crate) fn group_root(world: &World, start: Entity) -> Entity {
     let mut current = start;
     let mut steps = 0;
     while let Some(f) = world.get::<Follower>(current) {
@@ -15091,7 +15091,7 @@ fn group_root(world: &World, start: Entity) -> Entity {
 /// Walk every entity transitively following `root` (directly or via
 /// chain). Includes `root` itself in the returned vec. The order is
 /// breadth-first; the leader is always position 0.
-fn group_members(world: &mut World, root: Entity) -> Vec<Entity> {
+pub(crate) fn group_members(world: &mut World, root: Entity) -> Vec<Entity> {
     let mut group = vec![root];
     let mut frontier = vec![root];
     while let Some(parent) = frontier.pop() {

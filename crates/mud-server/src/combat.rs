@@ -455,17 +455,47 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
         q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
     };
     let Some(killer) = killer else { return };
-    if let Some(mut p) = world.get_mut::<mud_world::Profile>(killer) {
-        p.experience = p.experience.saturating_add(xp);
+
+    // Group XP share: walk the killer's group (rooted at the
+    // top-of-chain follower target), keep only members in the
+    // same room as the killer, and split the kill XP evenly. Solo
+    // kills (no follow chain) get the full amount.
+    let killer_room = world.get::<mud_world::Located>(killer).map(|l| l.0);
+    let recipients: Vec<Entity> = {
+        let root = crate::commands::group_root(world, killer);
+        let members = crate::commands::group_members(world, root);
+        members
+            .into_iter()
+            .filter(|m| {
+                killer_room.is_some()
+                    && world.get::<mud_world::Located>(*m).map(|l| l.0) == killer_room
+            })
+            .collect()
+    };
+    let recipients = if recipients.is_empty() {
+        vec![killer]
     } else {
-        return;
+        recipients
+    };
+    let n = i32::try_from(recipients.len()).unwrap_or(1).max(1);
+    let share = (xp / n).max(1);
+
+    for entity in &recipients {
+        if let Some(mut p) = world.get_mut::<mud_world::Profile>(*entity) {
+            p.experience = p.experience.saturating_add(share);
+        } else {
+            continue;
+        }
+        let line = if *entity == killer && recipients.len() == 1 {
+            format!("You gain {share} experience for the kill of {victim_name}.\r\n")
+        } else {
+            format!(
+                "You gain {share} experience (group share) for the kill of {victim_name}.\r\n"
+            )
+        };
+        send_to(world, *entity, line);
+        check_level_up(world, *entity);
     }
-    send_to(
-        world,
-        killer,
-        format!("You gain {xp} experience for the kill of {victim_name}.\r\n"),
-    );
-    check_level_up(world, killer);
 }
 
 /// Check whether `entity`'s `Profile.experience` has crossed the
