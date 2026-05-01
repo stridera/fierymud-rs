@@ -776,12 +776,11 @@ impl UserData for LuaActor {
         // uses `self.X` exclusively. Adding them as methods would
         // shadow the __index resolution and return the function
         // value (`<function>`) instead of the bound value.
-        methods.add_method("is_player", |lua, this, ()| {
-            world_from_lua(lua, |w| w.get::<Player>(this.entity).is_some())
-        });
-        methods.add_method("is_mob", |lua, this, ()| {
-            world_from_lua(lua, |w| w.get::<Mob>(this.entity).is_some())
-        });
+        // `is_player` lives only as a field on __index — the corpus
+        // uses `self.is_player` (211 refs), not the method form, and
+        // method registration would shadow it. `is_mob` is similar
+        // (no field-form refs, but method-form is rare). Both are
+        // exposed via __index below.
         // Returns the room name, or nil if the actor isn't in a room.
         methods.add_method(
             "room_name",
@@ -1169,6 +1168,85 @@ impl UserData for LuaActor {
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
+                    // 167 corpus refs: gating against race name in
+                    // string compare patterns (`actor.race == "elf"`).
+                    "race" => {
+                        let s = world_from_lua(lua, |w| {
+                            w.get::<Profile>(this.entity)
+                                .map(|p| p.race.to_ascii_lowercase())
+                                .unwrap_or_default()
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    // 211 corpus refs.
+                    "is_player" => world_from_lua(lua, |w| {
+                        Value::Boolean(w.get::<Player>(this.entity).is_some())
+                    }),
+                    "is_mob" => world_from_lua(lua, |w| {
+                        Value::Boolean(w.get::<Mob>(this.entity).is_some())
+                    }),
+                    // 95 corpus refs — character alignment (good/evil
+                    // axis as integer). Sourced from CombatStats so
+                    // both players and mobs return their loaded value.
+                    "alignment" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CombatStats>(this.entity)
+                                .map_or(0, |c| c.alignment)
+                                .into(),
+                        )
+                    }),
+                    // 42 corpus refs. Returns the posture label
+                    // matching the legacy "Position" enum token
+                    // ("standing" / "sitting" / "sleeping" / etc.).
+                    "position" => {
+                        let s = world_from_lua(lua, |w| {
+                            w.get::<Posture>(this.entity).map_or_else(
+                                || "standing".to_string(),
+                                |p| {
+                                    match p.0 {
+                                        PostureKind::Standing => "standing",
+                                        PostureKind::Sitting => "sitting",
+                                        PostureKind::Resting => "resting",
+                                        PostureKind::Sleeping => "sleeping",
+                                        PostureKind::Kneeling => "kneeling",
+                                    }
+                                    .to_string()
+                                },
+                            )
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    // 34 corpus refs.
+                    "is_fighting" => world_from_lua(lua, |w| {
+                        Value::Boolean(w.get::<mud_world::Fighting>(this.entity).is_some())
+                    }),
+                    // 64 corpus refs — DG-Script `vnum` field. Legacy
+                    // CircleMUD encoding: zone * 100 + id. Triggers
+                    // converted from DG sometimes still reference
+                    // `self.vnum` instead of (zone_id, id) — return
+                    // the encoded form so they keep working.
+                    "vnum" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<WorldKey>(this.entity)
+                                .map_or(0, |wk| wk.zone * 100 + wk.id)
+                                .into(),
+                        )
+                    }),
+                    // 62 corpus refs — gender-keyed pronoun ("his" /
+                    // "her" / "its"). Sourced from Profile.gender
+                    // (players); mobs return "its" by default.
+                    "possessive" => {
+                        let s = world_from_lua(lua, |w| {
+                            w.get::<Profile>(this.entity)
+                                .map_or("its", |p| match p.gender.as_str() {
+                                    "male" => "his",
+                                    "female" => "her",
+                                    _ => "its",
+                                })
+                                .to_string()
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
                     _ => Ok(Value::Nil),
                 }
             },
@@ -1496,7 +1574,7 @@ mod tests {
             .exec_for_actor(
                 &mut world,
                 player,
-                "print(actor:is_player(), actor:is_mob())",
+                "print(actor.is_player, actor.is_mob)",
             )
             .expect("ok");
         // Lua's print joins multiple args with tab.
@@ -1505,7 +1583,7 @@ mod tests {
             .exec_for_actor(
                 &mut world,
                 mob,
-                "print(actor:is_player(), actor:is_mob())",
+                "print(actor.is_player, actor.is_mob)",
             )
             .expect("ok");
         assert_eq!(mob_out, "false\ttrue\r\n");
