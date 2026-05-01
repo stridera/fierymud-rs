@@ -2880,6 +2880,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_tstat,
     },
     Command {
+        names: &["scripterrors", "scripterr"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "scripterrors [<count>]",
+            summary: "Recent Lua trigger fire failures.",
+            long: "Builder+. Walks the in-memory ScriptErrorLog \
+                   (most-recent first) and prints each failure with \
+                   timestamp, (zone, id), trigger name, event, and \
+                   the lua error message. Capped at 256 entries; \
+                   default `count` is 20.",
+        },
+        run: cmd_scripterrors,
+    },
+    Command {
         names: &["astat"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -15754,6 +15770,45 @@ fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
     }
     out.push_str(&format!("triggers:      {trig_count}\r\n"));
     out.push_str(&format!("live count:    {live}\r\n"));
+    send_to(world, player, out);
+}
+
+/// `scripterrors [<n>]`: list the most recent Lua trigger fire
+/// failures from the in-memory `ScriptErrorLog`.
+fn cmd_scripterrors(world: &mut World, player: Entity, args: &str) {
+    use mud_world::ScriptErrorLog;
+    let n: usize = args
+        .trim()
+        .parse()
+        .ok()
+        .filter(|x: &usize| *x > 0)
+        .unwrap_or(20);
+    if !world.contains_resource::<ScriptErrorLog>() {
+        send_to(world, player, "No trigger errors recorded yet.\r\n");
+        return;
+    }
+    let log = world.resource::<ScriptErrorLog>();
+    if log.entries.is_empty() {
+        send_to(world, player, "No trigger errors recorded yet.\r\n");
+        return;
+    }
+    let total = log.entries.len();
+    let mut out = format!("\r\nLast {} of {total} trigger error(s):\r\n", n.min(total));
+    for entry in log.entries.iter().rev().take(n) {
+        let secs_ago = std::time::SystemTime::now()
+            .duration_since(entry.at)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        out.push_str(&format!(
+            "  {ago:>4}s ago  ({zone}, {id}) [{event}] {name}\r\n         {msg}\r\n",
+            ago = secs_ago,
+            zone = entry.trigger_zone,
+            id = entry.trigger_id,
+            event = entry.event,
+            name = entry.trigger_name,
+            msg = entry.message,
+        ));
+    }
     send_to(world, player, out);
 }
 

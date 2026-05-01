@@ -313,6 +313,38 @@ pub struct TriggerCatalog {
     pub room_attachments: HashMap<(i32, i32), Vec<(i32, i32)>>,
 }
 
+/// One entry in the in-memory script error log. Push-only; the
+/// reader (admin `scripterrors` command) walks the buffer in
+/// reverse chronological order. No DB persistence yet — the
+/// schema's `script_error_log` table is the eventual home.
+#[derive(Debug, Clone)]
+pub struct ScriptError {
+    pub at: std::time::SystemTime,
+    pub trigger_zone: i32,
+    pub trigger_id: i32,
+    pub trigger_name: String,
+    pub event: String,
+    pub message: String,
+}
+
+/// Ring buffer of recent trigger fire failures. Pushed by the
+/// dispatcher; capped at 256 entries so a runaway trigger doesn't
+/// blow memory. Drained by `scripterrors`.
+#[derive(Resource, Debug, Default)]
+pub struct ScriptErrorLog {
+    pub entries: std::collections::VecDeque<ScriptError>,
+}
+
+impl ScriptErrorLog {
+    pub const CAP: usize = 256;
+    pub fn push(&mut self, e: ScriptError) {
+        if self.entries.len() >= Self::CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(e);
+    }
+}
+
 /// Queued output produced by Lua trigger bodies. `messages` carries
 /// room broadcasts (`room.send` / `room.send_except`); `direct`
 /// carries one-to-one lines (`actor.send`). mud-server drains both

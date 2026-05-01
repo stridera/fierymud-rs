@@ -10,10 +10,37 @@
 //! gain dispatch points.
 
 use bevy_ecs::prelude::*;
-use mud_world::{AttachedTriggers, Located, Mob, TriggerCatalog, TriggerEvent};
+use mud_world::{
+    AttachedTriggers, Located, Mob, ScriptError, ScriptErrorLog, TriggerCatalog, TriggerEvent,
+};
 use tracing::warn;
 
 use crate::commands::drain_lua_outbox;
+
+/// Push a fire failure into the in-memory `ScriptErrorLog` and emit
+/// the matching tracing warn. Called from every event dispatcher's
+/// error arm.
+fn record_failure(
+    world: &mut World,
+    zone: i32,
+    id: i32,
+    name: &str,
+    event: &str,
+    message: &str,
+) {
+    warn!(zone, id, name = %name, event = %event, error = %message, "trigger fire failed");
+    if !world.contains_resource::<ScriptErrorLog>() {
+        world.insert_resource(ScriptErrorLog::default());
+    }
+    world.resource_mut::<ScriptErrorLog>().push(ScriptError {
+        at: std::time::SystemTime::now(),
+        trigger_zone: zone,
+        trigger_id: id,
+        trigger_name: name.to_string(),
+        event: event.to_string(),
+        message: message.to_string(),
+    });
+}
 
 /// Fire every trigger attached to `entity` whose flags include `event`.
 /// Each fire takes a fresh `&mut World` (via `resource_scope` on
@@ -51,7 +78,7 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
         });
         drain_lua_outbox(world);
         if let Err(e) = result {
-            warn!(zone, id, name = %name, error = %e, "trigger fire failed");
+            record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
         }
     }
 }
@@ -105,7 +132,7 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
             });
             drain_lua_outbox(world);
             if let Err(e) = result {
-                warn!(zone, id, name = %name, error = %e, "SPEECH trigger fire failed");
+                record_failure(world, zone, id, &name, "SPEECH", &e);
             }
         }
     }
@@ -142,7 +169,7 @@ pub fn fire_room_entry(world: &mut World, room: Entity, entering: Entity, event:
         });
         drain_lua_outbox(world);
         if let Err(e) = result {
-            warn!(zone, id, name = %name, event = ?event, error = %e, "room-entry trigger fire failed");
+            record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
         }
     }
 }
@@ -189,7 +216,7 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
             });
             drain_lua_outbox(world);
             if let Err(e) = result {
-                warn!(zone, id, name = %name, error = %e, "GREET trigger fire failed");
+                record_failure(world, zone, id, &name, "GREET", &e);
             }
         }
     }
@@ -232,7 +259,7 @@ pub fn fire_item_event(
         });
         drain_lua_outbox(world);
         if let Err(e) = result {
-            warn!(zone, id, name = %name, event = ?event, error = %e, "item-event trigger fire failed");
+            record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
         }
     }
 }
@@ -268,7 +295,7 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
         });
         drain_lua_outbox(world);
         if let Err(e) = result {
-            warn!(zone, id, name = %name, error = %e, "RECEIVE trigger fire failed");
+            record_failure(world, zone, id, &name, "RECEIVE", &e);
         }
     }
 }
@@ -332,7 +359,7 @@ pub fn fire_command_in_room(
                     consumed = true;
                 }
                 Ok(_) => {}
-                Err(e) => warn!(zone, id, name = %name, error = %e, "COMMAND trigger fire failed"),
+                Err(e) => record_failure(world, zone, id, &name, "COMMAND", &e),
             }
         }
         if consumed {
