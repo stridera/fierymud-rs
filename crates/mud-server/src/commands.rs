@@ -2094,6 +2094,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_gossip,
     },
     Command {
+        names: &["petition"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "petition <message>",
+            summary: "Send a message to all online immortals.",
+            long: "Quick way to ask a staff member for help. Reaches \
+                   every online player whose role is Immortal+; the \
+                   sender gets a confirmation echo. Mortals never see \
+                   anyone else's petitions.",
+        },
+        run: cmd_petition,
+    },
+    Command {
         names: &["wiznet", ";"],
         min_role: UserRole::Immortal,
         required_perm: None,
@@ -13830,6 +13845,37 @@ fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
         };
         send_to(world, t, line);
     }
+}
+
+/// `petition <message>`: one-way help channel. Anyone can send;
+/// every online Immortal+ receives. Sender gets a confirmation echo.
+fn cmd_petition(world: &mut World, player: Entity, args: &str) {
+    let message = args.trim();
+    if message.is_empty() {
+        send_to(
+            world,
+            player,
+            "Petition what? Use this to ask online immortals for help.\r\n",
+        );
+        return;
+    }
+    let player_name = name_of(world, player);
+    let immortals: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Account), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .filter(|(_, a)| a.role.at_least(UserRole::Immortal))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let line = format!("[PETITION] {player_name}: {message}\r\n");
+    for t in immortals {
+        send_to(world, t, line.clone());
+    }
+    send_to(
+        world,
+        player,
+        "Your petition has been sent to the immortals.\r\n",
+    );
 }
 
 /// `wiznet <message>`: staff-only chat. Reaches every online
