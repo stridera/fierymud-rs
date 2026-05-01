@@ -2886,6 +2886,24 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_triggers,
     },
+    Command {
+        names: &["firetrig"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "firetrig <zone> <id> [<keyword>]",
+            summary: "Hand-fire a Lua trigger body for testing.",
+            long: "Looks up the trigger in TriggerCatalog by `(zone, id)` \
+                   and executes its `commands` body via the LuaHost. \
+                   Without a keyword, `self` and `actor` bind to YOU. \
+                   With a keyword, they bind to the matching mob/item in \
+                   the current room. Captured `print` output and any \
+                   error are sent back. Useful for validating trigger \
+                   data without waiting for the natural event.",
+        },
+        run: cmd_firetrig,
+    },
 ];
 
 const MOVE_HELP: Help = Help {
@@ -15124,6 +15142,62 @@ fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
     } else {
         out.push_str(&format!("{total} trigger(s).\r\n"));
         send_to(world, player, out);
+    }
+}
+
+/// `firetrig <zone> <id> [<keyword>]`: manually fire a Lua trigger
+/// body against an actor. The actor defaults to the player; with a
+/// keyword, resolves a mob/item in the current room. Bound via
+/// `self` / `actor` in the executed snippet.
+fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() < 2 {
+        send_to(world, player, "Usage: firetrig <zone> <id> [<keyword>]\r\n");
+        return;
+    }
+    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
+        send_to(world, player, "Zone and id must be integers.\r\n");
+        return;
+    };
+    let body = world
+        .resource::<TriggerCatalog>()
+        .by_key
+        .get(&(zone, id))
+        .map(|d| d.commands.clone());
+    let Some(code) = body else {
+        send_to(world, player, format!("No trigger ({zone}, {id}) in catalog.\r\n"));
+        return;
+    };
+
+    let actor = if parts.len() >= 3 {
+        let needle = parts[2..].join(" ");
+        let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+            send_to(world, player, "You're nowhere.\r\n");
+            return;
+        };
+        let Some(target) = find_in_room(world, &needle, room)
+            .or_else(|| find_actor_in_room(world, &needle, room, player))
+        else {
+            send_to(world, player, format!("No '{needle}' here.\r\n"));
+            return;
+        };
+        target
+    } else {
+        player
+    };
+
+    let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+        host.exec_for_actor(world, actor, &code)
+    });
+    match result {
+        Ok(out) => {
+            if out.is_empty() {
+                send_to(world, player, "(trigger ran, no output)\r\n");
+            } else {
+                send_to(world, player, out);
+            }
+        }
+        Err(e) => send_to(world, player, format!("{e}\r\n")),
     }
 }
 

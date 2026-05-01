@@ -56,6 +56,12 @@ impl LuaHost {
         let result = (|| -> mlua::Result<()> {
             let globals = self.lua.globals();
             globals.set("actor", LuaActor { entity: actor })?;
+            // `self` is the canonical name in DG-Script-converted bodies
+            // ("set_level(self, ...)"). Bind it alongside `actor` so the
+            // imported corpus runs without rewriting; both point at the
+            // same entity. Lua treats `self` as an ordinary identifier
+            // outside of `:` method definitions.
+            globals.set("self", LuaActor { entity: actor })?;
 
             // Override print so output flows back to the caller.
             globals.set(
@@ -82,6 +88,7 @@ impl LuaHost {
         self.lua.remove_app_data::<WorldPtr>();
         // Unbind globals to avoid leaking actor between calls.
         let _ = self.lua.globals().raw_remove("actor");
+        let _ = self.lua.globals().raw_remove("self");
 
         match result {
             Ok(()) => {
@@ -336,6 +343,16 @@ mod tests {
             .exec_for_actor(&mut world, actor, "print(tostring(actor))")
             .expect("ok");
         assert_eq!(out, "Actor(TestActor)\r\n");
+    }
+
+    #[test]
+    fn self_binding_aliases_actor() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        let out = host
+            .exec_for_actor(&mut world, actor, "print(self:name())")
+            .expect("ok");
+        assert_eq!(out, "TestActor\r\n");
     }
 
     #[test]
