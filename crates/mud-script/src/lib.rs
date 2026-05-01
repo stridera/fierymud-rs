@@ -10,8 +10,8 @@
 use std::ptr::NonNull;
 
 use bevy_ecs::prelude::*;
-use mlua::{Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
-use mud_world::{Health, Located, Mob, Named, Player};
+use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
+use mud_world::{AbilityCatalog, Health, KnownAbilities, Located, Mob, Named, Player};
 
 /// Bevy resource wrapping the Lua interpreter.
 #[derive(Resource)]
@@ -76,6 +76,30 @@ impl LuaHost {
                     })?,
             )?;
 
+            // `globals` is a script-scoped scratchpad table. The
+            // DG-Script-converted corpus uses the
+            // `globals.x = globals.x or true` pattern as a "first-time
+            // only" guard. v1: per-call empty table — writes/reads are
+            // consistent within the body. Persistence (round-trip via
+            // `Triggers.variables` jsonb) is a follow-up.
+            globals.set("globals", self.lua.create_table()?)?;
+
+            // `skills.set_level(actor, name, level)` upserts an entry
+            // into the actor's `KnownAbilities`. Used by the
+            // breathe-* family of LOAD triggers to grant abilities at
+            // mob spawn time.
+            let skills_tbl = self.lua.create_table()?;
+            skills_tbl.set(
+                "set_level",
+                self.lua.create_function(
+                    |lua, (a, name, level): (AnyUserData, String, i32)| -> mlua::Result<()> {
+                        let entity = a.borrow::<LuaActor>()?.entity;
+                        skills_set_level(lua, entity, &name, level)
+                    },
+                )?,
+            )?;
+            globals.set("skills", skills_tbl)?;
+
             self.lua.load(code).exec()
         })();
 
@@ -89,6 +113,8 @@ impl LuaHost {
         // Unbind globals to avoid leaking actor between calls.
         let _ = self.lua.globals().raw_remove("actor");
         let _ = self.lua.globals().raw_remove("self");
+        let _ = self.lua.globals().raw_remove("globals");
+        let _ = self.lua.globals().raw_remove("skills");
 
         match result {
             Ok(()) => {
@@ -126,6 +152,55 @@ fn world_from_lua<R>(lua: &Lua, f: impl FnOnce(&World) -> R) -> mlua::Result<R> 
     // don't re-enter Lua before the function returns.
     let world = unsafe { ptr.0.as_ref() };
     Ok(f(world))
+}
+
+fn world_mut_from_lua<R>(lua: &Lua, f: impl FnOnce(&mut World) -> R) -> mlua::Result<R> {
+    let ptr = lua
+        .app_data_ref::<WorldPtr>()
+        .ok_or_else(|| mlua::Error::external("no world bound to Lua state"))?;
+    let mut p = ptr.0;
+    drop(ptr);
+    // Safety: same invariant as `world_from_lua` — exclusive access to
+    // World is held by exec_for_actor for the duration of the Lua call,
+    // and Lua callbacks never re-enter (no coroutine yielding into the
+    // host yet).
+    let world = unsafe { p.as_mut() };
+    Ok(f(world))
+}
+
+/// Upsert a `KnownAbilities` row on `entity`. If the entity has no
+/// `KnownAbilities` component yet (mobs typically don't), insert one.
+/// Names are matched case-insensitively against `AbilityCatalog.by_name`
+/// (the lowercased plain-name index). Unknown names are a no-op so
+/// imported triggers don't crash on data drift.
+fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::Result<()> {
+    world_mut_from_lua(lua, |world| {
+        let key = name.trim().to_ascii_lowercase();
+        let Some(ability_id) = world
+            .resource::<AbilityCatalog>()
+            .by_name
+            .get(&key)
+            .map(|d| d.id)
+        else {
+            return;
+        };
+        let known = if let Some(existing) = world.get_mut::<KnownAbilities>(entity) {
+            existing
+        } else {
+            world.entity_mut(entity).insert(KnownAbilities::default());
+            world
+                .get_mut::<KnownAbilities>(entity)
+                .expect("just inserted")
+        };
+        let mut known = known;
+        if let Some(slot) = known.entries.iter_mut().find(|(id, _, _)| *id == ability_id) {
+            slot.1 = level;
+            slot.2 = true;
+        } else {
+            known.entries.push((ability_id, level, true));
+            known.entries.sort_by_key(|(id, _, _)| *id);
+        }
+    })
 }
 
 fn format_args(args: &Variadic<Value>) -> String {
@@ -343,6 +418,56 @@ mod tests {
             .exec_for_actor(&mut world, actor, "print(tostring(actor))")
             .expect("ok");
         assert_eq!(out, "Actor(TestActor)\r\n");
+    }
+
+    #[test]
+    fn globals_table_is_writable_within_call() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        // The trigger corpus uses `globals.x = globals.x or true` patterns.
+        // v1 is a per-call empty table — within the body, reads after writes
+        // should round-trip.
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                actor,
+                "globals.flag = 'hello'; print(globals.flag)",
+            )
+            .expect("ok");
+        assert_eq!(out, "hello\r\n");
+    }
+
+    #[test]
+    fn globals_does_not_persist_across_calls() {
+        let (mut world, actor) = make_world_with_actor();
+        let host = LuaHost::new();
+        let _ = host
+            .exec_for_actor(&mut world, actor, "globals.flag = 'set-once'")
+            .unwrap();
+        let out = host
+            .exec_for_actor(&mut world, actor, "print(tostring(globals.flag))")
+            .expect("ok");
+        // Per-call table → fresh empty table → field is nil.
+        assert_eq!(out, "nil\r\n");
+    }
+
+    #[test]
+    fn skills_set_level_unknown_ability_is_noop() {
+        let (mut world, actor) = make_world_with_actor();
+        // No AbilityCatalog inserted → all lookups miss → no error.
+        world.insert_resource(AbilityCatalog::default());
+        let host = LuaHost::new();
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                actor,
+                "skills.set_level(self, 'no-such-ability', 100); print('ok')",
+            )
+            .expect("ok");
+        assert_eq!(out, "ok\r\n");
+        // No KnownAbilities component should have been inserted for an
+        // unknown ability — the no-op path doesn't create state.
+        assert!(world.get::<KnownAbilities>(actor).is_none());
     }
 
     #[test]
