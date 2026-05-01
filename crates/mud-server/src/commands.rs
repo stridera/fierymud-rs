@@ -12057,6 +12057,28 @@ fn invoke_ability(
                     applied_msgs.push(format!("{} (not in combat)", spec.name));
                 }
             }
+            "extract" => {
+                // Remove the target from the world. Used by Banish
+                // (and any future "send back to home plane" /
+                // "evict from this dimension" abilities). Players are
+                // never extracted — that path leads to lost data and
+                // is reserved for admin commands. Mobs are despawned
+                // outright; their effects, equipment, and triggers
+                // get the same cleanup as mob death.
+                if world.get::<Player>(target_entity).is_some() {
+                    applied_msgs.push(format!("{} (can't extract a player)", spec.name));
+                    continue;
+                }
+                if world.get::<Mob>(target_entity).is_none() {
+                    applied_msgs.push(format!("{} (target isn't a creature)", spec.name));
+                    continue;
+                }
+                disengage_attackers_of(world, target_entity);
+                if let Ok(e) = world.get_entity_mut(target_entity) {
+                    e.despawn();
+                }
+                applied_msgs.push(format!("{} (banished)", spec.name));
+            }
             "dismount" => {
                 // Force-end the rider/mount relationship on the
                 // target entity. Works both directions: target might
