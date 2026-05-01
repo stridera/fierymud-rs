@@ -1974,6 +1974,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["innate"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "innate",
+            summary: "List your race's innate abilities.",
+            long: "Reads the `RaceAbilities` rows for your character's \
+                   race and prints each ability's name, category \
+                   (PRIMARY / SECONDARY / ...), starting bonus, and \
+                   proficiency cap. Race is stamped on the character \
+                   at creation; you don't pick or change innates here.",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["questinfo"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3469,6 +3485,12 @@ pub async fn try_dispatch_async(
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_questinfo(world, player, pool, args).await;
+            true
+        }
+        "innate" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_innate(world, player, pool).await;
             true
         }
         "qload" => {
@@ -13581,6 +13603,45 @@ pub(crate) async fn cmd_qload(
         ),
         Err(e) => send_to(world, player, format!("Assign failed: {e}\r\n")),
     }
+}
+
+/// `innate`: list the caller race's innate abilities (`RaceAbilities`).
+pub(crate) async fn cmd_innate(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+) {
+    let race = world.get::<Profile>(player).map(|p| p.race.clone());
+    let Some(race) = race else {
+        send_to(world, player, "You have no race assigned.\r\n");
+        return;
+    };
+    let rows = match mud_db::race_abilities::list_for_race(pool, &race).await {
+        Ok(r) => r,
+        Err(e) => {
+            send_to(world, player, format!("Innate fetch failed: {e}\r\n"));
+            return;
+        }
+    };
+    if rows.is_empty() {
+        send_to(
+            world,
+            player,
+            format!("\r\nThe {race} race has no innate abilities.\r\n"),
+        );
+        return;
+    }
+    let mut out = format!("\r\nInnate abilities for {race} ({}):\r\n", rows.len());
+    for r in &rows {
+        out.push_str(&format!(
+            "  {name:<24} {cat:<10} bonus +{bonus:<3} cap {cap}\r\n",
+            name = r.ability_name,
+            cat = r.category,
+            bonus = r.bonus,
+            cap = r.proficiency_cap,
+        ));
+    }
+    send_to(world, player, out);
 }
 
 /// `questinfo <zone> <id>`: read-only catalog view of one quest.

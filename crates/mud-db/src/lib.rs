@@ -24,6 +24,7 @@ pub mod object_reset_contents;
 pub mod object_resets;
 pub mod objects;
 pub mod quests;
+pub mod race_abilities;
 pub mod room_exits;
 pub mod rooms;
 pub mod shops;
