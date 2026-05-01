@@ -2992,6 +2992,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_transfer,
     },
     Command {
+        names: &["teleport"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "teleport <player> <zone> <room>",
+            summary: "Send an online player to a specific room.",
+            long: "Builder+. Inverse of `transfer` (which pulls them \
+                   to you) and `goto` (which moves you). Looks up the \
+                   target by case-insensitive name, looks up the \
+                   destination via `WorldKeyIndex`, then re-attaches \
+                   their `Located` and (if mounted) their mount's. The \
+                   target gets an automatic `look` at the new room.",
+        },
+        run: cmd_teleport,
+    },
+    Command {
         names: &["force"],
         min_role: UserRole::Implementor,
         required_perm: None,
@@ -18765,6 +18782,106 @@ fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
 
     send_rendered(world, player, &format!("You summon {target_name}.\r\n"));
     send_rendered(world, target, &format!("{admin_name} summons you.\r\n"),
+    );
+    cmd_look(world, target, "");
+}
+
+/// `teleport <player> <zone> <room>`: send target to a room. Inverse
+/// of `transfer` (target → me) and `goto` (me → room).
+fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 3 {
+        send_to(
+            world,
+            player,
+            "Usage: teleport <player> <zone> <room>\r\n",
+        );
+        return;
+    }
+    let target_word = parts[0];
+    let Ok(zone) = parts[1].parse::<i32>() else {
+        send_to(world, player, "Zone must be an integer.\r\n");
+        return;
+    };
+    let Ok(room_id) = parts[2].parse::<i32>() else {
+        send_to(world, player, "Room id must be an integer.\r\n");
+        return;
+    };
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(target_word))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{target_word}' isn't online.\r\n"));
+        return;
+    };
+    let dest = world
+        .resource::<WorldKeyIndex>()
+        .rooms
+        .get(&(zone, room_id))
+        .copied();
+    let Some(dest) = dest else {
+        send_to(world, player, format!("No room ({zone}, {room_id}).\r\n"));
+        return;
+    };
+    let admin_name = name_of(world, player);
+    let target_name = name_of(world, target);
+    let Some(src_loc) = world.get::<Located>(target).copied() else {
+        send_to(world, player, "Target is nowhere.\r\n");
+        return;
+    };
+    if src_loc.0 == dest {
+        send_to(world, player, "They're already there.\r\n");
+        return;
+    }
+    let mount = world.get::<mud_world::Mounted>(target).map(|m| m.0);
+
+    let src_bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != target && l.0 == src_loc.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in src_bystanders {
+        send_rendered(
+            world,
+            b,
+            &format!("{target_name} vanishes in a puff of smoke.\r\n"),
+        );
+    }
+
+    if let Some(mut l) = world.get_mut::<Located>(target) {
+        l.0 = dest;
+    }
+    if let Some(mount) = mount
+        && let Some(mut l) = world.get_mut::<Located>(mount)
+    {
+        l.0 = dest;
+    }
+
+    let dest_bystanders: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| *e != target && l.0 == dest)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for b in dest_bystanders {
+        send_rendered(world, b, &format!("{target_name} arrives in a swirl of light.\r\n"));
+    }
+
+    send_rendered(
+        world,
+        player,
+        &format!("You teleport {target_name} to ({zone}, {room_id}).\r\n"),
+    );
+    send_rendered(
+        world,
+        target,
+        &format!("{admin_name} teleports you elsewhere.\r\n"),
     );
     cmd_look(world, target, "");
 }
