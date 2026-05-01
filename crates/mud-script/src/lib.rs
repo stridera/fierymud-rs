@@ -404,6 +404,51 @@ fn actor_emit(
     })
 }
 
+/// Despawn items in `actor`'s inventory matching `needle`. The
+/// needle can be a bare keyword (despawns the first match) or
+/// `all.<keyword>` (despawns every match). Lookup is case-insensitive
+/// against each candidate's `Keywords` and `Named.name`.
+fn destroy_item(lua: &Lua, actor: Entity, needle: &str) -> mlua::Result<()> {
+    let trimmed = needle.trim();
+    let (all, keyword) = if let Some(rest) = trimmed.strip_prefix("all.") {
+        (true, rest.to_ascii_lowercase())
+    } else {
+        (false, trimmed.to_ascii_lowercase())
+    };
+    if keyword.is_empty() {
+        return Ok(());
+    }
+    world_mut_from_lua(lua, |world| {
+        let mut to_remove: Vec<Entity> = Vec::new();
+        {
+            let mut q = world.query_filtered::<
+                (Entity, &Located, Option<&Keywords>, &Named),
+                With<Item>,
+            >();
+            for (e, l, kw, n) in q.iter(world) {
+                if l.0 != actor {
+                    continue;
+                }
+                let matches = n.name.to_ascii_lowercase().contains(&keyword)
+                    || kw.is_some_and(|k| {
+                        k.0.iter().any(|w| w.to_ascii_lowercase().contains(&keyword))
+                    });
+                if matches {
+                    to_remove.push(e);
+                    if !all {
+                        break;
+                    }
+                }
+            }
+        }
+        for e in to_remove {
+            if let Ok(em) = world.get_entity_mut(e) {
+                em.despawn();
+            }
+        }
+    })
+}
+
 /// Look up a room by `(zone, id)` via `WorldKeyIndex.rooms` and
 /// return a `LuaRoom` userdata, or nil if not found.
 fn get_room(lua: &Lua, zone: i32, id: i32) -> mlua::Result<Value> {
@@ -674,6 +719,19 @@ impl UserData for LuaActor {
             |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
                 tracing::warn!("trigger called award_exp(...) — stub no-op");
                 Ok(())
+            },
+        );
+
+        // `actor:destroy_item(needle)` removes items from the actor's
+        // inventory whose keywords match. `all.X` form despawns
+        // every matching item; bare `X` despawns just the first.
+        // 172 corpus refs — typically used by DEATH bodies to clean
+        // up mob-specific items (e.g. drunk drops their whisky
+        // bottle when killed).
+        methods.add_method(
+            "destroy_item",
+            |lua, this, needle: String| -> mlua::Result<()> {
+                destroy_item(lua, this.entity, &needle)
             },
         );
 
