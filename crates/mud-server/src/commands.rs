@@ -2612,6 +2612,23 @@ const COMMANDS: &[Command] = &[
         run: cmd_tame,
     },
     Command {
+        names: &["breathe"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "breathe [<target>]",
+            summary: "Dragonborn breath weapon — race-typed.",
+            long: "Dispatches one of BREATHE_FIRE / BREATHE_FROST / \
+                   BREATHE_ACID / BREATHE_GAS / BREATHE_LIGHTNING \
+                   based on your race (only the DRAGONBORN_* races \
+                   carry one). Refuses for races with no breath \
+                   weapon. Drains 6 stamina; the actual damage / \
+                   target gating runs through the data path.",
+        },
+        run: cmd_breathe,
+    },
+    Command {
         names: &["lure"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -16758,6 +16775,49 @@ fn cmd_tame(world: &mut World, player: Entity, args: &str) {
         world,
         player,
         &format!("tame {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+
+/// `breathe [<target>]`: dragonborn breath weapon shim. Looks up
+/// the player's race in a static DRAGONBORN_* → ability-name map;
+/// non-dragonborn races refuse with a flavor line. Drains 6 stamina
+/// and dispatches via the data path.
+fn cmd_breathe(world: &mut World, player: Entity, args: &str) {
+    const BREATHE_COST: i32 = 6;
+    let race = world
+        .get::<Profile>(player)
+        .map(|p| p.race.clone())
+        .unwrap_or_default();
+    let ability_name = match race.as_str() {
+        "DRAGONBORN_FIRE" => "breathe_fire",
+        "DRAGONBORN_FROST" => "breathe_frost",
+        "DRAGONBORN_ACID" => "breathe_acid",
+        "DRAGONBORN_GAS" => "breathe_gas",
+        "DRAGONBORN_LIGHTNING" => "breathe_lightning",
+        _ => {
+            send_to(world, player, "You have no breath weapon.\r\n");
+            return;
+        }
+    };
+    if !require_alert_posture(world, player, "breathe") {
+        return;
+    }
+    if !check_stamina(world, player, BREATHE_COST, "breathe") {
+        return;
+    }
+    drain_stamina(world, player, BREATHE_COST);
+    let arg = args.trim();
+    let dispatched = if arg.is_empty() {
+        ability_name.to_string()
+    } else {
+        format!("{ability_name} {arg}")
+    };
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
         mud_db::abilities::AbilityKind::Skill,
         "use",
     );
