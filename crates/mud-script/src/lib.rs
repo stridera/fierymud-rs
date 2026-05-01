@@ -12,8 +12,9 @@ use std::ptr::NonNull;
 use bevy_ecs::prelude::*;
 use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
 use mud_world::{
-    AbilityCatalog, Health, KnownAbilities, Located, LuaOutbox, Mob, Named, Player, WorldKey,
-    WorldKeyIndex,
+    AbilityCatalog, AttachedTriggers, CombatStats, Description, Health, Item, Keywords,
+    KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player,
+    Posture, PostureKind, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 
 /// Bevy resource wrapping the Lua interpreter.
@@ -576,6 +577,30 @@ impl UserData for LuaRoom {
                     .push((this.entity, msg));
             })
         });
+
+        // `room:spawn_mobile(zone, id)` materializes a fresh Mob from
+        // the prototype catalog into this room. Returns a LuaActor on
+        // the new entity, or nil if the proto doesn't exist. v1
+        // intentionally does NOT fire LOAD on the spawned mob — the
+        // dispatcher is currently single-threaded and re-entrant
+        // firing would risk infinite recursion (LOAD → spawn → LOAD).
+        methods.add_method(
+            "spawn_mobile",
+            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                spawn_mob_proto(lua, this.entity, zone, id)
+            },
+        );
+
+        // `room:spawn_object(zone, id)` materializes a fresh Item from
+        // the prototype catalog into this room. Returns a LuaActor on
+        // the new item entity, or nil if the proto doesn't exist.
+        methods.add_method(
+            "spawn_object",
+            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                spawn_obj_proto(lua, this.entity, zone, id)
+            },
+        );
+
         methods.add_meta_method(MetaMethod::ToString, |lua, this, ()| {
             world_from_lua(lua, |w| {
                 let name = w
@@ -584,6 +609,89 @@ impl UserData for LuaRoom {
                 format!("Room({name})")
             })
         });
+    }
+}
+
+/// Materialize a Mob entity from `MobPrototypes` into `room` and
+/// return a `LuaActor` wrapping it. Returns nil if the proto isn't
+/// in the catalog. Mirrors the loader's Pass 5 mob spawn but skips
+/// reset / shop / mountable bookkeeping (script-spawned mobs don't
+/// participate in the reset cycle).
+fn spawn_mob_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<Value> {
+    let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
+        let proto = world
+            .resource::<MobPrototypes>()
+            .by_key
+            .get(&(zone, id))
+            .cloned()?;
+        let trigger_keys = world
+            .resource::<TriggerCatalog>()
+            .mob_attachments
+            .get(&(zone, id))
+            .cloned();
+        let hp = proto.rolled_hp();
+        let dmg = proto.avg_damage();
+        let mut em = world.spawn((
+            Mob,
+            Named { name: proto.name.clone() },
+            Keywords(proto.keywords.clone()),
+            Description(proto.room_description.clone()),
+            WorldKey { zone, id },
+            Located(room),
+            Health { hp, max: hp },
+            CombatStats {
+                hit_roll: proto.hit_roll,
+                dmg_roll: dmg,
+                ac: proto.armor_class,
+                alignment: proto.alignment,
+            },
+            Posture(PostureKind::Standing),
+        ));
+        if let Some(keys) = trigger_keys {
+            em.insert(AttachedTriggers(keys));
+        }
+        Some(em.id())
+    })?;
+    match entity {
+        Some(e) => Ok(Value::UserData(lua.create_userdata(LuaActor { entity: e })?)),
+        None => Ok(Value::Nil),
+    }
+}
+
+/// Materialize an Item entity from `ObjectPrototypes` into `room`
+/// and return a `LuaActor` wrapping it (so triggers can call further
+/// methods on it as a generic entity). Returns nil if the proto is
+/// missing.
+fn spawn_obj_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<Value> {
+    let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
+        let proto = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(zone, id))
+            .cloned()?;
+        let trigger_keys = world
+            .resource::<TriggerCatalog>()
+            .object_attachments
+            .get(&(zone, id))
+            .cloned();
+        let mut em = world.spawn((
+            Item,
+            Named { name: proto.name.clone() },
+            Keywords(proto.keywords.clone()),
+            WorldKey { zone, id },
+            Located(room),
+        ));
+        if let Some(desc) = proto.examine_description.clone() {
+            em.insert(Description(desc));
+        }
+        if let Some(keys) = trigger_keys {
+            em.insert(AttachedTriggers(keys));
+        }
+        Some(em.id())
+    })?;
+    match entity {
+        Some(e) => Ok(Value::UserData(lua.create_userdata(LuaActor { entity: e })?)),
+        None => Ok(Value::Nil),
     }
 }
 
