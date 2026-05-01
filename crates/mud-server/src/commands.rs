@@ -8399,6 +8399,7 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} picks up {item_name}.\r\n"),
     );
+    crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Get);
 }
 
 /// `junk <item>` / `trash <item>`: destroy a carried item. Equipped
@@ -8508,6 +8509,7 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} drops {item_name}.\r\n"),
     );
+    crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Drop);
 }
 
 fn cmd_give(world: &mut World, player: Entity, args: &str) {
@@ -9243,6 +9245,7 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
         _ => "wear",
     };
     send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
+    crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
 }
 
 fn cmd_remove(world: &mut World, player: Entity, args: &str) {
@@ -9260,6 +9263,7 @@ fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     let item_name = name_of(world, item);
     try_remove::<EquippedSlot>(world, item);
     send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
+    crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Remove);
 }
 
 fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {

@@ -159,6 +159,48 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
     }
 }
 
+/// Fire an `event`-flagged trigger on `item` (an Item entity) with
+/// `self` bound to the item and `actor` bound to the acting player.
+/// Used by GET / DROP / WEAR / REMOVE / USE / CONSUME — every
+/// object-attached event whose dispatch shape is "the item observed
+/// the actor doing X to it."
+pub fn fire_item_event(
+    world: &mut World,
+    item: Entity,
+    actor: Entity,
+    event: TriggerEvent,
+) {
+    let to_fire: Vec<(i32, i32, String, String)> = {
+        let Some(at) = world.get::<AttachedTriggers>(item) else {
+            return;
+        };
+        let keys = at.0.clone();
+        let catalog = world.resource::<TriggerCatalog>();
+        keys.into_iter()
+            .filter_map(|(zone, id)| {
+                let def = catalog.by_key.get(&(zone, id))?;
+                if def.flags.contains(&event) {
+                    Some((zone, id, def.name.clone(), def.commands.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    if to_fire.is_empty() {
+        return;
+    }
+    for (zone, id, name, body) in to_fire {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+            host.exec_for_listener_with_extras(world, item, actor, &body, &[])
+        });
+        drain_lua_outbox(world);
+        if let Err(e) = result {
+            warn!(zone, id, name = %name, event = ?event, error = %e, "item-event trigger fire failed");
+        }
+    }
+}
+
 /// Fire `RECEIVE`-flagged triggers on `recipient` when `giver` hands
 /// them `item`. Each fire binds `self` to recipient, `actor` to giver,
 /// `object` to the item. RECEIVE bodies typically inspect `object.id`
