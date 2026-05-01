@@ -2559,6 +2559,38 @@ const COMMANDS: &[Command] = &[
         run: cmd_retreat,
     },
     Command {
+        names: &["lure"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "lure <target>",
+            summary: "Bait a mob into engaging you with a stinging hit.",
+            long: "Drains 4 stamina and dispatches the LURE skill at \
+                   the named target. Effect is a level-scaling \
+                   physical-damage application; combat starts via the \
+                   normal damage→engage path. Same arg-resolution as \
+                   `backstab`.",
+        },
+        run: cmd_lure,
+    },
+    Command {
+        names: &["corner"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Combat,
+        help: Help {
+            usage: "corner <target>",
+            summary: "Pin a mob with a hard hit to keep them in melee.",
+            long: "Drains 4 stamina and dispatches the CORNER skill at \
+                   the named target. Effect is a level-scaling \
+                   physical-damage application like LURE; \
+                   pin-in-place mechanics aren't modeled in the schema, \
+                   so v1 is the damage hit and the engage.",
+        },
+        run: cmd_corner,
+    },
+    Command {
         names: &["sneak"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -16108,6 +16140,68 @@ fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
 /// gets 0 HP from that until the formula gains a baseline (also
 /// in `SUGGESTIONS.md`) — until then the staunch is the only
 /// visible effect for an untrained caster.
+/// `lure <target>` / `corner <target>` shared shim: target arg
+/// resolves to an actor in the room, drains stamina, dispatches the
+/// named skill via the data path, and engages combat (mutual
+/// `Fighting`). Used by `cmd_lure` and `cmd_corner` since the only
+/// per-skill difference is the ability name.
+fn engage_skill_shim(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    skill: &str,
+    cost: i32,
+) {
+    if !require_alert_posture(world, player, skill) {
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, format!("{} whom?\r\n", capitalize(skill)));
+        return;
+    }
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        send_to(world, player, format!("You can't {skill} yourself.\r\n"));
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if !check_stamina(world, player, cost, skill) {
+        return;
+    }
+    drain_stamina(world, player, cost);
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("{skill} {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+    if world.get_entity(target).is_ok() {
+        try_insert(world, player, Fighting(target));
+        if world.get::<CombatStats>(target).is_some()
+            && let Ok(mut e) = world.get_entity_mut(target)
+        {
+            e.insert(Fighting(player));
+        }
+    }
+}
+
+fn cmd_lure(world: &mut World, player: Entity, args: &str) {
+    engage_skill_shim(world, player, args, "lure", 4);
+}
+
+fn cmd_corner(world: &mut World, player: Entity, args: &str) {
+    engage_skill_shim(world, player, args, "corner", 4);
+}
+
 /// `sneak`: data-path SNEAK skill shim. Stealth marker installation
 /// happens in the status effect-type arm via the runtime wired in
 /// 404fa6c.
