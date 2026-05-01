@@ -408,14 +408,29 @@ const COMMANDS: &[Command] = &[
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "get <item>",
-            summary: "Pick up an item from the room.",
+            usage: "get <item> | get <item> from <container>",
+            summary: "Pick up an item from the room or a container.",
             long: "Match is by case-insensitive substring on the item's \
-                   keywords (or its name). The item moves into your \
-                   inventory; everyone else in the room sees you pick \
-                   it up.",
+                   keywords (or its name). With `from <container>`, \
+                   pulls from a container the player is carrying or \
+                   one in the room. The item moves into your \
+                   inventory; everyone else in the room sees the action.",
         },
         run: cmd_get,
+    },
+    Command {
+        names: &["put"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "put <item> <container>",
+            summary: "Move a carried item into a container.",
+            long: "Container can be a carried item or one in the \
+                   current room. Equipped items must be `remove`d \
+                   first. Bystanders see the action.",
+        },
+        run: cmd_put,
     },
     Command {
         names: &["drop"],
@@ -8461,8 +8476,8 @@ fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
 }
 
 fn cmd_get(world: &mut World, player: Entity, args: &str) {
-    let target_word = args.trim();
-    if target_word.is_empty() {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
         send_to(world, player, "Get what?\r\n");
         return;
     }
@@ -8471,9 +8486,50 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
 
-    let item = find_in_room(world, target_word, room);
+    // `get <item> from <container>` — pull from a container the
+    // player is carrying or which sits in the room.
+    if let Some((needle, container_word)) = split_from_keyword(trimmed) {
+        let container = find_in_room(world, container_word, room)
+            .or_else(|| find_carried_by(world, container_word, player, EquipFilter::Anywhere));
+        let Some(container) = container else {
+            send_to(
+                world,
+                player,
+                format!("You don't see '{container_word}' here.\r\n"),
+            );
+            return;
+        };
+        let item = find_in_container(world, needle, container);
+        let Some(item) = item else {
+            let cn = name_of(world, container);
+            send_rendered(world, player, &format!("There's no '{needle}' in {cn}.\r\n"));
+            return;
+        };
+        let item_name = name_of(world, item);
+        let container_name = name_of(world, container);
+        let player_name = name_of(world, player);
+        if let Some(mut l) = world.get_mut::<Located>(item) {
+            l.0 = player;
+        }
+        send_rendered(
+            world,
+            player,
+            &format!("You take {item_name} from {container_name}.\r\n"),
+        );
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} takes {item_name} from {container_name}.\r\n"),
+        );
+        crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Get);
+        return;
+    }
+
+    // Plain `get <item>` from the floor.
+    let item = find_in_room(world, trimmed, room);
     let Some(item) = item else {
-        send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
+        send_to(world, player, format!("You don't see '{trimmed}' here.\r\n"));
         return;
     };
 
@@ -8492,6 +8548,91 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} picks up {item_name}.\r\n"),
     );
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Get);
+}
+
+/// Split `<item> from <container>` into `(item, container)` if the
+/// `from` keyword appears as a separator. Returns None for inputs
+/// without the keyword.
+fn split_from_keyword(input: &str) -> Option<(&str, &str)> {
+    let lower = input.to_ascii_lowercase();
+    let pat = " from ";
+    let i = lower.find(pat)?;
+    let (a, _) = input.split_at(i);
+    let b = &input[i + pat.len()..];
+    let a = a.trim();
+    let b = b.trim();
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    Some((a, b))
+}
+
+/// Find an item Located on `container` whose Named or Keywords
+/// match `needle` (case-insensitive substring).
+fn find_in_container(world: &mut World, needle: &str, container: Entity) -> Option<Entity> {
+    let needle = needle.to_ascii_lowercase();
+    let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+    q.iter(world)
+        .find(|(_, l, n, kw)| l.0 == container && matches(&needle, n, *kw))
+        .map(|(e, _, _, _)| e)
+}
+
+/// `put <item> <container>`: move a carried item into a container
+/// the player is carrying or which sits in the room.
+fn cmd_put(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 || parts[1].trim().is_empty() {
+        send_to(world, player, "Usage: put <item> <container>\r\n");
+        return;
+    }
+    let item_word = parts[0].trim();
+    let container_word = parts[1].trim();
+
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+
+    let item = find_carried_by(world, item_word, player, EquipFilter::Inventory);
+    let Some(item) = item else {
+        send_rendered(
+            world,
+            player,
+            &format!("You aren't carrying '{item_word}'.\r\n"),
+        );
+        return;
+    };
+    let container = find_carried_by(world, container_word, player, EquipFilter::Anywhere)
+        .or_else(|| find_in_room(world, container_word, room));
+    let Some(container) = container else {
+        send_rendered(
+            world,
+            player,
+            &format!("You don't see '{container_word}' here.\r\n"),
+        );
+        return;
+    };
+    if container == item {
+        send_to(world, player, "You can't put something inside itself.\r\n");
+        return;
+    }
+    let item_name = name_of(world, item);
+    let container_name = name_of(world, container);
+    let player_name = name_of(world, player);
+    if let Some(mut l) = world.get_mut::<Located>(item) {
+        l.0 = container;
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("You put {item_name} in {container_name}.\r\n"),
+    );
+    broadcast_room_except_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} puts {item_name} in {container_name}.\r\n"),
+    );
 }
 
 /// `junk <item>` / `trash <item>`: destroy a carried item. Equipped
