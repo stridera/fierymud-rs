@@ -14,13 +14,14 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRole};
 use mud_net::Outbound;
 use mud_world::{
-    AbilityCatalog, Account, AccountSummary, AppliedTo, ClassCatalog, CombatStats, Cooldowns,
-    CoreStats, Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen,
-    Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
-    MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
+    AbilityCatalog, Account, AccountSummary, AppliedTo, AttachedTriggers, ClassCatalog,
+    CombatStats, Cooldowns, CoreStats, Description, EffectCatalog, EffectInstance, EffectSource,
+    EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen, Health, IgnoreList, Item, Keywords,
+    KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes, Named,
+    ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
     BankWealth, BoardCatalog, BoardDraft, BoardLink, MailDraft, RecallPoint, RoomSector,
     ShopCatalog, Shopkeeper, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, TellLog,
-    Title, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex, ZoneClimate,
+    Title, TriggerCatalog, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex, ZoneClimate,
 };
 use tracing::{info, info_span};
 
@@ -2868,6 +2869,22 @@ const COMMANDS: &[Command] = &[
                      lua print(actor:hp() .. '/' .. actor:max_hp())",
         },
         run: cmd_lua,
+    },
+    Command {
+        names: &["triggers", "trigs"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "triggers [here|<keyword>]",
+            summary: "List Lua triggers attached to entities.",
+            long: "With `here` (default), lists triggers on your room and \
+                   on every mob/item in it. With a keyword, finds the \
+                   single matching mob or item and lists just its \
+                   triggers. Each line is `(zone, id) name [FLAG ...]`. \
+                   Read-only diagnostic — does not fire anything.",
+        },
+        run: cmd_triggers,
     },
 ];
 
@@ -14988,6 +15005,125 @@ fn cmd_lua(world: &mut World, player: Entity, args: &str) {
         Err(e) => {
             send_to(world, player, format!("{e}\r\n"));
         }
+    }
+}
+
+/// `triggers [here|<keyword>]`: list Lua triggers attached to entities
+/// in the current room (default) or to a single keyword-resolved
+/// target. Read-only diagnostic — does not fire anything.
+#[allow(clippy::too_many_lines)]
+fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
+    use mud_world::TriggerEvent;
+
+    let arg = args.trim();
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        send_to(world, player, "You're nowhere.\r\n");
+        return;
+    };
+
+    // Targets: room itself + every mob/item/player whose Located == room,
+    // unless the user named a specific keyword.
+    let mut targets: Vec<Entity> = Vec::new();
+    if arg.is_empty() || arg.eq_ignore_ascii_case("here") {
+        targets.push(room);
+        let mut q = world.query::<(Entity, &Located)>();
+        for (e, l) in q.iter(world) {
+            if l.0 == room {
+                targets.push(e);
+            }
+        }
+    } else if let Some(e) = find_in_room(world, arg, room)
+        .or_else(|| find_actor_in_room(world, arg, room, player))
+    {
+        targets.push(e);
+    } else {
+        send_to(world, player, format!("No '{arg}' here.\r\n"));
+        return;
+    }
+
+    let render_event = |ev: &TriggerEvent| match ev {
+        TriggerEvent::Global => "GLOBAL",
+        TriggerEvent::Random => "RANDOM",
+        TriggerEvent::Command => "COMMAND",
+        TriggerEvent::Load => "LOAD",
+        TriggerEvent::Cast => "CAST",
+        TriggerEvent::Leave => "LEAVE",
+        TriggerEvent::Time => "TIME",
+        TriggerEvent::Speech => "SPEECH",
+        TriggerEvent::Act => "ACT",
+        TriggerEvent::Death => "DEATH",
+        TriggerEvent::Greet => "GREET",
+        TriggerEvent::GreetAll => "GREET_ALL",
+        TriggerEvent::Entry => "ENTRY",
+        TriggerEvent::Receive => "RECEIVE",
+        TriggerEvent::Fight => "FIGHT",
+        TriggerEvent::HitPercent => "HIT_PERCENT",
+        TriggerEvent::Bribe => "BRIBE",
+        TriggerEvent::Memory => "MEMORY",
+        TriggerEvent::Door => "DOOR",
+        TriggerEvent::SpeechTo => "SPEECH_TO",
+        TriggerEvent::Look => "LOOK",
+        TriggerEvent::Auto => "AUTO",
+        TriggerEvent::Attack => "ATTACK",
+        TriggerEvent::Defend => "DEFEND",
+        TriggerEvent::Timer => "TIMER",
+        TriggerEvent::Get => "GET",
+        TriggerEvent::Drop => "DROP",
+        TriggerEvent::Give => "GIVE",
+        TriggerEvent::Wear => "WEAR",
+        TriggerEvent::Remove => "REMOVE",
+        TriggerEvent::Use => "USE",
+        TriggerEvent::Consume => "CONSUME",
+        TriggerEvent::Reset => "RESET",
+        TriggerEvent::Preentry => "PREENTRY",
+        TriggerEvent::Postentry => "POSTENTRY",
+    };
+
+    let mut out = String::new();
+    let mut total = 0usize;
+    for &e in &targets {
+        let Some(at) = world.get::<AttachedTriggers>(e) else {
+            continue;
+        };
+        if at.0.is_empty() {
+            continue;
+        }
+        let label = world.get::<Named>(e).map_or("(unnamed)", |n| n.name.as_str());
+        let kind = if e == room {
+            "room"
+        } else if world.get::<Mob>(e).is_some() {
+            "mob"
+        } else if world.get::<Item>(e).is_some() {
+            "item"
+        } else if world.get::<Player>(e).is_some() {
+            "player"
+        } else {
+            "entity"
+        };
+        out.push_str(&format!("{label} [{kind}]:\r\n"));
+        let keys = at.0.clone();
+        let catalog = world.resource::<TriggerCatalog>();
+        for (zone, id) in keys {
+            total += 1;
+            if let Some(def) = catalog.by_key.get(&(zone, id)) {
+                let flags: Vec<&'static str> = def.flags.iter().map(render_event).collect();
+                let flag_str = if flags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", flags.join(" "))
+                };
+                out.push_str(&format!("  ({zone}, {id}) {}{flag_str}\r\n", def.name));
+            } else {
+                out.push_str(&format!("  ({zone}, {id}) <missing>\r\n"));
+            }
+        }
+    }
+
+    if total == 0 {
+        send_to(world, player, "No triggers attached.\r\n");
+    } else {
+        out.push_str(&format!("{total} trigger(s).\r\n"));
+        send_to(world, player, out);
     }
 }
 
