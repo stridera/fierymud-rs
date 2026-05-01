@@ -40,6 +40,7 @@ impl LuaHost {
     /// Run `code` with `actor` bound to the supplied entity. Captured `print`
     /// output is returned as a single string (one line per print call,
     /// terminated with \r\n).
+    #[allow(clippy::too_many_lines)]
     pub fn exec_for_actor(
         &self,
         world: &mut World,
@@ -135,7 +136,41 @@ impl LuaHost {
                     },
                 )?,
             )?;
+            // `world.destroy(actor)` — despawning needs to coordinate
+            // with `MobResetCatalog` so respawn accounting stays
+            // correct (a destroyed reset-spawned mob shouldn't
+            // immediately respawn). Stubbed as a warn-no-op for now;
+            // 344 corpus refs will succeed silently. Real impl
+            // pending.
+            world_tbl.set(
+                "destroy",
+                self.lua.create_function(|_, _: AnyUserData| -> mlua::Result<()> {
+                    tracing::warn!("trigger called world.destroy(...) — stub no-op");
+                    Ok(())
+                })?,
+            )?;
             globals.set("world", world_tbl)?;
+
+            // `combat` namespace — stubbed mutating verbs. Real impl
+            // (engage = force-aggression onto target; rescue = swap
+            // Fighting via the existing `redirect` consumer) deferred
+            // until LOAD/FIGHT trigger event firing lands.
+            let combat_tbl = self.lua.create_table()?;
+            combat_tbl.set(
+                "engage",
+                self.lua.create_function(|_, _: AnyUserData| -> mlua::Result<()> {
+                    tracing::warn!("trigger called combat.engage(...) — stub no-op");
+                    Ok(())
+                })?,
+            )?;
+            combat_tbl.set(
+                "rescue",
+                self.lua.create_function(|_, _: AnyUserData| -> mlua::Result<()> {
+                    tracing::warn!("trigger called combat.rescue(...) — stub no-op");
+                    Ok(())
+                })?,
+            )?;
+            globals.set("combat", combat_tbl)?;
 
             self.lua.load(code).exec()
         })();
@@ -153,6 +188,7 @@ impl LuaHost {
         let _ = self.lua.globals().raw_remove("globals");
         let _ = self.lua.globals().raw_remove("skills");
         let _ = self.lua.globals().raw_remove("world");
+        let _ = self.lua.globals().raw_remove("combat");
 
         match result {
             Ok(()) => {
