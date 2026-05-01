@@ -337,6 +337,12 @@ pub(crate) fn handle_death(
             &format!("{victim_name} dies.\r\n"),
         );
         award_kill_coin(world, victim, victim_name);
+        // Fire DEATH triggers BEFORE despawn so the body can read
+        // self.room, broadcast last words, etc. The trigger
+        // dispatcher takes a snapshot of bodies up front, so even if
+        // the body somehow despawns mid-fire it still completes
+        // safely.
+        crate::triggers::fire_event(world, victim, mud_world::TriggerEvent::Death);
         disengage_attackers_of(world, victim);
         if let Ok(e) = world.get_entity_mut(victim) {
             e.despawn();
