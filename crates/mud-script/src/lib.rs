@@ -241,6 +241,40 @@ impl LuaHost {
                 self.lua.create_function(|_, _: Value| -> mlua::Result<()> { Ok(()) })?,
             )?;
 
+            // `mobiles.template(zone, id)` and `objects.template(zone,
+            // id)` return a read-only LuaProto userdata wrapping the
+            // catalog entry. The corpus uses these as
+            // `objects.template(555, 77).name` to get a proto's
+            // display name without spawning. 363 + 353 corpus refs.
+            let mobiles_tbl = self.lua.create_table()?;
+            mobiles_tbl.set(
+                "template",
+                self.lua.create_function(
+                    |lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                        Ok(Value::UserData(lua.create_userdata(LuaProto {
+                            zone,
+                            id,
+                            kind: ProtoKind::Mob,
+                        })?))
+                    },
+                )?,
+            )?;
+            globals.set("mobiles", mobiles_tbl)?;
+            let objects_tbl = self.lua.create_table()?;
+            objects_tbl.set(
+                "template",
+                self.lua.create_function(
+                    |lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                        Ok(Value::UserData(lua.create_userdata(LuaProto {
+                            zone,
+                            id,
+                            kind: ProtoKind::Item,
+                        })?))
+                    },
+                )?,
+            )?;
+            globals.set("objects", objects_tbl)?;
+
             // `find_actor(keyword)` searches the entire world for the
             // first actor (mob or player) whose Named or Keywords
             // match. Returns a LuaActor or nil. 589 corpus refs —
@@ -340,6 +374,8 @@ impl LuaHost {
         let _ = self.lua.globals().raw_remove("percent_chance");
         let _ = self.lua.globals().raw_remove("Effect");
         let _ = self.lua.globals().raw_remove("find_actor");
+        let _ = self.lua.globals().raw_remove("mobiles");
+        let _ = self.lua.globals().raw_remove("objects");
         for (name, _) in extras {
             let _ = self.lua.globals().raw_remove(*name);
         }
@@ -1116,6 +1152,75 @@ impl UserData for LuaRoom {
                 format!("Room({name})")
             })
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LuaProto userdata (read-only catalog entry)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum ProtoKind {
+    Mob,
+    Item,
+}
+
+/// Read-only handle to a prototype row. Returned by `mobiles.template`
+/// and `objects.template` so trigger bodies can inspect proto fields
+/// (`.name`, `.id`, `.zone_id`) without spawning.
+#[derive(Clone, Copy)]
+pub struct LuaProto {
+    pub zone: i32,
+    pub id: i32,
+    kind: ProtoKind,
+}
+
+impl UserData for LuaProto {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(
+            MetaMethod::Index,
+            |lua, this, key: String| -> mlua::Result<Value> {
+                match key.as_str() {
+                    "id" => Ok(Value::Integer(this.id.into())),
+                    "zone_id" => Ok(Value::Integer(this.zone.into())),
+                    "name" => {
+                        let s = world_from_lua(lua, |w| match this.kind {
+                            ProtoKind::Mob => w
+                                .resource::<MobPrototypes>()
+                                .by_key
+                                .get(&(this.zone, this.id))
+                                .map(|p| p.name.clone())
+                                .unwrap_or_default(),
+                            ProtoKind::Item => w
+                                .resource::<ObjectPrototypes>()
+                                .by_key
+                                .get(&(this.zone, this.id))
+                                .map(|p| p.name.clone())
+                                .unwrap_or_default(),
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    "shortdesc" => {
+                        let s = world_from_lua(lua, |w| match this.kind {
+                            ProtoKind::Mob => w
+                                .resource::<MobPrototypes>()
+                                .by_key
+                                .get(&(this.zone, this.id))
+                                .map(|p| p.room_description.clone())
+                                .unwrap_or_default(),
+                            ProtoKind::Item => w
+                                .resource::<ObjectPrototypes>()
+                                .by_key
+                                .get(&(this.zone, this.id))
+                                .and_then(|p| p.examine_description.clone())
+                                .unwrap_or_default(),
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    _ => Ok(Value::Nil),
+                }
+            },
+        );
     }
 }
 
