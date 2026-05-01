@@ -2974,6 +2974,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_setweather,
     },
     Command {
+        names: &["identify", "id"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "identify <item>",
+            summary: "Magical analysis of a carried item.",
+            long: "Reveals the item's type, weight, base value, \
+                   wear slots, weapon dice (when applicable), bound \
+                   abilities (scrolls/wands/staves), liquid state \
+                   (drink containers), remaining charges, and any \
+                   active effects on the item.",
+        },
+        run: cmd_identify,
+    },
+    Command {
         names: &["set"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -16328,6 +16344,131 @@ fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
         player,
         format!("Set climate of zone {zone_id} ({zone_name}) to {climate:?}.\r\n"),
     );
+}
+
+/// `identify <item>`: dump proto + runtime state for a carried item.
+#[allow(clippy::too_many_lines)]
+fn cmd_identify(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(world, player, "Identify what?\r\n");
+        return;
+    }
+    let Some(item) = find_carried_by(world, needle, player, EquipFilter::Anywhere) else {
+        send_rendered(
+            world,
+            player,
+            &format!("You aren't carrying '{needle}'.\r\n"),
+        );
+        return;
+    };
+    let item_name = name_of(world, item);
+    let key = world.get::<WorldKey>(item).copied();
+    let Some(key) = key else {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} has no proto link.\r\n"),
+        );
+        return;
+    };
+    let proto = world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .get(&(key.zone, key.id))
+        .cloned();
+    let Some(p) = proto else {
+        send_rendered(
+            world,
+            player,
+            &format!("No prototype data for {item_name}.\r\n"),
+        );
+        return;
+    };
+    let mode = color_mode_for(world, player);
+    let mut out = String::from("\r\n");
+    out.push_str(&format!(
+        "  Item:      {}\r\n",
+        render_color_tags(&p.name, mode)
+    ));
+    out.push_str(&format!("  Type:      {:?}\r\n", p.r#type));
+    out.push_str(&format!("  Weight:    {:.1}\r\n", p.weight));
+    out.push_str(&format!("  Level:     {}\r\n", p.level));
+    if p.cost > 0
+        && let Some(coin) = format_wealth(i64::from(p.cost))
+    {
+        out.push_str(&format!("  Value:     {coin}\r\n"));
+    }
+    if !p.wear_flags.is_empty() {
+        let labels: Vec<String> = p.wear_flags.iter().map(|f| format!("{f:?}")).collect();
+        out.push_str(&format!("  Wear:      {}\r\n", labels.join(", ")));
+    }
+    if p.weapon_dice_num > 0 {
+        out.push_str(&format!(
+            "  Damage:    {}d{}+{}\r\n",
+            p.weapon_dice_num, p.weapon_dice_size, p.weapon_dice_bonus
+        ));
+    }
+    if let Some(liq) = &p.liquid {
+        let state = world.get::<mud_world::LiquidContainer>(item).cloned();
+        let (remaining, capacity) =
+            state.as_ref().map_or((liq.remaining, liq.capacity), |s| (s.remaining, s.capacity));
+        out.push_str(&format!(
+            "  Liquid:    {} ({}/{}){}\r\n",
+            liq.liquid,
+            remaining,
+            capacity,
+            if state.as_ref().is_some_and(|s| s.poisoned) {
+                " — POISONED"
+            } else {
+                ""
+            }
+        ));
+    }
+
+    // Bound abilities (scrolls, wands, staves).
+    let bindings = world
+        .resource::<mud_world::ObjectAbilityCatalog>()
+        .by_key
+        .get(&(key.zone, key.id))
+        .cloned()
+        .unwrap_or_default();
+    if !bindings.is_empty() {
+        out.push_str("  Bound abilities:\r\n");
+        let abilities = world.resource::<AbilityCatalog>();
+        for b in bindings {
+            let name = abilities
+                .by_name
+                .values()
+                .find(|d| d.id == b.ability_id)
+                .map_or_else(|| format!("ability {}", b.ability_id), |d| d.plain_name.clone());
+            let charges = b
+                .charges
+                .map_or_else(|| "unlimited".to_string(), |c| format!("{c} charges"));
+            out.push_str(&format!(
+                "    - {name} (level {}, {charges})\r\n",
+                b.level
+            ));
+        }
+    }
+    if let Some(c) = world.get::<mud_world::Charges>(item) {
+        out.push_str(&format!("  Charges remaining: {}\r\n", c.0));
+    }
+
+    // Active effects on the item (rare today; surfaces if any are
+    // applied via consume/quaff bindings later).
+    let item_effects: Vec<String> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, a)| a.0 == item)
+            .map(|(inst, _)| inst.name.clone())
+            .collect()
+    };
+    if !item_effects.is_empty() {
+        out.push_str(&format!("  Effects:   {}\r\n", item_effects.join(", ")));
+    }
+
+    send_rendered(world, player, &out);
 }
 
 /// `set <target> <field> <value>`: admin mutation of a numeric
