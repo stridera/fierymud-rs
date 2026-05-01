@@ -207,6 +207,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_wealth,
     },
     Command {
+        names: &["bribe"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "bribe <amount> <target>",
+            summary: "Hand a sum of copper to a mob — fires BRIBE triggers.",
+            long: "Decrements your on-hand coin by `amount` (copper \
+                   units) and pads the target mob's coin by the same. \
+                   Fires the target's BRIBE-flagged Lua triggers with \
+                   `actor` = you and `amount` as a Lua global so \
+                   bodies can react proportionally.",
+        },
+        run: cmd_bribe,
+    },
+    Command {
         names: &["balance", "bal"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5809,6 +5825,97 @@ fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
         "\r\nYou have no coin to your name.\r\n".to_string()
     };
     send_to(world, player, msg);
+}
+
+/// `bribe <amount> <target>`: transfer copper to a mob and fire
+/// its BRIBE triggers. Refuses on insufficient funds, missing
+/// target, or self-target.
+fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 || parts[1].trim().is_empty() {
+        send_to(world, player, "Usage: bribe <amount> <target>\r\n");
+        return;
+    }
+    let Ok(amount) = parts[0].trim().parse::<i64>() else {
+        send_to(world, player, "Amount must be a positive integer.\r\n");
+        return;
+    };
+    if amount <= 0 {
+        send_to(world, player, "Amount must be positive.\r\n");
+        return;
+    }
+    let target_word = parts[1].trim();
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
+        send_rendered(
+            world,
+            player,
+            &format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+    let funds = world.get::<Wealth>(player).map_or(0, |w| w.0);
+    if funds < amount {
+        send_to(world, player, "You don't have that much coin.\r\n");
+        return;
+    }
+    if let Some(mut w) = world.get_mut::<Wealth>(player) {
+        w.0 -= amount;
+    }
+    if let Some(mut w) = world.get_mut::<Wealth>(target) {
+        w.0 += amount;
+    } else {
+        world.entity_mut(target).insert(Wealth(amount));
+    }
+    let target_name = name_of(world, target);
+    send_rendered(
+        world,
+        player,
+        &format!("You hand {amount} copper to {target_name}.\r\n"),
+    );
+    send_rendered(
+        world,
+        target,
+        &format!(
+            "{} bribes you with {amount} copper.\r\n",
+            name_of(world, player)
+        ),
+    );
+    // Fire BRIBE on target with the amount as a Lua extras global.
+    let amount_str = amount.to_string();
+    let to_fire: Vec<(i32, i32, String, String)> = {
+        if let Some(at) = world.get::<AttachedTriggers>(target) {
+            let keys = at.0.clone();
+            let catalog = world.resource::<TriggerCatalog>();
+            keys.into_iter()
+                .filter_map(|(z, i)| {
+                    let def = catalog.by_key.get(&(z, i))?;
+                    if def.flags.contains(&mud_world::TriggerEvent::Bribe) {
+                        Some((z, i, def.name.clone(), def.commands.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    };
+    for (zone, id, _name, body) in to_fire {
+        let _ = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+            host.exec_for_listener_with_extras(
+                world,
+                target,
+                player,
+                &body,
+                &[("amount", &amount_str)],
+            )
+        });
+        crate::commands::drain_lua_outbox(world);
+        let _ = (zone, id); // referenced for the closure capture only
+    }
 }
 
 /// `list`: find a shopkeeper in the player's room and dump the catalog
