@@ -17510,11 +17510,17 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         .get::<RoomSector>(target)
         .map_or(Sector::Field, |s| s.0);
     let is_flying = world.get::<mud_world::Flying>(player).is_some();
-    let stamina_cost = if is_flying {
+    let mut stamina_cost = if is_flying {
         1 + 1
     } else {
         sector_movement_cost(target_sector)
     };
+    // Drag-effect penalty: doubles movement cost. The schema's
+    // `speedPenalty` is 0.5 (half speed = double cost). Spawned by
+    // the DRAG skill; effect name is "drag" via the spec.name flow.
+    if has_effect_named(world, player, "drag") {
+        stamina_cost = stamina_cost.saturating_mul(2);
+    }
     if let Some(s) = world.get::<Stamina>(player).copied()
         && s.current < stamina_cost
     {
