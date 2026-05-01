@@ -476,6 +476,62 @@ impl UserData for LuaActor {
             })
         });
 
+        // Quest API stubs. The corpus references these heavily
+        // (get_quest_stage 2271, get_quest_var 2007, set_quest_var
+        // 727, get_has_completed 344, advance_quest 283, start_quest
+        // 92, award_exp 95, complete_quest 76). Real implementation
+        // requires loading per-character `CharacterQuest` rows into
+        // an ECS component and round-tripping them on save —
+        // substantial work deferred to a follow-up. v1 stubs keep
+        // trigger bodies from crashing on a nil index.
+        methods.add_method(
+            "get_quest_stage",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<i64> { Ok(0) },
+        );
+        methods.add_method(
+            "get_quest_var",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<String> { Ok(String::new()) },
+        );
+        methods.add_method(
+            "get_has_completed",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<bool> { Ok(false) },
+        );
+        methods.add_method(
+            "set_quest_var",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
+                tracing::warn!("trigger called set_quest_var(...) — stub no-op");
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "advance_quest",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
+                tracing::warn!("trigger called advance_quest(...) — stub no-op");
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "complete_quest",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
+                tracing::warn!("trigger called complete_quest(...) — stub no-op");
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "start_quest",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
+                tracing::warn!("trigger called start_quest(...) — stub no-op");
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "award_exp",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
+                tracing::warn!("trigger called award_exp(...) — stub no-op");
+                Ok(())
+            },
+        );
+
         // `actor:command(line)` queues `line` to be dispatched as if
         // the actor typed it. 2106 corpus refs — used by mob bodies
         // to drive themselves through standard commands ("emote",
