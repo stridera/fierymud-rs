@@ -102,6 +102,41 @@ impl LuaHost {
             )?;
             globals.set("skills", skills_tbl)?;
 
+            // `world` namespace: read-only queries against the live
+            // world. `count_mobiles` / `count_objects` return how many
+            // entities of the given proto `(zone, id)` are currently
+            // alive. `find_mobile` returns the first matching mob as
+            // a LuaActor or nil. Mutating verbs (destroy / load) are
+            // deliberately omitted from v1 — triggers calling them
+            // error cleanly with a "nil value" message instead of
+            // silently corrupting world state.
+            let world_tbl = self.lua.create_table()?;
+            world_tbl.set(
+                "count_mobiles",
+                self.lua.create_function(
+                    |lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+                        world_count_kind(lua, zone, id, EntityKind::Mob)
+                    },
+                )?,
+            )?;
+            world_tbl.set(
+                "count_objects",
+                self.lua.create_function(
+                    |lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+                        world_count_kind(lua, zone, id, EntityKind::Item)
+                    },
+                )?,
+            )?;
+            world_tbl.set(
+                "find_mobile",
+                self.lua.create_function(
+                    |lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                        world_find_kind(lua, zone, id, EntityKind::Mob)
+                    },
+                )?,
+            )?;
+            globals.set("world", world_tbl)?;
+
             self.lua.load(code).exec()
         })();
 
@@ -117,6 +152,7 @@ impl LuaHost {
         let _ = self.lua.globals().raw_remove("self");
         let _ = self.lua.globals().raw_remove("globals");
         let _ = self.lua.globals().raw_remove("skills");
+        let _ = self.lua.globals().raw_remove("world");
 
         match result {
             Ok(()) => {
@@ -203,6 +239,70 @@ fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::
             known.entries.sort_by_key(|(id, _, _)| *id);
         }
     })
+}
+
+/// Filter for `world_count_kind` / `world_find_kind`. Distinguishes
+/// "count me a mob" from "count me an item" without needing two
+/// near-identical helpers.
+#[derive(Clone, Copy)]
+enum EntityKind {
+    Mob,
+    Item,
+}
+
+/// Count entities of `kind` whose `WorldKey == (zone, id)`. Used by
+/// `world.count_mobiles` / `world.count_objects`.
+fn world_count_kind(lua: &Lua, zone: i32, id: i32, kind: EntityKind) -> mlua::Result<i64> {
+    use mud_world::Item;
+    world_mut_from_lua(lua, |world| {
+        let mut count: i64 = 0;
+        match kind {
+            EntityKind::Mob => {
+                let mut q = world.query_filtered::<&WorldKey, With<Mob>>();
+                for wk in q.iter(world) {
+                    if wk.zone == zone && wk.id == id {
+                        count += 1;
+                    }
+                }
+            }
+            EntityKind::Item => {
+                let mut q = world.query_filtered::<&WorldKey, With<Item>>();
+                for wk in q.iter(world) {
+                    if wk.zone == zone && wk.id == id {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    })
+}
+
+/// Return the first entity of `kind` matching `(zone, id)` as a
+/// `LuaActor` userdata. Returns nil if none. Used by
+/// `world.find_mobile`.
+fn world_find_kind(lua: &Lua, zone: i32, id: i32, kind: EntityKind) -> mlua::Result<Value> {
+    use mud_world::Item;
+    let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
+        match kind {
+            EntityKind::Mob => {
+                let mut q = world.query_filtered::<(Entity, &WorldKey), With<Mob>>();
+                q.iter(world)
+                    .find(|(_, wk)| wk.zone == zone && wk.id == id)
+                    .map(|(e, _)| e)
+            }
+            EntityKind::Item => {
+                let mut q = world.query_filtered::<(Entity, &WorldKey), With<Item>>();
+                q.iter(world)
+                    .find(|(_, wk)| wk.zone == zone && wk.id == id)
+                    .map(|(e, _)| e)
+            }
+        }
+    })?;
+    match entity {
+        Some(e) => Ok(Value::UserData(lua.create_userdata(LuaActor { entity: e })?)),
+        None => Ok(Value::Nil),
+    }
 }
 
 fn format_args(args: &Variadic<Value>) -> String {
