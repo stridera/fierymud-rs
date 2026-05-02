@@ -81,6 +81,7 @@ pub enum AdminRequest {
     Command { executor: String, command: String },
     Teleport { player_name: String, zone_id: i32, room_id: i32 },
     Spawn { kind: String, zone_id: i32, id: i32, room_zone: i32, room_id: i32 },
+    InspectMob { zone_id: i32, id: i32 },
 }
 
 pub type AdminResponse = Result<Value, (StatusCode, String)>;
@@ -125,6 +126,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/world/status", get(handle_world_status))
         .route("/api/admin/room/{zone_id}/{id}", get(handle_look_room))
         .route("/api/admin/actor/{name}", get(handle_inspect_actor))
+        .route("/api/admin/mob/{zone_id}/{id}", get(handle_inspect_mob))
         .route("/api/admin/session/create", post(handle_session_create))
         .route("/api/admin/session/destroy", post(handle_session_destroy))
         .route("/api/admin/command", post(handle_command))
@@ -192,6 +194,17 @@ async fn handle_inspect_actor(
         return json_err(e);
     }
     json_ok(enqueue(&state, AdminRequest::InspectActor { name }).await)
+}
+
+async fn handle_inspect_mob(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((zone_id, id)): Path<(i32, i32)>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(enqueue(&state, AdminRequest::InspectMob { zone_id, id }).await)
 }
 
 #[derive(Deserialize)]
@@ -425,6 +438,7 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::Spawn { kind, zone_id, id, room_zone, room_id } => {
             spawn_into(world, &kind, zone_id, id, room_zone, room_id)
         }
+        AdminRequest::InspectMob { zone_id, id } => inspect_mob(world, zone_id, id),
     }
 }
 
@@ -887,4 +901,39 @@ fn spawn_into(
             format!("unknown spawn kind '{other}'; expected 'mob' or 'object'"),
         )),
     }
+}
+
+/// Look up a mob prototype by (zone, id) in the catalog and return
+/// its template stats. This is the *prototype* (loader-time data),
+/// not a live instance — for live state use `inspect_actor` against
+/// a spawned mob's name.
+fn inspect_mob(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
+    let proto = world
+        .resource::<MobPrototypes>()
+        .by_key
+        .get(&(zone_id, id))
+        .cloned();
+    let Some(p) = proto else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no mob prototype ({zone_id}, {id})"),
+        ));
+    };
+    Ok(json!({
+        "world_key": [zone_id, id],
+        "name": p.name,
+        "keywords": p.keywords,
+        "room_description": p.room_description,
+        "level": p.level,
+        "alignment": p.alignment,
+        "role": format!("{:?}", p.role),
+        "hp_dice": format!("{}d{}+{}", p.hp_dice_num, p.hp_dice_size, p.hp_dice_bonus),
+        "hp_avg": p.rolled_hp(),
+        "damage_dice": format!("{}d{}+{}", p.damage_dice_num, p.damage_dice_size, p.damage_dice_bonus),
+        "damage_avg": p.avg_damage(),
+        "hit_roll": p.hit_roll,
+        "armor_class": p.armor_class,
+        "wealth": p.wealth,
+        "class_id": p.class_id,
+    }))
 }
