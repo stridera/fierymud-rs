@@ -17151,6 +17151,24 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         return;
     };
 
+    // Peaceful mob gate — `MobBehavior::Peaceful` mobs refuse to be
+    // attacked. Mirrors the legacy aura that quest-givers and
+    // shopkeepers tend to have so a misclick doesn't aggro a
+    // critical NPC. Doesn't apply to PvP — players never carry
+    // MobBehaviors and don't get covered.
+    if world
+        .get::<mud_world::MobBehaviors>(target)
+        .is_some_and(|b| b.has(mud_db::enums::MobBehavior::Peaceful))
+    {
+        let target_name_owned = name_of(world, target);
+        send_to(
+            world,
+            player,
+            format!("{target_name_owned} radiates a calm that turns your blow aside.\r\n"),
+        );
+        return;
+    }
+
     let actual_name = name_of(world, target);
     let player_name = name_of(world, player);
 
