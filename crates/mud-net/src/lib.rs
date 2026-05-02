@@ -37,10 +37,46 @@ pub async fn serve(bind_addr: &str, inbound: InboundTx) -> std::io::Result<()> {
     let mut next_id: ConnId = 1;
     loop {
         let (stream, peer) = listener.accept().await?;
+        if !throttle_allow(peer.ip()) {
+            warn!(%peer, "throttle: rejecting connection — over rate limit");
+            drop(stream);
+            continue;
+        }
         let conn_id = next_id;
         next_id += 1;
         tokio::spawn(handle_connection(conn_id, peer, stream, inbound.clone()));
     }
+}
+
+/// Per-IP connection-rate gate. Refuses an accept when the source
+/// IP has connected more than `MAX_CONNECTS_PER_MIN` times in the
+/// last minute. Shared between the plain-TCP and TLS listeners
+/// since they both share the same threat model.
+static THROTTLER: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<std::net::IpAddr, std::collections::VecDeque<std::time::Instant>>,
+    >,
+> = std::sync::OnceLock::new();
+
+const MAX_CONNECTS_PER_MIN: usize = 10;
+
+/// Returns true when the IP is allowed to connect. Records the
+/// attempt; expired entries are pruned in the same call so the
+/// map doesn't grow unboundedly.
+fn throttle_allow(ip: std::net::IpAddr) -> bool {
+    let map_lock = THROTTLER.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = map_lock.lock().expect("throttler poisoned");
+    let now = std::time::Instant::now();
+    let window = std::time::Duration::from_secs(60);
+    let entry = map.entry(ip).or_default();
+    while entry.front().is_some_and(|t| now.duration_since(*t) > window) {
+        entry.pop_front();
+    }
+    if entry.len() >= MAX_CONNECTS_PER_MIN {
+        return false;
+    }
+    entry.push_back(now);
+    true
 }
 
 /// Like [`serve`] but wraps every accepted connection in TLS using the
@@ -70,7 +106,15 @@ pub async fn serve_tls(
     // High bit set so TLS conn ids never collide with plain ones.
     let mut next_id: ConnId = 1u64 << 40;
     loop {
+        // Same throttler guards both listeners — limit IS shared
+        // (a flood that exhausts plain TCP shouldn't fall through
+        // to TLS, and vice versa).
         let (stream, peer) = listener.accept().await?;
+        if !throttle_allow(peer.ip()) {
+            warn!(%peer, "throttle: rejecting TLS connection — over rate limit");
+            drop(stream);
+            continue;
+        }
         let acceptor = acceptor.clone();
         let inbound = inbound.clone();
         let conn_id = next_id;
