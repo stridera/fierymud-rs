@@ -1406,10 +1406,12 @@ const COMMANDS: &[Command] = &[
             summary: "Show or change your status prompt template.",
             long: "With no argument, prints your current template. With a \
                    template, replaces it. Variables: %h current HP, %H max \
-                   HP, %v current stamina, %V max stamina, %% literal \
+                   HP, %v current stamina, %V max stamina, %n your name, \
+                   %r current room, %g on-hand wealth (copper), %t in-game \
+                   hour (zero-padded), %s season, %d day/night, %% literal \
                    percent. Examples: \
                      prompt <%h/%H hp %v/%V mv> \
-                     prompt [%h hp] ",
+                     prompt [%t %h/%H %d] ",
         },
         run: cmd_prompt,
     },
