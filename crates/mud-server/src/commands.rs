@@ -8411,6 +8411,10 @@ struct ScoreData<'a> {
     /// Sated state stays silent.
     hunger: i32,
     thirst: i32,
+    /// `(carried_lbs, capacity_lbs)`. Surfaced on the score sheet so
+    /// the encumbrance numbers are visible without `inventory`.
+    /// Capacity is always positive — `carry_capacity` floors at 1.
+    carry: (f64, f64),
 }
 
 fn cmd_score(world: &mut World, player: Entity, _args: &str) {
@@ -8449,6 +8453,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
     let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
     let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
+    let carry = (carried_weight(world, player), carry_capacity(world, player));
     let data = ScoreData {
         name: &name,
         hp,
@@ -8465,6 +8470,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         bank,
         hunger,
         thirst,
+        carry,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
@@ -8501,6 +8507,12 @@ fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(coin) = format_wealth(d.bank) {
         out.push_str(&format!("  Bank:   {coin}\r\n"));
+    }
+    if d.carry.0 > 0.0 {
+        out.push_str(&format!(
+            "  Load:   {:.1} / {:.0} lbs.\r\n",
+            d.carry.0, d.carry.1,
+        ));
     }
     if let Some(l) = d.logged_in {
         out.push_str(&format!("  Online for: {}\r\n", format_idle(l.0.elapsed().as_secs())));
@@ -8575,6 +8587,9 @@ fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(coin) = format_wealth(d.bank) {
         row(format!("Bank:      {coin}"));
+    }
+    if d.carry.0 > 0.0 {
+        row(format!("Load:      {:.1} / {:.0} lbs.", d.carry.0, d.carry.1));
     }
     if let Some(l) = d.logged_in {
         row(format!("Online:    {}", format_idle(l.0.elapsed().as_secs())));
