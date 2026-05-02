@@ -6446,6 +6446,54 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
     }
 }
 
+/// In-memory ring buffer of admin-mutating actions for replay /
+/// review. Capped at 256 entries; oldest get dropped on overflow.
+/// Surfaced via `show audit`. Not persisted to DB yet — separate
+/// concern from the schema's `script_error_log` table.
+#[derive(Resource, Default)]
+pub struct AdminAuditLog {
+    pub entries: std::collections::VecDeque<AdminAuditEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminAuditEntry {
+    pub at: std::time::SystemTime,
+    pub actor_name: String,
+    pub verb: &'static str,
+    pub args: String,
+}
+
+impl AdminAuditLog {
+    const CAP: usize = 256;
+    pub fn push(&mut self, e: AdminAuditEntry) {
+        if self.entries.len() >= Self::CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(e);
+    }
+}
+
+/// Record one admin-mutating command for the audit log. Logged at
+/// info level too so operators tailing tracing get the same data.
+pub(crate) fn record_admin_action(
+    world: &mut World,
+    actor: Entity,
+    verb: &'static str,
+    args: &str,
+) {
+    if !world.contains_resource::<AdminAuditLog>() {
+        world.insert_resource(AdminAuditLog::default());
+    }
+    let actor_name = name_of(world, actor);
+    tracing::info!(actor = %actor_name, verb = %verb, args = %args, "admin action");
+    world.resource_mut::<AdminAuditLog>().push(AdminAuditEntry {
+        at: std::time::SystemTime::now(),
+        actor_name,
+        verb,
+        args: args.to_string(),
+    });
+}
+
 /// 10-cell ASCII bar with a color tag wrapping the filled portion.
 /// 100% = `<green>[##########]</>`, 50% = `<yellow>[#####_____]</>`,
 /// 10% = `<red>[#_________]</>`. Used by the `%B` (HP) and `%M`
@@ -19598,6 +19646,7 @@ fn try_engage_aggressive_mob(world: &mut World, player: Entity, room: Entity) {
 // ---------------------------------------------------------------------------
 
 fn cmd_slay(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "slay", args);
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "Usage: slay <mob>\r\n");
@@ -19774,6 +19823,7 @@ fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_purge(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "purge", args);
     let arg = args.trim();
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
@@ -20676,6 +20726,7 @@ fn cmd_show(world: &mut World, player: Entity, args: &str) {
             out.push_str("  clock     MudClock + TickCount\r\n");
             out.push_str("  resets    mob/object reset catalog counts\r\n");
             out.push_str("  corpses   active corpses + decay timers + item counts\r\n");
+            out.push_str("  audit     recent admin-mutating actions\r\n");
         }
         "players" => {
             let mut rows: Vec<(String, String, i32, String)> = {
@@ -20797,6 +20848,34 @@ fn cmd_show(world: &mut World, player: Entity, args: &str) {
             let obj_count = world.resource::<ObjectResetCatalog>().entries.len();
             out.push_str(&format!("Mob reset rows:    {mob_count}\r\n"));
             out.push_str(&format!("Object reset rows: {obj_count}\r\n"));
+        }
+        "audit" => {
+            let log = world.get_resource::<AdminAuditLog>();
+            match log {
+                None => out.push_str("Audit log empty (no admin actions yet).\r\n"),
+                Some(l) if l.entries.is_empty() => {
+                    out.push_str("Audit log empty (no admin actions yet).\r\n");
+                }
+                Some(l) => {
+                    out.push_str(&format!(
+                        "Last {} admin action(s):\r\n",
+                        l.entries.len(),
+                    ));
+                    for e in l.entries.iter().rev().take(40) {
+                        let secs_ago = std::time::SystemTime::now()
+                            .duration_since(e.at)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        out.push_str(&format!(
+                            "  {ago:>5}s ago  {actor:<20}  {verb:<10}  {args}\r\n",
+                            ago = secs_ago,
+                            actor = e.actor_name,
+                            verb = e.verb,
+                            args = e.args,
+                        ));
+                    }
+                }
+            }
         }
         "corpses" => {
             // Collect (corpse, name, decay, room, item_count) — same shape
@@ -21441,6 +21520,7 @@ fn cmd_load(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "loadobj", args);
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
         send_to(world, player, "Usage: loadobj <zone_id> <obj_id>\r\n");
@@ -21540,6 +21620,7 @@ fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_summon(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "summon", args);
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
         send_to(world, player, "Usage: summon <zone_id> <mob_id>\r\n");
@@ -21862,6 +21943,7 @@ fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
 }
 
 fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "freeze", args);
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "Usage: freeze <player>\r\n");
@@ -21908,6 +21990,7 @@ fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_force(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "force", args);
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.len() != 2 || parts[1].trim().is_empty() {
         send_to(world, player, "Usage: force <player> <command>\r\n");
