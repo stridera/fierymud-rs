@@ -23,7 +23,7 @@ pub use resources::{
     EffectDef, LevelRow, LevelTable, LiquidIndex, LiquidProto, LuaOutbox, MobProto,
     MobPrototypes, MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding,
     ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
-    LightFuelProto, PrecipKind, SavingThrow, ScriptError, ScriptErrorLog, ShopAcceptRule,
+    LightFuelProto, PrecipKind, SavingThrow, ScriptError, ScriptErrorLog, Season, ShopAcceptRule,
     ShopCatalog, ShopDef,
     ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, SpellSlotData, TargetingRule,
     TempBand, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, WeatherCatalog,

@@ -477,6 +477,79 @@ impl Default for MudClock {
     }
 }
 
+/// Sixteen-month calendar inherited from `FieryMUD`'s lore — four
+/// thematic months per season, 30 days each. Months are 1-indexed
+/// in `MudClock.month`; helpers accept that and clamp out-of-range
+/// values to the placeholder so persisted snapshots from a future
+/// schema bump still render something readable.
+const MONTH_NAMES: [&str; 16] = [
+    "the Month of Deepwinter",
+    "the Month of the Claw",
+    "the Month of the Grand Struggle",
+    "the Month of the Running",
+    "the Month of the Planting",
+    "the Month of the Long Day",
+    "the Month of the Time of Famine",
+    "the Month of the High Sun",
+    "the Month of the Ripening",
+    "the Month of the Lowering",
+    "the Month of the Fade",
+    "the Month of the Dying",
+    "the Month of the Shadows",
+    "the Month of the Great Frost",
+    "the Month of the Drawing",
+    "the Month of the Long Night",
+];
+
+/// Calendar quarter — months 1..=4 are Winter, 5..=8 Spring, etc.
+/// Matches the legacy four-seasons-of-four-months layout exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Season {
+    Winter,
+    Spring,
+    Summer,
+    Autumn,
+}
+
+impl Season {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Winter => "Winter",
+            Self::Spring => "Spring",
+            Self::Summer => "Summer",
+            Self::Autumn => "Autumn",
+        }
+    }
+}
+
+impl MudClock {
+    /// Month name for the current `month` field. Out-of-range months
+    /// (a hand-edited snapshot, a future bump) get a placeholder
+    /// rather than panicking — `time` is a read-only command and a
+    /// crash there isn't worth a defensible invariant elsewhere.
+    #[must_use]
+    pub fn month_name(&self) -> &'static str {
+        usize::try_from(self.month - 1)
+            .ok()
+            .and_then(|idx| MONTH_NAMES.get(idx).copied())
+            .unwrap_or("an unknown month")
+    }
+
+    /// Calendar quarter for the current `month`. Out-of-range months
+    /// fold into the nearest in-range quarter (months ≤ 0 → Winter,
+    /// months ≥ 17 → Autumn) so a hand-edited snapshot still renders.
+    #[must_use]
+    pub fn season(&self) -> Season {
+        match self.month {
+            5..=8 => Season::Spring,
+            9..=12 => Season::Summer,
+            13..=16 => Season::Autumn,
+            _ => Season::Winter,
+        }
+    }
+}
+
 /// One entry in the in-memory script error log. Push-only; the
 /// reader (admin `scripterrors` command) walks the buffer in
 /// reverse chronological order. No DB persistence yet — the
@@ -881,4 +954,43 @@ pub struct WeatherState {
 #[derive(Resource, Default, Debug)]
 pub struct WeatherCatalog {
     pub by_zone: HashMap<i32, WeatherState>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clock_for_month(month: i32) -> MudClock {
+        MudClock { year: 1, month, day: 1, hour: 12, stamp: 0 }
+    }
+
+    #[test]
+    fn month_name_covers_full_calendar() {
+        assert_eq!(clock_for_month(1).month_name(), "the Month of Deepwinter");
+        assert_eq!(clock_for_month(8).month_name(), "the Month of the High Sun");
+        assert_eq!(clock_for_month(16).month_name(), "the Month of the Long Night");
+    }
+
+    #[test]
+    fn month_name_clamps_out_of_range() {
+        assert_eq!(clock_for_month(0).month_name(), "an unknown month");
+        assert_eq!(clock_for_month(17).month_name(), "an unknown month");
+        assert_eq!(clock_for_month(-3).month_name(), "an unknown month");
+    }
+
+    #[test]
+    fn season_partitions_calendar_into_quarters() {
+        for m in 1..=4 {
+            assert_eq!(clock_for_month(m).season(), Season::Winter);
+        }
+        for m in 5..=8 {
+            assert_eq!(clock_for_month(m).season(), Season::Spring);
+        }
+        for m in 9..=12 {
+            assert_eq!(clock_for_month(m).season(), Season::Summer);
+        }
+        for m in 13..=16 {
+            assert_eq!(clock_for_month(m).season(), Season::Autumn);
+        }
+    }
 }

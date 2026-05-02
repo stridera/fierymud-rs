@@ -10078,8 +10078,9 @@ fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     let clock = world.resource::<mud_world::MudClock>();
     let mud_hour = i64::from(clock.hour);
     let mud_day = i64::from(clock.day);
-    let mud_month = i64::from(clock.month);
     let mud_year = i64::from(clock.year);
+    let month_name = clock.month_name();
+    let season = clock.season().label();
     let period = match mud_hour {
         0..=4 => "deep night",
         5..=7 => "early morning",
@@ -10089,15 +10090,35 @@ fn cmd_time(world: &mut World, player: Entity, _args: &str) {
         18..=20 => "evening",
         _ => "night",
     };
+    let day_suffix = ordinal_suffix(mud_day);
 
     let mut out = String::from("\r\n");
     out.push_str(&format!("  Server time: {}\r\n", now.format("%Y-%m-%d %H:%M:%S UTC")));
     out.push_str(&format!("  Uptime:      {h}h {m}m {s}s\r\n"));
     out.push_str(&format!("  World tick:  {tick}\r\n"));
     out.push_str(&format!(
-        "  Game time:   {mud_year}-{mud_month:02}-{mud_day:02}, {mud_hour:02}:00 ({period})\r\n",
+        "  Game time:   The {mud_day}{day_suffix} day of {month_name}, Year {mud_year}.\r\n",
+    ));
+    out.push_str(&format!(
+        "               It is {mud_hour:02}:00 ({period}); the season is {season}.\r\n",
     ));
     send_to(world, player, out);
+}
+
+/// Ordinal suffix for a day-of-month number ("1st", "22nd", "13th").
+/// Handles the standard 11/12/13 exception. Used by `time` for the
+/// "The 3rd day of the Month of …" line.
+fn ordinal_suffix(n: i64) -> &'static str {
+    let abs = n.unsigned_abs();
+    if (11..=13).contains(&(abs % 100)) {
+        return "th";
+    }
+    match abs % 10 {
+        1 => "st",
+        2 => "nd",
+        3 => "rd",
+        _ => "th",
+    }
 }
 
 /// `weather`: render an atmospheric flavor line based on the player's

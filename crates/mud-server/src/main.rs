@@ -71,7 +71,9 @@ fn mud_clock_tick(tick: Res<TickCount>, mut clock: ResMut<mud_world::MudClock>) 
         clock.day = 1;
         clock.month += 1;
     }
-    if clock.month > 12 {
+    // 16-month calendar — four thematic months per season, see
+    // `MudClock::month_name` / `Season`.
+    if clock.month > 16 {
         clock.month = 1;
         clock.year += 1;
     }
