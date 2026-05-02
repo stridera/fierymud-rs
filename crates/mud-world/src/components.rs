@@ -41,6 +41,58 @@ pub struct Account {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Mob;
 
+/// Player housing summary, loaded once at login. Holds the
+/// `PlayerHouse` row id, the entrance room (a real world room
+/// in the player's race start zone), and a snapshot of the
+/// interior rooms / exits / items / guests for reads via the
+/// `house` command. Absent for characters who don't own a
+/// house — most players, especially before housing UX lands.
+///
+/// Treated as a read-cache: on login we refresh from DB; mutations
+/// (place / remove / expand / guest) write to DB and update this
+/// component. Cross-restart persistence comes from the DB layer
+/// itself — nothing serialized via `state/`.
+#[derive(Component, Debug, Clone)]
+pub struct HouseSummary {
+    pub house_id: i32,
+    pub entrance_room: WorldKey,
+    pub return_room: Option<WorldKey>,
+    pub rooms: Vec<HouseRoomEntry>,
+    pub exits: Vec<HouseExitEntry>,
+    pub items: Vec<HouseItemEntry>,
+    pub guests: Vec<HouseGuestEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HouseRoomEntry {
+    pub id: i32,
+    pub local_index: i32,
+    pub name: String,
+    pub description: String,
+    pub is_peaceful: bool,
+    pub capacity: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct HouseExitEntry {
+    pub from_room_id: i32,
+    pub to_room_id: i32,
+    pub direction: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct HouseItemEntry {
+    pub room_id: i32,
+    pub object_zone_id: i32,
+    pub object_id: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct HouseGuestEntry {
+    pub character_id: String,
+    pub can_place: bool,
+}
+
 /// Loot-claim window on a freshly-spawned mob corpse. Only
 /// `owner` (and their group, once group bridging lands) can `get`
 /// items from this corpse until `expires_at` — past that,

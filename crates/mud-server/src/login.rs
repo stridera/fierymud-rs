@@ -310,6 +310,7 @@ impl ConnRouter {
     /// Player entity, and migrate the connection from `login` to
     /// `playing`. Shared by both the email + char-select path and
     /// the direct character-name path.
+    #[allow(clippy::too_many_lines)]
     async fn complete_login(
         &mut self,
         conn_id: ConnId,
@@ -324,6 +325,31 @@ impl ConnRouter {
                 warn!(conn_id, error = %e, "character_items load failed");
                 Vec::new()
             });
+        // Housing summary — Ok(None) for the typical player who
+        // doesn't own a house. Unwrap-Some path fires the rest of
+        // the housing fetches; an error logs and skips.
+        let house_summary = match mud_db::housing::for_character(pool, &char_row.id).await {
+            Ok(Some(h)) => {
+                let rooms = mud_db::housing::rooms_for_house(pool, h.id)
+                    .await
+                    .unwrap_or_default();
+                let exits = mud_db::housing::exits_for_house(pool, h.id)
+                    .await
+                    .unwrap_or_default();
+                let items = mud_db::housing::items_for_house(pool, h.id)
+                    .await
+                    .unwrap_or_default();
+                let guests = mud_db::housing::guests_for_house(pool, h.id)
+                    .await
+                    .unwrap_or_default();
+                Some((h, rooms, exits, items, guests))
+            }
+            Ok(None) => None,
+            Err(e) => {
+                warn!(conn_id, error = %e, "housing load failed");
+                None
+            }
+        };
         let ability_rows = mud_db::character_abilities::list_for(pool, &char_row.id)
             .await
             .unwrap_or_else(|e| {
@@ -388,6 +414,53 @@ impl ConnRouter {
                 && !d.trim().is_empty()
             {
                 e.insert(Description(d.trim().to_string()));
+            }
+            if let Some((house, rooms, exits, items, guests)) = house_summary {
+                e.insert(mud_world::HouseSummary {
+                    house_id: house.id,
+                    entrance_room: mud_world::WorldKey {
+                        zone: house.entrance_room_zone_id,
+                        id: house.entrance_room_id,
+                    },
+                    return_room: house
+                        .return_room_zone_id
+                        .zip(house.return_room_id)
+                        .map(|(zone, id)| mud_world::WorldKey { zone, id }),
+                    rooms: rooms
+                        .into_iter()
+                        .map(|r| mud_world::HouseRoomEntry {
+                            id: r.id,
+                            local_index: r.local_index,
+                            name: r.name,
+                            description: r.description,
+                            is_peaceful: r.is_peaceful,
+                            capacity: r.capacity,
+                        })
+                        .collect(),
+                    exits: exits
+                        .into_iter()
+                        .map(|x| mud_world::HouseExitEntry {
+                            from_room_id: x.from_room_id,
+                            to_room_id: x.to_room_id,
+                            direction: x.direction,
+                        })
+                        .collect(),
+                    items: items
+                        .into_iter()
+                        .map(|i| mud_world::HouseItemEntry {
+                            room_id: i.room_id,
+                            object_zone_id: i.object_zone_id,
+                            object_id: i.object_id,
+                        })
+                        .collect(),
+                    guests: guests
+                        .into_iter()
+                        .map(|g| mud_world::HouseGuestEntry {
+                            character_id: g.character_id,
+                            can_place: g.can_place,
+                        })
+                        .collect(),
+                });
             }
         }
         self.playing.insert(conn_id, entity);

@@ -1851,6 +1851,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_say,
     },
     Command {
+        names: &["house"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "house [info|guests|rooms]",
+            summary: "Show information about your player house.",
+            long: "Players who own a house can inspect its layout, \
+                   guest list, and room contents. `house` (no arg) \
+                   defaults to the info subcommand. Players without \
+                   a house get a polite refusal — house creation \
+                   isn't yet wired through the runtime.",
+        },
+        run: cmd_house,
+    },
+    Command {
         names: &["ask"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -12469,6 +12485,81 @@ fn cmd_report(world: &mut World, player: Entity, _args: &str) {
         };
         send_rendered(world, target, &line);
     }
+}
+
+/// `house [subcommand]` — read-only inspection of the player's
+/// house. v1: info / rooms / guests subcommands. Mutating
+/// commands (place, remove, expand, name) and the `home` /
+/// `visit` traversal commands land in subsequent slices.
+fn cmd_house(world: &mut World, player: Entity, args: &str) {
+    let sub = args.trim().to_ascii_lowercase();
+    let sub = if sub.is_empty() { "info" } else { sub.as_str() };
+    let house = world.get::<mud_world::HouseSummary>(player).cloned();
+    let Some(house) = house else {
+        send_to(
+            world,
+            player,
+            "You don't own a house. Speak with a builder to claim one.\r\n",
+        );
+        return;
+    };
+    let mut out = String::from("\r\n");
+    match sub {
+        "info" => {
+            out.push_str(&format!("House #{}\r\n", house.house_id));
+            out.push_str(&format!(
+                "Entrance: zone {} room {}\r\n",
+                house.entrance_room.zone, house.entrance_room.id
+            ));
+            if let Some(rr) = house.return_room {
+                out.push_str(&format!(
+                    "Return-on-exit: zone {} room {}\r\n",
+                    rr.zone, rr.id
+                ));
+            }
+            out.push_str(&format!("Rooms: {}\r\n", house.rooms.len()));
+            out.push_str(&format!("Items placed: {}\r\n", house.items.len()));
+            out.push_str(&format!("Guests: {}\r\n", house.guests.len()));
+        }
+        "rooms" => {
+            if house.rooms.is_empty() {
+                out.push_str("Your house has no rooms — that shouldn't happen.\r\n");
+            } else {
+                out.push_str(&format!("{} room(s):\r\n", house.rooms.len()));
+                for r in &house.rooms {
+                    let item_count = house.items.iter().filter(|i| i.room_id == r.id).count();
+                    out.push_str(&format!(
+                        "  [{:>2}] {} ({} item(s), capacity {}{})\r\n",
+                        r.local_index,
+                        r.name,
+                        item_count,
+                        r.capacity,
+                        if r.is_peaceful { ", peaceful" } else { "" },
+                    ));
+                }
+            }
+        }
+        "guests" => {
+            if house.guests.is_empty() {
+                out.push_str("No guests on your access list.\r\n");
+            } else {
+                out.push_str(&format!("{} guest(s):\r\n", house.guests.len()));
+                for g in &house.guests {
+                    out.push_str(&format!(
+                        "  {} ({})\r\n",
+                        g.character_id,
+                        if g.can_place { "can place items" } else { "visit only" },
+                    ));
+                }
+            }
+        }
+        other => {
+            out.push_str(&format!(
+                "Unknown subcommand '{other}'. Try `house info`, `house rooms`, or `house guests`.\r\n"
+            ));
+        }
+    }
+    send_to(world, player, out);
 }
 
 /// `ask <mob> <topic>` — target a single mob and fire its SPEECH

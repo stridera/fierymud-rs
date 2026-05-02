@@ -13,6 +13,7 @@ pub mod character_abilities;
 pub mod character_aliases;
 pub mod consumable_effects;
 pub mod character_items;
+pub mod housing;
 pub mod characters;
 pub mod classes;
 pub mod effects;
