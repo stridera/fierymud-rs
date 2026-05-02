@@ -10365,9 +10365,37 @@ fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
         out.push_str(&format!("  {}\r\n", render_color_tags(name, mode)));
     }
     if weight > 0.0 {
-        out.push_str(&format!("\r\nTotal weight carried: {weight:.1} lbs.\r\n"));
+        let cap = carry_capacity(world, player);
+        out.push_str(&format!(
+            "\r\nTotal weight carried: {weight:.1} / {cap:.0} lbs.\r\n",
+        ));
     }
     send_to(world, player, out);
+}
+
+/// Carry capacity in pounds. Level-scaled: a fresh character can
+/// haul ~100 lbs, an endgame character ~600. Mobs and entities
+/// without a `Profile` default to 100 — the gate only applies to
+/// players via `cmd_get` anyway, but the helper stays total so
+/// callers don't have to special-case absence.
+pub(crate) fn carry_capacity(world: &World, actor: Entity) -> f64 {
+    let level = world.get::<Profile>(actor).map_or(1, |p| p.level.max(1));
+    100.0 + f64::from(level) * 5.0
+}
+
+/// Look up the prototype weight of a single item — zero for
+/// synthetic items without a `WorldKey`. Used by the encumbrance
+/// gate to test whether one more item would overload the carrier.
+pub(crate) fn item_weight(world: &World, item: Entity) -> f64 {
+    world
+        .get::<WorldKey>(item)
+        .and_then(|wk| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(wk.zone, wk.id))
+        })
+        .map_or(0.0, |p| p.weight)
 }
 
 /// Sum the prototype weight of every item rooted at `actor` —
@@ -10454,8 +10482,17 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
                 );
                 return;
             }
-            let count = items.len();
+            let cap = carry_capacity(world, player);
+            let mut running = carried_weight(world, player);
+            let mut moved = 0usize;
+            let mut skipped = 0usize;
             for (item, item_name) in &items {
+                let w = item_weight(world, *item);
+                if running + w > cap {
+                    skipped += 1;
+                    continue;
+                }
+                running += w;
                 if let Some(mut l) = world.get_mut::<Located>(*item) {
                     l.0 = player;
                 }
@@ -10470,13 +10507,23 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
                     player,
                     mud_world::TriggerEvent::Get,
                 );
+                moved += 1;
             }
-            broadcast_room_except_rendered(
-                world,
-                room,
-                &[player],
-                &format!("{player_name} loots {count} item(s) from {container_name}.\r\n"),
-            );
+            if moved > 0 {
+                broadcast_room_except_rendered(
+                    world,
+                    room,
+                    &[player],
+                    &format!("{player_name} loots {moved} item(s) from {container_name}.\r\n"),
+                );
+            }
+            if skipped > 0 {
+                send_to(
+                    world,
+                    player,
+                    format!("You're too encumbered to carry {skipped} more item(s).\r\n"),
+                );
+            }
             return;
         }
 
@@ -10486,6 +10533,16 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
             return;
         };
         let item_name = name_of(world, item);
+        if carried_weight(world, player) + item_weight(world, item)
+            > carry_capacity(world, player)
+        {
+            send_rendered(
+                world,
+                player,
+                &format!("{item_name} is too heavy — you'd be encumbered.\r\n"),
+            );
+            return;
+        }
         if let Some(mut l) = world.get_mut::<Located>(item) {
             l.0 = player;
         }
@@ -10513,6 +10570,17 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
 
     let item_name = name_of(world, item);
     let player_name = name_of(world, player);
+
+    if carried_weight(world, player) + item_weight(world, item)
+        > carry_capacity(world, player)
+    {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} is too heavy — you'd be encumbered.\r\n"),
+        );
+        return;
+    }
 
     if let Some(mut l) = world.get_mut::<Located>(item) {
         l.0 = player;
