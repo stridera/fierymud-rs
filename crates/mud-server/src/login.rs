@@ -409,6 +409,13 @@ impl ConnRouter {
                 .map(|c| (c.name.clone(), c.level))
                 .collect(),
         };
+        // Build CharacterAchievements + ZoneVisits from the loaded
+        // rows, applying the runtime convention: a `zone_<N>_cleared`
+        // row only counts as "unlocked" once the visited-rooms set
+        // covers the whole zone roster. In-progress visited sets
+        // hydrate ZoneVisits so a player who comes back in the
+        // middle of a zone walk doesn't lose their progress.
+        let (ca_built, zv_built) = build_achievement_components(world, &achievement_rows);
         if let Ok(mut e) = world.get_entity_mut(entity) {
             e.insert(known_abilities);
             e.insert(aliases);
@@ -424,11 +431,12 @@ impl ConnRouter {
                 e.insert(Description(d.trim().to_string()));
             }
             if !achievement_rows.is_empty() {
-                let mut ca = mud_world::CharacterAchievements::default();
-                for row in &achievement_rows {
-                    ca.unlocked.insert(row.achievement_id);
+                if !ca_built.unlocked.is_empty() {
+                    e.insert(ca_built);
                 }
-                e.insert(ca);
+                if !zv_built.by_zone.is_empty() {
+                    e.insert(zv_built);
+                }
             }
             if let Some((house, rooms, exits, items, guests)) = house_summary {
                 e.insert(mud_world::HouseSummary {
@@ -497,6 +505,77 @@ impl ConnRouter {
             "player spawned"
         );
     }
+}
+
+/// Translate the raw `CharacterAchievement` rows into the runtime
+/// pair of components the rest of the world expects:
+///
+/// * `CharacterAchievements` — unlocked set. A row counts as
+///   unlocked iff it's a one-shot (no progress), or the
+///   matching zone roster is fully visited.
+/// * `ZoneVisits` — partial-progress visited rooms keyed by zone.
+///
+/// Pulls room counts from `WorldKeyIndex` and code lookup from
+/// `AchievementCatalog`; both must already be installed as
+/// resources by the loader.
+fn build_achievement_components(
+    world: &World,
+    rows: &[mud_db::achievements::CharacterAchievementRow],
+) -> (mud_world::CharacterAchievements, mud_world::ZoneVisits) {
+    use std::collections::HashSet;
+    let zone_room_counts: HashMap<i32, usize> = world
+        .get_resource::<WorldKeyIndex>()
+        .map(|ki| {
+            let mut counts: HashMap<i32, usize> = HashMap::new();
+            for (z, _) in ki.rooms.keys() {
+                *counts.entry(*z).or_insert(0) += 1;
+            }
+            counts
+        })
+        .unwrap_or_default();
+    let achievement_codes: HashMap<i32, String> = world
+        .get_resource::<mud_world::AchievementCatalog>()
+        .map(|c| {
+            c.by_id
+                .iter()
+                .map(|(id, def)| (*id, def.code.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut ca = mud_world::CharacterAchievements::default();
+    let mut zv = mud_world::ZoneVisits::default();
+    for row in rows {
+        let code = achievement_codes.get(&row.achievement_id);
+        let zone_n = code.and_then(|c| {
+            c.strip_prefix("zone_")
+                .and_then(|s| s.strip_suffix("_cleared"))
+                .and_then(|s| s.parse::<i32>().ok())
+        });
+        if let Some(n) = zone_n {
+            let visited: HashSet<i32> = row
+                .progress
+                .as_ref()
+                .and_then(|p| p.get("visited"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_i64().map(|x| i32::try_from(x).unwrap_or(0)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let total = zone_room_counts.get(&n).copied().unwrap_or(0);
+            if total > 0 && visited.len() >= total {
+                ca.unlocked.insert(row.achievement_id);
+            }
+            if !visited.is_empty() {
+                zv.by_zone.insert(n, visited);
+            }
+        } else {
+            ca.unlocked.insert(row.achievement_id);
+        }
+    }
+    (ca, zv)
 }
 
 /// Single spawn path for a player entity. The `Located(room_entity)`

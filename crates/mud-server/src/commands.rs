@@ -6626,10 +6626,10 @@ pub(crate) fn grant_achievement(world: &mut World, player: Entity, code: &str) {
 
 /// Track that `player` has set foot in `room` and, if the visit
 /// completes the room's zone, fire the `zone_<N>_cleared` achievement.
-/// In-session only — `ZoneVisits` does not currently round-trip
-/// through the DB, so a player who walks half a zone, logs out, and
-/// returns starts that zone fresh. Granted achievements DO persist
-/// (via `grant_achievement`'s normal write).
+/// Persists the visited set to `CharacterAchievement.progress` JSON
+/// (via fire-and-forget upsert) so partial progress survives logout.
+/// On unlock, `grant_achievement` flips the in-memory unlocked set
+/// and the next login picks it up via the room-count check.
 pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity) {
     if world.get::<Player>(player).is_none() {
         return;
@@ -6638,9 +6638,6 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
         Some(k) => *k,
         None => return,
     };
-    // House rooms / synthesized rooms have no WorldKey, so the early
-    // return above filters them out — only authored world rooms
-    // count toward zone clears.
     let needs_init = world.get::<mud_world::ZoneVisits>(player).is_none();
     if needs_init {
         try_insert(world, player, mud_world::ZoneVisits::default());
@@ -6651,8 +6648,6 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
     if !newly_inserted {
         return;
     }
-    // Compare against the loaded room roster for the zone. Empty
-    // zones (nothing in WorldKeyIndex) can't be cleared by accident.
     let total_in_zone = world
         .resource::<WorldKeyIndex>()
         .rooms
@@ -6662,11 +6657,33 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
     if total_in_zone == 0 {
         return;
     }
-    let visited_in_zone = world
+    let visited_set: Vec<i32> = world
         .get::<mud_world::ZoneVisits>(player)
         .and_then(|v| v.by_zone.get(&key.zone))
-        .map_or(0, std::collections::HashSet::len);
-    if visited_in_zone >= total_in_zone {
+        .map(|s| s.iter().copied().collect())
+        .unwrap_or_default();
+    let achievement_id = world
+        .get_resource::<mud_world::AchievementCatalog>()
+        .and_then(|c| c.by_code.get(&format!("zone_{}_cleared", key.zone)))
+        .map(|d| d.id);
+    let character_id = world
+        .get::<Account>(player)
+        .map(|a| a.character_id.clone());
+    if let (Some(ach_id), Some(cid), Some(pool)) = (
+        achievement_id,
+        character_id,
+        world.get_resource::<DbPool>().map(|p| p.0.clone()),
+    ) {
+        let progress = serde_json::json!({ "visited": visited_set });
+        tokio::spawn(async move {
+            if let Err(e) =
+                mud_db::achievements::upsert_progress(&pool, &cid, ach_id, &progress).await
+            {
+                tracing::warn!(error = %e, "zone-clear progress write failed");
+            }
+        });
+    }
+    if visited_set.len() >= total_in_zone {
         let code = format!("zone_{}_cleared", key.zone);
         grant_achievement(world, player, &code);
     }
