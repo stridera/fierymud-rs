@@ -10943,6 +10943,23 @@ fn cmd_give(world: &mut World, player: Entity, args: &str) {
     let target_name = name_of(world, target);
     let player_name = name_of(world, player);
 
+    // Encumbrance gate on the recipient. Mobs (no Profile + no
+    // capacity check) skip — they're carrying gear, not balancing
+    // a budget — and a quest-turn-in mob would balk at otherwise
+    // valid gifts. Player-to-player gifts respect the same load
+    // cap a player would hit picking the item up off the floor.
+    if world.get::<Player>(target).is_some()
+        && carried_weight(world, target) + item_weight(world, item)
+            > carry_capacity(world, target)
+    {
+        send_rendered(
+            world,
+            player,
+            &format!("{target_name} is too laden to take {item_name}.\r\n"),
+        );
+        return;
+    }
+
     if let Some(mut l) = world.get_mut::<Located>(item) {
         l.0 = target;
     }
