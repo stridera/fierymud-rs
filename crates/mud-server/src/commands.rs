@@ -6411,6 +6411,31 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
     }
 }
 
+/// 10-cell ASCII bar with a color tag wrapping the filled portion.
+/// 100% = `<green>[##########]</>`, 50% = `<yellow>[#####_____]</>`,
+/// 10% = `<red>[#_________]</>`. Used by the `%B` (HP) and `%M`
+/// (stamina) prompt vars. Out-of-range or zero-max readings render
+/// an empty bar without color.
+fn render_vital_bar(current: i32, max: i32) -> String {
+    if max <= 0 {
+        return "[__________]".to_string();
+    }
+    let pct = current.saturating_mul(100) / max.max(1);
+    let filled = usize::try_from(pct.clamp(0, 100) / 10).unwrap_or(0);
+    let empty = 10usize.saturating_sub(filled);
+    let bar = format!("[{}{}]", "#".repeat(filled), "_".repeat(empty));
+    let tag = match pct {
+        ..=24 => Some("<red>"),
+        25..=49 => Some("<yellow>"),
+        50..=100 => Some("<green>"),
+        _ => None,
+    };
+    match tag {
+        Some(open) => format!("{open}{bar}</>"),
+        None => bar,
+    }
+}
+
 /// XML-Lite open tag for a vital reading at `current/max`. Red
 /// below 25%, yellow below 50%, none otherwise. Returns the open
 /// tag string; the caller closes with `</>`. Zero / negative max
@@ -6474,6 +6499,17 @@ fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
                 Some('H') => match ctx.hp {
                     Some(hp) => out.push_str(&hp.max.to_string()),
                     None => out.push('?'),
+                },
+                // %B = 10-cell health bar like `[####______]`,
+                // colored by ratio (red/yellow/green-default).
+                Some('B') => match ctx.hp {
+                    Some(hp) => out.push_str(&render_vital_bar(hp.hp, hp.max)),
+                    None => out.push_str("[??????????]"),
+                },
+                // %M = 10-cell stamina bar.
+                Some('M') => match ctx.stamina {
+                    Some(s) => out.push_str(&render_vital_bar(s.current, s.max)),
+                    None => out.push_str("[??????????]"),
                 },
                 Some('v') => match ctx.stamina {
                     Some(s) => {
