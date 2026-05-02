@@ -12297,13 +12297,28 @@ const APPLIED_EFFECT_DURATION_SECS: i32 = 60;
 /// still a follow-up.
 // Linear top-to-bottom flow with a few inline metadata blocks; splitting
 // into helpers would just hide the ordering.
-#[allow(clippy::too_many_lines)]
 fn invoke_ability(
     world: &mut World,
     player: Entity,
     args: &str,
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
+) {
+    invoke_ability_with(world, player, args, kind, verb, false);
+}
+
+/// Same as [`invoke_ability`] but skips the leading description-box
+/// header (`name (kind)`, description, cast time, posture, flags).
+/// Used by AOE shims like `cmd_roar` so the box prints once for the
+/// first target instead of N times for an N-mob room.
+#[allow(clippy::too_many_lines)]
+fn invoke_ability_with(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    kind: mud_db::abilities::AbilityKind,
+    verb: &str,
+    quiet_header: bool,
 ) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.is_empty() || parts[0].trim().is_empty() {
@@ -12464,30 +12479,32 @@ fn invoke_ability(
 
     let mode = color_mode_for(world, player);
     let mut out = String::from("\r\n");
-    out.push_str(&format!(
-        "  {} ({})\r\n",
-        render_color_tags(&def.name, mode),
-        def.kind.label()
-    ));
-    if let Some(desc) = &def.description {
-        out.push_str(&format!("    {}\r\n", render_color_tags(desc.trim(), mode)));
+    if !quiet_header {
+        out.push_str(&format!(
+            "  {} ({})\r\n",
+            render_color_tags(&def.name, mode),
+            def.kind.label()
+        ));
+        if let Some(desc) = &def.description {
+            out.push_str(&format!("    {}\r\n", render_color_tags(desc.trim(), mode)));
+        }
+        out.push_str(&format!(
+            "    cast time: {} round(s)   cooldown: {}ms   {}area\r\n",
+            def.cast_time_rounds,
+            def.cooldown_ms,
+            if def.is_area { "" } else { "single-target / not " }
+        ));
+        out.push_str(&format!(
+            "    requires posture: {}\r\n",
+            def.min_position_label,
+        ));
+        out.push_str(&format!(
+            "    {}{}{}\r\n",
+            if def.violent { "violent  " } else { "" },
+            if def.in_combat_only { "combat-only  " } else { "" },
+            if def.combat_ok { "" } else { "non-combat  " },
+        ));
     }
-    out.push_str(&format!(
-        "    cast time: {} round(s)   cooldown: {}ms   {}area\r\n",
-        def.cast_time_rounds,
-        def.cooldown_ms,
-        if def.is_area { "" } else { "single-target / not " }
-    ));
-    out.push_str(&format!(
-        "    requires posture: {}\r\n",
-        def.min_position_label,
-    ));
-    out.push_str(&format!(
-        "    {}{}{}\r\n",
-        if def.violent { "violent  " } else { "" },
-        if def.in_combat_only { "combat-only  " } else { "" },
-        if def.combat_ok { "" } else { "non-combat  " },
-    ));
     // Resolve the target. Empty / "me" / "self" → the caster.
     // Anything else → look up an actor in the caster's room. If the
     // word doesn't resolve, abort before applying any effects.
@@ -16849,13 +16866,18 @@ fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     drain_stamina(world, player, ROAR_COST);
-    for target_name in targets {
-        invoke_ability(
+    // First target gets the full description box; subsequent targets
+    // dispatch through the quiet variant so the box doesn't repeat
+    // N times in an N-mob room. Per-target success / effect summary
+    // lines still emit normally.
+    for (idx, target_name) in targets.iter().enumerate() {
+        invoke_ability_with(
             world,
             player,
             &format!("roar {target_name}"),
             mud_db::abilities::AbilityKind::Skill,
             "use",
+            idx > 0,
         );
     }
 }
