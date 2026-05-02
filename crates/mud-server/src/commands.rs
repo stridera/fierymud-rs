@@ -4578,6 +4578,21 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         return;
     }
 
+    // Ghost gate: dead-but-incorporeal players can perceive the world
+    // and communicate but can't interact with it physically. Whitelist
+    // the verbs that ARE allowed; everything else gets a "you can't do
+    // that as a ghost" reply pointing them at `release`.
+    if world.get::<mud_world::Ghost>(player).is_some() && !ghost_allowed(tokens[0]) {
+        send_to(
+            world,
+            player,
+            "Your spirit can't act on the world while disembodied. \
+             Type `release` to return to your recall point, or wait \
+             for someone to resurrect you.\r\n",
+        );
+        return;
+    }
+
     // Fire COMMAND-flagged triggers in the player's room first.
     // If any trigger returns `false`, the command is consumed (a
     // mob intercepted it) and we stop dispatch here.
@@ -4643,6 +4658,58 @@ fn expand_alias(world: &World, player: Entity, line: &str) -> Option<String> {
     } else {
         Some(format!("{expansion} {rest}"))
     }
+}
+
+/// Whitelist of verbs a ghost can use. Covers perception, movement,
+/// communication, account-level utilities, and the `release` exit
+/// from the ghost state. Everything else is gated off so ghosts can't
+/// fight, cast, pick things up, wear gear, etc. Cardinal direction
+/// movement is allowed by name (n/s/e/w/up/down + diagonals + their
+/// long forms) so ghosts can wander between rooms.
+fn ghost_allowed(verb: &str) -> bool {
+    matches!(
+        verb,
+        "release"
+            | "look" | "l"
+            | "examine" | "ex"
+            | "exits"
+            | "scan"
+            | "where"
+            | "who"
+            | "score" | "sc"
+            | "inventory" | "inv" | "i"
+            | "equipment" | "eq"
+            | "abilities"
+            | "stat"
+            | "rstat"
+            | "help"
+            | "save"
+            | "quit"
+            // Movement
+            | "north" | "n"
+            | "south" | "s"
+            | "east" | "e"
+            | "west" | "w"
+            | "up" | "u"
+            | "down" | "d"
+            | "northeast" | "ne"
+            | "northwest" | "nw"
+            | "southeast" | "se"
+            | "southwest" | "sw"
+            | "in" | "out"
+            // Communication
+            | "say" | "'"
+            | "tell"
+            | "gossip"
+            | "shout"
+            | "ooc"
+            | "emote"
+            // Settings
+            | "title"
+            | "description"
+            | "prompt"
+            | "color"
+    )
 }
 
 fn longest_prefix_match(tokens: &[&str]) -> Option<(&'static Command, usize)> {
