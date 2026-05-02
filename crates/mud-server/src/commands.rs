@@ -5201,7 +5201,7 @@ fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColorMode, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
+        ColorMode, PromptCtx, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
         apply_knockdown_posture, check_ability_restrictions, check_target_type, condition_label,
         direction_name, evaluate_formula, evaluate_simple_formula, format_idle, has_effect_named,
         is_being_attacked, is_immobilized, normalize_dice_notation, parse_direction,
@@ -5375,42 +5375,64 @@ mod tests {
 
     #[test]
     fn render_prompt_substitutes_hp_and_stamina() {
-        let hp = Some(Health { hp: 42, max: 100 });
-        let st = Some(Stamina { current: 7, max: 50 });
-        let name = Some("Strider");
-        let room = Some("The Void");
-        let g = Some(12345i64);
-        assert_eq!(render_prompt("<%h/%H>", hp, st, name, room, g), "<42/100> ");
-        assert_eq!(render_prompt("<%v/%V mv>", hp, st, name, room, g), "<7/50 mv> ");
-        assert_eq!(
-            render_prompt("<%h/%H %v/%V>", hp, st, name, room, g),
-            "<42/100 7/50> "
-        );
+        let ctx = PromptCtx {
+            hp: Some(Health { hp: 42, max: 100 }),
+            stamina: Some(Stamina { current: 7, max: 50 }),
+            name: Some("Strider"),
+            room: Some("The Void"),
+            wealth: Some(12345i64),
+            hour: Some(7),
+        };
+        assert_eq!(render_prompt("<%h/%H>", ctx), "<42/100> ");
+        assert_eq!(render_prompt("<%v/%V mv>", ctx), "<7/50 mv> ");
+        assert_eq!(render_prompt("<%h/%H %v/%V>", ctx), "<42/100 7/50> ");
         // Trailing space already present — don't double-add.
-        assert_eq!(render_prompt("<%h> ", hp, st, name, room, g), "<42> ");
+        assert_eq!(render_prompt("<%h> ", ctx), "<42> ");
         // Literal percent.
-        assert_eq!(render_prompt("100%%", hp, st, name, room, g), "100% ");
+        assert_eq!(render_prompt("100%%", ctx), "100% ");
         // Name substitution.
-        assert_eq!(render_prompt("[%n]", hp, st, name, room, g), "[Strider] ");
+        assert_eq!(render_prompt("[%n]", ctx), "[Strider] ");
         // Room substitution.
-        assert_eq!(render_prompt("[%r]", hp, st, name, room, g), "[The Void] ");
+        assert_eq!(render_prompt("[%r]", ctx), "[The Void] ");
         // Wealth substitution: raw copper.
-        assert_eq!(render_prompt("[%g cp]", hp, st, name, room, g), "[12345 cp] ");
+        assert_eq!(render_prompt("[%g cp]", ctx), "[12345 cp] ");
+        // Hour substitution: zero-padded.
+        assert_eq!(render_prompt("[%t]", ctx), "[07] ");
         // Unknown variable: pass through literally so the player sees they
         // typed something we don't implement.
-        assert_eq!(render_prompt("[%z]", hp, st, name, room, g), "[%z] ");
+        assert_eq!(render_prompt("[%z]", ctx), "[%z] ");
         // Missing Health: question marks.
-        assert_eq!(render_prompt("<%h/%H>", None, st, name, room, g), "<?/?> ");
+        assert_eq!(
+            render_prompt("<%h/%H>", PromptCtx { hp: None, ..ctx }),
+            "<?/?> "
+        );
         // Missing Stamina: question marks for v/V.
-        assert_eq!(render_prompt("<%v/%V>", hp, None, name, room, g), "<?/?> ");
+        assert_eq!(
+            render_prompt("<%v/%V>", PromptCtx { stamina: None, ..ctx }),
+            "<?/?> "
+        );
         // Missing name: question mark.
-        assert_eq!(render_prompt("[%n]", hp, st, None, room, g), "[?] ");
+        assert_eq!(
+            render_prompt("[%n]", PromptCtx { name: None, ..ctx }),
+            "[?] "
+        );
         // Missing room: question mark.
-        assert_eq!(render_prompt("[%r]", hp, st, name, None, g), "[?] ");
+        assert_eq!(
+            render_prompt("[%r]", PromptCtx { room: None, ..ctx }),
+            "[?] "
+        );
         // Missing wealth: question mark.
-        assert_eq!(render_prompt("[%g]", hp, st, name, room, None), "[?] ");
+        assert_eq!(
+            render_prompt("[%g]", PromptCtx { wealth: None, ..ctx }),
+            "[?] "
+        );
+        // Missing hour: question mark.
+        assert_eq!(
+            render_prompt("[%t]", PromptCtx { hour: None, ..ctx }),
+            "[?] "
+        );
         // Empty template still gets a trailing space.
-        assert_eq!(render_prompt("", hp, st, name, room, g), " ");
+        assert_eq!(render_prompt("", ctx), " ");
     }
 
     #[test]
@@ -6339,7 +6361,11 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
         .and_then(|l| world.get::<Named>(l.0))
         .map(|n| n.name.as_str());
     let wealth = world.get::<Wealth>(target).map(|w| w.0);
-    let rendered = render_prompt(template, hp, stamina, name, room, wealth);
+    let hour = world.get_resource::<mud_world::MudClock>().map(|c| c.hour);
+    let rendered = render_prompt(
+        template,
+        PromptCtx { hp, stamina, name, room, wealth, hour },
+    );
     // Prompts can carry color tags both directly in the template
     // (`prompt <red>%h</>`) and indirectly via %r / %n (room and player
     // names that may have embedded tags). render_color_tags handles
@@ -6365,48 +6391,62 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
     }
 }
 
-fn render_prompt(
-    template: &str,
-    hp: Option<Health>,
-    stamina: Option<Stamina>,
-    name: Option<&str>,
-    room: Option<&str>,
-    wealth: Option<i64>,
-) -> String {
+/// Bag of substitutions the prompt template can read. Bundled in
+/// a struct so adding new variables (`%t`, `%s`, …) doesn't keep
+/// growing the function signature; older callers can keep building
+/// it inline with `..PromptCtx::default()`.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct PromptCtx<'a> {
+    pub hp: Option<Health>,
+    pub stamina: Option<Stamina>,
+    pub name: Option<&'a str>,
+    pub room: Option<&'a str>,
+    pub wealth: Option<i64>,
+    /// In-game hour 0..=23. Surfaces as `%t` zero-padded ("07").
+    pub hour: Option<i32>,
+}
+
+fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let mut chars = template.chars();
     while let Some(c) = chars.next() {
         if c == '%' {
             match chars.next() {
-                Some('h') => match hp {
+                Some('h') => match ctx.hp {
                     Some(hp) => out.push_str(&hp.hp.to_string()),
                     None => out.push('?'),
                 },
-                Some('H') => match hp {
+                Some('H') => match ctx.hp {
                     Some(hp) => out.push_str(&hp.max.to_string()),
                     None => out.push('?'),
                 },
-                Some('v') => match stamina {
+                Some('v') => match ctx.stamina {
                     Some(s) => out.push_str(&s.current.to_string()),
                     None => out.push('?'),
                 },
-                Some('V') => match stamina {
+                Some('V') => match ctx.stamina {
                     Some(s) => out.push_str(&s.max.to_string()),
                     None => out.push('?'),
                 },
-                Some('n') => match name {
+                Some('n') => match ctx.name {
                     Some(n) => out.push_str(n),
                     None => out.push('?'),
                 },
-                Some('r') => match room {
+                Some('r') => match ctx.room {
                     Some(r) => out.push_str(r),
                     None => out.push('?'),
                 },
                 // %g = on-hand wealth in copper (raw integer; players
                 // do their own math). Skipped denomination split here
                 // because the prompt is a tight one-line readout.
-                Some('g') => match wealth {
+                Some('g') => match ctx.wealth {
                     Some(w) => out.push_str(&w.to_string()),
+                    None => out.push('?'),
+                },
+                // %t = in-game hour, zero-padded. Lets a player put
+                // a clock in their prompt without `time` round-trips.
+                Some('t') => match ctx.hour {
+                    Some(h) => out.push_str(&format!("{h:02}")),
                     None => out.push('?'),
                 },
                 Some('%') | None => out.push('%'),
