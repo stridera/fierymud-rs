@@ -2,6 +2,7 @@ mod admin;
 mod combat;
 mod commands;
 mod corpses;
+mod drowning;
 mod effects;
 mod idle;
 mod login;
@@ -212,6 +213,7 @@ async fn main() {
             regen::regen_tick,
             regen::hunger_thirst_tick,
             regen::light_fuel_tick,
+            drowning::drowning_tick,
             weather::weather_tick,
             sleep::mob_sleep_tick,
             idle::idle_kick_tick,
