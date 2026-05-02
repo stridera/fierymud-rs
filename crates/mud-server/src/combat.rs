@@ -165,6 +165,23 @@ pub fn hit_chance_pct(hit_roll: i32, target_ac: i32) -> i32 {
     (80i32.saturating_add(modifier)).clamp(5, 100)
 }
 
+/// Posture modifier applied to the target's effective AC at swing
+/// time. A non-standing target is easier to hit — they can't
+/// dodge as effectively. Each step "down" the posture rank adds
+/// 2 to AC (improves attacker odds by ~10%). Sleeping targets
+/// auto-hit before this even runs (handled at the call site), so
+/// the `Sleeping` arm is included only for symmetry.
+#[must_use]
+pub fn posture_ac_modifier(p: PostureKind) -> i32 {
+    match p {
+        PostureKind::Standing => 0,
+        PostureKind::Kneeling => 2,
+        PostureKind::Sitting => 4,
+        PostureKind::Resting => 5,
+        PostureKind::Sleeping => 6,
+    }
+}
+
 /// Per-mob memory of the players who've ever swung at them.
 /// Lifetime ties to the mob: dies with the mob, never persisted,
 /// never serialized. Used by the on-entry aggro path so a mob
@@ -429,7 +446,16 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // jolt-awake path already assumed. Otherwise compute the
     // chance from attacker hit_roll vs target AC and roll d100.
     let hit_roll = world.get::<CombatStats>(s.attacker).map_or(0, |cs| cs.hit_roll);
-    let target_ac = world.get::<CombatStats>(s.target).map_or(0, |cs| cs.ac);
+    // Effective AC includes a posture modifier — a sitting /
+    // kneeling target is easier to hit than a standing one.
+    // Posture modifier is added to AC; lower-AC = harder to hit,
+    // so the addition makes the target softer. Sleeping targets
+    // bypass the roll entirely (auto-hit) at the call site below.
+    let base_ac = world.get::<CombatStats>(s.target).map_or(0, |cs| cs.ac);
+    let posture_mod = world
+        .get::<Posture>(s.target)
+        .map_or(0, |p| posture_ac_modifier(p.0));
+    let target_ac = base_ac + posture_mod;
     let outcome = if was_sleeping {
         SwingOutcome::Hit
     } else {
