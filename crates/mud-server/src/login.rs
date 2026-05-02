@@ -341,6 +341,14 @@ impl ConnRouter {
             .and_then(|v| v.get("total").and_then(serde_json::Value::as_i64))
             .and_then(|n| i32::try_from(n).ok())
             .unwrap_or(0);
+        // Last 10 received tells, newest first. Hydrates TellLog
+        // so `lasttells` shows continuity across reconnects.
+        let recent_tells = mud_db::tell_messages::recent_for(pool, &char_row.id, 10)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "tell history load failed");
+                Vec::new()
+            });
 
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
@@ -450,6 +458,23 @@ impl ConnRouter {
             // KillStats is always inserted so the bump path can
             // mutate it without a "needs_init" branch on every kill.
             e.insert(mud_world::KillStats { total: kill_total });
+            // Hydrate TellLog from the persisted tail. Insertion
+            // order: newest-first as returned by `recent_for`, but
+            // `push_at` puts each at the front, so we iterate the
+            // *oldest* first to land newest at the head.
+            if !recent_tells.is_empty() {
+                use std::time::SystemTime;
+                let mut log = mud_world::TellLog::with_cap(10);
+                for row in recent_tells.iter().rev() {
+                    let when = SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(
+                            u64::try_from(row.sent_at.and_utc().timestamp().max(0))
+                                .unwrap_or(0),
+                        );
+                    log.push_at(row.sender_name.clone(), when);
+                }
+                e.insert(log);
+            }
             if let Some((house, rooms, exits, items, guests)) = house_summary {
                 e.insert(mud_world::HouseSummary {
                     house_id: house.id,

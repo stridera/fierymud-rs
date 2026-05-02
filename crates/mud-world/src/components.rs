@@ -683,7 +683,10 @@ impl IgnoreList {
 #[derive(Component, Debug, Default, Clone)]
 pub struct TellLog {
     /// (`sender_name`, `when_received`). Capped at `cap`; oldest dropped.
-    pub entries: std::collections::VecDeque<(String, std::time::Instant)>,
+    /// `SystemTime` (not `Instant`) so login-time hydration from the
+    /// `tell_message` table can preserve real timestamps across
+    /// process restarts.
+    pub entries: std::collections::VecDeque<(String, std::time::SystemTime)>,
     pub cap: usize,
 }
 
@@ -697,7 +700,15 @@ impl TellLog {
     }
 
     pub fn push(&mut self, name: String) {
-        self.entries.push_front((name, std::time::Instant::now()));
+        self.push_at(name, std::time::SystemTime::now());
+    }
+
+    /// Push with a specific timestamp — used when hydrating from
+    /// the persisted `tell_message` table so the entries keep
+    /// their original `sent_at` rather than getting clobbered to
+    /// "right now."
+    pub fn push_at(&mut self, name: String, when: std::time::SystemTime) {
+        self.entries.push_front((name, when));
         while self.entries.len() > self.cap {
             self.entries.pop_back();
         }

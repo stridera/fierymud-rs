@@ -37,6 +37,7 @@ pub mod shops;
 pub mod levels;
 pub mod socials;
 pub mod spell_slots;
+pub mod tell_messages;
 pub mod triggers;
 pub mod users;
 pub mod zones;

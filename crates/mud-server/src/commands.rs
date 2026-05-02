@@ -17145,6 +17145,27 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
         log.push(player_name_owned);
         try_insert(world, target, log);
     }
+    // Persist to the `tell_message` table so the receiver's
+    // `lasttells` survives logout / restart. Fire-and-forget;
+    // the in-memory `TellLog` already holds the entry for the
+    // common case where the recipient is online.
+    let recipient_id = world
+        .get::<Account>(target)
+        .map(|a| a.character_id.clone());
+    if let (Some(rid), Some(pool)) = (
+        recipient_id,
+        world.get_resource::<DbPool>().map(|p| p.0.clone()),
+    ) {
+        let sender_name = player_name.clone();
+        let body = message.to_string();
+        tokio::spawn(async move {
+            if let Err(e) =
+                mud_db::tell_messages::record(&pool, &rid, &sender_name, &body).await
+            {
+                tracing::warn!(error = %e, "tell persist failed");
+            }
+        });
+    }
 }
 
 fn cmd_reply(world: &mut World, player: Entity, args: &str) {
@@ -17237,7 +17258,13 @@ fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {
         .map(|log| {
             log.entries
                 .iter()
-                .map(|(name, when)| (name.clone(), when.elapsed().as_secs()))
+                .map(|(name, when)| {
+                    let secs = when
+                        .elapsed()
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    (name.clone(), secs)
+                })
                 .collect()
         })
         .unwrap_or_default();
