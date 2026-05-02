@@ -4903,6 +4903,68 @@ pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
 /// string also returns true to preserve the previous "drop empty `<>`"
 /// behavior. Anything else (most importantly `<%h/%H>`-style prompt
 /// vars) is treated as literal text.
+/// Visible width of a string after XML-Lite color tags are stripped.
+/// Counts characters that would actually appear in the rendered
+/// output — `<red>foo</>` reports 3, not 11. Used by table-alignment
+/// sites (`who`, `idle`, ability/inventory lists) so columns stay
+/// aligned regardless of color markup in entity names.
+///
+/// Limitations: counts chars (not grapheme clusters), so multi-codepoint
+/// emoji or combining marks would still over-count. Good enough for
+/// the all-ASCII content the imported world contains.
+pub(crate) fn visible_width(s: &str) -> usize {
+    let mut count = 0usize;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '<' {
+            count += 1;
+            continue;
+        }
+        // Buffer up to the matching `>` (or end). If the buffered
+        // content isn't tag-shaped, we should have counted the `<`
+        // and the buffered chars and the `>` as visible. Mirrors
+        // render_color_tags' "literal text" fallback so the two
+        // functions agree on what counts as printable.
+        let mut tag = String::new();
+        let mut closed = false;
+        for next in chars.by_ref() {
+            if next == '>' {
+                closed = true;
+                break;
+            }
+            tag.push(next);
+        }
+        if !closed {
+            // Unterminated `<`: render_color_tags drops the rest;
+            // we mirror that and stop counting here.
+            break;
+        }
+        if !is_tag_shaped(&tag) {
+            // Literal `<...>` — counts as visible (`<`, body, `>`).
+            count += 2 + tag.chars().count();
+        }
+        // Tag-shaped: contributes 0 visible chars.
+    }
+    count
+}
+
+/// Right-pad `s` to `width` *visible* columns with spaces. Used in
+/// place of `format!("{s:<width$}")` for content that may carry
+/// XML-Lite color tags.
+pub(crate) fn pad_visible(s: &str, width: usize) -> String {
+    let vis = visible_width(s);
+    if vis >= width {
+        s.to_string()
+    } else {
+        let mut out = String::with_capacity(s.len() + (width - vis));
+        out.push_str(s);
+        for _ in 0..(width - vis) {
+            out.push(' ');
+        }
+        out
+    }
+}
+
 fn is_tag_shaped(tag: &str) -> bool {
     let bytes = tag.as_bytes();
     let body = if bytes.first() == Some(&b'/') {
@@ -5084,6 +5146,36 @@ mod tests {
     }
     fn ansi(s: &str) -> String {
         render_color_tags(s, ColorMode::Ansi)
+    }
+
+    #[test]
+    fn visible_width_matches_render_strip_length() {
+        // Plain text: visible_width == chars().count().
+        assert_eq!(super::visible_width("plain text"), "plain text".chars().count());
+        // Color-wrapped: only inner text counts.
+        assert_eq!(super::visible_width("<red>foo</>"), 3);
+        assert_eq!(super::visible_width("<b:yellow>warning</> ahead"), "warning ahead".len());
+        // Multi-tag: each pair contributes only its inner content.
+        assert_eq!(super::visible_width("<r>r</><g>g</><b>b</>"), 3);
+        // Non-tag-shaped angle text: counts as literal.
+        assert_eq!(super::visible_width("<%h/%H>"), "<%h/%H>".chars().count());
+        // Unterminated `<` truncates (matches render_color_tags).
+        assert_eq!(super::visible_width("hi <b:yellow"), 3);
+    }
+
+    #[test]
+    fn pad_visible_aligns_color_names() {
+        // Plain name padded to width.
+        assert_eq!(super::pad_visible("foo", 6), "foo   ");
+        // Colored name still pads to the same visible width — output
+        // contains the tags plus enough trailing spaces to reach
+        // 6 visible columns (3 visible + 3 spaces).
+        let padded = super::pad_visible("<red>foo</>", 6);
+        assert_eq!(super::visible_width(&padded), 6);
+        assert!(padded.starts_with("<red>foo</>"));
+        assert!(padded.ends_with("   "));
+        // No truncation when input wider than `width`.
+        assert_eq!(super::pad_visible("looooong", 4), "looooong");
     }
 
     #[test]
@@ -7992,8 +8084,11 @@ fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
             Some(s) => format_idle(*s),
         };
         let online_label = online.map_or_else(|| "?".to_string(), format_idle);
+        // pad_visible counts visible chars (skipping XML-Lite tags)
+        // so columns stay aligned even when names contain `<red>...</>`.
+        let padded_name = pad_visible(name, 24);
         out.push_str(&format!(
-            "  {name:<24} {idle_label:<9} {online_label}\r\n"
+            "  {padded_name} {idle_label:<9} {online_label}\r\n"
         ));
     }
     send_to(world, player, out);
@@ -9788,7 +9883,9 @@ fn cmd_where(world: &mut World, player: Entity, _args: &str) {
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     let mut out = format!("\r\n{} player(s) online:\r\n", rows.len());
     for (name, room) in &rows {
-        out.push_str(&format!("  {name:<24} {room}\r\n"));
+        // pad_visible: counts visible chars, skipping XML-Lite tags.
+        let padded = pad_visible(name, 24);
+        out.push_str(&format!("  {padded} {room}\r\n"));
     }
     send_to(world, player, out);
 }
