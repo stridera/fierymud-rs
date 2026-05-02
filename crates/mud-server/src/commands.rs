@@ -9218,6 +9218,17 @@ fn look_direction(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "The way fades into the unknown.\r\n");
         return;
     };
+    // Mirror the dark-room gate from cmd_look's home-room render —
+    // peeking into a black cave from a lit corridor reveals nothing
+    // either. Source-room lighting doesn't bleed through the doorway.
+    if room_is_dark(world, target_room) && !room_has_light(world, target_room) {
+        send_to(
+            world,
+            player,
+            format!("\r\nYou peer {} but see only blackness.\r\n", direction_name(dir)),
+        );
+        return;
+    }
     let name = name_or(world, target_room, "(unknown)");
     let mode = color_mode_for(world, player);
     let name = render_color_tags(&name, mode);
