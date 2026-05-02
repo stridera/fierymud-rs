@@ -10283,6 +10283,43 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Drop what?\r\n");
         return;
     }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let player_name = name_of(world, player);
+
+    // `drop all` — drop every carried (non-equipped) item.
+    if target_word.eq_ignore_ascii_case("all") {
+        let items: Vec<(Entity, String)> = {
+            let mut q = world
+                .query_filtered::<(Entity, &Located, &Named, Option<&EquippedSlot>), With<Item>>();
+            q.iter(world)
+                .filter(|(_, l, _, eq)| l.0 == player && eq.is_none())
+                .map(|(e, _, n, _)| (e, n.name.clone()))
+                .collect()
+        };
+        if items.is_empty() {
+            send_to(world, player, "You aren't carrying anything to drop.\r\n");
+            return;
+        }
+        let count = items.len();
+        for (item, item_name) in &items {
+            if let Some(mut l) = world.get_mut::<Located>(*item) {
+                l.0 = room;
+            }
+            send_rendered(world, player, &format!("You drop {item_name}.\r\n"));
+            crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Drop);
+        }
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} drops {count} item(s).\r\n"),
+        );
+        return;
+    }
+
     let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
     let Some(item) = item else {
         send_rendered(world, player, &format!("You aren't carrying '{target_word}'.\r\n"),
@@ -10290,13 +10327,7 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let room = located.0;
-
     let item_name = name_of(world, item);
-    let player_name = name_of(world, player);
 
     if let Some(mut l) = world.get_mut::<Located>(item) {
         l.0 = room;
