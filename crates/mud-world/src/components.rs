@@ -104,15 +104,24 @@ pub struct CharacterAchievements {
 }
 
 /// Per-player set of `(zone_id -> visited room local ids)` used by
-/// the zone-clear achievement track. v1 is in-session only —
-/// persistence is deferred until the schema settles on whether
-/// progress lives on `CharacterAchievement.progress` JSON or in a
-/// dedicated visited-rooms table. Players who walk a full zone in a
-/// single session still get the unlock; the unlock itself is
-/// persisted via `CharacterAchievement` once granted.
+/// the zone-clear achievement track. Hydrates at login from the
+/// `progress.visited` JSON on each `zone_<N>_cleared` row in
+/// `character_achievement`. The runtime updates this in-place on
+/// each new room visit and fire-and-forget upserts the JSON back.
 #[derive(Component, Debug, Clone, Default)]
 pub struct ZoneVisits {
     pub by_zone: std::collections::HashMap<i32, std::collections::HashSet<i32>>,
+}
+
+/// Lifetime kill counter for the kills-milestone achievement track
+/// (`kills_100`, `kills_500`, ...). Loads from / saves to the
+/// `kill_tracking_data` JSON on `Characters` so the count survives
+/// logout. Other future kill stats (per-zone counts for diversity
+/// bonuses, per-mob kill tallies) can layer additional fields onto
+/// the same JSON without churning the schema.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct KillStats {
+    pub total: i32,
 }
 
 /// Marker for ECS Room entities that are part of a player's

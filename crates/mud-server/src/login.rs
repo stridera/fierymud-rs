@@ -332,6 +332,15 @@ impl ConnRouter {
                 warn!(conn_id, error = %e, "achievements load failed");
                 Vec::new()
             });
+        // Lifetime kill counter, persisted in the JSON column on
+        // Characters. Defaults to 0 for new characters / null JSON.
+        let kill_total: i32 = mud_db::characters::load_kill_tracking(pool, &char_row.id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.get("total").and_then(serde_json::Value::as_i64))
+            .and_then(|n| i32::try_from(n).ok())
+            .unwrap_or(0);
 
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
@@ -438,6 +447,9 @@ impl ConnRouter {
                     e.insert(zv_built);
                 }
             }
+            // KillStats is always inserted so the bump path can
+            // mutate it without a "needs_init" branch on every kill.
+            e.insert(mud_world::KillStats { total: kill_total });
             if let Some((house, rooms, exits, items, guests)) = house_summary {
                 e.insert(mud_world::HouseSummary {
                     house_id: house.id,

@@ -174,6 +174,40 @@ pub async fn save_state(
     Ok(())
 }
 
+/// Read the raw `kill_tracking_data` JSON for a character. Returns
+/// Ok(None) when the column is null. The JSON shape is owned by
+/// the runtime today — `{ "total": <int>, ...future fields }`.
+pub async fn load_kill_tracking(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<serde_json::Value>> {
+    let row = sqlx::query!(
+        r#"SELECT kill_tracking_data FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.kill_tracking_data))
+}
+
+/// Overwrite the `kill_tracking_data` JSON. Caller is responsible
+/// for the merge — the runtime reads the existing JSON, mutates,
+/// and writes the full object back.
+pub async fn save_kill_tracking(
+    pool: &PgPool,
+    character_id: &str,
+    data: &serde_json::Value,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET kill_tracking_data = $1 WHERE id = $2"#,
+        data,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<CharacterRow>> {
     sqlx::query_as!(
         CharacterRow,

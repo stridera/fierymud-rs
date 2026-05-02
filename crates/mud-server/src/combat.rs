@@ -964,6 +964,7 @@ pub(crate) fn handle_death(
         };
         if let Some(killer) = killer {
             crate::commands::grant_achievement(world, killer, "first_kill");
+            crate::commands::bump_kill_count(world, killer);
         }
         // Fire DEATH triggers BEFORE despawn so the body can read
         // self.room, broadcast last words, etc. The trigger

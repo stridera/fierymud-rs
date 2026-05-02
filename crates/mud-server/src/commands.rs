@@ -6689,6 +6689,57 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
     }
 }
 
+/// Bump the player's lifetime-kill counter, persist to the
+/// `kill_tracking_data` JSON, and grant any milestone achievement
+/// the new total has just crossed (`kills_100`, `kills_500`, ...).
+/// Fire-and-forget DB write — the next login just reads whatever
+/// landed.
+pub(crate) fn bump_kill_count(world: &mut World, player: Entity) {
+    let new_total = {
+        let Some(mut stats) = world.get_mut::<mud_world::KillStats>(player) else {
+            return;
+        };
+        stats.total = stats.total.saturating_add(1);
+        stats.total
+    };
+    // Threshold check.
+    for milestone in [100, 500, 1000, 5000, 10000] {
+        if new_total == milestone {
+            let code = format!("kills_{milestone}");
+            grant_achievement(world, player, &code);
+        }
+    }
+    // Persist. The shape of `kill_tracking_data` is owned by the
+    // runtime; preserve any other fields the column may already
+    // hold by merging into the JSON object.
+    let character_id = world
+        .get::<Account>(player)
+        .map(|a| a.character_id.clone());
+    if let (Some(cid), Some(pool)) = (
+        character_id,
+        world.get_resource::<DbPool>().map(|p| p.0.clone()),
+    ) {
+        tokio::spawn(async move {
+            let mut data = mud_db::characters::load_kill_tracking(&pool, &cid)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert(
+                    "total".to_string(),
+                    serde_json::Value::from(new_total),
+                );
+            } else {
+                data = serde_json::json!({ "total": new_total });
+            }
+            if let Err(e) = mud_db::characters::save_kill_tracking(&pool, &cid, &data).await {
+                tracing::warn!(error = %e, "kill_tracking_data write failed");
+            }
+        });
+    }
+}
+
 pub(crate) fn record_admin_action(
     world: &mut World,
     actor: Entity,
