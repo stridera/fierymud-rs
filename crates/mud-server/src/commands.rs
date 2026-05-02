@@ -7938,7 +7938,9 @@ fn cmd_who(world: &mut World, player: Entity, _args: &str) {
         }
         out.push_str("\r\n");
     }
-    send_to(world, player, out);
+    // Player titles can contain XML-Lite color tags; render before
+    // sending so they show as ANSI rather than literal markup.
+    send_rendered(world, player, &out);
 }
 
 fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
