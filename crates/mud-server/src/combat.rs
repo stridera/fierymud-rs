@@ -954,6 +954,17 @@ pub(crate) fn handle_death(
         );
         award_kill_coin(world, victim, victim_name);
         award_kill_xp(world, victim, victim_name);
+        // Achievement hooks: first_kill and (eventually)
+        // milestone-kill counters. Fire on the player who's
+        // currently Fighting the victim — same target as the
+        // kill-coin / loot-claim attribution.
+        let killer: Option<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
+            q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
+        };
+        if let Some(killer) = killer {
+            crate::commands::grant_achievement(world, killer, "first_kill");
+        }
         // Fire DEATH triggers BEFORE despawn so the body can read
         // self.room, broadcast last words, etc. The trigger
         // dispatcher takes a snapshot of bodies up front, so even if

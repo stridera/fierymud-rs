@@ -325,6 +325,14 @@ impl ConnRouter {
                 warn!(conn_id, error = %e, "character_items load failed");
                 Vec::new()
             });
+        // Achievement unlock list. Empty for new characters.
+        let achievement_rows = mud_db::achievements::unlocked_for(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "achievements load failed");
+                Vec::new()
+            });
+
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
         // the housing fetches; an error logs and skips.
@@ -414,6 +422,13 @@ impl ConnRouter {
                 && !d.trim().is_empty()
             {
                 e.insert(Description(d.trim().to_string()));
+            }
+            if !achievement_rows.is_empty() {
+                let mut ca = mud_world::CharacterAchievements::default();
+                for row in &achievement_rows {
+                    ca.unlocked.insert(row.achievement_id);
+                }
+                e.insert(ca);
             }
             if let Some((house, rooms, exits, items, guests)) = house_summary {
                 e.insert(mud_world::HouseSummary {

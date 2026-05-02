@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
-    ability_restrictions, ability_saving_throw, ability_targeting, boards, classes, effects, levels,
+    ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
+    effects, levels,
     mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
     objects, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool, triggers, zones,
 };
@@ -267,6 +268,32 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         );
     }
     stats.effects_listed = effect_catalog.by_id.len();
+
+    // Achievement catalog. Hooks reference rows by their stable
+    // `code` string so per-row id changes (re-import, schema
+    // migration) don't break. `by_id` lookup serves the
+    // CharacterAchievement render path (per-player unlocks store
+    // ids only).
+    let achievement_rows = achievements::list_all(pool).await?;
+    let mut achievement_catalog = crate::resources::AchievementCatalog::default();
+    for row in achievement_rows {
+        let def = crate::resources::AchievementDef {
+            id: row.id,
+            code: row.code.clone(),
+            title: row.title,
+            description: row.description,
+            category: row.category,
+            hidden: row.hidden,
+            sort_order: row.sort_order,
+        };
+        achievement_catalog.by_id.insert(row.id, def.clone());
+        achievement_catalog.by_code.insert(row.code, def);
+    }
+    info!(
+        achievements = achievement_catalog.by_id.len(),
+        "achievement catalog loaded"
+    );
+    world.insert_resource(achievement_catalog);
 
     let social_rows = socials::list_all(pool).await?;
     let mut social_registry = SocialRegistry::default();

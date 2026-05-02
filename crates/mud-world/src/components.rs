@@ -93,6 +93,15 @@ pub struct HouseGuestEntry {
     pub can_place: bool,
 }
 
+/// Set of achievement ids the player has unlocked, loaded once at
+/// login. Mutated in-place when a fresh achievement is granted;
+/// the DB is the source of truth across restart. v1 holds ids
+/// only — the catalog provides title/description for render.
+#[derive(Component, Debug, Clone, Default)]
+pub struct CharacterAchievements {
+    pub unlocked: std::collections::HashSet<i32>,
+}
+
 /// Marker for ECS Room entities that are part of a player's
 /// instanced house. Distinct from world Rooms (which carry a
 /// `WorldKey`) so the housing system can reason about them

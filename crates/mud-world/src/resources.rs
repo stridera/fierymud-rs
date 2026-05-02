@@ -2,6 +2,28 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 
+/// Authored achievement catalog loaded at boot. Hooks reference
+/// rows by their stable `code` string (e.g. `"first_kill"`,
+/// `"zone_30_cleared"`); the catalog provides id/title/description
+/// for the grant + display path. `by_id` lets the per-character
+/// unlock list (loaded as ids) render as titles in `cmd_achievements`.
+#[derive(Resource, Default, Debug)]
+pub struct AchievementCatalog {
+    pub by_code: HashMap<String, AchievementDef>,
+    pub by_id: HashMap<i32, AchievementDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AchievementDef {
+    pub id: i32,
+    pub code: String,
+    pub title: String,
+    pub description: String,
+    pub category: mud_db::enums::AchievementCategory,
+    pub hidden: bool,
+    pub sort_order: i32,
+}
+
 /// Index of currently-spawned per-house rooms. Lookup key is
 /// `(house_id, local_index)`. Populated lazily by `cmd_home`
 /// the first time a house is entered; cleared on no schedule

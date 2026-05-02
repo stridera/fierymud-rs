@@ -1851,6 +1851,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_say,
     },
     Command {
+        names: &["achievements", "achieve"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "achievements [<category>]",
+            summary: "List your unlocked achievements (and visible-but-locked ones).",
+            long: "Filter by category: combat, exploration, social, \
+                   crafting, misc. Unlocked entries show with a tick; \
+                   locked-but-visible ones with a placeholder. Hidden \
+                   achievements stay invisible until unlocked — those \
+                   are the spoiler ones.",
+        },
+        run: cmd_achievements,
+    },
+    Command {
         names: &["house"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -6535,6 +6551,79 @@ impl AdminAuditLog {
 
 /// Record one admin-mutating command for the audit log. Logged at
 /// info level too so operators tailing tracing get the same data.
+/// Grant an achievement to `player` by stable code. Idempotent —
+/// no-op if the player already has the achievement. Writes to the
+/// DB fire-and-forget via the world-installed pool, updates the
+/// in-memory `CharacterAchievements` component, and broadcasts a
+/// "Achievement unlocked: <title>" line to the player.
+pub(crate) fn grant_achievement(world: &mut World, player: Entity, code: &str) {
+    let def = world
+        .get_resource::<mud_world::AchievementCatalog>()
+        .and_then(|c| c.by_code.get(code))
+        .cloned();
+    let Some(def) = def else {
+        tracing::debug!(code = %code, "grant_achievement: unknown code");
+        return;
+    };
+    // Already-unlocked check via the in-memory component.
+    let already = world
+        .get::<mud_world::CharacterAchievements>(player)
+        .is_some_and(|c| c.unlocked.contains(&def.id));
+    if already {
+        return;
+    }
+    // Update in-memory state immediately so back-to-back grants
+    // (same code from two simultaneous events) collapse to one
+    // notification + one DB write.
+    let has_component = world
+        .get::<mud_world::CharacterAchievements>(player)
+        .is_some();
+    if has_component {
+        if let Some(mut c) = world.get_mut::<mud_world::CharacterAchievements>(player) {
+            c.unlocked.insert(def.id);
+        }
+    } else {
+        let mut ca = mud_world::CharacterAchievements::default();
+        ca.unlocked.insert(def.id);
+        try_insert(world, player, ca);
+    }
+    // Fire-and-forget DB write. The character_id lives on Account.
+    let character_id = world
+        .get::<Account>(player)
+        .map(|a| a.character_id.clone());
+    if let (Some(cid), Some(pool)) = (
+        character_id,
+        world.get_resource::<DbPool>().map(|p| p.0.clone()),
+    ) {
+        let id = def.id;
+        tokio::spawn(async move {
+            if let Err(e) =
+                mud_db::achievements::grant(&pool, &cid, id, None).await
+            {
+                tracing::warn!(error = %e, achievement_id = id, "achievement grant write failed");
+            }
+        });
+    }
+    let mode = color_mode_for(world, player);
+    send_to(
+        world,
+        player,
+        render_color_tags(
+            &format!(
+                "<yellow>Achievement unlocked: {}</> — {}\r\n",
+                def.title, def.description,
+            ),
+            mode,
+        ),
+    );
+    tracing::info!(
+        player = ?player,
+        code = %def.code,
+        title = %def.title,
+        "achievement granted",
+    );
+}
+
 pub(crate) fn record_admin_action(
     world: &mut World,
     actor: Entity,
@@ -12505,6 +12594,71 @@ fn cmd_report(world: &mut World, player: Entity, _args: &str) {
         };
         send_rendered(world, target, &line);
     }
+}
+
+/// `achievements [<category>]` — list achievements grouped by
+/// category. Unlocked ones show their title + description; locked
+/// (and not hidden) ones show a placeholder; hidden ones are
+/// suppressed until unlocked.
+fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
+    use mud_db::enums::AchievementCategory;
+    let filter = args.trim().to_ascii_lowercase();
+    let unlocked = world
+        .get::<mud_world::CharacterAchievements>(player)
+        .map(|c| c.unlocked.clone())
+        .unwrap_or_default();
+    let catalog = world.resource::<mud_world::AchievementCatalog>();
+    let mut entries: Vec<&mud_world::AchievementDef> = catalog.by_id.values().collect();
+    entries.sort_by_key(|d| (d.category as i32, d.sort_order, d.id));
+    let want_cat: Option<AchievementCategory> = match filter.as_str() {
+        "" | "all" => None,
+        "combat" => Some(AchievementCategory::Combat),
+        "exploration" => Some(AchievementCategory::Exploration),
+        "social" => Some(AchievementCategory::Social),
+        "crafting" => Some(AchievementCategory::Crafting),
+        "misc" => Some(AchievementCategory::Misc),
+        other => {
+            send_to(
+                world,
+                player,
+                format!("Unknown category '{other}'. Try: all, combat, exploration, social, crafting, misc.\r\n"),
+            );
+            return;
+        }
+    };
+    let mut out = String::from("\r\nAchievements:\r\n");
+    let mut current_cat: Option<AchievementCategory> = None;
+    let mut shown = 0;
+    let total_unlocked = unlocked.len();
+    for def in entries {
+        if let Some(want) = want_cat
+            && def.category != want
+        {
+            continue;
+        }
+        let is_unlocked = unlocked.contains(&def.id);
+        if def.hidden && !is_unlocked {
+            continue;
+        }
+        if current_cat != Some(def.category) {
+            current_cat = Some(def.category);
+            out.push_str(&format!("\r\n  --- {} ---\r\n", def.category.label()));
+        }
+        let mark = if is_unlocked { "[*]" } else { "[ ]" };
+        out.push_str(&format!(
+            "  {mark} {} — {}\r\n",
+            def.title, def.description,
+        ));
+        shown += 1;
+    }
+    if shown == 0 {
+        out.push_str("  (none visible)\r\n");
+    }
+    out.push_str(&format!(
+        "\r\n{total_unlocked} unlocked of {} total.\r\n",
+        catalog.by_id.len()
+    ));
+    send_to(world, player, out);
 }
 
 /// `home` — teleport to the foyer of the player's house. Lazily

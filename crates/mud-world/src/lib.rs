@@ -4,6 +4,7 @@ pub mod resources;
 
 pub use components::{
     Account, AccountSummary, Aliases, AppliedTo, AttachedTriggers, BankWealth, BoardDraft,
+    CharacterAchievements,
     BoardLink, Charges, CombatStats, Cooldowns, CoreStats, Corpse, CorpseDecay, Description,
     EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Flying, Follower,
     FromMobReset, FromObjectReset, Frozen, Ghost,
@@ -23,10 +24,10 @@ pub use loader::{
     wear_flags_primary_slot,
 };
 pub use resources::{
-    AbilityCatalog, AbilityComponentReq, AbilityDef, AbilityMessageSet, BoardCatalog,
-    BoardSummary, ClassCatalog, ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog,
-    DamageComponent, EffectCatalog, EffectDef, HousingIndex, LevelRow, LevelTable, LiquidIndex,
-    LiquidProto, LuaOutbox, MobProto,
+    AbilityCatalog, AbilityComponentReq, AbilityDef, AbilityMessageSet, AchievementCatalog,
+    AchievementDef, BoardCatalog, BoardSummary, ClassCatalog, ClassDef, ConsumableEffectBinding,
+    ConsumableEffectCatalog, DamageComponent, EffectCatalog, EffectDef, HousingIndex, LevelRow,
+    LevelTable, LiquidIndex, LiquidProto, LuaOutbox, MobProto,
     MobPrototypes, MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding,
     ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
     LightFuelProto, PrecipKind, SavingThrow, ScriptError, ScriptErrorLog, Season, ShopAcceptRule,

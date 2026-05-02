@@ -143,6 +143,29 @@ pub enum ObjectType {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = "AchievementCategory", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AchievementCategory {
+    Combat,
+    Exploration,
+    Social,
+    Crafting,
+    Misc,
+}
+
+impl AchievementCategory {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Combat => "Combat",
+            Self::Exploration => "Exploration",
+            Self::Social => "Social",
+            Self::Crafting => "Crafting",
+            Self::Misc => "Misc",
+        }
+    }
+}
+
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[sqlx(type_name = "MobRole", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MobRole {
     Trash,
