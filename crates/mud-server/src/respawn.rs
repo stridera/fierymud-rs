@@ -36,14 +36,22 @@ pub fn respawn_tick(world: &mut World) {
         return;
     }
 
-    // Snapshot live world-counts per (zone, id) so the cap check is
-    // global rather than per-reset-row. Walks every Mob entity once
-    // up front; faster than re-querying inside the refill loop.
+    // Snapshot live world-counts per (zone, id) for the global cap
+    // check, plus the set of reset_ids whose mob is alive. Same
+    // semantic as the object respawn pass: each MobResets row owns
+    // at most one live instance — we only re-fire a row when its
+    // mob is gone. Multiple rows for the same proto in the same
+    // room are legitimate (a guard post staffed by three guards).
+    // `max_instances` remains the global ceiling.
     let mut world_counts: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut reset_id_alive: std::collections::HashSet<i32> = std::collections::HashSet::new();
     {
-        let mut q = world.query_filtered::<&WorldKey, With<Mob>>();
-        for wk in q.iter(world) {
+        let mut q = world.query_filtered::<(&WorldKey, Option<&FromMobReset>), With<Mob>>();
+        for (wk, fr) in q.iter(world) {
             *world_counts.entry((wk.zone, wk.id)).or_insert(0) += 1;
+            if let Some(fr) = fr {
+                reset_id_alive.insert(fr.0);
+            }
         }
     }
 
@@ -59,6 +67,9 @@ pub fn respawn_tick(world: &mut World) {
     // exits — firing inside the loop would re-borrow World mid-spawn.
     let mut load_fire_queue: Vec<Entity> = Vec::new();
     for entry in &entries {
+        if reset_id_alive.contains(&entry.reset_id) {
+            continue;
+        }
         let proto_key = (entry.mob_zone_id, entry.mob_id);
         let live = world_counts.get(&proto_key).copied().unwrap_or(0);
         let cap = entry.max_instances.max(1);
@@ -118,6 +129,7 @@ pub fn respawn_tick(world: &mut World) {
         }) {
             em.insert(Mountable);
         }
+        reset_id_alive.insert(entry.reset_id);
         *world_counts.entry(proto_key).or_insert(0) += 1;
         refilled += 1;
     }
