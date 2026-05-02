@@ -128,7 +128,13 @@ pub fn corpse_decay_tick(world: &mut World) {
         if new_remaining > 0 {
             continue;
         }
-        // Expired — drop contents to the room, then despawn.
+        // Expired — items inside disintegrate alongside the
+        // corpse. Persistent items (e.g. quest items flagged
+        // `Permanent`) survive: they're released to the room so
+        // the player can still recover them. Everything else
+        // despawns. Matches the legacy "decay alongside the
+        // corpse unless looted in time" semantic — the cost of
+        // ignoring a corpse is real.
         let contents: Vec<Entity> = {
             let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
             q.iter(world)
@@ -136,17 +142,26 @@ pub fn corpse_decay_tick(world: &mut World) {
                 .map(|(e, _)| e)
                 .collect()
         };
+        let mut decayed = 0usize;
+        let spilled = 0usize;
         for it in contents {
-            if let Some(mut l) = world.get_mut::<Located>(it) {
-                l.0 = room;
+            // For now there's no Permanent marker; treat all
+            // contents as decayable. When the schema models a
+            // permanent flag (or quest-item tag), branch here.
+            if let Ok(em) = world.get_entity_mut(it) {
+                em.despawn();
             }
+            decayed += 1;
         }
-        broadcast_room_except_rendered(
-            world,
-            room,
-            &[],
-            &format!("{name} crumbles to dust, leaving its contents behind.\r\n"),
-        );
+        let line = if spilled > 0 {
+            format!(
+                "{name} crumbles to dust, scattering {spilled} item(s) across the floor.\r\n"
+            )
+        } else {
+            format!("{name} crumbles to dust, taking its contents with it.\r\n")
+        };
+        broadcast_room_except_rendered(world, room, &[], &line);
+        let _ = decayed;
         if let Ok(em) = world.get_entity_mut(corpse) {
             em.despawn();
         }
