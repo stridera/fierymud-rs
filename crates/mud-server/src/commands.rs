@@ -6163,6 +6163,22 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
     // since `<42/100>` isn't tag-shaped after %-substitution.
     let mode = color_mode_for(world, target);
     let _ = conn.0.send(render_color_tags(&rendered, mode).into_bytes());
+
+    // Piggyback Char.Vitals on the prompt cadence — same once-per-
+    // command frequency, which is reasonable for HUD-style clients.
+    // Mudlet / MUSHclient parse the GMCP frame; plain telnet clients
+    // see the IAC bytes as garbage which most terminal emulators
+    // strip (they're outside the ASCII range). A future commit will
+    // add inbound IAC parsing and gate the push on the client
+    // confirming `IAC DO 201`.
+    if let (Some(h), Some(s)) = (hp, stamina) {
+        let level = world.get::<Profile>(target).map_or(0, |p| p.level);
+        let payload = format!(
+            "{{\"hp\":{},\"max_hp\":{},\"sp\":{},\"max_sp\":{},\"level\":{}}}",
+            h.hp, h.max, s.current, s.max, level
+        );
+        let _ = conn.0.send(mud_net::gmcp_packet("Char.Vitals", &payload));
+    }
 }
 
 fn render_prompt(
