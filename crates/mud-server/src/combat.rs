@@ -677,6 +677,27 @@ pub(crate) fn handle_death(
             try_remove::<mud_world::EquippedSlot>(world, it);
         }
 
+        // XP loss on death: shave 10% of the player's experience
+        // total, floored at 0. Mirrors legacy CircleMUD's
+        // round-down-to-bracket-floor behavior loosely; we don't
+        // model XP brackets yet, so pure 10% is the right v1.
+        // Skipped for level-1 players who have no progress to
+        // lose.
+        let xp_lost = world
+            .get::<mud_world::Profile>(victim)
+            .filter(|p| p.level > 1)
+            .map_or(0, |p| p.experience / 10);
+        if xp_lost > 0 {
+            if let Some(mut prof) = world.get_mut::<mud_world::Profile>(victim) {
+                prof.experience = (prof.experience - xp_lost).max(0);
+            }
+            send_to(
+                world,
+                victim,
+                format!("You feel the weight of death — {xp_lost} experience drains away.\r\n"),
+            );
+        }
+
         // Ghost the player. HP pinned to 1 so any further damage is
         // a no-op (data path and apply_damage both clamp at 0/1).
         try_insert(world, victim, Ghost);
