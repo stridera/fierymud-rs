@@ -28,6 +28,10 @@ pub struct Object {
     /// Class ids that CANNOT use this item. FK to `Class.id`.
     /// Empty for unrestricted gear.
     pub restricted_class_ids: Vec<i32>,
+    /// Races that CANNOT use this item. Stored as raw enum
+    /// labels (HUMAN / ELF / ...) for direct comparison against
+    /// `Profile.race` which is also kept as a string.
+    pub restricted_races: Vec<String>,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -48,7 +52,8 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             "wearFlags" AS "wear_flags!: Vec<WearFlag>",
             values AS "values!: serde_json::Value",
             restricted_alignments AS "restricted_alignments!: Vec<Alignment>",
-            restricted_class_ids AS "restricted_class_ids!: Vec<i32>"
+            restricted_class_ids AS "restricted_class_ids!: Vec<i32>",
+            restricted_races::text[] AS "restricted_races!: Vec<String>"
         FROM "Objects"
         ORDER BY zone_id, id
         "#

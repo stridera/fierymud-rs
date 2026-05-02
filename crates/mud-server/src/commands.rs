@@ -12366,6 +12366,7 @@ fn invoke_object_abilities(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: Option<Slot>) {
     if target_word.is_empty() {
         send_to(world, player, "Wear what?\r\n");
@@ -12406,7 +12407,7 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
     // restriction list contains the player's bucket. Lookup is
     // by WorldKey → ObjectPrototypes; items without a proto
     // (corpses, dynamically synthesized) skip both checks.
-    let (alignment_restriction, class_restriction) = world
+    let (alignment_restriction, class_restriction, race_restriction) = world
         .get::<WorldKey>(item)
         .and_then(|k| {
             world
@@ -12417,6 +12418,7 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
                     (
                         p.restricted_alignments.clone(),
                         p.restricted_class_ids.clone(),
+                        p.restricted_races.clone(),
                     )
                 })
         })
@@ -12452,6 +12454,19 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
             );
             return;
         }
+    }
+    if !race_restriction.is_empty()
+        && let Some(race) = world.get::<Profile>(player).map(|p| p.race.clone())
+        && race_restriction
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(&race))
+    {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} wasn't made for your kind.\r\n"),
+        );
+        return;
     }
 
     // Check the slot is free.

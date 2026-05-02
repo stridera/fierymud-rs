@@ -213,6 +213,10 @@ pub struct ObjectProto {
     /// Class ids that CAN'T equip this item. Empty for
     /// unrestricted gear.
     pub restricted_class_ids: Vec<i32>,
+    /// Races that CAN'T equip this item, stored as the raw
+    /// enum-label string (HUMAN / ELF / ...) for direct
+    /// comparison with `Profile.race`.
+    pub restricted_races: Vec<String>,
 }
 
 /// Static initial-spawn data for a `DrinkContainer` proto. Mirrors
