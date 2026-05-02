@@ -724,6 +724,31 @@ pub(crate) fn handle_death(
             );
         }
 
+        // PvP alignment shift: if a Player killed this Player,
+        // the killer's alignment slides 50 points toward evil
+        // (clamped at -1000). PvP carries weight even for
+        // self-styled "neutral" players. The killer is whoever
+        // had Fighting(victim) at death-time and is themselves
+        // a Player.
+        let pvp_killer: Option<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
+            q.iter(world).find(|(e, f)| f.0 == victim && *e != victim).map(|(e, _)| e)
+        };
+        if let Some(killer) = pvp_killer
+            && let Some(mut cs) = world.get_mut::<CombatStats>(killer)
+        {
+            let before = cs.alignment;
+            cs.alignment = (cs.alignment - 50).max(-1000);
+            let after = cs.alignment;
+            if before != after {
+                send_to(
+                    world,
+                    killer,
+                    "A shadow falls across your soul as you take a player's life.\r\n",
+                );
+            }
+        }
+
         // Ghost the player. HP pinned to 1 so any further damage is
         // a no-op (data path and apply_damage both clamp at 0/1).
         try_insert(world, victim, Ghost);
