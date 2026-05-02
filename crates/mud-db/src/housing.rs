@@ -264,6 +264,30 @@ pub async fn delete_house(pool: &PgPool, house_id: i32) -> sqlx::Result<u64> {
     Ok(res.rows_affected())
 }
 
+/// Rename a house room (and optionally update its description).
+/// Either field can be passed as `None` to leave it untouched.
+pub async fn rename_room(
+    pool: &PgPool,
+    room_id: i32,
+    new_name: Option<&str>,
+    new_description: Option<&str>,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query!(
+        r#"
+        UPDATE player_house_rooms
+        SET name        = COALESCE($1, name),
+            description = COALESCE($2, description)
+        WHERE id = $3
+        "#,
+        new_name,
+        new_description,
+        room_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// Add a guest entry to a house. Idempotent on
 /// `(house_id, character_id)` — re-adding the same guest is a
 /// no-op if their `can_place` flag matches; otherwise the flag

@@ -12998,6 +12998,7 @@ fn spawn_house_item(
 /// house. v1: info / rooms / guests subcommands. Mutating
 /// commands (place, remove, expand, name) and the `home` /
 /// `visit` traversal commands land in subsequent slices.
+#[allow(clippy::too_many_lines)]
 fn cmd_house(world: &mut World, player: Entity, args: &str) {
     let sub = args.trim().to_ascii_lowercase();
     let sub = if sub.is_empty() { "info" } else { sub.as_str() };
@@ -13079,9 +13080,23 @@ fn cmd_house(world: &mut World, player: Entity, args: &str) {
             cmd_house_guest(world, player, &house, rest);
             return;
         }
+        s if s.starts_with("rename ") => {
+            let rest = args.trim().trim_start_matches("rename").trim();
+            cmd_house_rename(world, player, &house, rest, false);
+            return;
+        }
+        s if s.starts_with("describe ") || s.starts_with("redesc ") => {
+            let rest = if s.starts_with("describe ") {
+                args.trim().trim_start_matches("describe").trim()
+            } else {
+                args.trim().trim_start_matches("redesc").trim()
+            };
+            cmd_house_rename(world, player, &house, rest, true);
+            return;
+        }
         other => {
             out.push_str(&format!(
-                "Unknown subcommand '{other}'. Try `house info`, `house rooms`, `house guests`, `house place <item>`, `house take <item>`, `house guest add <name> [place]`, `house guest remove <name>`.\r\n"
+                "Unknown subcommand '{other}'. Try `house info`, `house rooms`, `house guests`, `house place <item>`, `house take <item>`, `house guest add <name> [place]`, `house guest remove <name>`, `house rename <#> <name>`, `house describe <#> <text>`.\r\n"
             ));
         }
     }
@@ -13465,6 +13480,84 @@ fn cmd_hinfo(world: &mut World, player: Entity, args: &str) {
         }
         let _ = out.send(buf.into_bytes());
     });
+}
+
+/// `house rename <#> <new name>` and `house describe <#> <text>`.
+/// Single helper for both — `is_description=true` writes the
+/// description column instead of the name. The local index `#`
+/// must be a room belonging to *this* house.
+fn cmd_house_rename(
+    world: &mut World,
+    player: Entity,
+    house: &mud_world::HouseSummary,
+    args: &str,
+    is_description: bool,
+) {
+    let mut parts = args.splitn(2, char::is_whitespace);
+    let idx_str = parts.next().unwrap_or("");
+    let new_text = parts.next().unwrap_or("").trim();
+    let Ok(local_idx) = idx_str.parse::<i32>() else {
+        send_to(
+            world,
+            player,
+            "Usage: house rename <local-index> <new name>\r\n       house describe <local-index> <text>\r\n",
+        );
+        return;
+    };
+    if new_text.is_empty() {
+        send_to(world, player, "New text can't be empty.\r\n");
+        return;
+    }
+    let Some(room_id) = house
+        .rooms
+        .iter()
+        .find(|r| r.local_index == local_idx)
+        .map(|r| r.id)
+    else {
+        send_to(
+            world,
+            player,
+            format!("No room #{local_idx} in your house.\r\n"),
+        );
+        return;
+    };
+    // Mirror the change onto the live ECS room entity (if it's
+    // currently synthesized) so the change is visible without an
+    // exit-and-re-enter dance.
+    let entity = world
+        .get_resource::<mud_world::HousingIndex>()
+        .and_then(|hi| hi.by_key.get(&(house.house_id, local_idx)).copied());
+    if let Some(entity) = entity {
+        if is_description {
+            try_insert(world, entity, Description(new_text.to_string()));
+        } else if let Some(mut named) = world.get_mut::<Named>(entity) {
+            named.name = new_text.to_string();
+        }
+    }
+    let new_text_owned = new_text.to_string();
+    if let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) {
+        let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+        tokio::spawn(async move {
+            let res = if is_description {
+                mud_db::housing::rename_room(&pool, room_id, None, Some(&new_text_owned)).await
+            } else {
+                mud_db::housing::rename_room(&pool, room_id, Some(&new_text_owned), None).await
+            };
+            if let Some(out) = outbound {
+                match res {
+                    Ok(_) => {
+                        let label = if is_description { "description" } else { "name" };
+                        let _ = out
+                            .send(format!("Updated room #{local_idx} {label}.\r\n").into_bytes());
+                    }
+                    Err(e) => {
+                        let _ = out
+                            .send(format!("DB write failed: {e}\r\n").into_bytes());
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// `house guest add <name> [place]` and `house guest remove <name>`.
