@@ -82,6 +82,7 @@ pub struct HouseExitEntry {
 
 #[derive(Debug, Clone)]
 pub struct HouseItemEntry {
+    pub id: i32,
     pub room_id: i32,
     pub object_zone_id: i32,
     pub object_id: i32,
@@ -124,6 +125,12 @@ pub struct HouseRoom {
     pub house_id: i32,
     pub local_index: i32,
 }
+
+/// Marker for spawned Items that originated from a `PlayerHouseItem`
+/// row. The `i32` is the row id so `house take` can DELETE the
+/// right row when removing the item from the house.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HouseItem(pub i32);
 
 /// Loot-claim window on a freshly-spawned mob corpse. Only
 /// `owner` (and their group, once group bridging lands) can `get`

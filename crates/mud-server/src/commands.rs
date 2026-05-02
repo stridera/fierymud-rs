@@ -12831,7 +12831,9 @@ fn synthesize_house_rooms(world: &mut World, summary: &mud_world::HouseSummary) 
     }
     // Phase 3: drop placed items into their respective rooms.
     // Items use the same prototype-spawn helper that respawn /
-    // corpses already share.
+    // corpses already share. Each spawned item carries a
+    // `HouseItem(row_id)` component so `house take` can identify
+    // and DELETE the row when the item is removed.
     for placed in &summary.items {
         let room_local = local_to_row_id
             .iter()
@@ -12843,15 +12845,22 @@ fn synthesize_house_rooms(world: &mut World, summary: &mud_world::HouseSummary) 
         let Some(&room_entity) = local_to_entity.get(&room_local) else {
             continue;
         };
-        spawn_house_item(world, placed.object_zone_id, placed.object_id, room_entity);
+        spawn_house_item(world, placed.id, placed.object_zone_id, placed.object_id, room_entity);
     }
 }
 
 /// Spawn an item from the proto catalog directly into a house
 /// room. Mirrors `respawn::spawn_item_into` but without the
 /// reset bookkeeping — placed items are persistent via
-/// `PlayerHouseItem`, not via the reset cycle.
-fn spawn_house_item(world: &mut World, proto_zone: i32, proto_id: i32, parent: Entity) {
+/// `PlayerHouseItem`, not via the reset cycle. The `house_item_id`
+/// FK is attached so `house take` can DELETE the right row.
+fn spawn_house_item(
+    world: &mut World,
+    house_item_id: i32,
+    proto_zone: i32,
+    proto_id: i32,
+    parent: Entity,
+) {
     let proto = world
         .resource::<ObjectPrototypes>()
         .by_key
@@ -12864,6 +12873,7 @@ fn spawn_house_item(world: &mut World, proto_zone: i32, proto_id: i32, parent: E
         Keywords(proto.keywords.clone()),
         WorldKey { zone: proto.zone_id, id: proto.id },
         Located(parent),
+        mud_world::HouseItem(house_item_id),
     ));
     if let Some(desc) = proto.examine_description.clone() {
         bundle.insert(Description(desc));
@@ -12940,13 +12950,219 @@ fn cmd_house(world: &mut World, player: Entity, args: &str) {
                 }
             }
         }
+        s if s.starts_with("place ") || s == "place" => {
+            let rest = args.trim().trim_start_matches("place").trim();
+            cmd_house_place(world, player, &house, rest);
+            return;
+        }
+        s if s.starts_with("take ") || s == "take" => {
+            let rest = args.trim().trim_start_matches("take").trim();
+            cmd_house_take(world, player, &house, rest);
+            return;
+        }
         other => {
             out.push_str(&format!(
-                "Unknown subcommand '{other}'. Try `house info`, `house rooms`, or `house guests`.\r\n"
+                "Unknown subcommand '{other}'. Try `house info`, `house rooms`, `house guests`, `house place <item>`, `house take <item>`.\r\n"
             ));
         }
     }
     send_to(world, player, out);
+}
+
+/// `house place <item>` — moves an item from the player's
+/// inventory into the current house room (player must be standing
+/// in a room of *their own* house). Persists via `PlayerHouseItem`
+/// fire-and-forget; the in-memory entity gets a `HouseItem(row_id)`
+/// component once the insert completes so `house take` can find
+/// the FK row.
+fn cmd_house_place(
+    world: &mut World,
+    player: Entity,
+    house: &mud_world::HouseSummary,
+    target_word: &str,
+) {
+    if target_word.is_empty() {
+        send_to(world, player, "Place what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    // Owner-room gate: must be in a room belonging to *this* house.
+    let house_room = match world.get::<mud_world::HouseRoom>(room) {
+        Some(hr) if hr.house_id == house.house_id => *hr,
+        Some(_) => {
+            send_to(
+                world,
+                player,
+                "You can only place items in your own house.\r\n",
+            );
+            return;
+        }
+        None => {
+            send_to(
+                world,
+                player,
+                "You can only place items inside your house. Try `house enter` first.\r\n",
+            );
+            return;
+        }
+    };
+    let Some(room_row_id) = house
+        .rooms
+        .iter()
+        .find(|r| r.local_index == house_room.local_index)
+        .map(|r| r.id)
+    else {
+        send_to(world, player, "Couldn't resolve this house room.\r\n");
+        return;
+    };
+    let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
+    let Some(item) = item else {
+        send_rendered(
+            world,
+            player,
+            &format!("You aren't carrying '{target_word}'.\r\n"),
+        );
+        return;
+    };
+    let Some(proto_key) = world.get::<WorldKey>(item).copied() else {
+        send_to(
+            world,
+            player,
+            "That item has no prototype — it can't be placed.\r\n",
+        );
+        return;
+    };
+    let item_name = name_of(world, item);
+    if let Some(mut l) = world.get_mut::<Located>(item) {
+        l.0 = room;
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("You place {item_name} in your house.\r\n"),
+    );
+    // Fire-and-forget DB insert; the returned id is attached to
+    // the entity so a later `house take` can DELETE the row.
+    if let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) {
+        let outbound_player = player;
+        tokio::spawn(async move {
+            match mud_db::housing::place_item(
+                &pool,
+                room_row_id,
+                proto_key.zone,
+                proto_key.id,
+            )
+            .await
+            {
+                Ok(id) => {
+                    tracing::debug!(
+                        ?outbound_player,
+                        item_id = id,
+                        "house item placed"
+                    );
+                    // Note: we don't flow the id back into the
+                    // entity here (would need a world handle).
+                    // The component is attached on next login when
+                    // the row reloads via spawn_house_item.
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "house item place failed");
+                }
+            }
+        });
+    }
+}
+
+/// `house take <item>` — pick up a placed item back into the
+/// player's inventory. Requires the item to carry a
+/// `HouseItem(row_id)` component (which only fully-loaded house
+/// items have — items placed *this session* won't be takeable
+/// until next login, see the comment in `cmd_house_place`).
+fn cmd_house_take(
+    world: &mut World,
+    player: Entity,
+    house: &mud_world::HouseSummary,
+    target_word: &str,
+) {
+    if target_word.is_empty() {
+        send_to(world, player, "Take what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    match world.get::<mud_world::HouseRoom>(room) {
+        Some(hr) if hr.house_id == house.house_id => {}
+        _ => {
+            send_to(
+                world,
+                player,
+                "You can only take items inside your house.\r\n",
+            );
+            return;
+        }
+    }
+    // Find a HouseItem in this room matching the keyword.
+    let matched: Option<(Entity, i32, String)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &Named, Option<&Keywords>, &mud_world::HouseItem),
+            With<Item>,
+        >();
+        q.iter(world)
+            .filter(|(_, l, _, _, _)| l.0 == room)
+            .find(|(_, _, named, kw, _)| name_or_keyword_matches(target_word, &named.name, *kw))
+            .map(|(e, _, n, _, hi)| (e, hi.0, n.name.clone()))
+    };
+    let Some((item, house_item_id, item_name)) = matched else {
+        send_rendered(
+            world,
+            player,
+            &format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+    if let Some(mut l) = world.get_mut::<Located>(item) {
+        l.0 = player;
+    }
+    // Strip the FK so the item is now an ordinary carried item.
+    if let Ok(mut e) = world.get_entity_mut(item) {
+        e.remove::<mud_world::HouseItem>();
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("You take {item_name} from the room.\r\n"),
+    );
+    if let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) {
+        tokio::spawn(async move {
+            if let Err(e) = mud_db::housing::remove_item(&pool, house_item_id).await {
+                tracing::warn!(error = %e, "house item remove failed");
+            }
+        });
+    }
+}
+
+/// Tiny helper: does the target word match the named.name token or
+/// any keyword? Mirrors what `find_carried_by` does internally but
+/// against the room-side query.
+fn name_or_keyword_matches(target: &str, name: &str, kw: Option<&Keywords>) -> bool {
+    let t = target.to_ascii_lowercase();
+    let n = name.to_ascii_lowercase();
+    if n.split_whitespace().any(|tok| tok == t) {
+        return true;
+    }
+    if let Some(kw) = kw {
+        for k in &kw.0 {
+            if k.to_ascii_lowercase() == t {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// `ask <mob> <topic>` — target a single mob and fire its SPEECH

@@ -174,3 +174,40 @@ pub async fn guests_for_house(
     .fetch_all(pool)
     .await
 }
+
+/// Insert a placed item, returning the new row id so the runtime
+/// can attach it to the spawned ECS entity for later removal.
+pub async fn place_item(
+    pool: &PgPool,
+    room_id: i32,
+    object_zone_id: i32,
+    object_id: i32,
+) -> sqlx::Result<i32> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO player_house_items (room_id, object_zone_id, object_id)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        "#,
+        room_id,
+        object_zone_id,
+        object_id,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.id)
+}
+
+/// Delete one placed item by primary key. Returns the number of
+/// rows actually removed (0 if the row was already gone).
+pub async fn remove_item(pool: &PgPool, item_id: i32) -> sqlx::Result<u64> {
+    let res = sqlx::query!(
+        r#"
+        DELETE FROM player_house_items WHERE id = $1
+        "#,
+        item_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}

@@ -463,6 +463,7 @@ impl ConnRouter {
                     items: items
                         .into_iter()
                         .map(|i| mud_world::HouseItemEntry {
+                            id: i.id,
                             room_id: i.room_id,
                             object_zone_id: i.object_zone_id,
                             object_id: i.object_id,
