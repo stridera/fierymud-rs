@@ -165,6 +165,29 @@ pub fn hit_chance_pct(hit_roll: i32, target_ac: i32) -> i32 {
     (80i32.saturating_add(modifier)).clamp(5, 100)
 }
 
+/// Per-mob memory of the players who've ever swung at them.
+/// Lifetime ties to the mob: dies with the mob, never persisted,
+/// never serialized. Used by the on-entry aggro path so a mob
+/// you fled from re-engages on your return without needing the
+/// alignment threshold.
+#[derive(Component, Debug, Default)]
+pub struct MobMemory(pub std::collections::HashSet<Entity>);
+
+/// Add `attacker` to `mob`'s memory. Inserts the component on
+/// first use. No-op if `mob` has been despawned.
+pub(crate) fn remember_attacker(world: &mut World, mob: Entity, attacker: Entity) {
+    let has = world.get::<MobMemory>(mob).is_some();
+    if has {
+        if let Some(mut mem) = world.get_mut::<MobMemory>(mob) {
+            mem.0.insert(attacker);
+        }
+    } else {
+        let mut set = std::collections::HashSet::new();
+        set.insert(attacker);
+        try_insert(world, mob, MobMemory(set));
+    }
+}
+
 /// Pick a random open exit and walk a fleeing mob through it.
 /// No-op if the room has no open exits — the swing path falls
 /// through and the mob takes the next hit normally. Drops the
@@ -392,6 +415,14 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
     let was_sleeping =
         world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
+
+    // Mob memory: any swing initiated by a player at a mob lands
+    // them in that mob's grudge book, regardless of hit/miss/crit.
+    // Re-entering the same room later auto-engages without a
+    // fresh aggro check (see `try_engage_remembered_mob`).
+    if world.get::<Mob>(s.target).is_some() && world.get::<Player>(s.attacker).is_some() {
+        remember_attacker(world, s.target, s.attacker);
+    }
 
     // Hit / miss / crit roll. Sleeping defenders are auto-hit (you
     // can't dodge unconscious) — same special case the existing

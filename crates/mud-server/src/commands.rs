@@ -19195,8 +19195,32 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         {
             continue;
         }
-        try_engage_aggressive_mob(world, mover, target);
+        // Memory check first: a mob already nursing a grudge from
+        // an earlier swing engages before the alignment-tier
+        // generic-aggro check fires. Otherwise fall through to the
+        // alignment rule.
+        if !try_engage_remembered_mob(world, mover, target) {
+            try_engage_aggressive_mob(world, mover, target);
+        }
     }
+}
+
+/// If any mob in `room` has the player in its `MobMemory`, engage
+/// it. Returns true if an engagement fired so the caller can skip
+/// the generic alignment-aggro check.
+fn try_engage_remembered_mob(world: &mut World, player: Entity, room: Entity) -> bool {
+    let grudger: Option<Entity> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &crate::combat::MobMemory),
+            (With<Mob>, Without<Fighting>),
+        >();
+        q.iter(world)
+            .find(|(_, l, mem)| l.0 == room && mem.0.contains(&player))
+            .map(|(e, _, _)| e)
+    };
+    let Some(mob) = grudger else { return false };
+    engage_combat(world, mob, player, room);
+    true
 }
 
 /// Alignment threshold below which a mob will swing on a player
