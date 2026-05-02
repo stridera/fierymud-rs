@@ -383,6 +383,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn handle_death(
     world: &mut World,
     victim: Entity,
@@ -473,7 +474,10 @@ pub(crate) fn handle_death(
         );
         info!(?victim, name = %victim_name, ?corpse, "player corpsed");
     } else {
-        // Mob death: notify, despawn, stop attackers (with "target falls" line).
+        // Mob death: notify, drop loot into a corpse, despawn the
+        // mob, stop attackers. Without the corpse path the items
+        // the loader put on the mob (equipment) would be orphaned
+        // ECS entities pointing at a despawned parent.
         broadcast_room_except_rendered(
             world,
             room,
@@ -488,6 +492,62 @@ pub(crate) fn handle_death(
         // the body somehow despawns mid-fire it still completes
         // safely.
         crate::triggers::fire_event(world, victim, mud_world::TriggerEvent::Death);
+        let owned_items: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+            q.iter(world)
+                .filter(|(_, l)| l.0 == victim)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        let killer: Option<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
+            q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
+        };
+        if !owned_items.is_empty() {
+            let corpse = world
+                .spawn((
+                    Item,
+                    Corpse,
+                    Named { name: format!("the corpse of {victim_name}") },
+                    Keywords(vec![
+                        "corpse".to_string(),
+                        victim_name.to_ascii_lowercase(),
+                    ]),
+                    Located(room),
+                    CorpseDecay { remaining_secs: 600 },
+                ))
+                .id();
+            for it in &owned_items {
+                if let Some(mut l) = world.get_mut::<Located>(*it) {
+                    l.0 = corpse;
+                }
+                try_remove::<mud_world::EquippedSlot>(world, *it);
+            }
+            // Auto-loot: if the killer has the flag, immediately
+            // pull every item out of the corpse onto them and let
+                // the corpse decay empty. Quiet — players opted in.
+            let auto_loot = killer
+                .and_then(|k| world.get::<mud_world::PlayerFlags>(k).cloned())
+                .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::AutoLoot));
+            if let (Some(killer), true) = (killer, auto_loot) {
+                let mut moved = 0;
+                for it in &owned_items {
+                    if let Some(mut l) = world.get_mut::<Located>(*it) {
+                        l.0 = killer;
+                        moved += 1;
+                    }
+                }
+                if moved > 0 {
+                    send_to(
+                        world,
+                        killer,
+                        format!(
+                            "You loot {moved} item(s) from the corpse of {victim_name}.\r\n"
+                        ),
+                    );
+                }
+            }
+        }
         disengage_attackers_of(world, victim);
         if let Ok(e) = world.get_entity_mut(victim) {
             e.despawn();
