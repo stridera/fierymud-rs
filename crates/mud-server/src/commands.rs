@@ -10354,6 +10354,7 @@ fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
             .map(|(_, n, _)| n.name.clone())
             .collect()
     };
+    let weight = carried_weight(world, player);
     let mode = color_mode_for(world, player);
     let mut out = if items.is_empty() {
         "\r\nYou are carrying nothing.\r\n".to_string()
@@ -10363,7 +10364,45 @@ fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
     for name in &items {
         out.push_str(&format!("  {}\r\n", render_color_tags(name, mode)));
     }
+    if weight > 0.0 {
+        out.push_str(&format!("\r\nTotal weight carried: {weight:.1} lbs.\r\n"));
+    }
     send_to(world, player, out);
+}
+
+/// Sum the prototype weight of every item rooted at `actor` —
+/// inventory, equipped slots, and the contents of any container
+/// they're carrying, recursively. Items missing a `WorldKey` (rare:
+/// synthetic seed items) contribute zero. Used by `inventory` for
+/// the readout, and reusable when pickup enforcement lands later.
+pub(crate) fn carried_weight(world: &mut World, actor: Entity) -> f64 {
+    use std::collections::HashSet;
+    // Snapshot every (item, parent, proto_key) once so the BFS
+    // below doesn't reborrow the world each step.
+    let all_items: Vec<(Entity, Entity, Option<WorldKey>)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, Option<&WorldKey>), With<Item>>();
+        q.iter(world).map(|(e, l, wk)| (e, l.0, wk.copied())).collect()
+    };
+    let mut visited: HashSet<Entity> = HashSet::new();
+    let mut frontier: Vec<Entity> = vec![actor];
+    let mut total = 0.0_f64;
+    while let Some(parent) = frontier.pop() {
+        for (e, p, wk) in &all_items {
+            if *p != parent || !visited.insert(*e) {
+                continue;
+            }
+            if let Some(wk) = wk
+                && let Some(proto) = world
+                    .resource::<ObjectPrototypes>()
+                    .by_key
+                    .get(&(wk.zone, wk.id))
+            {
+                total += proto.weight;
+            }
+            frontier.push(*e);
+        }
+    }
+    total
 }
 
 #[allow(clippy::too_many_lines)]
