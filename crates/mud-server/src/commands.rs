@@ -19006,6 +19006,20 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             stamina_cost = stamina_cost.saturating_add(1);
         }
     }
+    // Encumbrance surcharge: at >75% of carry capacity each step
+    // costs +1; at >90% +2. Flyers pay it too — pack weight is
+    // pack weight whether you're walking or gliding. Capacity is
+    // level-scaled, so the threshold travels with the player.
+    let cap = carry_capacity(world, player);
+    let load = carried_weight(world, player);
+    if cap > 0.0 {
+        let frac = load / cap;
+        if frac > 0.90 {
+            stamina_cost = stamina_cost.saturating_add(2);
+        } else if frac > 0.75 {
+            stamina_cost = stamina_cost.saturating_add(1);
+        }
+    }
     if let Some(s) = world.get::<Stamina>(player).copied()
         && s.current < stamina_cost
     {
