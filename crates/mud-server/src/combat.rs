@@ -392,11 +392,21 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // Stacks multiplicatively with the berserk +50% computed in
     // the swing-snapshot phase: a critical berserk swing lands at
     // base * 3/2 * 3/2 = base * 9/4.
-    let damage = if outcome == SwingOutcome::Crit {
+    let mut damage = if outcome == SwingOutcome::Crit {
         s.damage.saturating_mul(3) / 2
     } else {
         s.damage
     };
+    // Per-swing damage variance: ±25% of the post-crit base, integer
+    // floor. Bigger swings get a wider band; sub-4 damage swings
+    // pin at variance=0. Floor at 1 so a low roll never zeroes out
+    // a swing — that would make the hit/miss roll the only meaningful
+    // outcome and the dmg_roll stat decorative.
+    let variance_band = damage / 4;
+    if variance_band > 0 {
+        let delta = rand::random_range(-variance_band..=variance_band);
+        damage = damage.saturating_add(delta).max(1);
+    }
     let (dead, threshold_msg) = apply_damage(world, s.target, damage);
 
     // Names may carry XML-Lite tags; render per-recipient so each player
@@ -958,12 +968,13 @@ mod tests {
         run_combat_tick(&mut world);
 
         let hp = world.get::<Health>(target).expect("target still has Health");
-        // Normal hit lands 7 (50 → 43); the 1% natural-100 crit
-        // path lands 10 (50 → 40). Anything else means the swing
-        // didn't connect at all.
+        // Damage = 7 ± (7/4 = 1) for normal, or 10 ± (10/4 = 2)
+        // on the 1% crit branch. So hp lands in [50-12 .. 50-6],
+        // i.e. 38..=44. Anything else means the swing didn't
+        // connect at all (impossible at hit_chance=100%).
         assert!(
-            hp.hp == 43 || hp.hp == 40,
-            "target HP dropped by dmg_roll (or 1.5x on crit), got {}",
+            (38..=44).contains(&hp.hp),
+            "target HP within damage+crit+variance band, got {}",
             hp.hp,
         );
         assert_eq!(hp.max, 50, "max HP unchanged");
