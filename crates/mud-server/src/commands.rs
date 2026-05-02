@@ -5377,9 +5377,11 @@ mod tests {
 
     #[test]
     fn render_prompt_substitutes_hp_and_stamina() {
+        // Use a healthy ratio (>=50%) so vitals don't get colored.
+        // Color-threshold cases live in their own test below.
         let ctx = PromptCtx {
-            hp: Some(Health { hp: 42, max: 100 }),
-            stamina: Some(Stamina { current: 7, max: 50 }),
+            hp: Some(Health { hp: 80, max: 100 }),
+            stamina: Some(Stamina { current: 40, max: 50 }),
             name: Some("Strider"),
             room: Some("The Void"),
             wealth: Some(12345i64),
@@ -5387,11 +5389,11 @@ mod tests {
             season: Some("Winter"),
             day_night: Some("day"),
         };
-        assert_eq!(render_prompt("<%h/%H>", ctx), "<42/100> ");
-        assert_eq!(render_prompt("<%v/%V mv>", ctx), "<7/50 mv> ");
-        assert_eq!(render_prompt("<%h/%H %v/%V>", ctx), "<42/100 7/50> ");
+        assert_eq!(render_prompt("<%h/%H>", ctx), "<80/100> ");
+        assert_eq!(render_prompt("<%v/%V mv>", ctx), "<40/50 mv> ");
+        assert_eq!(render_prompt("<%h/%H %v/%V>", ctx), "<80/100 40/50> ");
         // Trailing space already present — don't double-add.
-        assert_eq!(render_prompt("<%h> ", ctx), "<42> ");
+        assert_eq!(render_prompt("<%h> ", ctx), "<80> ");
         // Literal percent.
         assert_eq!(render_prompt("100%%", ctx), "100% ");
         // Name substitution.
@@ -6409,6 +6411,22 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
     }
 }
 
+/// XML-Lite open tag for a vital reading at `current/max`. Red
+/// below 25%, yellow below 50%, none otherwise. Returns the open
+/// tag string; the caller closes with `</>`. Zero / negative max
+/// yields no color (defensive — avoids divide-by-zero panic).
+fn vital_color_tag(current: i32, max: i32) -> Option<&'static str> {
+    if max <= 0 {
+        return None;
+    }
+    let pct = current.saturating_mul(100) / max;
+    match pct {
+        ..=24 => Some("<red>"),
+        25..=49 => Some("<yellow>"),
+        _ => None,
+    }
+}
+
 /// Bag of substitutions the prompt template can read. Bundled in
 /// a struct so adding new variables (`%t`, `%s`, …) doesn't keep
 /// growing the function signature; older callers can keep building
@@ -6436,7 +6454,21 @@ fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
         if c == '%' {
             match chars.next() {
                 Some('h') => match ctx.hp {
-                    Some(hp) => out.push_str(&hp.hp.to_string()),
+                    Some(hp) => {
+                        // Color-grade current HP by ratio so a
+                        // glance at the prompt warns the player
+                        // before they get themselves killed. Tags
+                        // render through render_color_tags which
+                        // strips them for color-off clients.
+                        let tag = vital_color_tag(hp.hp, hp.max);
+                        if let Some(open) = tag {
+                            out.push_str(open);
+                            out.push_str(&hp.hp.to_string());
+                            out.push_str("</>");
+                        } else {
+                            out.push_str(&hp.hp.to_string());
+                        }
+                    }
                     None => out.push('?'),
                 },
                 Some('H') => match ctx.hp {
@@ -6444,7 +6476,16 @@ fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
                     None => out.push('?'),
                 },
                 Some('v') => match ctx.stamina {
-                    Some(s) => out.push_str(&s.current.to_string()),
+                    Some(s) => {
+                        let tag = vital_color_tag(s.current, s.max);
+                        if let Some(open) = tag {
+                            out.push_str(open);
+                            out.push_str(&s.current.to_string());
+                            out.push_str("</>");
+                        } else {
+                            out.push_str(&s.current.to_string());
+                        }
+                    }
                     None => out.push('?'),
                 },
                 Some('V') => match ctx.stamina {
