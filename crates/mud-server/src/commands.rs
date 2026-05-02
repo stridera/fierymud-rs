@@ -6409,6 +6409,41 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
         );
         let _ = conn.0.send(mud_net::gmcp_packet("Char.Vitals", &payload));
     }
+    // Room.Info: lightweight room metadata for Mudlet-style
+    // mappers. Same prompt cadence as Char.Vitals; per-prompt
+    // re-emit is cheap (one telnet frame, ~80 bytes) and lets
+    // the client refresh on any view change. Room name is
+    // sanitized of XML-Lite tags so the JSON stays well-formed.
+    if let Some(located) = world.get::<Located>(target) {
+        let room = located.0;
+        let room_name = world
+            .get::<Named>(room)
+            .map_or_else(String::new, |n| n.name.clone());
+        let plain = render_color_tags(&room_name, ColorMode::Strip)
+            .replace('"', "\\\"")
+            .replace('\\', "\\\\");
+        let (zone, id) = world
+            .get::<WorldKey>(room)
+            .map_or((-1, -1), |k| (k.zone, k.id));
+        let exits: Vec<&'static str> = world
+            .get::<Exits>(room)
+            .map(|e| {
+                e.0.keys()
+                    .copied()
+                    .map(direction_name)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let exits_json = exits
+            .iter()
+            .map(|e| format!("\"{e}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let payload = format!(
+            "{{\"name\":\"{plain}\",\"zone\":{zone},\"id\":{id},\"exits\":[{exits_json}]}}"
+        );
+        let _ = conn.0.send(mud_net::gmcp_packet("Room.Info", &payload));
+    }
 }
 
 /// 10-cell ASCII bar with a color tag wrapping the filled portion.
