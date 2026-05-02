@@ -13125,6 +13125,52 @@ fn invoke_ability_with(
     // the rules became live — the messages are written as failure
     // text, so showing them on success is misleading. The player
     // sees them only when the gate refuses the cast above.)
+    //
+    // Material reagent gate: every `required` AbilityComponent row
+    // must be carried by the caster, else refuse. `consumed` rows
+    // are tracked through to the post-success despawn pass so a
+    // misfired cast doesn't burn reagents.
+    let component_reqs: Vec<mud_world::AbilityComponentReq> = world
+        .resource::<AbilityCatalog>()
+        .components
+        .get(&def.id)
+        .cloned()
+        .unwrap_or_default();
+    let mut to_consume: Vec<Entity> = Vec::new();
+    if !component_reqs.is_empty() {
+        // Snapshot the carried items once so the per-component
+        // search doesn't re-borrow the world inside the loop.
+        let carried: Vec<(Entity, i32, String)> = {
+            let mut q = world.query_filtered::<(Entity, &Located, &WorldKey, &Named), With<Item>>();
+            q.iter(world)
+                .filter(|(_, l, _, _)| l.0 == player)
+                .map(|(e, _, k, n)| (e, k.id, n.name.clone()))
+                .collect()
+        };
+        for req in &component_reqs {
+            let match_idx = carried.iter().position(|(_, oid, _)| *oid == req.object_id);
+            match match_idx {
+                Some(idx) => {
+                    if req.consumed {
+                        to_consume.push(carried[idx].0);
+                    }
+                }
+                None => {
+                    if req.required {
+                        send_to(
+                            world,
+                            player,
+                            format!(
+                                "You lack the proper material component for {}.\r\n",
+                                def.plain_name,
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
     // Look up the effects this ability applies and dispatch each by
     // its `Effect.effectType`. `heal` is applied immediately to the
     // target's `Health` (or `Stamina` when `resource = "move"`); other
@@ -13916,6 +13962,20 @@ fn invoke_ability_with(
             except.push(target_entity);
         }
         broadcast_room_except_rendered(world, located.0, &except, &format!("{rendered}\r\n"));
+    }
+    // Reagent consumption: only when the cast actually applied at
+    // least one effect (mirrors the cooldown gate below). Despawn
+    // every entity in `to_consume` collected during the pre-flight
+    // gate; partial application of multi-effect abilities still
+    // counts as success for reagent purposes — a fireball that
+    // landed but missed half its damage component still burned
+    // its bat guano.
+    if !aoe_repeat && !applied_msgs.is_empty() {
+        for item in &to_consume {
+            if let Ok(em) = world.get_entity_mut(*item) {
+                em.despawn();
+            }
+        }
     }
     // Cooldown write-back: only when the cast actually applied at
     // least one effect (skips no-op casts like "nothing to dispel" so

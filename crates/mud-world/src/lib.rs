@@ -21,9 +21,10 @@ pub use loader::{
     wear_flags_primary_slot,
 };
 pub use resources::{
-    AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
-    ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog, DamageComponent, EffectCatalog,
-    EffectDef, LevelRow, LevelTable, LiquidIndex, LiquidProto, LuaOutbox, MobProto,
+    AbilityCatalog, AbilityComponentReq, AbilityDef, AbilityMessageSet, BoardCatalog,
+    BoardSummary, ClassCatalog, ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog,
+    DamageComponent, EffectCatalog, EffectDef, LevelRow, LevelTable, LiquidIndex, LiquidProto,
+    LuaOutbox, MobProto,
     MobPrototypes, MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding,
     ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
     LightFuelProto, PrecipKind, SavingThrow, ScriptError, ScriptErrorLog, Season, ShopAcceptRule,

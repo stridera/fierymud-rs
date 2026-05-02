@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_db::{
-    abilities, ability_damage_components, ability_effects, ability_messages, ability_restrictions,
-    ability_saving_throw, ability_targeting, boards, classes, effects, levels,
+    abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
+    ability_restrictions, ability_saving_throw, ability_targeting, boards, classes, effects, levels,
     mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
     objects, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool, triggers, zones,
 };
@@ -376,6 +376,23 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 on_save_action: row.on_save_action,
             },
         );
+    }
+
+    // Material reagent rows. `invoke_ability` checks every
+    // `required` row against the caster's carried items before
+    // applying effects; on success it removes one instance per
+    // `consumed` row.
+    let comp_rows = ability_components::list_all(pool).await?;
+    for row in comp_rows {
+        ability_catalog
+            .components
+            .entry(row.ability_id)
+            .or_default()
+            .push(crate::resources::AbilityComponentReq {
+                object_id: row.object_id,
+                consumed: row.consumed,
+                required: row.required,
+            });
     }
 
     // Multi-element damage components — append per-ability

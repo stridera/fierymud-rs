@@ -688,6 +688,24 @@ pub struct AbilityCatalog {
     /// damage when components exist; otherwise falls back to the
     /// single `override_params.amount` path.
     pub damage_components: HashMap<i32, Vec<DamageComponent>>,
+    /// Per-ability material reagent list. Each entry binds an
+    /// object proto id; `required` makes it a hard precondition
+    /// for casting, `consumed` removes one carried instance on
+    /// success. `invoke_ability` reads this before effect
+    /// application; missing required reagents refuse the cast
+    /// with a templated message.
+    pub components: HashMap<i32, Vec<AbilityComponentReq>>,
+}
+
+/// One row from the schema's `AbilityComponent` table. The
+/// `object_id` is the legacy zone-less id; runtime carrier-check
+/// matches on `WorldKey.id` regardless of zone, mirroring the
+/// scope of the legacy data.
+#[derive(Debug, Clone, Copy)]
+pub struct AbilityComponentReq {
+    pub object_id: i32,
+    pub consumed: bool,
+    pub required: bool,
 }
 
 /// One element of an ability's damage breakdown loaded from
