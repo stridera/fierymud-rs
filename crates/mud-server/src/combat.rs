@@ -165,12 +165,31 @@ pub fn hit_chance_pct(hit_roll: i32, target_ac: i32) -> i32 {
     (80i32.saturating_add(modifier)).clamp(5, 100)
 }
 
-/// Roll d100 against the computed hit chance — true on hit, false
-/// on miss. Sleeping defenders are handled at the call site
-/// (auto-hit) so this stays a pure function of the stats pair.
-fn roll_hit(hit_roll: i32, target_ac: i32) -> bool {
+/// One swing's outcome from the d100 roll. Crit and Miss are
+/// special cases of the natural-100 / natural-1 corners; the
+/// in-between resolves against the computed hit chance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwingOutcome {
+    Crit,
+    Hit,
+    Miss,
+}
+
+/// Roll d100 against the computed hit chance. Natural-100 promotes
+/// to a critical; everything else resolves normally against the
+/// chance band. A 100% `hit_chance` attacker therefore lands 99% as
+/// regular hits and 1% as crits — never misses. Sleeping defenders
+/// bypass this at the call site (auto-hit).
+fn resolve_swing(hit_roll: i32, target_ac: i32) -> SwingOutcome {
     let chance = hit_chance_pct(hit_roll, target_ac);
-    rand::random_range(1..=100) <= chance
+    let roll = rand::random_range(1..=100);
+    if roll == 100 {
+        SwingOutcome::Crit
+    } else if roll <= chance {
+        SwingOutcome::Hit
+    } else {
+        SwingOutcome::Miss
+    }
 }
 
 /// Atmospheric line for the tick that crossed a decay threshold.
@@ -328,14 +347,18 @@ fn apply_swing(world: &mut World, s: &Swing) {
     let was_sleeping =
         world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
 
-    // Hit / miss roll. Sleeping defenders are auto-hit (you can't
-    // dodge unconscious) — same special case the existing
+    // Hit / miss / crit roll. Sleeping defenders are auto-hit (you
+    // can't dodge unconscious) — same special case the existing
     // jolt-awake path already assumed. Otherwise compute the
     // chance from attacker hit_roll vs target AC and roll d100.
     let hit_roll = world.get::<CombatStats>(s.attacker).map_or(0, |cs| cs.hit_roll);
     let target_ac = world.get::<CombatStats>(s.target).map_or(0, |cs| cs.ac);
-    let landed = was_sleeping || roll_hit(hit_roll, target_ac);
-    if !landed {
+    let outcome = if was_sleeping {
+        SwingOutcome::Hit
+    } else {
+        resolve_swing(hit_roll, target_ac)
+    };
+    if outcome == SwingOutcome::Miss {
         let attacker_mode = color_mode_for(world, s.attacker);
         let target_mode = color_mode_for(world, s.target);
         send_to(
@@ -365,17 +388,27 @@ fn apply_swing(world: &mut World, s: &Swing) {
         return;
     }
 
-    let (dead, threshold_msg) = apply_damage(world, s.target, s.damage);
+    // Crit promotes the swing's already-resolved damage by 1.5x.
+    // Stacks multiplicatively with the berserk +50% computed in
+    // the swing-snapshot phase: a critical berserk swing lands at
+    // base * 3/2 * 3/2 = base * 9/4.
+    let damage = if outcome == SwingOutcome::Crit {
+        s.damage.saturating_mul(3) / 2
+    } else {
+        s.damage
+    };
+    let (dead, threshold_msg) = apply_damage(world, s.target, damage);
 
     // Names may carry XML-Lite tags; render per-recipient so each player
     // gets ANSI or stripped output according to their own COLOR_BLIND flag.
     let attacker_mode = color_mode_for(world, s.attacker);
     let target_mode = color_mode_for(world, s.target);
+    let crit_tag = if outcome == SwingOutcome::Crit { " (critical hit!)" } else { "" };
     send_to(
         world,
         s.attacker,
         render_color_tags(
-            &format!("You hit {target_name} for {} damage.\r\n", s.damage),
+            &format!("You hit {target_name} for {damage} damage{crit_tag}.\r\n"),
             attacker_mode,
         ),
     );
@@ -383,7 +416,10 @@ fn apply_swing(world: &mut World, s: &Swing) {
         world,
         s.target,
         render_color_tags(
-            &format!("{} hits you for {} damage.\r\n", s.attacker_name, s.damage),
+            &format!(
+                "{} hits you for {damage} damage{crit_tag}.\r\n",
+                s.attacker_name
+            ),
             target_mode,
         ),
     );
@@ -922,7 +958,14 @@ mod tests {
         run_combat_tick(&mut world);
 
         let hp = world.get::<Health>(target).expect("target still has Health");
-        assert_eq!(hp.hp, 43, "target HP dropped by attacker's dmg_roll");
+        // Normal hit lands 7 (50 → 43); the 1% natural-100 crit
+        // path lands 10 (50 → 40). Anything else means the swing
+        // didn't connect at all.
+        assert!(
+            hp.hp == 43 || hp.hp == 40,
+            "target HP dropped by dmg_roll (or 1.5x on crit), got {}",
+            hp.hp,
+        );
         assert_eq!(hp.max, 50, "max HP unchanged");
     }
 
