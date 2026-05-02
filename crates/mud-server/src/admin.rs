@@ -272,10 +272,30 @@ struct CommandBody {
     command: String,
 }
 
+// MCP clients sometimes send numeric fields as JSON strings
+// (the MCP framework's JSON-schema-based marshalling is lenient
+// here). Accept either int literal or numeric string.
+fn de_i32_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+    use serde::Deserialize as _;
+    match Value::deserialize(d)? {
+        Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()).ok_or_else(|| {
+            serde::de::Error::custom("number out of range for i32")
+        }),
+        Value::String(s) => s
+            .parse::<i32>()
+            .map_err(|e| serde::de::Error::custom(e.to_string())),
+        other => Err(serde::de::Error::custom(format!(
+            "expected number or numeric string, got {other}"
+        ))),
+    }
+}
+
 #[derive(Deserialize)]
 struct TeleportBody {
     player_name: String,
+    #[serde(deserialize_with = "de_i32_lenient")]
     zone_id: i32,
+    #[serde(deserialize_with = "de_i32_lenient")]
     room_id: i32,
 }
 
@@ -283,9 +303,13 @@ struct TeleportBody {
 struct SpawnBody {
     #[serde(rename = "type")]
     kind: String,
+    #[serde(deserialize_with = "de_i32_lenient")]
     zone_id: i32,
+    #[serde(deserialize_with = "de_i32_lenient")]
     id: i32,
+    #[serde(deserialize_with = "de_i32_lenient")]
     room_zone: i32,
+    #[serde(deserialize_with = "de_i32_lenient")]
     room_id: i32,
 }
 
