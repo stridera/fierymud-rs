@@ -8080,6 +8080,11 @@ struct WhoRow {
 }
 
 fn cmd_who(world: &mut World, player: Entity, _args: &str) {
+    // Width-aware columns: pad the name to NAME_COL visible chars
+    // (skipping XML-Lite color tags via pad_visible) so titles and
+    // flags line up across players regardless of name length or
+    // colors. NAME_COL covers the canonical Characters.name limit.
+    const NAME_COL: usize = 20;
     // Two-pass: first collect rows, then resolve group roots so we
     // can mark grouped players with [G].
     let raw: Vec<WhoRow> = {
@@ -8118,7 +8123,7 @@ fn cmd_who(world: &mut World, player: Entity, _args: &str) {
         let root = roots.get(&r.entity).copied().unwrap_or(r.entity);
         let in_group = group_size.get(&root).copied().unwrap_or(0) > 1;
         out.push_str("  ");
-        out.push_str(&r.name);
+        out.push_str(&pad_visible(&r.name, NAME_COL));
         if let Some(t) = &r.title {
             out.push(' ');
             out.push_str(t);
