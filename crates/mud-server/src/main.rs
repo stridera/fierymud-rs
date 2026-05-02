@@ -6,6 +6,7 @@ mod login;
 mod memorize;
 mod regen;
 mod respawn;
+mod sleep;
 mod syslog;
 mod triggers;
 mod weather;
@@ -205,6 +206,7 @@ async fn main() {
             regen::hunger_thirst_tick,
             regen::light_fuel_tick,
             weather::weather_tick,
+            sleep::mob_sleep_tick,
             memorize::memorize_tick,
             respawn::respawn_tick,
             triggers::lua_coroutine_tick,
