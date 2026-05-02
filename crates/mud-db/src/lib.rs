@@ -2,6 +2,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 
 pub mod abilities;
 pub mod achievements;
+pub mod audit;
 pub mod boards;
 pub mod ability_components;
 pub mod ability_damage_components;

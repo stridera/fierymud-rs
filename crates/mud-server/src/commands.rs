@@ -6799,10 +6799,27 @@ pub(crate) fn record_admin_action(
     tracing::info!(actor = %actor_name, verb = %verb, args = %args, "admin action");
     world.resource_mut::<AdminAuditLog>().push(AdminAuditEntry {
         at: std::time::SystemTime::now(),
-        actor_name,
+        actor_name: actor_name.clone(),
         verb,
         args: args.to_string(),
     });
+    // Persist to AuditLogs. Fire-and-forget so the command path
+    // doesn't block on the DB write. user_id comes from the
+    // actor's Account; the target identifier is the actor name
+    // for now (the verb's actual target is in `args` and a
+    // future pass can parse + index that more cleanly).
+    let user_id = world.get::<Account>(actor).map(|a| a.user_id.clone());
+    if let (Some(uid), Some(pool)) = (
+        user_id,
+        world.get_resource::<DbPool>().map(|p| p.0.clone()),
+    ) {
+        let args = args.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = mud_db::audit::record(&pool, &uid, verb, &actor_name, &args).await {
+                tracing::warn!(error = %e, verb, "audit log persist failed");
+            }
+        });
+    }
 }
 
 /// 10-cell ASCII bar with a color tag wrapping the filled portion.
