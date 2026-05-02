@@ -8403,6 +8403,9 @@ fn render_score_fancy(d: &ScoreData) -> String {
     if !d.flags.is_empty() {
         row(format!("Flags:     {}", d.flags.join(", ")));
     }
+    if let Some(c) = condition_summary(d.hunger, d.thirst) {
+        row(format!("Condition: {c}"));
+    }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out
 }
@@ -8433,6 +8436,9 @@ fn render_score_minimal(d: &ScoreData) -> String {
     }
     if let Some(target) = d.fight_target {
         parts.push(format!("vs:{target}"));
+    }
+    if let Some(c) = condition_summary(d.hunger, d.thirst) {
+        parts.push(c);
     }
     format!("{}\r\n", parts.join("  "))
 }
