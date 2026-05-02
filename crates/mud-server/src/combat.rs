@@ -1,8 +1,9 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AppliedTo, CombatStats, Corpse, CorpseDecay, Description, EffectInstance, Exits, Fighting,
-    Ghost, Guarding, Health, Item, Keywords, Located, Mob, MobPrototypes, Named, Player,
-    PlayerFlags, Posture, PostureKind, Slot, Stunned, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    Ghost, Guarding, Health, Item, Keywords, KnownAbilities, Located, Mob, MobPrototypes, Named,
+    Player, PlayerFlags, Posture, PostureKind, Slot, Stunned, Wealth, WearableIn, WorldKey,
+    WorldKeyIndex,
 };
 use tracing::info;
 
@@ -180,6 +181,46 @@ pub fn posture_ac_modifier(p: PostureKind) -> i32 {
         PostureKind::Resting => 5,
         PostureKind::Sleeping => 6,
     }
+}
+
+/// `Ability.id` for the DODGE skill in the current `fierydev`
+/// import. Hardcoded so the swing path doesn't need to scan the
+/// catalog by name on every hit. Pinned to 288.
+const DODGE_ABILITY_ID: i32 = 288;
+/// `Ability.id` for the PARRY skill. Pinned to 287.
+const PARRY_ABILITY_ID: i32 = 287;
+
+/// Roll a defender's evasion abilities (Dodge / Parry) against
+/// an incoming hit. Returns the name of the ability that evaded
+/// (`"dodge"` / `"parry"`) when one fires, or None to let the hit
+/// through. Standing-only — a non-standing defender can't reset
+/// their stance to evade. Proficiency 0..=1000+; chance is
+/// `prof / 50` clipped to 25 (so a fully-mastered Dodge gives a
+/// 20% miss-the-swing roll, and a junior 100-prof apprentice
+/// dodges 2%).
+fn roll_evasion(world: &World, defender: Entity) -> Option<&'static str> {
+    if !matches!(
+        world.get::<Posture>(defender).map(|p| p.0),
+        None | Some(PostureKind::Standing)
+    ) {
+        return None;
+    }
+    let known = world.get::<KnownAbilities>(defender)?;
+    for (id, kind) in [(DODGE_ABILITY_ID, "dodge"), (PARRY_ABILITY_ID, "parry")] {
+        let prof = known
+            .entries
+            .iter()
+            .find(|(aid, _, _)| *aid == id)
+            .map_or(0, |(_, p, _)| *p);
+        if prof <= 0 {
+            continue;
+        }
+        let chance = (prof / 50).min(25);
+        if rand::random_range(0..100) < chance {
+            return Some(kind);
+        }
+    }
+    None
 }
 
 /// Per-mob memory of the players who've ever swung at them.
@@ -461,6 +502,47 @@ fn apply_swing(world: &mut World, s: &Swing) {
     } else {
         resolve_swing(hit_roll, target_ac)
     };
+    // Active evasion (Dodge / Parry): a defender with the trained
+    // skill rolls against a small chance to turn an incoming hit
+    // into a miss. Sleeping targets bypass — they can't dodge.
+    // Crit-class incoming swings still get rolled — a perfect
+    // dodge cancels even a critical hit.
+    let evaded_via = if was_sleeping || outcome == SwingOutcome::Miss {
+        None
+    } else {
+        roll_evasion(world, s.target)
+    };
+    if let Some(via) = evaded_via {
+        let attacker_mode = color_mode_for(world, s.attacker);
+        let target_mode = color_mode_for(world, s.target);
+        send_to(
+            world,
+            s.attacker,
+            render_color_tags(
+                &format!("{target_name} {via}s your attack!\r\n"),
+                attacker_mode,
+            ),
+        );
+        send_to(
+            world,
+            s.target,
+            render_color_tags(
+                &format!("You {via} {}'s attack!\r\n", s.attacker_name),
+                target_mode,
+            ),
+        );
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[s.attacker, s.target],
+            &format!(
+                "{target_name} {via}s {}'s attack.\r\n",
+                s.attacker_name
+            ),
+        );
+        drain_stamina(world, s.attacker, 1);
+        return;
+    }
     if outcome == SwingOutcome::Miss {
         let attacker_mode = color_mode_for(world, s.attacker);
         let target_mode = color_mode_for(world, s.target);
