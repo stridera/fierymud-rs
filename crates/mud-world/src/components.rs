@@ -266,6 +266,31 @@ pub struct Fighting(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Stunned;
 
+/// Marker: this player is dead-but-incorporeal and waiting for `release`.
+/// Set by `combat::handle_death` after spawning the player's corpse;
+/// removed by `cmd_release` which restores HP and moves the player to
+/// their recall point. The marker doesn't currently gate any combat
+/// behavior on its own — that's a follow-up. v1 just signals "your
+/// body is over there, type release to return."
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Ghost;
+
+/// Marker: this Item is a player corpse. Holds items the dead player
+/// was carrying as `Located` children; the corpse-decay tick despawns
+/// it after `CorpseDecay.remaining_secs` reaches zero, dropping the
+/// contained items to the room first.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Corpse;
+
+/// Decay timer on a corpse. Decrements one second per game-second;
+/// when it hits 0 the corpse despawns and any items Located on it
+/// drop to the room. Default v1 lifetime is 10 minutes (600 secs);
+/// configurable per-spawn for boss/quest corpses later.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CorpseDecay {
+    pub remaining_secs: i32,
+}
+
 /// Marker: this entity is hidden / sneaking. Resolves the `hidden`
 /// symbol in formula expressions to 1 (vs 0 when absent). Used by
 /// rogue-style abilities (BACKSTAB's `bonusIfHidden`, future

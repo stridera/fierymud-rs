@@ -1,8 +1,8 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AppliedTo, CombatStats, Description, EffectInstance, Exits, Fighting, Guarding, Health, Item,
-    Keywords, Located, Mob, MobPrototypes, Named, Player, PlayerFlags, Posture, PostureKind,
-    Slot, Stunned, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    AppliedTo, CombatStats, Corpse, CorpseDecay, Description, EffectInstance, Exits, Fighting,
+    Ghost, Guarding, Health, Item, Keywords, Located, Mob, MobPrototypes, Named, Player,
+    PlayerFlags, Posture, PostureKind, Slot, Stunned, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -90,6 +90,61 @@ pub fn seed_test_items(world: &mut World) {
 
 /// Exclusive system: every `COMBAT_PERIOD_TICKS` world ticks, every entity with
 /// Fighting takes a swing at its target.
+/// One real-time second per tick fire (10 ticks at 10Hz). Decrements
+/// every `CorpseDecay.remaining_secs`; on hitting 0 re-Locates any
+/// items inside the corpse to the corpse's room, broadcasts a decay
+/// line, and despawns the corpse entity. Ephemeral — corpses don't
+/// survive server restart.
+pub fn corpse_decay_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(10) {
+        return;
+    }
+    // Snapshot so we can mutate freely.
+    let corpses: Vec<(Entity, Entity, i32, String)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &CorpseDecay, &Named), With<Corpse>>();
+        q.iter(world)
+            .map(|(e, l, d, n)| (e, l.0, d.remaining_secs, n.name.clone()))
+            .collect()
+    };
+    for (corpse, room, _remaining, name) in corpses {
+        // Decrement first (or expire and despawn).
+        let new_remaining = {
+            if let Some(mut d) = world.get_mut::<CorpseDecay>(corpse) {
+                d.remaining_secs -= 1;
+                d.remaining_secs
+            } else {
+                continue;
+            }
+        };
+        if new_remaining > 0 {
+            continue;
+        }
+        // Expired — drop contents to the room, then despawn.
+        let contents: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+            q.iter(world)
+                .filter(|(_, l)| l.0 == corpse)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        for it in contents {
+            if let Some(mut l) = world.get_mut::<Located>(it) {
+                l.0 = room;
+            }
+        }
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[],
+            &format!("{name} crumbles to dust, leaving its contents behind.\r\n"),
+        );
+        if let Ok(em) = world.get_entity_mut(corpse) {
+            em.despawn();
+        }
+    }
+}
+
 pub fn combat_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(COMBAT_PERIOD_TICKS) {
@@ -337,8 +392,22 @@ pub(crate) fn handle_death(
     let is_player = world.get::<Player>(victim).is_some();
 
     if is_player {
-        // Player "death": revive in place, end all combat involving them.
-        // Silent disengage on the attackers — the revive line covers it.
+        // If they're already a Ghost, don't double-corpse them — just
+        // pin HP to 1 and stop combat. Ghosts in combat is rare (no
+        // gate today) but defensible as a no-op safety branch.
+        if world.get::<Ghost>(victim).is_some() {
+            if let Some(mut hp) = world.get_mut::<Health>(victim) {
+                hp.hp = hp.hp.max(1);
+            }
+            try_remove::<Fighting>(world, victim);
+            disengage_attackers_of(world, victim);
+            return;
+        }
+
+        // Player death: stop combat, spawn a corpse with their stuff
+        // in it, ghost the player. They stay where they are (in their
+        // body's last room) until they `release`. Default decay is
+        // 10 minutes; legacy MUDs typically decayed in similar time.
         let attackers: Vec<Entity> = {
             let mut q = world.query::<(Entity, &Fighting)>();
             q.iter(world)
@@ -346,25 +415,63 @@ pub(crate) fn handle_death(
                 .map(|(e, _)| e)
                 .collect()
         };
-        if let Some(mut hp) = world.get_mut::<Health>(victim) {
-            hp.hp = hp.max;
-        }
         try_remove::<Fighting>(world, victim);
         for a in attackers {
             try_remove::<Fighting>(world, a);
         }
+        // Move every Item Located on the player (carried + worn) to
+        // the corpse. Equipped slots are dropped (item becomes a
+        // floor item inside the corpse). Spawn the corpse first, then
+        // re-Located each item to it.
+        let owned_items: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+            q.iter(world)
+                .filter(|(_, l)| l.0 == victim)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        let corpse_name = format!("the corpse of {victim_name}");
+        let corpse = world
+            .spawn((
+                Item,
+                Corpse,
+                Named { name: corpse_name },
+                Keywords(vec![
+                    "corpse".to_string(),
+                    victim_name.to_ascii_lowercase(),
+                ]),
+                Located(room),
+                CorpseDecay { remaining_secs: 600 },
+            ))
+            .id();
+        for it in owned_items {
+            if let Some(mut l) = world.get_mut::<Located>(it) {
+                l.0 = corpse;
+            }
+            // Strip EquippedSlot — items inside a corpse aren't
+            // worn anymore. crate uses `mud_world::EquippedSlot`.
+            try_remove::<mud_world::EquippedSlot>(world, it);
+        }
+
+        // Ghost the player. HP pinned to 1 so any further damage is
+        // a no-op (data path and apply_damage both clamp at 0/1).
+        try_insert(world, victim, Ghost);
+        if let Some(mut hp) = world.get_mut::<Health>(victim) {
+            hp.hp = 1;
+        }
+
         send_to(
             world,
             victim,
-            "You collapse, then gasp back to life with full health.\r\n",
+            "You collapse, your spirit drifting free of your dying body.\r\nType `release` to return to your recall point.\r\n",
         );
         broadcast_room_except_rendered(
             world,
             room,
             &[victim],
-            &format!("{victim_name} collapses, then revives.\r\n"),
+            &format!("{victim_name} collapses, dead.\r\n"),
         );
-        info!(?victim, name = %victim_name, "player auto-revived");
+        info!(?victim, name = %victim_name, ?corpse, "player corpsed");
     } else {
         // Mob death: notify, despawn, stop attackers (with "target falls" line).
         broadcast_room_except_rendered(
@@ -753,5 +860,74 @@ mod tests {
             world.get::<Fighting>(attacker).is_none(),
             "attacker's Fighting cleared after target died"
         );
+    }
+
+    #[test]
+    fn handle_death_player_spawns_corpse_and_ghosts_player() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        // Insert a tick resource so any system queried during the test
+        // doesn't panic on missing TickCount.
+        world.insert_resource(TickCount(0));
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Tester".to_string() },
+                Located(room),
+                Health { hp: 0, max: 100 },
+                Posture(PostureKind::Standing),
+            ))
+            .id();
+        // Two carried items, one of them equipped on the body slot.
+        let _carried = world
+            .spawn((
+                Item,
+                Named { name: "a stick".to_string() },
+                Keywords(vec!["stick".to_string()]),
+                Located(player),
+            ))
+            .id();
+        let _worn = world
+            .spawn((
+                Item,
+                Named { name: "a robe".to_string() },
+                Keywords(vec!["robe".to_string()]),
+                Located(player),
+                mud_world::EquippedSlot(Slot::Body),
+            ))
+            .id();
+
+        super::handle_death(&mut world, player, "Tester", room);
+
+        // Player should now be a Ghost with HP pinned to 1.
+        assert!(
+            world.get::<Ghost>(player).is_some(),
+            "player gains Ghost marker on death"
+        );
+        let hp = world.get::<Health>(player).expect("player keeps Health");
+        assert_eq!(hp.hp, 1, "ghost HP pinned to 1");
+        // A Corpse Item should exist in the death room.
+        let corpse = world
+            .query_filtered::<(Entity, &Located, &Named, &CorpseDecay), With<Corpse>>()
+            .iter(&world)
+            .find(|(_, l, _, _)| l.0 == room)
+            .map(|(e, _, n, d)| (e, n.name.clone(), d.remaining_secs));
+        let (corpse_entity, corpse_name, decay) = corpse.expect("corpse spawned in room");
+        assert!(corpse_name.contains("Tester"), "corpse names the dead player");
+        assert!(decay > 0, "corpse has positive decay timer");
+        // Both items should now be Located on the corpse, not the player.
+        let on_corpse: Vec<String> = world
+            .query_filtered::<(&Located, &Named), With<Item>>()
+            .iter(&world)
+            .filter(|(l, _)| l.0 == corpse_entity)
+            .map(|(_, n)| n.name.clone())
+            .collect();
+        assert_eq!(on_corpse.len(), 2, "both items moved to corpse");
+        // Worn item should have shed its EquippedSlot.
+        let still_equipped = world
+            .query_filtered::<&mud_world::EquippedSlot, With<Item>>()
+            .iter(&world)
+            .count();
+        assert_eq!(still_equipped, 0, "EquippedSlot stripped on death");
     }
 }

@@ -1771,24 +1771,6 @@ const COMMANDS: &[Command] = &[
         run: cmd_abort,
     },
     Command {
-        names: &["release"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: Help {
-            usage: "release",
-            summary: "Leave your corpse and respawn (ghost-only).",
-            long: "Used in legacy CircleMUD lineage to release a \
-                   ghost from its corpse and return to the recall \
-                   point. Today's death handler auto-revives in \
-                   place, so there's no ghost state and nothing to \
-                   release. Kept as a registered command name to \
-                   provide a clear message; `recall` covers the \
-                   manual return-to-base case.",
-        },
-        run: cmd_release,
-    },
-    Command {
         names: &["cancel"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -3192,6 +3174,21 @@ const COMMANDS: &[Command] = &[
                    room to bind it as your recall point.",
         },
         run: cmd_recall,
+    },
+    Command {
+        names: &["release"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Movement,
+        help: Help {
+            usage: "release",
+            summary: "End the ghost cycle: restore HP, return to recall.",
+            long: "When you die, your spirit is left where you fell while \
+                   your corpse drops at the death scene. `release` returns \
+                   you to your recall point at full HP. Refused when you \
+                   aren't currently dead.",
+        },
+        run: cmd_release,
     },
     Command {
         names: &["enter"],
@@ -11180,17 +11177,6 @@ fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
         world,
         player,
         "You aren't casting anything. (Use `cancel <effect>` to drop an active buff.)\r\n",
-    );
-}
-
-/// `release`: stub for the legacy ghost-release-from-corpse flow.
-/// Today's death handler auto-revives the player in place, so the
-/// ghost state never arises. The stub stays for muscle memory.
-fn cmd_release(world: &mut World, player: Entity, _args: &str) {
-    send_to(
-        world,
-        player,
-        "You aren't dead. (Use `recall` to return to your home temple.)\r\n",
     );
 }
 
@@ -20383,6 +20369,68 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
     );
 
     send_to(world, player, "The world swirls around you...\r\n");
+    cmd_look(world, player, "");
+}
+
+/// `release`: end the ghost cycle. Restores HP to max, clears the
+/// `Ghost` marker, and moves the player to their `RecallPoint` (or
+/// the fallback start when no recall is set). Refuses when the
+/// player isn't currently a ghost — the only state that produces
+/// ghosts is dying via `combat::handle_death`.
+fn cmd_release(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<mud_world::Ghost>(player).is_none() {
+        send_to(
+            world,
+            player,
+            "You aren't dead. Nothing to release.\r\n",
+        );
+        return;
+    }
+    // Restore. Stamina is intentionally left at whatever it was when
+    // they died — the death-corpse cycle's recovery cost is the move
+    // back to recall plus losing stamina momentum, not a hard reset.
+    if let Some(mut hp) = world.get_mut::<Health>(player) {
+        hp.hp = hp.max;
+    }
+    try_remove::<mud_world::Ghost>(world, player);
+    // Resolve target room: RecallPoint, falling back to the same
+    // (0, 0) Void as login::FALLBACK_START when not set.
+    let target = world
+        .get::<RecallPoint>(player)
+        .map(|r| r.0)
+        .or_else(|| {
+            world
+                .resource::<WorldKeyIndex>()
+                .rooms
+                .get(&(0, 0))
+                .copied()
+        });
+    let Some(target) = target else {
+        send_to(
+            world,
+            player,
+            "Your spirit has nowhere to return to. Speak with an immortal.\r\n",
+        );
+        return;
+    };
+    if world.get_entity(target).is_err() {
+        send_to(
+            world,
+            player,
+            "Your recall point has vanished. Speak with an immortal.\r\n",
+        );
+        return;
+    }
+    if let Some(mut l) = world.get_mut::<Located>(player) {
+        l.0 = target;
+    } else {
+        try_insert(world, player, Located(target));
+    }
+    send_to(
+        world,
+        player,
+        "Your spirit settles back into your body. You return, alive once more.\r\n",
+    );
     cmd_look(world, player, "");
 }
 

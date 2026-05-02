@@ -186,6 +186,7 @@ async fn main() {
             advance_tick,
             mud_clock_tick,
             combat::combat_tick,
+            combat::corpse_decay_tick,
             effects::effects_tick,
             regen::regen_tick,
             memorize::memorize_tick,
