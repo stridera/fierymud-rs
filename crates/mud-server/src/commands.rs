@@ -10709,16 +10709,18 @@ fn cmd_visible(world: &mut World, player: Entity, _args: &str) {
 /// `eat <item>` / `quaff <item>`: consume a Food / Potion. Looks up
 /// the item's proto, checks the type, then despawns. Effects are a
 /// follow-up — they need `ConsumableEffects` loading.
-fn consume_item(world: &mut World, player: Entity, args: &str, expected: mud_db::enums::ObjectType, verb: &str) {
+/// Returns true when the item was actually consumed (so callers can
+/// chain post-effects like resetting Hunger after a successful eat).
+fn consume_item(world: &mut World, player: Entity, args: &str, expected: mud_db::enums::ObjectType, verb: &str) -> bool {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
-        return;
+        return false;
     }
     let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
     let Some(item) = item else {
         send_to(world, player, format!("You aren't carrying '{target_word}'.\r\n"));
-        return;
+        return false;
     };
     let item_name = name_of(world, item);
     let kind = world
@@ -10728,7 +10730,7 @@ fn consume_item(world: &mut World, player: Entity, args: &str, expected: mud_db:
         send_to(world, player, format!(
             "You can't {verb} {item_name}.\r\n",
         ));
-        return;
+        return false;
     }
     send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
     // Apply ConsumableEffects bound to this object proto. Per-row
@@ -10741,6 +10743,7 @@ fn consume_item(world: &mut World, player: Entity, args: &str, expected: mud_db:
     if let Ok(e) = world.get_entity_mut(item) {
         e.despawn();
     }
+    true
 }
 
 /// Spawn ConsumableEffect-bound effects on `player` for object
@@ -10822,7 +10825,13 @@ fn spawn_consumable_effect(
 }
 
 fn cmd_eat(world: &mut World, player: Entity, args: &str) {
-    consume_item(world, player, args, mud_db::enums::ObjectType::Food, "eat");
+    if consume_item(world, player, args, mud_db::enums::ObjectType::Food, "eat")
+        && let Some(mut h) = world.get_mut::<mud_world::Hunger>(player)
+    {
+        // v1: any Food fully sates. Legacy CircleMUD's per-food
+        // `fill` attribute can refine in a follow-up.
+        h.0 = 0;
+    }
 }
 
 fn cmd_quaff(world: &mut World, player: Entity, args: &str) {
@@ -10876,6 +10885,12 @@ fn drink_amount(world: &mut World, player: Entity, args: &str, units: i32, verb:
         );
     }
     apply_consumable_liquid_effects(world, player, &state.liquid);
+    // Reset thirst proportional to swig size — `sip` (1 unit) takes
+    // a small bite out, `drink` (4 units) sates entirely. Clamps at
+    // 0 (never goes negative).
+    if let Some(mut t) = world.get_mut::<mud_world::Thirst>(player) {
+        t.0 = (t.0 - drank.saturating_mul(6)).max(0);
+    }
     let was_last = state.remaining == drank;
     if was_last {
         send_rendered(

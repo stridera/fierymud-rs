@@ -194,6 +194,7 @@ async fn main() {
             combat::corpse_decay_tick,
             effects::effects_tick,
             regen::regen_tick,
+            regen::hunger_thirst_tick,
             memorize::memorize_tick,
             respawn::respawn_tick,
             triggers::lua_coroutine_tick,

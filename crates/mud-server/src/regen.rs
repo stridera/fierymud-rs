@@ -1,7 +1,8 @@
 use bevy_ecs::prelude::*;
-use mud_world::{Fighting, Health, Online, Posture, PostureKind, Stamina};
+use mud_world::{Fighting, Frozen, Ghost, Health, Hunger, Online, Player, Posture, PostureKind, Stamina, Thirst};
 
 use crate::TickCount;
+use crate::commands::send_to;
 
 /// One regen tick = one second.
 const REGEN_PERIOD_TICKS: u64 = 10;
@@ -80,6 +81,82 @@ pub fn regen_tick(world: &mut World) {
             && let Some(mut h) = world.get_mut::<Health>(entity)
         {
             h.hp = new_hp;
+        }
+    }
+}
+
+/// One game-hour at 10Hz × 75s/hour. Hunger / Thirst tick at this
+/// cadence; matches `mud_clock_tick`'s hour rollover.
+const HUNGER_TICK_TICKS: u64 = 750;
+/// Threshold at which the player feels the gauge — soft warning.
+const HUNGRY_AT: i32 = 24;
+const THIRSTY_AT: i32 = 12;
+/// Threshold at which actual stamina/HP drain starts. Drain is 1
+/// stamina per game-hour; once stamina is at 0, 1 HP per hour
+/// (clamped at 1 — starvation never KILLS in v1, just incapacitates).
+const STARVING_AT: i32 = 48;
+const PARCHED_AT: i32 = 24;
+
+/// Increment Hunger and Thirst once per game-hour, emit threshold
+/// crossing messages, and drain stamina/HP when starving / parched.
+/// Skips ghosts, frozen players, and offline players (only Online +
+/// Player + non-Ghost + non-Frozen tick).
+pub fn hunger_thirst_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(HUNGER_TICK_TICKS) {
+        return;
+    }
+
+    // Snapshot pre-tick state so all mutations and notifications can
+    // happen in a single pass without juggling re-borrows.
+    let snapshot: Vec<(Entity, i32, i32, i32, i32, i32, i32)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Hunger, &Thirst, &Stamina, &Health),
+            (With<Player>, With<Online>, Without<Ghost>, Without<Frozen>),
+        >();
+        q.iter(world)
+            .map(|(e, h, t, s, hp)| (e, h.0, t.0, s.current, s.max, hp.hp, hp.max))
+            .collect()
+    };
+
+    for (entity, old_hunger, old_thirst, stam, _stam_max, hp, _hp_max) in snapshot {
+        let new_hunger = old_hunger + 1;
+        let new_thirst = old_thirst + 1;
+        if let Some(mut h) = world.get_mut::<Hunger>(entity) {
+            h.0 = new_hunger;
+        }
+        if let Some(mut t) = world.get_mut::<Thirst>(entity) {
+            t.0 = new_thirst;
+        }
+
+        // Threshold-crossing messages — fire once per crossing, not
+        // every tick the player is over.
+        if old_hunger < HUNGRY_AT && new_hunger >= HUNGRY_AT {
+            send_to(world, entity, "You are hungry.\r\n");
+        }
+        if old_hunger < STARVING_AT && new_hunger >= STARVING_AT {
+            send_to(world, entity, "You feel weak from hunger.\r\n");
+        }
+        if old_thirst < THIRSTY_AT && new_thirst >= THIRSTY_AT {
+            send_to(world, entity, "You are thirsty.\r\n");
+        }
+        if old_thirst < PARCHED_AT && new_thirst >= PARCHED_AT {
+            send_to(world, entity, "Your throat is parched!\r\n");
+        }
+
+        // Drain when over either threshold. 1 stamina/hour; once
+        // stamina is at 0, 1 HP/hour clamped at 1 — survival
+        // mechanic, not death.
+        if new_hunger >= STARVING_AT || new_thirst >= PARCHED_AT {
+            if stam > 0 {
+                if let Some(mut s) = world.get_mut::<Stamina>(entity) {
+                    s.current = (s.current - 1).max(0);
+                }
+            } else if hp > 1
+                && let Some(mut h) = world.get_mut::<Health>(entity)
+            {
+                h.hp = (h.hp - 1).max(1);
+            }
         }
     }
 }
