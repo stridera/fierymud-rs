@@ -10147,28 +10147,30 @@ fn find_in_container(world: &mut World, needle: &str, container: Entity) -> Opti
 /// `put <item> <container>`: move a carried item into a container
 /// the player is carrying or which sits in the room.
 fn cmd_put(world: &mut World, player: Entity, args: &str) {
-    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
-    if parts.len() != 2 || parts[1].trim().is_empty() {
-        send_to(world, player, "Usage: put <item> <container>\r\n");
-        return;
-    }
-    let item_word = parts[0].trim();
-    let container_word = parts[1].trim();
+    // Support both `put <item> <container>` and `put <item> in <container>`.
+    // The "in" keyword form is natural and matches how players type it.
+    let trimmed = args.trim();
+    let (item_word, container_word) = if let Some(pair) = split_in_keyword(trimmed) {
+        pair
+    } else {
+        let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+        if parts.len() != 2 || parts[1].trim().is_empty() {
+            send_to(
+                world,
+                player,
+                "Usage: put <item> in <container>\r\n",
+            );
+            return;
+        }
+        (parts[0].trim(), parts[1].trim())
+    };
 
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
     let room = located.0;
+    let player_name = name_of(world, player);
 
-    let item = find_carried_by(world, item_word, player, EquipFilter::Inventory);
-    let Some(item) = item else {
-        send_rendered(
-            world,
-            player,
-            &format!("You aren't carrying '{item_word}'.\r\n"),
-        );
-        return;
-    };
     let container = find_carried_by(world, container_word, player, EquipFilter::Anywhere)
         .or_else(|| find_in_room(world, container_word, room));
     let Some(container) = container else {
@@ -10179,13 +10181,59 @@ fn cmd_put(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
+    let container_name = name_of(world, container);
+
+    // `put all in <container>` — store every carried (non-equipped)
+    // item in the target. Skips the container itself.
+    if item_word.eq_ignore_ascii_case("all") {
+        let items: Vec<(Entity, String)> = {
+            let mut q = world
+                .query_filtered::<(Entity, &Located, &Named, Option<&EquippedSlot>), With<Item>>();
+            q.iter(world)
+                .filter(|(e, l, _, eq)| {
+                    l.0 == player && eq.is_none() && *e != container
+                })
+                .map(|(e, _, n, _)| (e, n.name.clone()))
+                .collect()
+        };
+        if items.is_empty() {
+            send_to(world, player, "You aren't carrying anything to put away.\r\n");
+            return;
+        }
+        let count = items.len();
+        for (item, item_name) in &items {
+            if let Some(mut l) = world.get_mut::<Located>(*item) {
+                l.0 = container;
+            }
+            send_rendered(
+                world,
+                player,
+                &format!("You put {item_name} in {container_name}.\r\n"),
+            );
+        }
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} puts {count} item(s) in {container_name}.\r\n"),
+        );
+        return;
+    }
+
+    let item = find_carried_by(world, item_word, player, EquipFilter::Inventory);
+    let Some(item) = item else {
+        send_rendered(
+            world,
+            player,
+            &format!("You aren't carrying '{item_word}'.\r\n"),
+        );
+        return;
+    };
     if container == item {
         send_to(world, player, "You can't put something inside itself.\r\n");
         return;
     }
     let item_name = name_of(world, item);
-    let container_name = name_of(world, container);
-    let player_name = name_of(world, player);
     if let Some(mut l) = world.get_mut::<Located>(item) {
         l.0 = container;
     }
@@ -10200,6 +10248,23 @@ fn cmd_put(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} puts {item_name} in {container_name}.\r\n"),
     );
+}
+
+/// Mirror of `split_from_keyword` for the `in` preposition. Returns
+/// `Some((before, after))` when the input contains a standalone ` in `
+/// separator. Used by `put` to support `put X in Y` natural phrasing.
+fn split_in_keyword(input: &str) -> Option<(&str, &str)> {
+    let lower = input.to_ascii_lowercase();
+    let pat = " in ";
+    let i = lower.find(pat)?;
+    let (a, _) = input.split_at(i);
+    let b = &input[i + pat.len()..];
+    let a = a.trim();
+    let b = b.trim();
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    Some((a, b))
 }
 
 /// `junk <item>` / `trash <item>`: destroy a carried item. Equipped
