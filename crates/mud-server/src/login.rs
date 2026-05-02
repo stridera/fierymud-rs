@@ -431,18 +431,44 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         .and_then(|r| world.get::<WorldKey>(r.0).copied())
         .map_or((None, None), |wk| (Some(wk.zone), Some(wk.id)));
 
-    // Snapshot every Item Located on the player. Items inside containers
-    // the player is carrying have Located(container_item) — those stay in
-    // the DB on the previous save until container-chain support lands;
-    // walking just the directly-carried set here matches the load path.
+    // Snapshot every Item rooted at the player — both directly carried
+    // and nested inside any container the player carries. BFS keeps
+    // parents before children so the eventual save_for can resolve
+    // `parent_idx` correctly.
     let new_items: Vec<mud_db::character_items::NewCharacterItem> = {
-        let mut q = world.query::<(&Located, &WorldKey, Option<&EquippedSlot>, &Item)>();
-        q.iter(world)
-            .filter(|(l, _, _, _)| l.0 == entity)
-            .map(|(_, wk, eq, _)| mud_db::character_items::NewCharacterItem {
+        use std::collections::HashMap;
+        // Snapshot every item entity together with its Located parent and
+        // metadata once, so the rest of the loop doesn't reborrow World.
+        let all_items: Vec<(Entity, Entity, WorldKey, Option<EquippedSlot>)> = {
+            let mut q = world.query::<(Entity, &Located, &WorldKey, Option<&EquippedSlot>, &Item)>();
+            q.iter(world)
+                .map(|(e, l, wk, eq, _)| (e, l.0, *wk, eq.copied()))
+                .collect()
+        };
+        // BFS from `entity` (the player) through "is parent of" edges.
+        let mut order: Vec<(Entity, Entity, WorldKey, Option<EquippedSlot>)> = Vec::new();
+        let mut entity_to_idx: HashMap<Entity, usize> = HashMap::new();
+        let mut frontier: Vec<Entity> = vec![entity];
+        while let Some(parent) = frontier.pop() {
+            for (e, p, wk, eq) in &all_items {
+                if *p == parent && !entity_to_idx.contains_key(e) {
+                    entity_to_idx.insert(*e, order.len());
+                    order.push((*e, *p, *wk, *eq));
+                    frontier.push(*e);
+                }
+            }
+        }
+        order
+            .into_iter()
+            .map(|(_, parent, wk, eq)| mud_db::character_items::NewCharacterItem {
                 object_zone_id: wk.zone,
                 object_id: wk.id,
                 equipped_location: eq.map(|s| s.0.db_label().to_string()),
+                parent_idx: if parent == entity {
+                    None
+                } else {
+                    entity_to_idx.get(&parent).copied()
+                },
             })
             .collect()
     };
@@ -562,67 +588,107 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
     );
 }
 
-/// Materialize each saved `CharacterItem` into a live Item entity attached
-/// to `player`. Skips rows whose prototype isn't loaded (logs a warn) and
-/// rows with a `container_id` that we don't yet resolve. Returns how many
-/// items were spawned (for the login info line).
+/// Materialize each saved `CharacterItem` into a live Item entity. Top-
+/// level rows (`container_id IS NULL`) get `Located(player)`; nested
+/// rows get `Located(parent_item_entity)` so the existing structural
+/// `Located` chain models bag-in-bag inventory. Multi-pass walk over
+/// the row set handles arbitrary nesting depth: items whose parent
+/// entity hasn't been spawned yet roll over to a later pass; the loop
+/// stops when no row makes progress.
+///
+/// Skips rows whose prototype isn't loaded (logs a warn) and orphan
+/// rows whose parent never spawned (also logged). Returns total spawn
+/// count for the login info line.
 fn spawn_inventory(world: &mut World, player: Entity, rows: &[CharacterItemRow]) -> usize {
-    let mut spawned = 0usize;
-    for row in rows {
-        if row.container_id.is_some() {
-            // Container chain handling is a follow-up — for now items
-            // inside containers stay parked in the DB and don't appear
-            // in the player's inventory.
-            continue;
+    use std::collections::HashMap;
+    // row.id → spawned Entity. Top-level items spawn first; nested rows
+    // wait for their parent to land.
+    let mut spawned: HashMap<i32, Entity> = HashMap::new();
+    let mut pending: Vec<&CharacterItemRow> = rows.iter().collect();
+
+    loop {
+        let mut made_progress = false;
+        let mut still_pending: Vec<&CharacterItemRow> = Vec::with_capacity(pending.len());
+        for row in pending {
+            // Determine the parent entity to attach to:
+            //   - container_id is None → player (top-level inventory)
+            //   - container_id is Some(parent_row_id) → spawned[parent_row_id] if known
+            //     (otherwise this row gets re-queued for the next pass)
+            let parent_entity = match row.container_id {
+                None => Some(player),
+                Some(parent_row_id) => spawned.get(&parent_row_id).copied(),
+            };
+            let Some(parent_entity) = parent_entity else {
+                still_pending.push(row);
+                continue;
+            };
+            let proto = world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(row.object_zone_id, row.object_id))
+                .cloned();
+            let Some(proto) = proto else {
+                warn!(
+                    row_id = row.id,
+                    object_zone_id = row.object_zone_id,
+                    object_id = row.object_id,
+                    "character_items row references missing ObjectProto; skipping"
+                );
+                made_progress = true;
+                continue;
+            };
+            let mut bundle = world.spawn((
+                Item,
+                Named { name: proto.name.clone() },
+                Keywords(proto.keywords.clone()),
+                WorldKey {
+                    zone: proto.zone_id,
+                    id: proto.id,
+                },
+                Located(parent_entity),
+            ));
+            if let Some(desc) = proto.examine_description.clone() {
+                bundle.insert(Description(desc));
+            }
+            let item_entity = bundle.id();
+            if let Some(slot_str) = row.equipped_location.as_deref()
+                && let Some(slot) = Slot::from_label(slot_str)
+                && let Ok(mut e) = world.get_entity_mut(item_entity)
+            {
+                e.insert(EquippedSlot(slot));
+            }
+            // Restore Charges from the ObjectAbilities binding's
+            // charges value. CharacterItems doesn't store per-instance
+            // charges yet, so wand/staff items reset to full on
+            // reconnect — generous but consistent with how loadobj
+            // spawns. Logged in SUGGESTIONS for proper persistence.
+            if let Some(charges) = world
+                .resource::<mud_world::ObjectAbilityCatalog>()
+                .by_key
+                .get(&(proto.zone_id, proto.id))
+                .and_then(|v| v.first().and_then(|b| b.charges))
+                && let Ok(mut e) = world.get_entity_mut(item_entity)
+            {
+                e.insert(mud_world::Charges(charges));
+            }
+            spawned.insert(row.id, item_entity);
+            made_progress = true;
         }
-        let proto = world
-            .resource::<ObjectPrototypes>()
-            .by_key
-            .get(&(row.object_zone_id, row.object_id))
-            .cloned();
-        let Some(proto) = proto else {
+        pending = still_pending;
+        if !made_progress {
+            break;
+        }
+    }
+    if !pending.is_empty() {
+        for row in &pending {
             warn!(
                 row_id = row.id,
-                object_zone_id = row.object_zone_id,
-                object_id = row.object_id,
-                "character_items row references missing ObjectProto; skipping"
+                container_id = row.container_id,
+                "character_items row's container parent never spawned; orphan dropped"
             );
-            continue;
-        };
-        let mut bundle = world.spawn((
-            Item,
-            Named { name: proto.name.clone() },
-            Keywords(proto.keywords.clone()),
-            WorldKey { zone: proto.zone_id, id: proto.id },
-            Located(player),
-        ));
-        if let Some(desc) = proto.examine_description.clone() {
-            bundle.insert(Description(desc));
         }
-        let item_entity = bundle.id();
-        if let Some(slot_str) = row.equipped_location.as_deref()
-            && let Some(slot) = Slot::from_label(slot_str)
-            && let Ok(mut e) = world.get_entity_mut(item_entity)
-        {
-            e.insert(EquippedSlot(slot));
-        }
-        // Restore Charges from the ObjectAbilities binding's
-        // charges value. CharacterItems doesn't store per-instance
-        // charges yet, so wand/staff items reset to full on
-        // reconnect — generous but consistent with how loadobj
-        // spawns. Logged in SUGGESTIONS for proper persistence.
-        if let Some(charges) = world
-            .resource::<mud_world::ObjectAbilityCatalog>()
-            .by_key
-            .get(&(proto.zone_id, proto.id))
-            .and_then(|v| v.first().and_then(|b| b.charges))
-            && let Ok(mut e) = world.get_entity_mut(item_entity)
-        {
-            e.insert(mud_world::Charges(charges));
-        }
-        spawned += 1;
     }
-    spawned
+    spawned.len()
 }
 
 fn pick_starting_room(c: &CharacterRow) -> (i32, i32) {

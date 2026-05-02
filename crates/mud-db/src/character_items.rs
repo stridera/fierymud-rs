@@ -30,15 +30,22 @@ pub struct CharacterItemRow {
     pub equipped_location: Option<String>,
 }
 
-/// Insert payload — one row per item the character is carrying or wearing.
-/// The runtime owns the `(zone_id, id)` prototype key and the optional slot
-/// label; everything else (charges, condition, custom_*) is left to the
-/// schema's defaults for a fresh save.
+/// Insert payload — one row per item the character is carrying, wearing,
+/// or has stashed inside another item. The runtime owns the
+/// `(zone_id, id)` prototype key, the optional slot label, and an
+/// optional `parent_idx` pointing at this Vec's earlier slot when this
+/// item lives inside a container. Topological constraint: any
+/// `parent_idx` must be strictly less than the row's own index, so
+/// parents are inserted before children and `save_for` can resolve
+/// `container_id` via the returned id of the parent row.
 #[derive(Debug, Clone)]
 pub struct NewCharacterItem {
     pub object_zone_id: i32,
     pub object_id: i32,
     pub equipped_location: Option<String>,
+    /// Position of this item's container in the input Vec. None means
+    /// this item is directly carried/equipped by the character.
+    pub parent_idx: Option<usize>,
 }
 
 /// Read every item row for a character. Ordered by `id` (insertion order)
@@ -64,47 +71,44 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
     .await
 }
 
-/// Replace the top-level item rows for a character (every row whose
-/// `container_id IS NULL` — i.e. items the runtime materializes as
-/// inventory or equipped). Rows nested inside containers stay untouched:
-/// the runtime doesn't yet rehydrate them and we don't want to wipe
-/// stashed inventory just because we don't model it yet.
-///
-/// Side effect of the DELETE: any row whose `container_id` pointed to a
-/// row we just deleted has its `container_id` set to NULL via the schema's
-/// `ON DELETE SET NULL` cascade. Those orphans become top-level on the
-/// next login and get loaded into the player's inventory — graceful
-/// degradation rather than silent loss. (Once the runtime grows real
-/// container commands and parent-aware save logic, this stops mattering.)
-///
-/// All in one transaction so a failure mid-save doesn't leave the
-/// character with a partial inventory.
+/// Replace the entire `CharacterItems` set for a character. Inserts run
+/// in input order so each row's `parent_idx` (when set) can be resolved
+/// to the previously-inserted parent's auto-generated `id` via a
+/// running index→id map. Single transaction — partial failure rolls
+/// back cleanly.
 pub async fn save_for(
     pool: &PgPool,
     character_id: &str,
     items: &[NewCharacterItem],
 ) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
+    // Wipe every row for this character (top-level AND nested), since
+    // the runtime now reconstructs the full chain.
     sqlx::query!(
-        r#"DELETE FROM "CharacterItems" WHERE character_id = $1 AND container_id IS NULL"#,
+        r#"DELETE FROM "CharacterItems" WHERE character_id = $1"#,
         character_id,
     )
     .execute(&mut *tx)
     .await?;
+    let mut inserted_ids: Vec<i32> = Vec::with_capacity(items.len());
     for it in items {
-        sqlx::query!(
+        let container_id: Option<i32> = it.parent_idx.and_then(|idx| inserted_ids.get(idx).copied());
+        let row = sqlx::query!(
             r#"
             INSERT INTO "CharacterItems"
-                (character_id, object_zone_id, object_id, equipped_location, updated_at)
-            VALUES ($1, $2, $3, $4, NOW())
+                (character_id, object_zone_id, object_id, equipped_location, container_id, updated_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            RETURNING id
             "#,
             character_id,
             it.object_zone_id,
             it.object_id,
             it.equipped_location.as_deref(),
+            container_id,
         )
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
+        inserted_ids.push(row.id);
     }
     tx.commit().await?;
     Ok(())

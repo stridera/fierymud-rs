@@ -129,11 +129,13 @@ async fn round_trips_character_items() {
             object_zone_id: keys[0].0,
             object_id: keys[0].1,
             equipped_location: None,
+            parent_idx: None,
         },
         NewCharacterItem {
             object_zone_id: keys[1].0,
             object_id: keys[1].1,
             equipped_location: Some("BODY".to_string()),
+            parent_idx: None,
         },
     ];
     save_for(&pool, &cid, &payload).await.expect("save");
@@ -152,6 +154,7 @@ async fn round_trips_character_items() {
             object_zone_id: r.object_zone_id,
             object_id: r.object_id,
             equipped_location: r.equipped_location.clone(),
+            parent_idx: None,
         })
         .collect();
     save_for(&pool, &cid, &restore).await.expect("restore");
