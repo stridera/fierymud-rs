@@ -15705,7 +15705,6 @@ const DOORBASH_COST: i32 = 10;
 const BACKSTAB_COST: i32 = 6;
 const SPRINGLEAP_COST: i32 = 7;
 const GOUGE_COST: i32 = 7;
-const GOUGE_BLIND_SECS: i32 = 30;
 const REND_COST: i32 = 7;
 const REND_BLEED_SECS: i32 = 30;
 const ROAR_COST: i32 = 8;
@@ -16469,86 +16468,36 @@ fn cmd_rend(world: &mut World, player: Entity, args: &str) {
 
 /// `gouge [<target>]`: damage + temporary blind effect. Default
 /// target = current Fighting target.
+/// `gouge [<target>]`: damage + temporary blind. Phase C thin shim
+/// (2026-05-02). Ability row 339 now has both a damage mapping
+/// (`amount = "level + dex_bonus + skill / 4"`) and a status mapping
+/// (`flag=blind`, 30s, `on_hit`). Default target (no arg) is the
+/// current Fighting target — same as the old hardcoded behavior.
 fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "gouge") {
         return;
     }
-    if !check_stamina(world, player, GOUGE_COST, "gouge") {
-        return;
-    }
     let arg = args.trim();
-    let target = if arg.is_empty() {
+    let target_word = if arg.is_empty() {
         let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
             send_to(world, player, "Gouge whom? You aren't fighting.\r\n");
             return;
         };
-        t
+        name_of(world, t)
     } else {
-        let Some(located) = world.get::<Located>(player).copied() else {
-            send_to(world, player, "You are nowhere.\r\n");
-            return;
-        };
-        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
-            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
-            return;
-        };
-        t
+        arg.to_string()
     };
-    if target == player {
-        send_to(world, player, "You can't gouge yourself.\r\n");
+    if !check_stamina(world, player, GOUGE_COST, "gouge") {
         return;
     }
-    // Already blinded? Refuse.
-    if has_effect_named(world, target, "blind") {
-        let target_name = name_or(world, target, "<unknown>");
-        send_to(world, player, format!("{target_name} is already blinded.\r\n"));
-        return;
-    }
-    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
-        send_to(world, player, "Target is in limbo.\r\n");
-        return;
-    };
-
-    let dmg = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
     drain_stamina(world, player, GOUGE_COST);
-
-    let player_name = name_of(world, player);
-    let target_name = name_or(world, target, "<unknown>");
-    let (dead, _) = apply_damage(world, target, dmg);
-
-    if !dead {
-        // Apply the blind effect.
-        world.spawn((
-            EffectInstance {
-                kind: 0,
-                name: "blind".to_string(),
-                strength: 1,
-                remaining_secs: GOUGE_BLIND_SECS,
-                source: EffectSource::Other("gouge".to_string()),
-                ability_id: None,
-            },
-            AppliedTo(target),
-        ));
-    }
-
-    send_to(world, player, format!(
-        "You gouge {target_name}'s eyes for {dmg} damage!\r\n"
-    ));
-    if !dead {
-        send_rendered(world, target, &format!(
-            "{player_name} gouges your eyes; you can't see!\r\n"
-        ));
-    }
-    broadcast_room_except_rendered(
+    invoke_ability(
         world,
-        target_room,
-        &[player, target],
-        &format!("{player_name} stabs at {target_name}'s eyes!\r\n"),
+        player,
+        &format!("eye_gouge {target_word}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
-
-    if dead {
-        crate::combat::handle_death(world, target, &target_name, target_room);
-    }
 }
 
 /// `springleap <target>` — Phase C migration: shimmed over the
