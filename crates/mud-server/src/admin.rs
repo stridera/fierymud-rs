@@ -117,6 +117,14 @@ pub enum AdminRequest {
         self_name: String,
         actor_name: Option<String>,
     },
+    /// Write a typed integer attribute on a player or mob entity.
+    /// Field name is checked against an allowlist server-side so
+    /// a typo can't silently no-op.
+    SetPlayerField {
+        player_name: String,
+        field: String,
+        value: i64,
+    },
 }
 
 pub type AdminResponse = Result<Value, (StatusCode, String)>;
@@ -176,6 +184,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/triggers/stats", get(handle_trigger_stats))
         .route("/api/admin/triggers/reload", post(handle_trigger_reload))
         .route("/api/admin/triggers/fire", post(handle_trigger_fire))
+        .route("/api/admin/player/set", post(handle_player_set))
         .with_state(state)
 }
 
@@ -363,6 +372,13 @@ struct FireTriggerBody {
     id: i32,
     self_name: String,
     actor_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SetPlayerFieldBody {
+    player_name: String,
+    field: String,
+    value: i64,
 }
 
 #[derive(Deserialize)]
@@ -567,6 +583,27 @@ async fn handle_trigger_stats(
     json_ok(enqueue(&state, AdminRequest::TriggerStats).await)
 }
 
+async fn handle_player_set(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<SetPlayerFieldBody>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(
+        enqueue(
+            &state,
+            AdminRequest::SetPlayerField {
+                player_name: body.player_name,
+                field: body.field,
+                value: body.value,
+            },
+        )
+        .await,
+    )
+}
+
 /// Manually invoke a trigger body. Bypasses the usual event-flag
 /// gating; lets a tester exercise a specific body without
 /// engineering a real GREET / SPEECH / RECEIVE event.
@@ -700,7 +737,144 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::FireTrigger { zone_id, id, self_name, actor_name } => {
             fire_trigger(world, zone_id, id, &self_name, actor_name.as_deref())
         }
+        AdminRequest::SetPlayerField { player_name, field, value } => {
+            set_player_field(world, &player_name, &field, value)
+        }
     }
+}
+
+/// Write a typed integer attribute on a player or mob entity.
+/// `field` is checked against an explicit allowlist; unknown
+/// names yield a 400 so a typo never silently no-ops. Saturating
+/// casts on the i64 → narrower-int conversions to avoid wrap.
+#[allow(clippy::too_many_lines)]
+fn set_player_field(
+    world: &mut World,
+    player_name: &str,
+    field: &str,
+    value: i64,
+) -> AdminResponse {
+    let Some(entity) = find_actor_by_name(world, player_name) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no actor matching '{player_name}'"),
+        ));
+    };
+    let clamped = value.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+    let v32: i32 = i32::try_from(clamped).unwrap_or(0);
+    let mut applied = true;
+    match field {
+        "hp" => {
+            if let Some(mut h) = world.get_mut::<Health>(entity) {
+                h.hp = v32.min(h.max);
+            } else {
+                applied = false;
+            }
+        }
+        "hp_max" => {
+            if let Some(mut h) = world.get_mut::<Health>(entity) {
+                h.max = v32.max(1);
+                h.hp = h.hp.min(h.max);
+            } else {
+                applied = false;
+            }
+        }
+        "stamina" => {
+            if let Some(mut s) = world.get_mut::<Stamina>(entity) {
+                s.current = v32.min(s.max);
+            } else {
+                applied = false;
+            }
+        }
+        "stamina_max" => {
+            if let Some(mut s) = world.get_mut::<Stamina>(entity) {
+                s.max = v32.max(1);
+                s.current = s.current.min(s.max);
+            } else {
+                applied = false;
+            }
+        }
+        "level" => {
+            if let Some(mut p) = world.get_mut::<Profile>(entity) {
+                p.level = v32.max(1);
+            } else {
+                applied = false;
+            }
+        }
+        "experience" => {
+            if let Some(mut p) = world.get_mut::<Profile>(entity) {
+                p.experience = v32.max(0);
+            } else {
+                applied = false;
+            }
+        }
+        "hunger" => {
+            if let Some(mut h) = world.get_mut::<mud_world::Hunger>(entity) {
+                h.0 = v32.max(0);
+            } else {
+                applied = false;
+            }
+        }
+        "thirst" => {
+            if let Some(mut t) = world.get_mut::<mud_world::Thirst>(entity) {
+                t.0 = v32.max(0);
+            } else {
+                applied = false;
+            }
+        }
+        "alignment" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.alignment = v32.clamp(-1000, 1000);
+            } else {
+                applied = false;
+            }
+        }
+        "hit_roll" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.hit_roll = v32;
+            } else {
+                applied = false;
+            }
+        }
+        "dmg_roll" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.dmg_roll = v32;
+            } else {
+                applied = false;
+            }
+        }
+        "ac" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.ac = v32;
+            } else {
+                applied = false;
+            }
+        }
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unsupported field '{other}'. Allowed: hp, hp_max, stamina, \
+                     stamina_max, level, experience, hunger, thirst, alignment, \
+                     hit_roll, dmg_roll, ac"
+                ),
+            ));
+        }
+    }
+    if !applied {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "actor '{player_name}' has no '{field}' component to write"
+            ),
+        ));
+    }
+    Ok(json!({
+        "ok": true,
+        "actor": player_name,
+        "field": field,
+        "value": value,
+    }))
 }
 
 /// Resolve an actor by case-insensitive name match against any
