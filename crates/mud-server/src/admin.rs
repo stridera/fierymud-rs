@@ -107,6 +107,16 @@ pub enum AdminRequest {
     /// attachments. Mob/object spawns will pick up new trigger
     /// rows on their next respawn naturally.
     ReloadTriggers { catalog: Box<mud_world::TriggerCatalog> },
+    /// Manually invoke a trigger body against a chosen `self`
+    /// entity, optionally with an `actor` binding. Bypasses the
+    /// usual event-flag gating — you can fire any body regardless
+    /// of whether the trigger has the matching event flag set.
+    FireTrigger {
+        zone_id: i32,
+        id: i32,
+        self_name: String,
+        actor_name: Option<String>,
+    },
 }
 
 pub type AdminResponse = Result<Value, (StatusCode, String)>;
@@ -165,6 +175,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/triggers/errors", get(handle_trigger_errors))
         .route("/api/admin/triggers/stats", get(handle_trigger_stats))
         .route("/api/admin/triggers/reload", post(handle_trigger_reload))
+        .route("/api/admin/triggers/fire", post(handle_trigger_fire))
         .with_state(state)
 }
 
@@ -342,6 +353,16 @@ fn de_i32_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Erro
             "expected number or numeric string, got {other}"
         ))),
     }
+}
+
+#[derive(Deserialize)]
+struct FireTriggerBody {
+    #[serde(deserialize_with = "de_i32_lenient")]
+    zone_id: i32,
+    #[serde(deserialize_with = "de_i32_lenient")]
+    id: i32,
+    self_name: String,
+    actor_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -546,6 +567,31 @@ async fn handle_trigger_stats(
     json_ok(enqueue(&state, AdminRequest::TriggerStats).await)
 }
 
+/// Manually invoke a trigger body. Bypasses the usual event-flag
+/// gating; lets a tester exercise a specific body without
+/// engineering a real GREET / SPEECH / RECEIVE event.
+async fn handle_trigger_fire(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<FireTriggerBody>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(
+        enqueue(
+            &state,
+            AdminRequest::FireTrigger {
+                zone_id: body.zone_id,
+                id: body.id,
+                self_name: body.self_name,
+                actor_name: body.actor_name,
+            },
+        )
+        .await,
+    )
+}
+
 /// Re-pull the trigger catalog from the DB, then post the rebuilt
 /// resource into the world tick for atomic swap. The DB query
 /// runs here in the async handler — by the time the world dispatch
@@ -651,6 +697,80 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::TriggerErrors { limit } => Ok(trigger_errors(world, limit)),
         AdminRequest::TriggerStats => Ok(trigger_stats(world)),
         AdminRequest::ReloadTriggers { catalog } => Ok(reload_triggers(world, *catalog)),
+        AdminRequest::FireTrigger { zone_id, id, self_name, actor_name } => {
+            fire_trigger(world, zone_id, id, &self_name, actor_name.as_deref())
+        }
+    }
+}
+
+/// Resolve an actor by case-insensitive name match against any
+/// Mob or Player. Used by `fire_trigger` self/actor binding.
+fn find_actor_by_name(world: &mut World, name: &str) -> Option<Entity> {
+    let needle = name.to_ascii_lowercase();
+    let mut q = world.query_filtered::<(Entity, &Named), bevy_ecs::prelude::Or<(With<Mob>, With<Player>)>>();
+    q.iter(world)
+        .find(|(_, n)| n.name.to_ascii_lowercase().contains(&needle))
+        .map(|(e, _)| e)
+}
+
+/// Manually invoke a trigger body. Looks up `(zone_id, id)` in the
+/// catalog, resolves `self_name` (and optional `actor_name`) to
+/// entities, and runs the body via `LuaHost::exec_for_listener_with_extras`.
+/// Side effects (`room.send`, state mutations) happen for real —
+/// callers should pause the world first if they want isolation.
+fn fire_trigger(
+    world: &mut World,
+    zone_id: i32,
+    id: i32,
+    self_name: &str,
+    actor_name: Option<&str>,
+) -> AdminResponse {
+    let body: String = {
+        let catalog = world.resource::<TriggerCatalog>();
+        let Some(def) = catalog.by_key.get(&(zone_id, id)) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("no trigger at ({zone_id}, {id})"),
+            ));
+        };
+        def.commands.clone()
+    };
+    let Some(self_entity) = find_actor_by_name(world, self_name) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no actor matching '{self_name}'"),
+        ));
+    };
+    let actor_entity = match actor_name {
+        Some(n) => match find_actor_by_name(world, n) {
+            Some(e) => e,
+            None => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("no actor matching '{n}'"),
+                ));
+            }
+        },
+        None => self_entity,
+    };
+    let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
+        host.exec_for_listener_with_extras(world, self_entity, actor_entity, &body, &[])
+    });
+    commands::drain_lua_outbox(world);
+    match result {
+        Ok(_) => Ok(json!({
+            "ok": true,
+            "zone_id": zone_id,
+            "id": id,
+            "self_entity": format!("{self_entity:?}"),
+            "actor_entity": format!("{actor_entity:?}"),
+        })),
+        Err(e) => Ok(json!({
+            "ok": false,
+            "zone_id": zone_id,
+            "id": id,
+            "error": e.clone(),
+        })),
     }
 }
 
