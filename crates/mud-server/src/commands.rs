@@ -3354,6 +3354,38 @@ const COMMANDS: &[Command] = &[
         run: cmd_hinfo,
     },
     Command {
+        names: &["hgrant"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "hgrant <player>",
+            summary: "Assign a fresh house to a player.",
+            long: "Builder+. Creates a `PlayerHouse` row for the named \
+                   character with the entrance set to the room you're \
+                   currently standing in. Seeds one foyer room \
+                   (`local_index = 0`). Fails if the character already \
+                   owns a house — use `hrevoke` first.",
+        },
+        run: cmd_hgrant,
+    },
+    Command {
+        names: &["hrevoke"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "hrevoke <player>",
+            summary: "Delete a player's house and all its rooms / items.",
+            long: "Implementor-only. Deletes the named character's \
+                   PlayerHouse row; FK cascades remove all rooms, \
+                   exits, placed items, and guest entries. The owner's \
+                   in-memory `HouseSummary` component remains until \
+                   they reconnect — bounce them if they're online.",
+        },
+        run: cmd_hrevoke,
+    },
+    Command {
         names: &["force"],
         min_role: UserRole::Implementor,
         required_perm: None,
@@ -13231,6 +13263,129 @@ fn cmd_house_take(
             }
         });
     }
+}
+
+/// `hgrant <player>` — admin command. Creates a fresh `PlayerHouse`
+/// for the named character, with the entrance set to the admin's
+/// current room. Refuses (via DB unique constraint) if the
+/// character already owns one.
+fn cmd_hgrant(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "hgrant", args);
+    let name = args.trim();
+    if name.is_empty() {
+        send_to(world, player, "Usage: hgrant <player>\r\n");
+        return;
+    }
+    let entrance = world
+        .get::<Located>(player)
+        .and_then(|l| world.get::<WorldKey>(l.0).copied());
+    let Some(entrance) = entrance else {
+        send_to(
+            world,
+            player,
+            "Stand in the room you want to use as the house entrance.\r\n",
+        );
+        return;
+    };
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    let name = name.to_string();
+    tokio::spawn(async move {
+        let Some(out) = outbound else { return };
+        let target = match mud_db::characters::find_by_name(&pool, &name).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                let _ = out.send(format!("No character named '{name}'.\r\n").into_bytes());
+                return;
+            }
+            Err(e) => {
+                let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+        match mud_db::housing::create_house(&pool, &target.id, entrance.zone, entrance.id).await {
+            Ok((house_id, foyer_id)) => {
+                let _ = out.send(
+                    format!(
+                        "House #{house_id} created for {} (foyer room id {foyer_id}, entrance ({}, {})).\r\n",
+                        target.name, entrance.zone, entrance.id
+                    )
+                    .into_bytes(),
+                );
+            }
+            Err(e) => {
+                let _ = out.send(
+                    format!("Couldn't create house: {e}\r\n").into_bytes(),
+                );
+            }
+        }
+    });
+}
+
+/// `hrevoke <player>` — admin command. Deletes the named
+/// character's `PlayerHouse` row; FK cascades clean up every
+/// dependent table.
+fn cmd_hrevoke(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "hrevoke", args);
+    let name = args.trim();
+    if name.is_empty() {
+        send_to(world, player, "Usage: hrevoke <player>\r\n");
+        return;
+    }
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    let name = name.to_string();
+    tokio::spawn(async move {
+        let Some(out) = outbound else { return };
+        let target = match mud_db::characters::find_by_name(&pool, &name).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                let _ = out.send(format!("No character named '{name}'.\r\n").into_bytes());
+                return;
+            }
+            Err(e) => {
+                let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+        let house = match mud_db::housing::for_character(&pool, &target.id).await {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                let _ = out.send(
+                    format!("{} doesn't own a house — nothing to revoke.\r\n", target.name)
+                        .into_bytes(),
+                );
+                return;
+            }
+            Err(e) => {
+                let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+        match mud_db::housing::delete_house(&pool, house.id).await {
+            Ok(0) => {
+                let _ = out.send(b"House row vanished mid-call.\r\n".to_vec());
+            }
+            Ok(_) => {
+                let _ = out.send(
+                    format!(
+                        "House #{} ({}'s) deleted; cascade cleared rooms / items / guests.\r\n",
+                        house.id, target.name
+                    )
+                    .into_bytes(),
+                );
+            }
+            Err(e) => {
+                let _ = out.send(format!("Delete failed: {e}\r\n").into_bytes());
+            }
+        }
+    });
 }
 
 /// `hinfo <player>` — admin command. Loads the named player's

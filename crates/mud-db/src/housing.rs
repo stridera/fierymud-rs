@@ -212,6 +212,58 @@ pub async fn remove_item(pool: &PgPool, item_id: i32) -> sqlx::Result<u64> {
     Ok(res.rows_affected())
 }
 
+/// Create a fresh `PlayerHouse` row for a character that doesn't
+/// own one yet. Also seeds a single foyer (`local_index = 0`) so
+/// the house has at least one room. Returns `(house_id, foyer_id)`.
+/// `Err` from a unique-constraint violation means the character
+/// already owns a house.
+pub async fn create_house(
+    pool: &PgPool,
+    character_id: &str,
+    entrance_zone_id: i32,
+    entrance_room_id: i32,
+) -> sqlx::Result<(i32, i32)> {
+    let mut tx = pool.begin().await?;
+    let house_row = sqlx::query!(
+        r#"
+        INSERT INTO player_houses
+            (character_id, entrance_room_zone_id, entrance_room_id)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        "#,
+        character_id,
+        entrance_zone_id,
+        entrance_room_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let foyer_row = sqlx::query!(
+        r#"
+        INSERT INTO player_house_rooms (house_id, local_index, name, description)
+        VALUES ($1, 0, 'Your Foyer', 'A simple foyer welcomes you home.')
+        RETURNING id
+        "#,
+        house_row.id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((house_row.id, foyer_row.id))
+}
+
+/// Delete a house. Cascades remove rooms / items / guests / exits
+/// via the FK constraints. Returns rows-affected on the parent
+/// (0 if the house didn't exist).
+pub async fn delete_house(pool: &PgPool, house_id: i32) -> sqlx::Result<u64> {
+    let res = sqlx::query!(
+        r#"DELETE FROM player_houses WHERE id = $1"#,
+        house_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// Add a guest entry to a house. Idempotent on
 /// `(house_id, character_id)` — re-adding the same guest is a
 /// no-op if their `can_place` flag matches; otherwise the flag
