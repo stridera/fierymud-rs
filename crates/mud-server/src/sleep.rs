@@ -5,7 +5,11 @@ use mud_world::{
 };
 
 use crate::TickCount;
-use crate::commands::{broadcast_room_except_rendered, sector_is_outdoor_for_weather};
+use crate::commands::{
+    broadcast_room_except_players_rendered, broadcast_room_except_rendered,
+    sector_is_outdoor_for_weather,
+};
+use mud_world::Player;
 
 /// Hour the village shutters and bandits curl up — also when the
 /// dark-room gate kicks in (`commands::room_is_dark`). Keep these
@@ -37,9 +41,46 @@ pub fn mob_sleep_tick(world: &mut World) {
     }
     let hour = world.resource::<MudClock>().hour;
     match hour {
-        NIGHT_START_HOUR => sleep_outdoor_mobs(world),
-        MORNING_HOUR => wake_night_sleepers(world),
+        NIGHT_START_HOUR => {
+            sleep_outdoor_mobs(world);
+            announce_to_outdoor_players(
+                world,
+                "The sun dips below the horizon, and darkness gathers.\r\n",
+            );
+        }
+        MORNING_HOUR => {
+            wake_night_sleepers(world);
+            announce_to_outdoor_players(
+                world,
+                "The sky pales and the sun begins to rise.\r\n",
+            );
+        }
         _ => {}
+    }
+}
+
+/// Broadcast a single line to every player currently standing in an
+/// outdoor room. Skips dungeons/caves/underdark (no sky to see) and
+/// indoor structures. Used for the sunrise / sunset transitions.
+fn announce_to_outdoor_players(world: &mut World, msg: &str) {
+    // Distinct rooms each get one broadcast call (which itself sends
+    // per-player), so dedupe before iterating.
+    let rooms: Vec<Entity> = {
+        let mut q = world.query_filtered::<&Located, With<Player>>();
+        let mut seen = std::collections::HashSet::new();
+        q.iter(world)
+            .map(|l| l.0)
+            .filter(|r| seen.insert(*r))
+            .collect()
+    };
+    for room in rooms {
+        let outdoor = world
+            .get::<RoomSector>(room)
+            .is_some_and(|s| sector_is_outdoor_for_weather(s.0));
+        if !outdoor {
+            continue;
+        }
+        broadcast_room_except_players_rendered(world, room, &[], msg);
     }
 }
 
