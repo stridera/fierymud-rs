@@ -152,6 +152,27 @@ pub fn corpse_decay_tick(world: &mut World) {
     }
 }
 
+/// Hit-chance percentage on `[5, 100]` from attacker hit roll vs
+/// target AC. Lower AC = better armor (CircleMUD/D&D semantics —
+/// effects modify AC by subtracting for buffs). Tuned so an avg
+/// mob (`hit_roll`≈17, ac≈0) effectively never misses; an unrolled
+/// stat-zero attacker (`hit_roll`=0) lands 80%; a heavily armored
+/// target (ac=10) drops the same swing to ~30%. The 5% floor keeps
+/// even a hopeless brawl from being literally unwinnable.
+#[must_use]
+pub fn hit_chance_pct(hit_roll: i32, target_ac: i32) -> i32 {
+    let modifier = hit_roll.saturating_mul(2) - target_ac.saturating_mul(5);
+    (80i32.saturating_add(modifier)).clamp(5, 100)
+}
+
+/// Roll d100 against the computed hit chance — true on hit, false
+/// on miss. Sleeping defenders are handled at the call site
+/// (auto-hit) so this stays a pure function of the stats pair.
+fn roll_hit(hit_roll: i32, target_ac: i32) -> bool {
+    let chance = hit_chance_pct(hit_roll, target_ac);
+    rand::random_range(1..=100) <= chance
+}
+
 /// Atmospheric line for the tick that crossed a decay threshold.
 /// `prev` is the value before this second's decrement, `now` after,
 /// so a line fires on the exact tick where `prev > T >= now` for
@@ -278,6 +299,7 @@ struct Swing {
     attacker_name: String,
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_swing(world: &mut World, s: &Swing) {
     // Target may have been despawned earlier in this same tick.
     if world.get_entity(s.target).is_err() {
@@ -305,6 +327,44 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
     let was_sleeping =
         world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
+
+    // Hit / miss roll. Sleeping defenders are auto-hit (you can't
+    // dodge unconscious) — same special case the existing
+    // jolt-awake path already assumed. Otherwise compute the
+    // chance from attacker hit_roll vs target AC and roll d100.
+    let hit_roll = world.get::<CombatStats>(s.attacker).map_or(0, |cs| cs.hit_roll);
+    let target_ac = world.get::<CombatStats>(s.target).map_or(0, |cs| cs.ac);
+    let landed = was_sleeping || roll_hit(hit_roll, target_ac);
+    if !landed {
+        let attacker_mode = color_mode_for(world, s.attacker);
+        let target_mode = color_mode_for(world, s.target);
+        send_to(
+            world,
+            s.attacker,
+            render_color_tags(
+                &format!("You swing at {target_name} but miss.\r\n"),
+                attacker_mode,
+            ),
+        );
+        send_to(
+            world,
+            s.target,
+            render_color_tags(
+                &format!("{} swings at you but misses.\r\n", s.attacker_name),
+                target_mode,
+            ),
+        );
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[s.attacker, s.target],
+            &format!("{} swings at {target_name} but misses.\r\n", s.attacker_name),
+        );
+        // Stamina still drains — you swung, you spent the breath.
+        drain_stamina(world, s.attacker, 1);
+        return;
+    }
+
     let (dead, threshold_msg) = apply_damage(world, s.target, s.damage);
 
     // Names may carry XML-Lite tags; render per-recipient so each player
@@ -823,7 +883,10 @@ mod tests {
                 Located(room),
                 Fighting(target),
                 CombatStats {
-                    hit_roll: 0,
+                    // hit_roll high enough to guarantee a 100% hit
+                    // chance (see hit_chance_pct's clamp). Tests
+                    // shouldn't gamble on the miss path.
+                    hit_roll: 10,
                     dmg_roll,
                     ac: 10,
                     alignment: 0,
@@ -1012,6 +1075,27 @@ mod tests {
             .iter(&world)
             .count();
         assert_eq!(still_equipped, 0, "EquippedSlot stripped on death");
+    }
+
+    #[test]
+    fn hit_chance_curve() {
+        // Stat-zero matchup: 80% baseline.
+        assert_eq!(hit_chance_pct(0, 0), 80);
+        // Each point of hit_roll = +2%.
+        assert_eq!(hit_chance_pct(5, 0), 90);
+        assert_eq!(hit_chance_pct(10, 0), 100);
+        // Each point of AC = -5% (lower AC = better defense).
+        assert_eq!(hit_chance_pct(0, 10), 30);
+        assert_eq!(hit_chance_pct(0, 20), 5);
+        // Floor and ceiling clamp.
+        assert_eq!(hit_chance_pct(0, 100), 5);
+        assert_eq!(hit_chance_pct(100, 0), 100);
+        // Mixed: avg mob (hit_roll=17) vs avg defender (ac=0) is
+        // capped at 100% — strong attackers should never miss
+        // unarmored targets.
+        assert_eq!(hit_chance_pct(17, 0), 100);
+        // Heavy armor flips it: same attacker vs ac=10.
+        assert_eq!(hit_chance_pct(17, 10), 64);
     }
 
     #[test]
