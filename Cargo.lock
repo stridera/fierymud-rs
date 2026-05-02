@@ -1487,6 +1487,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "mlua",
+ "mud-db",
  "mud-world",
  "rand 0.10.1",
  "tracing",

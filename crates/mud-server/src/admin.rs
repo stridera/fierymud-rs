@@ -99,6 +99,9 @@ pub enum AdminRequest {
     PauseWorld,
     UnpauseWorld,
     TickWorld { count: u32 },
+    TriggerInfo { zone_id: Option<i32>, id: Option<i32> },
+    TriggerErrors { limit: Option<usize> },
+    TriggerStats,
 }
 
 pub type AdminResponse = Result<Value, (StatusCode, String)>;
@@ -152,6 +155,10 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/world/pause", post(handle_pause_world))
         .route("/api/admin/world/unpause", post(handle_unpause_world))
         .route("/api/admin/world/tick", post(handle_tick_world))
+        .route("/api/admin/triggers", get(handle_trigger_info))
+        .route("/api/admin/triggers/{zone_id}/{id}", get(handle_trigger_info_one))
+        .route("/api/admin/triggers/errors", get(handle_trigger_errors))
+        .route("/api/admin/triggers/stats", get(handle_trigger_stats))
         .with_state(state)
 }
 
@@ -475,6 +482,64 @@ async fn handle_spawn(
     )
 }
 
+async fn handle_trigger_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(
+        enqueue(
+            &state,
+            AdminRequest::TriggerInfo { zone_id: None, id: None },
+        )
+        .await,
+    )
+}
+
+async fn handle_trigger_info_one(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((zone_id, id)): Path<(i32, i32)>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(
+        enqueue(
+            &state,
+            AdminRequest::TriggerInfo {
+                zone_id: Some(zone_id),
+                id: Some(id),
+            },
+        )
+        .await,
+    )
+}
+
+async fn handle_trigger_errors(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    let limit = params.get("limit").and_then(|s| s.parse().ok());
+    json_ok(enqueue(&state, AdminRequest::TriggerErrors { limit }).await)
+}
+
+async fn handle_trigger_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(enqueue(&state, AdminRequest::TriggerStats).await)
+}
+
 fn json_ok(r: Result<Value, (StatusCode, String)>) -> (StatusCode, axum::Json<Value>) {
     match r {
         Ok(v) => (StatusCode::OK, axum::Json(v)),
@@ -553,7 +618,136 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
                 "note": if paused { "ticks will fire one per real frame while paused" } else { "world is running; forced_ticks accumulates but has no effect until pause" },
             }))
         }
+        AdminRequest::TriggerInfo { zone_id, id } => Ok(trigger_info(world, zone_id, id)),
+        AdminRequest::TriggerErrors { limit } => Ok(trigger_errors(world, limit)),
+        AdminRequest::TriggerStats => Ok(trigger_stats(world)),
     }
+}
+
+/// Enumerate trigger catalog rows as JSON. With no filter, returns
+/// every trigger; with both `zone_id` and `id`, returns just that
+/// row. Each row carries name, attached counts, and the event flag
+/// list — the body is omitted to keep the payload tractable.
+fn trigger_info(world: &World, zone_id: Option<i32>, id: Option<i32>) -> Value {
+    let catalog = world.resource::<TriggerCatalog>();
+    let key_filter = zone_id.zip(id);
+    let mut rows: Vec<Value> = catalog
+        .by_key
+        .iter()
+        .filter(|((z, i), _)| match key_filter {
+            Some((wz, wi)) => *z == wz && *i == wi,
+            None => true,
+        })
+        .map(|((z, i), def)| {
+            let events: Vec<String> = def.flags.iter().map(|f| format!("{f:?}")).collect();
+            let mob_attachments = catalog
+                .mob_attachments
+                .values()
+                .filter(|keys| keys.contains(&(*z, *i)))
+                .count();
+            let object_attachments = catalog
+                .object_attachments
+                .values()
+                .filter(|keys| keys.contains(&(*z, *i)))
+                .count();
+            let room_attachments = catalog
+                .room_attachments
+                .values()
+                .filter(|keys| keys.contains(&(*z, *i)))
+                .count();
+            json!({
+                "zone_id": z,
+                "id": i,
+                "name": def.name,
+                "events": events,
+                "mob_attachments": mob_attachments,
+                "object_attachments": object_attachments,
+                "room_attachments": room_attachments,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        let za = a.get("zone_id").and_then(Value::as_i64).unwrap_or(0);
+        let zb = b.get("zone_id").and_then(Value::as_i64).unwrap_or(0);
+        let ia = a.get("id").and_then(Value::as_i64).unwrap_or(0);
+        let ib = b.get("id").and_then(Value::as_i64).unwrap_or(0);
+        za.cmp(&zb).then(ia.cmp(&ib))
+    });
+    json!({
+        "total": rows.len(),
+        "triggers": rows,
+    })
+}
+
+/// Drain the in-memory `ScriptErrorLog` ring buffer to JSON,
+/// most-recent first. Default cap of 50 entries when no limit
+/// query param is supplied; clamped to the buffer size either way.
+fn trigger_errors(world: &World, limit: Option<usize>) -> Value {
+    let Some(log) = world.get_resource::<mud_world::ScriptErrorLog>() else {
+        return json!({
+            "total": 0,
+            "errors": [],
+        });
+    };
+    let cap = limit.unwrap_or(50).min(log.entries.len());
+    let entries: Vec<Value> = log
+        .entries
+        .iter()
+        .rev()
+        .take(cap)
+        .map(|e| {
+            let secs_ago = std::time::SystemTime::now()
+                .duration_since(e.at)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            json!({
+                "secs_ago": secs_ago,
+                "trigger_zone": e.trigger_zone,
+                "trigger_id": e.trigger_id,
+                "trigger_name": e.trigger_name,
+                "event": e.event,
+                "message": e.message,
+            })
+        })
+        .collect();
+    json!({
+        "total": log.entries.len(),
+        "errors": entries,
+    })
+}
+
+/// Snapshot of the runtime trigger fire counters. Per-event keys
+/// match the `Debug` form of `TriggerEvent` ("Greet", "Speech",
+/// …). Resets when the process restarts.
+fn trigger_stats(world: &World) -> Value {
+    let Some(stats) = world.get_resource::<crate::triggers::TriggerStats>() else {
+        return json!({
+            "total_fired": 0,
+            "total_succeeded": 0,
+            "total_failed": 0,
+            "by_event": {},
+        });
+    };
+    let by_event: serde_json::Map<String, Value> = stats
+        .by_event
+        .iter()
+        .map(|(k, c)| {
+            (
+                k.clone(),
+                json!({
+                    "fired": c.fired,
+                    "succeeded": c.succeeded,
+                    "failed": c.failed,
+                }),
+            )
+        })
+        .collect();
+    json!({
+        "total_fired": stats.total_fired,
+        "total_succeeded": stats.total_succeeded,
+        "total_failed": stats.total_failed,
+        "by_event": by_event,
+    })
 }
 
 fn world_status(world: &mut World) -> Value {
