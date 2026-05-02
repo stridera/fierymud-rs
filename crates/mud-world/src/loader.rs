@@ -11,7 +11,8 @@ use tracing::{info, warn};
 
 use crate::components::{
     AttachedTriggers, BoardLink, CombatStats, Description, EquippedSlot, ExitData, Exits,
-    FromMobReset, Health, Item, Keywords, LiquidContainer, Located, Mob, Mountable, Named, Posture,
+    FromMobReset, FromObjectReset, Health, Item, Keywords, LiquidContainer, Located, Mob,
+    Mountable, Named, Posture,
     PostureKind, Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
@@ -954,6 +955,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 Keywords(proto.keywords.clone()),
                 WorldKey { zone: proto.zone_id, id: proto.id },
                 Located(room_entity),
+                FromObjectReset(r.id),
             ));
             if let Some(desc) = proto.examine_description.clone() {
                 bundle.insert(Description(desc));

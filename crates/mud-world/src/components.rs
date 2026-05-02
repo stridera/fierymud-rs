@@ -505,6 +505,15 @@ pub struct LoggedInAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FromMobReset(pub i32);
 
+/// Marker linking a spawned item entity back to the `ObjectResets.id`
+/// row that produced it. Each reset row owns at most one live instance
+/// at a time; the respawn tick re-fires a row only when its instance no
+/// longer exists, so multiple rows in the same room legitimately stack
+/// (a basket of apples, a rose bush). `max_instances` on the row is the
+/// global ceiling across all rows for that proto.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct FromObjectReset(pub i32);
+
 /// Player-set epithet shown after the character name on `who` and
 /// (eventually) on the long room-occupant line. Loaded from
 /// `Characters.title` at login; absent when the column is NULL or

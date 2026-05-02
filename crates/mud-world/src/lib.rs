@@ -5,7 +5,8 @@ pub mod resources;
 pub use components::{
     Account, AccountSummary, Aliases, AppliedTo, AttachedTriggers, BankWealth, BoardDraft,
     BoardLink, Charges, CombatStats, Cooldowns, CoreStats, Description, EffectInstance,
-    EffectSource, EquippedSlot, ExitData, Exits, Fighting, Flying, Follower, FromMobReset, Frozen,
+    EffectSource, EquippedSlot, ExitData, Exits, Fighting, Flying, Follower, FromMobReset,
+    FromObjectReset, Frozen,
     GroupInvite, Guarding, Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt,
     LastTeller, LiquidContainer, Lit, Located, LoggedInAt, MailDraft, MemEntry, MemorizedSpells,
     Mob, ModifyDelta, Mountable, Mounted, Named, Online, Player, PlayerFlags, Posture,

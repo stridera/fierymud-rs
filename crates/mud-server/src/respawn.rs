@@ -18,7 +18,7 @@ use mud_world::{
     Mob, MobPrototypes, MobResetCatalog, Mountable, Named, ObjectPrototypes, ObjectResetCatalog,
     Posture, PostureKind, ShopCatalog, Shopkeeper, TriggerCatalog, WorldKey,
 };
-use mud_world::FromMobReset;
+use mud_world::{FromMobReset, FromObjectReset};
 use tracing::info;
 
 use crate::TickCount;
@@ -133,21 +133,36 @@ pub fn respawn_tick(world: &mut World) {
         crate::triggers::fire_event(world, e, mud_world::TriggerEvent::Load);
     }
 
-    // Object respawn: same shape as the mob loop. Items get picked
-    // up, looted off corpses, or destroyed; once world-count of
-    // their proto drops below the reset row's cap, refill one.
+    // Object respawn: each ObjectResets row owns at most one live
+    // instance. We refire a row only when its prior instance has
+    // despawned (picked up + destroyed, or the world has restarted
+    // without it). Multiple reset rows for the same room are
+    // legitimate (a basket of apples, a rose bush) — they each get
+    // their own slot. `max_instances` is still enforced as the
+    // global ceiling on this proto's world count, so a "unique
+    // dagger" (cap=1) won't multiply across rows.
     let mut object_world_counts: std::collections::HashMap<(i32, i32), i32> =
         std::collections::HashMap::new();
+    let mut reset_id_alive: std::collections::HashSet<i32> = std::collections::HashSet::new();
     {
         let mut q = world.query_filtered::<&WorldKey, With<Item>>();
         for wk in q.iter(world) {
             *object_world_counts.entry((wk.zone, wk.id)).or_insert(0) += 1;
         }
     }
+    {
+        let mut q = world.query_filtered::<&FromObjectReset, With<Item>>();
+        for fr in q.iter(world) {
+            reset_id_alive.insert(fr.0);
+        }
+    }
     let object_entries: Vec<mud_world::ObjectResetEntry> =
         world.resource::<ObjectResetCatalog>().entries.clone();
     let mut object_refilled = 0usize;
     for entry in &object_entries {
+        if reset_id_alive.contains(&entry.reset_id) {
+            continue;
+        }
         let proto_key = (entry.object_zone_id, entry.object_id);
         let live = object_world_counts.get(&proto_key).copied().unwrap_or(0);
         let cap = entry.max_instances.max(1);
@@ -172,6 +187,7 @@ pub fn respawn_tick(world: &mut World) {
             Keywords(proto.keywords.clone()),
             WorldKey { zone: proto.zone_id, id: proto.id },
             Located(entry.room_entity),
+            FromObjectReset(entry.reset_id),
         ));
         if let Some(desc) = proto.examine_description.clone() {
             bundle.insert(Description(desc));
@@ -193,6 +209,7 @@ pub fn respawn_tick(world: &mut World) {
         if let Some(keys) = trigger_keys {
             bundle.insert(AttachedTriggers(keys));
         }
+        reset_id_alive.insert(entry.reset_id);
         *object_world_counts.entry(proto_key).or_insert(0) += 1;
         object_refilled += 1;
     }
