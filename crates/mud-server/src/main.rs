@@ -112,6 +112,7 @@ async fn main() {
     world.insert_resource(TickCount::default());
     world.insert_resource(ServerStart(Instant::now()));
     world.insert_resource(mud_world::MudClock::default());
+    world.insert_resource(mud_world::HousingIndex::default());
     world.insert_resource(mud_script::LuaHost::default());
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {

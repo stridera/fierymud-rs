@@ -154,6 +154,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                     to: target,
                     state: e.default_state,
                     key,
+                    description: e.description,
+                    keywords: e.keywords,
                 },
             );
         }

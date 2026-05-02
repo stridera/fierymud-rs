@@ -16,6 +16,15 @@ pub struct RoomExit {
     /// The pair points at an `Objects(zoneId, id)` row.
     pub key_zone_id: Option<i32>,
     pub key_id: Option<i32>,
+    /// Free-text exit description shown by `look <direction>` or
+    /// `examine <keyword>`. Lets builders flavor non-standard
+    /// exits ("a curtain of beads sways in the doorway") without
+    /// modeling them as objects.
+    pub description: Option<String>,
+    /// Keywords that match the exit for `look <keyword>` /
+    /// `open <keyword>` / `close <keyword>` / `unlock <keyword>`.
+    /// Empty vec when the exit is plain (just a direction).
+    pub keywords: Vec<String>,
 }
 
 pub async fn list_exits(pool: &PgPool) -> sqlx::Result<Vec<RoomExit>> {
@@ -31,7 +40,9 @@ pub async fn list_exits(pool: &PgPool) -> sqlx::Result<Vec<RoomExit>> {
             to_room_id,
             default_state AS "default_state: ExitState",
             key_zone_id,
-            key_id
+            key_id,
+            description,
+            keywords AS "keywords!: Vec<String>"
         FROM "RoomExit"
         ORDER BY room_zone_id, room_id, direction
         "#

@@ -1856,13 +1856,14 @@ const COMMANDS: &[Command] = &[
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "house [info|guests|rooms]",
-            summary: "Show information about your player house.",
+            usage: "house [info|enter|guests|rooms]",
+            summary: "Inspect or enter your player house.",
             long: "Players who own a house can inspect its layout, \
-                   guest list, and room contents. `house` (no arg) \
-                   defaults to the info subcommand. Players without \
-                   a house get a polite refusal — house creation \
-                   isn't yet wired through the runtime.",
+                   guest list, room contents, or step inside via \
+                   `house enter`. `house` (no arg) defaults to the \
+                   info subcommand. Players without a house get a \
+                   polite refusal — house creation isn't yet wired \
+                   through the runtime.",
         },
         run: cmd_house,
     },
@@ -9639,10 +9640,29 @@ fn look_direction(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "You see nothing in that direction.\r\n");
         return;
     };
-    let Some(ed) = exits.0.get(&dir).copied() else {
+    let Some(ed) = exits.0.get(&dir).cloned() else {
         send_to(world, player, "You see nothing in that direction.\r\n");
         return;
     };
+    // Builder-authored exit description wins over the destination
+    // peek — a "curtain of beads" should describe the curtain
+    // itself, not what's beyond it. Render even when the exit is
+    // closed / locked, since that's exactly when the description
+    // matters most.
+    let mode_pre = color_mode_for(world, player);
+    if let Some(desc) = ed.description.as_ref() {
+        send_to(
+            world,
+            player,
+            format!("\r\n{}\r\n", render_color_tags(desc.trim_end(), mode_pre)),
+        );
+        if matches!(
+            ed.state,
+            mud_db::enums::ExitState::Closed | mud_db::enums::ExitState::Locked
+        ) {
+            return;
+        }
+    }
     if ed.state == mud_db::enums::ExitState::Closed
         || ed.state == mud_db::enums::ExitState::Locked
     {
@@ -12487,6 +12507,167 @@ fn cmd_report(world: &mut World, player: Entity, _args: &str) {
     }
 }
 
+/// `home` — teleport to the foyer of the player's house. Lazily
+/// synthesizes ECS Room entities for each `PlayerHouseRoom` on
+/// first call (cached in `HousingIndex`); subsequent calls
+/// just look up and move.
+fn cmd_home(world: &mut World, player: Entity, _args: &str) {
+    let summary = world.get::<mud_world::HouseSummary>(player).cloned();
+    let Some(summary) = summary else {
+        send_to(
+            world,
+            player,
+            "You don't own a house. Speak with a builder to claim one.\r\n",
+        );
+        return;
+    };
+    if summary.rooms.is_empty() {
+        send_to(
+            world,
+            player,
+            "Your house has no rooms — that shouldn't happen.\r\n",
+        );
+        return;
+    }
+
+    // Spawn missing rooms. The HousingIndex gates so we don't
+    // double-spawn on subsequent `home` calls.
+    let house_id = summary.house_id;
+    let already_spawned = world
+        .resource::<mud_world::HousingIndex>()
+        .by_key
+        .contains_key(&(house_id, summary.rooms[0].local_index));
+    if !already_spawned {
+        synthesize_house_rooms(world, &summary);
+    }
+
+    // Look up the foyer (local_index 0; falls back to first room
+    // if the foyer is missing).
+    let foyer_idx = summary
+        .rooms
+        .iter()
+        .find(|r| r.local_index == 0)
+        .map_or(summary.rooms[0].local_index, |r| r.local_index);
+    let foyer_entity = world
+        .resource::<mud_world::HousingIndex>()
+        .by_key
+        .get(&(house_id, foyer_idx))
+        .copied();
+    let Some(foyer) = foyer_entity else {
+        send_to(world, player, "Your house couldn't be reached.\r\n");
+        return;
+    };
+
+    if let Some(mut l) = world.get_mut::<Located>(player) {
+        l.0 = foyer;
+    }
+    send_to(world, player, "You return home.\r\n");
+    cmd_look(world, player, "");
+}
+
+/// Spawn ECS Room entities for every `PlayerHouseRoom` in the
+/// summary, wire their exits, drop placed items into them, and
+/// register the per-house index entries in `HousingIndex`.
+fn synthesize_house_rooms(world: &mut World, summary: &mud_world::HouseSummary) {
+    use bevy_ecs::prelude::*;
+    // Phase 1: spawn rooms, populate index.
+    let mut local_to_entity: std::collections::HashMap<i32, Entity> = std::collections::HashMap::new();
+    let mut local_to_row_id: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+    for room in &summary.rooms {
+        let entity = world
+            .spawn((
+                mud_world::Room,
+                mud_world::HouseRoom {
+                    house_id: summary.house_id,
+                    local_index: room.local_index,
+                },
+                Named { name: room.name.clone() },
+                Description(room.description.clone()),
+                mud_world::RoomSector(mud_db::enums::Sector::Structure),
+                mud_world::Exits::default(),
+            ))
+            .id();
+        world
+            .resource_mut::<mud_world::HousingIndex>()
+            .by_key
+            .insert((summary.house_id, room.local_index), entity);
+        local_to_entity.insert(room.local_index, entity);
+        local_to_row_id.insert(room.local_index, room.id);
+    }
+    // Phase 2: wire exits. We have row IDs from the schema and
+    // need to map back to local_index to set Exits properly.
+    let row_to_local: std::collections::HashMap<i32, i32> =
+        local_to_row_id.iter().map(|(local, row)| (*row, *local)).collect();
+    for exit in &summary.exits {
+        let Some(&from_local) = row_to_local.get(&exit.from_room_id) else {
+            continue;
+        };
+        let Some(&to_local) = row_to_local.get(&exit.to_room_id) else {
+            continue;
+        };
+        let Some(&from_e) = local_to_entity.get(&from_local) else {
+            continue;
+        };
+        let Some(&to_e) = local_to_entity.get(&to_local) else {
+            continue;
+        };
+        let Some(dir) = parse_direction(&exit.direction.to_ascii_lowercase()) else {
+            continue;
+        };
+        if let Some(mut exits) = world.get_mut::<mud_world::Exits>(from_e) {
+            exits.0.insert(
+                dir,
+                mud_world::ExitData {
+                    to: Some(to_e),
+                    state: mud_db::enums::ExitState::Open,
+                    key: None,
+                    description: None,
+                    keywords: Vec::new(),
+                },
+            );
+        }
+    }
+    // Phase 3: drop placed items into their respective rooms.
+    // Items use the same prototype-spawn helper that respawn /
+    // corpses already share.
+    for placed in &summary.items {
+        let room_local = local_to_row_id
+            .iter()
+            .find(|(_, row)| **row == placed.room_id)
+            .map(|(local, _)| *local);
+        let Some(room_local) = room_local else {
+            continue;
+        };
+        let Some(&room_entity) = local_to_entity.get(&room_local) else {
+            continue;
+        };
+        spawn_house_item(world, placed.object_zone_id, placed.object_id, room_entity);
+    }
+}
+
+/// Spawn an item from the proto catalog directly into a house
+/// room. Mirrors `respawn::spawn_item_into` but without the
+/// reset bookkeeping — placed items are persistent via
+/// `PlayerHouseItem`, not via the reset cycle.
+fn spawn_house_item(world: &mut World, proto_zone: i32, proto_id: i32, parent: Entity) {
+    let proto = world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .get(&(proto_zone, proto_id))
+        .cloned();
+    let Some(proto) = proto else { return };
+    let mut bundle = world.spawn((
+        Item,
+        Named { name: proto.name.clone() },
+        Keywords(proto.keywords.clone()),
+        WorldKey { zone: proto.zone_id, id: proto.id },
+        Located(parent),
+    ));
+    if let Some(desc) = proto.examine_description.clone() {
+        bundle.insert(Description(desc));
+    }
+}
+
 /// `house [subcommand]` — read-only inspection of the player's
 /// house. v1: info / rooms / guests subcommands. Mutating
 /// commands (place, remove, expand, name) and the `home` /
@@ -12505,6 +12686,10 @@ fn cmd_house(world: &mut World, player: Entity, args: &str) {
     };
     let mut out = String::from("\r\n");
     match sub {
+        "enter" => {
+            cmd_home(world, player, "");
+            return;
+        }
         "info" => {
             out.push_str(&format!("House #{}\r\n", house.house_id));
             out.push_str(&format!(
@@ -18517,7 +18702,7 @@ fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "No exits here.\r\n");
         return;
     };
-    let Some(ed) = exits.0.get(&dir).copied() else {
+    let Some(ed) = exits.0.get(&dir).cloned() else {
         send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
         return;
     };
@@ -19574,7 +19759,7 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 
     let exit = world
         .get::<Exits>(from_room)
-        .and_then(|e| e.0.get(&dir).copied());
+        .and_then(|e| e.0.get(&dir).cloned());
     let Some(exit) = exit else {
         send_to(world, player, "You can't go that way.\r\n");
         return;

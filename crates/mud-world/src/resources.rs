@@ -2,6 +2,17 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 
+/// Index of currently-spawned per-house rooms. Lookup key is
+/// `(house_id, local_index)`. Populated lazily by `cmd_home`
+/// the first time a house is entered; cleared on no schedule
+/// today (rooms persist across tick cycles, only despawn at
+/// process exit). A future eviction tick can walk this and free
+/// rooms whose owner has been offline for N minutes.
+#[derive(Resource, Default, Debug)]
+pub struct HousingIndex {
+    pub by_key: HashMap<(i32, i32), bevy_ecs::prelude::Entity>,
+}
+
 /// Maps composite (zone, id) keys from the schema to live entities in the world.
 /// Used by spawn/lookup code to translate DB references to runtime handles.
 #[derive(Resource, Debug, Default)]

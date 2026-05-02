@@ -93,6 +93,17 @@ pub struct HouseGuestEntry {
     pub can_place: bool,
 }
 
+/// Marker for ECS Room entities that are part of a player's
+/// instanced house. Distinct from world Rooms (which carry a
+/// `WorldKey`) so the housing system can reason about them
+/// separately. The `(house_id, local_index)` pair routes back
+/// to the `PlayerHouseRoom` row.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HouseRoom {
+    pub house_id: i32,
+    pub local_index: i32,
+}
+
 /// Loot-claim window on a freshly-spawned mob corpse. Only
 /// `owner` (and their group, once group bridging lands) can `get`
 /// items from this corpse until `expires_at` — past that,
@@ -1020,7 +1031,7 @@ pub struct Located(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct RoomSector(pub Sector);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ExitData {
     /// Resolved target room entity, if the target exists in the loaded world.
     pub to: Option<Entity>,
@@ -1029,6 +1040,12 @@ pub struct ExitData {
     /// exits that need no key. `unlock` looks up the player's
     /// inventory by exact `WorldKey` match.
     pub key: Option<(i32, i32)>,
+    /// Free-text description shown by `look <direction>` /
+    /// `examine <keyword>`. None for plain directional exits.
+    pub description: Option<String>,
+    /// Keywords matching this exit for `look <keyword>` /
+    /// `open <keyword>` / etc. Empty for plain directional exits.
+    pub keywords: Vec<String>,
 }
 
 #[derive(Component, Debug, Clone, Default)]
