@@ -16706,9 +16706,15 @@ fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
     let target_name = name_of(world, target);
 
     let self_max_hp = world.get::<Health>(player).map_or(1, |h| h.max).max(1);
-    let self_dmg = world.get::<CombatStats>(player).map_or(0, |c| c.dmg_roll);
+    let self_stats = world.get::<CombatStats>(player).copied();
+    let self_dmg = self_stats.map_or(0, |c| c.dmg_roll);
+    let self_hit_roll = self_stats.map_or(0, |c| c.hit_roll);
     let target_max_hp = world.get::<Health>(target).map_or(0, |h| h.max);
-    let target_dmg = world.get::<CombatStats>(target).map_or(0, |c| c.dmg_roll);
+    let target_stats = world.get::<CombatStats>(target).copied();
+    let target_dmg = target_stats.map_or(0, |c| c.dmg_roll);
+    let target_hit_roll = target_stats.map_or(0, |c| c.hit_roll);
+    let self_ac = self_stats.map_or(0, |c| c.ac);
+    let target_ac = target_stats.map_or(0, |c| c.ac);
 
     if target_max_hp == 0 {
         send_rendered(world, player, &format!("{target_name} doesn't look like a fighter at all.\r\n"),
@@ -16734,7 +16740,15 @@ fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
         "would slaughter you. Don't try it."
     };
 
-    send_rendered(world, player, &format!("{target_name} {verdict}\r\n"));
+    let mut out = format!("{target_name} {verdict}\r\n");
+    // Hit-chance hints both ways. Use the same formula combat does
+    // so what `consider` predicts matches what swings actually land.
+    let your_chance = crate::combat::hit_chance_pct(self_hit_roll, target_ac);
+    let their_chance = crate::combat::hit_chance_pct(target_hit_roll, self_ac);
+    out.push_str(&format!(
+        "Your strikes would land about {your_chance}%; theirs about {their_chance}%.\r\n",
+    ));
+    send_rendered(world, player, &out);
 }
 
 pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
