@@ -514,6 +514,16 @@ impl LuaHost {
             time_tbl.set("day", i64::from(clock.day))?;
             time_tbl.set("month", i64::from(clock.month))?;
             time_tbl.set("year", i64::from(clock.year))?;
+            // String views of the calendar — let triggers branch on
+            // "if time.season == 'Winter' then …" without rebuilding
+            // the 16-month name table in every script.
+            time_tbl.set("month_name", clock.month_name())?;
+            time_tbl.set("season", clock.season().label())?;
+            // Day/night convenience flag matches `commands::room_is_dark`'s
+            // window (22..=05) so triggers don't have to redo the math.
+            let is_night = matches!(clock.hour, 0..=4 | 22..=23);
+            time_tbl.set("is_night", is_night)?;
+            time_tbl.set("is_day", !is_night)?;
             globals.set("time", time_tbl)?;
 
             // `find_actor(keyword)` searches the entire world for the
