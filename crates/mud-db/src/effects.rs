@@ -25,6 +25,19 @@ pub struct Effect {
     /// When true, blocks `cmd_move` (cardinal directions). Used for
     /// hold/web/paralyze flavors of immobilization.
     pub prevents_movement: bool,
+    /// Lua source executed when an `EffectInstance` of this kind is
+    /// first applied to a target. `self` binds to the target. Used
+    /// for "you begin to drown" style on-apply flavor or one-shot
+    /// state setup.
+    pub on_apply: Option<String>,
+    /// Lua source executed once per second while the effect is
+    /// active. `self` binds to the target. Used for damage-over-time
+    /// or atmospheric tick lines that don't justify a runtime hook.
+    pub on_tick: Option<String>,
+    /// Lua source executed when the effect is removed (expiry,
+    /// dispel, cleanse, or target despawn). `self` binds to the
+    /// target. Used for "you gasp for air" style fade messages.
+    pub on_remove: Option<String>,
 }
 
 pub async fn list_effects(pool: &PgPool) -> sqlx::Result<Vec<Effect>> {
@@ -41,7 +54,10 @@ pub async fn list_effects(pool: &PgPool) -> sqlx::Result<Vec<Effect>> {
             default_params,
             prevents_speaking,
             prevents_casting,
-            prevents_movement
+            prevents_movement,
+            on_apply,
+            on_tick,
+            on_remove
         FROM "Effect"
         ORDER BY id
         "#

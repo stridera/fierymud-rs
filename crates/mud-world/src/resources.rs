@@ -55,6 +55,15 @@ pub struct EffectDef {
     pub prevents_speaking: bool,
     pub prevents_casting: bool,
     pub prevents_movement: bool,
+    /// Lua source executed when an instance is applied. `self`
+    /// binds to the target entity. None / blank means "no hook".
+    pub on_apply: Option<String>,
+    /// Lua source executed once per second while the effect is
+    /// active. `self` binds to the target.
+    pub on_tick: Option<String>,
+    /// Lua source executed when the effect is removed (expiry,
+    /// dispel, cleanse, target despawn). `self` binds to the target.
+    pub on_remove: Option<String>,
 }
 
 /// Catalog of object prototypes loaded from the Objects table at startup.

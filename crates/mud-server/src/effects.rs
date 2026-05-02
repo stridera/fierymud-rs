@@ -1,11 +1,88 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AbilityCatalog, AppliedTo, EffectInstance, Item, Located, ModifyDelta, Stealth, Stunned,
+    AbilityCatalog, AppliedTo, EffectCatalog, EffectInstance, Item, Located, ModifyDelta,
+    Stealth, Stunned,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::TickCount;
-use crate::commands::{apply_damage, name_of, name_or, send_rendered, send_to, try_remove};
+use crate::commands::{apply_damage, drain_lua_outbox, name_of, name_or, send_rendered, send_to, try_insert, try_remove};
+
+/// Marker added to an `EffectInstance` after its `on_apply` Lua
+/// hook has fired. Lets the lifecycle scan distinguish "freshly
+/// spawned" effects from ones the loop has already seen, without
+/// needing every spawn site to call into Lua synchronously.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct EffectInstanceApplied;
+
+/// What lifecycle hook to fire. Picked off the `EffectDef` field
+/// of the matching name; missing or blank hooks are silently
+/// skipped, so content authors only pay for what they use.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::enum_variant_names)]
+enum EffectHook {
+    OnApply,
+    OnTick,
+    OnRemove,
+}
+
+impl EffectHook {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OnApply => "on_apply",
+            Self::OnTick => "on_tick",
+            Self::OnRemove => "on_remove",
+        }
+    }
+
+    fn body(self, def: &mud_world::EffectDef) -> Option<&str> {
+        match self {
+            Self::OnApply => def.on_apply.as_deref(),
+            Self::OnTick => def.on_tick.as_deref(),
+            Self::OnRemove => def.on_remove.as_deref(),
+        }
+    }
+}
+
+/// Look up the `EffectDef` for `effect_name` in the catalog and
+/// fire the matching lifecycle hook against `target`. `self` binds
+/// to the target inside the Lua body. Logs failures via tracing
+/// rather than the script error log — these are runtime hooks not
+/// dispatched triggers, and the catalog has no (zone, id).
+fn run_effect_hook(
+    world: &mut World,
+    hook: EffectHook,
+    target: Entity,
+    effect_name: &str,
+) {
+    let body = {
+        let Some(catalog) = world.get_resource::<EffectCatalog>() else {
+            return;
+        };
+        let Some(def) = catalog.find_by_name(effect_name) else {
+            return;
+        };
+        let Some(b) = hook.body(def) else {
+            return;
+        };
+        b.to_string()
+    };
+    if world.get_entity(target).is_err() {
+        return;
+    }
+    let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
+        host.exec_for_actor(world, target, &body)
+    });
+    drain_lua_outbox(world);
+    if let Err(e) = result {
+        warn!(
+            effect = %effect_name,
+            hook = %hook.label(),
+            error = %e,
+            "effect hook failed",
+        );
+    }
+}
 
 /// One effect tick = one second.
 const EFFECT_PERIOD_TICKS: u64 = 10;
@@ -22,6 +99,25 @@ pub fn effects_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(EFFECT_PERIOD_TICKS) {
         return;
+    }
+
+    // Pre-pass: fire `on_apply` hooks for any EffectInstance that
+    // hasn't been seen yet, then mark it `EffectInstanceApplied`.
+    // Spawn sites are too scattered to thread the hook through;
+    // a once-per-second sweep with a marker is correct enough and
+    // doesn't push a Lua call into every callsite.
+    let fresh: Vec<(Entity, Entity, String)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &EffectInstance, &AppliedTo),
+            Without<EffectInstanceApplied>,
+        >();
+        q.iter(world)
+            .map(|(eff, inst, applied)| (eff, applied.0, inst.name.clone()))
+            .collect()
+    };
+    for (eff_entity, target, name) in fresh {
+        run_effect_hook(world, EffectHook::OnApply, target, &name);
+        try_insert(world, eff_entity, EffectInstanceApplied);
     }
 
     // Snapshot all active effects: (effect_entity, target_entity, remaining_secs, name, ability_id).
@@ -67,6 +163,16 @@ pub fn effects_tick(world: &mut World) {
                 continue;
             }
         }
+        // on_tick: fired once per second for every still-alive
+        // effect, including permanent ones. Hook bodies typically
+        // do their own internal throttling via `time.stamp` if
+        // they need a slower cadence.
+        run_effect_hook(world, EffectHook::OnTick, target, &name);
+        if world.get_entity(eff_entity).is_err() {
+            // Hook may have despawned the effect or its target;
+            // bail before we touch a stale entity.
+            continue;
+        }
         if ticks < 0 {
             // Permanent — leave alone.
             continue;
@@ -76,6 +182,10 @@ pub fn effects_tick(world: &mut World) {
             inst.remaining_secs = new_ticks;
         }
         if new_ticks <= 0 {
+            // on_remove: fire before any of the despawn or marker
+            // cleanup runs, so the hook body can still inspect the
+            // effect / target relationship if it wants.
+            run_effect_hook(world, EffectHook::OnRemove, target, &name);
             // Look up wearoff_to_target / wearoff_to_room from the
             // AbilityMessages catalog. ability_id is None for hardcoded
             // effects (rend's bleed, gouge's blind, admin tests) — those

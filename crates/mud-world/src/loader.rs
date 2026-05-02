@@ -257,6 +257,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 prevents_speaking: row.prevents_speaking,
                 prevents_casting: row.prevents_casting,
                 prevents_movement: row.prevents_movement,
+                on_apply: row.on_apply.filter(|s| !s.trim().is_empty()),
+                on_tick: row.on_tick.filter(|s| !s.trim().is_empty()),
+                on_remove: row.on_remove.filter(|s| !s.trim().is_empty()),
             },
         );
     }
