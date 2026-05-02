@@ -1,3 +1,4 @@
+mod admin;
 mod combat;
 mod commands;
 mod effects;
@@ -167,6 +168,13 @@ async fn main() {
     }
     drop(inbound_tx);
 
+    // Spawn the admin HTTP listener and install its inbox + virtual
+    // session table as resources so the world tick can drain pending
+    // requests synchronously each frame.
+    let admin_rx = admin::spawn_admin_server();
+    world.insert_resource(admin::AdminInbox(std::sync::Mutex::new(admin_rx)));
+    world.insert_resource(admin::VirtualSessions::default());
+
     let mut router = ConnRouter::new();
     let mut schedule = Schedule::default();
     schedule.add_systems(
@@ -179,6 +187,7 @@ async fn main() {
             memorize::memorize_tick,
             respawn::respawn_tick,
             triggers::lua_coroutine_tick,
+            admin::drain_admin_requests,
             log_heartbeat,
         )
             .chain(),
