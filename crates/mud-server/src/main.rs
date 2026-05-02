@@ -75,6 +75,7 @@ fn mud_clock_tick(tick: Res<TickCount>, mut clock: ResMut<mud_world::MudClock>) 
 }
 
 #[tokio::main(flavor = "current_thread")]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -123,11 +124,48 @@ async fn main() {
         std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into());
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<Inbound>();
     let listen_addr_for_task = listen_addr.clone();
+    let inbound_tx_plain = inbound_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = mud_net::serve(&listen_addr_for_task, inbound_tx).await {
+        if let Err(e) = mud_net::serve(&listen_addr_for_task, inbound_tx_plain).await {
             error!(addr = %listen_addr_for_task, error = %e, "listener stopped");
         }
     });
+
+    // Optional TLS listener — enabled when both TLS_CERT_PATH and
+    // TLS_KEY_PATH point at PEM files. Cert is a chain (server cert
+    // first, then intermediates); key is PKCS#8 / RSA / SEC1 PEM.
+    if let (Ok(cert_path), Ok(key_path)) =
+        (std::env::var("TLS_CERT_PATH"), std::env::var("TLS_KEY_PATH"))
+    {
+        let tls_addr = std::env::var("MUD_TLS_LISTEN_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:4443".into());
+        // Required by rustls 0.23+: install a default crypto provider
+        // before any ServerConfig is built.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        info!(tls_addr = %tls_addr, cert = %cert_path, "TLS listener configured");
+        let inbound_tx_tls = inbound_tx.clone();
+        let tls_addr_for_task = tls_addr.clone();
+        let cert_path_for_task = cert_path.clone();
+        let key_path_for_task = key_path.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mud_net::serve_tls(
+                &tls_addr_for_task,
+                &cert_path_for_task,
+                &key_path_for_task,
+                inbound_tx_tls,
+            )
+            .await
+            {
+                error!(addr = %tls_addr_for_task, error = %e, "TLS listener stopped");
+            }
+        });
+    } else {
+        info!(
+            "TLS disabled — set TLS_CERT_PATH and TLS_KEY_PATH to enable on \
+             $MUD_TLS_LISTEN_ADDR (default 0.0.0.0:4443)"
+        );
+    }
+    drop(inbound_tx);
 
     let mut router = ConnRouter::new();
     let mut schedule = Schedule::default();
