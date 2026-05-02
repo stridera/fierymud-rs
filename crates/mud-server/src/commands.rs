@@ -19037,37 +19037,52 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 }
 
 /// Alignment threshold below which a mob will swing on a player
-/// who walks into the room. Tuned by the import distribution: the
+/// who walks into the room (or, on respawn, lands in a room with
+/// a player already there). Tuned by the import distribution: the
 /// nastiest two-hundred-odd mobs sit at -1000, so -800 lights up
 /// roughly the lower fifth — enough to make low-zone exploration
 /// have teeth without making every wandering goblin hostile.
-const AGGRO_ALIGNMENT: i32 = -800;
+pub(crate) const AGGRO_ALIGNMENT: i32 = -800;
 
-fn try_engage_aggressive_mob(world: &mut World, player: Entity, room: Entity) {
-    let aggro: Option<(Entity, String)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &CombatStats, &Named),
-            (With<Mob>, Without<Fighting>),
-        >();
-        q.iter(world)
-            .find(|(_, l, cs, _)| l.0 == room && cs.alignment <= AGGRO_ALIGNMENT)
-            .map(|(e, _, _, n)| (e, n.name.clone()))
-    };
-    let Some((mob, mob_name)) = aggro else { return };
-    try_insert(world, mob, Fighting(player));
-    try_insert(world, player, Fighting(mob));
+/// Bidirectional `Fighting` + announcement on both sides + the
+/// rest of the room. Shared between the on-entry aggro check and
+/// any other path that wants to start hostilities programmatically
+/// (respawn into an occupied room, scripted ambush, etc).
+pub(crate) fn engage_combat(
+    world: &mut World,
+    attacker: Entity,
+    defender: Entity,
+    room: Entity,
+) {
+    let attacker_name = name_of(world, attacker);
+    let defender_name = name_of(world, defender);
+    try_insert(world, attacker, Fighting(defender));
+    try_insert(world, defender, Fighting(attacker));
     send_to(
         world,
-        player,
-        format!("{mob_name} sees you and attacks!\r\n"),
+        defender,
+        format!("{attacker_name} sees you and attacks!\r\n"),
     );
-    let player_name = name_of(world, player);
     broadcast_room_except_rendered(
         world,
         room,
-        &[player],
-        &format!("{mob_name} sees {player_name} and attacks!\r\n"),
+        &[defender],
+        &format!("{attacker_name} sees {defender_name} and attacks!\r\n"),
     );
+}
+
+fn try_engage_aggressive_mob(world: &mut World, player: Entity, room: Entity) {
+    let aggro: Option<Entity> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &CombatStats),
+            (With<Mob>, Without<Fighting>),
+        >();
+        q.iter(world)
+            .find(|(_, l, cs)| l.0 == room && cs.alignment <= AGGRO_ALIGNMENT)
+            .map(|(e, _, _)| e)
+    };
+    let Some(mob) = aggro else { return };
+    engage_combat(world, mob, player, room);
 }
 
 // ---------------------------------------------------------------------------

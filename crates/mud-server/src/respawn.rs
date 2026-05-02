@@ -71,6 +71,11 @@ pub fn respawn_tick(world: &mut World) {
     // Same reason as load_fire_queue — the broadcast helper queries
     // the world, but the spawn block here holds an EntityWorldMut.
     let mut announce_queue: Vec<(Entity, String)> = Vec::new();
+    // (mob, room) pairs for any aggro mob that just spawned —
+    // post-loop, we look for a player in that room and start
+    // hostilities. Reuses the same threshold the on-entry check
+    // does so look / consider / spawn-engage all flip together.
+    let mut aggro_queue: Vec<(Entity, Entity)> = Vec::new();
     for entry in &entries {
         if reset_id_alive.contains(&entry.reset_id) {
             continue;
@@ -137,6 +142,9 @@ pub fn respawn_tick(world: &mut World) {
         reset_id_alive.insert(entry.reset_id);
         *world_counts.entry(proto_key).or_insert(0) += 1;
         announce_queue.push((entry.room_entity, proto.name.clone()));
+        if proto.alignment <= crate::commands::AGGRO_ALIGNMENT {
+            aggro_queue.push((em.id(), entry.room_entity));
+        }
         refilled += 1;
     }
 
@@ -155,6 +163,32 @@ pub fn respawn_tick(world: &mut World) {
             &[],
             &format!("{name} arrives.\r\n"),
         );
+    }
+
+    // Aggro pass: any hostile mob that just respawned tries to grab
+    // a non-admin, non-fighting player in the same room. Same
+    // threshold as the on-entry attack — and same one-attacker
+    // semantic, since each respawn iteration owns at most one mob.
+    for (mob, room) in aggro_queue {
+        let defender: Option<Entity> = {
+            let mut q = world.query_filtered::<
+                (Entity, &Located, Option<&mud_world::Account>, Option<&mud_world::Fighting>),
+                (With<mud_world::Player>, With<mud_world::Online>),
+            >();
+            q.iter(world)
+                .filter(|(_, l, account, fighting)| {
+                    l.0 == room
+                        && fighting.is_none()
+                        && account.is_some_and(|a| {
+                            a.role.rank() <= mud_db::enums::UserRole::Player.rank()
+                        })
+                })
+                .map(|(e, _, _, _)| e)
+                .next()
+        };
+        if let Some(defender) = defender {
+            crate::commands::engage_combat(world, mob, defender, room);
+        }
     }
 
     // Fire LOAD triggers for the just-spawned mobs. The respawn loop
