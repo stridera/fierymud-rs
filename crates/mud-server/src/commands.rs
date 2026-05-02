@@ -11995,6 +11995,36 @@ fn drink_amount(world: &mut World, player: Entity, args: &str, units: i32, verb:
         );
     }
     apply_consumable_liquid_effects(world, player, &state.liquid);
+    // Drunkenness: per-unit alcohol contribution from the
+    // schema's `Liquids.drunk_effect`. 0 for non-alcoholic drinks
+    // = no-op. Capped at 100 — anything beyond is "blackout"
+    // (future pass: penalize skills + slur speech).
+    let drunk_per_unit = world
+        .resource::<mud_world::LiquidIndex>()
+        .drunk_effect
+        .get(&state.liquid.to_ascii_lowercase())
+        .copied()
+        .unwrap_or(0);
+    let drunk_gain = drunk_per_unit.saturating_mul(drank);
+    if drunk_gain > 0 {
+        let new_total = {
+            let entry = world
+                .get_mut::<mud_world::Drunkenness>(player)
+                .map(|mut d| {
+                    d.0 = (d.0 + drunk_gain).min(100);
+                    d.0
+                });
+            entry.unwrap_or_else(|| {
+                try_insert(world, player, mud_world::Drunkenness(drunk_gain.min(100)));
+                drunk_gain.min(100)
+            })
+        };
+        if new_total >= 80 {
+            send_to(world, player, "The room spins violently around you.\r\n");
+        } else if new_total >= 40 {
+            send_to(world, player, "You feel pleasantly buzzed.\r\n");
+        }
+    }
     // Reset thirst proportional to swig size — `sip` (1 unit) takes
     // a small bite out, `drink` (4 units) sates entirely. Clamps at
     // 0 (never goes negative).

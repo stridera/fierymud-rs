@@ -138,9 +138,12 @@ pub struct ConsumableEffectBinding {
 /// Lightweight catalog of `Liquids` rows — name → id mapping used
 /// by the drink path to look up `ConsumableEffects` per-liquid
 /// bindings. Names are normalized to lowercase at insert.
+/// `drunk_effect` is the per-unit alcohol contribution (0 for
+/// non-alcoholic drinks).
 #[derive(Resource, Debug, Default)]
 pub struct LiquidIndex {
     pub by_name: HashMap<String, i32>,
+    pub drunk_effect: HashMap<String, i32>,
 }
 
 /// Catalog of `ConsumableEffects` rows: which effects fire on

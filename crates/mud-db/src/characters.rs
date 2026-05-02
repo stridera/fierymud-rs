@@ -174,6 +174,36 @@ pub async fn save_state(
     Ok(())
 }
 
+/// Load the persisted drunkenness counter. Returns 0 for null /
+/// missing rows. The runtime ticks this down over time (a future
+/// pass) and bumps on alcoholic drinks.
+pub async fn load_drunkenness(pool: &PgPool, character_id: &str) -> sqlx::Result<i32> {
+    let row = sqlx::query!(
+        r#"SELECT drunkenness FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map_or(0, |r| r.drunkenness))
+}
+
+/// Save the drunkenness counter. Called from save-on-disconnect
+/// alongside hunger / thirst so the value round-trips.
+pub async fn save_drunkenness(
+    pool: &PgPool,
+    character_id: &str,
+    drunkenness: i32,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET drunkenness = $1 WHERE id = $2"#,
+        drunkenness,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Read the staff-notes blob for a character (Builder+ visibility).
 /// Returns Ok(None) when null. Single shared blob — appended to by
 /// the runtime's `pnote add` path.

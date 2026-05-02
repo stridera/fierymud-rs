@@ -341,6 +341,10 @@ impl ConnRouter {
             .and_then(|v| v.get("total").and_then(serde_json::Value::as_i64))
             .and_then(|n| i32::try_from(n).ok())
             .unwrap_or(0);
+        // Drunkenness counter, persisted on Characters.
+        let drunk = mud_db::characters::load_drunkenness(pool, &char_row.id)
+            .await
+            .unwrap_or(0);
         // Last 10 received tells, newest first. Hydrates TellLog
         // so `lasttells` shows continuity across reconnects.
         let recent_tells = mud_db::tell_messages::recent_for(pool, &char_row.id, 10)
@@ -458,6 +462,9 @@ impl ConnRouter {
             // KillStats is always inserted so the bump path can
             // mutate it without a "needs_init" branch on every kill.
             e.insert(mud_world::KillStats { total: kill_total });
+            if drunk > 0 {
+                e.insert(mud_world::Drunkenness(drunk));
+            }
             // Hydrate TellLog from the persisted tail. Insertion
             // order: newest-first as returned by `recent_for`, but
             // `push_at` puts each at the front, so we iterate the
@@ -832,6 +839,19 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
     .await
     {
         warn!(error = %e, character_id = %account.character_id, "items save failed");
+    }
+
+    // Drunkenness round-trip. Only write when nonzero so brand-new
+    // characters and steady-state sober players don't take a write
+    // hit on every disconnect.
+    let drunk = world
+        .get::<mud_world::Drunkenness>(entity)
+        .map_or(0, |d| d.0);
+    if drunk > 0
+        && let Err(e) =
+            mud_db::characters::save_drunkenness(pool, &account.character_id, drunk).await
+    {
+        warn!(error = %e, character_id = %account.character_id, "drunkenness save failed");
     }
 
     // Persist KnownAbilities → CharacterAbilities so `study`-acquired

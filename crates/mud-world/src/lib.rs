@@ -6,7 +6,7 @@ pub use components::{
     Account, AccountSummary, Aliases, AppliedTo, AttachedTriggers, BankWealth, BoardDraft,
     CharacterAchievements,
     BoardLink, Charges, CombatStats, Cooldowns, CoreStats, Corpse, CorpseDecay, Description,
-    EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Flying, Follower,
+    Drunkenness, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Flying, Follower,
     FromMobReset, FromObjectReset, Frozen, Ghost,
     GroupInvite, Guarding, Health, HouseExitEntry, HouseGuestEntry, HouseItem, HouseItemEntry,
     HouseRoom, HouseRoomEntry, HouseSummary, Hunger, IgnoreList, Item, Keywords, KillStats,

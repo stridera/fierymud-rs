@@ -113,6 +113,14 @@ pub struct ZoneVisits {
     pub by_zone: std::collections::HashMap<i32, std::collections::HashSet<i32>>,
 }
 
+/// Persistent drunkenness counter — bumped per alcoholic drink,
+/// ticks down over time. Hydrates from `Characters.drunkenness`
+/// at login, persists on save. Higher values fuzz the player's
+/// outgoing speech and degrade certain skill rolls (future
+/// pass — runtime today only tracks the counter).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Drunkenness(pub i32);
+
 /// Lifetime kill counter for the kills-milestone achievement track
 /// (`kills_100`, `kills_500`, ...). Loads from / saves to the
 /// `kill_tracking_data` JSON on `Characters` so the count survives

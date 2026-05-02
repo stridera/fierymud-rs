@@ -614,13 +614,15 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // ConsumableEffects lookup. `LiquidContainer` stores the name;
     // this resolves to the schema's id.
     let mut liquid_index = LiquidIndex::default();
-    let liquid_rows = sqlx::query!(r#"SELECT id, name FROM "Liquids""#)
-        .fetch_all(pool)
-        .await?;
+    let liquid_rows = sqlx::query!(
+        r#"SELECT id, name, drunk_effect FROM "Liquids""#
+    )
+    .fetch_all(pool)
+    .await?;
     for row in liquid_rows {
-        liquid_index
-            .by_name
-            .insert(row.name.to_ascii_lowercase(), row.id);
+        let name_lc = row.name.to_ascii_lowercase();
+        liquid_index.by_name.insert(name_lc.clone(), row.id);
+        liquid_index.drunk_effect.insert(name_lc, row.drunk_effect);
     }
     info!(
         liquids = liquid_index.by_name.len(),
