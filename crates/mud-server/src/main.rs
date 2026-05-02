@@ -1,6 +1,7 @@
 mod admin;
 mod combat;
 mod commands;
+mod corpses;
 mod effects;
 mod login;
 mod memorize;
@@ -121,6 +122,9 @@ async fn main() {
     // Same for the in-game clock — without this, every restart snaps
     // back to year 1 / month 1 / day 1 / hour 12.
     weather::load_clock_snapshot(&mut world);
+    // Recreate any corpses that were on the floor at last shutdown.
+    // Needs prototypes + WorldKeyIndex which load_from_db populated.
+    corpses::load_snapshot(&mut world);
 
     combat::seed_test_mobs(&mut world);
     combat::seed_test_items(&mut world);
@@ -292,6 +296,7 @@ async fn main() {
     // left off instead of snapping back to climate defaults.
     weather::save_snapshot(&world);
     weather::save_clock_snapshot(&world);
+    corpses::save_snapshot(&mut world);
 
     info!(
         final_tick = world.resource::<TickCount>().0,
