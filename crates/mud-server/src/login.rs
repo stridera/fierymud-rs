@@ -75,6 +75,21 @@ impl ConnRouter {
         );
     }
 
+    /// Run the `save_player` path for every still-connected character
+    /// that has finished login. Called once on graceful shutdown so a
+    /// Ctrl-C doesn't lose hp/stamina/inventory/location for whoever
+    /// happened to be online — without this, `on_disconnect` only
+    /// fires on actual telnet disconnects and Ctrl-C drops the
+    /// process before that path runs.
+    pub async fn save_all_online(&self, world: &mut World, pool: &PgPool) {
+        // Snapshot the (conn_id, entity) pairs so we don't borrow self
+        // across `.await` calls — save_player takes &mut World.
+        let entries: Vec<Entity> = self.playing.values().copied().collect();
+        for entity in entries {
+            save_player(world, entity, pool).await;
+        }
+    }
+
     pub async fn on_disconnect(&mut self, world: &mut World, conn_id: ConnId, pool: &PgPool) {
         self.login.remove(&conn_id);
         if let Some(entity) = self.playing.remove(&conn_id) {

@@ -279,6 +279,13 @@ async fn main() {
         }
     }
 
+    // Save every online player BEFORE persisting world snapshots —
+    // their save path reads Located → WorldKey on the room they're
+    // standing in, plus the items they're carrying. Doing this only
+    // on `on_disconnect` meant Ctrl-C dropped the process without
+    // ever firing the save and players lost progress.
+    router.save_all_online(&mut world, &pool).await;
+
     // Persist weather state so the next boot picks up where we
     // left off instead of snapping back to climate defaults.
     weather::save_snapshot(&world);
