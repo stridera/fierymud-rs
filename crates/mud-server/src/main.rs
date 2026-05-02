@@ -175,6 +175,11 @@ async fn main() {
     world.insert_resource(admin::AdminInbox(std::sync::Mutex::new(admin_rx)));
     world.insert_resource(admin::VirtualSessions::default());
     world.insert_resource(admin::WorldPause::default());
+    // Pool as a resource so sync command handlers can fire-and-forget
+    // DB writes via tokio::spawn (e.g. `bug` / `idea` / `typo` reports
+    // through any dispatch path, including the admin port's sync path
+    // that doesn't go through try_dispatch_async).
+    world.insert_resource(commands::DbPool(pool.clone()));
 
     let mut router = ConnRouter::new();
     let mut schedule = Schedule::default();

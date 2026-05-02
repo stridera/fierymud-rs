@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+/// Player feedback categories — drives `reports.report_type` on the
+/// in-game `idea` / `bug` / `typo` commands. Each row carries a
+/// reporter, room, and free-text message; staff triages via the
+/// open/in-progress/closed status field.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = "ReportType", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReportType {
+    Bug,
+    Idea,
+    Typo,
+}
+
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[sqlx(type_name = "ResetMode", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ResetMode {

@@ -37,6 +37,13 @@ use crate::{ServerStart, TickCount};
 #[derive(Component)]
 pub struct Connection(pub Outbound);
 
+/// World resource carrying a clone of the Postgres pool. Lets sync
+/// command handlers (which can't `.await`) `tokio::spawn` async DB
+/// writes — currently used by the `bug`/`idea`/`typo` feedback
+/// commands. Cheap to clone; sqlx pools are Arc-backed.
+#[derive(Resource)]
+pub struct DbPool(pub mud_db::sqlx::PgPool);
+
 // ---------------------------------------------------------------------------
 // Command contract
 // ---------------------------------------------------------------------------
@@ -11699,9 +11706,10 @@ fn cmd_typo(world: &mut World, player: Entity, args: &str) {
 }
 
 /// Log a player feedback report (`bug`/`idea`/`typo`) to the tracing
-/// pipeline so it ends up in the server log for staff review. Includes
-/// the player's name, character id, and current room id when available
-/// — useful for `typo` reports that almost always need location context.
+/// pipeline AND insert into the `reports` table. The DB write is
+/// fire-and-forget via `tokio::spawn` so the sync command handler
+/// returns immediately; staff sees both the log line and the DB row.
+/// Empty messages get refused so we don't accumulate empty rows.
 fn submit_feedback(world: &mut World, player: Entity, kind: &'static str, args: &str) {
     let body = args.trim();
     if body.is_empty() {
@@ -11709,22 +11717,51 @@ fn submit_feedback(world: &mut World, player: Entity, kind: &'static str, args: 
         return;
     }
     let name = name_of(world, player);
-    let char_id = world
-        .get::<Account>(player)
-        .map(|a| a.character_id.clone())
-        .unwrap_or_default();
-    let room_key = world
+    let char_id = world.get::<Account>(player).map(|a| a.character_id.clone());
+    let (room_zone, room_id) = world
         .get::<Located>(player)
-        .and_then(|l| world.get::<WorldKey>(l.0))
-        .map(|wk| format!("{}:{}", wk.zone, wk.id));
+        .and_then(|l| world.get::<WorldKey>(l.0).copied())
+        .map_or((None, None), |wk| (Some(wk.zone), Some(wk.id)));
+    let room_label = match (room_zone, room_id) {
+        (Some(z), Some(i)) => format!("{z}:{i}"),
+        _ => "?".to_string(),
+    };
     info!(
         kind,
         player = %name,
-        character_id = %char_id,
-        room = room_key.as_deref().unwrap_or("?"),
+        character_id = char_id.as_deref().unwrap_or(""),
+        room = %room_label,
         body = %body,
         "player feedback"
     );
+    // Caller is always one of the three verbs. Defaulting to Bug
+    // means a wiring mistake still produces a findable row rather
+    // than dropping silently.
+    let report_kind = match kind {
+        "idea" => mud_db::enums::ReportType::Idea,
+        "typo" => mud_db::enums::ReportType::Typo,
+        _ => mud_db::enums::ReportType::Bug,
+    };
+    if let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) {
+        let body_owned = body.to_string();
+        let name_owned = name.clone();
+        let char_id_owned = char_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mud_db::reports::submit(
+                &pool,
+                report_kind,
+                &name_owned,
+                char_id_owned.as_deref(),
+                room_zone,
+                room_id,
+                &body_owned,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "report submit failed");
+            }
+        });
+    }
     send_to(
         world,
         player,
