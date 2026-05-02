@@ -1145,6 +1145,109 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
 
 /// Initial weather state for a zone given its `Climate`. Picks a
 /// resting-state band; the weather tick will drift it from here.
+/// Re-query the trigger catalog from the live DB and return a
+/// freshly-built `TriggerCatalog`. Caller is responsible for
+/// swapping it into the world's resource slot and refreshing any
+/// per-entity `AttachedTriggers` components — this just builds
+/// the catalog from rows. Pulled out of `load_from_db` so the
+/// admin `reload_triggers` endpoint can rebuild without
+/// restarting the process.
+pub async fn load_trigger_catalog(pool: &PgPool) -> sqlx::Result<TriggerCatalog> {
+    let trigger_rows = triggers::list_triggers(pool).await?;
+    let mut catalog = TriggerCatalog::default();
+    for row in trigger_rows {
+        let attach = match row.attach_type {
+            triggers::ScriptType::Mob => TriggerAttach::Mob,
+            triggers::ScriptType::Object => TriggerAttach::Object,
+            triggers::ScriptType::World => TriggerAttach::World,
+        };
+        let flags = row
+            .flags
+            .unwrap_or_default()
+            .into_iter()
+            .map(map_trigger_flag)
+            .collect();
+        catalog.by_key.insert(
+            (row.zone_id, row.id),
+            TriggerDef {
+                zone_id: row.zone_id,
+                id: row.id,
+                name: row.name,
+                attach_type: attach,
+                commands: row.commands,
+                flags,
+                arg_list: row.arg_list.unwrap_or_default(),
+                num_args: row.num_args,
+            },
+        );
+    }
+    for link in triggers::list_mob_triggers(pool).await? {
+        catalog
+            .mob_attachments
+            .entry((link.mob_zone_id, link.mob_id))
+            .or_default()
+            .push((link.trigger_zone_id, link.trigger_id));
+    }
+    for link in triggers::list_object_triggers(pool).await? {
+        catalog
+            .object_attachments
+            .entry((link.object_zone_id, link.object_id))
+            .or_default()
+            .push((link.trigger_zone_id, link.trigger_id));
+    }
+    for link in triggers::list_room_triggers(pool).await? {
+        catalog
+            .room_attachments
+            .entry((link.room_zone_id, link.room_id))
+            .or_default()
+            .push((link.trigger_zone_id, link.trigger_id));
+    }
+    Ok(catalog)
+}
+
+/// Mapping from the DB enum to the runtime enum. Same shape as the
+/// inline match in `load_from_db`'s pass 4.7; extracted so
+/// `load_trigger_catalog` can reuse it without churning the loader.
+fn map_trigger_flag(flag: triggers::TriggerFlag) -> TriggerEvent {
+    match flag {
+        triggers::TriggerFlag::Global => TriggerEvent::Global,
+        triggers::TriggerFlag::Random => TriggerEvent::Random,
+        triggers::TriggerFlag::Command => TriggerEvent::Command,
+        triggers::TriggerFlag::Load => TriggerEvent::Load,
+        triggers::TriggerFlag::Cast => TriggerEvent::Cast,
+        triggers::TriggerFlag::Leave => TriggerEvent::Leave,
+        triggers::TriggerFlag::Time => TriggerEvent::Time,
+        triggers::TriggerFlag::Speech => TriggerEvent::Speech,
+        triggers::TriggerFlag::Act => TriggerEvent::Act,
+        triggers::TriggerFlag::Death => TriggerEvent::Death,
+        triggers::TriggerFlag::Greet => TriggerEvent::Greet,
+        triggers::TriggerFlag::GreetAll => TriggerEvent::GreetAll,
+        triggers::TriggerFlag::Entry => TriggerEvent::Entry,
+        triggers::TriggerFlag::Receive => TriggerEvent::Receive,
+        triggers::TriggerFlag::Fight => TriggerEvent::Fight,
+        triggers::TriggerFlag::HitPercent => TriggerEvent::HitPercent,
+        triggers::TriggerFlag::Bribe => TriggerEvent::Bribe,
+        triggers::TriggerFlag::Memory => TriggerEvent::Memory,
+        triggers::TriggerFlag::Door => TriggerEvent::Door,
+        triggers::TriggerFlag::SpeechTo => TriggerEvent::SpeechTo,
+        triggers::TriggerFlag::Look => TriggerEvent::Look,
+        triggers::TriggerFlag::Auto => TriggerEvent::Auto,
+        triggers::TriggerFlag::Attack => TriggerEvent::Attack,
+        triggers::TriggerFlag::Defend => TriggerEvent::Defend,
+        triggers::TriggerFlag::Timer => TriggerEvent::Timer,
+        triggers::TriggerFlag::Get => TriggerEvent::Get,
+        triggers::TriggerFlag::Drop => TriggerEvent::Drop,
+        triggers::TriggerFlag::Give => TriggerEvent::Give,
+        triggers::TriggerFlag::Wear => TriggerEvent::Wear,
+        triggers::TriggerFlag::Remove => TriggerEvent::Remove,
+        triggers::TriggerFlag::Use => TriggerEvent::Use,
+        triggers::TriggerFlag::Consume => TriggerEvent::Consume,
+        triggers::TriggerFlag::Reset => TriggerEvent::Reset,
+        triggers::TriggerFlag::Preentry => TriggerEvent::Preentry,
+        triggers::TriggerFlag::Postentry => TriggerEvent::Postentry,
+    }
+}
+
 /// `NONE` zones are treated as Mild + Clear (indoor / abstract zones
 /// like the Void / Limbo never see player-visible weather anyway).
 #[must_use]

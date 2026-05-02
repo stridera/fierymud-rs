@@ -102,6 +102,11 @@ pub enum AdminRequest {
     TriggerInfo { zone_id: Option<i32>, id: Option<i32> },
     TriggerErrors { limit: Option<usize> },
     TriggerStats,
+    /// New catalog assembled from the DB by the HTTP handler;
+    /// the world dispatch swaps the resource and re-applies room
+    /// attachments. Mob/object spawns will pick up new trigger
+    /// rows on their next respawn naturally.
+    ReloadTriggers { catalog: Box<mud_world::TriggerCatalog> },
 }
 
 pub type AdminResponse = Result<Value, (StatusCode, String)>;
@@ -159,6 +164,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/triggers/{zone_id}/{id}", get(handle_trigger_info_one))
         .route("/api/admin/triggers/errors", get(handle_trigger_errors))
         .route("/api/admin/triggers/stats", get(handle_trigger_stats))
+        .route("/api/admin/triggers/reload", post(handle_trigger_reload))
         .with_state(state)
 }
 
@@ -540,6 +546,29 @@ async fn handle_trigger_stats(
     json_ok(enqueue(&state, AdminRequest::TriggerStats).await)
 }
 
+/// Re-pull the trigger catalog from the DB, then post the rebuilt
+/// resource into the world tick for atomic swap. The DB query
+/// runs here in the async handler — by the time the world dispatch
+/// runs, all rows are already in memory.
+async fn handle_trigger_reload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    let catalog = match mud_world::load_trigger_catalog(&state.pool).await {
+        Ok(c) => Box::new(c),
+        Err(e) => {
+            return json_err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("trigger catalog query failed: {e}"),
+            ));
+        }
+    };
+    json_ok(enqueue(&state, AdminRequest::ReloadTriggers { catalog }).await)
+}
+
 fn json_ok(r: Result<Value, (StatusCode, String)>) -> (StatusCode, axum::Json<Value>) {
     match r {
         Ok(v) => (StatusCode::OK, axum::Json(v)),
@@ -621,7 +650,67 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::TriggerInfo { zone_id, id } => Ok(trigger_info(world, zone_id, id)),
         AdminRequest::TriggerErrors { limit } => Ok(trigger_errors(world, limit)),
         AdminRequest::TriggerStats => Ok(trigger_stats(world)),
+        AdminRequest::ReloadTriggers { catalog } => Ok(reload_triggers(world, *catalog)),
     }
+}
+
+/// Swap the live `TriggerCatalog` for `new` and refresh
+/// `AttachedTriggers` on every Room entity using the new
+/// `room_attachments` map. Mob and item entities keep whatever
+/// attachments they were spawned with — the next respawn cycle
+/// picks up additions/removals naturally; reloading existing
+/// instances would risk surprising live combat.
+fn reload_triggers(world: &mut World, new: mud_world::TriggerCatalog) -> Value {
+    use bevy_ecs::prelude::With;
+    use mud_world::{AttachedTriggers, Room};
+
+    let total = new.by_key.len();
+    let mob_links = new.mob_attachments.len();
+    let object_links = new.object_attachments.len();
+    let room_links = new.room_attachments.len();
+
+    // Snapshot every Room entity's WorldKey so we can clear and
+    // re-apply attachments without holding a query borrow during
+    // the entity edits.
+    let rooms_to_refresh: Vec<(Entity, (i32, i32))> = {
+        let mut q = world.query_filtered::<(Entity, &WorldKey), With<Room>>();
+        q.iter(world).map(|(e, k)| (e, (k.zone, k.id))).collect()
+    };
+    let mut rooms_with_triggers = 0usize;
+    for (room, key) in rooms_to_refresh {
+        let attached = new.room_attachments.get(&key).cloned();
+        if let Ok(mut em) = world.get_entity_mut(room) {
+            // Always clear, then re-add only when the new catalog
+            // has something — avoids leaving stale keys on rooms
+            // that lost all their attachments.
+            em.remove::<AttachedTriggers>();
+            if let Some(list) = attached
+                && !list.is_empty()
+            {
+                em.insert(AttachedTriggers(list));
+                rooms_with_triggers += 1;
+            }
+        }
+    }
+
+    world.insert_resource(new);
+    info!(
+        total,
+        mob_links,
+        object_links,
+        room_links,
+        rooms_with_triggers,
+        "trigger catalog reloaded",
+    );
+    json!({
+        "ok": true,
+        "total": total,
+        "mob_links": mob_links,
+        "object_links": object_links,
+        "room_links": room_links,
+        "rooms_with_triggers": rooms_with_triggers,
+        "note": "mob/object instance attachments unchanged; next respawn picks up catalog edits",
+    })
 }
 
 /// Enumerate trigger catalog rows as JSON. With no filter, returns

@@ -16,7 +16,10 @@ pub use components::{
     WimpyThreshold,
     WorldKey, Zone, ZoneClimate,
 };
-pub use loader::{LoadStats, default_weather_for_climate, load_from_db, wear_flags_primary_slot};
+pub use loader::{
+    LoadStats, default_weather_for_climate, load_from_db, load_trigger_catalog,
+    wear_flags_primary_slot,
+};
 pub use resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog, DamageComponent, EffectCatalog,
