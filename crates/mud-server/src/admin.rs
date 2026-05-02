@@ -46,6 +46,18 @@ use crate::commands::{self, name_of};
 #[derive(Resource)]
 pub struct AdminInbox(pub Mutex<mpsc::UnboundedReceiver<AdminCommand>>);
 
+/// Pause state. While `paused`, the main tick loop skips the
+/// gameplay schedule (combat, effects, regen, mob AI, respawn,
+/// Lua coroutines). The admin inbox keeps draining so unpause /
+/// tick / status calls still go through. `forced_ticks` lets a
+/// paused world step a fixed number of frames for deterministic
+/// testing — set by `POST /api/admin/world/tick`.
+#[derive(Resource, Default)]
+pub struct WorldPause {
+    pub paused: bool,
+    pub forced_ticks: u32,
+}
+
 /// Active virtual sessions keyed by player name. Each holds the
 /// spawned Player entity plus the receiver that captures its
 /// outbound bytes — drained at the end of each `execute_command`
@@ -82,6 +94,9 @@ pub enum AdminRequest {
     Teleport { player_name: String, zone_id: i32, room_id: i32 },
     Spawn { kind: String, zone_id: i32, id: i32, room_zone: i32, room_id: i32 },
     InspectMob { zone_id: i32, id: i32 },
+    PauseWorld,
+    UnpauseWorld,
+    TickWorld { count: u32 },
 }
 
 pub type AdminResponse = Result<Value, (StatusCode, String)>;
@@ -132,6 +147,9 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/command", post(handle_command))
         .route("/api/admin/teleport", post(handle_teleport))
         .route("/api/admin/spawn", post(handle_spawn))
+        .route("/api/admin/world/pause", post(handle_pause_world))
+        .route("/api/admin/world/unpause", post(handle_unpause_world))
+        .route("/api/admin/world/tick", post(handle_tick_world))
         .with_state(state)
 }
 
@@ -364,6 +382,66 @@ async fn handle_teleport(
     )
 }
 
+// Lenient optional u32 — accepts int literal, numeric string,
+// null, or absent. Mirrors `de_i32_lenient` for the MCP TS layer
+// that ships numeric tool args as JSON strings.
+#[derive(Deserialize, Default)]
+struct TickBody {
+    #[serde(default, deserialize_with = "de_u32_lenient_opt")]
+    count: Option<u32>,
+}
+
+fn de_u32_lenient_opt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error> {
+    use serde::Deserialize as _;
+    match Option::<Value>::deserialize(d)? {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => Ok(Some(
+            n.as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| serde::de::Error::custom("number out of range for u32"))?,
+        )),
+        Some(Value::String(s)) => Ok(Some(
+            s.parse::<u32>()
+                .map_err(|e| serde::de::Error::custom(e.to_string()))?,
+        )),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected number or numeric string, got {other}"
+        ))),
+    }
+}
+
+async fn handle_pause_world(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(enqueue(&state, AdminRequest::PauseWorld).await)
+}
+
+async fn handle_unpause_world(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(enqueue(&state, AdminRequest::UnpauseWorld).await)
+}
+
+async fn handle_tick_world(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<axum::Json<TickBody>>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    let count = body.and_then(|b| b.0.count).unwrap_or(1).max(1);
+    json_ok(enqueue(&state, AdminRequest::TickWorld { count }).await)
+}
+
 async fn handle_spawn(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -439,11 +517,40 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
             spawn_into(world, &kind, zone_id, id, room_zone, room_id)
         }
         AdminRequest::InspectMob { zone_id, id } => inspect_mob(world, zone_id, id),
+        AdminRequest::PauseWorld => {
+            let mut p = world.resource_mut::<WorldPause>();
+            let was = p.paused;
+            p.paused = true;
+            Ok(json!({ "paused": true, "was_paused": was }))
+        }
+        AdminRequest::UnpauseWorld => {
+            let mut p = world.resource_mut::<WorldPause>();
+            let was = p.paused;
+            p.paused = false;
+            p.forced_ticks = 0;
+            Ok(json!({ "paused": false, "was_paused": was }))
+        }
+        AdminRequest::TickWorld { count } => {
+            let mut p = world.resource_mut::<WorldPause>();
+            // Saturating so a misbehaving caller can't overflow.
+            p.forced_ticks = p.forced_ticks.saturating_add(count);
+            let pending = p.forced_ticks;
+            let paused = p.paused;
+            Ok(json!({
+                "ticks_queued": count,
+                "pending": pending,
+                "paused": paused,
+                "note": if paused { "ticks will fire one per real frame while paused" } else { "world is running; forced_ticks accumulates but has no effect until pause" },
+            }))
+        }
     }
 }
 
 fn world_status(world: &mut World) -> Value {
     let tick = world.resource::<crate::TickCount>().0;
+    let pause = world.resource::<WorldPause>();
+    let paused = pause.paused;
+    let pending_ticks = pause.forced_ticks;
     let players = world
         .query_filtered::<(), (With<Player>, With<Online>)>()
         .iter(world)
@@ -451,7 +558,8 @@ fn world_status(world: &mut World) -> Value {
     let mobs = world.query_filtered::<(), With<Mob>>().iter(world).count();
     let items = world.query_filtered::<(), With<Item>>().iter(world).count();
     json!({
-        "paused": false,
+        "paused": paused,
+        "pending_forced_ticks": pending_ticks,
         "tick": tick,
         "online_players": players,
         "mobs": mobs,

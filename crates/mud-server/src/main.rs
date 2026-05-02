@@ -174,9 +174,13 @@ async fn main() {
     let admin_rx = admin::spawn_admin_server(pool.clone());
     world.insert_resource(admin::AdminInbox(std::sync::Mutex::new(admin_rx)));
     world.insert_resource(admin::VirtualSessions::default());
+    world.insert_resource(admin::WorldPause::default());
 
     let mut router = ConnRouter::new();
     let mut schedule = Schedule::default();
+    // drain_admin_requests is intentionally OUTSIDE the schedule so
+    // pause/unpause/tick admin requests can still flow through while
+    // the rest of the world is frozen. Everything else stops on pause.
     schedule.add_systems(
         (
             advance_tick,
@@ -187,7 +191,6 @@ async fn main() {
             memorize::memorize_tick,
             respawn::respawn_tick,
             triggers::lua_coroutine_tick,
-            admin::drain_admin_requests,
             log_heartbeat,
         )
             .chain(),
@@ -207,7 +210,25 @@ async fn main() {
             _ = ticker.tick() => {
                 let span = info_span!("tick");
                 let _g = span.enter();
-                schedule.run(&mut world);
+                // Always drain admin requests first — pause/unpause/
+                // tick must flow even while the rest of the world is
+                // frozen. The drain consumes any forced-tick budget
+                // posted by /api/admin/world/tick.
+                admin::drain_admin_requests(&mut world);
+                let run_world = {
+                    let mut p = world.resource_mut::<admin::WorldPause>();
+                    if !p.paused {
+                        true
+                    } else if p.forced_ticks > 0 {
+                        p.forced_ticks -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if run_world {
+                    schedule.run(&mut world);
+                }
                 // After all systems for this tick have run, refresh
                 // prompts for anyone who received output (combat hits,
                 // effect fades, broadcasts, etc.).
