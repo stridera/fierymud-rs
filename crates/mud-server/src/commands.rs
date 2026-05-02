@@ -8156,6 +8156,7 @@ struct WhoRow {
     title: Option<String>,
     afk: bool,
     idle: Option<u64>,
+    level: i32,
 }
 
 fn cmd_who(world: &mut World, player: Entity, _args: &str) {
@@ -8173,14 +8174,16 @@ fn cmd_who(world: &mut World, player: Entity, _args: &str) {
             Option<&Title>,
             Option<&PlayerFlags>,
             Option<&LastInputAt>,
+            Option<&Profile>,
         ), (With<Player>, With<Online>)>();
         q.iter(world)
-            .map(|(e, n, t, f, last)| WhoRow {
+            .map(|(e, n, t, f, last, prof)| WhoRow {
                 entity: e,
                 name: n.name.clone(),
                 title: t.map(|t| t.0.clone()),
                 afk: f.is_some_and(|pf| pf.has(PlayerFlag::Afk)),
                 idle: last.map(|l| l.0.elapsed().as_secs()),
+                level: prof.map_or(0, |p| p.level),
             })
             .collect()
     };
@@ -8198,10 +8201,19 @@ fn cmd_who(world: &mut World, player: Entity, _args: &str) {
     }
 
     let mut out = format!("\r\n{} online:\r\n", raw.len());
-    for r in &raw {
+    // Sort by level desc so endgame players surface first; same-
+    // level players sort alphabetically for stable output.
+    let mut raw_sorted = raw;
+    raw_sorted.sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.name.cmp(&b.name)));
+    for r in &raw_sorted {
         let root = roots.get(&r.entity).copied().unwrap_or(r.entity);
         let in_group = group_size.get(&root).copied().unwrap_or(0) > 1;
         out.push_str("  ");
+        if r.level > 0 {
+            out.push_str(&format!("[L{:>3}] ", r.level));
+        } else {
+            out.push_str("       ");
+        }
         out.push_str(&pad_visible(&r.name, NAME_COL));
         if let Some(t) = &r.title {
             out.push(' ');
