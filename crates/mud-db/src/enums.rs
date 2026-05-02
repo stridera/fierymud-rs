@@ -176,6 +176,35 @@ pub enum MobRole {
     RaidBoss,
 }
 
+/// "Kill the wrong target" alignment-penalty marker on mobs.
+/// `Normal` is the default and incurs no penalty; the others
+/// scale a player's alignment toward EVIL on kill.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[sqlx(type_name = "ProtectedKind", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProtectedKind {
+    #[default]
+    Normal,
+    Innocent,
+    Shopkeeper,
+    QuestNpc,
+}
+
+impl ProtectedKind {
+    /// Alignment delta applied to the killer when this mob dies.
+    /// Negative numbers shift toward EVIL. `Normal` is 0 (no
+    /// penalty). Tunable; values picked to make `Innocent` a
+    /// strong shaping signal without one-shotting alignment.
+    #[must_use]
+    pub const fn alignment_penalty(self) -> i32 {
+        match self {
+            Self::Normal => 0,
+            Self::Innocent => -250,
+            Self::Shopkeeper => -150,
+            Self::QuestNpc => -75,
+        }
+    }
+}
+
 /// Per-mob behavior flags, sourced from `Mobs.behaviors`. Mirrors
 /// the schema's `MobBehavior` enum verbatim. Variants the runtime
 /// doesn't read yet stay in the spawn-time list; future systems

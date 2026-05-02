@@ -965,6 +965,7 @@ pub(crate) fn handle_death(
         if let Some(killer) = killer {
             crate::commands::grant_achievement(world, killer, "first_kill");
             crate::commands::bump_kill_count(world, killer);
+            apply_protected_kill_penalty(world, killer, victim);
         }
         // Fire DEATH triggers BEFORE despawn so the body can read
         // self.room, broadcast last words, etc. The trigger
@@ -1142,6 +1143,43 @@ fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
 ///   Boss 10.0x / `RaidBoss` 20.0x.
 /// No-op when the killer has no Profile (admin testing path) or
 /// the mob has no proto.
+/// "Kill the wrong target" alignment penalty. Looks up the
+/// victim's `MobProto.protected_kind`; if non-Normal, shifts the
+/// killer's `CombatStats.alignment` toward EVIL by the per-kind
+/// delta and emits a guilt-flavor line. Clamped at -1000 (the
+/// schema's pure-evil floor).
+fn apply_protected_kill_penalty(world: &mut World, killer: Entity, victim: Entity) {
+    let proto_key = match world.get::<mud_world::WorldKey>(victim) {
+        Some(k) => *k,
+        None => return,
+    };
+    let protected = world
+        .get_resource::<mud_world::MobPrototypes>()
+        .and_then(|p| p.by_key.get(&(proto_key.zone, proto_key.id)))
+        .map(|m| m.protected_kind);
+    let Some(kind) = protected else { return };
+    let delta = kind.alignment_penalty();
+    if delta == 0 {
+        return;
+    }
+    if let Some(mut cs) = world.get_mut::<mud_world::CombatStats>(killer) {
+        cs.alignment = (cs.alignment + delta).max(-1000);
+    }
+    let line = match kind {
+        mud_db::enums::ProtectedKind::Innocent => {
+            "A wave of cold guilt washes through you — that creature was no threat.\r\n"
+        }
+        mud_db::enums::ProtectedKind::Shopkeeper => {
+            "A shudder runs through the marketplace. Word of this will spread.\r\n"
+        }
+        mud_db::enums::ProtectedKind::QuestNpc => {
+            "A flicker of regret — there were stories left untold.\r\n"
+        }
+        mud_db::enums::ProtectedKind::Normal => return,
+    };
+    send_to(world, killer, line);
+}
+
 fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
     use mud_db::enums::MobRole;
     let proto = world

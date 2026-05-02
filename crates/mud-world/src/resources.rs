@@ -893,6 +893,10 @@ pub struct MobProto {
     /// spawn instance as a `MobBehaviors` component. Empty when the
     /// content has no tags for this mob.
     pub behaviors: Vec<mud_db::enums::MobBehavior>,
+    /// Wrong-target alignment-penalty marker. `Normal` for the
+    /// vast majority of mobs; non-Normal triggers an alignment
+    /// hit on the killer in `combat::handle_death`.
+    pub protected_kind: mud_db::enums::ProtectedKind,
 }
 
 impl MobProto {
