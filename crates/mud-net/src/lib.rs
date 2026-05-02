@@ -149,6 +149,74 @@ pub fn gmcp_packet(package: &str, payload: &str) -> Vec<u8> {
     out
 }
 
+/// State for the inbound IAC stripper. Persists across `read_until`
+/// calls because telnet subnegotiation sequences may span multiple
+/// reads (rare in practice but legal per RFC 854).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IacState {
+    /// Pass-through. Switch to `AfterIac` on 0xFF.
+    Normal,
+    /// Saw an IAC byte. Next byte tells us what kind of sequence.
+    AfterIac,
+    /// Saw IAC + DO/DONT/WILL/WONT (0xFB–0xFE). Next byte is the
+    /// option number; drop it and return to Normal.
+    AfterCommand,
+    /// Inside `IAC SB ... IAC SE`. Consume bytes until IAC SE.
+    InSubneg,
+    /// Inside SB and just saw an IAC. The next byte is either SE
+    /// (0xF0, end of subneg) or another IAC (0xFF, escaped data
+    /// byte). Either way return to `InSubneg` or Normal accordingly.
+    SubnegAfterIac,
+}
+
+/// Filter telnet IAC sequences out of a byte buffer. Returns only
+/// the data bytes (player text); IAC negotiation and subnegotiation
+/// frames are silently dropped. The state machine persists across
+/// calls so multi-read subnegotiations resolve correctly.
+fn strip_iac(input: &[u8], state: &mut IacState) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    for &b in input {
+        match *state {
+            IacState::Normal => {
+                if b == 0xFF {
+                    *state = IacState::AfterIac;
+                } else {
+                    out.push(b);
+                }
+            }
+            IacState::AfterIac => {
+                match b {
+                    0xFF => {
+                        // Escaped data byte (IAC IAC). Telnet says
+                        // emit a single 0xFF, but player text won't
+                        // contain such bytes legitimately and we
+                        // can't UTF-8-encode them, so drop.
+                        *state = IacState::Normal;
+                    }
+                    0xFB..=0xFE => *state = IacState::AfterCommand,
+                    0xFA => *state = IacState::InSubneg,
+                    _ => *state = IacState::Normal,
+                }
+            }
+            IacState::AfterCommand => *state = IacState::Normal,
+            IacState::InSubneg => {
+                if b == 0xFF {
+                    *state = IacState::SubnegAfterIac;
+                }
+                // else: subnegotiation payload byte, drop.
+            }
+            IacState::SubnegAfterIac => {
+                if b == 0xF0 {
+                    *state = IacState::Normal;
+                } else {
+                    *state = IacState::InSubneg;
+                }
+            }
+        }
+    }
+    out
+}
+
 async fn handle_connection<S>(
     conn_id: ConnId,
     peer: SocketAddr,
@@ -188,14 +256,31 @@ async fn handle_connection<S>(
         }
     });
 
+    // Raw-bytes reader: read_until(\n) instead of read_line because
+    // clients that speak GMCP (or any telnet option) reply with IAC
+    // sequences containing 0xFF — invalid UTF-8, which read_line
+    // refuses. We parse out IAC framing here, then lossy-convert
+    // what remains to UTF-8 for the line dispatcher.
     let mut reader = BufReader::new(read_half);
-    let mut buf = String::new();
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    let mut iac_state = IacState::Normal;
     loop {
         buf.clear();
-        match reader.read_line(&mut buf).await {
+        match reader.read_until(b'\n', &mut buf).await {
             Ok(0) => break,
             Ok(_) => {
-                let line = buf.trim_end_matches(['\r', '\n']).to_string();
+                let stripped = strip_iac(&buf, &mut iac_state);
+                let line = String::from_utf8_lossy(&stripped)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string();
+                // A line that was nothing but IAC bytes (option
+                // negotiation reply, GMCP subneg, etc.) leaves
+                // `stripped` empty after filtering — skip the
+                // empty-line forward instead of treating it as an
+                // empty player command.
+                if stripped.is_empty() {
+                    continue;
+                }
                 if inbound
                     .send(Inbound {
                         conn: conn_id,
@@ -221,3 +306,44 @@ async fn handle_connection<S>(
     writer.abort();
 }
 
+
+#[cfg(test)]
+mod iac_tests {
+    use super::{strip_iac, IacState};
+
+    fn run(input: &[u8]) -> Vec<u8> {
+        let mut state = IacState::Normal;
+        strip_iac(input, &mut state)
+    }
+
+    #[test]
+    fn passes_plain_text() {
+        assert_eq!(run(b"hello\r\n"), b"hello\r\n");
+    }
+
+    #[test]
+    fn strips_iac_do_gmcp() {
+        // Mudlet's reply to our IAC WILL 201: IAC DO 201
+        let input = [b'h', b'i', 0xFF, 0xFD, 0xC9, b'\r', b'\n'];
+        assert_eq!(run(&input), b"hi\r\n");
+    }
+
+    #[test]
+    fn strips_iac_subneg() {
+        // IAC SB 201 some payload IAC SE
+        let input: Vec<u8> =
+            [&[b'a'][..], &[0xFF, 0xFA, 0xC9], b"payload", &[0xFF, 0xF0], b"b"].concat();
+        assert_eq!(run(&input), b"ab");
+    }
+
+    #[test]
+    fn state_persists_across_calls() {
+        let mut state = IacState::Normal;
+        // First chunk: opens a subneg but doesn't close it.
+        assert_eq!(strip_iac(&[b'x', 0xFF, 0xFA, 0xC9, b'p'], &mut state), b"x");
+        assert_eq!(state, IacState::InSubneg);
+        // Second chunk: more subneg payload then IAC SE then real text.
+        assert_eq!(strip_iac(&[b'q', 0xFF, 0xF0, b'y'], &mut state), b"y");
+        assert_eq!(state, IacState::Normal);
+    }
+}
