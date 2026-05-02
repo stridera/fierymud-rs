@@ -222,10 +222,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 zone_id: row.zone_id,
                 id: row.id,
                 r#type: row.r#type,
-                name: row.name,
+                name: strip_ansi(&row.name),
                 keywords: row.keywords,
-                room_description: row.room_description,
-                examine_description: row.examine_description,
+                room_description: strip_ansi(&row.room_description),
+                examine_description: row.examine_description.as_deref().map(strip_ansi),
                 weight: row.weight,
                 level: row.level,
                 wear_flags: row.wear_flags,
@@ -1169,6 +1169,37 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
 
 /// Initial weather state for a zone given its `Climate`. Picks a
 /// resting-state band; the weather tick will drift it from here.
+/// Strip raw ANSI SGR escape sequences (`ESC[...m`) from a
+/// string. Legacy `CircleMUD` content baked color codes directly
+/// into object names; those leak into XML-Lite-rendered output as
+/// literal escape codes for color-off clients and break visible-
+/// width math for everyone. Runtime workaround until the
+/// fierylib import pass rewrites them to XML-Lite tags.
+fn strip_ansi(s: &str) -> String {
+    if !s.contains('\x1b') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // SGR sequence: skip until 'm'.
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // consume the 'm'
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 /// Re-query the trigger catalog from the live DB and return a
 /// freshly-built `TriggerCatalog`. Caller is responsible for
 /// swapping it into the world's resource slot and refreshing any
