@@ -21502,7 +21502,7 @@ fn sector_movement_cost(s: Sector) -> i32 {
     }
 }
 
-fn direction_name(d: Direction) -> &'static str {
+pub(crate) fn direction_name(d: Direction) -> &'static str {
     use Direction::{
         Down, East, In, North, Northeast, Northwest, Out, Portal, South, Southeast, Southwest, Up,
         West,
@@ -21525,7 +21525,7 @@ fn direction_name(d: Direction) -> &'static str {
     }
 }
 
-fn opposite(d: Direction) -> Option<Direction> {
+pub(crate) fn opposite(d: Direction) -> Option<Direction> {
     use Direction::{
         Down, East, In, North, Northeast, Northwest, Out, South, Southeast, Southwest, Up, West,
     };

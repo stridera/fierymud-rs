@@ -8,9 +8,9 @@ use tracing::info;
 
 use crate::TickCount;
 use crate::commands::{
-    apply_damage, broadcast_room_except_rendered, cmd_flee, color_mode_for,
-    disengage_attackers_of, drain_stamina, name_of, render_color_tags, send_to, try_insert,
-    try_remove,
+    apply_damage, broadcast_room_except_players_rendered, broadcast_room_except_rendered,
+    cmd_flee, color_mode_for, direction_name, disengage_attackers_of, drain_stamina, name_of,
+    opposite, render_color_tags, send_to, try_insert, try_remove,
 };
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
@@ -163,6 +163,52 @@ pub fn corpse_decay_tick(world: &mut World) {
 pub fn hit_chance_pct(hit_roll: i32, target_ac: i32) -> i32 {
     let modifier = hit_roll.saturating_mul(2) - target_ac.saturating_mul(5);
     (80i32.saturating_add(modifier)).clamp(5, 100)
+}
+
+/// Pick a random open exit and walk a fleeing mob through it.
+/// No-op if the room has no open exits — the swing path falls
+/// through and the mob takes the next hit normally. Drops the
+/// mob's `Fighting` so attackers will auto-disengage on the room
+/// mismatch in the next combat tick.
+fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
+    let candidates: Vec<(mud_db::enums::Direction, Entity)> = world
+        .get::<Exits>(from_room)
+        .map(|e| {
+            e.0.iter()
+                .filter_map(|(dir, ed)| {
+                    if ed.state == mud_db::enums::ExitState::Open {
+                        ed.to.map(|t| (*dir, t))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if candidates.is_empty() {
+        return;
+    }
+    let pick = rand::random_range(0..candidates.len());
+    let (dir, target_room) = candidates[pick];
+    let mob_name = name_of(world, mob);
+    broadcast_room_except_players_rendered(
+        world,
+        from_room,
+        &[mob],
+        &format!("{mob_name} panics and flees {}!\r\n", direction_name(dir)),
+    );
+    try_remove::<Fighting>(world, mob);
+    if let Some(mut l) = world.get_mut::<Located>(mob) {
+        l.0 = target_room;
+    }
+    let arrival_dir =
+        opposite(dir).map_or("nearby".to_string(), |d| format!("the {}", direction_name(d)));
+    broadcast_room_except_players_rendered(
+        world,
+        target_room,
+        &[mob],
+        &format!("{mob_name} arrives, panting, from {arrival_dir}.\r\n"),
+    );
 }
 
 /// One swing's outcome from the d100 roll. Crit and Miss are
@@ -478,6 +524,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     //
     // cmd_flee handles "no exits" and the room-broadcast itself.
     let target_is_player = world.get::<Player>(s.target).is_some();
+    let target_is_mob = world.get::<Mob>(s.target).is_some();
     let wimpy_set = world
         .get::<PlayerFlags>(s.target)
         .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::Wimpy));
@@ -485,6 +532,22 @@ fn apply_swing(world: &mut World, s: &Swing) {
         .get::<mud_world::WimpyThreshold>(s.target)
         .map_or(25, |w| w.0)
         .clamp(1, 99);
+    // Mob auto-flee at <20% HP. Trivial mobs (max HP < 30) can't
+    // really flee meaningfully — they'd die on the next swing
+    // anyway. Boss-tier mobs (max HP > 200) hold ground; without a
+    // proper role flag this absolute-HP heuristic cleanly separates
+    // wildlife from set-piece encounters. 50% per-swing roll gives
+    // players a window to finish rather than chasing through rooms.
+    if target_is_mob
+        && let Some(hp) = world.get::<Health>(s.target).copied()
+        && hp.hp > 0
+        && (30..=200).contains(&hp.max)
+        && hp.hp * 5 < hp.max
+        && rand::random_range(0..2) == 0
+    {
+        mob_flee(world, s.target, room);
+        return;
+    }
     if target_is_player && wimpy_set
         && let Some(hp) = world.get::<Health>(s.target).copied()
         && hp.hp > 0
