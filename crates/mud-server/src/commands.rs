@@ -6519,6 +6519,11 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             let mount_name = name_or(world, mount, "(unknown)");
             out.push_str(&format!("You're riding {mount_name}.\r\n"));
         }
+        let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
+        let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
+        if let Some(c) = condition_summary(hunger, thirst) {
+            out.push_str(&format!("You feel {c}.\r\n"));
+        }
         send_to(world, player, out);
         return;
     }
