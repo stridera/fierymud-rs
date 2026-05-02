@@ -8224,6 +8224,11 @@ struct ScoreData<'a> {
     /// Bank-stored copper total. Rendered as a separate `Bank:` line
     /// when nonzero so players can tell on-hand vs. saved at a glance.
     bank: i64,
+    /// Survival gauges; rendered as one comma-separated `Condition:`
+    /// line when any band crossed (hungry/starving/thirsty/parched).
+    /// Sated state stays silent.
+    hunger: i32,
+    thirst: i32,
 }
 
 fn cmd_score(world: &mut World, player: Entity, _args: &str) {
@@ -8260,6 +8265,8 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
 
     let wealth = world.get::<Wealth>(player).map_or(0, |w| w.0);
     let bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
+    let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
+    let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
     let data = ScoreData {
         name: &name,
         hp,
@@ -8274,6 +8281,8 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .map(|(lvl, cls, race, xp)| (*lvl, cls.as_str(), race.as_str(), *xp)),
         wealth,
         bank,
+        hunger,
+        thirst,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
@@ -8320,7 +8329,32 @@ fn render_score_standard(d: &ScoreData) -> String {
     if !d.flags.is_empty() {
         out.push_str(&format!("  Flags: {}\r\n", d.flags.join(", ")));
     }
+    if let Some(c) = condition_summary(d.hunger, d.thirst) {
+        out.push_str(&format!("  Condition: {c}\r\n"));
+    }
     out
+}
+
+/// Comma-joined hunger/thirst descriptors, or None if both are
+/// below their warning thresholds. Bands match the tick consumer's
+/// `HUNGRY_AT` / `STARVING_AT` / `THIRSTY_AT` / `PARCHED_AT`.
+fn condition_summary(hunger: i32, thirst: i32) -> Option<String> {
+    let mut parts = Vec::new();
+    if hunger >= 48 {
+        parts.push("starving");
+    } else if hunger >= 24 {
+        parts.push("hungry");
+    }
+    if thirst >= 24 {
+        parts.push("parched");
+    } else if thirst >= 12 {
+        parts.push("thirsty");
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
 }
 
 fn render_score_fancy(d: &ScoreData) -> String {
