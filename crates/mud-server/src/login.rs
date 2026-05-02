@@ -304,7 +304,7 @@ impl ConnRouter {
 /// the starting room resolved — keeping the core bundle one place
 /// avoids the recurring "did I update both branches?" bug we hit
 /// three times before consolidating.
-fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outbound) -> Entity {
+pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outbound) -> Entity {
     let (zone, room) = pick_starting_room(c);
 
     let index = world.resource::<WorldKeyIndex>();
@@ -603,7 +603,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
 /// Skips rows whose prototype isn't loaded (logs a warn) and orphan
 /// rows whose parent never spawned (also logged). Returns total spawn
 /// count for the login info line.
-fn spawn_inventory(world: &mut World, player: Entity, rows: &[CharacterItemRow]) -> usize {
+pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[CharacterItemRow]) -> usize {
     use std::collections::HashMap;
     // row.id → spawned Entity. Top-level items spawn first; nested rows
     // wait for their parent to land.

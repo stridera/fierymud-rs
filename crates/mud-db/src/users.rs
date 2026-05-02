@@ -30,3 +30,22 @@ pub async fn find_by_email(pool: &PgPool, email: &str) -> sqlx::Result<Option<Us
     .fetch_optional(pool)
     .await
 }
+
+pub async fn find_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<User>> {
+    sqlx::query_as!(
+        User,
+        r#"
+        SELECT
+            id,
+            email,
+            display_name,
+            password_hash,
+            role AS "role: UserRole"
+        FROM "Users"
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+        id
+    )
+    .fetch_optional(pool)
+    .await
+}

@@ -26,6 +26,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use bevy_ecs::prelude::*;
+use mud_db::{characters, characters::CharacterRow, character_items, sqlx::PgPool, users, users::User};
 use mud_net::Outbound;
 use mud_world::{
     AppliedTo, EffectInstance, Exits, Health, Item, Located, Mob, Named, Online, Player, Posture,
@@ -36,7 +37,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::commands::{self, Connection, name_of};
+use crate::commands::{self, name_of};
 
 /// Where the world tick reads pending admin requests from. Installed
 /// as a resource at boot.
@@ -64,12 +65,16 @@ pub struct AdminCommand {
     pub reply: oneshot::Sender<AdminResponse>,
 }
 
-#[derive(Debug)]
 pub enum AdminRequest {
     WorldStatus,
     LookRoom { zone_id: i32, id: i32 },
     InspectActor { name: String },
-    SessionCreate { player_name: String },
+    SessionCreate {
+        player_name: String,
+        user: Box<User>,
+        character: Box<CharacterRow>,
+        items: Vec<character_items::CharacterItemRow>,
+    },
     SessionDestroy { player_name: String },
     Command { executor: String, command: String },
 }
@@ -80,19 +85,22 @@ pub type AdminResponse = Result<Value, (StatusCode, String)>;
 struct AppState {
     tx: mpsc::UnboundedSender<AdminCommand>,
     token: Option<Arc<String>>,
+    pool: PgPool,
 }
 
 /// Spawn the HTTP listener on `ADMIN_LISTEN_ADDR` (default
 /// `127.0.0.1:8080`). Returns the inbox receiver so the caller
-/// can install it as a bevy resource.
-pub fn spawn_admin_server() -> mpsc::UnboundedReceiver<AdminCommand> {
+/// can install it as a bevy resource. The pool is used by handlers
+/// that need DB access (e.g. `session/create` loads the character
+/// and its inventory before handing off to the world tick).
+pub fn spawn_admin_server(pool: PgPool) -> mpsc::UnboundedReceiver<AdminCommand> {
     let (tx, rx) = mpsc::unbounded_channel::<AdminCommand>();
     let addr: SocketAddr = std::env::var("ADMIN_LISTEN_ADDR")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| "127.0.0.1:8080".parse().expect("default admin addr parses"));
     let token = std::env::var("ADMIN_TOKEN").ok().map(Arc::new);
-    let state = AppState { tx, token };
+    let state = AppState { tx, token, pool };
     tokio::spawn(async move {
         let app = build_router(state);
         info!(%addr, "admin HTTP listener configured");
@@ -193,8 +201,49 @@ async fn handle_session_create(
     if let Err(e) = check_auth(&state, &headers) {
         return json_err(e);
     }
+    // DB lookups happen here in async context; the world tick is
+    // sync and can't await. We hand the loaded character/user/items
+    // to the tick via the request enum.
+    let character = match characters::find_by_name(&state.pool, &body.player_name).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return json_err((
+                StatusCode::NOT_FOUND,
+                format!("no character named '{}'", body.player_name),
+            ));
+        }
+        Err(e) => return json_err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+    let Some(user_id) = character.user_id.clone() else {
+        return json_err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("character '{}' has no user_id", body.player_name),
+        ));
+    };
+    let user = match users::find_by_id(&state.pool, &user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return json_err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("character '{}' references missing user_id", body.player_name),
+            ));
+        }
+        Err(e) => return json_err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+    let items = character_items::list_for(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
     json_ok(
-        enqueue(&state, AdminRequest::SessionCreate { player_name: body.player_name }).await,
+        enqueue(
+            &state,
+            AdminRequest::SessionCreate {
+                player_name: body.player_name,
+                user: Box::new(user),
+                character: Box::new(character),
+                items,
+            },
+        )
+        .await,
     )
 }
 
@@ -274,7 +323,9 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::WorldStatus => Ok(world_status(world)),
         AdminRequest::LookRoom { zone_id, id } => look_room(world, zone_id, id),
         AdminRequest::InspectActor { name } => inspect_actor(world, &name),
-        AdminRequest::SessionCreate { player_name } => session_create(world, &player_name),
+        AdminRequest::SessionCreate { player_name, user, character, items } => {
+            session_create(world, &player_name, &user, &character, &items)
+        }
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
         AdminRequest::Command { executor, command } => run_command(world, &executor, &command),
     }
@@ -430,8 +481,14 @@ fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
     }))
 }
 
-fn session_create(world: &mut World, player_name: &str) -> AdminResponse {
-    // Reject if a session by that name already exists.
+fn session_create(
+    world: &mut World,
+    player_name: &str,
+    user: &User,
+    character: &CharacterRow,
+    items: &[character_items::CharacterItemRow],
+) -> AdminResponse {
+    // Reject duplicate by name.
     {
         let sessions = world.resource::<VirtualSessions>();
         let by_name = sessions.by_name.lock().expect("sessions poisoned");
@@ -442,38 +499,28 @@ fn session_create(world: &mut World, player_name: &str) -> AdminResponse {
             ));
         }
     }
-    // Find the player's existing online entity by name (case-insensitive
-    // exact match). v1 attaches the virtual session to a logged-in
-    // character — full-fat "load from DB" comes later. For most testing
-    // scenarios, the user logs in once via telnet, then attaches a
-    // virtual session for capture.
-    let needle = player_name.to_ascii_lowercase();
-    let entity = {
-        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
-        q.iter(world)
-            .find(|(_, n)| n.name.eq_ignore_ascii_case(&needle))
-            .map(|(e, _)| e)
+    // If the character is already logged in via telnet, refuse —
+    // double-spawning would corrupt the world (two entities for
+    // the same character_id, conflicting saves on disconnect).
+    let already_online = {
+        let mut q = world.query_filtered::<&Named, (With<Player>, With<Online>)>();
+        q.iter(world).any(|n| n.name.eq_ignore_ascii_case(player_name))
     };
-    let Some(entity) = entity else {
+    if already_online {
         return Err((
-            StatusCode::NOT_FOUND,
-            format!(
-                "no online player named '{player_name}'; log in via telnet first"
-            ),
+            StatusCode::CONFLICT,
+            format!("'{player_name}' is already logged in via telnet; destroy that session first"),
         ));
-    };
-    // Replace the player's Connection with a fresh Outbound whose
-    // receiver we keep, so future bytes the runtime emits to this
-    // player are captured locally instead of streamed to a real
-    // socket. Saves the previous Outbound? No — for v1 attaching a
-    // virtual session is destructive: the original telnet conn (if
-    // any) loses output until destroy_session restores it. Logged
-    // for the user; revisit if it's a real footgun.
+    }
+    // Reuse the same spawn machinery the telnet login path uses:
+    // spawn_player attaches Connection/health/stats/profile, then
+    // spawn_inventory rehydrates carried + worn items including
+    // the proto-derived component set (LiquidContainer, WearableIn,
+    // BoardLink, AttachedTriggers — see commit c332609).
     let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let outbound: Outbound = tx;
-    if let Ok(mut e) = world.get_entity_mut(entity) {
-        e.insert(Connection(outbound));
-    }
+    let entity = crate::login::spawn_player(world, user, character, outbound);
+    let item_count = crate::login::spawn_inventory(world, entity, items);
     let mut by_name = world.resource::<VirtualSessions>().by_name.lock().expect("sessions poisoned");
     by_name.insert(
         player_name.to_string(),
@@ -483,7 +530,8 @@ fn session_create(world: &mut World, player_name: &str) -> AdminResponse {
         "success": true,
         "player_name": player_name,
         "entity": format!("{:?}", entity),
-        "note": "virtual session attached; outbound bytes are now captured for execute_command",
+        "items_loaded": item_count,
+        "note": "virtual session spawned standalone (no telnet required); destroy_session despawns",
     }))
 }
 
@@ -493,16 +541,40 @@ fn session_destroy(world: &mut World, player_name: &str) -> AdminResponse {
         let mut by_name = sessions.by_name.lock().expect("sessions poisoned");
         by_name.remove(player_name)
     };
-    let Some(_session) = removed else {
+    let Some(session) = removed else {
         return Err((
             StatusCode::NOT_FOUND,
             format!("no virtual session for '{player_name}'"),
         ));
     };
+    // Despawn the player entity itself plus everything Located on
+    // them (worn equipment, carried inventory). Skip a DB save —
+    // virtual sessions are ephemeral by design, and saving could
+    // overwrite legitimate state from a separate telnet session.
+    let mut to_despawn: Vec<Entity> = vec![session.entity];
+    let mut frontier = vec![session.entity];
+    while let Some(parent) = frontier.pop() {
+        let children: Vec<Entity> = {
+            let mut q = world.query::<(Entity, &Located)>();
+            q.iter(world)
+                .filter(|(_, l)| l.0 == parent)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        for c in children {
+            to_despawn.push(c);
+            frontier.push(c);
+        }
+    }
+    for e in to_despawn {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
     Ok(json!({
         "success": true,
         "player_name": player_name,
-        "note": "session removed; the player's Connection is no longer captured (real telnet output stays disconnected for this session — reconnect via telnet to restore live socket I/O)",
+        "note": "virtual session despawned (entity + carried items removed; not saved to DB)",
     }))
 }
 

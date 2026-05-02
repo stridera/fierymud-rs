@@ -160,6 +160,31 @@ pub async fn save_state(
     Ok(())
 }
 
+pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<CharacterRow>> {
+    sqlx::query_as!(
+        CharacterRow,
+        r#"
+        SELECT
+            id, name, user_id, level, hit_points, hit_points_max, stamina, stamina_max,
+            hit_roll, damage_roll, armor_class, alignment,
+            permissions AS "permissions!: Vec<Permission>",
+            player_flags AS "player_flags!: Vec<PlayerFlag>",
+            prompt, current_room_zone_id, current_room_id,
+            recall_room_zone_id, recall_room_id, class_id,
+            race::text AS "race!: String",
+            experience, title, description,
+            strength, dexterity, constitution, intelligence, wisdom, charisma,
+            wealth, bank_wealth, gender, skill_points
+        FROM "Characters"
+        WHERE LOWER(name) = LOWER($1)
+        LIMIT 1
+        "#,
+        name
+    )
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<CharacterRow>> {
     sqlx::query_as!(
         CharacterRow,

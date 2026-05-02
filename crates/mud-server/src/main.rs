@@ -171,7 +171,7 @@ async fn main() {
     // Spawn the admin HTTP listener and install its inbox + virtual
     // session table as resources so the world tick can drain pending
     // requests synchronously each frame.
-    let admin_rx = admin::spawn_admin_server();
+    let admin_rx = admin::spawn_admin_server(pool.clone());
     world.insert_resource(admin::AdminInbox(std::sync::Mutex::new(admin_rx)));
     world.insert_resource(admin::VirtualSessions::default());
 
