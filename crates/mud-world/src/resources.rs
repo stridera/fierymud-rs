@@ -853,6 +853,10 @@ pub struct MobProto {
     /// FK to `Class.id`; `None` for classless mobs. Used by Lua
     /// trigger `actor.class` field access for class-gated dialogue.
     pub class_id: Option<i32>,
+    /// AI behavior flags from `Mobs.behaviors`. Copied onto every
+    /// spawn instance as a `MobBehaviors` component. Empty when the
+    /// content has no tags for this mob.
+    pub behaviors: Vec<mud_db::enums::MobBehavior>,
 }
 
 impl MobProto {

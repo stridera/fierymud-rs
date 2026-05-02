@@ -41,6 +41,23 @@ pub struct Account {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Mob;
 
+/// Per-instance copy of the prototype's `behaviors` list. Drives
+/// the runtime AI gates (Sentinel skips wander, Helper joins
+/// allies in combat, Scavenger picks up loot, etc.). Empty for
+/// mobs whose proto carries no behaviors; the inherent default
+/// is "no AI flag — react only to direct events".
+#[derive(Component, Debug, Clone, Default)]
+pub struct MobBehaviors(pub Vec<mud_db::enums::MobBehavior>);
+
+impl MobBehaviors {
+    /// True when the mob carries the given behavior flag. Linear
+    /// scan — n is ≤ 4 in practice (most mobs have 0-2 flags).
+    #[must_use]
+    pub fn has(&self, flag: mud_db::enums::MobBehavior) -> bool {
+        self.0.contains(&flag)
+    }
+}
+
 /// Marker: this entity is an item instance (weapon, potion, container, …).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Item;

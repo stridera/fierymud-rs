@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::enums::MobRole;
+use crate::enums::{MobBehavior, MobRole};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mob {
@@ -28,6 +28,9 @@ pub struct Mob {
     /// Read by triggers via `actor.class` to gate class-specific
     /// dialogue (e.g. quest hint chains attached to guildmasters).
     pub class_id: Option<i32>,
+    /// AI behavior flags from `Mobs.behaviors`. Empty for mobs the
+    /// content authors haven't tagged.
+    pub behaviors: Vec<MobBehavior>,
 }
 
 pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
@@ -52,7 +55,8 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             hit_roll,
             armor_class,
             wealth,
-            class_id
+            class_id,
+            behaviors AS "behaviors!: Vec<MobBehavior>"
         FROM "Mobs"
         ORDER BY zone_id, id
         "#

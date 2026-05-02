@@ -185,6 +185,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 armor_class: row.armor_class,
                 wealth: row.wealth,
                 class_id: row.class_id,
+                behaviors: row.behaviors,
             },
         );
     }
@@ -905,6 +906,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
         if let Some(ref keys) = trigger_keys {
             em.insert(AttachedTriggers(keys.clone()));
+        }
+        if !proto.behaviors.is_empty() {
+            em.insert(crate::components::MobBehaviors(proto.behaviors.clone()));
         }
         // Mountable inference: keywords containing horse/steed/mount
         // get the marker. Builders can refine via richer mount data

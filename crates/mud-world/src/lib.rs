@@ -10,7 +10,7 @@ pub use components::{
     GroupInvite, Guarding, Health, Hunger, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt,
     LastTeller, LightFuel, LiquidContainer, Lit, Located, LoggedInAt, MailDraft, MemEntry,
     MemorizedSpells,
-    Mob, ModifyDelta, Mountable, Mounted, Named, Online, Player, PlayerFlags, Posture,
+    Mob, MobBehaviors, ModifyDelta, Mountable, Mounted, Named, Online, Player, PlayerFlags, Posture,
     PostureKind, Profile, Prompt, RecallPoint, RiddenBy, Room, RoomSector, Shopkeeper, SkillPoints,
     Slot, Stamina, Stealth, Stunned, TellLog, Thirst, Title, UiStyle, Wealth, WearableIn,
     WimpyThreshold,

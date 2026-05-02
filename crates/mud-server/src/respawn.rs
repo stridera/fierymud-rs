@@ -128,6 +128,9 @@ pub fn respawn_tick(world: &mut World) {
             em.insert(AttachedTriggers(keys.clone()));
             load_fire_queue.push(em.id());
         }
+        if !proto.behaviors.is_empty() {
+            em.insert(mud_world::MobBehaviors(proto.behaviors.clone()));
+        }
         if proto.keywords.iter().any(|k| {
             let lc = k.to_ascii_lowercase();
             lc.contains("horse")

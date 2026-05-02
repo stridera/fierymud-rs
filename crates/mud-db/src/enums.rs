@@ -153,6 +153,36 @@ pub enum MobRole {
     RaidBoss,
 }
 
+/// Per-mob behavior flags, sourced from `Mobs.behaviors`. Mirrors
+/// the schema's `MobBehavior` enum verbatim. Variants the runtime
+/// doesn't read yet stay in the spawn-time list; future systems
+/// can light them up without re-running the DB query.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = "MobBehavior", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MobBehavior {
+    Sentinel,
+    StayZone,
+    Scavenger,
+    Track,
+    SlowTrack,
+    FastTrack,
+    Wimpy,
+    Aware,
+    Helper,
+    Protector,
+    Peacekeeper,
+    NoBash,
+    NoSummon,
+    NoVicious,
+    Memory,
+    Teacher,
+    Meditate,
+    NoScript,
+    NoClassAi,
+    Peaceful,
+    NoKill,
+}
+
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[sqlx(type_name = "UserRole", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum UserRole {

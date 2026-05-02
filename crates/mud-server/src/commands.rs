@@ -16995,6 +16995,12 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     // the same room, not already fighting — they engage `player`.
     auto_assist_followers_of(world, target, player, located.0);
 
+    // Mob HELPER behavior: any mob in the room (other than the
+    // attacker / defender) with the `Helper` flag joins in and
+    // engages the attacker. Same room-mismatch auto-disengage as
+    // any other combat enrollment if the attacker leaves.
+    mob_helpers_engage(world, target, player, located.0);
+
     // Fire ATTACK trigger on the target. Bodies typically run
     // initial-aggression flavor or counter-attacks. `self` = target,
     // `actor` = attacker.
@@ -17004,6 +17010,51 @@ fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         player,
         mud_world::TriggerEvent::Attack,
     );
+}
+
+/// Mob HELPER behavior: every mob in `room` (other than attacker /
+/// defender) carrying the `Helper` `MobBehavior` auto-engages the
+/// attacker. Mirrors `auto_assist_followers_of` for mobs and
+/// fires from the same call site (`cmd_attack`). Skips mobs already
+/// in combat — they don't switch targets just because someone
+/// nearby is being attacked.
+fn mob_helpers_engage(world: &mut World, defender: Entity, attacker: Entity, room: Entity) {
+    let helpers: Vec<Entity> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &mud_world::MobBehaviors, Option<&Fighting>),
+            With<Mob>,
+        >();
+        q.iter(world)
+            .filter(|(e, l, beh, fighting)| {
+                *e != defender
+                    && *e != attacker
+                    && l.0 == room
+                    && fighting.is_none()
+                    && beh.has(mud_db::enums::MobBehavior::Helper)
+            })
+            .map(|(e, _, _, _)| e)
+            .collect()
+    };
+    if helpers.is_empty() {
+        return;
+    }
+    let defender_name = name_of(world, defender);
+    let attacker_name = name_of(world, attacker);
+    for helper in helpers {
+        try_insert(world, helper, Fighting(attacker));
+        let helper_name = name_of(world, helper);
+        send_rendered(
+            world,
+            attacker,
+            &format!("{helper_name} leaps to {defender_name}'s defense!\r\n"),
+        );
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[attacker],
+            &format!("{helper_name} leaps to {defender_name}'s defense against {attacker_name}!\r\n"),
+        );
+    }
 }
 
 /// When `defender` is attacked, find every entity with
