@@ -1,8 +1,11 @@
 use bevy_ecs::prelude::*;
-use mud_world::{Fighting, Frozen, Ghost, Health, Hunger, Online, Player, Posture, PostureKind, Stamina, Thirst};
+use mud_world::{
+    Fighting, Frozen, Ghost, Health, Hunger, LightFuel, Lit, Located, Mob, Named, Online, Player,
+    Posture, PostureKind, Stamina, Thirst,
+};
 
 use crate::TickCount;
-use crate::commands::send_to;
+use crate::commands::{broadcast_room_except_rendered, send_to};
 
 /// One regen tick = one second.
 const REGEN_PERIOD_TICKS: u64 = 10;
@@ -169,6 +172,64 @@ pub fn hunger_thirst_tick(world: &mut World) {
             {
                 h.hp = (h.hp - 1).max(1);
             }
+        }
+    }
+}
+
+/// Decrement fuel on Lit items once per game-hour. When `remaining`
+/// hits 0 the `Lit` marker is removed and a "the X gutters out"
+/// line is broadcast to the holding actor's room (or the room
+/// directly if the item is on the floor). `remaining < 0` means
+/// infinite — eternal flames are skipped entirely.
+pub fn light_fuel_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(750) {
+        return;
+    }
+    // Snapshot lit items + their fuel + their location chain.
+    // We resolve the carrier's room (if applicable) up front so the
+    // gutter-out line lands at the right address.
+    let snapshot: Vec<(Entity, i32, Entity, String)> = {
+        let mut q = world.query_filtered::<(Entity, &LightFuel, &Located, &Named), With<Lit>>();
+        q.iter(world)
+            .filter(|(_, fuel, _, _)| fuel.remaining > 0)
+            .map(|(e, fuel, l, n)| (e, fuel.remaining, l.0, n.name.clone()))
+            .collect()
+    };
+    for (item, remaining, parent, item_name) in snapshot {
+        // Decrement first.
+        let new_remaining = remaining - 1;
+        if let Some(mut f) = world.get_mut::<LightFuel>(item) {
+            f.remaining = new_remaining;
+        }
+        if new_remaining > 0 {
+            continue;
+        }
+        // Out of fuel — clear Lit and announce.
+        if let Ok(mut em) = world.get_entity_mut(item) {
+            em.remove::<Lit>();
+        }
+        // Resolve the eventual room for broadcast. If `parent` is a
+        // Player or Mob, fall through to its Located room; otherwise
+        // it IS a room (or some non-actor container).
+        let room = if world.get::<Player>(parent).is_some() || world.get::<Mob>(parent).is_some() {
+            world.get::<Located>(parent).map_or(parent, |l| l.0)
+        } else {
+            parent
+        };
+        let line = format!("{item_name} gutters and goes out.\r\n");
+        // Player carriers see a personal line; everyone else in the
+        // room sees the third-person broadcast.
+        if world.get::<Player>(parent).is_some() {
+            send_to(world, parent, format!("\r\n{line}"));
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[parent],
+                &format!("{item_name} carried by someone here gutters and goes out.\r\n"),
+            );
+        } else {
+            broadcast_room_except_rendered(world, room, &[], &line);
         }
     }
 }

@@ -218,6 +218,12 @@ pub fn respawn_tick(world: &mut World) {
                 poisoned: liq.poisoned,
             });
         }
+        if let Some(fuel) = proto.light_fuel {
+            bundle.insert(mud_world::LightFuel {
+                capacity: fuel.capacity,
+                remaining: fuel.remaining,
+            });
+        }
         if let Some(keys) = trigger_keys {
             bundle.insert(AttachedTriggers(keys));
         }

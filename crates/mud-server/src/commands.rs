@@ -7114,6 +7114,12 @@ fn cmd_buy(world: &mut World, player: Entity, args: &str) {
             poisoned: liq.poisoned,
         });
     }
+    if let Some(fuel) = proto.light_fuel {
+        bundle.insert(mud_world::LightFuel {
+            capacity: fuel.capacity,
+            remaining: fuel.remaining,
+        });
+    }
     let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
     let item_name = proto.name.clone();
     send_rendered(
@@ -20656,6 +20662,12 @@ fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
             capacity: liq.capacity,
             remaining: liq.remaining,
             poisoned: liq.poisoned,
+        });
+    }
+    if let Some(fuel) = proto.light_fuel {
+        bundle.insert(mud_world::LightFuel {
+            capacity: fuel.capacity,
+            remaining: fuel.remaining,
         });
     }
     let item = bundle.id();

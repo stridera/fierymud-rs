@@ -51,6 +51,17 @@ pub struct Item;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lit;
 
+/// Per-instance fuel for a Light-type item. Decremented once per
+/// game-hour while `Lit` is set; when `remaining` hits 0 the
+/// `Lit` marker is removed and a "the X gutters out" line is
+/// broadcast to the room. `remaining < 0` is sentinel for
+/// infinite (matches schema's `values.Remaining = -1`).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LightFuel {
+    pub capacity: i32,
+    pub remaining: i32,
+}
+
 /// Lookup keywords for an entity, used by `get`/`drop`/`attack` matching.
 /// First entry is typically the canonical identifier ("sword"), followed by
 /// other words a player might type ("rusty", "iron").

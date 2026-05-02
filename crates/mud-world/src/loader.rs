@@ -210,6 +210,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         } else {
             None
         };
+        let light_fuel = if matches!(row.r#type, mud_db::enums::ObjectType::Light) {
+            Some(parse_light_fuel(&row.values))
+        } else {
+            None
+        };
         object_prototypes.by_key.insert(
             (row.zone_id, row.id),
             ObjectProto {
@@ -230,6 +235,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 portal_destination_vnum,
                 board_id,
                 liquid,
+                light_fuel,
             },
         );
     }
@@ -979,6 +985,12 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                     poisoned: liq.poisoned,
                 });
             }
+            if let Some(fuel) = proto.light_fuel {
+                bundle.insert(crate::components::LightFuel {
+                    capacity: fuel.capacity,
+                    remaining: fuel.remaining,
+                });
+            }
             if let Some(ref keys) = trigger_keys {
                 bundle.insert(AttachedTriggers(keys.clone()));
             }
@@ -1243,6 +1255,26 @@ fn parse_portal_destination(values: &serde_json::Value) -> Option<i32> {
 /// Remaining: 256}`. Numbers come as either Number or String; bools
 /// come as Bool or String. Missing fields default to safe values
 /// (capacity 0 means uninitialized — runtime treats it as empty).
+/// Parse a Light's fuel state from its `values` JSONB. Schema
+/// shape: `{"Capacity": 240, "Remaining": 240, "Is_Lit:": false}`.
+/// Numbers can be int or string; missing fields default to -1
+/// (infinite). The `Is_Lit:` flag is loader-time hint only — at
+/// runtime, the Lit marker comes from `cmd_light` toggles.
+fn parse_light_fuel(values: &serde_json::Value) -> crate::resources::LightFuelProto {
+    let parse_int = |v: Option<&serde_json::Value>| -> i32 {
+        match v {
+            Some(serde_json::Value::Number(n)) => {
+                i32::try_from(n.as_i64().unwrap_or(-1)).unwrap_or(-1)
+            }
+            Some(serde_json::Value::String(s)) => s.parse().unwrap_or(-1),
+            _ => -1,
+        }
+    };
+    let capacity = parse_int(values.get("Capacity"));
+    let remaining = parse_int(values.get("Remaining"));
+    crate::resources::LightFuelProto { capacity, remaining }
+}
+
 fn parse_liquid(values: &serde_json::Value) -> Option<LiquidProto> {
     let liquid = values.get("Liquid")?.as_str().unwrap_or("WATER").to_string();
     let parse_int = |v: Option<&serde_json::Value>| -> i32 {

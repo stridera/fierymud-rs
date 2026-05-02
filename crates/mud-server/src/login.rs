@@ -690,6 +690,7 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
 /// Skips rows whose prototype isn't loaded (logs a warn) and orphan
 /// rows whose parent never spawned (also logged). Returns total spawn
 /// count for the login info line.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[CharacterItemRow]) -> usize {
     use std::collections::HashMap;
     // row.id → spawned Entity. Top-level items spawn first; nested rows
@@ -768,6 +769,12 @@ pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[Charact
                     capacity: liq.capacity,
                     remaining: liq.remaining,
                     poisoned: liq.poisoned,
+                });
+            }
+            if let Some(fuel) = proto.light_fuel {
+                bundle.insert(mud_world::LightFuel {
+                    capacity: fuel.capacity,
+                    remaining: fuel.remaining,
                 });
             }
             if let Some(keys) = trigger_keys {

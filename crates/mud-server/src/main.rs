@@ -196,6 +196,7 @@ async fn main() {
             effects::effects_tick,
             regen::regen_tick,
             regen::hunger_thirst_tick,
+            regen::light_fuel_tick,
             weather::weather_tick,
             memorize::memorize_tick,
             respawn::respawn_tick,

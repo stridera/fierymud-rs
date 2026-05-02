@@ -157,6 +157,10 @@ pub struct ObjectProto {
     /// happens per-instance (drink/sip/pour/fill) without touching
     /// the proto.
     pub liquid: Option<LiquidProto>,
+    /// Per-spawn fuel state for Light-type items. Schema's
+    /// `Objects.values` has `Capacity` / `Remaining` in game-hours;
+    /// `Remaining < 0` means "infinite" (eternal-flame items).
+    pub light_fuel: Option<LightFuelProto>,
 }
 
 /// Static initial-spawn data for a `DrinkContainer` proto. Mirrors
@@ -167,6 +171,15 @@ pub struct LiquidProto {
     pub capacity: i32,
     pub remaining: i32,
     pub poisoned: bool,
+}
+
+/// Static initial-spawn data for a Light-type item's fuel.
+/// `remaining < 0` (and `capacity < 0`) means infinite — eternal
+/// flames, magical glow-globes, and the like.
+#[derive(Debug, Clone, Copy)]
+pub struct LightFuelProto {
+    pub capacity: i32,
+    pub remaining: i32,
 }
 
 impl ObjectProto {
