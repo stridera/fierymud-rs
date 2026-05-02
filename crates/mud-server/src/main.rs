@@ -258,6 +258,20 @@ async fn main() {
                 };
                 if run_world {
                     schedule.run(&mut world);
+                    // Periodic autosave: every 5 minutes of game time
+                    // (3000 ticks at 10Hz), save every still-connected
+                    // player. Cheap insurance against crashes — a SIGKILL
+                    // or a power loss would skip the graceful shutdown
+                    // save_all_online path entirely. Done out-of-band of
+                    // the schedule so any save_player work doesn't get
+                    // re-entered by the schedule's effects/regen ticks.
+                    {
+                        let tick = world.resource::<TickCount>().0;
+                        if tick > 0 && tick.is_multiple_of(3000) {
+                            router.save_all_online(&mut world, &pool).await;
+                            info!(tick, "periodic autosave");
+                        }
+                    }
                     // Drain idle-kick markers before flushing prompts
                     // so the kick notice lands ahead of the prompt
                     // refresh and the disconnect path runs cleanly
