@@ -107,7 +107,7 @@ pub fn corpse_decay_tick(world: &mut World) {
             .map(|(e, l, d, n)| (e, l.0, d.remaining_secs, n.name.clone()))
             .collect()
     };
-    for (corpse, room, _remaining, name) in corpses {
+    for (corpse, room, prev_remaining, name) in corpses {
         // Decrement first (or expire and despawn).
         let new_remaining = {
             if let Some(mut d) = world.get_mut::<CorpseDecay>(corpse) {
@@ -117,6 +117,13 @@ pub fn corpse_decay_tick(world: &mut World) {
                 continue;
             }
         };
+        // Atmospheric decay markers — fire on the tick that crosses
+        // each threshold so a snapshot-restored corpse with a non-
+        // canonical timer (e.g. 380s) still hits them on the way
+        // down. Silent if the room has no observers.
+        if let Some(line) = decay_milestone(prev_remaining, new_remaining, &name) {
+            broadcast_room_except_rendered(world, room, &[], &line);
+        }
         if new_remaining > 0 {
             continue;
         }
@@ -142,6 +149,22 @@ pub fn corpse_decay_tick(world: &mut World) {
         if let Ok(em) = world.get_entity_mut(corpse) {
             em.despawn();
         }
+    }
+}
+
+/// Atmospheric line for the tick that crossed a decay threshold.
+/// `prev` is the value before this second's decrement, `now` after,
+/// so a line fires on the exact tick where `prev > T >= now` for
+/// each threshold. Returns None for ticks that didn't cross one.
+fn decay_milestone(prev: i32, now: i32, name: &str) -> Option<String> {
+    if prev > 300 && now <= 300 {
+        Some(format!("Flies gather around {name}.\r\n"))
+    } else if prev > 120 && now <= 120 {
+        Some(format!("{name} begins to stink.\r\n"))
+    } else if prev > 30 && now <= 30 {
+        Some(format!("{name} sags as decay sets in.\r\n"))
+    } else {
+        None
     }
 }
 
@@ -989,5 +1012,23 @@ mod tests {
             .iter(&world)
             .count();
         assert_eq!(still_equipped, 0, "EquippedSlot stripped on death");
+    }
+
+    #[test]
+    fn decay_milestone_fires_on_crossing_tick() {
+        let n = "the corpse of a wolf";
+        // Crosses 300 from above.
+        assert!(decay_milestone(301, 300, n).unwrap().contains("Flies"));
+        // No crossing (still above the threshold).
+        assert!(decay_milestone(450, 449, n).is_none());
+        // Crosses 120.
+        assert!(decay_milestone(121, 120, n).unwrap().contains("stink"));
+        // Crosses 30.
+        assert!(decay_milestone(31, 30, n).unwrap().contains("decay"));
+        // No second fire when already past threshold.
+        assert!(decay_milestone(120, 119, n).is_none());
+        // Snapshot-restored corpse with weird boundary still trips
+        // the right threshold on the way down.
+        assert!(decay_milestone(305, 295, n).unwrap().contains("Flies"));
     }
 }
