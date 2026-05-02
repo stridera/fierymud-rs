@@ -28,6 +28,11 @@ pub fn weather_tick(world: &mut World) {
         let mut q = world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
         q.iter(world).map(|(wk, c)| (wk.zone, c.0)).collect()
     };
+    // Read the current season once — drift_temp uses it to shift the
+    // climate's allowed band. Without this, a Temperate zone in deep
+    // winter still drifted Cool..Warm, which looked weird next to a
+    // "the snow thickens" precip line.
+    let season = world.resource::<mud_world::MudClock>().season();
     // Track zones whose precip changed so the post-tick pass can
     // broadcast "the sky shifts" lines to outdoor players in them.
     let mut precip_changes: Vec<(i32, PrecipKind, PrecipKind)> = Vec::new();
@@ -40,7 +45,7 @@ pub fn weather_tick(world: &mut World) {
                 .or_insert_with(|| mud_world::default_weather_for_climate(climate))
                 .precip;
             let entry = weather.by_zone.get_mut(&zone_id).unwrap();
-            entry.temp = drift_temp(entry.temp, climate);
+            entry.temp = drift_temp(entry.temp, climate, season);
             entry.precip = drift_precip(entry.precip, climate);
             if entry.precip != prev {
                 precip_changes.push((zone_id, prev, entry.precip));
@@ -91,8 +96,12 @@ fn transition_line(new_precip: PrecipKind) -> &'static str {
     }
 }
 
-fn drift_temp(current: TempBand, climate: Climate) -> TempBand {
-    let (lo, hi) = temp_range(climate);
+fn drift_temp(
+    current: TempBand,
+    climate: Climate,
+    season: mud_world::Season,
+) -> TempBand {
+    let (lo, hi) = seasonal_temp_range(climate, season);
     let lo_idx = i32::try_from(temp_idx(lo)).unwrap_or(0);
     let hi_idx = i32::try_from(temp_idx(hi)).unwrap_or(6);
     let cur_idx = i32::try_from(temp_idx(current)).unwrap_or(3);
@@ -104,6 +113,42 @@ fn drift_temp(current: TempBand, climate: Climate) -> TempBand {
     };
     let new_idx = (cur_idx + delta).clamp(lo_idx, hi_idx);
     idx_to_temp(usize::try_from(new_idx).unwrap_or(3))
+}
+
+/// Climate's base band shifted by the calendar quarter. Winter pulls
+/// the allowed range two bands cooler, summer two bands warmer; the
+/// equinox seasons leave the climate alone. Bands clamp to
+/// [Frigid, Sweltering] so subarctic in summer doesn't escape to a
+/// nonsense `idx_to_temp(8)`.
+fn seasonal_temp_range(
+    climate: Climate,
+    season: mud_world::Season,
+) -> (TempBand, TempBand) {
+    let (lo, hi) = temp_range(climate);
+    if matches!(climate, Climate::None) {
+        // No climate = no seasonal swing. Static dungeons / planes.
+        return (lo, hi);
+    }
+    let shift: i32 = match season {
+        mud_world::Season::Winter => -2,
+        mud_world::Season::Summer => 2,
+        mud_world::Season::Spring | mud_world::Season::Autumn => 0,
+    };
+    let lo_idx =
+        (i32::try_from(temp_idx(lo)).unwrap_or(0) + shift).clamp(0, 6);
+    let hi_idx =
+        (i32::try_from(temp_idx(hi)).unwrap_or(6) + shift).clamp(0, 6);
+    // Preserve invariant: lo <= hi after clamping (a single-band climate
+    // shifted off the edge becomes a single-band climate at the edge).
+    let (lo_idx, hi_idx) = if lo_idx <= hi_idx {
+        (lo_idx, hi_idx)
+    } else {
+        (hi_idx, lo_idx)
+    };
+    (
+        idx_to_temp(usize::try_from(lo_idx).unwrap_or(0)),
+        idx_to_temp(usize::try_from(hi_idx).unwrap_or(6)),
+    )
 }
 
 fn drift_precip(current: PrecipKind, climate: Climate) -> PrecipKind {
