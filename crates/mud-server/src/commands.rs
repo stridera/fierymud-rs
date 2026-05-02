@@ -3340,6 +3340,20 @@ const COMMANDS: &[Command] = &[
         run: cmd_teleport,
     },
     Command {
+        names: &["hinfo"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "hinfo <player>",
+            summary: "Inspect any player's house from anywhere.",
+            long: "Builder+. Loads the named player's PlayerHouse row \
+                   plus rooms / item count / guest list and prints the \
+                   summary. Doesn't require the target to be online.",
+        },
+        run: cmd_hinfo,
+    },
+    Command {
         names: &["force"],
         min_role: UserRole::Implementor,
         required_perm: None,
@@ -13217,6 +13231,85 @@ fn cmd_house_take(
             }
         });
     }
+}
+
+/// `hinfo <player>` — admin command. Loads the named player's
+/// `PlayerHouse` (plus rooms / items / guests) from the DB and
+/// renders a summary. Doesn't require the target to be online.
+fn cmd_hinfo(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "hinfo", args);
+    let name = args.trim();
+    if name.is_empty() {
+        send_to(world, player, "Usage: hinfo <player>\r\n");
+        return;
+    }
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    let name = name.to_string();
+    tokio::spawn(async move {
+        let Some(out) = outbound else { return };
+        let target = match mud_db::characters::find_by_name(&pool, &name).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                let _ = out.send(format!("No character named '{name}'.\r\n").into_bytes());
+                return;
+            }
+            Err(e) => {
+                let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+        let house = match mud_db::housing::for_character(&pool, &target.id).await {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                let _ = out.send(
+                    format!("{} doesn't own a house.\r\n", target.name).into_bytes(),
+                );
+                return;
+            }
+            Err(e) => {
+                let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+        let rooms = mud_db::housing::rooms_for_house(&pool, house.id).await.unwrap_or_default();
+        let items = mud_db::housing::items_for_house(&pool, house.id).await.unwrap_or_default();
+        let guests = mud_db::housing::guests_for_house(&pool, house.id).await.unwrap_or_default();
+        let mut buf = String::new();
+        buf.push_str(&format!("\r\n=== House #{} ({}) ===\r\n", house.id, target.name));
+        buf.push_str(&format!(
+            "Entrance: zone {} room {}\r\n",
+            house.entrance_room_zone_id, house.entrance_room_id
+        ));
+        if let (Some(rz), Some(ri)) = (house.return_room_zone_id, house.return_room_id) {
+            buf.push_str(&format!("Return-on-exit: zone {rz} room {ri}\r\n"));
+        }
+        buf.push_str(&format!("Rooms: {}\r\n", rooms.len()));
+        for r in &rooms {
+            let item_count = items.iter().filter(|i| i.room_id == r.id).count();
+            buf.push_str(&format!(
+                "  [{:>2}] {} ({} item(s), capacity {}{})\r\n",
+                r.local_index,
+                r.name,
+                item_count,
+                r.capacity,
+                if r.is_peaceful { ", peaceful" } else { "" },
+            ));
+        }
+        buf.push_str(&format!("Items placed: {}\r\n", items.len()));
+        buf.push_str(&format!("Guests: {}\r\n", guests.len()));
+        for g in &guests {
+            buf.push_str(&format!(
+                "  {} ({})\r\n",
+                g.character_id,
+                if g.can_place { "can place items" } else { "visit only" },
+            ));
+        }
+        let _ = out.send(buf.into_bytes());
+    });
 }
 
 /// `house guest add <name> [place]` and `house guest remove <name>`.
