@@ -16,7 +16,10 @@ use tracing::{info, warn};
 use crate::commands::{self, Connection};
 
 const BANNER: &str = "\r\n=========================================\r\n   fierymud-rs (Rust ECS rewrite)\r\n=========================================\r\n";
-const EMAIL_PROMPT: &str = "Email: ";
+/// Combined identifier prompt — accepts either an email or a
+/// character name. Email is detected by the presence of '@' (the
+/// only thing legacy MUD usernames couldn't legally contain).
+const IDENT_PROMPT: &str = "Email or character name: ";
 const PASSWORD_PROMPT: &str = "Password: ";
 
 /// Default starting room when a character has no current/recall location set.
@@ -24,8 +27,17 @@ const PASSWORD_PROMPT: &str = "Password: ";
 const FALLBACK_START: (i32, i32) = (0, 0);
 
 pub enum Stage {
-    AwaitingEmail,
-    AwaitingPassword { user: User },
+    /// Initial prompt accepts either an email (contains `@`) or a
+    /// character name. Email path leads to `CharSelect` like before;
+    /// character-name path skips the menu and lands directly in the
+    /// world after the password check.
+    AwaitingIdentifier,
+    AwaitingPassword {
+        user: User,
+        /// Character chosen at the identifier prompt (character-name
+        /// path). When `Some`, the menu is skipped on auth success.
+        preselected: Option<Box<CharacterRow>>,
+    },
     CharSelect { user: User, characters: Vec<CharacterRow> },
 }
 
@@ -53,12 +65,12 @@ impl ConnRouter {
 
     pub fn on_connect(&mut self, conn_id: ConnId, outbound: Outbound) {
         let _ = outbound.send(BANNER.as_bytes().to_vec());
-        let _ = outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
+        let _ = outbound.send(IDENT_PROMPT.as_bytes().to_vec());
         self.login.insert(
             conn_id,
             LoginCtx {
                 outbound,
-                stage: Stage::AwaitingEmail,
+                stage: Stage::AwaitingIdentifier,
             },
         );
     }
@@ -122,40 +134,82 @@ impl ConnRouter {
         };
         let trimmed = text.trim();
 
-        match std::mem::replace(&mut ctx.stage, Stage::AwaitingEmail) {
-            Stage::AwaitingEmail => {
-                // Look up by email. Don't reveal whether the email exists —
-                // ask for password regardless, fail later. (Constant-time'ish.)
-                let lookup = users::find_by_email(pool, trimmed).await;
-                match lookup {
-                    Ok(Some(user)) => {
-                        ctx.stage = Stage::AwaitingPassword { user };
+        match std::mem::replace(&mut ctx.stage, Stage::AwaitingIdentifier) {
+            Stage::AwaitingIdentifier => {
+                // Branch on '@' — emails contain it, character names don't.
+                // Either path lands in AwaitingPassword; the character path
+                // also stashes a preselected character so we can skip the
+                // CharSelect menu.
+                let is_email = trimmed.contains('@');
+                let sentinel_user = || User {
+                    id: String::new(),
+                    email: trimmed.to_string(),
+                    display_name: String::new(),
+                    password_hash: None,
+                    role: mud_db::enums::UserRole::Player,
+                };
+                if is_email {
+                    let lookup = users::find_by_email(pool, trimmed).await;
+                    match lookup {
+                        Ok(Some(user)) => {
+                            ctx.stage = Stage::AwaitingPassword { user, preselected: None };
+                        }
+                        Ok(None) => {
+                            ctx.stage = Stage::AwaitingPassword {
+                                user: sentinel_user(),
+                                preselected: None,
+                            };
+                        }
+                        Err(e) => {
+                            warn!(conn_id, error = %e, "user lookup failed");
+                            let _ = ctx.outbound.send("Server error.\r\n".as_bytes().to_vec());
+                            ctx.stage = Stage::AwaitingIdentifier;
+                            let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                            return;
+                        }
                     }
-                    Ok(None) => {
-                        // Stash a sentinel "user" so the prompt advances; the
-                        // password check will fail anyway.
-                        ctx.stage = Stage::AwaitingPassword {
-                            user: User {
-                                id: String::new(),
-                                email: trimmed.into(),
-                                display_name: String::new(),
-                                password_hash: None,
-                                role: mud_db::enums::UserRole::Player,
-                            },
-                        };
-                    }
-                    Err(e) => {
-                        warn!(conn_id, error = %e, "user lookup failed");
-                        let _ = ctx.outbound.send("Server error.\r\n".as_bytes().to_vec());
-                        ctx.stage = Stage::AwaitingEmail;
-                        let _ = ctx.outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
-                        return;
+                } else {
+                    // Character-name path. Look up the row by name; if found,
+                    // resolve its user_id → User. Don't leak whether the name
+                    // exists — always advance to password and let bcrypt
+                    // verify fail.
+                    let char_lookup = characters::find_by_name(pool, trimmed).await;
+                    match char_lookup {
+                        Ok(Some(c)) => {
+                            let user_lookup: Option<User> = match c.user_id.as_deref() {
+                                Some(uid) => match users::find_by_id(pool, uid).await {
+                                    Ok(u) => u,
+                                    Err(e) => {
+                                        warn!(conn_id, error = %e, "user lookup failed");
+                                        None
+                                    }
+                                },
+                                None => None,
+                            };
+                            ctx.stage = Stage::AwaitingPassword {
+                                user: user_lookup.unwrap_or_else(sentinel_user),
+                                preselected: Some(Box::new(c)),
+                            };
+                        }
+                        Ok(None) => {
+                            ctx.stage = Stage::AwaitingPassword {
+                                user: sentinel_user(),
+                                preselected: None,
+                            };
+                        }
+                        Err(e) => {
+                            warn!(conn_id, error = %e, "character lookup failed");
+                            let _ = ctx.outbound.send("Server error.\r\n".as_bytes().to_vec());
+                            ctx.stage = Stage::AwaitingIdentifier;
+                            let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                            return;
+                        }
                     }
                 }
                 let _ = ctx.outbound.send(PASSWORD_PROMPT.as_bytes().to_vec());
             }
 
-            Stage::AwaitingPassword { user } => {
+            Stage::AwaitingPassword { user, preselected } => {
                 let ok = user
                     .password_hash
                     .as_ref()
@@ -163,19 +217,27 @@ impl ConnRouter {
                 if !ok {
                     info!(conn_id, email = %user.email, "auth failure");
                     let _ = ctx.outbound.send("Invalid credentials.\r\n".as_bytes().to_vec());
-                    ctx.stage = Stage::AwaitingEmail;
-                    let _ = ctx.outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 info!(conn_id, user_id = %user.id, email = %user.email, "auth success");
 
+                // Character-name path: preselected character → spawn it
+                // directly without showing the CharSelect menu.
+                if let Some(char_row) = preselected {
+                    self.complete_login(conn_id, world, pool, user, *char_row).await;
+                    return;
+                }
+
+                // Email path: list all characters and show the menu.
                 let chars = match characters::list_for_user(pool, &user.id).await {
                     Ok(c) => c,
                     Err(e) => {
                         warn!(conn_id, error = %e, "character list failed");
                         let _ = ctx.outbound.send("Server error.\r\n".as_bytes().to_vec());
-                        ctx.stage = Stage::AwaitingEmail;
-                        let _ = ctx.outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
@@ -183,8 +245,8 @@ impl ConnRouter {
                     let _ = ctx
                         .outbound
                         .send("No characters on this account.\r\n".as_bytes().to_vec());
-                    ctx.stage = Stage::AwaitingEmail;
-                    let _ = ctx.outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 let mut menu = String::from("\r\nCharacters:\r\n");
@@ -212,90 +274,107 @@ impl ConnRouter {
                     ctx.stage = Stage::CharSelect { user, characters };
                     return;
                 };
-
-                // Pre-load the character's saved inventory before we spawn —
-                // we're still in async context here, spawn_player is sync.
-                let item_rows = match mud_db::character_items::list_for(pool, &char_row.id).await
-                {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        warn!(conn_id, error = %e, "character_items load failed");
-                        Vec::new()
-                    }
-                };
-                // What spells/skills they know.
-                let ability_rows =
-                    match mud_db::character_abilities::list_for(pool, &char_row.id).await {
-                        Ok(rows) => rows,
-                        Err(e) => {
-                            warn!(conn_id, error = %e, "character_abilities load failed");
-                            Vec::new()
-                        }
-                    };
-                // Saved command aliases.
-                let alias_rows =
-                    match mud_db::character_aliases::list_for(pool, &char_row.id).await {
-                        Ok(rows) => rows,
-                        Err(e) => {
-                            warn!(conn_id, error = %e, "character_aliases load failed");
-                            Vec::new()
-                        }
-                    };
-                // Drop the &mut ctx borrow by removing — the LoginCtx and its
-                // outbound move into the Player entity's Connection component.
-                let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
-                let entity = spawn_player(world, &user, &char_row, outbound);
-                let item_count = spawn_inventory(world, entity, &item_rows);
-                let known_abilities = KnownAbilities {
-                    entries: ability_rows
-                        .iter()
-                        .map(|r| (r.ability_id, r.proficiency, r.known))
-                        .collect(),
-                };
-                let ability_count = known_abilities.entries.len();
-                let aliases = mud_world::Aliases {
-                    entries: alias_rows
-                        .iter()
-                        .map(|r| (r.alias.clone(), r.command.clone()))
-                        .collect(),
-                };
-                let alias_count = aliases.entries.len();
-                let summary = AccountSummary {
-                    email: user.email.clone(),
-                    display_name: user.display_name.clone(),
-                    characters: characters
-                        .iter()
-                        .map(|c| (c.name.clone(), c.level))
-                        .collect(),
-                };
-                if let Ok(mut e) = world.get_entity_mut(entity) {
-                    e.insert(known_abilities);
-                    e.insert(aliases);
-                    e.insert(summary);
-                    if let Some(t) = char_row.title.as_deref()
-                        && !t.trim().is_empty()
-                    {
-                        e.insert(Title(t.trim().to_string()));
-                    }
-                    if let Some(d) = char_row.description.as_deref()
-                        && !d.trim().is_empty()
-                    {
-                        e.insert(Description(d.trim().to_string()));
-                    }
-                }
-                self.playing.insert(conn_id, entity);
-                commands::send_prompt(world, entity);
-                info!(
-                    conn_id,
-                    char_name = %char_row.name,
-                    char_level = char_row.level,
-                    item_count,
-                    ability_count,
-                    alias_count,
-                    "player spawned"
-                );
+                self.complete_login(conn_id, world, pool, user, char_row).await;
             }
         }
+    }
+
+    /// Final login step: load the chosen character's saved state
+    /// (items / abilities / aliases / account siblings), spawn the
+    /// Player entity, and migrate the connection from `login` to
+    /// `playing`. Shared by both the email + char-select path and
+    /// the direct character-name path.
+    async fn complete_login(
+        &mut self,
+        conn_id: ConnId,
+        world: &mut World,
+        pool: &PgPool,
+        user: User,
+        char_row: CharacterRow,
+    ) {
+        let item_rows = mud_db::character_items::list_for(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "character_items load failed");
+                Vec::new()
+            });
+        let ability_rows = mud_db::character_abilities::list_for(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "character_abilities load failed");
+                Vec::new()
+            });
+        let alias_rows = mud_db::character_aliases::list_for(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "character_aliases load failed");
+                Vec::new()
+            });
+        // AccountSummary lists all sibling characters on the account.
+        // Empty list when the character has no associated user (some
+        // legacy imports) — the summary just shows the chosen one.
+        let all_chars: Vec<CharacterRow> = if user.id.is_empty() {
+            vec![char_row.clone()]
+        } else {
+            characters::list_for_user(pool, &user.id)
+                .await
+                .unwrap_or_else(|e| {
+                    warn!(conn_id, error = %e, "character list failed");
+                    vec![char_row.clone()]
+                })
+        };
+
+        let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
+        let entity = spawn_player(world, &user, &char_row, outbound);
+        let item_count = spawn_inventory(world, entity, &item_rows);
+        let known_abilities = KnownAbilities {
+            entries: ability_rows
+                .iter()
+                .map(|r| (r.ability_id, r.proficiency, r.known))
+                .collect(),
+        };
+        let ability_count = known_abilities.entries.len();
+        let aliases = mud_world::Aliases {
+            entries: alias_rows
+                .iter()
+                .map(|r| (r.alias.clone(), r.command.clone()))
+                .collect(),
+        };
+        let alias_count = aliases.entries.len();
+        let summary = AccountSummary {
+            email: user.email.clone(),
+            display_name: user.display_name.clone(),
+            characters: all_chars
+                .iter()
+                .map(|c| (c.name.clone(), c.level))
+                .collect(),
+        };
+        if let Ok(mut e) = world.get_entity_mut(entity) {
+            e.insert(known_abilities);
+            e.insert(aliases);
+            e.insert(summary);
+            if let Some(t) = char_row.title.as_deref()
+                && !t.trim().is_empty()
+            {
+                e.insert(Title(t.trim().to_string()));
+            }
+            if let Some(d) = char_row.description.as_deref()
+                && !d.trim().is_empty()
+            {
+                e.insert(Description(d.trim().to_string()));
+            }
+        }
+        self.playing.insert(conn_id, entity);
+        commands::send_prompt(world, entity);
+        info!(
+            conn_id,
+            char_name = %char_row.name,
+            char_level = char_row.level,
+            item_count,
+            ability_count,
+            alias_count,
+            "player spawned"
+        );
     }
 }
 
