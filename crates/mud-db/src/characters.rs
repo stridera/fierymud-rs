@@ -59,6 +59,14 @@ pub struct CharacterRow {
     /// Practice points awarded on level-up; spent by `practice <ability>`
     /// to bump proficiency. Defaults to 0 in the schema.
     pub skill_points: i32,
+    /// Hunger gauge — game-hours since last meal. 0 = sated. Drained
+    /// stamina/hp once over threshold (legacy `CircleMUD`: ~48). Tick
+    /// system not yet wired; column is loaded and persisted so the
+    /// tick can come up later without touching login flow again.
+    pub hunger: i32,
+    /// Thirst gauge — game-hours since last drink. 0 = sated. Same
+    /// tick contract as `hunger` but with a tighter threshold (~24).
+    pub thirst: i32,
 }
 
 /// Persist mutable core attribute scores (str/dex/con/int/wis/cha)
@@ -120,6 +128,8 @@ pub async fn save_state(
     wealth: i64,
     experience: i32,
     skill_points: i32,
+    hunger: i32,
+    thirst: i32,
 ) -> sqlx::Result<()> {
     sqlx::query!(
         r#"
@@ -137,8 +147,10 @@ pub async fn save_state(
             wealth = $11,
             experience = $12,
             skill_points = $13,
+            hunger = $14,
+            thirst = $15,
             last_login = NOW()
-        WHERE id = $14
+        WHERE id = $16
         "#,
         hit_points,
         stamina,
@@ -153,6 +165,8 @@ pub async fn save_state(
         wealth,
         experience,
         skill_points,
+        hunger,
+        thirst,
         character_id,
     )
     .execute(pool)
@@ -174,7 +188,7 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             race::text AS "race!: String",
             experience, title, description,
             strength, dexterity, constitution, intelligence, wisdom, charisma,
-            wealth, bank_wealth, gender, skill_points
+            wealth, bank_wealth, gender, skill_points, hunger, thirst
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -223,7 +237,9 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             wealth,
             bank_wealth,
             gender,
-            skill_points
+            skill_points,
+            hunger,
+            thirst
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

@@ -222,6 +222,19 @@ pub struct Stamina {
     pub max: i32,
 }
 
+/// Hunger gauge — game-hours since the last meal. 0 = sated. Once
+/// the value crosses a threshold (legacy `CircleMUD`: 48 hours), the
+/// hunger tick (TBD) starts draining stamina then HP. Loaded from
+/// `Characters.hunger` at spawn; persisted on disconnect. Wiring is
+/// load + save only today; the tick consumer arrives in a follow-up.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Hunger(pub i32);
+
+/// Thirst gauge — game-hours since the last drink. Same contract
+/// as `Hunger` with a tighter legacy threshold (~24 hours).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Thirst(pub i32);
+
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct CombatStats {
     pub hit_roll: i32,

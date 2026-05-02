@@ -479,6 +479,10 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         if let Some(re) = recall_entity {
             e.insert(RecallPoint(re));
         }
+        // Hunger/Thirst loaded from the row. Tick consumer is a
+        // follow-up; for now the gauges just round-trip.
+        e.insert(mud_world::Hunger(c.hunger));
+        e.insert(mud_world::Thirst(c.thirst));
     }
     entity
 }
@@ -509,6 +513,8 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
     let skill_points = world
         .get::<mud_world::SkillPoints>(entity)
         .map_or(0, |s| s.0);
+    let hunger = world.get::<mud_world::Hunger>(entity).map_or(0, |h| h.0);
+    let thirst = world.get::<mud_world::Thirst>(entity).map_or(0, |t| t.0);
     let (recall_zone, recall_room) = world
         .get::<RecallPoint>(entity)
         .and_then(|r| world.get::<WorldKey>(r.0).copied())
@@ -573,6 +579,8 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         wealth,
         experience,
         skill_points,
+        hunger,
+        thirst,
     )
     .await
     {
@@ -859,6 +867,8 @@ mod tests {
             bank_wealth: 0,
             gender: "neutral".into(),
             skill_points: 0,
+            hunger: 0,
+            thirst: 0,
         }
     }
 

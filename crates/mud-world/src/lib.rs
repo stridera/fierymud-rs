@@ -7,11 +7,12 @@ pub use components::{
     BoardLink, Charges, CombatStats, Cooldowns, CoreStats, Corpse, CorpseDecay, Description,
     EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Flying, Follower,
     FromMobReset, FromObjectReset, Frozen, Ghost,
-    GroupInvite, Guarding, Health, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt,
+    GroupInvite, Guarding, Health, Hunger, IgnoreList, Item, Keywords, KnownAbilities, LastInputAt,
     LastTeller, LiquidContainer, Lit, Located, LoggedInAt, MailDraft, MemEntry, MemorizedSpells,
     Mob, ModifyDelta, Mountable, Mounted, Named, Online, Player, PlayerFlags, Posture,
     PostureKind, Profile, Prompt, RecallPoint, RiddenBy, Room, RoomSector, Shopkeeper, SkillPoints,
-    Slot, Stamina, Stealth, Stunned, TellLog, Title, UiStyle, Wealth, WearableIn, WimpyThreshold,
+    Slot, Stamina, Stealth, Stunned, TellLog, Thirst, Title, UiStyle, Wealth, WearableIn,
+    WimpyThreshold,
     WorldKey, Zone, ZoneClimate,
 };
 pub use loader::{LoadStats, load_from_db, wear_flags_primary_slot};

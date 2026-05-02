@@ -684,6 +684,8 @@ fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
         "other"
     };
     let level = world.get::<Profile>(entity).map(|p| p.level);
+    let hunger = world.get::<mud_world::Hunger>(entity).map(|h| h.0);
+    let thirst = world.get::<mud_world::Thirst>(entity).map(|t| t.0);
     let effects: Vec<Value> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         q.iter(world)
@@ -705,6 +707,8 @@ fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
         "level": level,
         "health": health,
         "stamina": stamina,
+        "hunger": hunger,
+        "thirst": thirst,
         "posture": posture,
         "effects": effects,
     }))
