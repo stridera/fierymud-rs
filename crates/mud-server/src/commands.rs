@@ -5382,6 +5382,8 @@ mod tests {
             room: Some("The Void"),
             wealth: Some(12345i64),
             hour: Some(7),
+            season: Some("Winter"),
+            day_night: Some("day"),
         };
         assert_eq!(render_prompt("<%h/%H>", ctx), "<42/100> ");
         assert_eq!(render_prompt("<%v/%V mv>", ctx), "<7/50 mv> ");
@@ -5398,6 +5400,8 @@ mod tests {
         assert_eq!(render_prompt("[%g cp]", ctx), "[12345 cp] ");
         // Hour substitution: zero-padded.
         assert_eq!(render_prompt("[%t]", ctx), "[07] ");
+        // Season + day/night.
+        assert_eq!(render_prompt("[%s %d]", ctx), "[Winter day] ");
         // Unknown variable: pass through literally so the player sees they
         // typed something we don't implement.
         assert_eq!(render_prompt("[%z]", ctx), "[%z] ");
@@ -6361,10 +6365,22 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
         .and_then(|l| world.get::<Named>(l.0))
         .map(|n| n.name.as_str());
     let wealth = world.get::<Wealth>(target).map(|w| w.0);
-    let hour = world.get_resource::<mud_world::MudClock>().map(|c| c.hour);
+    let clock = world.get_resource::<mud_world::MudClock>();
+    let hour = clock.map(|c| c.hour);
+    let season = clock.map(|c| c.season().label());
+    let day_night = hour.map(|h| if matches!(h, 0..=4 | 22..=23) { "night" } else { "day" });
     let rendered = render_prompt(
         template,
-        PromptCtx { hp, stamina, name, room, wealth, hour },
+        PromptCtx {
+            hp,
+            stamina,
+            name,
+            room,
+            wealth,
+            hour,
+            season,
+            day_night,
+        },
     );
     // Prompts can carry color tags both directly in the template
     // (`prompt <red>%h</>`) and indirectly via %r / %n (room and player
@@ -6404,6 +6420,11 @@ pub(crate) struct PromptCtx<'a> {
     pub wealth: Option<i64>,
     /// In-game hour 0..=23. Surfaces as `%t` zero-padded ("07").
     pub hour: Option<i32>,
+    /// Season label ("Winter") for `%s`. Read off `MudClock`.
+    pub season: Option<&'a str>,
+    /// "day" or "night" — surfaces as `%d`. Matches `room_is_dark`'s
+    /// 22..=05 window so players can theme prompts by daylight.
+    pub day_night: Option<&'a str>,
 }
 
 fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
@@ -6447,6 +6468,18 @@ fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
                 // a clock in their prompt without `time` round-trips.
                 Some('t') => match ctx.hour {
                     Some(h) => out.push_str(&format!("{h:02}")),
+                    None => out.push('?'),
+                },
+                // %s = season label ("Winter"). Tracks the calendar.
+                Some('s') => match ctx.season {
+                    Some(s) => out.push_str(s),
+                    None => out.push('?'),
+                },
+                // %d = "day" or "night" — same hour window as the
+                // dark-room gate, so a `<%d>` prompt theme matches
+                // the light flag the world uses for `look`.
+                Some('d') => match ctx.day_night {
+                    Some(d) => out.push_str(d),
                     None => out.push('?'),
                 },
                 Some('%') | None => out.push('%'),
