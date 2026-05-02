@@ -16188,7 +16188,6 @@ const SPRINGLEAP_COST: i32 = 7;
 const GOUGE_COST: i32 = 7;
 const REND_COST: i32 = 7;
 const ROAR_COST: i32 = 8;
-const ROAR_FEAR_SECS: i32 = 20;
 const STOMP_COST: i32 = 6;
 const TRIPUP_COST: i32 = 5;
 const SWEEP_COST: i32 = 12;
@@ -16808,7 +16807,15 @@ fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-/// `roar` / `howl`: room-wide fear application to mobs.
+/// `roar` / `howl`: room-wide fear application to mobs. Phase C
+/// thin shim (2026-05-02). Ability row 304 has a damage mapping
+/// (`amount = "level + cha_bonus + skill / 4"`) plus a status
+/// mapping (`flag=fear`, 20s, `on_hit`). Snapshots mobs in the
+/// room (skipping any already feared) and dispatches
+/// `invoke_ability` per-target. Keeping the iteration here avoids
+/// a multi-target refactor of `invoke_ability` itself — the
+/// per-target description box repeats N times, which is noisy but
+/// correct; cleaner per-call output is a follow-up.
 fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "roar") {
         return;
@@ -16821,7 +16828,8 @@ fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let room = located.0;
-    // Pre-compute the set of currently-feared mobs so we don't stack.
+    // Skip already-feared targets — re-applying just resets duration
+    // but the visual repetition is annoying.
     let feared: std::collections::HashSet<Entity> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         q.iter(world)
@@ -16829,39 +16837,27 @@ fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
             .map(|(_, applied)| applied.0)
             .collect()
     };
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
+    let targets: Vec<String> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Mob>>();
         q.iter(world)
-            .filter(|(e, l)| l.0 == room && !feared.contains(e))
-            .map(|(e, _)| e)
+            .filter(|(e, l, _)| l.0 == room && !feared.contains(e))
+            .map(|(_, _, n)| n.name.clone())
             .collect()
     };
-    drain_stamina(world, player, ROAR_COST);
-
-    let player_name = name_of(world, player);
-    let count = targets.len();
-    for t in targets {
-        world.spawn((
-            EffectInstance {
-                kind: 0,
-                name: "fear".to_string(),
-                strength: 1,
-                remaining_secs: ROAR_FEAR_SECS,
-                source: EffectSource::Other("roar".to_string()),
-                ability_id: None,
-            },
-            AppliedTo(t),
-        ));
+    if targets.is_empty() {
+        send_to(world, player, "There's nothing here to roar at.\r\n");
+        return;
     }
-    send_to(world, player, format!(
-        "You roar a primal challenge. ({count} mob(s) feared)\r\n"
-    ));
-    broadcast_room_except_rendered(
-        world,
-        room,
-        &[player],
-        &format!("{player_name} roars a primal challenge!\r\n"),
-    );
+    drain_stamina(world, player, ROAR_COST);
+    for target_name in targets {
+        invoke_ability(
+            world,
+            player,
+            &format!("roar {target_name}"),
+            mud_db::abilities::AbilityKind::Skill,
+            "use",
+        );
+    }
 }
 
 /// `rend [<target>]`: tearing attack — damage + temporary bleed
