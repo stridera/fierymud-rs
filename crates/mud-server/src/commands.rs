@@ -6502,6 +6502,22 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let needle = target_word.to_ascii_lowercase();
 
+    // Dark-room gate (matches cmd_look). Self-target is allowed —
+    // you can always introspect yourself even in pitch black.
+    // Anything else fails until there's a light source in the room.
+    if needle != "me"
+        && needle != "self"
+        && room_is_dark(world, room)
+        && !room_has_light(world, room)
+    {
+        send_to(
+            world,
+            player,
+            "It is too dark to make anything out.\r\n",
+        );
+        return;
+    }
+
     // Self-target. Surfaces the same state lines as examining
     // another player would — Stealth (only visible to self anyway),
     // Flying, Mounted — so a player can confirm their state without
@@ -20456,6 +20472,21 @@ fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         out.push_str("kind:          Mob\r\n");
     } else if world.get::<Item>(target).is_some() {
         out.push_str("kind:          Item\r\n");
+        // Lit + fuel state for Light-typed items. Lit alone is a
+        // marker; LightFuel carries the burn timer.
+        if world.get::<mud_world::Lit>(target).is_some() {
+            out.push_str("lit:           yes\r\n");
+        }
+        if let Some(fuel) = world.get::<mud_world::LightFuel>(target).copied() {
+            if fuel.remaining < 0 {
+                out.push_str("fuel:          infinite\r\n");
+            } else {
+                out.push_str(&format!(
+                    "fuel:          {} / {} game-hours\r\n",
+                    fuel.remaining, fuel.capacity,
+                ));
+            }
+        }
         // Resolve through the prototype catalog for weight / level /
         // type. Synthetic seed items lack a WorldKey and so fall
         // through silently.
