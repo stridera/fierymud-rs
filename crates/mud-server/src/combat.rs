@@ -894,6 +894,18 @@ pub(crate) fn handle_death(
                     CorpseDecay { remaining_secs: 600 },
                 ))
                 .id();
+            // Loot-claim window: 5 minutes for the killer.
+            // Player-only — mob killers don't claim corpses (this
+            // path is reached only when a player landed the
+            // killing blow against another mob; the killer
+            // lookup above filters to Player entities).
+            if let Some(k) = killer {
+                world.get_entity_mut(corpse).unwrap().insert(mud_world::LootClaim {
+                    owner: k,
+                    expires_at: std::time::Instant::now()
+                        + std::time::Duration::from_secs(300),
+                });
+            }
             for it in &owned_items {
                 if let Some(mut l) = world.get_mut::<Located>(*it) {
                     l.0 = corpse;

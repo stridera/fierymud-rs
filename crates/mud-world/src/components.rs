@@ -41,6 +41,17 @@ pub struct Account {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Mob;
 
+/// Loot-claim window on a freshly-spawned mob corpse. Only
+/// `owner` (and their group, once group bridging lands) can `get`
+/// items from this corpse until `expires_at` — past that,
+/// anyone can loot. Player-death corpses don't carry this; the
+/// dead player's group is whoever's standing there.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LootClaim {
+    pub owner: Entity,
+    pub expires_at: std::time::Instant,
+}
+
 /// Per-instance copy of the prototype's `behaviors` list. Drives
 /// the runtime AI gates (Sentinel skips wander, Helper joins
 /// allies in combat, Scavenger picks up loot, etc.). Empty for

@@ -10587,6 +10587,26 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
         let container_name = name_of(world, container);
         let player_name = name_of(world, player);
 
+        // Loot-claim gate: corpses with an active LootClaim refuse
+        // anyone other than the owner until the window expires.
+        // Past the deadline the component still exists; we just
+        // don't enforce it. The despawn-on-decay path cleans it up.
+        if let Some(claim) = world.get::<mud_world::LootClaim>(container).copied()
+            && claim.expires_at > std::time::Instant::now()
+            && claim.owner != player
+        {
+            let owner_name = name_or(world, claim.owner, "another");
+            send_to(
+                world,
+                player,
+                format!(
+                    "{container_name} is claimed by {owner_name}; \
+                     you cannot loot it yet.\r\n"
+                ),
+            );
+            return;
+        }
+
         // `get all from <container>`: snapshot every item inside,
         // re-Located to the player, broadcast a single line with the
         // count. Empty containers report the obvious "nothing in
