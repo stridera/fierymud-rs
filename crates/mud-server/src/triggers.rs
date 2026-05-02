@@ -73,7 +73,7 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
     }
 
     for (zone, id, name, body) in to_fire {
-        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             host.exec_for_actor(world, entity, &body)
         });
         drain_lua_outbox(world);
@@ -122,7 +122,7 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
                 .collect()
         };
         for (zone, id, name, body) in to_fire {
-            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
                 host.exec_for_actor_with_extras(
                     world,
                     listener,
@@ -164,7 +164,7 @@ pub fn fire_room_entry(world: &mut World, room: Entity, entering: Entity, event:
         return;
     }
     for (zone, id, name, body) in to_fire {
-        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             host.exec_for_listener_with_extras(world, room, entering, &body, &[])
         });
         drain_lua_outbox(world);
@@ -211,7 +211,7 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
                 .collect()
         };
         for (zone, id, name, body) in to_fire {
-            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
                 host.exec_for_listener_with_extras(world, listener, entering, &body, &[])
             });
             drain_lua_outbox(world);
@@ -254,7 +254,7 @@ pub fn fire_item_event(
         return;
     }
     for (zone, id, name, body) in to_fire {
-        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             host.exec_for_listener_with_extras(world, item, actor, &body, &[])
         });
         drain_lua_outbox(world);
@@ -294,7 +294,7 @@ pub fn fire_event_with_actor(
         return;
     }
     for (zone, id, name, body) in to_fire {
-        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             host.exec_for_listener_with_extras(world, listener, acting, &body, &[])
         });
         drain_lua_outbox(world);
@@ -330,7 +330,7 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
         return;
     }
     for (zone, id, name, body) in to_fire {
-        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             host.exec_for_event(world, recipient, giver, Some(item), &body, &[])
         });
         drain_lua_outbox(world);
@@ -383,7 +383,7 @@ pub fn fire_command_in_room(
                 .collect()
         };
         for (zone, id, name, body) in to_fire {
-            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
                 host.exec_for_event_with_value(
                     world,
                     listener,
@@ -423,4 +423,21 @@ pub fn fire_load_for_all_mobs(world: &mut World) {
         fire_event(world, e, TriggerEvent::Load);
     }
     tracing::info!(mobs = count, "fired LOAD triggers for spawned mobs");
+}
+
+/// Tick system: advance the `LuaHost`'s view of the current tick, then
+/// resume any parked threads whose `wait(N)` deadline has passed.
+/// `LuaOutbox` is drained inline after the resume pass since
+/// resumed bodies may emit `actor:send` / `room.send` lines.
+pub fn lua_coroutine_tick(world: &mut World) {
+    let tick = world.resource::<crate::TickCount>().0;
+    let (resumed, parked) = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
+        host.set_current_tick(tick);
+        let n = host.tick_yielded(world);
+        (n, host.yielded_count())
+    });
+    if resumed > 0 {
+        crate::commands::drain_lua_outbox(world);
+        tracing::info!(resumed, parked, "lua_coroutine_tick resumed parked threads");
+    }
 }

@@ -140,6 +140,7 @@ async fn main() {
             regen::regen_tick,
             memorize::memorize_tick,
             respawn::respawn_tick,
+            triggers::lua_coroutine_tick,
             log_heartbeat,
         )
             .chain(),

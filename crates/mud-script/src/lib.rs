@@ -10,7 +10,10 @@
 use std::ptr::NonNull;
 
 use bevy_ecs::prelude::*;
-use mlua::{AnyUserData, Lua, MetaMethod, UserData, UserDataMethods, Value, Variadic};
+use mlua::{
+    AnyUserData, Function, Lua, MetaMethod, MultiValue, Thread, ThreadStatus, UserData,
+    UserDataMethods, Value, Variadic,
+};
 use mud_world::{
     AbilityCatalog, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats, Description,
     EffectCatalog, EffectInstance, EquippedSlot, Fighting, Follower, Health, Item, Keywords,
@@ -18,11 +21,39 @@ use mud_world::{
     Posture, PostureKind, Profile, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 
-/// Bevy resource wrapping the Lua interpreter.
+/// One trigger body that ran into `wait(N)` and got parked. We hold the
+/// `mlua::Thread` plus enough context (`acting` / `listener` / `object`
+/// / `extras`) to re-bind the globals on resumption — Lua's globals are
+/// shared across threads, so any other trigger that fires between
+/// yield and resume will trample them.
+pub struct YieldedThread {
+    thread: Thread,
+    listener: Entity,
+    acting: Entity,
+    object: Option<Entity>,
+    extras: Vec<(String, String)>,
+    /// Tick value at which this thread becomes due to resume. Computed
+    /// at park time as `host.current_tick + wait_secs * TICK_HZ`.
+    resume_at_tick: u64,
+}
+
+/// Bevy resource wrapping the Lua interpreter and the parked-coroutine
+/// queue. mud-server stamps `current_tick` each frame; `tick_yielded`
+/// resumes any threads whose `resume_at_tick` has elapsed.
 #[derive(Resource)]
 pub struct LuaHost {
     lua: Lua,
+    /// Most recently observed tick from mud-server. Used as the basis
+    /// for computing `resume_at_tick` when a new thread parks, and for
+    /// deciding which parked threads are due in `tick_yielded`.
+    current_tick: u64,
+    yielded: Vec<YieldedThread>,
 }
+
+/// Real-tick rate, mirrored from mud-server's `TICK_HZ`. Used to convert
+/// a Lua `wait(seconds)` into ticks. Kept here as a const so mud-script
+/// doesn't need to depend on mud-server.
+const TICK_HZ: u64 = 10;
 
 impl Default for LuaHost {
     fn default() -> Self {
@@ -31,20 +62,135 @@ impl Default for LuaHost {
 }
 
 impl LuaHost {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         // TODO: lock down os/io/debug modules. mlua 0.11 doesn't expose a
         // direct sandbox helper for stock Lua 5.4 builds; we'll do explicit
         // global removal once we land actual triggers (the admin-only
         // `lua` command isn't a meaningful threat surface).
-        Self { lua: Lua::new() }
+        Self {
+            lua: Lua::new(),
+            current_tick: 0,
+            yielded: Vec::new(),
+        }
+    }
+
+    /// Stamp the current world tick. mud-server calls this once per
+    /// tick before any Lua-firing system runs so newly-parked threads
+    /// compute their resume time relative to a fresh value.
+    pub fn set_current_tick(&mut self, tick: u64) {
+        self.current_tick = tick;
+    }
+
+    /// Number of threads currently parked waiting for `wait(N)` to
+    /// elapse. Surfaced for diagnostics (the `show` admin command).
+    #[must_use]
+    pub fn yielded_count(&self) -> usize {
+        self.yielded.len()
+    }
+
+    /// Resume every parked thread whose `resume_at_tick <= current_tick`.
+    /// Threads that yield again get re-parked with a fresh resume time;
+    /// threads that finish or error fall off. Returns the number of
+    /// threads resumed (whether they finished or yielded again).
+    pub fn tick_yielded(&mut self, world: &mut World) -> usize {
+        if self.yielded.is_empty() {
+            return 0;
+        }
+        let due_tick = self.current_tick;
+        let (due, parked): (Vec<_>, Vec<_>) = std::mem::take(&mut self.yielded)
+            .into_iter()
+            .partition(|y| y.resume_at_tick <= due_tick);
+        self.yielded = parked;
+        let resumed = due.len();
+        for yielded in due {
+            // Errors during resume are swallowed — the body's already
+            // partway through, and mud-server's outbox-drain happens
+            // around `tick_yielded`, so any pre-error output reaches
+            // the player. Future work could route the error to
+            // `ScriptErrorLog` like the initial-fire path.
+            let _ = self.resume_thread(world, yielded);
+        }
+        resumed
+    }
+
+    /// Resume a single parked thread. Re-binds globals (actor / self /
+    /// object / extras) since Lua globals are shared across threads;
+    /// any other trigger that fired between yield and resume would
+    /// have trampled them. On a second yield, re-parks; on completion
+    /// or error, falls off.
+    fn resume_thread(&mut self, world: &mut World, yielded: YieldedThread) -> Result<(), String> {
+        let world_ptr = WorldPtr(NonNull::from(&mut *world));
+        self.lua.set_app_data(world_ptr);
+        self.lua.set_app_data(LuaCapture::default());
+        self.lua.set_app_data(SelfEntity(yielded.listener));
+
+        let extras_refs: Vec<(&str, &str)> = yielded
+            .extras
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let result = (|| -> mlua::Result<Option<i64>> {
+            self.bind_globals(
+                world,
+                yielded.listener,
+                yielded.acting,
+                yielded.object,
+                &extras_refs,
+            )?;
+            let values: MultiValue = yielded.thread.resume(())?;
+            if matches!(yielded.thread.status(), ThreadStatus::Resumable) {
+                let wait_secs = values
+                    .into_iter()
+                    .next()
+                    .and_then(|v| match v {
+                        Value::Integer(i) => Some(i),
+                        Value::Number(n) => {
+                            #[allow(clippy::cast_possible_truncation)]
+                            Some(n as i64)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(1)
+                    .max(1);
+                Ok(Some(wait_secs))
+            } else {
+                Ok(None)
+            }
+        })();
+
+        self.lua.remove_app_data::<LuaCapture>();
+        self.lua.remove_app_data::<WorldPtr>();
+        self.lua.remove_app_data::<SelfEntity>();
+        self.unbind_globals(&extras_refs);
+
+        match result {
+            Ok(Some(wait_secs)) => {
+                #[allow(clippy::cast_sign_loss)]
+                let resume_at_tick = self
+                    .current_tick
+                    .saturating_add((wait_secs as u64).saturating_mul(TICK_HZ));
+                self.yielded.push(YieldedThread {
+                    thread: yielded.thread,
+                    listener: yielded.listener,
+                    acting: yielded.acting,
+                    object: yielded.object,
+                    extras: yielded.extras,
+                    resume_at_tick,
+                });
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(e) => Err(format!("lua resume error: {e}")),
+        }
     }
 
     /// Run `code` with `actor` bound to the supplied entity. Captured `print`
     /// output is returned as a single string (one line per print call,
     /// terminated with \r\n).
     pub fn exec_for_actor(
-        &self,
+        &mut self,
         world: &mut World,
         actor: Entity,
         code: &str,
@@ -56,7 +202,7 @@ impl LuaHost {
     /// `(name, value)` pairs as Lua globals before the body runs.
     /// `actor` and `self` are bound to the same entity.
     pub fn exec_for_actor_with_extras(
-        &self,
+        &mut self,
         world: &mut World,
         actor: Entity,
         code: &str,
@@ -72,7 +218,7 @@ impl LuaHost {
     /// attacking). For LOAD/SPEECH/etc. callers where listener IS the
     /// actor, `exec_for_actor_with_extras` is the simpler entry.
     pub fn exec_for_listener_with_extras(
-        &self,
+        &mut self,
         world: &mut World,
         listener: Entity,
         acting_entity: Entity,
@@ -89,7 +235,7 @@ impl LuaHost {
     /// where the return value gates whether to continue, see
     /// `exec_for_event_with_value`.
     pub fn exec_for_event(
-        &self,
+        &mut self,
         world: &mut World,
         listener: Entity,
         acting_entity: Entity,
@@ -113,9 +259,16 @@ impl LuaHost {
     /// `return true` or no return; false on `return false`; None
     /// for non-boolean returns). Used by COMMAND dispatch to gate
     /// whether the typed command continues to the default handler.
+    ///
+    /// Bodies that hit `wait(N)` yield via Lua coroutines. The thread
+    /// is parked on `self.yielded` and `tick_yielded` resumes it once
+    /// `current_tick` advances past `resume_at_tick`. Callers see the
+    /// pre-yield captured output and `return_bool: None`; the body's
+    /// final return value is dropped (current callers use it only for
+    /// COMMAND-trigger gating, which doesn't yield in practice).
     #[allow(clippy::too_many_lines)]
     pub fn exec_for_event_with_value(
-        &self,
+        &mut self,
         world: &mut World,
         listener: Entity,
         acting_entity: Entity,
@@ -136,7 +289,12 @@ impl LuaHost {
         // userdata argument.
         self.lua.set_app_data(SelfEntity(listener));
 
-        let result = (|| -> mlua::Result<Value> {
+        // Result is one of:
+        //   - Ok(None): body finished normally (with optional bool return)
+        //   - Ok(Some((thread, wait_secs))): body yielded; park it
+        //   - Err: lua compile/exec error
+        #[allow(clippy::type_complexity)]
+        let result: Result<(Option<bool>, Option<(Thread, i64)>), mlua::Error> = (|| {
             let globals = self.lua.globals();
             globals.set("actor", LuaActor { entity: acting_entity })?;
             // `self` is the canonical name in DG-Script-converted bodies
@@ -298,16 +456,16 @@ impl LuaHost {
             )?;
             globals.set("combat", combat_tbl)?;
 
-            // `wait(seconds)` is the legacy DG coroutine sleep —
-            // suspend the trigger body for N seconds and resume.
-            // The runtime doesn't have a coroutine scheduler yet, so
-            // v1 is a no-op: the body continues immediately. Most LOAD
-            // bodies that use `wait(1)` are just waiting for the spawn
-            // to settle, which has already happened by the time the
-            // dispatcher fires LOAD. 6198 corpus refs.
+            // `wait(seconds)` is the legacy DG coroutine sleep. The
+            // body runs inside a coroutine thread (see below), so
+            // `coroutine.yield(N)` parks it. The dispatcher
+            // (`tick_yielded`) resumes due threads each tick. Pure
+            // Lua so the yield works without mlua's async feature.
             globals.set(
                 "wait",
-                self.lua.create_function(|_, _: Value| -> mlua::Result<()> { Ok(()) })?,
+                self.lua
+                    .load("local y = coroutine.yield; return function(n) y(n or 1) end")
+                    .eval::<Function>()?,
             )?;
 
             // `mobiles.template(zone, id)` and `objects.template(zone,
@@ -433,7 +591,43 @@ impl LuaHost {
                 globals.set(*name, *value)?;
             }
 
-            self.lua.load(code).eval::<Value>()
+            // Wrap the body in a coroutine thread instead of a
+            // straight `eval`. `wait(N)` (= coroutine.yield) parks
+            // the thread; on Resumable status we hand it back so the
+            // outer arm can park it on `self.yielded`. The first
+            // returned value (the yield argument or the body's
+            // return) is the seconds-to-wait or the return-bool.
+            let func: Function = self.lua.load(code).into_function()?;
+            let thread = self.lua.create_thread(func)?;
+            let values: MultiValue = thread.resume(())?;
+            if matches!(thread.status(), ThreadStatus::Resumable) {
+                let wait_secs = values
+                    .into_iter()
+                    .next()
+                    .and_then(|v| match v {
+                        Value::Integer(i) => Some(i),
+                        Value::Number(n) => {
+                            #[allow(clippy::cast_possible_truncation)]
+                            Some(n as i64)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(1)
+                    .max(1);
+                Ok::<(Option<bool>, Option<(Thread, i64)>), mlua::Error>((
+                    None,
+                    Some((thread, wait_secs)),
+                ))
+            } else {
+                let return_bool = values.into_iter().next().and_then(|v| {
+                    if let Value::Boolean(b) = v {
+                        Some(b)
+                    } else {
+                        None
+                    }
+                });
+                Ok((return_bool, None))
+            }
         })();
 
         // Clean up app data so a later call gets a fresh capture.
@@ -466,20 +660,284 @@ impl LuaHost {
         }
 
         match result {
-            Ok(value) => {
+            Ok((return_bool, yield_info)) => {
                 let mut out = String::new();
                 for line in captured {
                     out.push_str(&line);
                     out.push_str("\r\n");
                 }
-                let return_bool = if let Value::Boolean(b) = value {
-                    Some(b)
-                } else {
-                    None
-                };
+                if let Some((thread, wait_secs)) = yield_info {
+                    #[allow(clippy::cast_sign_loss)]
+                    let resume_at_tick = self
+                        .current_tick
+                        .saturating_add((wait_secs as u64).saturating_mul(TICK_HZ));
+                    self.yielded.push(YieldedThread {
+                        thread,
+                        listener,
+                        acting: acting_entity,
+                        object: object_entity,
+                        extras: extras
+                            .iter()
+                            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                            .collect(),
+                        resume_at_tick,
+                    });
+                }
                 Ok((out, return_bool))
             }
             Err(e) => Err(format!("lua error: {e}")),
+        }
+    }
+
+    /// Bind every host-supplied global the trigger body can see —
+    /// `actor` / `self` / `object`, `print`, `wait`, `world`,
+    /// `combat`, `skills`, `Effect`, `mobiles`, `objects`, `time`,
+    /// plus any caller-provided extras. Used by both the initial fire
+    /// path (above) and `resume_thread` since Lua globals are shared
+    /// across threads — any other trigger that fired between yield
+    /// and resume would have trampled them.
+    #[allow(clippy::too_many_lines)]
+    fn bind_globals(
+        &self,
+        world: &World,
+        listener: Entity,
+        acting: Entity,
+        object: Option<Entity>,
+        extras: &[(&str, &str)],
+    ) -> mlua::Result<()> {
+        let globals = self.lua.globals();
+        globals.set("actor", LuaActor { entity: acting })?;
+        globals.set("self", LuaActor { entity: listener })?;
+        match object {
+            Some(e) => globals.set("object", LuaActor { entity: e })?,
+            None => globals.set("object", Value::Nil)?,
+        }
+        globals.set(
+            "print",
+            self.lua
+                .create_function(|lua, args: Variadic<Value>| -> mlua::Result<()> {
+                    let line = format_args(&args);
+                    if let Some(mut cap) = lua.app_data_mut::<LuaCapture>() {
+                        cap.lines.push(line);
+                    }
+                    Ok(())
+                })?,
+        )?;
+        globals.set("globals", self.lua.create_table()?)?;
+
+        let skills_tbl = self.lua.create_table()?;
+        skills_tbl.set(
+            "set_level",
+            self.lua.create_function(
+                |lua, (a, name, level): (AnyUserData, String, i32)| -> mlua::Result<()> {
+                    let entity = a.borrow::<LuaActor>()?.entity;
+                    skills_set_level(lua, entity, &name, level)
+                },
+            )?,
+        )?;
+        globals.set("skills", skills_tbl)?;
+
+        let world_tbl = self.lua.create_table()?;
+        world_tbl.set(
+            "count_mobiles",
+            self.lua
+                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+                    world_count_kind(lua, zone, id, EntityKind::Mob)
+                })?,
+        )?;
+        world_tbl.set(
+            "count_objects",
+            self.lua
+                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+                    world_count_kind(lua, zone, id, EntityKind::Item)
+                })?,
+        )?;
+        world_tbl.set(
+            "find_mobile",
+            self.lua.create_function(
+                |lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                    world_find_kind(lua, zone, id, EntityKind::Mob)
+                },
+            )?,
+        )?;
+        world_tbl.set(
+            "destroy",
+            self.lua
+                .create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
+                    let entity = target.borrow::<LuaActor>()?.entity;
+                    world_mut_from_lua(lua, |world| {
+                        if let Ok(em) = world.get_entity_mut(entity) {
+                            em.despawn();
+                        }
+                    })
+                })?,
+        )?;
+        globals.set("world", world_tbl)?;
+
+        let combat_tbl = self.lua.create_table()?;
+        combat_tbl.set(
+            "engage",
+            self.lua
+                .create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
+                    let target_entity = target.borrow::<LuaActor>()?.entity;
+                    world_mut_from_lua(lua, |world| {
+                        if let Some(self_ud) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) {
+                            world.entity_mut(self_ud).insert(Fighting(target_entity));
+                        }
+                    })
+                })?,
+        )?;
+        combat_tbl.set(
+            "rescue",
+            self.lua
+                .create_function(|lua, victim: AnyUserData| -> mlua::Result<()> {
+                    let victim_entity = victim.borrow::<LuaActor>()?.entity;
+                    world_mut_from_lua(lua, |world| {
+                        let Some(self_ent) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) else {
+                            return;
+                        };
+                        let mut attackers: Vec<Entity> = Vec::new();
+                        {
+                            let mut q = world.query::<(Entity, &Fighting)>();
+                            for (e, f) in q.iter(world) {
+                                if f.0 == victim_entity {
+                                    attackers.push(e);
+                                }
+                            }
+                        }
+                        if let Some(&attacker) = attackers.first() {
+                            world.entity_mut(attacker).insert(Fighting(self_ent));
+                            world.entity_mut(self_ent).insert(Fighting(attacker));
+                        }
+                    })
+                })?,
+        )?;
+        globals.set("combat", combat_tbl)?;
+
+        // wait(N) → coroutine.yield(N). Pure-Lua so the yield works
+        // without mlua's async feature.
+        globals.set(
+            "wait",
+            self.lua
+                .load("local y = coroutine.yield; return function(n) y(n or 1) end")
+                .eval::<Function>()?,
+        )?;
+
+        let mobiles_tbl = self.lua.create_table()?;
+        mobiles_tbl.set(
+            "template",
+            self.lua
+                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                    Ok(Value::UserData(lua.create_userdata(LuaProto {
+                        zone,
+                        id,
+                        kind: ProtoKind::Mob,
+                    })?))
+                })?,
+        )?;
+        globals.set("mobiles", mobiles_tbl)?;
+        let objects_tbl = self.lua.create_table()?;
+        objects_tbl.set(
+            "template",
+            self.lua
+                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                    Ok(Value::UserData(lua.create_userdata(LuaProto {
+                        zone,
+                        id,
+                        kind: ProtoKind::Item,
+                    })?))
+                })?,
+        )?;
+        globals.set("objects", objects_tbl)?;
+
+        let time_tbl = self.lua.create_table()?;
+        let clock = world
+            .get_resource::<mud_world::MudClock>()
+            .cloned()
+            .unwrap_or_default();
+        time_tbl.set("stamp", clock.stamp)?;
+        time_tbl.set("hour", i64::from(clock.hour))?;
+        time_tbl.set("day", i64::from(clock.day))?;
+        time_tbl.set("month", i64::from(clock.month))?;
+        time_tbl.set("year", i64::from(clock.year))?;
+        globals.set("time", time_tbl)?;
+
+        globals.set(
+            "find_actor",
+            self.lua
+                .create_function(|lua, needle: String| -> mlua::Result<Value> {
+                    find_actor(lua, &needle)
+                })?,
+        )?;
+
+        let effect_tbl = self.lua.create_table()?;
+        let effect_meta = self.lua.create_table()?;
+        effect_meta.set(
+            "__index",
+            self.lua
+                .create_function(|_, (_t, key): (Value, String)| -> mlua::Result<String> {
+                    Ok(key.to_ascii_lowercase())
+                })?,
+        )?;
+        let _ = effect_tbl.set_metatable(Some(effect_meta));
+        globals.set("Effect", effect_tbl)?;
+
+        globals.set(
+            "random",
+            self.lua
+                .create_function(|_, (low, high): (i64, i64)| -> mlua::Result<i64> {
+                    if low > high {
+                        return Ok(low);
+                    }
+                    Ok(rand::random_range(low..=high))
+                })?,
+        )?;
+
+        globals.set(
+            "percent_chance",
+            self.lua
+                .create_function(|_, n: i64| -> mlua::Result<bool> {
+                    Ok(rand::random_range(1i64..=100) <= n.clamp(0, 100))
+                })?,
+        )?;
+
+        globals.set(
+            "get_room",
+            self.lua
+                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                    get_room(lua, zone, id)
+                })?,
+        )?;
+
+        for (name, value) in extras {
+            globals.set(*name, *value)?;
+        }
+        Ok(())
+    }
+
+    /// Inverse of `bind_globals` — clears every binding so the next
+    /// fire's globals start fresh.
+    fn unbind_globals(&self, extras: &[(&str, &str)]) {
+        let g = self.lua.globals();
+        let _ = g.raw_remove("actor");
+        let _ = g.raw_remove("self");
+        let _ = g.raw_remove("object");
+        let _ = g.raw_remove("print");
+        let _ = g.raw_remove("globals");
+        let _ = g.raw_remove("skills");
+        let _ = g.raw_remove("world");
+        let _ = g.raw_remove("combat");
+        let _ = g.raw_remove("wait");
+        let _ = g.raw_remove("get_room");
+        let _ = g.raw_remove("random");
+        let _ = g.raw_remove("percent_chance");
+        let _ = g.raw_remove("Effect");
+        let _ = g.raw_remove("find_actor");
+        let _ = g.raw_remove("mobiles");
+        let _ = g.raw_remove("objects");
+        let _ = g.raw_remove("time");
+        for (name, _) in extras {
+            let _ = g.raw_remove(*name);
         }
     }
 }
@@ -1555,7 +2013,7 @@ mod tests {
     #[test]
     fn actor_name_round_trips() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let out = host
             .exec_for_actor(&mut world, actor, "print(actor.name)")
             .expect("ok");
@@ -1565,7 +2023,7 @@ mod tests {
     #[test]
     fn actor_hp_and_max_hp() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let out = host
             .exec_for_actor(
                 &mut world,
@@ -1582,7 +2040,7 @@ mod tests {
         let mob = world
             .spawn((Mob, Named { name: "Goblin".to_string() }))
             .id();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let player_out = host
             .exec_for_actor(
                 &mut world,
@@ -1605,7 +2063,7 @@ mod tests {
     #[test]
     fn room_name_nil_when_unplaced() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let out = host
             .exec_for_actor(&mut world, actor, "print(actor:room_name())")
             .expect("ok");
@@ -1616,7 +2074,7 @@ mod tests {
     #[test]
     fn syntax_error_returns_lua_error_string() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let err = host
             .exec_for_actor(&mut world, actor, "this is not valid lua")
             .expect_err("syntax error expected");
@@ -1629,7 +2087,7 @@ mod tests {
     #[test]
     fn multi_print_concatenates_lines() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let out = host
             .exec_for_actor(
                 &mut world,
@@ -1643,7 +2101,7 @@ mod tests {
     #[test]
     fn each_call_clears_actor_global() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         // First call binds actor; second should rebind, but if the first
         // somehow leaked, the second call could still see the first's actor.
         // Both calls should print the SAME actor's name (TestActor).
@@ -1667,7 +2125,7 @@ mod tests {
                 Located(room),
             ))
             .id();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let out = host
             .exec_for_actor(&mut world, actor, "print(actor:room_name())")
             .expect("ok");
@@ -1677,7 +2135,7 @@ mod tests {
     #[test]
     fn tostring_renders_actor_with_name() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let out = host
             .exec_for_actor(&mut world, actor, "print(tostring(actor))")
             .expect("ok");
@@ -1687,7 +2145,7 @@ mod tests {
     #[test]
     fn globals_table_is_writable_within_call() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         // The trigger corpus uses `globals.x = globals.x or true` patterns.
         // v1 is a per-call empty table — within the body, reads after writes
         // should round-trip.
@@ -1704,7 +2162,7 @@ mod tests {
     #[test]
     fn globals_does_not_persist_across_calls() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let _ = host
             .exec_for_actor(&mut world, actor, "globals.flag = 'set-once'")
             .unwrap();
@@ -1720,7 +2178,7 @@ mod tests {
         let (mut world, actor) = make_world_with_actor();
         // No AbilityCatalog inserted → all lookups miss → no error.
         world.insert_resource(AbilityCatalog::default());
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let out = host
             .exec_for_actor(
                 &mut world,
@@ -1737,7 +2195,7 @@ mod tests {
     #[test]
     fn self_binding_aliases_actor() {
         let (mut world, actor) = make_world_with_actor();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let out = host
             .exec_for_actor(&mut world, actor, "print(self.name)")
             .expect("ok");
@@ -1750,7 +2208,7 @@ mod tests {
         // return empty/zero rather than panic.
         let mut world = World::new();
         let actor = world.spawn_empty().id();
-        let host = LuaHost::new();
+        let mut host = LuaHost::new();
         let name = host
             .exec_for_actor(&mut world, actor, "print(actor.name)")
             .expect("ok");

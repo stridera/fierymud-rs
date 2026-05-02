@@ -6612,7 +6612,7 @@ fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
         }
     };
     for (zone, id, _name, body) in to_fire {
-        let _ = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+        let _ = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             host.exec_for_listener_with_extras(
                 world,
                 target,
@@ -18604,7 +18604,7 @@ fn cmd_lua(world: &mut World, player: Entity, args: &str) {
     }
     // Take the LuaHost out of the world temporarily so we can borrow
     // both &LuaHost and &mut World at once.
-    let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+    let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
         host.exec_for_actor(world, player, code)
     });
     drain_lua_outbox(world);
@@ -18782,7 +18782,7 @@ fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
         player
     };
 
-    let result = world.resource_scope::<mud_script::LuaHost, _>(|world, host| {
+    let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
         host.exec_for_actor(world, actor, &code)
     });
     drain_lua_outbox(world);
