@@ -241,6 +241,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 board_id,
                 liquid,
                 light_fuel,
+                restricted_alignments: row.restricted_alignments,
             },
         );
     }

@@ -12402,6 +12402,38 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
         return;
     }
 
+    // Alignment restriction: refuse if the proto's
+    // `restricted_alignments` list contains the player's bucket.
+    // Lookup is by WorldKey → ObjectPrototypes; items without a
+    // proto (corpses, dynamically synthesized) skip the check.
+    let restriction = world
+        .get::<WorldKey>(item)
+        .and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| p.restricted_alignments.clone())
+        })
+        .unwrap_or_default();
+    if !restriction.is_empty() {
+        let player_align = world
+            .get::<CombatStats>(player)
+            .map_or(0, |c| c.alignment);
+        let bucket = mud_db::enums::Alignment::from_score(player_align);
+        if restriction.contains(&bucket) {
+            send_rendered(
+                world,
+                player,
+                &format!(
+                    "{item_name} repels your touch — your {} alignment is incompatible.\r\n",
+                    bucket.label()
+                ),
+            );
+            return;
+        }
+    }
+
     // Check the slot is free.
     let slot_taken = {
         let mut q = world.query_filtered::<(&Located, &EquippedSlot), With<Item>>();

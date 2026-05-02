@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::enums::{ObjectType, WearFlag};
+use crate::enums::{Alignment, ObjectType, WearFlag};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Object {
@@ -22,6 +22,9 @@ pub struct Object {
     /// carry hours; potions carry levels and spell ids; etc. The
     /// runtime reads only what each consumer needs.
     pub values: serde_json::Value,
+    /// Alignments that CANNOT use this item. Empty for
+    /// unrestricted gear. Mirrors `Objects.restricted_alignments`.
+    pub restricted_alignments: Vec<Alignment>,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -40,7 +43,8 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             weight,
             cost,
             "wearFlags" AS "wear_flags!: Vec<WearFlag>",
-            values AS "values!: serde_json::Value"
+            values AS "values!: serde_json::Value",
+            restricted_alignments AS "restricted_alignments!: Vec<Alignment>"
         FROM "Objects"
         ORDER BY zone_id, id
         "#

@@ -176,6 +176,44 @@ pub enum MobRole {
     RaidBoss,
 }
 
+/// Three-bucket alignment used for item restrictions. The
+/// schema's `Objects.restricted_alignments` column is an array
+/// of these. The runtime compares against the killer's i32
+/// alignment via `Alignment::from_score`.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = "Alignment", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Alignment {
+    Good,
+    Neutral,
+    Evil,
+}
+
+impl Alignment {
+    /// Map an integer alignment score onto the three-bucket enum.
+    /// Mirrors classic `FieryMUD`: ≥350 = Good, ≤-350 = Evil, else
+    /// Neutral. The thresholds are the same ones the schema's
+    /// `protectedKind`/race-restriction docs reference.
+    #[must_use]
+    pub const fn from_score(score: i32) -> Self {
+        if score >= 350 {
+            Self::Good
+        } else if score <= -350 {
+            Self::Evil
+        } else {
+            Self::Neutral
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Good => "good",
+            Self::Neutral => "neutral",
+            Self::Evil => "evil",
+        }
+    }
+}
+
 /// "Kill the wrong target" alignment-penalty marker on mobs.
 /// `Normal` is the default and incurs no penalty; the others
 /// scale a player's alignment toward EVIL on kill.

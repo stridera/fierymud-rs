@@ -206,6 +206,10 @@ pub struct ObjectProto {
     /// `Objects.values` has `Capacity` / `Remaining` in game-hours;
     /// `Remaining < 0` means "infinite" (eternal-flame items).
     pub light_fuel: Option<LightFuelProto>,
+    /// Alignments that CAN'T equip this item. Empty for
+    /// unrestricted gear; checked at wear time against the
+    /// player's three-bucket alignment.
+    pub restricted_alignments: Vec<mud_db::enums::Alignment>,
 }
 
 /// Static initial-spawn data for a `DrinkContainer` proto. Mirrors
