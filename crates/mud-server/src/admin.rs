@@ -29,8 +29,10 @@ use bevy_ecs::prelude::*;
 use mud_db::{characters, characters::CharacterRow, character_items, sqlx::PgPool, users, users::User};
 use mud_net::Outbound;
 use mud_world::{
-    AppliedTo, EffectInstance, Exits, Health, Item, Located, Mob, Named, Online, Player, Posture,
-    Profile, Stamina, WorldKey, WorldKeyIndex,
+    AppliedTo, AttachedTriggers, BoardLink, CombatStats, Description, EffectInstance, Exits,
+    Health, Item, Keywords, LiquidContainer, Located, Mob, MobPrototypes, Named,
+    ObjectPrototypes, Online, Player, Posture, PostureKind, Profile, Stamina, TriggerCatalog,
+    WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -77,6 +79,8 @@ pub enum AdminRequest {
     },
     SessionDestroy { player_name: String },
     Command { executor: String, command: String },
+    Teleport { player_name: String, zone_id: i32, room_id: i32 },
+    Spawn { kind: String, zone_id: i32, id: i32, room_zone: i32, room_id: i32 },
 }
 
 pub type AdminResponse = Result<Value, (StatusCode, String)>;
@@ -124,6 +128,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/session/create", post(handle_session_create))
         .route("/api/admin/session/destroy", post(handle_session_destroy))
         .route("/api/admin/command", post(handle_command))
+        .route("/api/admin/teleport", post(handle_teleport))
+        .route("/api/admin/spawn", post(handle_spawn))
         .with_state(state)
 }
 
@@ -266,6 +272,23 @@ struct CommandBody {
     command: String,
 }
 
+#[derive(Deserialize)]
+struct TeleportBody {
+    player_name: String,
+    zone_id: i32,
+    room_id: i32,
+}
+
+#[derive(Deserialize)]
+struct SpawnBody {
+    #[serde(rename = "type")]
+    kind: String,
+    zone_id: i32,
+    id: i32,
+    room_zone: i32,
+    room_id: i32,
+}
+
 async fn handle_command(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -278,6 +301,50 @@ async fn handle_command(
         enqueue(
             &state,
             AdminRequest::Command { executor: body.executor, command: body.command },
+        )
+        .await,
+    )
+}
+
+async fn handle_teleport(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<TeleportBody>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(
+        enqueue(
+            &state,
+            AdminRequest::Teleport {
+                player_name: body.player_name,
+                zone_id: body.zone_id,
+                room_id: body.room_id,
+            },
+        )
+        .await,
+    )
+}
+
+async fn handle_spawn(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<SpawnBody>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(
+        enqueue(
+            &state,
+            AdminRequest::Spawn {
+                kind: body.kind,
+                zone_id: body.zone_id,
+                id: body.id,
+                room_zone: body.room_zone,
+                room_id: body.room_id,
+            },
         )
         .await,
     )
@@ -328,6 +395,12 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         }
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
         AdminRequest::Command { executor, command } => run_command(world, &executor, &command),
+        AdminRequest::Teleport { player_name, zone_id, room_id } => {
+            teleport(world, &player_name, zone_id, room_id)
+        }
+        AdminRequest::Spawn { kind, zone_id, id, room_zone, room_id } => {
+            spawn_into(world, &kind, zone_id, id, room_zone, room_id)
+        }
     }
 }
 
@@ -612,4 +685,182 @@ fn run_command(world: &mut World, executor: &str, command_line: &str) -> AdminRe
         "command": command_line,
         "output": String::from_utf8_lossy(&buf).to_string(),
     }))
+}
+
+/// Move an actor (player or mob) by name to the given room. Does not
+/// require a virtual session — useful for setting up scenarios via
+/// MCP before spawning a session at the destination. Looks up the
+/// target by case-insensitive Named match.
+fn teleport(world: &mut World, name: &str, zone_id: i32, room_id: i32) -> AdminResponse {
+    let needle = name.to_ascii_lowercase();
+    let entity = {
+        let mut q = world
+            .query_filtered::<(Entity, &Named), Or<(With<Mob>, With<Player>)>>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(&needle))
+            .map(|(e, _)| e)
+    };
+    let Some(entity) = entity else {
+        return Err((StatusCode::NOT_FOUND, format!("no actor matching '{name}'")));
+    };
+    let Some(room_entity) = world
+        .resource::<WorldKeyIndex>()
+        .rooms
+        .get(&(zone_id, room_id))
+        .copied()
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("room ({zone_id}, {room_id}) not loaded"),
+        ));
+    };
+    if let Some(mut l) = world.get_mut::<Located>(entity) {
+        l.0 = room_entity;
+    } else if let Ok(mut e) = world.get_entity_mut(entity) {
+        e.insert(Located(room_entity));
+    }
+    Ok(json!({
+        "success": true,
+        "name": name_of(world, entity),
+        "destination": [zone_id, room_id],
+    }))
+}
+
+/// Spawn a fresh mob or item directly into a target room. Mirrors
+/// the proto-derived component set the loader's reset pass uses
+/// (`Description`, `Health`, `CombatStats` for mobs; `WearableIn`,
+/// `BoardLink`, `LiquidContainer` for items) so the spawned entity
+/// is indistinguishable from one produced by world load. No reset
+/// row is associated — destroying a spawned entity won't trigger a
+/// respawn since `FromMobReset` / `FromObjectReset` aren't
+/// attached.
+#[allow(clippy::too_many_lines)]
+fn spawn_into(
+    world: &mut World,
+    kind: &str,
+    zone_id: i32,
+    id: i32,
+    room_zone: i32,
+    room_id: i32,
+) -> AdminResponse {
+    let Some(room_entity) = world
+        .resource::<WorldKeyIndex>()
+        .rooms
+        .get(&(room_zone, room_id))
+        .copied()
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("room ({room_zone}, {room_id}) not loaded"),
+        ));
+    };
+    match kind.to_ascii_lowercase().as_str() {
+        "mob" | "mobile" | "npc" => {
+            let proto = world
+                .resource::<MobPrototypes>()
+                .by_key
+                .get(&(zone_id, id))
+                .cloned();
+            let Some(proto) = proto else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("no mob prototype ({zone_id}, {id})"),
+                ));
+            };
+            let hp = proto.rolled_hp();
+            let dmg = proto.avg_damage();
+            let trigger_keys = world
+                .resource::<TriggerCatalog>()
+                .mob_attachments
+                .get(&(zone_id, id))
+                .cloned();
+            let mut em = world.spawn((
+                Mob,
+                Named { name: proto.name.clone() },
+                Keywords(proto.keywords.clone()),
+                Description(proto.room_description.clone()),
+                WorldKey { zone: proto.zone_id, id: proto.id },
+                Located(room_entity),
+                Health { hp, max: hp },
+                CombatStats {
+                    hit_roll: proto.hit_roll,
+                    dmg_roll: dmg,
+                    ac: proto.armor_class,
+                    alignment: proto.alignment,
+                },
+                Posture(PostureKind::Standing),
+            ));
+            if let Some(keys) = trigger_keys {
+                em.insert(AttachedTriggers(keys));
+            }
+            let entity = em.id();
+            Ok(json!({
+                "success": true,
+                "kind": "mob",
+                "entity": format!("{:?}", entity),
+                "name": proto.name,
+                "world_key": [zone_id, id],
+                "room": [room_zone, room_id],
+            }))
+        }
+        "obj" | "object" | "item" => {
+            let proto = world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(zone_id, id))
+                .cloned();
+            let Some(proto) = proto else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("no object prototype ({zone_id}, {id})"),
+                ));
+            };
+            let primary_slot = wear_flags_primary_slot(&proto.wear_flags);
+            let trigger_keys = world
+                .resource::<TriggerCatalog>()
+                .object_attachments
+                .get(&(zone_id, id))
+                .cloned();
+            let mut bundle = world.spawn((
+                Item,
+                Named { name: proto.name.clone() },
+                Keywords(proto.keywords.clone()),
+                WorldKey { zone: proto.zone_id, id: proto.id },
+                Located(room_entity),
+            ));
+            if let Some(desc) = proto.examine_description.clone() {
+                bundle.insert(Description(desc));
+            }
+            if let Some(s) = primary_slot {
+                bundle.insert(WearableIn(s));
+            }
+            if let Some(board_id) = proto.board_id {
+                bundle.insert(BoardLink(board_id));
+            }
+            if let Some(liq) = proto.liquid.clone() {
+                bundle.insert(LiquidContainer {
+                    liquid: liq.liquid,
+                    capacity: liq.capacity,
+                    remaining: liq.remaining,
+                    poisoned: liq.poisoned,
+                });
+            }
+            if let Some(keys) = trigger_keys {
+                bundle.insert(AttachedTriggers(keys));
+            }
+            let entity = bundle.id();
+            Ok(json!({
+                "success": true,
+                "kind": "object",
+                "entity": format!("{:?}", entity),
+                "name": proto.name,
+                "world_key": [zone_id, id],
+                "room": [room_zone, room_id],
+            }))
+        }
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!("unknown spawn kind '{other}'; expected 'mob' or 'object'"),
+        )),
+    }
 }
