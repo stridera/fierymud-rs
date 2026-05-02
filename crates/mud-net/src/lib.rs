@@ -37,6 +37,11 @@ pub async fn serve(bind_addr: &str, inbound: InboundTx) -> std::io::Result<()> {
     let mut next_id: ConnId = 1;
     loop {
         let (stream, peer) = listener.accept().await?;
+        if banned(peer.ip()) {
+            warn!(%peer, "banlist: refusing connection");
+            drop(stream);
+            continue;
+        }
         if !throttle_allow(peer.ip()) {
             warn!(%peer, "throttle: rejecting connection — over rate limit");
             drop(stream);
@@ -59,6 +64,29 @@ static THROTTLER: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 const MAX_CONNECTS_PER_MIN: usize = 10;
+
+/// Hard ban list — IPs that should never connect, regardless of
+/// rate. Initialized once from the `MUD_BANLIST` env var (comma-
+/// separated `1.2.3.4` entries). Empty by default.
+static BANLIST: std::sync::OnceLock<std::collections::HashSet<std::net::IpAddr>> =
+    std::sync::OnceLock::new();
+
+fn banlist() -> &'static std::collections::HashSet<std::net::IpAddr> {
+    BANLIST.get_or_init(|| {
+        std::env::var("MUD_BANLIST")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .filter_map(|s| s.trim().parse::<std::net::IpAddr>().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn banned(ip: std::net::IpAddr) -> bool {
+    banlist().contains(&ip)
+}
 
 /// Returns true when the IP is allowed to connect. Records the
 /// attempt; expired entries are pruned in the same call so the
@@ -110,6 +138,11 @@ pub async fn serve_tls(
         // (a flood that exhausts plain TCP shouldn't fall through
         // to TLS, and vice versa).
         let (stream, peer) = listener.accept().await?;
+        if banned(peer.ip()) {
+            warn!(%peer, "banlist: refusing TLS connection");
+            drop(stream);
+            continue;
+        }
         if !throttle_allow(peer.ip()) {
             warn!(%peer, "throttle: rejecting TLS connection — over rate limit");
             drop(stream);
