@@ -1262,6 +1262,15 @@ fn check_level_up(world: &mut World, entity: Entity) {
                     .map_or_else(String::new, |n| format!(" ({n})"))
             ),
         );
+        // Milestone achievement hooks. Codes are stable strings the
+        // catalog references; if a row is missing, grant_achievement
+        // no-ops cleanly.
+        for milestone in [5, 15, 30, 50, 75, 100] {
+            if next == milestone {
+                let code = format!("level_{milestone}");
+                crate::commands::grant_achievement(world, entity, &code);
+            }
+        }
     }
 }
 
