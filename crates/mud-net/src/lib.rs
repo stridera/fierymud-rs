@@ -107,6 +107,15 @@ const TELNET_SB: u8 = 0xFA;
 const TELNET_SE: u8 = 0xF0;
 /// GMCP option number per the protocol (decimal 201, hex 0xC9).
 const TELNET_OPT_GMCP: u8 = 0xC9;
+/// MSSP option number (RFC-ish, decimal 70). Servers advertise
+/// MSSP via `IAC WILL 70`; clients (MUD listing scrapers) request
+/// the data via `IAC DO 70`. The reply is a single SB frame
+/// holding `<MSSP_VAR> <name> <MSSP_VAL> <value>` pairs.
+const TELNET_OPT_MSSP: u8 = 0x46;
+/// MSSP variable-name marker per the spec (1 = `MSSP_VAR`).
+const MSSP_VAR: u8 = 0x01;
+/// MSSP value marker per the spec (2 = `MSSP_VAL`).
+const MSSP_VAL: u8 = 0x02;
 
 /// Build the 3-byte `IAC WILL GMCP` sequence the server sends on
 /// connect to advertise GMCP support. Mainstream MUD clients
@@ -114,6 +123,45 @@ const TELNET_OPT_GMCP: u8 = 0xC9;
 #[must_use]
 pub fn iac_will_gmcp() -> Vec<u8> {
     vec![TELNET_IAC, TELNET_WILL, TELNET_OPT_GMCP]
+}
+
+/// Build the 3-byte `IAC WILL MSSP` advertisement. MUD list
+/// scrapers (`TMS`, `MudConnect`) reply `IAC DO 70` and expect the
+/// server to follow with an MSSP subnegotiation frame.
+#[must_use]
+pub fn iac_will_mssp() -> Vec<u8> {
+    vec![TELNET_IAC, TELNET_WILL, TELNET_OPT_MSSP]
+}
+
+/// Build an MSSP subnegotiation frame: `IAC SB 70 (MSSP_VAR name
+/// MSSP_VAL value)+ IAC SE`. Vars / values are framed per the spec
+/// with their leading 1 / 2 bytes. Standard variable names per the
+/// MSSP spec: NAME, PLAYERS, UPTIME, CODEBASE, FAMILY, CONTACT,
+/// GENRE, LANGUAGE — the caller picks which to send.
+#[must_use]
+pub fn mssp_packet(vars: &[(&str, &str)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + vars.iter().map(|(k, v)| k.len() + v.len() + 2).sum::<usize>());
+    out.push(TELNET_IAC);
+    out.push(TELNET_SB);
+    out.push(TELNET_OPT_MSSP);
+    for (name, value) in vars {
+        out.push(MSSP_VAR);
+        out.extend_from_slice(name.as_bytes());
+        out.push(MSSP_VAL);
+        // Escape any 0xFF in the value (unlikely for ASCII metadata
+        // but cheap insurance).
+        for b in value.as_bytes() {
+            if *b == TELNET_IAC {
+                out.push(TELNET_IAC);
+                out.push(TELNET_IAC);
+            } else {
+                out.push(*b);
+            }
+        }
+    }
+    out.push(TELNET_IAC);
+    out.push(TELNET_SE);
+    out
 }
 
 /// Build a GMCP subnegotiation frame:
@@ -234,6 +282,22 @@ async fn handle_connection<S>(
     // assumes "client said yes" if it later receives a GMCP
     // subnegotiation. Plain telnet clients ignore the WILL.
     let _ = out_tx.send(iac_will_gmcp());
+    // Same one-shot pattern for MSSP: advertise WILL 70 then push
+    // the variable list inline. MUD list scrapers parse the SB
+    // frame whether or not they replied with DO; sending it
+    // unconditionally costs ~80 bytes per connect and reaches
+    // every scraper in one round-trip.
+    let _ = out_tx.send(iac_will_mssp());
+    let _ = out_tx.send(mssp_packet(&[
+        ("NAME", "fierymud-rs"),
+        ("CODEBASE", "fierymud-rs"),
+        ("FAMILY", "Custom"),
+        ("GENRE", "Fantasy"),
+        ("LANGUAGE", "English"),
+        ("DEFAULT_PORT", "4003"),
+        ("SSL", "4443"),
+        ("HOSTNAME", "minastirith.utaboshi.com"),
+    ]));
 
     if inbound
         .send(Inbound {
