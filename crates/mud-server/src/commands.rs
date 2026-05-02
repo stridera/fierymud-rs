@@ -10466,7 +10466,32 @@ fn cmd_give(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_wear(world: &mut World, player: Entity, args: &str) {
-    wear_into(world, player, args.trim(), None);
+    let trimmed = args.trim();
+    // `wear all` — try to equip every carried wearable. Items whose
+    // primary slot is already filled get skipped silently (a single
+    // collective "couldn't wear N" line summarizes failures).
+    if trimmed.eq_ignore_ascii_case("all") {
+        let items: Vec<Entity> = {
+            let mut q = world
+                .query_filtered::<(Entity, &Located, Option<&EquippedSlot>, Option<&WearableIn>), With<Item>>();
+            q.iter(world)
+                .filter(|(_, l, eq, wi)| l.0 == player && eq.is_none() && wi.is_some())
+                .map(|(e, _, _, _)| e)
+                .collect()
+        };
+        if items.is_empty() {
+            send_to(world, player, "You have nothing wearable in your inventory.\r\n");
+            return;
+        }
+        // wear_into handles its own per-item messaging including
+        // refusal lines for slot conflicts; we just feed it a name.
+        for item in items {
+            let name = name_of(world, item);
+            wear_into(world, player, &name, None);
+        }
+        return;
+    }
+    wear_into(world, player, trimmed, None);
 }
 
 fn cmd_wield(world: &mut World, player: Entity, args: &str) {
@@ -11237,6 +11262,32 @@ fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Remove what?\r\n");
+        return;
+    }
+    // `remove all` — strip every equipped item.
+    if target_word.eq_ignore_ascii_case("all") {
+        let items: Vec<(Entity, String)> = {
+            let mut q = world
+                .query_filtered::<(Entity, &Located, &Named, &EquippedSlot), With<Item>>();
+            q.iter(world)
+                .filter(|(_, l, _, _)| l.0 == player)
+                .map(|(e, _, n, _)| (e, n.name.clone()))
+                .collect()
+        };
+        if items.is_empty() {
+            send_to(world, player, "You aren't wearing anything.\r\n");
+            return;
+        }
+        for (item, item_name) in &items {
+            try_remove::<EquippedSlot>(world, *item);
+            send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
+            crate::triggers::fire_item_event(
+                world,
+                *item,
+                player,
+                mud_world::TriggerEvent::Remove,
+            );
+        }
         return;
     }
     let item = find_carried_by(world, target_word, player, EquipFilter::Equipped);
