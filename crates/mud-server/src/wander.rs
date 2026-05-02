@@ -16,8 +16,8 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ExitState, MobBehavior};
 use mud_world::{
-    AttachedTriggers, ExitData, Exits, Fighting, Located, Mob, MobBehaviors, Named, RiddenBy,
-    WorldKey,
+    AttachedTriggers, ExitData, Exits, Fighting, Item, Located, Mob, MobBehaviors, Named,
+    RiddenBy, WorldKey,
 };
 
 use crate::TickCount;
@@ -31,6 +31,12 @@ const WANDER_PERIOD_TICKS: u64 = 300;
 /// 1 in 4 means roughly one move every 2 minutes per mob —
 /// ambient, not chaotic.
 const WANDER_CHANCE_DENOM: u32 = 4;
+
+/// Scavenger pickup tick fires every 100 ticks (= 10s real-time).
+/// Each Scavenger-flagged mob in a room with a free-floor item
+/// picks one up — at most one per tick per mob, so a busy zone
+/// doesn't see mobs hoover the floor in a single frame.
+const SCAVENGER_PERIOD_TICKS: u64 = 100;
 
 pub fn wander_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
@@ -120,5 +126,56 @@ pub fn wander_tick(world: &mut World) {
             &[mob],
             &format!("{mob_name} arrives from {arrival_dir}.\r\n"),
         );
+    }
+}
+
+/// Mob `Scavenger` behavior: every Scavenger-flagged mob picks up
+/// one floor item per tick from its current room. Items already
+/// inside containers (Located on something other than the room)
+/// or worn (`EquippedSlot` set) are skipped. Cadence is 10s so
+/// even a Scavenger-heavy zone doesn't strip the floor in one
+/// frame; a player dropping a stack still gets to grab some back.
+pub fn scavenger_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(SCAVENGER_PERIOD_TICKS) {
+        return;
+    }
+    let scavengers: Vec<(Entity, Entity)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &MobBehaviors),
+            (With<Mob>, Without<Fighting>),
+        >();
+        q.iter(world)
+            .filter(|(_, _, beh)| beh.has(MobBehavior::Scavenger))
+            .map(|(e, l, _)| (e, l.0))
+            .collect()
+    };
+    for (mob, room) in scavengers {
+        // Pick the first free-floor item in the room — items
+        // Located on other actors or inside containers stay put.
+        let target_item: Option<(Entity, String)> = {
+            let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Item>>();
+            q.iter(world)
+                .find(|(_, l, _)| l.0 == room)
+                .map(|(e, _, n)| (e, n.name.clone()))
+        };
+        let Some((item, item_name)) = target_item else {
+            continue;
+        };
+        if let Some(mut l) = world.get_mut::<Located>(item) {
+            l.0 = mob;
+        }
+        let mob_name = world
+            .get::<Named>(mob)
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        if !mob_name.is_empty() {
+            broadcast_room_except_players_rendered(
+                world,
+                room,
+                &[],
+                &format!("{mob_name} picks up {item_name}.\r\n"),
+            );
+        }
     }
 }
