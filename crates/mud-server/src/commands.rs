@@ -6425,6 +6425,33 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
         );
         let _ = conn.0.send(mud_net::gmcp_packet("Char.Vitals", &payload));
     }
+    // Char.Status: longer-lived character metadata (level / xp /
+    // class / race / wealth). Same prompt cadence — many of these
+    // change only on level-up but the per-prompt push is cheap
+    // and lets the client refresh on any state change without
+    // computing what changed.
+    if let Some(prof) = world.get::<Profile>(target) {
+        let class_label = prof
+            .class_id
+            .and_then(|id| {
+                world
+                    .get_resource::<ClassCatalog>()
+                    .and_then(|c| c.by_id.get(&id))
+                    .map(|d| d.plain_name.as_str())
+            })
+            .unwrap_or("");
+        let wealth = world.get::<Wealth>(target).map_or(0, |w| w.0);
+        let payload = format!(
+            "{{\"name\":\"{}\",\"level\":{},\"xp\":{},\"class\":\"{}\",\"race\":\"{}\",\"wealth\":{}}}",
+            name.unwrap_or("").replace('"', "\\\""),
+            prof.level,
+            prof.experience,
+            class_label.replace('"', "\\\""),
+            prof.race.replace('"', "\\\""),
+            wealth,
+        );
+        let _ = conn.0.send(mud_net::gmcp_packet("Char.Status", &payload));
+    }
     // Room.Info: lightweight room metadata for Mudlet-style
     // mappers. Same prompt cadence as Char.Vitals; per-prompt
     // re-emit is cheap (one telnet frame, ~80 bytes) and lets
