@@ -3517,7 +3517,8 @@ const COMMANDS: &[Command] = &[
                    `triggers` (catalog totals + per-event tally), \
                    `effects` (active EffectInstance count by tag), \
                    `clock` (MudClock + TickCount), \
-                   `resets` (mob/object refresh counts). \
+                   `resets` (mob/object refresh counts), \
+                   `corpses` (active corpses + decay + item counts). \
                    `show` with no arg lists the subsystems.",
         },
         run: cmd_show,
@@ -19952,6 +19953,7 @@ fn cmd_show(world: &mut World, player: Entity, args: &str) {
             out.push_str("  effects   active EffectInstance counts\r\n");
             out.push_str("  clock     MudClock + TickCount\r\n");
             out.push_str("  resets    mob/object reset catalog counts\r\n");
+            out.push_str("  corpses   active corpses + decay timers + item counts\r\n");
         }
         "players" => {
             let mut rows: Vec<(String, String, i32, String)> = {
@@ -20073,6 +20075,41 @@ fn cmd_show(world: &mut World, player: Entity, args: &str) {
             let obj_count = world.resource::<ObjectResetCatalog>().entries.len();
             out.push_str(&format!("Mob reset rows:    {mob_count}\r\n"));
             out.push_str(&format!("Object reset rows: {obj_count}\r\n"));
+        }
+        "corpses" => {
+            // Collect (corpse, name, decay, room, item_count) — same shape
+            // as the persistence snapshot uses, so what `show corpses`
+            // surfaces matches what survives a Ctrl-C.
+            let rows: Vec<(String, i32, String, usize)> = {
+                let mut q = world
+                    .query_filtered::<(Entity, &Named, &mud_world::CorpseDecay, &Located), With<mud_world::Corpse>>();
+                let snapshot: Vec<(Entity, String, i32, Entity)> = q
+                    .iter(world)
+                    .map(|(e, n, d, l)| (e, n.name.clone(), d.remaining_secs, l.0))
+                    .collect();
+                snapshot
+                    .into_iter()
+                    .map(|(corpse, name, decay, room)| {
+                        let room_name = name_or(world, room, "(unknown)");
+                        let item_count = {
+                            let mut q = world
+                                .query_filtered::<&Located, With<Item>>();
+                            q.iter(world).filter(|l| l.0 == corpse).count()
+                        };
+                        (name, decay, room_name, item_count)
+                    })
+                    .collect()
+            };
+            if rows.is_empty() {
+                out.push_str("No corpses on the floor.\r\n");
+            } else {
+                out.push_str(&format!("{} corpse(s):\r\n", rows.len()));
+                for (name, decay, room, items) in rows {
+                    out.push_str(&format!(
+                        "  {name} ({decay}s left, {items} item(s)) @ {room}\r\n"
+                    ));
+                }
+            }
         }
         other => {
             out.push_str(&format!(
