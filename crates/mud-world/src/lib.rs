@@ -15,14 +15,15 @@ pub use components::{
     WimpyThreshold,
     WorldKey, Zone, ZoneClimate,
 };
-pub use loader::{LoadStats, load_from_db, wear_flags_primary_slot};
+pub use loader::{LoadStats, default_weather_for_climate, load_from_db, wear_flags_primary_slot};
 pub use resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog, DamageComponent, EffectCatalog,
     EffectDef, LevelRow, LevelTable, LiquidIndex, LiquidProto, LuaOutbox, MobProto,
     MobPrototypes, MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding,
     ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
-    SavingThrow, ScriptError, ScriptErrorLog, ShopAcceptRule, ShopCatalog, ShopDef,
+    PrecipKind, SavingThrow, ScriptError, ScriptErrorLog, ShopAcceptRule, ShopCatalog, ShopDef,
     ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, SpellSlotData, TargetingRule,
-    TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, WorldKeyIndex,
+    TempBand, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, WeatherCatalog,
+    WeatherState, WorldKeyIndex,
 };

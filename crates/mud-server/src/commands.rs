@@ -9956,10 +9956,21 @@ fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let room = located.0;
-    let zone = world
-        .get::<WorldKey>(room)
-        .and_then(|k| world.resource::<WorldKeyIndex>().zones.get(&k.zone).copied());
+    let zone_id = world.get::<WorldKey>(room).map(|k| k.zone);
+    let zone = zone_id.and_then(|z| world.resource::<WorldKeyIndex>().zones.get(&z).copied());
     let climate = zone.and_then(|z| world.get::<ZoneClimate>(z).map(|c| c.0));
+    // Live state line from the per-zone catalog (drifts via
+    // weather_tick). Falls back to climate-default if the catalog
+    // hasn't been populated for some reason.
+    let live_line = zone_id
+        .and_then(|zid| {
+            world
+                .resource::<mud_world::WeatherCatalog>()
+                .by_zone
+                .get(&zid)
+                .copied()
+        })
+        .map(crate::weather::describe);
     let mud_hour = world.resource::<mud_world::MudClock>().hour;
     let day = match mud_hour {
         0..=4 | 21..=23 => "night",
@@ -9990,11 +10001,12 @@ fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
         (Some(Climate::Alpine), _) => "The wind howls down the slopes; stars are knife-bright at altitude.",
         (Some(Climate::None) | None, _) => "The air is still and unremarkable.",
     };
-    send_to(
-        world,
-        player,
-        format!("\r\n{line}\r\n"),
-    );
+    let mut out = String::from("\r\n");
+    if let Some(live) = live_line {
+        out.push_str(&format!("{live}\r\n"));
+    }
+    out.push_str(&format!("{line}\r\n"));
+    send_to(world, player, out);
 }
 
 fn cmd_version(world: &mut World, player: Entity, _args: &str) {

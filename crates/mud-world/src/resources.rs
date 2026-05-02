@@ -797,3 +797,75 @@ pub struct SocialDef {
     pub char_auto: Option<String>,
     pub others_auto: Option<String>,
 }
+
+/// Coarse temperature band. Climate sets the resting band; weather
+/// drift can move ±1 band per tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TempBand {
+    Frigid,
+    Cold,
+    Cool,
+    Mild,
+    Warm,
+    Hot,
+    Sweltering,
+}
+
+impl TempBand {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Frigid => "frigid",
+            Self::Cold => "cold",
+            Self::Cool => "cool",
+            Self::Mild => "mild",
+            Self::Warm => "warm",
+            Self::Hot => "hot",
+            Self::Sweltering => "sweltering",
+        }
+    }
+}
+
+/// Precipitation/sky state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrecipKind {
+    Clear,
+    Cloudy,
+    Drizzle,
+    Rain,
+    Storm,
+    Snow,
+    Blizzard,
+}
+
+impl PrecipKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Clear => "clear",
+            Self::Cloudy => "overcast",
+            Self::Drizzle => "drizzling",
+            Self::Rain => "raining",
+            Self::Storm => "stormy",
+            Self::Snow => "snowing",
+            Self::Blizzard => "blizzarding",
+        }
+    }
+}
+
+/// Live weather state for one zone. Updated per `weather_tick`;
+/// surfaced via the `weather` command and (eventually) outdoor
+/// room descriptions.
+#[derive(Debug, Clone, Copy)]
+pub struct WeatherState {
+    pub temp: TempBand,
+    pub precip: PrecipKind,
+}
+
+/// Per-zone weather catalog. Initialized at world load from the
+/// Zone's `Climate`; ticked periodically by the runtime. Fully
+/// ephemeral — restart re-derives from climate.
+#[derive(Resource, Default, Debug)]
+pub struct WeatherCatalog {
+    pub by_zone: HashMap<i32, WeatherState>,
+}

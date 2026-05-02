@@ -70,6 +70,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // Pass 1: zones.
     let zone_rows = zones::list_zones(pool).await?;
     let mut zone_index: HashMap<i32, Entity> = HashMap::with_capacity(zone_rows.len());
+    let mut weather = crate::resources::WeatherCatalog::default();
     for z in &zone_rows {
         let entity = world
             .spawn((
@@ -85,7 +86,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             ))
             .id();
         zone_index.insert(z.id, entity);
+        weather
+            .by_zone
+            .insert(z.id, default_weather_for_climate(z.climate));
     }
+    world.insert_resource(weather);
     stats.zones = zone_index.len();
 
     // Pass 2: rooms.
@@ -1126,12 +1131,36 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     Ok(stats)
 }
 
+/// Initial weather state for a zone given its `Climate`. Picks a
+/// resting-state band; the weather tick will drift it from here.
+/// `NONE` zones are treated as Mild + Clear (indoor / abstract zones
+/// like the Void / Limbo never see player-visible weather anyway).
+#[must_use]
+pub fn default_weather_for_climate(
+    climate: mud_db::enums::Climate,
+) -> crate::resources::WeatherState {
+    use crate::resources::{PrecipKind, TempBand, WeatherState};
+    use mud_db::enums::Climate;
+    let (temp, precip) = match climate {
+        Climate::None => (TempBand::Mild, PrecipKind::Clear),
+        Climate::Arid | Climate::Semiarid => (TempBand::Hot, PrecipKind::Clear),
+        Climate::Tropical => (TempBand::Hot, PrecipKind::Cloudy),
+        Climate::Subtropical => (TempBand::Warm, PrecipKind::Clear),
+        // Temperate / Subarctic / Alpine all happen to rest on
+        // (Cold|Mild, Cloudy). Different climates, same default
+        // start state — drift will diverge them quickly.
+        Climate::Temperate => (TempBand::Mild, PrecipKind::Cloudy),
+        Climate::Oceanic => (TempBand::Cool, PrecipKind::Drizzle),
+        Climate::Subarctic | Climate::Alpine => (TempBand::Cold, PrecipKind::Cloudy),
+        Climate::Arctic => (TempBand::Frigid, PrecipKind::Snow),
+    };
+    WeatherState { temp, precip }
+}
+
 /// Pick a single primary `Slot` from a list of `WearFlag`s. Most
 /// items in legacy data carry exactly one flag; for the few that
 /// have several (e.g. ring on FINGER + neck-pendant on NECK) we
-/// prefer the more common-use slot. The runtime `Slot` enum is
-/// smaller than the schema's wear-flag set; flags without a runtime
-/// equivalent (Tail, Hover, Disguise, Badge) return None.
+/// prefer the more common-use slot.
 #[must_use]
 pub fn wear_flags_primary_slot(flags: &[mud_db::enums::WearFlag]) -> Option<crate::components::Slot> {
     use crate::components::Slot;

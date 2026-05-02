@@ -8,6 +8,7 @@ mod regen;
 mod respawn;
 mod syslog;
 mod triggers;
+mod weather;
 
 use std::time::{Duration, Instant};
 
@@ -195,6 +196,7 @@ async fn main() {
             effects::effects_tick,
             regen::regen_tick,
             regen::hunger_thirst_tick,
+            weather::weather_tick,
             memorize::memorize_tick,
             respawn::respawn_tick,
             triggers::lua_coroutine_tick,
