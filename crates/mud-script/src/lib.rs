@@ -2093,6 +2093,34 @@ mod tests {
     }
 
     #[test]
+    fn wait_yields_and_resumes_on_tick_advance() {
+        // Body prints once, waits 2s, prints again. Initial fire
+        // captures the pre-yield output and parks; tick_yielded
+        // resumes it once current_tick passes the deadline.
+        let (mut world, actor) = make_world_with_actor();
+        let mut host = LuaHost::new();
+        host.set_current_tick(0);
+        let body = "print('before')\nwait(2)\nprint('after')";
+        let pre = host.exec_for_actor(&mut world, actor, body).expect("ok");
+        assert!(pre.contains("before"));
+        assert!(!pre.contains("after"), "post-wait line should not have run");
+        assert_eq!(host.yielded_count(), 1, "thread should be parked");
+
+        // 2 seconds at 10Hz = 20 ticks. Advance just before the
+        // deadline; thread stays parked.
+        host.set_current_tick(19);
+        let resumed_early = host.tick_yielded(&mut world);
+        assert_eq!(resumed_early, 0, "still under wait threshold");
+        assert_eq!(host.yielded_count(), 1, "still parked");
+
+        // Cross the threshold; thread resumes and finishes.
+        host.set_current_tick(20);
+        let resumed = host.tick_yielded(&mut world);
+        assert_eq!(resumed, 1);
+        assert_eq!(host.yielded_count(), 0, "finished, no longer parked");
+    }
+
+    #[test]
     fn actor_name_round_trips() {
         let (mut world, actor) = make_world_with_actor();
         let mut host = LuaHost::new();
