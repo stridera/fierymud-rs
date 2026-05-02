@@ -1841,6 +1841,37 @@ impl UserData for LuaRoom {
             },
         );
 
+        // `room:weather()` returns the current precip label
+        // ("clear", "rain", "blizzard", …) for the room's zone.
+        // Returns "clear" when the zone has no entry in the
+        // catalog (e.g. planar rooms). Lets triggers branch on
+        // weather state without re-implementing the lookup.
+        methods.add_method("weather", |lua, this, ()| -> mlua::Result<String> {
+            world_from_lua(lua, |w| {
+                let zone = w.get::<WorldKey>(this.entity).map(|k| k.zone);
+                zone.and_then(|z| {
+                    w.get_resource::<mud_world::WeatherCatalog>()
+                        .and_then(|c| c.by_zone.get(&z).copied())
+                })
+                .map_or_else(|| "clear".to_string(), |s| s.precip.label().to_string())
+            })
+        });
+
+        // `room:temp()` returns the current temperature band label
+        // ("frigid", "mild", "sweltering", …) for the room's zone.
+        // Same fallback shape as `weather()` — defaults to "mild"
+        // for unmapped zones.
+        methods.add_method("temp", |lua, this, ()| -> mlua::Result<String> {
+            world_from_lua(lua, |w| {
+                let zone = w.get::<WorldKey>(this.entity).map(|k| k.zone);
+                zone.and_then(|z| {
+                    w.get_resource::<mud_world::WeatherCatalog>()
+                        .and_then(|c| c.by_zone.get(&z).copied())
+                })
+                .map_or_else(|| "mild".to_string(), |s| s.temp.label().to_string())
+            })
+        });
+
         methods.add_meta_method(MetaMethod::ToString, |lua, this, ()| {
             world_from_lua(lua, |w| {
                 let name = w
