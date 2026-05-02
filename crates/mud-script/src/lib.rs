@@ -1749,6 +1749,7 @@ pub struct LuaRoom {
 }
 
 impl UserData for LuaRoom {
+    #[allow(clippy::too_many_lines)]
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("send", |lua, this, msg: String| -> mlua::Result<()> {
             world_mut_from_lua(lua, |world| {
@@ -1869,6 +1870,46 @@ impl UserData for LuaRoom {
                         .and_then(|c| c.by_zone.get(&z).copied())
                 })
                 .map_or_else(|| "mild".to_string(), |s| s.temp.label().to_string())
+            })
+        });
+
+        // `room:sector()` returns the schema sector name in
+        // SCREAMING_SNAKE form ("FOREST", "CITY", "UNDERWATER",
+        // "AIR", …). Lets triggers branch on terrain without
+        // re-implementing the dark-room / outdoor checks.
+        methods.add_method("sector", |lua, this, ()| -> mlua::Result<String> {
+            world_from_lua(lua, |w| {
+                w.get::<mud_world::RoomSector>(this.entity)
+                    .map_or_else(|| "STRUCTURE".to_string(), |s| format!("{:?}", s.0).to_uppercase())
+            })
+        });
+
+        // `room:is_outdoor()` returns true for sectors the weather /
+        // dark-room / sky-look systems treat as outdoor. Cave,
+        // underdark, underwater, planar, and structure rooms read
+        // false. Mirrors the runtime helper, single source of truth.
+        methods.add_method("is_outdoor", |lua, this, ()| -> mlua::Result<bool> {
+            world_from_lua(lua, |w| {
+                w.get::<mud_world::RoomSector>(this.entity)
+                    .is_some_and(|s| {
+                        use mud_db::enums::Sector;
+                        matches!(
+                            s.0,
+                            Sector::City
+                                | Sector::Field
+                                | Sector::Forest
+                                | Sector::Hills
+                                | Sector::Mountain
+                                | Sector::Shallows
+                                | Sector::Water
+                                | Sector::Air
+                                | Sector::Road
+                                | Sector::Grasslands
+                                | Sector::Beach
+                                | Sector::Swamp
+                                | Sector::Ruins
+                        )
+                    })
             })
         });
 
