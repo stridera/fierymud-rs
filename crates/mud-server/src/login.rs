@@ -51,8 +51,8 @@ impl ConnRouter {
     }
 
     pub fn on_connect(&mut self, conn_id: ConnId, outbound: Outbound) {
-        let _ = outbound.send(BANNER.into());
-        let _ = outbound.send(EMAIL_PROMPT.into());
+        let _ = outbound.send(BANNER.as_bytes().to_vec());
+        let _ = outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
         self.login.insert(
             conn_id,
             LoginCtx {
@@ -145,13 +145,13 @@ impl ConnRouter {
                     }
                     Err(e) => {
                         warn!(conn_id, error = %e, "user lookup failed");
-                        let _ = ctx.outbound.send("Server error.\r\n".into());
+                        let _ = ctx.outbound.send("Server error.\r\n".as_bytes().to_vec());
                         ctx.stage = Stage::AwaitingEmail;
-                        let _ = ctx.outbound.send(EMAIL_PROMPT.into());
+                        let _ = ctx.outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 }
-                let _ = ctx.outbound.send(PASSWORD_PROMPT.into());
+                let _ = ctx.outbound.send(PASSWORD_PROMPT.as_bytes().to_vec());
             }
 
             Stage::AwaitingPassword { user } => {
@@ -161,9 +161,9 @@ impl ConnRouter {
                     .is_some_and(|h| bcrypt::verify(trimmed, h).unwrap_or(false));
                 if !ok {
                     info!(conn_id, email = %user.email, "auth failure");
-                    let _ = ctx.outbound.send("Invalid credentials.\r\n".into());
+                    let _ = ctx.outbound.send("Invalid credentials.\r\n".as_bytes().to_vec());
                     ctx.stage = Stage::AwaitingEmail;
-                    let _ = ctx.outbound.send(EMAIL_PROMPT.into());
+                    let _ = ctx.outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 info!(conn_id, user_id = %user.id, email = %user.email, "auth success");
@@ -172,18 +172,18 @@ impl ConnRouter {
                     Ok(c) => c,
                     Err(e) => {
                         warn!(conn_id, error = %e, "character list failed");
-                        let _ = ctx.outbound.send("Server error.\r\n".into());
+                        let _ = ctx.outbound.send("Server error.\r\n".as_bytes().to_vec());
                         ctx.stage = Stage::AwaitingEmail;
-                        let _ = ctx.outbound.send(EMAIL_PROMPT.into());
+                        let _ = ctx.outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
                 if chars.is_empty() {
                     let _ = ctx
                         .outbound
-                        .send("No characters on this account.\r\n".into());
+                        .send("No characters on this account.\r\n".as_bytes().to_vec());
                     ctx.stage = Stage::AwaitingEmail;
-                    let _ = ctx.outbound.send(EMAIL_PROMPT.into());
+                    let _ = ctx.outbound.send(EMAIL_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 let mut menu = String::from("\r\nCharacters:\r\n");
@@ -191,7 +191,7 @@ impl ConnRouter {
                     menu.push_str(&format!("  {}. {} (level {})\r\n", idx + 1, c.name, c.level));
                 }
                 menu.push_str("Pick a number: ");
-                let _ = ctx.outbound.send(menu);
+                let _ = ctx.outbound.send(menu.into_bytes());
                 ctx.stage = Stage::CharSelect {
                     user,
                     characters: chars,
@@ -207,7 +207,7 @@ impl ConnRouter {
                 else {
                     let _ = ctx
                         .outbound
-                        .send(format!("Pick 1-{}.\r\n", characters.len()));
+                        .send(format!("Pick 1-{}.\r\n", characters.len()).into_bytes());
                     ctx.stage = Stage::CharSelect { user, characters };
                     return;
                 };
@@ -348,11 +348,14 @@ fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outb
         let _ = outbound.send(format!(
             "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",
             name = c.name,
-        ));
+        ).into_bytes());
     } else {
-        let _ = outbound.send(format!(
-            "No starting room available (tried ({zone},{room}) and fallback {FALLBACK_START:?}).\r\n",
-        ));
+        let _ = outbound.send(
+            format!(
+                "No starting room available (tried ({zone},{room}) and fallback {FALLBACK_START:?}).\r\n",
+            )
+            .into_bytes(),
+        );
     }
 
     let entity = world

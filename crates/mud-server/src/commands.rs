@@ -4676,7 +4676,7 @@ fn skip_n_tokens(s: &str, n: usize) -> &str {
 
 pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
     if let Some(conn) = world.get::<Connection>(target) {
-        let _ = conn.0.send(text.into());
+        let _ = conn.0.send(text.into().into_bytes());
     }
     // Track for end-of-batch prompt refresh. Tracking mobs (no Connection)
     // is harmless; `flush_prompts` is a no-op for them via `send_prompt`'s
@@ -6162,7 +6162,7 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
     // both — and is_tag_shaped lets the default `<%h/%H>` survive
     // since `<42/100>` isn't tag-shaped after %-substitution.
     let mode = color_mode_for(world, target);
-    let _ = conn.0.send(render_color_tags(&rendered, mode));
+    let _ = conn.0.send(render_color_tags(&rendered, mode).into_bytes());
 }
 
 fn render_prompt(

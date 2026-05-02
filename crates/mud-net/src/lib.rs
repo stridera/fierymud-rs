@@ -7,7 +7,10 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 pub type ConnId = u64;
-pub type Outbound = mpsc::UnboundedSender<String>;
+/// Outbound message to a connected client. Bytes (not String) so the
+/// channel can carry telnet IAC framing for GMCP / MSSP / option
+/// negotiation alongside ordinary UTF-8 text.
+pub type Outbound = mpsc::UnboundedSender<Vec<u8>>;
 pub type InboundTx = mpsc::UnboundedSender<Inbound>;
 pub type InboundRx = mpsc::UnboundedReceiver<Inbound>;
 
@@ -106,7 +109,7 @@ async fn handle_connection<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (read_half, mut write_half) = tokio::io::split(stream);
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
     if inbound
         .send(Inbound {
@@ -122,8 +125,8 @@ async fn handle_connection<S>(
     }
 
     let writer = tokio::spawn(async move {
-        while let Some(text) = out_rx.recv().await {
-            if write_half.write_all(text.as_bytes()).await.is_err() {
+        while let Some(bytes) = out_rx.recv().await {
+            if write_half.write_all(&bytes).await.is_err() {
                 break;
             }
         }
