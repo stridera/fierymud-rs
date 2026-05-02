@@ -22,6 +22,7 @@ use mud_world::{FromMobReset, FromObjectReset};
 use tracing::info;
 
 use crate::TickCount;
+use crate::commands::broadcast_room_except_players_rendered;
 
 /// One refill cycle every 60 game ticks (= 6 seconds at 10 Hz).
 /// Plenty often for testing; players' perception of "respawn" is
@@ -66,6 +67,10 @@ pub fn respawn_tick(world: &mut World) {
     // dispatcher can fire LOAD on them after the respawn loop
     // exits — firing inside the loop would re-borrow World mid-spawn.
     let mut load_fire_queue: Vec<Entity> = Vec::new();
+    // (room, mob name) pairs for the post-loop announcement pass.
+    // Same reason as load_fire_queue — the broadcast helper queries
+    // the world, but the spawn block here holds an EntityWorldMut.
+    let mut announce_queue: Vec<(Entity, String)> = Vec::new();
     for entry in &entries {
         if reset_id_alive.contains(&entry.reset_id) {
             continue;
@@ -131,11 +136,25 @@ pub fn respawn_tick(world: &mut World) {
         }
         reset_id_alive.insert(entry.reset_id);
         *world_counts.entry(proto_key).or_insert(0) += 1;
+        announce_queue.push((entry.room_entity, proto.name.clone()));
         refilled += 1;
     }
 
     if refilled > 0 {
         info!(refilled, "respawn tick");
+    }
+
+    // Tell anyone watching that a mob just wandered in. Only fires
+    // for *refills* — the initial world load doesn't go through
+    // respawn_tick, so no flood at startup. Silent if the room has
+    // no players.
+    for (room, name) in announce_queue {
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[],
+            &format!("{name} arrives.\r\n"),
+        );
     }
 
     // Fire LOAD triggers for the just-spawned mobs. The respawn loop
