@@ -16835,6 +16835,14 @@ fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
     out.push_str(&format!(
         "Your strikes would land about {your_chance}%; theirs about {their_chance}%.\r\n",
     ));
+    // Aggro hint: same threshold the room-entry check uses, so
+    // `consider` matches the auto-engage rule. Players passing
+    // through a known-hostile zone can size up the danger before
+    // walking back in.
+    let target_alignment = target_stats.map_or(0, |c| c.alignment);
+    if target_alignment <= AGGRO_ALIGNMENT && world.get::<Mob>(target).is_some() {
+        out.push_str("Its eyes follow you with malice — it would attack on sight.\r\n");
+    }
     send_rendered(world, player, &out);
 }
 
