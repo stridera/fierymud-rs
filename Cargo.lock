@@ -1520,6 +1520,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "mud-db",
+ "serde",
  "serde_json",
  "sqlx",
  "tracing",

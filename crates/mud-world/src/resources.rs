@@ -813,7 +813,7 @@ pub struct SocialDef {
 
 /// Coarse temperature band. Climate sets the resting band; weather
 /// drift can move ±1 band per tick.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TempBand {
     Frigid,
     Cold,
@@ -840,7 +840,7 @@ impl TempBand {
 }
 
 /// Precipitation/sky state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PrecipKind {
     Clear,
     Cloudy,
@@ -869,7 +869,7 @@ impl PrecipKind {
 /// Live weather state for one zone. Updated per `weather_tick`;
 /// surfaced via the `weather` command and (eventually) outdoor
 /// room descriptions.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct WeatherState {
     pub temp: TempBand,
     pub precip: PrecipKind,

@@ -189,3 +189,63 @@ pub fn describe(state: WeatherState) -> String {
         state.precip.label()
     )
 }
+
+/// Where the persisted weather snapshot lives. Relative path so
+/// it follows the working directory the server's started from.
+const WEATHER_SNAPSHOT_PATH: &str = "state/weather.json";
+
+/// Try to overlay the `WeatherCatalog` with a saved snapshot from
+/// `state/weather.json`. Silent no-op when the file doesn't exist
+/// (first boot) or the parse fails (corrupt file). Climate-default
+/// state from world load remains for any zone the snapshot doesn't
+/// cover, so adding a new zone post-snapshot Just Works.
+pub fn load_snapshot(world: &mut World) {
+    let bytes = match std::fs::read(WEATHER_SNAPSHOT_PATH) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "weather snapshot read failed");
+            return;
+        }
+    };
+    let snapshot: std::collections::HashMap<i32, WeatherState> =
+        match serde_json::from_slice(&bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "weather snapshot parse failed");
+                return;
+            }
+        };
+    let mut catalog = world.resource_mut::<WeatherCatalog>();
+    let restored = snapshot.len();
+    for (zone_id, state) in snapshot {
+        catalog.by_zone.insert(zone_id, state);
+    }
+    tracing::info!(zones = restored, path = %WEATHER_SNAPSHOT_PATH, "weather snapshot loaded");
+}
+
+/// Persist the current `WeatherCatalog` to `state/weather.json`.
+/// Creates the parent directory if missing. Called from the main
+/// shutdown handler.
+pub fn save_snapshot(world: &World) {
+    if let Some(parent) = std::path::Path::new(WEATHER_SNAPSHOT_PATH).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(error = %e, "couldn't create weather snapshot dir");
+        return;
+    }
+    let catalog = world.resource::<WeatherCatalog>();
+    let bytes = match serde_json::to_vec_pretty(&catalog.by_zone) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "weather snapshot serialize failed");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(WEATHER_SNAPSHOT_PATH, bytes) {
+        tracing::warn!(error = %e, "weather snapshot write failed");
+        return;
+    }
+    tracing::info!(zones = catalog.by_zone.len(), path = %WEATHER_SNAPSHOT_PATH, "weather snapshot saved");
+}

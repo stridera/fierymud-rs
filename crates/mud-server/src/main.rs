@@ -112,6 +112,10 @@ async fn main() {
         return;
     }
 
+    // Overlay persisted weather (if any) on top of the climate-default
+    // state the loader populated. Silent no-op on first boot.
+    weather::load_snapshot(&mut world);
+
     combat::seed_test_mobs(&mut world);
     combat::seed_test_items(&mut world);
     commands::validate_registry();
@@ -269,6 +273,10 @@ async fn main() {
             }
         }
     }
+
+    // Persist weather state so the next boot picks up where we
+    // left off instead of snapping back to climate defaults.
+    weather::save_snapshot(&world);
 
     info!(
         final_tick = world.resource::<TickCount>().0,
