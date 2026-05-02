@@ -19332,6 +19332,16 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             send_to(world, mover, "You follow.\r\n");
         }
         cmd_look(world, mover, "");
+        // Hide-on-move semantics: footsteps break `hide` but not
+        // `sneak`. If a mover has a `hidden` EffectInstance and
+        // no `sneak` effect, drop the hidden effect; effects_tick
+        // GCs the Stealth marker once no hidden/sneak effects
+        // remain. A mover with only `sneak` glides through.
+        let has_sneak = has_effect_named(world, mover, "sneak");
+        if !has_sneak && has_effect_named(world, mover, "hidden") {
+            remove_effect_named(world, mover, "hidden");
+            send_to(world, mover, "Your footsteps reveal you.\r\n");
+        }
     }
 
     // Fire GREET / GREET_ALL triggers for every entity in the
