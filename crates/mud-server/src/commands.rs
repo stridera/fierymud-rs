@@ -16,12 +16,13 @@ use mud_net::Outbound;
 use mud_world::{
     AbilityCatalog, Account, AccountSummary, AppliedTo, AttachedTriggers, ClassCatalog,
     CombatStats, Cooldowns, CoreStats, Description, EffectCatalog, EffectInstance, EffectSource,
-    EquippedSlot, ExitData, Exits, Fighting, Follower, Frozen, Health, IgnoreList, Item, Keywords,
-    KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob, MobPrototypes, Named,
-    ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
-    BankWealth, BoardCatalog, BoardDraft, BoardLink, MailDraft, RecallPoint, RoomSector,
-    ShopCatalog, Shopkeeper, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, TellLog,
-    Title, TriggerCatalog, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex, ZoneClimate,
+    EquippedSlot, ExitData, Exits, Fighting, Follower, FromObjectReset, Frozen, Health, IgnoreList,
+    Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
+    MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind,
+    Profile, Prompt, BankWealth, BoardCatalog, BoardDraft, BoardLink, MailDraft, RecallPoint,
+    RoomSector, ShopCatalog, Shopkeeper, Slot, SocialDef, SocialRegistry, Stamina, Stealth,
+    Stunned, TellLog, Title, TriggerCatalog, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    ZoneClimate,
 };
 use tracing::{info, info_span};
 
@@ -3589,14 +3590,17 @@ const COMMANDS: &[Command] = &[
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "stat [<target>]",
-            summary: "Dump ECS state of an entity in your room (or self).",
+            usage: "stat [room [<zone> <id>] | <target>]",
+            summary: "Dump ECS state of an entity, or a room.",
             long: "Builder+ diagnostic. With no arg or `me`/`self`, \
                    inspects you. With a keyword, finds the matching mob/ \
                    player/item in the room and prints its components: \
                    WorldKey, Health, Stamina, Posture, CombatStats, \
                    Profile (players), and any active EffectInstances \
-                   pointing at it.",
+                   pointing at it. `stat room` (alias for `rstat`) dumps \
+                   the current room — name, sector, exits with state and \
+                   key, attached triggers, occupants by name, and any \
+                   environmental effect instances.",
         },
         run: cmd_stat,
     },
@@ -19689,7 +19693,10 @@ fn cmd_tstat(world: &mut World, player: Entity, args: &str) {
 /// No-arg form uses the player's current room; two-int form looks
 /// the room up via `WorldKeyIndex`. Useful for verifying loader
 /// state and catching dangling references.
+#[allow(clippy::too_many_lines)]
 fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
+    type ActorRow = (Entity, String, Option<(i32, i32)>);
+    type ItemRow = (Entity, String, Option<(i32, i32)>, Option<i32>);
     let parts: Vec<&str> = args.split_whitespace().collect();
     let room = if parts.is_empty() {
         let Some(located) = world.get::<Located>(player).copied() else {
@@ -19731,39 +19738,97 @@ fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
             out.push_str("exits:         <none>\r\n");
         } else {
             out.push_str(&format!("exits:         {} populated\r\n", exits.0.len()));
-            for (dir, ed) in &exits.0 {
+            let mut exit_pairs: Vec<(Direction, ExitData)> = exits.0.into_iter().collect();
+            exit_pairs.sort_by_key(|(d, _)| direction_rank(*d));
+            for (dir, ed) in &exit_pairs {
                 let (target_name, target_label) = match ed.to {
                     Some(t) => (name_or(world, t, "<unknown>"), format!("{t:?}")),
                     None => ("<dangling>".to_string(), "None".to_string()),
                 };
+                let key_label = ed
+                    .key
+                    .map_or_else(String::new, |(z, i)| format!(" key=({z}, {i})"));
                 out.push_str(&format!(
-                    "               {:>9} -> {} ({})\r\n",
+                    "               {:>9} -> {target_label} ({target_name}) [{:?}]{key_label}\r\n",
                     direction_name(*dir),
-                    target_label,
-                    target_name,
+                    ed.state,
                 ));
             }
         }
     }
+    // Attached triggers (catalog refs).
+    if let Some(trig) = world.get::<AttachedTriggers>(room).cloned() {
+        if trig.0.is_empty() {
+            out.push_str("triggers:      <none>\r\n");
+        } else {
+            out.push_str(&format!("triggers:      {} attached\r\n", trig.0.len()));
+            for (z, i) in &trig.0 {
+                out.push_str(&format!("               ({z}, {i})\r\n"));
+            }
+        }
+    }
     // Occupants: mobs, players, items directly Located in this room.
-    let mob_count = world
-        .query_filtered::<&Located, With<Mob>>()
+    let mut mobs: Vec<ActorRow> = world
+        .query_filtered::<(Entity, &Located, &Named, Option<&WorldKey>), With<Mob>>()
         .iter(world)
-        .filter(|l| l.0 == room)
-        .count();
-    let player_count = world
-        .query_filtered::<&Located, With<Player>>()
+        .filter(|(_, l, _, _)| l.0 == room)
+        .map(|(e, _, n, wk)| (e, n.name.clone(), wk.map(|w| (w.zone, w.id))))
+        .collect();
+    mobs.sort_by(|a, b| a.1.cmp(&b.1));
+    let mut players: Vec<(Entity, String)> = world
+        .query_filtered::<(Entity, &Located, &Named), With<Player>>()
         .iter(world)
-        .filter(|l| l.0 == room)
-        .count();
-    let item_count = world
-        .query_filtered::<&Located, With<Item>>()
+        .filter(|(_, l, _)| l.0 == room)
+        .map(|(e, _, n)| (e, n.name.clone()))
+        .collect();
+    players.sort_by(|a, b| a.1.cmp(&b.1));
+    let mut items: Vec<ItemRow> = world
+        .query_filtered::<(
+            Entity,
+            &Located,
+            &Named,
+            Option<&WorldKey>,
+            Option<&FromObjectReset>,
+        ), With<Item>>()
         .iter(world)
-        .filter(|l| l.0 == room)
-        .count();
+        .filter(|(_, l, _, _, _)| l.0 == room)
+        .map(|(e, _, n, wk, fr)| (e, n.name.clone(), wk.map(|w| (w.zone, w.id)), fr.map(|f| f.0)))
+        .collect();
+    items.sort_by(|a, b| a.1.cmp(&b.1));
     out.push_str(&format!(
-        "occupants:     {mob_count} mob(s), {player_count} player(s), {item_count} item(s)\r\n",
+        "occupants:     {} mob(s), {} player(s), {} item(s)\r\n",
+        mobs.len(),
+        players.len(),
+        items.len(),
     ));
+    for (e, name) in &players {
+        out.push_str(&format!("  player:      {e:?}  {name}\r\n"));
+    }
+    for (e, name, wk) in &mobs {
+        let key_str = wk.map_or(String::new(), |(z, i)| format!("  ({z}, {i})"));
+        out.push_str(&format!("  mob:         {e:?}  {name}{key_str}\r\n"));
+    }
+    for (e, name, wk, reset_id) in &items {
+        let key_str = wk.map_or(String::new(), |(z, i)| format!("  ({z}, {i})"));
+        let reset_str = reset_id.map_or(String::new(), |r| format!("  reset={r}"));
+        out.push_str(&format!("  item:        {e:?}  {name}{key_str}{reset_str}\r\n"));
+    }
+    // EffectInstances applied to this room (environmental auras).
+    let effects: Vec<(String, i32)> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, applied)| applied.0 == room)
+            .map(|(eff, _)| (eff.name.clone(), eff.remaining_secs))
+            .collect()
+    };
+    if effects.is_empty() {
+        out.push_str("effects:       <none>\r\n");
+    } else {
+        out.push_str(&format!("effects:       {} active\r\n", effects.len()));
+        for (name, secs) in &effects {
+            out.push_str(&format!("               {name} ({secs}s)\r\n"));
+        }
+    }
     send_to(world, player, out);
 }
 
@@ -19774,6 +19839,15 @@ fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
 #[allow(clippy::too_many_lines)]
 fn cmd_stat(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
+    // `stat room [<zone> <id>]` aliases through to `cmd_rstat`. Same
+    // semantics: no args dumps the room you're standing in, two ids
+    // resolve via WorldKeyIndex.
+    let mut head = arg.split_whitespace();
+    if head.next() == Some("room") {
+        let rest: String = head.collect::<Vec<_>>().join(" ");
+        cmd_rstat(world, player, &rest);
+        return;
+    }
     let target = if arg.is_empty() || arg.eq_ignore_ascii_case("me")
         || arg.eq_ignore_ascii_case("self")
     {
