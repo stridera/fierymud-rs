@@ -7967,6 +7967,7 @@ fn cmd_glance(world: &mut World, player: Entity, args: &str) {
     send_rendered(world, player, &line);
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_look(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if !arg.is_empty() {
@@ -8043,6 +8044,22 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
             "{}\r\n",
             render_color_tags(room_desc.trim_end(), mode)
         ));
+    }
+    // Weather hint for outdoor rooms — drawn from the per-zone live
+    // WeatherCatalog. Skipped for STRUCTURE / CAVE / UNDERWATER /
+    // UNDERDARK / planes where the sky isn't visible. BRIEF mode
+    // also suppresses to keep the terse output truly terse.
+    if !has_flag(world, player, PlayerFlag::Brief)
+        && let Some(sector) = world.get::<RoomSector>(room).map(|s| s.0)
+        && sector_is_outdoor_for_weather(sector)
+        && let Some(zone_id) = world.get::<WorldKey>(room).map(|k| k.zone)
+        && let Some(state) = world
+            .resource::<mud_world::WeatherCatalog>()
+            .by_zone
+            .get(&zone_id)
+            .copied()
+    {
+        out.push_str(&format!("{}\r\n", crate::weather::describe(state)));
     }
     for line in &mob_lines {
         out.push_str(&format!("{}\r\n", render_color_tags(line, mode)));
@@ -9071,6 +9088,31 @@ fn parse_direction(s: &str) -> Option<Direction> {
         "out" => Some(Direction::Out),
         _ => None,
     }
+}
+
+/// True for room sectors where the sky is visible — used by `look`
+/// to decide whether to surface the live weather line. STRUCTURE
+/// (building interior) / CAVE / UNDERWATER / UNDERDARK and the
+/// planes are excluded; everything outdoor (CITY streets, FIELD,
+/// FOREST, mountain, road, beach, swamp, ruins, water surface,
+/// AIR) shows the weather.
+fn sector_is_outdoor_for_weather(sector: Sector) -> bool {
+    matches!(
+        sector,
+        Sector::City
+            | Sector::Field
+            | Sector::Forest
+            | Sector::Hills
+            | Sector::Mountain
+            | Sector::Shallows
+            | Sector::Water
+            | Sector::Air
+            | Sector::Road
+            | Sector::Grasslands
+            | Sector::Beach
+            | Sector::Swamp
+            | Sector::Ruins
+    )
 }
 
 /// Peek at a neighboring room through the named exit. Reports whether
