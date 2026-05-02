@@ -3340,6 +3340,21 @@ const COMMANDS: &[Command] = &[
         run: cmd_teleport,
     },
     Command {
+        names: &["pnote", "playernote"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "pnote <player> [<text> | clear]",
+            summary: "Read / append / clear staff notes on a character.",
+            long: "Builder+. Without args after the name, prints the \
+                   current staff notes. With text, appends a new line \
+                   prefixed with the timestamp and your character name. \
+                   `clear` is Implementor-only and wipes the entire log.",
+        },
+        run: cmd_pnote,
+    },
+    Command {
         names: &["hinfo"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -13295,6 +13310,109 @@ fn cmd_house_take(
             }
         });
     }
+}
+
+/// `pnote <player> [<text>|clear]` — staff annotations on a
+/// character. Single shared blob on `Characters.staff_notes`;
+/// appends prefix each new note with timestamp + author name.
+fn cmd_pnote(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "pnote", args);
+    let mut parts = args.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("").trim();
+    let body = parts.next().unwrap_or("").trim();
+    if name.is_empty() {
+        send_to(world, player, "Usage: pnote <player> [<text> | clear]\r\n");
+        return;
+    }
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    let actor_role = world
+        .get::<Account>(player)
+        .map_or(UserRole::Player, |a| a.role);
+    let actor_name = name_of(world, player);
+    let name = name.to_string();
+    let body = body.to_string();
+    tokio::spawn(async move {
+        let Some(out) = outbound else { return };
+        let target = match mud_db::characters::find_by_name(&pool, &name).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                let _ = out.send(format!("No character named '{name}'.\r\n").into_bytes());
+                return;
+            }
+            Err(e) => {
+                let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+        if body.is_empty() {
+            // Read mode.
+            match mud_db::characters::load_staff_notes(&pool, &target.id).await {
+                Ok(Some(notes)) if !notes.is_empty() => {
+                    let _ = out.send(
+                        format!(
+                            "\r\n=== Staff notes for {} ===\r\n{notes}\r\n",
+                            target.name
+                        )
+                        .into_bytes(),
+                    );
+                }
+                Ok(_) => {
+                    let _ = out.send(
+                        format!("No staff notes on {}.\r\n", target.name).into_bytes(),
+                    );
+                }
+                Err(e) => {
+                    let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+                }
+            }
+            return;
+        }
+        if body.eq_ignore_ascii_case("clear") {
+            if actor_role.rank() < UserRole::Implementor.rank() {
+                let _ = out.send(b"`pnote ... clear` is Implementor-only.\r\n".to_vec());
+                return;
+            }
+            match mud_db::characters::save_staff_notes(&pool, &target.id, "").await {
+                Ok(()) => {
+                    let _ = out.send(
+                        format!("Cleared staff notes on {}.\r\n", target.name)
+                            .into_bytes(),
+                    );
+                }
+                Err(e) => {
+                    let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+                }
+            }
+            return;
+        }
+        // Append mode.
+        let existing = mud_db::characters::load_staff_notes(&pool, &target.id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+        let line = format!("[{now}] {actor_name}: {body}");
+        let new_blob = if existing.trim().is_empty() {
+            line
+        } else {
+            format!("{existing}\n{line}")
+        };
+        match mud_db::characters::save_staff_notes(&pool, &target.id, &new_blob).await {
+            Ok(()) => {
+                let _ = out.send(
+                    format!("Note added to {}.\r\n", target.name).into_bytes(),
+                );
+            }
+            Err(e) => {
+                let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+            }
+        }
+    });
 }
 
 /// `hgrant <player>` — admin command. Creates a fresh `PlayerHouse`

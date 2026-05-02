@@ -174,6 +174,40 @@ pub async fn save_state(
     Ok(())
 }
 
+/// Read the staff-notes blob for a character (Builder+ visibility).
+/// Returns Ok(None) when null. Single shared blob — appended to by
+/// the runtime's `pnote add` path.
+pub async fn load_staff_notes(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<String>> {
+    let row = sqlx::query!(
+        r#"SELECT staff_notes FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.staff_notes))
+}
+
+/// Overwrite the staff-notes blob. Caller is responsible for the
+/// concatenation (load → append → save) — the runtime treats the
+/// column as a free-form append-only log with author prefixes.
+pub async fn save_staff_notes(
+    pool: &PgPool,
+    character_id: &str,
+    notes: &str,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET staff_notes = $1 WHERE id = $2"#,
+        notes,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Read the raw `kill_tracking_data` JSON for a character. Returns
 /// Ok(None) when the column is null. The JSON shape is owned by
 /// the runtime today — `{ "total": <int>, ...future fields }`.
