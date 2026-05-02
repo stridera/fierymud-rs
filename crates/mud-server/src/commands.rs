@@ -6631,6 +6631,19 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             summary.title, suffix, lock, summary.alias,
         ));
     }
+    // Freshness cue for corpses — same thresholds the decay tick uses
+    // for its in-room atmospheric broadcasts. Players walking in late
+    // need a way to read the corpse's state without waiting for the
+    // next milestone tick.
+    if let Some(decay) = world.get::<mud_world::CorpseDecay>(target).copied() {
+        let line = match decay.remaining_secs {
+            i32::MIN..=30 => "It is on the verge of dissolution.",
+            31..=120 => "It reeks; flies and grubs are everywhere.",
+            121..=300 => "Flies have gathered; it is no longer fresh.",
+            _ => "It is still warm.",
+        };
+        out.push_str(&format!("{line}\r\n"));
+    }
     // If the target is an Item-typed container (corpse, bag, chest, ...),
     // list anything Located on it. Mirrors the legacy "you peek inside"
     // behavior — looters don't have to guess what to `get`.
