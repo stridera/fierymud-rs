@@ -129,14 +129,64 @@ pub fn ambient_tick(world: &mut World) {
                 .copied()
         });
         let Some(state) = state else { continue };
-        // Precip line takes precedence — when there's active weather,
-        // the precip flavor is the more vivid cue. Fall back to a
-        // temperature-extreme line for clear/cloudy days.
-        let line = ambient_line(state.precip).or_else(|| ambient_temp_line(state.temp));
+        // Cascade: precip first (the most vivid cue when present),
+        // then temperature extreme on quiet-sky days, then terrain
+        // flavor for fully mild outdoor rooms. The first hit fires;
+        // missing all three stays silent.
+        let sector = world.get::<mud_world::RoomSector>(room).map(|s| s.0);
+        let line = ambient_line(state.precip)
+            .or_else(|| ambient_temp_line(state.temp))
+            .or_else(|| sector.and_then(ambient_terrain_line));
         if let Some(line) = line {
             crate::commands::send_to(world, player, format!("\r\n{line}\r\n"));
         }
     }
+}
+
+/// Terrain-keyed flavor for mild outdoor rooms where neither
+/// precip nor temperature extreme has anything to say. Returns
+/// None for sectors whose surroundings don't have an obvious
+/// ambient sound (City streets, Roads — too varied to flavor
+/// generically).
+fn ambient_terrain_line(sector: mud_db::enums::Sector) -> Option<&'static str> {
+    use mud_db::enums::Sector;
+    let pool: &[&str] = match sector {
+        Sector::Forest => &[
+            "Leaves rustle in the canopy overhead.",
+            "Somewhere unseen, a bird calls.",
+            "A branch snaps in the distance.",
+        ],
+        Sector::Hills => &[
+            "Wind whispers across the slopes.",
+            "Grass bends in the breeze.",
+        ],
+        Sector::Mountain => &[
+            "A distant rock clatters down the slope.",
+            "Wind howls between the peaks.",
+            "A raptor's cry echoes off the stone.",
+        ],
+        Sector::Field | Sector::Grasslands => &[
+            "Tall grass whispers in the wind.",
+            "Insects hum in the undergrowth.",
+        ],
+        Sector::Beach | Sector::Shallows | Sector::Water => &[
+            "Waves wash against the shore.",
+            "A distant gull cries.",
+            "Salt spray rides the wind.",
+        ],
+        Sector::Swamp => &[
+            "Frogs croak from the murky pools.",
+            "Something splashes nearby.",
+            "Mosquitoes whine past your ear.",
+        ],
+        Sector::Ruins => &[
+            "Old stone settles with a creak.",
+            "Wind whistles through cracked walls.",
+        ],
+        _ => return None,
+    };
+    let pick = rand::random_range(0..pool.len());
+    Some(pool[pick])
 }
 
 /// Temperature-extreme flavor for the quiet-precip days where
