@@ -39,25 +39,37 @@ pub fn regen_tick(world: &mut World) {
 
     // Snapshot the (entity, new_stamina, new_hp) tuples while no mutable
     // borrows are live, then apply. Pattern matches combat_tick / effects_tick.
+    // Starving / parched players regen at half rate (rounded down) — they
+    // can still slowly recover, but the hunger drain on top makes net
+    // progress glacial. Mirrors the stat-survival contract in
+    // hunger_thirst_tick.
     let updates: Vec<(Entity, Option<i32>, Option<i32>)> = {
         let mut q = world.query_filtered::<
-            (Entity, Option<&Stamina>, Option<&Health>, &Posture),
+            (Entity, Option<&Stamina>, Option<&Health>, &Posture, Option<&Hunger>, Option<&Thirst>),
             (With<Online>, Without<Fighting>),
         >();
         q.iter(world)
-            .map(|(e, stamina, hp, posture)| {
+            .map(|(e, stamina, hp, posture, hunger, thirst)| {
+                let starved = hunger.is_some_and(|h| h.0 >= STARVING_AT)
+                    || thirst.is_some_and(|t| t.0 >= PARCHED_AT);
+                let scale = |amt: i32| if starved { amt / 2 } else { amt };
                 let new_stamina = stamina.and_then(|s| {
                     if s.current >= s.max {
                         None
                     } else {
-                        Some((s.current + stamina_per_tick(posture.0)).min(s.max))
+                        let regen = scale(stamina_per_tick(posture.0));
+                        if regen == 0 {
+                            None
+                        } else {
+                            Some((s.current + regen).min(s.max))
+                        }
                     }
                 });
                 let new_hp = hp.and_then(|h| {
                     if h.hp >= h.max {
                         None
                     } else {
-                        let regen = health_per_tick(posture.0);
+                        let regen = scale(health_per_tick(posture.0));
                         if regen == 0 {
                             None
                         } else {
