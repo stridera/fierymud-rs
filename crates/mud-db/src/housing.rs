@@ -211,3 +211,50 @@ pub async fn remove_item(pool: &PgPool, item_id: i32) -> sqlx::Result<u64> {
     .await?;
     Ok(res.rows_affected())
 }
+
+/// Add a guest entry to a house. Idempotent on
+/// `(house_id, character_id)` — re-adding the same guest is a
+/// no-op if their `can_place` flag matches; otherwise the flag
+/// is updated.
+pub async fn add_guest(
+    pool: &PgPool,
+    house_id: i32,
+    character_id: &str,
+    can_place: bool,
+) -> sqlx::Result<i32> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO player_house_guests (house_id, character_id, can_place)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (house_id, character_id)
+        DO UPDATE SET can_place = EXCLUDED.can_place
+        RETURNING id
+        "#,
+        house_id,
+        character_id,
+        can_place,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.id)
+}
+
+/// Remove a guest from a house's access list. Returns the number
+/// of rows deleted (0 if the character wasn't on the list).
+pub async fn remove_guest(
+    pool: &PgPool,
+    house_id: i32,
+    character_id: &str,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query!(
+        r#"
+        DELETE FROM player_house_guests
+        WHERE house_id = $1 AND character_id = $2
+        "#,
+        house_id,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}

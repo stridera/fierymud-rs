@@ -12960,9 +12960,14 @@ fn cmd_house(world: &mut World, player: Entity, args: &str) {
             cmd_house_take(world, player, &house, rest);
             return;
         }
+        s if s.starts_with("guest") => {
+            let rest = args.trim().trim_start_matches("guest").trim();
+            cmd_house_guest(world, player, &house, rest);
+            return;
+        }
         other => {
             out.push_str(&format!(
-                "Unknown subcommand '{other}'. Try `house info`, `house rooms`, `house guests`, `house place <item>`, `house take <item>`.\r\n"
+                "Unknown subcommand '{other}'. Try `house info`, `house rooms`, `house guests`, `house place <item>`, `house take <item>`, `house guest add <name> [place]`, `house guest remove <name>`.\r\n"
             ));
         }
     }
@@ -13143,6 +13148,132 @@ fn cmd_house_take(
                 tracing::warn!(error = %e, "house item remove failed");
             }
         });
+    }
+}
+
+/// `house guest add <name> [place]` and `house guest remove <name>`.
+/// `add` defaults to "visit only"; trailing `place` flips the
+/// `can_place` flag so the guest can drop items in your rooms too.
+/// DB lookup against `Characters.name` (case-insensitive).
+#[allow(clippy::too_many_lines)]
+fn cmd_house_guest(
+    world: &mut World,
+    player: Entity,
+    house: &mud_world::HouseSummary,
+    args: &str,
+) {
+    let mut parts = args.split_whitespace();
+    let action = parts.next().unwrap_or("");
+    let name = parts.next().unwrap_or("");
+    let modifier = parts.next().unwrap_or("");
+    if name.is_empty() {
+        send_to(
+            world,
+            player,
+            "Usage: house guest add <name> [place]\r\n       house guest remove <name>\r\n",
+        );
+        return;
+    }
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    let house_id = house.house_id;
+    let name = name.to_string();
+    let can_place = modifier.eq_ignore_ascii_case("place")
+        || modifier.eq_ignore_ascii_case("can_place");
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    match action {
+        "add" => {
+            tokio::spawn(async move {
+                let row = match mud_db::characters::find_by_name(&pool, &name).await {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        if let Some(out) = outbound {
+                            let _ = out
+                                .send(format!("No character named '{name}'.\r\n").into_bytes());
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "guest lookup failed");
+                        return;
+                    }
+                };
+                match mud_db::housing::add_guest(&pool, house_id, &row.id, can_place).await {
+                    Ok(_) => {
+                        if let Some(out) = outbound {
+                            let suffix = if can_place {
+                                " (with place permission)"
+                            } else {
+                                ""
+                            };
+                            let _ = out
+                                .send(
+                                    format!(
+                                        "{} added to your guest list{suffix}.\r\n",
+                                        row.name
+                                    )
+                                    .into_bytes(),
+                                );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "guest add failed");
+                    }
+                }
+            });
+        }
+        "remove" | "rm" | "del" => {
+            tokio::spawn(async move {
+                let row = match mud_db::characters::find_by_name(&pool, &name).await {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        if let Some(out) = outbound {
+                            let _ = out
+                                .send(format!("No character named '{name}'.\r\n").into_bytes());
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "guest lookup failed");
+                        return;
+                    }
+                };
+                match mud_db::housing::remove_guest(&pool, house_id, &row.id).await {
+                    Ok(0) => {
+                        if let Some(out) = outbound {
+                            let _ = out
+                                .send(
+                                    format!(
+                                        "{} wasn't on your guest list.\r\n",
+                                        row.name
+                                    )
+                                    .into_bytes(),
+                                );
+                        }
+                    }
+                    Ok(_) => {
+                        if let Some(out) = outbound {
+                            let _ = out.send(
+                                format!("{} removed from your guest list.\r\n", row.name)
+                                    .into_bytes(),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "guest remove failed");
+                    }
+                }
+            });
+        }
+        other => {
+            send_to(
+                world,
+                player,
+                format!("Unknown guest action '{other}'. Use `add` or `remove`.\r\n"),
+            );
+        }
     }
 }
 
