@@ -453,7 +453,7 @@ impl SpellSlotData {
 /// `time.hour` etc., the `weather` flavor lines, and any future
 /// day/night-gated systems. Stored as i64 for the wall-clock
 /// `stamp` (Unix epoch seconds).
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MudClock {
     pub year: i32,
     pub month: i32,

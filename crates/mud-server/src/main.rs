@@ -115,6 +115,9 @@ async fn main() {
     // Overlay persisted weather (if any) on top of the climate-default
     // state the loader populated. Silent no-op on first boot.
     weather::load_snapshot(&mut world);
+    // Same for the in-game clock — without this, every restart snaps
+    // back to year 1 / month 1 / day 1 / hour 12.
+    weather::load_clock_snapshot(&mut world);
 
     combat::seed_test_mobs(&mut world);
     combat::seed_test_items(&mut world);
@@ -277,6 +280,7 @@ async fn main() {
     // Persist weather state so the next boot picks up where we
     // left off instead of snapping back to climate defaults.
     weather::save_snapshot(&world);
+    weather::save_clock_snapshot(&world);
 
     info!(
         final_tick = world.resource::<TickCount>().0,

@@ -194,6 +194,74 @@ pub fn describe(state: WeatherState) -> String {
 /// it follows the working directory the server's started from.
 const WEATHER_SNAPSHOT_PATH: &str = "state/weather.json";
 
+/// Companion path for the in-game clock. Same persistence shape:
+/// a JSON snapshot read on boot, written on graceful shutdown.
+const CLOCK_SNAPSHOT_PATH: &str = "state/clock.json";
+
+/// Load `MudClock` state from `state/clock.json`. First boot or
+/// parse failures fall through silently — the resource keeps its
+/// `Default` value (year 2025, month 1, day 1, hour 12).
+pub fn load_clock_snapshot(world: &mut World) {
+    let bytes = match std::fs::read(CLOCK_SNAPSHOT_PATH) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "clock snapshot read failed");
+            return;
+        }
+    };
+    let snapshot: mud_world::MudClock = match serde_json::from_slice(&bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "clock snapshot parse failed");
+            return;
+        }
+    };
+    let year = snapshot.year;
+    let month = snapshot.month;
+    let day = snapshot.day;
+    let hour = snapshot.hour;
+    world.insert_resource(snapshot);
+    tracing::info!(
+        year,
+        month,
+        day,
+        hour,
+        path = %CLOCK_SNAPSHOT_PATH,
+        "clock snapshot loaded",
+    );
+}
+
+/// Persist the in-game `MudClock` to `state/clock.json` on graceful
+/// shutdown. Mirrors `save_snapshot` for weather.
+pub fn save_clock_snapshot(world: &World) {
+    if let Some(parent) = std::path::Path::new(CLOCK_SNAPSHOT_PATH).parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(error = %e, "couldn't create clock snapshot dir");
+        return;
+    }
+    let clock = world.resource::<mud_world::MudClock>();
+    let bytes = match serde_json::to_vec_pretty(clock) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "clock snapshot serialize failed");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(CLOCK_SNAPSHOT_PATH, bytes) {
+        tracing::warn!(error = %e, "clock snapshot write failed");
+        return;
+    }
+    tracing::info!(
+        hour = clock.hour,
+        day = clock.day,
+        path = %CLOCK_SNAPSHOT_PATH,
+        "clock snapshot saved",
+    );
+}
+
 /// Try to overlay the `WeatherCatalog` with a saved snapshot from
 /// `state/weather.json`. Silent no-op when the file doesn't exist
 /// (first boot) or the parse fails (corrupt file). Climate-default
