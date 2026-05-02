@@ -7985,6 +7985,27 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
 
+    // Dark-room gate: caves, underdark, underwater, and outdoor
+    // rooms at night print only "It is pitch black..." plus exits
+    // (AUTO_EXIT) — unless someone in the room carries a Lit item.
+    // Players with the AUTO_LIGHT class trait could bypass later;
+    // for now, a held torch / staff / luminous gem suffices.
+    if room_is_dark(world, room) && !room_has_light(world, room) {
+        let mut out = String::from("\r\nIt is pitch black; you can see nothing.\r\n");
+        if has_flag(world, player, PlayerFlag::AutoExit) {
+            let exits: Vec<Direction> = world
+                .get::<Exits>(room)
+                .map(|e| e.0.keys().copied().collect())
+                .unwrap_or_default();
+            if !exits.is_empty() {
+                let names: Vec<&str> = exits.iter().map(|d| direction_name(*d)).collect();
+                out.push_str(&format!("Exits: {}\r\n", names.join(", ")));
+            }
+        }
+        send_to(world, player, out);
+        return;
+    }
+
     let room_name = name_or(world, room, "(nowhere)");
     let room_desc = world
         .get::<Description>(room)
@@ -9088,6 +9109,62 @@ fn parse_direction(s: &str) -> Option<Direction> {
         "out" => Some(Direction::Out),
         _ => None,
     }
+}
+
+/// True when the player's room is currently dark enough that
+/// nothing can be seen without a light source. Cases: sector is
+/// intrinsically dark (CAVE / UNDERDARK / UNDERWATER), or sector
+/// is outdoor (sky-visible) AND it's nighttime (game hour 22..05).
+/// Caller checks for any `Lit` item carried by anyone in the room
+/// (player or mob) before declaring the player blind — torches /
+/// lanterns / luminous-glow items still work.
+fn room_is_dark(world: &World, room: Entity) -> bool {
+    let Some(sector) = world.get::<RoomSector>(room).map(|s| s.0) else {
+        return false;
+    };
+    if matches!(sector, Sector::Cave | Sector::Underdark | Sector::Underwater) {
+        return true;
+    }
+    if !sector_is_outdoor_for_weather(sector) {
+        return false;
+    }
+    let hour = world.resource::<mud_world::MudClock>().hour;
+    matches!(hour, 0..=4 | 22..=23)
+}
+
+/// True if anyone in `room` (any actor, plus loose items on the
+/// floor and items worn or carried by actors in the room) carries
+/// a `Lit` marker. Used to override `room_is_dark` for rooms with
+/// active light sources.
+fn room_has_light(world: &mut World, room: Entity) -> bool {
+    // 1. Loose lit items on the floor.
+    let any_floor = world
+        .query_filtered::<&Located, (With<Item>, With<mud_world::Lit>)>()
+        .iter(world)
+        .any(|l| l.0 == room);
+    if any_floor {
+        return true;
+    }
+    // 2. Lit items carried/worn by actors in the room. We snapshot
+    // who's here, then check each as a potential carrier.
+    let inhabitants: Vec<Entity> = {
+        let mut q = world
+            .query_filtered::<(Entity, &Located), Or<(With<Player>, With<Mob>)>>();
+        q.iter(world)
+            .filter(|(_, l)| l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for actor in inhabitants {
+        let any_on_actor = world
+            .query_filtered::<&Located, (With<Item>, With<mud_world::Lit>)>()
+            .iter(world)
+            .any(|l| l.0 == actor);
+        if any_on_actor {
+            return true;
+        }
+    }
+    false
 }
 
 /// True for room sectors where the sky is visible — used by `look`
