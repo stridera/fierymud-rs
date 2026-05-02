@@ -6603,6 +6603,25 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             summary.title, suffix, lock, summary.alias,
         ));
     }
+    // If the target is an Item-typed container (corpse, bag, chest, ...),
+    // list anything Located on it. Mirrors the legacy "you peek inside"
+    // behavior — looters don't have to guess what to `get`.
+    if world.get::<Item>(target).is_some() {
+        let contents: Vec<String> = {
+            let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
+            q.iter(world)
+                .filter(|(l, _)| l.0 == target)
+                .map(|(_, n)| n.name.clone())
+                .collect()
+        };
+        if !contents.is_empty() {
+            out.push_str(&format!("\r\n{name_rendered} contains:\r\n"));
+            for item_name in contents {
+                let rendered = render_color_tags(&item_name, mode);
+                out.push_str(&format!("  {rendered}\r\n"));
+            }
+        }
+    }
     send_to(world, player, out);
 }
 
