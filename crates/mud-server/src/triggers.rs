@@ -84,6 +84,33 @@ fn record_failure(
         event: event.to_string(),
         message: message.to_string(),
     });
+    // Fire-and-forget DB persistence into `script_error_log`.
+    // mlua errors are mostly runtime today; mark `runtime` until
+    // the dispatcher learns to differentiate compile-vs-runtime.
+    if let Some(pool) = world
+        .get_resource::<crate::commands::DbPool>()
+        .map(|p| p.0.clone())
+    {
+        let context = serde_json::json!({
+            "trigger_name": name,
+            "event": event,
+        });
+        let message_owned = message.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = mud_db::script_errors::record(
+                &pool,
+                zone,
+                id,
+                "runtime",
+                &message_owned,
+                &context,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "script_error_log persist failed");
+            }
+        });
+    }
 }
 
 /// Fire every trigger attached to `entity` whose flags include `event`.

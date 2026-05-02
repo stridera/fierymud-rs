@@ -33,6 +33,7 @@ pub mod race_abilities;
 pub mod reports;
 pub mod room_exits;
 pub mod rooms;
+pub mod script_errors;
 pub mod shops;
 pub mod levels;
 pub mod socials;
