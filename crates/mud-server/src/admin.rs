@@ -88,6 +88,8 @@ pub enum AdminRequest {
         user: Box<User>,
         character: Box<CharacterRow>,
         items: Vec<character_items::CharacterItemRow>,
+        abilities: Vec<mud_db::character_abilities::CharacterAbilityRow>,
+        aliases: Vec<mud_db::character_aliases::CharacterAliasRow>,
     },
     SessionDestroy { player_name: String },
     Command { executor: String, command: String },
@@ -270,6 +272,12 @@ async fn handle_session_create(
     let items = character_items::list_for(&state.pool, &character.id)
         .await
         .unwrap_or_default();
+    let abilities = mud_db::character_abilities::list_for(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
+    let aliases = mud_db::character_aliases::list_for(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
     json_ok(
         enqueue(
             &state,
@@ -278,6 +286,8 @@ async fn handle_session_create(
                 user: Box::new(user),
                 character: Box::new(character),
                 items,
+                abilities,
+                aliases,
             },
         )
         .await,
@@ -505,8 +515,8 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::WorldStatus => Ok(world_status(world)),
         AdminRequest::LookRoom { zone_id, id } => look_room(world, zone_id, id),
         AdminRequest::InspectActor { name } => inspect_actor(world, &name),
-        AdminRequest::SessionCreate { player_name, user, character, items } => {
-            session_create(world, &player_name, &user, &character, &items)
+        AdminRequest::SessionCreate { player_name, user, character, items, abilities, aliases } => {
+            session_create(world, &player_name, &user, &character, &items, &abilities, &aliases)
         }
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
         AdminRequest::Command { executor, command } => run_command(world, &executor, &command),
@@ -700,12 +710,15 @@ fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn session_create(
     world: &mut World,
     player_name: &str,
     user: &User,
     character: &CharacterRow,
     items: &[character_items::CharacterItemRow],
+    abilities: &[mud_db::character_abilities::CharacterAbilityRow],
+    aliases: &[mud_db::character_aliases::CharacterAliasRow],
 ) -> AdminResponse {
     // Reject duplicate by name.
     {
@@ -740,6 +753,39 @@ fn session_create(
     let outbound: Outbound = tx;
     let entity = crate::login::spawn_player(world, user, character, outbound);
     let item_count = crate::login::spawn_inventory(world, entity, items);
+    // Match login::complete_login: attach KnownAbilities + Aliases +
+    // Title + Description so commands that read those (invoke_ability's
+    // skill lookup, alias expansion, etc.) work for virtual sessions.
+    // Without this, every ability formula referencing `skill` resolves
+    // to 0 because KnownAbilities is missing.
+    let known_abilities = mud_world::KnownAbilities {
+        entries: abilities
+            .iter()
+            .map(|r| (r.ability_id, r.proficiency, r.known))
+            .collect(),
+    };
+    let ability_count = known_abilities.entries.len();
+    let alias_set = mud_world::Aliases {
+        entries: aliases
+            .iter()
+            .map(|r| (r.alias.clone(), r.command.clone()))
+            .collect(),
+    };
+    let alias_count = alias_set.entries.len();
+    if let Ok(mut e) = world.get_entity_mut(entity) {
+        e.insert(known_abilities);
+        e.insert(alias_set);
+        if let Some(t) = character.title.as_deref()
+            && !t.trim().is_empty()
+        {
+            e.insert(mud_world::Title(t.trim().to_string()));
+        }
+        if let Some(d) = character.description.as_deref()
+            && !d.trim().is_empty()
+        {
+            e.insert(mud_world::Description(d.trim().to_string()));
+        }
+    }
     let mut by_name = world.resource::<VirtualSessions>().by_name.lock().expect("sessions poisoned");
     by_name.insert(
         player_name.to_string(),
@@ -750,6 +796,8 @@ fn session_create(
         "player_name": player_name,
         "entity": format!("{:?}", entity),
         "items_loaded": item_count,
+        "abilities_loaded": ability_count,
+        "aliases_loaded": alias_count,
         "note": "virtual session spawned standalone (no telnet required); destroy_session despawns",
     }))
 }
