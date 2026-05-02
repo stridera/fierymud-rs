@@ -4678,13 +4678,29 @@ fn skip_n_tokens(s: &str, n: usize) -> &str {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Send rendered output to a player or mob. Input is XML-Lite color
+/// markup (`<red>...</>`); we run it through `render_color_tags` per
+/// the target's `UiStyle.colors` mode before sending. This is the
+/// default everywhere — call sites that build messages via `format!`
+/// containing entity names (which may carry XML-Lite tags) get
+/// correct ANSI output without needing to reach for `send_rendered`.
+///
+/// Use [`send_raw`] if you need to bypass rendering (e.g. when the
+/// bytes are already ANSI). Most non-text protocol bytes (GMCP/IAC)
+/// go through `Connection.0.send` directly, not here.
 pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
+    let mode = color_mode_for(world, target);
+    let rendered = render_color_tags(&text.into(), mode);
+    send_raw(world, target, rendered);
+}
+
+/// Raw-bytes send, no color-tag rendering. `PROMPT_RECIPIENTS` is
+/// still tracked. Used by `send_to` after rendering, and by callers
+/// that ship pre-rendered ANSI.
+pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
     if let Some(conn) = world.get::<Connection>(target) {
         let _ = conn.0.send(text.into().into_bytes());
     }
-    // Track for end-of-batch prompt refresh. Tracking mobs (no Connection)
-    // is harmless; `flush_prompts` is a no-op for them via `send_prompt`'s
-    // Connection lookup.
     PROMPT_RECIPIENTS.with(|r| {
         r.borrow_mut().insert(target);
     });
@@ -6337,7 +6353,7 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             out.push_str("You are hidden.\r\n");
         }
         if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(player).copied() {
-            let mount_name = name_or(world, mount, "<unknown>");
+            let mount_name = name_or(world, mount, "(unknown)");
             out.push_str(&format!("You're riding {mount_name}.\r\n"));
         }
         send_to(world, player, out);
@@ -6400,11 +6416,11 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!("{name_rendered} hovers in mid-air.\r\n"));
     }
     if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(target).copied() {
-        let mount_name = name_or(world, mount, "<unknown>");
+        let mount_name = name_or(world, mount, "(unknown)");
         out.push_str(&format!("{name_rendered} is riding {mount_name}.\r\n"));
     }
     if let Some(mud_world::RiddenBy(rider)) = world.get::<mud_world::RiddenBy>(target).copied() {
-        let rider_name = name_or(world, rider, "<unknown>");
+        let rider_name = name_or(world, rider, "(unknown)");
         out.push_str(&format!("{rider_name} is riding {name_rendered}.\r\n"));
     }
     if world.get::<Stealth>(target).is_some() && target == player {
@@ -7688,10 +7704,10 @@ fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
             continue;
         }
         let Some(target_room) = ed.to else {
-            out.push_str(&format!("  {dir_label:>9}: <dangling>\r\n"));
+            out.push_str(&format!("  {dir_label:>9}: (dangling)\r\n"));
             continue;
         };
-        let target_name = name_or(world, target_room, "<unknown>");
+        let target_name = name_or(world, target_room, "(unknown)");
         let mob_count = world
             .query_filtered::<&Located, With<Mob>>()
             .iter(world)
@@ -7755,7 +7771,7 @@ fn cmd_glance(world: &mut World, player: Entity, args: &str) {
         .map_or("standing", |p| p.0.label());
     let fighting = world
         .get::<Fighting>(target)
-        .map(|f| name_or(world, f.0, "<gone>"));
+        .map(|f| name_or(world, f.0, "(gone)"));
     let mut line = format!("\r\n{name} ({posture}) {cond}");
     if let Some(target_name) = fighting {
         line.push_str(&format!(" — fighting {target_name}"));
@@ -7781,7 +7797,7 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
 
-    let room_name = name_or(world, room, "<nowhere>");
+    let room_name = name_or(world, room, "(nowhere)");
     let room_desc = world
         .get::<Description>(room)
         .map(|d| d.0.clone())
@@ -8028,7 +8044,7 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let fighting = world.get::<Fighting>(player).copied();
     let posture = world.get::<Posture>(player).copied();
     let logged_in = world.get::<LoggedInAt>(player).copied();
-    let fight_target_name = fighting.map(|f| name_or(world, f.0, "<gone>"));
+    let fight_target_name = fighting.map(|f| name_or(world, f.0, "(gone)"));
     let flags: Vec<&'static str> = world
         .get::<PlayerFlags>(player)
         .map(|f| f.0.iter().map(|fl| fl.label()).collect())
@@ -8848,7 +8864,7 @@ fn look_direction(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "The way fades into the unknown.\r\n");
         return;
     };
-    let name = name_or(world, target_room, "<unknown>");
+    let name = name_or(world, target_room, "(unknown)");
     let mode = color_mode_for(world, player);
     let name = render_color_tags(&name, mode);
     let desc = world
@@ -9764,7 +9780,7 @@ fn cmd_where(world: &mut World, player: Entity, _args: &str) {
             .query_filtered::<(&Named, &Located), (With<Player>, With<Online>)>();
         q.iter(world)
             .map(|(n, l)| {
-                let room_name = name_or(world, l.0, "<unknown>");
+                let room_name = name_or(world, l.0, "(unknown)");
                 (n.name.clone(), room_name)
             })
             .collect()
@@ -12037,7 +12053,7 @@ fn invoke_ability(
     if target_entity == player {
         out.push_str("    target: yourself\r\n");
     } else {
-        let target_name = name_or(world, target_entity, "<unknown>");
+        let target_name = name_or(world, target_entity, "(unknown)");
         out.push_str(&format!(
             "    target: {}\r\n",
             render_color_tags(&target_name, mode),
@@ -12076,7 +12092,7 @@ fn invoke_ability(
         let target_name = if target_entity == player {
             actor_name.clone()
         } else {
-            name_or(world, target_entity, "<unknown>")
+            name_or(world, target_entity, "(unknown)")
         };
         let rendered = render_ability_template(
             &refusal,
@@ -12156,7 +12172,7 @@ fn invoke_ability(
     };
     // Capture caster + target names *before* effects apply. The
     // damage arm can despawn the target mid-loop; later rendering
-    // would otherwise see `<unknown>` and angle-bracket-eat the
+    // would otherwise see `(unknown)` and angle-bracket-eat the
     // template through XML-Lite color rendering. Same for the
     // AbilityMessages set lookup — pull it once up front.
     let messages_pre = world
@@ -12168,7 +12184,7 @@ fn invoke_ability(
     let target_name_pre = if target_entity == player {
         actor_name_pre.clone()
     } else {
-        name_or(world, target_entity, "<unknown>")
+        name_or(world, target_entity, "(unknown)")
     };
     // Saving-throw resolution. If the ability has a row in
     // AbilitySavingThrow, evaluate the DC against caster's
@@ -12187,7 +12203,7 @@ fn invoke_ability(
         let target_name = if target_entity == player {
             actor_name_pre.clone()
         } else {
-            name_or(world, target_entity, "<unknown>")
+            name_or(world, target_entity, "(unknown)")
         };
         send_to(
             world,
@@ -12276,7 +12292,7 @@ fn invoke_ability(
                     if dead
                         && let Some(located) = world.get::<Located>(target_entity).copied()
                     {
-                        let target_name = name_or(world, target_entity, "<unknown>");
+                        let target_name = name_or(world, target_entity, "(unknown)");
                         crate::combat::handle_death(
                             world,
                             target_entity,
@@ -14319,9 +14335,11 @@ fn substitute(template: &str, actor_name: &str, target_name: Option<&str>) -> St
 /// Renders the message's color tags with the recipient's `ColorMode`,
 /// then sends. Use when a directed `send_to(world, t, format!(...))`
 /// embeds a name that may carry XML-Lite tags.
+/// Historical alias for [`send_to`]. Kept so existing call sites
+/// don't need a sweep — `send_to` now always renders. Prefer
+/// `send_to` in new code.
 pub(crate) fn send_rendered(world: &World, target: Entity, text: &str) {
-    let mode = color_mode_for(world, target);
-    send_to(world, target, render_color_tags(text, mode));
+    send_to(world, target, text);
 }
 
 /// Read an entity's `Named.name` as an owned String. Empty when the
@@ -14334,8 +14352,10 @@ pub(crate) fn name_of(world: &World, e: Entity) -> String {
 }
 
 /// Same shape as `name_of` but with a caller-chosen fallback string —
-/// used by sites that prefer literal placeholders like `<unknown>`,
-/// `<gone>`, or `<nowhere>` when the entity lacks a Named.
+/// used by sites that prefer literal placeholders like `(unknown)`,
+/// `(gone)`, or `(nowhere)` when the entity lacks a Named.
+/// Round brackets so the output survives `render_color_tags` (which
+/// would parse and consume any angle-bracket form as a no-op tag).
 pub(crate) fn name_or(world: &World, e: Entity, fallback: &str) -> String {
     world
         .get::<Named>(e)
@@ -15932,10 +15952,10 @@ fn auto_assist_followers_of(
             .map(|(e, _, _, _, _)| e)
             .collect()
     };
-    let attacker_name = name_or(world, attacker, "<unknown>");
+    let attacker_name = name_or(world, attacker, "(unknown)");
     for helper in helpers {
         try_insert(world, helper, Fighting(attacker));
-        let helper_name = name_or(world, helper, "<unknown>");
+        let helper_name = name_or(world, helper, "(unknown)");
         send_rendered(
             world,
             helper,
@@ -16159,7 +16179,7 @@ fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     }
     let cur_posture = world.get::<Posture>(target).map(|p| p.0);
     if !matches!(cur_posture, Some(PostureKind::Standing)) {
-        let target_name = name_or(world, target, "<unknown>");
+        let target_name = name_or(world, target, "(unknown)");
         send_to(world, player, format!(
             "{target_name} is already on the ground.\r\n",
         ));
@@ -16174,7 +16194,7 @@ fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     drain_stamina(world, player, STOMP_COST);
 
     let player_name = name_of(world, player);
-    let target_name = name_or(world, target, "<unknown>");
+    let target_name = name_or(world, target, "(unknown)");
     let (dead, _) = apply_damage(world, target, dmg);
 
     if !dead
@@ -16279,7 +16299,7 @@ fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
     let player_name = name_of(world, player);
     let count = targets.len();
     for t in targets {
-        let target_name = name_or(world, t, "<unknown>");
+        let target_name = name_or(world, t, "(unknown)");
         let (dead, _) = apply_damage(world, t, dmg);
         if dead {
             crate::combat::handle_death(world, t, &target_name, room);
@@ -16662,7 +16682,7 @@ fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
     let mut first_alive: Option<Entity> = None;
     let mut hits: Vec<(String, bool)> = Vec::with_capacity(mob_targets.len());
     for target in &mob_targets {
-        let target_name = name_or(world, *target, "<unknown>");
+        let target_name = name_or(world, *target, "(unknown)");
         let (dead, _msg) = apply_damage(world, *target, dmg);
         hits.push((target_name.clone(), dead));
         if dead {
@@ -16745,7 +16765,7 @@ fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _, _)| e)
     };
     let Some(weapon) = weapon else {
-        let target_name = name_or(world, target, "<unknown>");
+        let target_name = name_or(world, target, "(unknown)");
         send_to(world, player, format!("{target_name} isn't wielding anything.\r\n"));
         return;
     };
@@ -16765,7 +16785,7 @@ fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
         e.insert(Located(target_room));
     }
     let weapon_name = name_or(world, weapon, "<weapon>");
-    let target_name = name_or(world, target, "<unknown>");
+    let target_name = name_or(world, target, "(unknown)");
     let player_name = name_of(world, player);
     send_to(world, player, format!(
         "You disarm {target_name}; {weapon_name} clatters to the ground.\r\n"
@@ -16894,7 +16914,7 @@ fn cmd_assist(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let Some(Fighting(ally_target)) = world.get::<Fighting>(ally).copied() else {
-        let ally_name = name_or(world, ally, "<unknown>");
+        let ally_name = name_or(world, ally, "(unknown)");
         send_to(world, player, format!("{ally_name} isn't fighting anyone.\r\n"));
         return;
     };
@@ -16902,7 +16922,7 @@ fn cmd_assist(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Their target is already gone.\r\n");
         return;
     }
-    let target_name = name_or(world, ally_target, "<unknown>");
+    let target_name = name_or(world, ally_target, "(unknown)");
     cmd_attack(world, player, &target_name);
 }
 
@@ -18160,7 +18180,7 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    let target_name = name_or(world, target, "<unknown>");
+    let target_name = name_or(world, target, "(unknown)");
 
     // Notify the room before death.
     let admin_name = name_of(world, player);
@@ -18222,7 +18242,7 @@ fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
         >();
         q.iter(world)
             .map(|(name, acct, prof, loc, hp, st, wealth)| {
-                let room_name = name_or(world, loc.0, "<unknown>");
+                let room_name = name_or(world, loc.0, "(unknown)");
                 let room_key = world
                     .get::<WorldKey>(loc.0)
                     .map_or((-1, -1), |wk| (wk.zone, wk.id));
@@ -18337,7 +18357,7 @@ fn cmd_purge(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, format!("No purge-able '{arg}' here.\r\n"));
             return;
         };
-        let target_name = name_or(world, target, "<unknown>");
+        let target_name = name_or(world, target, "(unknown)");
         // Cascade-despawn: anything Located on the target (mob's gear /
         // container contents) goes too.
         let nested: Vec<Entity> = {
@@ -18413,7 +18433,7 @@ fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     if let Some(mut s) = world.get_mut::<Stamina>(target) {
         s.current = s.max;
     }
-    let target_name = name_or(world, target, "<unknown>");
+    let target_name = name_or(world, target, "(unknown)");
     if target == player {
         send_to(world, player, "You feel completely refreshed.\r\n");
         return;
@@ -18483,7 +18503,7 @@ fn cmd_apply(world: &mut World, player: Entity, args: &str) {
         AppliedTo(target),
     ));
 
-    let target_name = name_or(world, target, "<unknown>");
+    let target_name = name_or(world, target, "(unknown)");
     let dur_label = if duration_s < 0 {
         "permanently".to_string()
     } else {
@@ -19225,7 +19245,7 @@ fn cmd_show(world: &mut World, player: Entity, args: &str) {
                     .map(|(n, acct, prof, loc)| {
                         let role = acct.role.label().to_string();
                         let level = prof.map_or(0, |p| p.level);
-                        let room = name_or(world, loc.0, "<unknown>");
+                        let room = name_or(world, loc.0, "(unknown)");
                         (n.name.clone(), role, level, room)
                     })
                     .collect()
@@ -19632,8 +19652,8 @@ fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
             exit_pairs.sort_by_key(|(d, _)| direction_rank(*d));
             for (dir, ed) in &exit_pairs {
                 let (target_name, target_label) = match ed.to {
-                    Some(t) => (name_or(world, t, "<unknown>"), format!("{t:?}")),
-                    None => ("<dangling>".to_string(), "None".to_string()),
+                    Some(t) => (name_or(world, t, "(unknown)"), format!("{t:?}")),
+                    None => ("(dangling)".to_string(), "None".to_string()),
                 };
                 let key_label = ed
                     .key
@@ -19773,7 +19793,7 @@ fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!("world_key:     ({}, {})\r\n", wk.zone, wk.id));
     }
     if let Some(located) = world.get::<Located>(target) {
-        let in_name = name_or(world, located.0, "<unknown>");
+        let in_name = name_or(world, located.0, "(unknown)");
         out.push_str(&format!("located_in:    {:?} ({})\r\n", located.0, in_name));
     }
     if let Some(kw) = world.get::<Keywords>(target) {
@@ -19858,7 +19878,7 @@ fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         ));
     }
     if let Some(f) = world.get::<Fighting>(target) {
-        let n = name_or(world, f.0, "<gone>");
+        let n = name_or(world, f.0, "(gone)");
         out.push_str(&format!("fighting:      {:?} ({n})\r\n", f.0));
     }
     if let Some(eq) = world.get::<EquippedSlot>(target) {
@@ -20275,7 +20295,7 @@ fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     try_insert(world, player, RecallPoint(located.0));
-    let room_name = name_or(world, located.0, "<unknown>");
+    let room_name = name_or(world, located.0, "(unknown)");
     send_to(
         world,
         player,
@@ -20627,7 +20647,7 @@ fn direction_name(d: Direction) -> &'static str {
         In => "in",
         Out => "out",
         Portal => "portal",
-        Direction::None => "<none>",
+        Direction::None => "(none)",
     }
 }
 
