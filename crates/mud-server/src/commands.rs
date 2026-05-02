@@ -18750,6 +18750,30 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     if has_effect_named(world, player, "drag") {
         stamina_cost = stamina_cost.saturating_mul(2);
     }
+    // Severe weather surcharge: outdoor moves through a storm or
+    // blizzard cost an extra stamina. Indoor / planar / cave sectors
+    // are sheltered. Flyers pay it too — wind buffets a glider as
+    // hard as it does a footslogger.
+    if sector_is_outdoor_for_weather(target_sector) {
+        let target_zone = world.get::<WorldKey>(target).map(|k| k.zone);
+        let severe = target_zone
+            .and_then(|z| {
+                world
+                    .resource::<mud_world::WeatherCatalog>()
+                    .by_zone
+                    .get(&z)
+                    .copied()
+            })
+            .is_some_and(|s| {
+                matches!(
+                    s.precip,
+                    mud_world::PrecipKind::Storm | mud_world::PrecipKind::Blizzard
+                )
+            });
+        if severe {
+            stamina_cost = stamina_cost.saturating_add(1);
+        }
+    }
     if let Some(s) = world.get::<Stamina>(player).copied()
         && s.current < stamina_cost
     {
