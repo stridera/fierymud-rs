@@ -12312,10 +12312,16 @@ fn invoke_ability(
     invoke_ability_with(world, player, args, kind, verb, false);
 }
 
-/// Same as [`invoke_ability`] but skips the leading description-box
-/// header (`name (kind)`, description, cast time, posture, flags).
-/// Used by AOE shims like `cmd_roar` so the box prints once for the
-/// first target instead of N times for an N-mob room.
+/// Same as [`invoke_ability`] but treats the call as a non-first
+/// dispatch in an AOE batch:
+///   - skips the leading description-box header (so `cmd_roar` over
+///     N mobs prints the box once, not N times)
+///   - skips the per-call cooldown gate AND the post-cast cooldown
+///     write (the AOE shim is responsible for cooldown semantics —
+///     gate once before the loop, set once after)
+///
+/// Used by AOE shims (`cmd_roar` today). For single-target dispatch
+/// keep using [`invoke_ability`].
 #[allow(clippy::too_many_lines)]
 fn invoke_ability_with(
     world: &mut World,
@@ -12323,7 +12329,7 @@ fn invoke_ability_with(
     args: &str,
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
-    quiet_header: bool,
+    aoe_repeat: bool,
 ) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.is_empty() || parts[0].trim().is_empty() {
@@ -12462,7 +12468,13 @@ fn invoke_ability_with(
     // component carries an Instant per ability.id at which the cooldown
     // expires. Stale entries (in the past) are silently treated as
     // expired and overwritten on next successful cast.
-    if def.cooldown_ms > 0
+    //
+    // Skip when called as an AOE repeat — the AOE shim's first call
+    // already passed the gate; subsequent per-target dispatches must
+    // not be blocked by the cooldown that this very batch is about
+    // to set.
+    if !aoe_repeat
+        && def.cooldown_ms > 0
         && let Some(cd) = world.get::<Cooldowns>(player)
         && let Some(ready_at) = cd.ready_at.get(&def.id).copied()
     {
@@ -12484,7 +12496,7 @@ fn invoke_ability_with(
 
     let mode = color_mode_for(world, player);
     let mut out = String::from("\r\n");
-    if !quiet_header {
+    if !aoe_repeat {
         out.push_str(&format!(
             "  {} ({})\r\n",
             render_color_tags(&def.name, mode),
@@ -13384,8 +13396,10 @@ fn invoke_ability_with(
     }
     // Cooldown write-back: only when the cast actually applied at
     // least one effect (skips no-op casts like "nothing to dispel" so
-    // a player isn't penalized for misfires).
-    if def.cooldown_ms > 0 && !applied_msgs.is_empty() {
+    // a player isn't penalized for misfires). Also skipped on AOE
+    // repeats — the first target in the batch already wrote the
+    // cooldown; subsequent dispatches share the same cooldown window.
+    if !aoe_repeat && def.cooldown_ms > 0 && !applied_msgs.is_empty() {
         let ready_at = std::time::Instant::now()
             + std::time::Duration::from_millis(u64::try_from(def.cooldown_ms).unwrap_or(0));
         let mut cd = world
