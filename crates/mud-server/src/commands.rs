@@ -1851,6 +1851,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_say,
     },
     Command {
+        names: &["ask"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "ask <mob> <topic>",
+            summary: "Ask an NPC about a topic; fires their SPEECH triggers.",
+            long: "Targets a single mob in the room and fires its \
+                   SPEECH triggers with the topic as the speech \
+                   keyword. Bystanders see that you asked but not \
+                   the topic. NPCs whose triggers match the topic \
+                   reply via room.send / actor.send from the body.",
+        },
+        run: cmd_ask,
+    },
+    Command {
         names: &["whisper"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -12426,6 +12442,46 @@ fn cmd_report(world: &mut World, player: Entity, _args: &str) {
         };
         send_rendered(world, target, &line);
     }
+}
+
+/// `ask <mob> <topic>` — target a single mob and fire its SPEECH
+/// triggers with the topic as the `speech` Lua global. Bystanders
+/// see that you asked something but not what. Mobs without
+/// matching SPEECH bodies stay silent.
+fn cmd_ask(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 || parts[1].trim().is_empty() {
+        send_to(world, player, "Usage: ask <mob> <topic>\r\n");
+        return;
+    }
+    let target_word = parts[0].trim();
+    let topic = parts[1].trim();
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
+        send_rendered(
+            world,
+            player,
+            &format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
+    send_to(
+        world,
+        player,
+        format!("You ask {target_name} about \"{topic}\".\r\n"),
+    );
+    broadcast_room_except_players_rendered(
+        world,
+        located.0,
+        &[player],
+        &format!("{player_name} asks {target_name} about something.\r\n"),
+    );
+    crate::triggers::fire_speech_at(world, target, player, topic);
 }
 
 fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
