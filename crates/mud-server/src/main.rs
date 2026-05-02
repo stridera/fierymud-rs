@@ -11,6 +11,7 @@ mod regen;
 mod respawn;
 mod sleep;
 mod syslog;
+mod wander;
 mod triggers;
 mod weather;
 
@@ -217,6 +218,7 @@ async fn main() {
             weather::weather_tick,
             weather::ambient_tick,
             sleep::mob_sleep_tick,
+            wander::wander_tick,
             idle::idle_kick_tick,
             memorize::memorize_tick,
             respawn::respawn_tick,
