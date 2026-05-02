@@ -9994,6 +9994,7 @@ fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_get(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     if trimmed.is_empty() {
@@ -10006,7 +10007,8 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
 
     // `get <item> from <container>` — pull from a container the
-    // player is carrying or which sits in the room.
+    // player is carrying or which sits in the room. `all` as the
+    // item word loots everything inside.
     if let Some((needle, container_word)) = split_from_keyword(trimmed) {
         let container = find_in_room(world, container_word, room)
             .or_else(|| find_carried_by(world, container_word, player, EquipFilter::Anywhere));
@@ -10018,15 +10020,61 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
             );
             return;
         };
+        let container_name = name_of(world, container);
+        let player_name = name_of(world, player);
+
+        // `get all from <container>`: snapshot every item inside,
+        // re-Located to the player, broadcast a single line with the
+        // count. Empty containers report the obvious "nothing in
+        // there" rather than failing the keyword lookup.
+        if needle.eq_ignore_ascii_case("all") {
+            let items: Vec<(Entity, String)> = {
+                let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Item>>();
+                q.iter(world)
+                    .filter(|(_, l, _)| l.0 == container)
+                    .map(|(e, _, n)| (e, n.name.clone()))
+                    .collect()
+            };
+            if items.is_empty() {
+                send_rendered(
+                    world,
+                    player,
+                    &format!("There's nothing in {container_name}.\r\n"),
+                );
+                return;
+            }
+            let count = items.len();
+            for (item, item_name) in &items {
+                if let Some(mut l) = world.get_mut::<Located>(*item) {
+                    l.0 = player;
+                }
+                send_rendered(
+                    world,
+                    player,
+                    &format!("You take {item_name} from {container_name}.\r\n"),
+                );
+                crate::triggers::fire_item_event(
+                    world,
+                    *item,
+                    player,
+                    mud_world::TriggerEvent::Get,
+                );
+            }
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[player],
+                &format!("{player_name} loots {count} item(s) from {container_name}.\r\n"),
+            );
+            return;
+        }
+
         let item = find_in_container(world, needle, container);
         let Some(item) = item else {
-            let cn = name_of(world, container);
-            send_rendered(world, player, &format!("There's no '{needle}' in {cn}.\r\n"));
+            send_rendered(world, player, &format!("There's no '{needle}' in {container_name}.\r\n"));
             return;
         };
         let item_name = name_of(world, item);
-        let container_name = name_of(world, container);
-        let player_name = name_of(world, player);
         if let Some(mut l) = world.get_mut::<Located>(item) {
             l.0 = player;
         }
