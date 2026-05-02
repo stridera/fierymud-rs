@@ -15716,7 +15716,6 @@ const SWEEP_COST: i32 = 12;
 const ROUNDHOUSE_COST: i32 = 7;
 const THROATCUT_COST: i32 = 8;
 const BERSERK_COST: i32 = 8;
-const BERSERK_DURATION_SECS: i32 = 60;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
@@ -16101,41 +16100,30 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
 }
 
 /// `berserk`: self-buff applying a `berserk` `EffectInstance` for 60s.
-/// No combat-damage scaling consumer yet — visible state only. Same
-/// dedup pattern as gouge via `has_effect_named`.
+/// `berserk`: self-buff applying a `berserk` `EffectInstance`.
+/// Phase C thin shim — Ability row 280 already maps to status
+/// effect with `override_params` `{"flag":"berserk", "duration":
+/// "skill / 10", "durationUnit": "hours"}`. Drains `BERSERK_COST`
+/// stamina, then dispatches `invoke_ability` like `cmd_kick`. Note
+/// this changes the duration from a fixed 60s to skill-scaled
+/// (~75s per 10 skill points) — that's the data's intent.
+/// `AbilityMessages` rows haven't been added for BERSERK yet, so
+/// the success emit falls back to a generic line; user should add
+/// `success_to_caster` + `success_to_room` rows in Muditor.
 fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "berserk") {
-        return;
-    }
-    if has_effect_named(world, player, "berserk") {
-        send_to(world, player, "You're already in a rage.\r\n");
         return;
     }
     if !check_stamina(world, player, BERSERK_COST, "berserk") {
         return;
     }
     drain_stamina(world, player, BERSERK_COST);
-    world.spawn((
-        EffectInstance {
-            kind: 0,
-            name: "berserk".to_string(),
-            strength: 1,
-            remaining_secs: BERSERK_DURATION_SECS,
-            source: EffectSource::Other("berserk".to_string()),
-            ability_id: None,
-        },
-        AppliedTo(player),
-    ));
-    send_to(world, player, "You go BERSERK!\r\n");
-    let player_name = name_of(world, player);
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    broadcast_room_except_rendered(
+    invoke_ability(
         world,
-        located.0,
-        &[player],
-        &format!("{player_name} goes BERSERK!\r\n"),
+        player,
+        "berserk",
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
 }
 
