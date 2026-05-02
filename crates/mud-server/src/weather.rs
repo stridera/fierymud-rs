@@ -17,6 +17,17 @@ use crate::TickCount;
 /// that a player's session sees it change.
 const WEATHER_TICK_TICKS: u64 = 600;
 
+/// Ambient flavor cadence — every 20 real-time seconds, sample
+/// outdoor players for a sky/wildlife line keyed off the current
+/// per-zone precip. Tighter than the drift tick so the world feels
+/// alive even when the band hasn't changed; looser than the combat
+/// tick so it isn't spammy.
+const AMBIENT_TICK_TICKS: u64 = 200;
+/// Per-tick chance any given outdoor player hears an ambient line.
+/// 1 in 4 means roughly one line every 80s on average — present
+/// without being noisy.
+const AMBIENT_CHANCE_DENOM: u32 = 4;
+
 pub fn weather_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(WEATHER_TICK_TICKS) {
@@ -79,6 +90,83 @@ pub fn weather_tick(world: &mut World) {
             crate::commands::send_to(world, r, format!("\r\n{line}\r\n"));
         }
     }
+}
+
+/// Ambient weather chatter — light, repeating flavor for each
+/// outdoor player keyed off the per-zone precip. Runs more often
+/// than the drift tick so the world feels alive even when the
+/// band hasn't shifted; per-player probability gate keeps the
+/// stream readable. No-op for indoor/cave/plane sectors.
+pub fn ambient_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(AMBIENT_TICK_TICKS) {
+        return;
+    }
+    let candidates: Vec<(Entity, Entity)> = {
+        let mut q = world.query_filtered::<(Entity, &mud_world::Located), (
+            With<mud_world::Player>,
+            With<mud_world::Online>,
+        )>();
+        q.iter(world)
+            .filter(|(_, l)| {
+                world
+                    .get::<mud_world::RoomSector>(l.0)
+                    .is_some_and(|s| crate::commands::sector_is_outdoor_for_weather(s.0))
+            })
+            .map(|(e, l)| (e, l.0))
+            .collect()
+    };
+    for (player, room) in candidates {
+        if rand::random_range(0..AMBIENT_CHANCE_DENOM) != 0 {
+            continue;
+        }
+        let zone = world.get::<mud_world::WorldKey>(room).map(|k| k.zone);
+        let precip = zone.and_then(|z| {
+            world
+                .resource::<WeatherCatalog>()
+                .by_zone
+                .get(&z)
+                .map(|s| s.precip)
+        });
+        let Some(precip) = precip else { continue };
+        if let Some(line) = ambient_line(precip) {
+            crate::commands::send_to(world, player, format!("\r\n{line}\r\n"));
+        }
+    }
+}
+
+/// Returns a flavor line for the given precip, or None for the
+/// quiet bands (Clear / Cloudy) where chatter would just be noise.
+/// Multiple variants per band; picked uniformly at random so the
+/// same band doesn't fire the same line every time.
+fn ambient_line(precip: PrecipKind) -> Option<&'static str> {
+    let pool: &[&str] = match precip {
+        PrecipKind::Clear | PrecipKind::Cloudy => return None,
+        PrecipKind::Drizzle => &[
+            "A fine mist drifts past your face.",
+            "Drops patter softly on stone.",
+        ],
+        PrecipKind::Rain => &[
+            "Rain hisses against the ground.",
+            "Wet wind tugs at your cloak.",
+            "A puddle ripples nearby.",
+        ],
+        PrecipKind::Storm => &[
+            "Thunder rumbles in the distance.",
+            "Lightning splits the sky for an instant.",
+            "The wind shrieks through the trees.",
+        ],
+        PrecipKind::Snow => &[
+            "Snowflakes settle on your shoulders.",
+            "The snow muffles every sound.",
+        ],
+        PrecipKind::Blizzard => &[
+            "The blizzard howls; visibility shrinks.",
+            "Stinging snow whips past your face.",
+        ],
+    };
+    let pick = rand::random_range(0..pool.len());
+    Some(pool[pick])
 }
 
 /// One-line atmospheric flavor for a precip transition. Generic

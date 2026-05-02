@@ -215,6 +215,7 @@ async fn main() {
             regen::light_fuel_tick,
             drowning::drowning_tick,
             weather::weather_tick,
+            weather::ambient_tick,
             sleep::mob_sleep_tick,
             idle::idle_kick_tick,
             memorize::memorize_tick,
