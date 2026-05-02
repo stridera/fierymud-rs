@@ -20117,10 +20117,10 @@ fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
         crate::commands::try_insert(world, item, mud_world::Charges(charges));
     }
 
-    send_to(
+    send_rendered(
         world,
         player,
-        format!(
+        &format!(
             "Loaded {proto_name} (entity {item:?}) at your feet.\r\n"
         ),
     );
@@ -20192,10 +20192,10 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         ))
         .id();
 
-    send_to(
+    send_rendered(
         world,
         player,
-        format!(
+        &format!(
             "Summoned {proto_name} (entity {mob_entity:?}) — HP {hp}, dmg {dmg}.\r\n"
         ),
     );
