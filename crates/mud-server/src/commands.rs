@@ -10179,11 +10179,26 @@ fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
         (Some(Climate::Alpine), _) => "The wind howls down the slopes; stars are knife-bright at altitude.",
         (Some(Climate::None) | None, _) => "The air is still and unremarkable.",
     };
+    // Season-flavored closer. Climate-agnostic so adding a new
+    // climate doesn't require updating four more lines — the climate
+    // arm above does the heavy lifting; this just lands the calendar
+    // on the readout. Hidden for Climate::None / unmapped rooms
+    // (caves, planes) where seasons don't apply.
+    let season_line: Option<&str> = match (climate, world.resource::<mud_world::MudClock>().season()) {
+        (Some(Climate::None) | None, _) => None,
+        (_, mud_world::Season::Winter) => Some("It is the depths of winter."),
+        (_, mud_world::Season::Spring) => Some("Spring stirs the world toward new growth."),
+        (_, mud_world::Season::Summer) => Some("The long days of summer hold sway."),
+        (_, mud_world::Season::Autumn) => Some("Autumn paints the air with change."),
+    };
     let mut out = String::from("\r\n");
     if let Some(live) = live_line {
         out.push_str(&format!("{live}\r\n"));
     }
     out.push_str(&format!("{line}\r\n"));
+    if let Some(s) = season_line {
+        out.push_str(&format!("{s}\r\n"));
+    }
     send_to(world, player, out);
 }
 
