@@ -210,6 +210,9 @@ pub struct ObjectProto {
     /// unrestricted gear; checked at wear time against the
     /// player's three-bucket alignment.
     pub restricted_alignments: Vec<mud_db::enums::Alignment>,
+    /// Class ids that CAN'T equip this item. Empty for
+    /// unrestricted gear.
+    pub restricted_class_ids: Vec<i32>,
 }
 
 /// Static initial-spawn data for a `DrinkContainer` proto. Mirrors

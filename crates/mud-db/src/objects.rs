@@ -25,6 +25,9 @@ pub struct Object {
     /// Alignments that CANNOT use this item. Empty for
     /// unrestricted gear. Mirrors `Objects.restricted_alignments`.
     pub restricted_alignments: Vec<Alignment>,
+    /// Class ids that CANNOT use this item. FK to `Class.id`.
+    /// Empty for unrestricted gear.
+    pub restricted_class_ids: Vec<i32>,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -44,7 +47,8 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             cost,
             "wearFlags" AS "wear_flags!: Vec<WearFlag>",
             values AS "values!: serde_json::Value",
-            restricted_alignments AS "restricted_alignments!: Vec<Alignment>"
+            restricted_alignments AS "restricted_alignments!: Vec<Alignment>",
+            restricted_class_ids AS "restricted_class_ids!: Vec<i32>"
         FROM "Objects"
         ORDER BY zone_id, id
         "#

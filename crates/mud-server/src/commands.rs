@@ -12402,32 +12402,52 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
         return;
     }
 
-    // Alignment restriction: refuse if the proto's
-    // `restricted_alignments` list contains the player's bucket.
-    // Lookup is by WorldKey → ObjectPrototypes; items without a
-    // proto (corpses, dynamically synthesized) skip the check.
-    let restriction = world
+    // Alignment + class restrictions: refuse if the proto's
+    // restriction list contains the player's bucket. Lookup is
+    // by WorldKey → ObjectPrototypes; items without a proto
+    // (corpses, dynamically synthesized) skip both checks.
+    let (alignment_restriction, class_restriction) = world
         .get::<WorldKey>(item)
         .and_then(|k| {
             world
                 .resource::<ObjectPrototypes>()
                 .by_key
                 .get(&(k.zone, k.id))
-                .map(|p| p.restricted_alignments.clone())
+                .map(|p| {
+                    (
+                        p.restricted_alignments.clone(),
+                        p.restricted_class_ids.clone(),
+                    )
+                })
         })
         .unwrap_or_default();
-    if !restriction.is_empty() {
+    if !alignment_restriction.is_empty() {
         let player_align = world
             .get::<CombatStats>(player)
             .map_or(0, |c| c.alignment);
         let bucket = mud_db::enums::Alignment::from_score(player_align);
-        if restriction.contains(&bucket) {
+        if alignment_restriction.contains(&bucket) {
             send_rendered(
                 world,
                 player,
                 &format!(
                     "{item_name} repels your touch — your {} alignment is incompatible.\r\n",
                     bucket.label()
+                ),
+            );
+            return;
+        }
+    }
+    if !class_restriction.is_empty() {
+        let player_class = world.get::<Profile>(player).and_then(|p| p.class_id);
+        if let Some(cid) = player_class
+            && class_restriction.contains(&cid)
+        {
+            send_rendered(
+                world,
+                player,
+                &format!(
+                    "{item_name} won't bend to your training — your class can't use it.\r\n"
                 ),
             );
             return;

@@ -242,6 +242,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 liquid,
                 light_fuel,
                 restricted_alignments: row.restricted_alignments,
+                restricted_class_ids: row.restricted_class_ids,
             },
         );
     }
