@@ -8093,6 +8093,16 @@ fn cmd_look(world: &mut World, player: Entity, args: &str) {
             look_direction(world, player, dir);
             return;
         }
+        // `look at sky` / `look stars` / `look horizon`: roll up the
+        // scattered weather/time/season readouts into one line. Done
+        // before the examine fallthrough so it works even though
+        // there's no `sky` entity to find.
+        let lower = arg.to_ascii_lowercase();
+        let stripped = lower.strip_prefix("at ").unwrap_or(&lower);
+        if matches!(stripped, "sky" | "stars" | "horizon" | "heavens") {
+            look_at_sky(world, player);
+            return;
+        }
         // Anything else: fall through to examine (look <object>).
         cmd_examine(world, player, arg);
         return;
@@ -9347,6 +9357,55 @@ pub(crate) fn sector_is_outdoor_for_weather(sector: Sector) -> bool {
             | Sector::Swamp
             | Sector::Ruins
     )
+}
+
+/// Roll up weather + time-of-day + season into a single response
+/// for `look (at) sky`. Indoor / cave / plane sectors get a
+/// contained answer instead — there's no sky to check.
+fn look_at_sky(world: &mut World, player: Entity) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+    let sector = world.get::<RoomSector>(room).map(|s| s.0);
+    let outdoor = sector.is_some_and(sector_is_outdoor_for_weather);
+    if !outdoor {
+        send_to(
+            world,
+            player,
+            "There's no sky to see here — only the ceiling above.\r\n",
+        );
+        return;
+    }
+    let zone_id = world.get::<WorldKey>(room).map(|k| k.zone);
+    let live = zone_id
+        .and_then(|zid| {
+            world
+                .resource::<mud_world::WeatherCatalog>()
+                .by_zone
+                .get(&zid)
+                .copied()
+        })
+        .map(crate::weather::describe);
+    let clock = world.resource::<mud_world::MudClock>();
+    let hour = clock.hour;
+    let season = clock.season().label();
+    let phase = match hour {
+        0..=4 => "Stars wheel overhead in the deep night.",
+        5..=7 => "The sky brightens with the colors of dawn.",
+        8..=11 => "The morning sun climbs steadily.",
+        12..=13 => "The sun stands at its zenith.",
+        14..=17 => "The afternoon sun slants toward the west.",
+        18..=20 => "Evening colors paint the horizon.",
+        _ => "Dusk fades to night.",
+    };
+    let mut out = format!("\r\n{phase}\r\n");
+    if let Some(weather) = live {
+        out.push_str(&format!("{weather}\r\n"));
+    }
+    out.push_str(&format!("(The season is {season}.)\r\n"));
+    send_to(world, player, out);
 }
 
 /// Peek at a neighboring room through the named exit. Reports whether
