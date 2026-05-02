@@ -9960,11 +9960,16 @@ fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     let m = (secs % 3600) / 60;
     let s = secs % 60;
 
-    // MUD time. Tick rate is 10 Hz; 1 MUD hour = 75 real seconds =
-    // 750 ticks; 24 hours = 1 day = 18000 ticks. Day 0 / hour 0
-    // starts at server boot.
-    let mud_hour = (tick / 750) % 24;
-    let mud_day = tick / 18000;
+    // Read from MudClock — the canonical in-game-time source. It
+    // starts at hour 12 day 1 month 1 year 2025 (per MudClock's
+    // Default impl), so a tick-derived calculation would be off by
+    // 12 hours from what Lua triggers / day-night gates / weather
+    // see via time.hour. Single source of truth wins.
+    let clock = world.resource::<mud_world::MudClock>();
+    let mud_hour = i64::from(clock.hour);
+    let mud_day = i64::from(clock.day);
+    let mud_month = i64::from(clock.month);
+    let mud_year = i64::from(clock.year);
     let period = match mud_hour {
         0..=4 => "deep night",
         5..=7 => "early morning",
@@ -9980,7 +9985,7 @@ fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     out.push_str(&format!("  Uptime:      {h}h {m}m {s}s\r\n"));
     out.push_str(&format!("  World tick:  {tick}\r\n"));
     out.push_str(&format!(
-        "  Game time:   day {mud_day}, {mud_hour:02}:00 ({period})\r\n",
+        "  Game time:   {mud_year}-{mud_month:02}-{mud_day:02}, {mud_hour:02}:00 ({period})\r\n",
     ));
     send_to(world, player, out);
 }
