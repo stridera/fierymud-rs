@@ -6624,6 +6624,54 @@ pub(crate) fn grant_achievement(world: &mut World, player: Entity, code: &str) {
     );
 }
 
+/// Track that `player` has set foot in `room` and, if the visit
+/// completes the room's zone, fire the `zone_<N>_cleared` achievement.
+/// In-session only — `ZoneVisits` does not currently round-trip
+/// through the DB, so a player who walks half a zone, logs out, and
+/// returns starts that zone fresh. Granted achievements DO persist
+/// (via `grant_achievement`'s normal write).
+pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity) {
+    if world.get::<Player>(player).is_none() {
+        return;
+    }
+    let key = match world.get::<WorldKey>(room) {
+        Some(k) => *k,
+        None => return,
+    };
+    // House rooms / synthesized rooms have no WorldKey, so the early
+    // return above filters them out — only authored world rooms
+    // count toward zone clears.
+    let needs_init = world.get::<mud_world::ZoneVisits>(player).is_none();
+    if needs_init {
+        try_insert(world, player, mud_world::ZoneVisits::default());
+    }
+    let newly_inserted = world
+        .get_mut::<mud_world::ZoneVisits>(player)
+        .is_some_and(|mut v| v.by_zone.entry(key.zone).or_default().insert(key.id));
+    if !newly_inserted {
+        return;
+    }
+    // Compare against the loaded room roster for the zone. Empty
+    // zones (nothing in WorldKeyIndex) can't be cleared by accident.
+    let total_in_zone = world
+        .resource::<WorldKeyIndex>()
+        .rooms
+        .keys()
+        .filter(|(z, _)| *z == key.zone)
+        .count();
+    if total_in_zone == 0 {
+        return;
+    }
+    let visited_in_zone = world
+        .get::<mud_world::ZoneVisits>(player)
+        .and_then(|v| v.by_zone.get(&key.zone))
+        .map_or(0, std::collections::HashSet::len);
+    if visited_in_zone >= total_in_zone {
+        let code = format!("zone_{}_cleared", key.zone);
+        grant_achievement(world, player, &code);
+    }
+}
+
 pub(crate) fn record_admin_action(
     world: &mut World,
     actor: Entity,
@@ -20056,6 +20104,11 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         if let Some(mut l) = world.get_mut::<Located>(mount) {
             l.0 = target;
         }
+    }
+    // Zone-clear tracking: each player mover now occupies `target`.
+    // Followers who happen to be NPCs are filtered inside the helper.
+    for &mover in &movers {
+        mark_room_visited(world, mover, target);
     }
 
     // Drain the leader's stamina by the target sector's cost. Followers

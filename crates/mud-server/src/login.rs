@@ -478,6 +478,12 @@ impl ConnRouter {
                 });
             }
         }
+        // Track the spawn room toward zone-clear, so a player who
+        // logs in inside the last unvisited room of a zone gets the
+        // unlock immediately instead of having to step out and back.
+        if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
+            commands::mark_room_visited(world, entity, room);
+        }
         self.playing.insert(conn_id, entity);
         commands::send_prompt(world, entity);
         info!(

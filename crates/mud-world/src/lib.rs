@@ -17,7 +17,7 @@ pub use components::{
     PostureKind, Profile, Prompt, RecallPoint, RiddenBy, Room, RoomSector, Shopkeeper, SkillPoints,
     Slot, Stamina, Stealth, Stunned, TellLog, Thirst, Title, UiStyle, Wealth, WearableIn,
     WimpyThreshold,
-    WorldKey, Zone, ZoneClimate,
+    WorldKey, Zone, ZoneClimate, ZoneVisits,
 };
 pub use loader::{
     LoadStats, default_weather_for_climate, load_from_db, load_trigger_catalog,
