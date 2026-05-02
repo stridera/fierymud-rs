@@ -13389,10 +13389,13 @@ fn invoke_ability_with(
     // text, so showing them on success is misleading. The player
     // sees them only when the gate refuses the cast above.)
     //
-    // Material reagent gate: every `required` AbilityComponent row
-    // must be carried by the caster, else refuse. `consumed` rows
-    // are tracked through to the post-success despawn pass so a
-    // misfired cast doesn't burn reagents.
+    // Material reagent boost: cast always proceeds. After the
+    // effect-application phase succeeds, any consumed-flagged
+    // AbilityComponent row whose proto sits in the caster's
+    // *direct* inventory (not in a container, not equipped) gets
+    // despawned and bumps the cast's primary effect by 25%.
+    // Stacks additively, capped at +100%. The legacy `required`
+    // flag is treated as advisory only — never blocks play.
     let component_reqs: Vec<mud_world::AbilityComponentReq> = world
         .resource::<AbilityCatalog>()
         .components
@@ -13401,39 +13404,45 @@ fn invoke_ability_with(
         .unwrap_or_default();
     let mut to_consume: Vec<Entity> = Vec::new();
     if !component_reqs.is_empty() {
-        // Snapshot the carried items once so the per-component
-        // search doesn't re-borrow the world inside the loop.
-        let carried: Vec<(Entity, i32, String)> = {
-            let mut q = world.query_filtered::<(Entity, &Located, &WorldKey, &Named), With<Item>>();
+        // Direct inventory only: Located == player AND no
+        // EquippedSlot. Items nested in a container have a
+        // different Located parent so they're naturally excluded.
+        let carried: Vec<(Entity, i32)> = {
+            let mut q = world.query_filtered::<
+                (Entity, &Located, &WorldKey, Option<&EquippedSlot>),
+                With<Item>,
+            >();
             q.iter(world)
-                .filter(|(_, l, _, _)| l.0 == player)
-                .map(|(e, _, k, n)| (e, k.id, n.name.clone()))
+                .filter(|(_, l, _, eq)| l.0 == player && eq.is_none())
+                .map(|(e, _, k, _)| (e, k.id))
                 .collect()
         };
+        let mut used = std::collections::HashSet::<Entity>::new();
         for req in &component_reqs {
-            let match_idx = carried.iter().position(|(_, oid, _)| *oid == req.object_id);
-            match match_idx {
-                Some(idx) => {
-                    if req.consumed {
-                        to_consume.push(carried[idx].0);
-                    }
-                }
-                None => {
-                    if req.required {
-                        send_to(
-                            world,
-                            player,
-                            format!(
-                                "You lack the proper material component for {}.\r\n",
-                                def.plain_name,
-                            ),
-                        );
-                        return;
-                    }
-                }
+            if !req.consumed {
+                continue;
+            }
+            // Pick the first matching item we haven't already
+            // earmarked — duplicate AbilityComponent rows can't
+            // double-eat the same instance.
+            let pick = carried
+                .iter()
+                .find(|(e, oid)| *oid == req.object_id && !used.contains(e))
+                .map(|(e, _)| *e);
+            if let Some(e) = pick {
+                used.insert(e);
+                to_consume.push(e);
             }
         }
     }
+    // Each consumed reagent adds 25% to the cast's primary effect,
+    // additive, capped at +100%. With zero reagents the boost is
+    // a no-op and the math collapses to the legacy path. Stored
+    // as integer percent so the per-site math stays in i32.
+    let reagent_boost_pct: i32 = i32::try_from(to_consume.len())
+        .unwrap_or(0)
+        .saturating_mul(25)
+        .min(100);
     // Look up the effects this ability applies and dispatch each by
     // its `Effect.effectType`. `heal` is applied immediately to the
     // target's `Health` (or `Stamina` when `resource = "move"`); other
@@ -13603,6 +13612,10 @@ fn invoke_ability_with(
                     amount = amount.saturating_add(bonus);
                 }
                 if amount > 0 {
+                    // Reagent boost on damage spells.
+                    if reagent_boost_pct > 0 {
+                        amount = amount.saturating_add(amount * reagent_boost_pct / 100);
+                    }
                     let (dead, threshold_msg) =
                         crate::commands::apply_damage(world, target_entity, amount);
                     // Surface the apply_damage threshold message
@@ -13636,10 +13649,14 @@ fn invoke_ability_with(
                     Some(&spec.default_params),
                     &formula_ctx,
                 );
-                let Some(amount) = amount else {
+                let Some(mut amount) = amount else {
                     applied_msgs.push(format!("{} (no amount resolved)", spec.name));
                     continue;
                 };
+                // Reagent boost on heal spells too.
+                if reagent_boost_pct > 0 {
+                    amount = amount.saturating_add(amount * reagent_boost_pct / 100);
+                }
                 let resource = resolve_effect_resource(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
@@ -13693,6 +13710,9 @@ fn invoke_ability_with(
                 );
                 if halve_duration {
                     dur_secs = (dur_secs / 2).max(1);
+                }
+                if reagent_boost_pct > 0 {
+                    dur_secs = dur_secs.saturating_add(dur_secs * reagent_boost_pct / 100);
                 }
                 world.spawn((
                     EffectInstance {
@@ -13896,6 +13916,9 @@ fn invoke_ability_with(
                 if halve_duration {
                     dur_secs = (dur_secs / 2).max(1);
                 }
+                if reagent_boost_pct > 0 {
+                    dur_secs = dur_secs.saturating_add(dur_secs * reagent_boost_pct / 100);
+                }
                 let applied_amount = match (target_stat.as_deref(), amount) {
                     (Some(t), Some(a)) if a != 0 => {
                         if apply_modify_delta(world, target_entity, t, a) {
@@ -14072,6 +14095,9 @@ fn invoke_ability_with(
                 if halve_duration {
                     dur_secs = (dur_secs / 2).max(1);
                 }
+                if reagent_boost_pct > 0 {
+                    dur_secs = dur_secs.saturating_add(dur_secs * reagent_boost_pct / 100);
+                }
                 world.spawn((
                     EffectInstance {
                         kind: spec.id,
@@ -14098,6 +14124,9 @@ fn invoke_ability_with(
                 );
                 if halve_duration {
                     dur_secs = (dur_secs / 2).max(1);
+                }
+                if reagent_boost_pct > 0 {
+                    dur_secs = dur_secs.saturating_add(dur_secs * reagent_boost_pct / 100);
                 }
                 world.spawn((
                     EffectInstance {
@@ -14234,10 +14263,20 @@ fn invoke_ability_with(
     // landed but missed half its damage component still burned
     // its bat guano.
     if !aoe_repeat && !applied_msgs.is_empty() {
+        let count = to_consume.len();
         for item in &to_consume {
             if let Ok(em) = world.get_entity_mut(*item) {
                 em.despawn();
             }
+        }
+        if count > 0 {
+            send_to(
+                world,
+                player,
+                format!(
+                    "Reagents flare ({count}); the cast surges by {reagent_boost_pct}%.\r\n"
+                ),
+            );
         }
     }
     // Cooldown write-back: only when the cast actually applied at
