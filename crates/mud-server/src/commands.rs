@@ -15706,7 +15706,6 @@ const BACKSTAB_COST: i32 = 6;
 const SPRINGLEAP_COST: i32 = 7;
 const GOUGE_COST: i32 = 7;
 const REND_COST: i32 = 7;
-const REND_BLEED_SECS: i32 = 30;
 const ROAR_COST: i32 = 8;
 const ROAR_FEAR_SECS: i32 = 20;
 const STOMP_COST: i32 = 6;
@@ -16386,84 +16385,36 @@ fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
 
 /// `rend [<target>]`: tearing attack — damage + temporary bleed
 /// effect. Same shape as gouge but for the `bleed` debuff name.
+/// `rend [<target>]`: damage + bleed status. Phase C thin shim
+/// (2026-05-02). Ability row 361 carries both a damage mapping
+/// (`amount = "level + str_bonus + skill / 4"`) and a status
+/// mapping (`flag=bleed`, 30s, `on_hit`). Default target is the
+/// current Fighting target.
 fn cmd_rend(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "rend") {
         return;
     }
-    if !check_stamina(world, player, REND_COST, "rend") {
-        return;
-    }
     let arg = args.trim();
-    let target = if arg.is_empty() {
+    let target_word = if arg.is_empty() {
         let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
             send_to(world, player, "Rend whom? You aren't fighting.\r\n");
             return;
         };
-        t
+        name_of(world, t)
     } else {
-        let Some(located) = world.get::<Located>(player).copied() else {
-            send_to(world, player, "You are nowhere.\r\n");
-            return;
-        };
-        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
-            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
-            return;
-        };
-        t
+        arg.to_string()
     };
-    if target == player {
-        send_to(world, player, "You can't rend yourself.\r\n");
+    if !check_stamina(world, player, REND_COST, "rend") {
         return;
     }
-    if has_effect_named(world, target, "bleed") {
-        let target_name = name_or(world, target, "<unknown>");
-        send_to(world, player, format!("{target_name} is already bleeding.\r\n"));
-        return;
-    }
-    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
-        send_to(world, player, "Target is in limbo.\r\n");
-        return;
-    };
-
-    let dmg = world.get::<CombatStats>(player).map_or(1, |c| c.dmg_roll);
     drain_stamina(world, player, REND_COST);
-
-    let player_name = name_of(world, player);
-    let target_name = name_or(world, target, "<unknown>");
-    let (dead, _) = apply_damage(world, target, dmg);
-
-    if !dead {
-        world.spawn((
-            EffectInstance {
-                kind: 0,
-                name: "bleed".to_string(),
-                strength: 1,
-                remaining_secs: REND_BLEED_SECS,
-                source: EffectSource::Other("rend".to_string()),
-                ability_id: None,
-            },
-            AppliedTo(target),
-        ));
-    }
-
-    send_to(world, player, format!(
-        "You rend {target_name} for {dmg} damage!\r\n"
-    ));
-    if !dead {
-        send_rendered(world, target, &format!(
-            "{player_name} tears into your flesh; you start to bleed!\r\n"
-        ));
-    }
-    broadcast_room_except_rendered(
+    invoke_ability(
         world,
-        target_room,
-        &[player, target],
-        &format!("{player_name} tears into {target_name}!\r\n"),
+        player,
+        &format!("rend {target_word}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
     );
-
-    if dead {
-        crate::combat::handle_death(world, target, &target_name, target_room);
-    }
 }
 
 /// `gouge [<target>]`: damage + temporary blind effect. Default
