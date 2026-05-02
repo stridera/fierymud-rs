@@ -246,6 +246,23 @@ fn roll_evasion(world: &World, defender: Entity) -> Option<&'static str> {
 #[derive(Component, Debug, Default)]
 pub struct MobMemory(pub std::collections::HashSet<Entity>);
 
+/// Active hate / aggro list. Ordered by most recent attacker last.
+/// `combat_tick`'s pre-pass picks the head when the mob's current
+/// `Fighting` target dies or flees so combat continues without
+/// the player having to re-engage. Per-instance, dies with the
+/// mob. Bounded — duplicates are dropped on push.
+#[derive(Component, Debug, Default)]
+pub struct HateList(pub Vec<Entity>);
+
+impl HateList {
+    /// Append `attacker` to the tail; remove existing instances
+    /// first so the most-recent swing wins re-engagement priority.
+    pub fn push(&mut self, attacker: Entity) {
+        self.0.retain(|e| *e != attacker);
+        self.0.push(attacker);
+    }
+}
+
 /// Add `attacker` to `mob`'s memory. Inserts the component on
 /// first use. No-op if `mob` has been despawned.
 pub(crate) fn remember_attacker(world: &mut World, mob: Entity, attacker: Entity) {
@@ -350,10 +367,56 @@ fn decay_milestone(prev: i32, now: i32, name: &str) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn combat_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(COMBAT_PERIOD_TICKS) {
         return;
+    }
+
+    // Pre-pass: re-engage mobs whose `Fighting` cleared but who
+    // still have a `HateList`. Pop entries until we find a live
+    // co-located target or exhaust the list. This is what makes
+    // multi-target aggro work: a mob fighting Alice + Bob keeps
+    // swinging at Bob when Alice flees, instead of standing
+    // around peacefully.
+    let to_reengage: Vec<(Entity, Entity)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &HateList),
+            (With<Mob>, Without<Fighting>),
+        >();
+        q.iter(world)
+            .filter_map(|(mob, loc, hate)| {
+                hate.0
+                    .iter()
+                    .rev()
+                    .find(|target| {
+                        world.get::<Located>(**target).map(|l| l.0) == Some(loc.0)
+                            && world.get::<Health>(**target).is_some_and(|h| h.hp > 0)
+                    })
+                    .map(|target| (mob, *target))
+            })
+            .collect()
+    };
+    for (mob, target) in to_reengage {
+        try_insert(world, mob, Fighting(target));
+        try_insert(world, target, Fighting(mob));
+        let mob_name = name_of(world, mob);
+        let target_name = name_of(world, target);
+        let target_room = world.get::<Located>(target).map(|l| l.0);
+        if let Some(room) = target_room {
+            send_to(
+                world,
+                target,
+                format!("{mob_name} turns its hate on you!\r\n"),
+            );
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[target],
+                &format!("{mob_name} turns on {target_name}!\r\n"),
+            );
+        }
     }
 
     // Pre-pass: collect all entities currently affected by `berserk`
@@ -495,6 +558,19 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // fresh aggro check (see `try_engage_remembered_mob`).
     if world.get::<Mob>(s.target).is_some() && world.get::<Player>(s.attacker).is_some() {
         remember_attacker(world, s.target, s.attacker);
+        // Hate list — populated regardless of hit outcome, like
+        // memory. The combat tick's pre-pass picks the head
+        // when the mob's current target dies / flees.
+        let already = world.get::<HateList>(s.target).is_some();
+        if already {
+            if let Some(mut h) = world.get_mut::<HateList>(s.target) {
+                h.push(s.attacker);
+            }
+        } else {
+            let mut list = HateList::default();
+            list.push(s.attacker);
+            try_insert(world, s.target, list);
+        }
     }
 
     // Hit / miss / crit roll. Sleeping defenders are auto-hit (you
