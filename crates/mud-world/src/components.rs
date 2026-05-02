@@ -57,13 +57,23 @@ pub struct Lit;
 #[derive(Component, Debug, Clone)]
 pub struct Keywords(pub Vec<String>);
 
-/// Equipment slots a wearable item can occupy.
+/// Equipment slots a wearable item can occupy. Order roughly head-to-toe
+/// for `equipment` display; weapons and odd-fits at the end. Modeled as
+/// single slots even when the schema flag implies a pair (a single
+/// `Ears` slot covers both ears, a single `Wrist` slot covers both
+/// wrists) — matches the legacy `CircleMUD` shape and avoids needing
+/// per-side bookkeeping in v1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slot {
     Head,
+    Eyes,
+    Face,
+    Ears,
     Neck,
+    About,
     Body,
     Arms,
+    Wrist,
     Hands,
     LeftFinger,
     RightFinger,
@@ -73,14 +83,21 @@ pub enum Slot {
     Wield,
     Hold,
     Light,
+    Hover,
+    Badge,
 }
 
 impl Slot {
     pub const ORDER: &'static [Self] = &[
         Self::Head,
+        Self::Eyes,
+        Self::Face,
+        Self::Ears,
         Self::Neck,
+        Self::About,
         Self::Body,
         Self::Arms,
+        Self::Wrist,
         Self::Hands,
         Self::LeftFinger,
         Self::RightFinger,
@@ -90,15 +107,22 @@ impl Slot {
         Self::Wield,
         Self::Hold,
         Self::Light,
+        Self::Hover,
+        Self::Badge,
     ];
 
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Head => "head",
+            Self::Eyes => "eyes",
+            Self::Face => "face",
+            Self::Ears => "ears",
             Self::Neck => "neck",
+            Self::About => "about body",
             Self::Body => "body",
             Self::Arms => "arms",
+            Self::Wrist => "wrist",
             Self::Hands => "hands",
             Self::LeftFinger => "finger (left)",
             Self::RightFinger => "finger (right)",
@@ -108,6 +132,8 @@ impl Slot {
             Self::Wield => "wielded",
             Self::Hold => "held",
             Self::Light => "light",
+            Self::Hover => "hovering",
+            Self::Badge => "badge",
         }
     }
 
@@ -117,9 +143,14 @@ impl Slot {
     pub fn db_label(self) -> &'static str {
         match self {
             Self::Head => "HEAD",
+            Self::Eyes => "EYES",
+            Self::Face => "FACE",
+            Self::Ears => "EARS",
             Self::Neck => "NECK",
+            Self::About => "ABOUT",
             Self::Body => "BODY",
             Self::Arms => "ARMS",
+            Self::Wrist => "WRIST",
             Self::Hands => "HANDS",
             Self::LeftFinger => "FINGER_LEFT",
             Self::RightFinger => "FINGER_RIGHT",
@@ -129,31 +160,41 @@ impl Slot {
             Self::Wield => "WIELD",
             Self::Hold => "HOLD",
             Self::Light => "LIGHT",
+            Self::Hover => "HOVER",
+            Self::Badge => "BADGE",
         }
     }
 
     /// Parse the free-text `equipped_location` from `CharacterItems`. Case
-    /// insensitive. Returns None for slots we don't yet model (BADGE,
-    /// EARS, FACE, ABOUT, NECK_1/NECK_2-as-distinct, etc.) — the caller
-    /// treats those rows as inventory rather than dropping them entirely.
+    /// insensitive. Mirrors `db_label` round-trip plus a few legacy
+    /// aliases (`NECK_1`/`NECK_2` collapse to `NECK`, `FINGER_R`/`FINGER_L`
+    /// map to `LeftFinger`/`RightFinger`). Returns None for any label
+    /// we still don't model.
     #[must_use]
     pub fn from_label(s: &str) -> Option<Self> {
         match s.to_ascii_uppercase().as_str() {
             "HEAD" => Some(Self::Head),
+            "EYES" => Some(Self::Eyes),
+            "FACE" => Some(Self::Face),
+            "EARS" | "EAR" => Some(Self::Ears),
             // Schema sometimes splits NECK_1/NECK_2 — we collapse to one
             // slot for now since the runtime doesn't model the pair.
             "NECK" | "NECK_1" | "NECK_2" => Some(Self::Neck),
+            "ABOUT" => Some(Self::About),
             "BODY" => Some(Self::Body),
             "ARMS" => Some(Self::Arms),
+            "WRIST" => Some(Self::Wrist),
             "HANDS" => Some(Self::Hands),
             "FINGER_LEFT" | "FINGER_R" => Some(Self::LeftFinger),
             "FINGER_RIGHT" | "FINGER_L" => Some(Self::RightFinger),
-            "WAIST" => Some(Self::Waist),
+            "WAIST" | "BELT" => Some(Self::Waist),
             "LEGS" => Some(Self::Legs),
             "FEET" => Some(Self::Feet),
             "WIELD" => Some(Self::Wield),
             "HOLD" => Some(Self::Hold),
             "LIGHT" => Some(Self::Light),
+            "HOVER" => Some(Self::Hover),
+            "BADGE" => Some(Self::Badge),
             _ => None,
         }
     }
@@ -930,10 +971,19 @@ mod tests {
     }
 
     #[test]
-    fn slot_from_label_unknowns_return_none() {
-        assert_eq!(Slot::from_label("BADGE"), None);
-        assert_eq!(Slot::from_label("ABOUT"), None);
-        assert_eq!(Slot::from_label("EARS"), None);
+    fn slot_from_label_extended_coverage() {
+        // Slots added 2026-05-02 covering ~340 previously-unwearable
+        // imported items (cloaks/wristbands/goggles/masks/badges/etc.).
+        assert_eq!(Slot::from_label("BADGE"), Some(Slot::Badge));
+        assert_eq!(Slot::from_label("ABOUT"), Some(Slot::About));
+        assert_eq!(Slot::from_label("EARS"), Some(Slot::Ears));
+        // Schema enum is `EAR` (singular); from_label accepts both
+        // forms so legacy DB rows that use either spelling resolve.
+        assert_eq!(Slot::from_label("EAR"), Some(Slot::Ears));
+        assert_eq!(Slot::from_label("WRIST"), Some(Slot::Wrist));
+        assert_eq!(Slot::from_label("EYES"), Some(Slot::Eyes));
+        assert_eq!(Slot::from_label("FACE"), Some(Slot::Face));
+        assert_eq!(Slot::from_label("HOVER"), Some(Slot::Hover));
         assert_eq!(Slot::from_label(""), None);
         assert_eq!(Slot::from_label("garbage"), None);
     }

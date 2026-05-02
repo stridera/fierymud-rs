@@ -1140,6 +1140,8 @@ pub fn wear_flags_primary_slot(flags: &[mud_db::enums::WearFlag]) -> Option<crat
         Hover, Legs, Mainhand, Neck, Offhand, Tail, Twohand, Waist, Wrist,
     };
     // Priority order: prefer wield/hold/body slots over decorative.
+    // Tail and Disguise have no in-game slot equivalent yet — silently
+    // ignored. Everything else maps to a Slot variant.
     for f in flags {
         let slot = match f {
             Mainhand | Twohand => Some(Slot::Wield),
@@ -1153,8 +1155,15 @@ pub fn wear_flags_primary_slot(flags: &[mud_db::enums::WearFlag]) -> Option<crat
             Waist | Belt => Some(Slot::Waist),
             Neck => Some(Slot::Neck),
             Finger => Some(Slot::LeftFinger),
-            // Schema flags with no runtime slot: ignored.
-            Wrist | About | Eyes | Face | Ear | Tail | Hover | Disguise | Badge => None,
+            Wrist => Some(Slot::Wrist),
+            About => Some(Slot::About),
+            Eyes => Some(Slot::Eyes),
+            Face => Some(Slot::Face),
+            Ear => Some(Slot::Ears),
+            Hover => Some(Slot::Hover),
+            Badge => Some(Slot::Badge),
+            // Tail / Disguise have no anatomical slot in v1.
+            Tail | Disguise => None,
         };
         if slot.is_some() {
             return slot;
