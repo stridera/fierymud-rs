@@ -6724,6 +6724,13 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // list anything Located on it. Mirrors the legacy "you peek inside"
     // behavior — looters don't have to guess what to `get`.
     if world.get::<Item>(target).is_some() {
+        // Surface item weight so a player can judge whether to pick
+        // it up before bumping into the encumbrance gate. Skipped
+        // for synthetic items that have no proto weight.
+        let weight = item_weight(world, target);
+        if weight > 0.0 {
+            out.push_str(&format!("It weighs about {weight:.1} lbs.\r\n"));
+        }
         let contents: Vec<String> = {
             let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
             q.iter(world)
