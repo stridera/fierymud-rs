@@ -63,6 +63,17 @@ impl ConnRouter {
         self.login.len() + self.playing.len()
     }
 
+    /// Reverse lookup: which `ConnId` (if any) is currently driving
+    /// the given player entity. Linear scan over `playing` — fine at
+    /// realistic player counts. Used by the idle-kick path to route
+    /// a disconnect through the canonical `on_disconnect` save flow.
+    #[must_use]
+    pub fn find_conn(&self, entity: Entity) -> Option<ConnId> {
+        self.playing
+            .iter()
+            .find_map(|(cid, e)| if *e == entity { Some(*cid) } else { None })
+    }
+
     pub fn on_connect(&mut self, conn_id: ConnId, outbound: Outbound) {
         let _ = outbound.send(BANNER.as_bytes().to_vec());
         let _ = outbound.send(IDENT_PROMPT.as_bytes().to_vec());

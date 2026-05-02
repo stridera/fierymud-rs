@@ -3,6 +3,7 @@ mod combat;
 mod commands;
 mod corpses;
 mod effects;
+mod idle;
 mod login;
 mod memorize;
 mod regen;
@@ -213,6 +214,7 @@ async fn main() {
             regen::light_fuel_tick,
             weather::weather_tick,
             sleep::mob_sleep_tick,
+            idle::idle_kick_tick,
             memorize::memorize_tick,
             respawn::respawn_tick,
             triggers::lua_coroutine_tick,
@@ -253,6 +255,30 @@ async fn main() {
                 };
                 if run_world {
                     schedule.run(&mut world);
+                    // Drain idle-kick markers before flushing prompts
+                    // so the kick notice lands ahead of the prompt
+                    // refresh and the disconnect path runs cleanly
+                    // through the canonical on_disconnect save flow.
+                    let pending: Vec<Entity> = {
+                        let mut q = world
+                            .query_filtered::<Entity, With<idle::IdleKickPending>>();
+                        q.iter(&world).collect()
+                    };
+                    for entity in pending {
+                        if let Some(conn_id) = router.find_conn(entity) {
+                            commands::send_to(
+                                &world,
+                                entity,
+                                "\r\nYou have been idle for too long. Disconnecting.\r\n",
+                            );
+                            router.on_disconnect(&mut world, conn_id, &pool).await;
+                        } else if let Ok(mut e) = world.get_entity_mut(entity) {
+                            // Orphaned marker (e.g. the player despawned
+                            // mid-tick somehow) — drop it so the next
+                            // pass doesn't keep retrying.
+                            e.remove::<idle::IdleKickPending>();
+                        }
+                    }
                 }
                 // After all systems for this tick have run, refresh
                 // prompts for anyone who received output (combat hits,
