@@ -8631,6 +8631,9 @@ fn render_score_minimal(d: &ScoreData) -> String {
     if d.bank > 0 {
         parts.push(format!("bank:{}", d.bank));
     }
+    if d.carry.0 > 0.0 {
+        parts.push(format!("ld:{:.0}/{:.0}", d.carry.0, d.carry.1));
+    }
     if let Some(target) = d.fight_target {
         parts.push(format!("vs:{target}"));
     }
