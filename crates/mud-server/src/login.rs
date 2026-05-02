@@ -5,10 +5,11 @@ use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::U
 use mud_net::{ConnId, Outbound};
 use mud_db::character_items::CharacterItemRow;
 use mud_world::{
-    Account, AccountSummary, CombatStats, CoreStats, Description, EquippedSlot, Health, Item,
-    Keywords, KnownAbilities, Located, LoggedInAt, Named, Online, ObjectPrototypes, Player,
-    BankWealth, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina,
-    Title, Wealth, WorldKey, WorldKeyIndex,
+    Account, AccountSummary, AttachedTriggers, BankWealth, BoardLink, CombatStats, CoreStats,
+    Description, EquippedSlot, Health, Item, Keywords, KnownAbilities, LiquidContainer, Located,
+    LoggedInAt, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind,
+    Profile, Prompt, RecallPoint, Slot, Stamina, Title, TriggerCatalog, Wealth, WearableIn,
+    WorldKey, WorldKeyIndex, wear_flags_primary_slot,
 };
 use tracing::{info, warn};
 
@@ -640,6 +641,21 @@ fn spawn_inventory(world: &mut World, player: Entity, rows: &[CharacterItemRow])
                 made_progress = true;
                 continue;
             };
+            // Mirror the proto-derived attach set the loader's reset
+            // pass uses: WearableIn (so saved equipment stays
+            // wearable), BoardLink (boards in inventory still link),
+            // LiquidContainer (drink containers stay drinkable —
+            // bug from this morning where a saved water skin came
+            // back without LiquidContainer and `drink` rejected it),
+            // AttachedTriggers (so on_get / on_drop fire on saved
+            // items). Without this list, inventory rehydration only
+            // produces a bare Item with no capability components.
+            let primary_slot = wear_flags_primary_slot(&proto.wear_flags);
+            let trigger_keys = world
+                .resource::<TriggerCatalog>()
+                .object_attachments
+                .get(&(proto.zone_id, proto.id))
+                .cloned();
             let mut bundle = world.spawn((
                 Item,
                 Named { name: proto.name.clone() },
@@ -652,6 +668,23 @@ fn spawn_inventory(world: &mut World, player: Entity, rows: &[CharacterItemRow])
             ));
             if let Some(desc) = proto.examine_description.clone() {
                 bundle.insert(Description(desc));
+            }
+            if let Some(s) = primary_slot {
+                bundle.insert(WearableIn(s));
+            }
+            if let Some(board_id) = proto.board_id {
+                bundle.insert(BoardLink(board_id));
+            }
+            if let Some(liq) = proto.liquid.clone() {
+                bundle.insert(LiquidContainer {
+                    liquid: liq.liquid,
+                    capacity: liq.capacity,
+                    remaining: liq.remaining,
+                    poisoned: liq.poisoned,
+                });
+            }
+            if let Some(keys) = trigger_keys {
+                bundle.insert(AttachedTriggers(keys));
             }
             let item_entity = bundle.id();
             if let Some(slot_str) = row.equipped_location.as_deref()
