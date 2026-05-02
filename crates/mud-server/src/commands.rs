@@ -16996,10 +16996,19 @@ fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
     // Aggro hint: same threshold the room-entry check uses, so
     // `consider` matches the auto-engage rule. Players passing
     // through a known-hostile zone can size up the danger before
-    // walking back in.
-    let target_alignment = target_stats.map_or(0, |c| c.alignment);
-    if target_alignment <= AGGRO_ALIGNMENT && world.get::<Mob>(target).is_some() {
-        out.push_str("Its eyes follow you with malice — it would attack on sight.\r\n");
+    // walking back in. Memory check first — a remembered grudge
+    // is the more specific reason a particular target would
+    // attack you.
+    if world.get::<Mob>(target).is_some() {
+        let remembers_you = world
+            .get::<crate::combat::MobMemory>(target)
+            .is_some_and(|m| m.0.contains(&player));
+        let target_alignment = target_stats.map_or(0, |c| c.alignment);
+        if remembers_you {
+            out.push_str("It remembers you, and its hand goes to its weapon.\r\n");
+        } else if target_alignment <= AGGRO_ALIGNMENT {
+            out.push_str("Its eyes follow you with malice — it would attack on sight.\r\n");
+        }
     }
     send_rendered(world, player, &out);
 }
