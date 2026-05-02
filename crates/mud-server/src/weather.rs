@@ -121,18 +121,41 @@ pub fn ambient_tick(world: &mut World) {
             continue;
         }
         let zone = world.get::<mud_world::WorldKey>(room).map(|k| k.zone);
-        let precip = zone.and_then(|z| {
+        let state = zone.and_then(|z| {
             world
                 .resource::<WeatherCatalog>()
                 .by_zone
                 .get(&z)
-                .map(|s| s.precip)
+                .copied()
         });
-        let Some(precip) = precip else { continue };
-        if let Some(line) = ambient_line(precip) {
+        let Some(state) = state else { continue };
+        // Precip line takes precedence — when there's active weather,
+        // the precip flavor is the more vivid cue. Fall back to a
+        // temperature-extreme line for clear/cloudy days.
+        let line = ambient_line(state.precip).or_else(|| ambient_temp_line(state.temp));
+        if let Some(line) = line {
             crate::commands::send_to(world, player, format!("\r\n{line}\r\n"));
         }
     }
+}
+
+/// Temperature-extreme flavor for the quiet-precip days where
+/// `ambient_line` returns None. Mild bands stay silent — only
+/// the ends of the scale (Frigid / Sweltering) get chatter.
+fn ambient_temp_line(temp: TempBand) -> Option<&'static str> {
+    let pool: &[&str] = match temp {
+        TempBand::Frigid => &[
+            "Your breath fogs in the bitter cold.",
+            "The cold gnaws at every exposed inch of skin.",
+        ],
+        TempBand::Sweltering => &[
+            "Heat shimmers off every surface.",
+            "Sweat beads on your brow; the air feels heavy.",
+        ],
+        _ => return None,
+    };
+    let pick = rand::random_range(0..pool.len());
+    Some(pool[pick])
 }
 
 /// Returns a flavor line for the given precip, or None for the
