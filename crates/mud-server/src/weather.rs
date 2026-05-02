@@ -28,17 +28,66 @@ pub fn weather_tick(world: &mut World) {
         let mut q = world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
         q.iter(world).map(|(wk, c)| (wk.zone, c.0)).collect()
     };
-    let mut weather = world.resource_mut::<WeatherCatalog>();
-    for (zone_id, climate) in climates {
-        let entry = weather
-            .by_zone
-            .entry(zone_id)
-            .or_insert_with(|| mud_world::default_weather_for_climate(climate));
-        // Drift each axis with a small random nudge per tick. Bounds
-        // come from the climate's typical range so e.g. an Arctic
-        // zone never drifts into "sweltering."
-        entry.temp = drift_temp(entry.temp, climate);
-        entry.precip = drift_precip(entry.precip, climate);
+    // Track zones whose precip changed so the post-tick pass can
+    // broadcast "the sky shifts" lines to outdoor players in them.
+    let mut precip_changes: Vec<(i32, PrecipKind, PrecipKind)> = Vec::new();
+    {
+        let mut weather = world.resource_mut::<WeatherCatalog>();
+        for (zone_id, climate) in climates {
+            let prev = weather
+                .by_zone
+                .entry(zone_id)
+                .or_insert_with(|| mud_world::default_weather_for_climate(climate))
+                .precip;
+            let entry = weather.by_zone.get_mut(&zone_id).unwrap();
+            entry.temp = drift_temp(entry.temp, climate);
+            entry.precip = drift_precip(entry.precip, climate);
+            if entry.precip != prev {
+                precip_changes.push((zone_id, prev, entry.precip));
+            }
+        }
+    }
+    // Broadcast precip changes. Snapshot players in outdoor rooms
+    // for each affected zone, then send a transition flavor line.
+    for (zone_id, _prev, new_precip) in precip_changes {
+        let outdoor_recipients: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &mud_world::Located), (
+                With<mud_world::Player>,
+                With<mud_world::Online>,
+            )>();
+            q.iter(world)
+                .filter(|(_, l)| {
+                    let room = l.0;
+                    let zone_match = world
+                        .get::<mud_world::WorldKey>(room)
+                        .is_some_and(|k| k.zone == zone_id);
+                    let outdoor = world
+                        .get::<mud_world::RoomSector>(room)
+                        .is_some_and(|s| crate::commands::sector_is_outdoor_for_weather(s.0));
+                    zone_match && outdoor
+                })
+                .map(|(e, _)| e)
+                .collect()
+        };
+        let line = transition_line(new_precip);
+        for r in outdoor_recipients {
+            crate::commands::send_to(world, r, format!("\r\n{line}\r\n"));
+        }
+    }
+}
+
+/// One-line atmospheric flavor for a precip transition. Generic
+/// (no per-from/per-to combinatorics) — players see the new
+/// state, not the delta. Good enough for v1.
+fn transition_line(new_precip: PrecipKind) -> &'static str {
+    match new_precip {
+        PrecipKind::Clear => "The clouds part; the sky brightens.",
+        PrecipKind::Cloudy => "Clouds gather overhead.",
+        PrecipKind::Drizzle => "A light drizzle begins to fall.",
+        PrecipKind::Rain => "The rain picks up — a steady downpour.",
+        PrecipKind::Storm => "The wind howls; thunder rumbles in the distance.",
+        PrecipKind::Snow => "Snowflakes begin to fall.",
+        PrecipKind::Blizzard => "The snow thickens into a blinding blizzard.",
     }
 }
 

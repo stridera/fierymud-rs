@@ -9096,7 +9096,7 @@ fn parse_direction(s: &str) -> Option<Direction> {
 /// planes are excluded; everything outdoor (CITY streets, FIELD,
 /// FOREST, mountain, road, beach, swamp, ruins, water surface,
 /// AIR) shows the weather.
-fn sector_is_outdoor_for_weather(sector: Sector) -> bool {
+pub(crate) fn sector_is_outdoor_for_weather(sector: Sector) -> bool {
     matches!(
         sector,
         Sector::City
