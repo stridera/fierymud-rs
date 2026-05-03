@@ -6827,6 +6827,7 @@ fn apply_room_environment(world: &mut World, player: Entity, room: Entity) {
 enum QuestObjectiveBump {
     KillMob { zone: i32, id: i32 },
     VisitRoom { zone: i32, id: i32 },
+    TalkToNpc { zone: i32, id: i32 },
 }
 
 /// Advance any active `KILL_MOB` objectives whose target matches
@@ -6863,6 +6864,25 @@ pub(crate) fn bump_visit_quest_progress(
         QuestObjectiveBump::VisitRoom {
             zone: room_zone,
             id: room_id,
+        },
+    );
+}
+
+/// Advance any active `TALK_TO_NPC` objectives whose target mob
+/// matches the entity addressed. Called from `cmd_ask` when the
+/// target is a mob.
+pub(crate) fn bump_talk_quest_progress(
+    world: &mut World,
+    speaker: Entity,
+    mob_zone: i32,
+    mob_id: i32,
+) {
+    bump_quest_progress(
+        world,
+        speaker,
+        QuestObjectiveBump::TalkToNpc {
+            zone: mob_zone,
+            id: mob_id,
         },
     );
 }
@@ -6905,6 +6925,12 @@ fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBum
                 }
                 QuestObjectiveBump::VisitRoom { zone, id } => {
                     mud_db::quest_objectives::list_visit_room_progress(
+                        &pool, &cid, zone, id, is_actor,
+                    )
+                    .await
+                }
+                QuestObjectiveBump::TalkToNpc { zone, id } => {
+                    mud_db::quest_objectives::list_talk_to_npc_progress(
                         &pool, &cid, zone, id, is_actor,
                     )
                     .await
@@ -14187,6 +14213,14 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} asks {target_name} about something.\r\n"),
     );
     crate::triggers::fire_speech_at(world, target, player, topic);
+    // TALK_TO_NPC objective progression. Only fires when the
+    // target is a mob with a known prototype — chats between
+    // players don't advance NPC objectives.
+    if world.get::<Mob>(target).is_some()
+        && let Some(key) = world.get::<WorldKey>(target).copied()
+    {
+        bump_talk_quest_progress(world, player, key.zone, key.id);
+    }
 }
 
 fn cmd_whisper(world: &mut World, player: Entity, args: &str) {

@@ -80,6 +80,58 @@ pub async fn list_kill_mob_progress(
 /// `(current_count, completed)`. Caller computes both so the
 /// runtime can pick its own threshold semantics; this just
 /// writes them.
+/// Active TALK_TO_NPC objectives for `character_id` whose target
+/// mob matches `(mob_zone, mob_id)`. Same SOLO/PARTY gate as the
+/// other types — a scout chatting up the questgiver brings the
+/// rest of the party along on PARTY scope.
+pub async fn list_talk_to_npc_progress(
+    pool: &PgPool,
+    character_id: &str,
+    mob_zone: i32,
+    mob_id: i32,
+    is_speaker: bool,
+) -> sqlx::Result<Vec<ObjectiveProgressRow>> {
+    sqlx::query_as!(
+        ObjectiveProgressRow,
+        r#"
+        SELECT
+            cq.id AS "character_quest_id!: String",
+            qo.quest_zone_id AS "quest_zone_id!: i32",
+            qo.quest_id AS "quest_id!: i32",
+            qo.phase_id AS "phase_id!: i32",
+            qo.id AS "objective_id!: i32",
+            qo.required_count AS "required_count!: i32",
+            qo.scope::text AS "scope!: String",
+            qo.show_progress AS "show_progress!: bool",
+            qo.player_description AS "player_description!: String",
+            COALESCE(cqo.current_count, 0) AS "current_count!: i32"
+        FROM "CharacterQuest" cq
+        JOIN "QuestObjective" qo
+            ON qo.quest_zone_id = cq.quest_zone_id
+           AND qo.quest_id = cq.quest_id
+        LEFT JOIN "CharacterQuestObjective" cqo
+            ON cqo.character_quest_id = cq.id
+           AND cqo.quest_zone_id = qo.quest_zone_id
+           AND cqo.quest_id = qo.quest_id
+           AND cqo.phase_id = qo.phase_id
+           AND cqo.objective_id = qo.id
+        WHERE cq.character_id = $1
+          AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.objective_type = 'TALK_TO_NPC'::"QuestObjectiveType"
+          AND qo.target_mob_zone_id = $2
+          AND qo.target_mob_id = $3
+          AND COALESCE(cqo.completed, false) = false
+          AND (qo.scope = 'PARTY'::"QuestObjectiveScope" OR $4)
+        "#,
+        character_id,
+        mob_zone,
+        mob_id,
+        is_speaker,
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Active VISIT_ROOM objectives for `character_id` whose target
 /// room matches `(room_zone, room_id)` and whose row isn't
 /// already complete. Same SOLO/PARTY gating shape as
