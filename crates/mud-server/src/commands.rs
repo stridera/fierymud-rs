@@ -2557,6 +2557,36 @@ mod tests {
     }
 
     #[test]
+    fn format_age_handles_singular_and_plural_units() {
+        // Level 0/negative → no profile-derived age. Score skips the
+        // line rather than printing nonsense.
+        assert_eq!(super::format_age(0), None);
+        assert_eq!(super::format_age(-5), None);
+        // Level 1 → 21 years, 3 months (placeholder formula).
+        assert_eq!(
+            super::format_age(1),
+            Some("21 years, 3 months".to_string()),
+        );
+        // Level 25 → 45 years, (25*3)%12 = 75%12 = 3 months.
+        assert_eq!(
+            super::format_age(25),
+            Some("45 years, 3 months".to_string()),
+        );
+        // Singular "1 month" path: level 4 → 24 years, 12%12=0 → 0
+        // months (plural). Level 9 → 29 years, 27%12=3 months. The
+        // exact level that yields "1 month" is level 11 → 33%12=9
+        // months — none, actually. Use level 5: (5*3)%12 = 15%12=3.
+        // Level that gives 1 month: (n*3)%12 = 1 → n*3 ≡ 1 mod 12
+        // has no integer solution since gcd(3,12)=3. So singular
+        // months is unreachable via this formula — leave the
+        // suffix logic exercised only by years.
+        // Singular "1 year" is also unreachable (years = 20+level,
+        // level >= 1 → years >= 21). Both suffixes therefore
+        // pluralize in practice. Test still guards the format
+        // shape so a future refactor can't silently change it.
+    }
+
+    #[test]
     fn format_wealth_zero_or_negative_is_none() {
         assert_eq!(super::format_wealth(0), None);
         assert_eq!(super::format_wealth(-5), None);
@@ -2705,6 +2735,8 @@ mod tests {
             out.contains("Title: the Daring Adventurer"),
             "title line: {out}",
         );
+        // Age: 20 + 25 = 45 years; (25*3) % 12 = 3 months.
+        assert!(out.contains("Age: 45 years, 3 months"), "age line: {out}");
     }
 
     #[test]
@@ -4324,6 +4356,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     if let Some(t) = d.title {
         out.push_str(&format!("  Title: {t}\r\n"));
     }
+    if let Some(age) = d.profile.and_then(|(lvl, ..)| format_age(lvl)) {
+        out.push_str(&format!("  Age: {age}\r\n"));
+    }
     if let Some(hp) = d.hp {
         out.push_str(&format!("  HP: {} / {}\r\n", hp.hp, hp.max));
     }
@@ -4565,6 +4600,25 @@ pub(crate) fn drunk_band(drunk: i32) -> &'static str {
     }
 }
 
+/// Cosmetic in-character age string for the score sheet. Mirrors
+/// the C++ placeholder formula (`20 + level` years, `(level * 3) %
+/// 12` months) until birth-time tracking lands — gives the score
+/// sheet a more character-sheet feel without touching schema /
+/// login. Returns None for level <= 0 (mob renders, broken data).
+#[must_use]
+pub(crate) fn format_age(level: i32) -> Option<String> {
+    if level <= 0 {
+        return None;
+    }
+    let years = 20 + level;
+    let months = (level * 3) % 12;
+    let yr_suffix = if years == 1 { "" } else { "s" };
+    let mo_suffix = if months == 1 { "" } else { "s" };
+    Some(format!(
+        "{years} year{yr_suffix}, {months} month{mo_suffix}",
+    ))
+}
+
 /// Comma-joined hunger/thirst descriptors, or None if both are
 /// below their warning thresholds. Bands match the tick consumer's
 /// `HUNGRY_AT` / `STARVING_AT` / `THIRSTY_AT` / `PARCHED_AT`.
@@ -4610,6 +4664,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(t) = d.title {
         row(format!("Title:     {t}"));
+    }
+    if let Some(age) = d.profile.and_then(|(lvl, ..)| format_age(lvl)) {
+        row(format!("Age:       {age}"));
     }
     if let Some(hp) = d.hp {
         row(format!("HP:        {} / {}", hp.hp, hp.max));
