@@ -3917,6 +3917,13 @@ pub(crate) struct ScoreData<'a> {
     /// "Exp: X / Y [bar] N%" line; the bar is computed here so
     /// renderers stay free of math.
     level_progress: Option<LevelProgress>,
+    /// Current room: `(display_name, zone, id)`. `None` only for
+    /// disconnected/unrooted entities (in practice never for an
+    /// online player at score time, but keep it Option-shaped so
+    /// the renderer can quietly omit the line rather than print
+    /// "[void]"). Display name has color tags pre-stripped so the
+    /// fancy renderer's fixed-width row padding stays correct.
+    location: Option<(&'a str, i32, i32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -3932,6 +3939,7 @@ pub(crate) struct GroupStatus<'a> {
     pub member_count: usize,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     let mut out = format!("\r\n{}\r\n", d.name);
     if let Some((level, class, race, gender, xp)) = d.profile {
@@ -4029,6 +4037,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             progress_bar(p.percent),
             p.percent,
         ));
+    }
+    if let Some((name, zone, id)) = d.location {
+        out.push_str(&format!("  Location: {name}  [{zone}:{id}]\r\n"));
     }
     out
 }
@@ -4272,6 +4283,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
             progress_bar(p.percent),
             p.percent,
         ));
+    }
+    if let Some((name, zone, id)) = d.location {
+        row(format!("Location:  {name}  [{zone}:{id}]"));
     }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out

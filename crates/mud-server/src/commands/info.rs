@@ -3977,6 +3977,25 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         .map(|f| name_or(world, f.0, "(unknown)"));
     let group_root_e = group_root(world, player);
     let group_size = group_members(world, group_root_e).len();
+    // Current room: name + composite key for the score-sheet
+    // location line. Pulled from Located → Named/WorldKey so
+    // builders and ops staff can see the (zone, id) at a glance
+    // without typing `where` or `tellroom`.
+    let location_owned: Option<(String, i32, i32)> = world
+        .get::<Located>(player)
+        .map(|l| l.0)
+        .map(|room| {
+            let raw = world
+                .get::<Named>(room)
+                .map_or_else(String::new, |n| n.name.clone());
+            // Strip color tags so the fancy renderer's fixed-width
+            // box padding matches the visible character width.
+            let name = render_color_tags(&raw, ColorMode::Strip);
+            let (zone, id) = world
+                .get::<WorldKey>(room)
+                .map_or((-1, -1), |k| (k.zone, k.id));
+            (name, zone, id)
+        });
     // Per-circle slot summary for spellcasters. Reads
     // SpellSlotData (level + class → slot caps) and the player's
     // MemorizedSpells (used vs ready). Empty for classless / non-
@@ -4048,6 +4067,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         level_progress: profile_owned
             .as_ref()
             .and_then(|(lvl, _, _, _, xp)| level_progress_for(*lvl, *xp)),
+        location: location_owned
+            .as_ref()
+            .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
