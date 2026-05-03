@@ -1,6 +1,6 @@
 # Objects
 
-**Status:** proposal — awaiting review.
+**Status:** locked (review pass 1, 2026-05-03).
 
 ## Design intent
 
@@ -36,9 +36,11 @@ edit columns directly in Muditor.
 
 | Column | Type | When set | Notes |
 |---|---|---|---|
-| `base_damage` | Int? | WEAPON | replaces Hit Dice (see [combat.md](combat.md)) |
-| `damage_type` | DamageType? | WEAPON | enum, see [damage-types.md](damage-types.md) |
-| `weapon_class` | WeaponClass? | WEAPON | sword, axe, dagger, bow, staff, … |
+| `base_damage` | Int? | WEAPON, MISSILE | replaces Hit Dice (see [combat.md](combat.md)). MISSILE rows carry an optional small bonus (default 0) added on top of the bow's base damage. |
+| `damage_type` | DamageType? | WEAPON, MISSILE | enum, see [damage-types.md](damage-types.md) |
+| `weapon_class` | WeaponClass? | WEAPON, INSTRUMENT | full enum: SWORD, AXE, DAGGER, MACE, STAFF, SPEAR, BOW, CROSSBOW, SLING, FLAIL, POLEARM, WHIP, CLAW, FIST, plus instrument variants — see "Weapon class enum" below. |
+| `requires_ammo` | MissileClass? | WEAPON (ranged only) | If set, every swing consumes one matching MISSILE from inventory. `null` for melee weapons. |
+| `missile_class` | MissileClass? | MISSILE | ARROW, BOLT, DART, STONE, BULLET. Pairs with `requires_ammo` on bows/crossbows/slings/blowguns. |
 | `light_capacity` | Int? | LIGHT | game-hours; `-1` means infinite |
 | `light_remaining` | Int? | LIGHT | per-spawn override allowed |
 | `liquid_id` | Int? | DRINKCONTAINER, FOUNTAIN | FK → `Liquids.id` (typed, vs string today) |
@@ -54,7 +56,7 @@ edit columns directly in Muditor.
 | `food_hours` | Int? | FOOD | hunger restored when eaten |
 | `armor_pct` | Int? | ARMOR | replaces hardcoded armor table; see combat.md |
 | `armor_flat` | Int? | ARMOR | flat soak per swing |
-| `pen_pct` | Int? | WEAPON | armor-pierce % |
+| `pen_pct` | Int? | WEAPON | armor-pierce %. Lives on weapon-side; wielder bonuses come from active modify-effects. |
 | `pen_flat` | Int? | WEAPON | armor-pierce flat |
 
 ### Drop
@@ -63,12 +65,199 @@ edit columns directly in Muditor.
 - The legacy "Pages doubles as Board.id" and "Destination is a vnum"
   conventions.
 
+## ObjectType rationalization
+
+`ObjectType` shrinks from 38 variants to ~28. Several legacy types
+encoded *behavior* that's better expressed as "type X with effect Y."
+Dropped types and their migration target:
+
+| Drop | Why | Migration |
+|---|---|---|
+| `FIREWEAPON` | `damage_type = FIRE` on regular WEAPON + on-hit `burning` STATUS via ObjectEffects covers it | Each FIREWEAPON → WEAPON with `damage_type = FIRE`; ObjectEffects row → `burning` Effect catalog row. |
+| `WORN` | Distinction from ARMOR was "wearable but no mitigation." Same shape, just `armor_pct = 0` | Each WORN → ARMOR with `armor_pct = 0`. |
+| `TRAP` | Triggers on items / rooms handle trap mechanics; no special type needed | Trap items either rebuild as triggered items, or convert to OTHER if decorative. |
+| `WINGS` | Wings are a slot, not a type. New `Slot::Wings` + `WearFlag::Wings`; flight is an effect. | Each WINGS → ARMOR with `wear_flags = [WINGS]`; ObjectEffects row → `fly` STATUS. |
+| `PERFUME` | Charisma buff via ObjectEffects (worn) or consumable POTION-style with duration | Re-author per item. |
+| `DISGUISE` | Pure effect mechanic — neither a type nor a slot. Disguise items are normal worn (Face / Head / About) with a `disguised_as_*` STATUS via ObjectEffects. | Each DISGUISE → ARMOR with appropriate wear_flag + ObjectEffects → disguise STATUS. |
+| `POISON` | Substance applied to weapons via skill/spell, or consumable potion with damage-on-self | Re-author. POISON → POTION (consumable) or OTHER (substance) + per-content effects. |
+| `BOAT` | Subset of VEHICLE | BOAT → VEHICLE; add `vehicle_class` enum if water-only matters mechanically. |
+
+Kept (with notes):
+
+| Type | Notes |
+|---|---|
+| `WEAPON` | Now carries `base_damage`, `damage_type`, `weapon_class`, `pen_pct`, `pen_flat`, `requires_ammo` |
+| `ARMOR` | Now carries `armor_pct`, `armor_flat` |
+| `MISSILE` | Now carries `damage_type`, `missile_class`, optional `base_damage` bonus |
+| `INSTRUMENT` | Now carries `weapon_class` (extended enum covers instruments) |
+| `LIGHT` | `light_capacity` + `light_remaining` |
+| `DRINKCONTAINER`, `FOUNTAIN` | `liquid_id` + `liquid_capacity` + `liquid_remaining` + `liquid_poisoned` |
+| `PORTAL` | `portal_dest_zone` + `portal_dest_room` |
+| `BOARD` | `board_id` |
+| `CONTAINER` | `container_capacity` + lock-key columns |
+| `KEY` | No data beyond name; pairs with CONTAINER's lock columns |
+| `FOOD` | `food_hours` |
+| `POTION`, `SCROLL`, `WAND`, `STAFF` | Use `ObjectAbilities` table for spell bindings (already exists) |
+| `SPELLBOOK` | `Ability.pages` already drives scribe cost; `ObjectSpellbookEntries` (or similar junction) carries which spells the book teaches — schema-level decision tracked in [schema-reconciliation.md](schema-reconciliation.md) |
+| `TOUCHSTONE` | No extra columns; runtime `cmd_touch` reads the type label |
+| `VEHICLE` | Absorbs former BOAT; optional `vehicle_class` enum (LAND / WATER / AIR) |
+| `MONEY`, `TREASURE` | `Objects.cost` is the value |
+| `CORPSE` | `decompose_timer` + a `Corpse` runtime component carrying contents |
+| `KIT` | Crafting-tool stub; add columns when crafting lands |
+| `WALL`, `ROPE`, `PEN`, `NOTE`, `OTHER`, `TRASH`, `NOTHING` | Narrow content uses; existing columns suffice |
+
+Net: 38 → 28 types. fierylib re-importer normalizes legacy data per
+the migration table above.
+
+## Slots — adding `Wings`
+
+Three back-region slots, each with distinct semantics:
+
+```
+Slot enum:
+  ...existing variants...
+  About      # cloak, cape — across the body
+  Wings      # NEW — back attachment (folded wings, harness)
+  Hover      # orbiting accessory (rune, familiar, glowing sigil)
+```
+
+These don't conflict — a player can wear a cloak (About), wing
+harness (Wings), and floating rune (Hover) simultaneously.
+
+Add `WearFlag::Wings` so items can declare they fit the slot:
+
+```
+WearFlag enum:
+  ...existing variants...
+  Wings      # NEW — pairs with Slot::Wings
+```
+
+Items today flagged as ObjectType::WINGS get re-tagged at migration:
+`ObjectType::ARMOR` + `wear_flags: [WINGS]` + an ObjectEffects row
+pointing at the `fly` Effect catalog row.
+
+## Missile / ranged combat — locked at option (A)
+
+Same-room only, ammo-consuming. No spatial mechanics, no
+adjacent-room targeting, no LOS. The simplest model that still
+makes ranged content meaningful via class theming and the
+ammo-economy gameplay loop.
+
+### Wielding a ranged weapon
+
+A WEAPON with `weapon_class IN (BOW, CROSSBOW, SLING, BLOWGUN)` and
+`requires_ammo = ARROW | BOLT | STONE | DART` triggers the
+ranged-attack path. The combat tick's swing-snapshot pre-pass
+extends to:
+
+1. Resolve attacker's wielded weapon proto.
+2. If `requires_ammo` is set:
+   - Find the first carried MISSILE matching `missile_class`.
+   - If none: emit "you have no arrows" once, swing fizzles (no damage,
+     no stamina drain, no follow-up engagement).
+   - If found: consume one (decrement stack count, despawn instance
+     when last is gone).
+3. Damage = `weapon.base_damage * (1 + attack_power) * variance`
+   plus an optional `missile.base_damage` flat bonus
+   (an iron-tipped arrow adds +1 over a wooden one).
+4. Run the standard armor / resist / hardness pipeline from
+   [combat.md](combat.md).
+
+### Why option (A)
+
+- Reuses every existing combat path. Combat tick doesn't grow new
+  cross-room concerns.
+- Ammo economy is the differentiator: bows are "free" once you have
+  arrows but you have to carry stacks. Melee weapons never run out.
+- Ranged-themed classes (Ranger, Archer) get class flavor through
+  `weapon_required: [BOW]` on their abilities, not through new
+  spatial mechanics.
+
+### What option (A) doesn't get us
+
+- No "tank in front, archer in back" tactical layer. If you want
+  cross-room combat ([options B / C in the original
+  proposal](https://example/never)), that's a follow-up doc — adjacent-
+  room targeting is substantial work and touches movement, LOS, group
+  positioning, exit visibility. Not on the locked path today.
+
+### Schema for missile content
+
+```yaml
+# A bow that requires arrows
+ObjectType: WEAPON
+weapon_class: BOW
+base_damage: 10
+damage_type: PIERCING
+requires_ammo: ARROW
+pen_pct: 0
+pen_flat: 0
+
+# An iron-tipped arrow stack
+ObjectType: MISSILE
+missile_class: ARROW
+base_damage: 1                    # small bonus
+damage_type: PIERCING             # mostly cosmetic; bow's type wins
+```
+
+When a player wields the bow and has arrows in inventory, every
+combat-tick swing consumes one arrow and lands as a regular swing.
+Out of arrows → fizzle. Switching weapons mid-combat works as today.
+
 ### Move (re-name only — semantics already exist)
 
 - `Objects.cost` (already a column) — no change.
 - `Objects.weight` — no change.
 - `Objects.level` — no change.
-- `Objects.wear_flags` — no change.
+- `Objects.wear_flags` — gains the `WINGS` variant.
+
+## `WeaponClass` enum (extended for instruments)
+
+```
+WeaponClass:
+  # Melee
+  SWORD
+  AXE
+  DAGGER
+  MACE
+  STAFF
+  SPEAR
+  POLEARM
+  FLAIL
+  WHIP
+  FIST           # brass knuckles, monk weapons
+  CLAW           # natural weapon for some shapechange forms
+
+  # Ranged
+  BOW
+  CROSSBOW
+  SLING
+  BLOWGUN
+
+  # Instruments — bards / mystics wield these to perform
+  LYRE
+  FLUTE
+  DRUM
+  HORN
+  LUTE
+```
+
+Both `WEAPON.weapon_class` and `INSTRUMENT.weapon_class` columns use
+the same enum. `Ability.weapon_required: WeaponClass[]` filters
+abilities by what's wielded — a song can require `[LYRE, FLUTE]`,
+`backstab` can require `[DAGGER]`. Extending the enum later
+(adding e.g. `RAPIER`, `SCYTHE`) is one migration line.
+
+`MissileClass` enum is separate — covers ammo only:
+
+```
+MissileClass:
+  ARROW
+  BOLT
+  STONE      # for slings
+  DART       # for blowguns
+  BULLET     # firearms — unused today, reserved
+```
 
 ## `Liquid` table
 
@@ -160,29 +349,32 @@ portal_dest_zone = 30
 portal_dest_room = 45
 ```
 
-## Open questions
+## Decisions locked (review pass 1, 2026-05-03)
 
-1. **Per-type tables vs per-type columns.** Alternative: a separate
-   `WeaponData(object_zone, object_id, …)` table per ObjectType,
-   with `Objects` carrying just the generic columns. More normalized
-   but more joins. I default to "columns on `Objects`" because every
-   read path knows the type already from `r#type`, so the conditional
-   nullability isn't wasteful.
-2. **Wear flags vs `armor_pct`/`armor_flat`.** Today armor items
-   have `wear_flags` (where they sit) but no actual mitigation
-   numbers — they exist as decoration. The combat redesign needs
-   armor numbers per-item. Add the columns now, populate from a
-   default "level-tier" table in the migration?
-3. **Drink-fountain remaining.** I propose `null` = bottomless
-   (matches the runtime fountain treatment from commit 4362f71).
-   Alternative: `-1`. Null reads better; null vs 0 is unambiguous.
-4. **`weapon_class` enum granularity.** SWORD, AXE, DAGGER, MACE,
-   STAFF, SPEAR, BOW, CROSSBOW, WHIP, CLAW, FIST? Or simpler ONE_HAND
-   / TWO_HAND / RANGED / NATURAL? I default to the bigger list since
-   `weapon_required` on abilities (see abilities.md) wants
-   class-specific gating ("backstab requires DAGGER").
-5. **Should `pen_*` live on the weapon proto or only on the wielder?**
-   Today the combat math reads it from the attacker. Cleaner to read
-   from the equipped weapon (so different weapons confer different
-   penetration). Recommendation: weapon-side, summed with any
-   wielder-side bonus from active effects.
+| Question | Locked |
+|---|---|
+| Schema shape | **Columns on `Objects`**, nullable per type. Read path branches on `r#type`. Per-type satellite tables not worth the joins. |
+| Armor item migration | **Migration script populates `armor_pct` / `armor_flat` from a level-tier default table** (1-10: 5/1; 11-30: 12/2; 31-60: 25/4; 61-90: 40/6; 90+: 55/9). Content authors hand-tune special items (artifacts, named gear) afterward. |
+| Drink-fountain "remaining" | **`null` = bottomless.** Unambiguous against `0 = empty`. |
+| `weapon_class` granularity | **Full list** — SWORD/AXE/DAGGER/MACE/STAFF/SPEAR/POLEARM/FLAIL/WHIP/FIST/CLAW + ranged + instrument variants. Single enum reused across WEAPON / INSTRUMENT columns. |
+| `pen_*` location | **Weapon-side**, summed with wielder bonuses from active modify-effects. |
+| Missile / ranged | **Option (A)** — same-room only, consume one MISSILE per swing, no spatial mechanics. Adjacent-room targeting deferred to a future ranged.md if ever. |
+| Wings | **Drop type, keep slot.** Add `Slot::Wings` + `WearFlag::Wings`. Items use `wear_flags: [WINGS]` + ObjectEffects → `fly` STATUS. |
+| Disguise | **Drop type AND slot.** Items use natural Face/Head/About slot + ObjectEffects → `disguised_as_*` STATUS. Magical disguise spells skip the item. |
+| Type rationalization | **38 → 28 ObjectTypes.** Drops: FIREWEAPON, WORN, TRAP, WINGS, PERFUME, DISGUISE, POISON, BOAT. Each migrates to a kept type + appropriate ObjectEffects rows. |
+| `Slot::Hover` vs `Slot::Wings` | **Both kept.** Hover is "orbiting accessory"; Wings is "back attachment." Distinct semantics, distinct slots. |
+
+## Remaining open questions
+
+1. **Spellbook content storage.** How does a spellbook know which
+   spells it carries? Existing schema likely has `Spellbooks` /
+   `SpellbookSpells` junction (verify). If not, add one. Tracked in
+   [schema-reconciliation.md](schema-reconciliation.md).
+2. **Vehicle subtype.** Add `vehicle_class LAND | WATER | AIR` if
+   gameplay needs water-only or land-only restrictions. Defer until
+   content actually wants it.
+3. **Adjacent-room ranged combat (option B/C/D from the missile
+   discussion).** Not in scope today. If we ever want a "tank in
+   front, archer in back" tactical layer, write a dedicated
+   `ranged.md` first — it touches movement, LOS, exit visibility,
+   group positioning, and combat-tick cross-room targeting.
