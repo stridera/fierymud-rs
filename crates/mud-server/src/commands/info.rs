@@ -4833,8 +4833,10 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "\r\nNo exits.\r\n");
         return;
     }
-    // Resolve each exit's target room name; sort by direction's canonical order.
-    let mut rows: Vec<(mud_db::enums::Direction, String)> = exits
+    // Resolve each exit's target room name + door state. Sort by
+    // direction's canonical order. State trailer signals whether
+    // the exit needs `open` / `unlock` before the player can pass.
+    let mut rows: Vec<(mud_db::enums::Direction, String, ExitState)> = exits
         .0
         .iter()
         .map(|(dir, ed)| {
@@ -4842,13 +4844,23 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
                 .to
                 .and_then(|e| world.get::<Named>(e).map(|n| n.name.clone()))
                 .unwrap_or_else(|| "(beyond)".to_string());
-            (*dir, target_name)
+            (*dir, target_name, ed.state)
         })
         .collect();
-    rows.sort_by_key(|(d, _)| direction_order(*d));
+    rows.sort_by_key(|(d, _, _)| direction_order(*d));
     let mut out = String::from("\r\nExits:\r\n");
-    for (dir, room) in &rows {
-        out.push_str(&format!("  {:>10} - {}\r\n", direction_name(*dir), room));
+    for (dir, room, state) in &rows {
+        let state_label = match state {
+            ExitState::Open => "",
+            ExitState::Closed => "  (closed)",
+            ExitState::Locked => "  (locked)",
+        };
+        out.push_str(&format!(
+            "  {:>10} - {}{}\r\n",
+            direction_name(*dir),
+            room,
+            state_label,
+        ));
     }
     send_to(world, player, out);
 }
