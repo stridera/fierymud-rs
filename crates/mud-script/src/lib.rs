@@ -1734,17 +1734,30 @@ impl UserData for LuaActor {
                         Value::Boolean(w.get::<mud_world::Fighting>(this.entity).is_some())
                     }),
                     // 62 corpus refs — gender-keyed pronoun ("his" /
-                    // "her" / "its"). Sourced from Profile.gender
-                    // (players); mobs return "its" by default.
+                    // "her" / "its"). Players source from
+                    // `Profile.gender`; mobs source from MobProto
+                    // now that the column is plumbed. Anything else
+                    // (or unrecognized gender like `non_binary` /
+                    // `neutral`) falls through to "its".
                     "possessive" => {
                         let s = world_from_lua(lua, |w| {
-                            w.get::<Profile>(this.entity)
-                                .map_or("its", |p| match p.gender.as_str() {
-                                    "male" => "his",
-                                    "female" => "her",
-                                    _ => "its",
-                                })
-                                .to_string()
+                            let gender = if let Some(p) = w.get::<Profile>(this.entity) {
+                                p.gender.clone()
+                            } else if let Some(wk) = w.get::<WorldKey>(this.entity) {
+                                w.resource::<MobPrototypes>()
+                                    .by_key
+                                    .get(&(wk.zone, wk.id))
+                                    .map(|p| p.gender.clone())
+                                    .unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            match gender.as_str() {
+                                "male" => "his",
+                                "female" => "her",
+                                _ => "its",
+                            }
+                            .to_string()
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
