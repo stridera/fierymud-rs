@@ -4097,6 +4097,30 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         practice_points: world
             .get::<mud_world::SkillPoints>(player)
             .map_or(0, |s| s.0),
+        achievements: {
+            let unlocked = world
+                .get::<mud_world::CharacterAchievements>(player)
+                .map_or(0, |a| a.unlocked.len());
+            // Total counts non-hidden rows so the visible
+            // denominator excludes secret challenges. A hidden
+            // row only enters the numerator once it's actually
+            // unlocked — at that point it stops being a secret.
+            let catalog = world.resource::<mud_world::AchievementCatalog>();
+            let visible_total = catalog
+                .by_id
+                .values()
+                .filter(|d| !d.hidden)
+                .count();
+            let unlocked_hidden = world
+                .get::<mud_world::CharacterAchievements>(player)
+                .map_or(0, |a| {
+                    a.unlocked
+                        .iter()
+                        .filter(|id| catalog.by_id.get(id).is_some_and(|d| d.hidden))
+                        .count()
+                });
+            (unlocked, visible_total + unlocked_hidden)
+        },
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

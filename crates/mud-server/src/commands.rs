@@ -3935,6 +3935,11 @@ pub(crate) struct ScoreData<'a> {
     /// can see they have something to spend without running
     /// `practice` first. Zero suppresses the line.
     practice_points: i32,
+    /// `(unlocked, total)` counts for non-hidden achievements.
+    /// Hidden rows stay out of the denominator so a brand-new
+    /// character doesn't see "0 / 47" when 12 of those 47 are
+    /// secret challenges. Both `0` suppress the line.
+    achievements: (usize, usize),
 }
 
 #[derive(Clone, Copy)]
@@ -4067,6 +4072,12 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         let suffix = if pts == 1 { "" } else { "s" };
         out.push_str(&format!(
             "  Practice: {pts} point{suffix} available    (`practice` to spend)\r\n",
+        ));
+    }
+    let (unlocked, total) = d.achievements;
+    if total > 0 {
+        out.push_str(&format!(
+            "  Achievements: {unlocked} / {total} unlocked    (`achievements` for the list)\r\n",
         ));
     }
     out
@@ -4346,6 +4357,10 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         let pts = d.practice_points;
         let suffix = if pts == 1 { "" } else { "s" };
         row(format!("Practice:  {pts} point{suffix} available"));
+    }
+    let (unlocked, total) = d.achievements;
+    if total > 0 {
+        row(format!("Achievements: {unlocked} / {total}"));
     }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out
