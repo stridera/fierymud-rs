@@ -927,11 +927,14 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "commands",
+            usage: "commands [<category>]",
             summary: "Flat alphabetical list of every command you can use.",
             long: "Shows just the names you have access to, without the \
                    per-category framing `help` uses. Aliases share their \
-                   primary name's slot.",
+                   primary name's slot. With a category arg (info / \
+                   movement / communication / combat / admin) the list \
+                   is filtered to that category, useful when the full \
+                   200+ command roster is overwhelming.",
         },
         run: cmd_commands,
     }
@@ -5310,17 +5313,36 @@ pub(crate) fn cmd_account(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-pub(crate) fn cmd_commands(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_commands(world: &mut World, player: Entity, args: &str) {
     let (role, perms) = world
         .get::<Account>(player)
         .map_or((UserRole::Player, Vec::new()), |a| (a.role, a.perms.clone()));
+    // Optional category filter. Match case-insensitively against
+    // each Category's `label()`. Unknown / typo args fall through
+    // to "no filter" — matches the lenient style of other info
+    // commands (`who`, `idle`).
+    let category_arg = args.trim().to_ascii_lowercase();
+    let want_category: Option<Category> = if category_arg.is_empty() {
+        None
+    } else {
+        Category::ORDER
+            .iter()
+            .copied()
+            .find(|c| c.label().eq_ignore_ascii_case(&category_arg))
+    };
     let mut names: Vec<&'static str> = all_commands()
         .filter(|c| visible(c, role, &perms))
+        .filter(|c| want_category.is_none_or(|w| c.category == w))
         .map(|c| c.names[0])
         .collect();
     names.sort_unstable();
 
-    let mut out = format!("\r\n{} commands available:\r\n", names.len());
+    let header = if let Some(cat) = want_category {
+        format!("\r\n{} {} commands available:\r\n", names.len(), cat.label())
+    } else {
+        format!("\r\n{} commands available:\r\n", names.len())
+    };
+    let mut out = header;
     for chunk in names.chunks(COMMANDS_LIST_COLS) {
         out.push_str("  ");
         for name in chunk {
