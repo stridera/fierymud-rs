@@ -9,6 +9,7 @@ use mud_world::{Account, Located, WorldKey};
 
 use crate::commands::{
     Category, Command, Connection, DbPool, Help, name_of, record_admin_action, send_to,
+    try_remove,
 };
 
 inventory::submit! {
@@ -36,7 +37,7 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "cclan create <name> <abbrev>\n       cclan assign <player> <abbrev> [rank]\n       cclan kick <player>\n       cclan motd <abbrev> <text>",
+            usage: "cclan create <name> <abbrev>\n       cclan assign <player> <abbrev> [rank]\n       cclan kick <player>\n       cclan motd <abbrev> <text>\n       cclan disband <abbrev>",
             summary: "Manage clans (create / assign / kick / MOTD).",
             long: "Implementor-only.\n\
                    - `create` opens a new clan; name + abbrev must \
@@ -194,7 +195,64 @@ pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
     let action = parts.next().unwrap_or("").to_ascii_lowercase();
     let rest = parts.next().unwrap_or("").trim();
     if action.is_empty() {
-        send_to(world, player, "Usage: cclan <create|assign|kick|motd> ...\r\n");
+        send_to(
+            world,
+            player,
+            "Usage: cclan <create|assign|kick|motd|disband> ...\r\n",
+        );
+        return;
+    }
+    // `disband` walks online players in this clan and clears their
+    // ClanMembership component before kicking off the async DB
+    // delete — has to happen before the spawn since &mut World
+    // can't cross the await.
+    if action == "disband" {
+        let abbrev_arg = rest.trim().to_string();
+        if abbrev_arg.is_empty() {
+            send_to(world, player, "Usage: cclan disband <abbrev>\r\n");
+            return;
+        }
+        // Snapshot online entities matching the abbrev (case-
+        // insensitive). The query borrows the world; collect the
+        // entity list first, then mutate.
+        let needle = abbrev_arg.to_ascii_lowercase();
+        let mut q = world.query_filtered::<(Entity, &mud_world::ClanMembership), With<mud_world::Player>>();
+        let online_in_clan: Vec<Entity> = q
+            .iter(world)
+            .filter(|(_, c)| c.clan_abbrev.eq_ignore_ascii_case(&needle))
+            .map(|(e, _)| e)
+            .collect();
+        for e in online_in_clan {
+            try_remove::<mud_world::ClanMembership>(world, e);
+        }
+        let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+            send_to(world, player, "Database unavailable.\r\n");
+            return;
+        };
+        let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+        tokio::spawn(async move {
+            let Some(out) = outbound else { return };
+            let Ok(Some(clan)) = mud_db::clans::get_by_abbrev(&pool, &abbrev_arg).await else {
+                let _ = out.send(
+                    format!("No clan with abbrev '{abbrev_arg}'.\r\n").into_bytes(),
+                );
+                return;
+            };
+            match mud_db::clans::delete_clan(&pool, clan.id).await {
+                Ok(removed) => {
+                    let _ = out.send(
+                        format!(
+                            "Disbanded {} [{}] ({} member rows cleared).\r\n",
+                            clan.name, clan.abbrev, removed,
+                        )
+                        .into_bytes(),
+                    );
+                }
+                Err(e) => {
+                    let _ = out.send(format!("Disband failed: {e}\r\n").into_bytes());
+                }
+            }
+        });
         return;
     }
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {

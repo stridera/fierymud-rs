@@ -165,6 +165,25 @@ pub async fn remove_member(
     Ok(res.rows_affected())
 }
 
+/// Disband a clan: drop every membership row, then drop the clan
+/// itself. Returns the count of members that were removed (0 when
+/// the clan was already empty). Atomically wrapped so a failure
+/// after the membership delete leaves a clean state.
+pub async fn delete_clan(pool: &PgPool, clan_id: i32) -> sqlx::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let members = sqlx::query!(
+        r#"DELETE FROM clan_member WHERE clan_id = $1"#,
+        clan_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(r#"DELETE FROM clan WHERE id = $1"#, clan_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(members.rows_affected())
+}
+
 /// Look up one clan by id. Returns Ok(None) for missing rows.
 pub async fn get_clan(pool: &PgPool, clan_id: i32) -> sqlx::Result<Option<ClanRow>> {
     sqlx::query_as!(
