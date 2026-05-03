@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::enums::{Direction, ExitState};
+use crate::enums::{Direction, ExitFlag, ExitState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomExit {
@@ -25,6 +25,10 @@ pub struct RoomExit {
     /// `open <keyword>` / `close <keyword>` / `unlock <keyword>`.
     /// Empty vec when the exit is plain (just a direction).
     pub keywords: Vec<String>,
+    /// Schema's `_ExitFlag` boolean-set column. The runtime today
+    /// only consults `Hidden`; the rest (`IsDoor` / `Pickproof` /
+    /// `Bashable` / `Magicproof`) are loaded for future use.
+    pub flags: Vec<ExitFlag>,
 }
 
 pub async fn list_exits(pool: &PgPool) -> sqlx::Result<Vec<RoomExit>> {
@@ -42,7 +46,8 @@ pub async fn list_exits(pool: &PgPool) -> sqlx::Result<Vec<RoomExit>> {
             key_zone_id,
             key_id,
             description,
-            keywords AS "keywords!: Vec<String>"
+            keywords AS "keywords!: Vec<String>",
+            flags AS "flags!: Vec<ExitFlag>"
         FROM "RoomExit"
         ORDER BY room_zone_id, room_id, direction
         "#

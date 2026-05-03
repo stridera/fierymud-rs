@@ -1115,6 +1115,12 @@ pub struct ExitData {
     /// Keywords matching this exit for `look <keyword>` /
     /// `open <keyword>` / etc. Empty for plain directional exits.
     pub keywords: Vec<String>,
+    /// Schema `ExitFlag::HIDDEN`. Future `search` / scout-style
+    /// commands flip the runtime override on a per-room basis;
+    /// this base value carries the as-authored default. Default
+    /// look / exits should suppress hidden exits until they're
+    /// revealed.
+    pub is_hidden: bool,
 }
 
 #[derive(Component, Debug, Clone, Default)]

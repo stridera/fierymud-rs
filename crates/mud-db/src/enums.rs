@@ -99,6 +99,31 @@ pub enum ExitState {
     Locked,
 }
 
+/// Boolean attributes layered on a `RoomExit`. Stored as a Postgres
+/// `_ExitFlag` array on the row. Most flags only matter once the
+/// corresponding gameplay system lands; `Hidden` is the first one
+/// the runtime cares about (filtered from default exit lists, only
+/// revealed by `search`).
+///
+/// `no_pg_array` disables sqlx's auto-derived `PgHasArrayType`
+/// impl so the manual impl below can supply the case-preserving
+/// quoted array name (`_ExitFlag`); the auto-derive lowercases.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[sqlx(type_name = "ExitFlag", rename_all = "SCREAMING_SNAKE_CASE", no_pg_array)]
+pub enum ExitFlag {
+    IsDoor,
+    Pickproof,
+    Hidden,
+    Bashable,
+    Magicproof,
+}
+
+impl sqlx::postgres::PgHasArrayType for ExitFlag {
+    fn array_type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_name(r#""_ExitFlag""#)
+    }
+}
+
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[sqlx(type_name = "ObjectType", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ObjectType {

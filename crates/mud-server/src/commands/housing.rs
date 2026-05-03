@@ -392,6 +392,7 @@ fn synthesize_single_room(
                     key: None,
                     description: None,
                     keywords: Vec::new(),
+                    is_hidden: false,
                 },
             );
         }
@@ -404,6 +405,7 @@ fn synthesize_single_room(
                     key: None,
                     description: None,
                     keywords: Vec::new(),
+                    is_hidden: false,
                 },
             );
         }

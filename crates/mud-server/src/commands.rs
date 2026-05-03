@@ -6427,6 +6427,7 @@ pub(crate) fn synthesize_house_rooms(world: &mut World, summary: &mud_world::Hou
                     key: None,
                     description: None,
                     keywords: Vec::new(),
+                    is_hidden: false,
                 },
             );
         }
