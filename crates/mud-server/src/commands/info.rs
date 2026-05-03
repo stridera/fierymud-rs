@@ -3732,11 +3732,12 @@ pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     // Hidden exits stay invisible to scan as well — same reveal
-    // contract as look / `exits` / movement.
+    // contract as look / `exits` / movement, honoring the
+    // per-player RevealedExits override.
     let mut entries: Vec<(Direction, ExitData)> = exits
         .0
         .into_iter()
-        .filter(|(_, ed)| !ed.is_hidden)
+        .filter(|(d, ed)| !exit_is_hidden_to(world, player, located.0, *d, ed))
         .collect();
     if entries.is_empty() {
         send_to(world, player, "No exits to scan.\r\n");
@@ -3774,6 +3775,95 @@ pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
         ));
     }
     send_to(world, player, out);
+}
+
+inventory::submit! {
+    Command {
+        names: &["search"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "search",
+            summary: "Search the area for hidden exits.",
+            long: "Refuses while fighting. Inspects every exit on \
+                   the current room and reveals any tagged HIDDEN \
+                   that you haven't already found. Reveals are \
+                   per-character and session-scoped — a fresh \
+                   login starts back at zero known hidden exits, \
+                   matching the legacy contract until a persistent \
+                   table for revealed exits lands. Pair with \
+                   `exits` afterward to confirm what surfaced.",
+        },
+        run: cmd_search,
+    }
+}
+
+/// `search`: scan the current room for hidden exits and add any
+/// found to the player's `RevealedExits` set. Today every hidden
+/// exit reveals on first search — no perception roll yet — but
+/// the per-(`room`, `direction`) reveal granularity is already
+/// in place so a difficulty model can layer in without breaking
+/// the rendering contract.
+pub(crate) fn cmd_search(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You're too busy fighting to search!\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere to search.\r\n");
+        return;
+    };
+    let room = located.0;
+    let player_name = name_of(world, player);
+    send_to(world, player, "You search the area carefully...\r\n");
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} searches the area.\r\n"),
+    );
+
+    let hidden_dirs: Vec<Direction> = world
+        .get::<Exits>(room)
+        .map(|e| {
+            e.0.iter()
+                .filter(|(_, ed)| ed.is_hidden)
+                .map(|(d, _)| *d)
+                .collect()
+        })
+        .unwrap_or_default();
+    if hidden_dirs.is_empty() {
+        send_to(world, player, "You find nothing of interest.\r\n");
+        return;
+    }
+    let already: std::collections::HashSet<(Entity, Direction)> = world
+        .get::<RevealedExits>(player)
+        .map(|r| r.set.clone())
+        .unwrap_or_default();
+    let newly: Vec<Direction> = hidden_dirs
+        .into_iter()
+        .filter(|d| !already.contains(&(room, *d)))
+        .collect();
+    if newly.is_empty() {
+        send_to(world, player, "You find nothing new.\r\n");
+        return;
+    }
+    let mut next = already;
+    for dir in &newly {
+        next.insert((room, *dir));
+    }
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(RevealedExits { set: next });
+    }
+    let mut out = String::new();
+    for dir in &newly {
+        out.push_str(&format!(
+            "You discover a hidden exit to the {}!\r\n",
+            direction_name(*dir),
+        ));
+    }
+    send_rendered(world, player, &out);
 }
 
 inventory::submit! {
@@ -3969,13 +4059,15 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         let mut out = String::from("\r\nIt is pitch black; you can see nothing.\r\n");
         if has_flag(world, player, PlayerFlag::AutoExit) {
             // Hidden exits stay out of the auto-listing even in
-            // pitch-black — secret passages don't betray themselves
-            // through any sense.
+            // pitch-black unless this player has already found
+            // them via `search`.
             let exits: Vec<Direction> = world
                 .get::<Exits>(room)
                 .map(|e| {
                     e.0.iter()
-                        .filter(|(_, ed)| !ed.is_hidden)
+                        .filter(|(d, ed)| {
+                            !exit_is_hidden_to(world, player, room, **d, ed)
+                        })
                         .map(|(d, _)| *d)
                         .collect()
                 })
@@ -3996,12 +4088,13 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         .unwrap_or_default();
     // Carry the (direction, state) pair so the auto-exit line can
     // tag closed/locked doors. Sorted later for stable output.
-    // Hidden exits stay out of the listing — `search` reveals them.
+    // Hidden exits stay out of the listing unless this player has
+    // already found them via `search`.
     let exits: Vec<(Direction, ExitState)> = world
         .get::<Exits>(room)
         .map(|e| {
             e.0.iter()
-                .filter(|(_, ed)| !ed.is_hidden)
+                .filter(|(d, ed)| !exit_is_hidden_to(world, player, room, **d, ed))
                 .map(|(d, ed)| (*d, ed.state))
                 .collect()
         })
@@ -5302,7 +5395,7 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
     let mut rows: Vec<(mud_db::enums::Direction, String, ExitState)> = exits
         .0
         .iter()
-        .filter(|(_, ed)| !ed.is_hidden)
+        .filter(|(d, ed)| !exit_is_hidden_to(world, player, located.0, **d, ed))
         .map(|(dir, ed)| {
             let target_name = ed
                 .to

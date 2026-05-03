@@ -472,6 +472,18 @@ pub struct CorpseDecay {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Stealth;
 
+/// Per-character set of `(room_entity, direction)` pairs the
+/// player has discovered via `search`, overriding the
+/// `ExitData::is_hidden` filter so that revealed exits show on
+/// look / exits / scan and can be walked. Session-scoped — not
+/// persisted across disconnect; a fresh login starts from zero
+/// known hidden exits. Schema persistence can layer in later
+/// once a `CharacterRevealedExits` table is decided on.
+#[derive(Component, Debug, Clone, Default)]
+pub struct RevealedExits {
+    pub set: std::collections::HashSet<(Entity, mud_db::enums::Direction)>,
+}
+
 /// Per-item finite charges for `ObjectAbilities`-bound items
 /// (wands, staves). `-1` means unlimited (never decremented).
 /// `0` means depleted — the item should despawn or refuse to

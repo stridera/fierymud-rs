@@ -5477,9 +5477,10 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
         send_to(world, player, "You see nothing in that direction.\r\n");
         return;
     };
-    // Hidden exits report identically to "no exit" — until `search`
-    // reveals them, looking that way must betray nothing.
-    if ed.is_hidden {
+    // Hidden exits report identically to "no exit" — until
+    // `search` reveals them on this player, looking that way
+    // must betray nothing.
+    if exit_is_hidden_to(world, player, located.0, dir, &ed) {
         send_to(world, player, "You see nothing in that direction.\r\n");
         return;
     }
@@ -9333,6 +9334,28 @@ pub(crate) fn name_or(world: &World, e: Entity, fallback: &str) -> String {
         .map_or_else(|| fallback.to_string(), |n| n.name.clone())
 }
 
+/// `true` when the exit should appear hidden to this player —
+/// i.e. it carries `ExitData::is_hidden = true` and the player
+/// hasn't yet found it via `search`. Used by every exit-rendering
+/// / movement site so the reveal logic stays consistent. Pass
+/// the `room` entity the exit lives on so the per-character
+/// `RevealedExits` set can be keyed `(room, dir)`.
+#[must_use]
+pub(crate) fn exit_is_hidden_to(
+    world: &World,
+    player: Entity,
+    room: Entity,
+    dir: Direction,
+    ed: &mud_world::ExitData,
+) -> bool {
+    if !ed.is_hidden {
+        return false;
+    }
+    !world
+        .get::<mud_world::RevealedExits>(player)
+        .is_some_and(|r| r.set.contains(&(room, dir)))
+}
+
 /// Insert (or replace) a component on an entity, silently no-op'ing if
 /// the entity has been despawned. Mid-tick mutations frequently target
 /// an entity that may have been removed earlier in the same tick — this
@@ -9819,10 +9842,10 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "You can't go that way.\r\n");
         return;
     };
-    // Hidden exits behave like walls until `search` reveals them.
-    // The wording matches the no-exit branch so blind-walking the
-    // direction can't confirm the secret.
-    if exit.is_hidden {
+    // Hidden exits behave like walls until `search` reveals them
+    // on this player. The wording matches the no-exit branch so
+    // blind-walking the direction can't confirm the secret.
+    if exit_is_hidden_to(world, player, from_room, dir, &exit) {
         send_to(world, player, "You can't go that way.\r\n");
         return;
     }
