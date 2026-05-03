@@ -1,11 +1,20 @@
-//! Player command system: registry-driven, role/permission gated.
+//! Player command system: distributed registry, role/permission gated.
 //!
-//! Every command is a `Command` value in the `COMMANDS` slice. Adding a new
-//! command means appending one entry — names, role, perm, category, help, and
-//! a handler `fn(&mut World, Entity, &str)`. Help is a required field; the
-//! registry's first-touch initialization asserts on empty `help.summary` and
-//! on duplicate names so contract violations surface at server startup, not
-//! when a player tries to use the command.
+//! Every command is a `Command` value submitted via `inventory::submit!`
+//! from a per-category file under `commands/`. The registry's
+//! first-touch initialization asserts on empty `help.summary` and on
+//! duplicate names so contract violations surface at server startup,
+//! not when a player tries to use the command.
+//!
+//! Adding a new command: pick the matching cluster file (or create a
+//! new one + add a `#[path = ...] mod` line below), submit a Command,
+//! and write the handler body. No central array touch.
+//!
+//! What's still in this file: the dispatcher (`try_dispatch` and its
+//! async sibling for stateful mail / boards / quests), the alias
+//! engine, and the helper functions / constants that the per-file
+//! handlers share (e.g. `send_to`, `find_actor_in_room`, the combat
+//! stamina costs).
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -329,7 +338,6 @@ impl Category {
 
 const MAX_NAME_TOKENS: usize = 3;
 
-
 pub(crate) const MOVE_HELP: Help = Help {
     usage: "<direction>",
     summary: "Walk through an exit.",
@@ -572,12 +580,6 @@ pub(crate) enum ComposeStep {
     SubjectSet,
     BodyAdded,
 }
-
-
-
-
-
-
 
 pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     // Whatever happens (success, error, unknown command, empty input), the
@@ -3547,15 +3549,9 @@ pub(crate) fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool 
         .is_some_and(|f| f.has(flag))
 }
 
-// ---------------------------------------------------------------------------
-// Info handlers
-// ---------------------------------------------------------------------------
-
-
 pub(crate) fn visible(cmd: &Command, role: UserRole, perms: &[Permission]) -> bool {
     role.at_least(cmd.min_role) && cmd.required_perm.is_none_or(|p| perms.contains(&p))
 }
-
 
 /// Map an entity's Health to a flavorful condition string for `examine`.
 /// Six bands by HP percentage: 0% / 1-15 / 16-35 / 36-60 / 61-85 / 86+.
@@ -3585,10 +3581,6 @@ const MAX_TITLE_LEN: usize = 60;
 /// from runaway-pasting.
 const MAX_DESCRIPTION_LEN: usize = 500;
 
-
-
-
-
 /// Render an `ObjectType` as the token shape used by `ShopAccepts.type`
 /// and the underlying enum (uppercase, no underscores). The schema's
 /// `Objects.type` uses sqlx-encoded `SCREAMING_SNAKE_CASE`, but
@@ -3610,10 +3602,6 @@ pub(crate) fn shop_offer_price(offer: &mud_world::ShopOffering, base_cost: i32, 
         (f64::from(base_cost) * buy_profit).round() as i64
     }
 }
-
-
-
-
 
 /// Returns true (and lets the caller proceed) if a mob with the
 /// requested profession occupies the player's current room. Emits
@@ -3648,8 +3636,6 @@ pub(crate) fn require_profession_in_room(
     }
     present
 }
-
-
 
 /// Shared body for `deposit` / `withdraw`. `direction` is "deposit"
 /// or "withdraw"; the function picks the source / destination
@@ -3746,7 +3732,6 @@ pub(crate) fn format_wealth(total: i64) -> Option<String> {
     Some(parts.join(", "))
 }
 
-
 /// `practice <ability>`: bump proficiency by 5, capped at the
 /// class's `proficiency_cap`. Refuses unknown abilities, abilities
 /// off the player's class list, abilities not in `KnownAbilities`,
@@ -3842,9 +3827,6 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
 /// values aren't clamped.
 const TRAIN_STAT_CAP: i32 = 18;
 
-
-
-
 pub(crate) fn direction_rank(d: Direction) -> u8 {
     match d {
         Direction::North => 0,
@@ -3864,8 +3846,6 @@ pub(crate) fn direction_rank(d: Direction) -> u8 {
     }
 }
 
-
-
 pub(crate) struct WhoRow {
     entity: Entity,
     name: String,
@@ -3875,8 +3855,6 @@ pub(crate) struct WhoRow {
     level: i32,
     clan_abbrev: Option<String>,
 }
-
-
 
 pub(crate) fn format_idle(secs: u64) -> String {
     if secs < 60 {
@@ -3931,7 +3909,6 @@ pub(crate) struct ScoreData<'a> {
     /// `(name, abbrev, rank)` from `ClanMembership` when present.
     clan: Option<(&'a str, &'a str, &'a str)>,
 }
-
 
 pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     let mut out = format!("\r\n{}\r\n", d.name);
@@ -4123,9 +4100,6 @@ pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
     format!("{}\r\n", parts.join("  "))
 }
 
-
-
-
 pub(crate) fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
     let current = world.get::<Posture>(player).map(|p| p.0);
     if current == Some(new) {
@@ -4166,10 +4140,6 @@ pub(crate) fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
     );
 }
 
-
-
-
-
 /// Toggle a single `PlayerFlag` and emit a friendlier message than the
 /// generic `toggle` command. `on_msg` / `off_msg` are written verbatim
 /// after the toggle. Used by the dedicated `afk` / `notell` / `deaf`
@@ -4192,16 +4162,11 @@ pub(crate) fn toggle_player_flag(
     send_to(world, player, format!("{}\r\n", if now_on { on_msg } else { off_msg }));
 }
 
-
 /// Names that would lock the player out of dispatch entirely if
 /// allowed as aliases. `quit` is the always-allowed escape hatch and
 /// must never be aliased away. `alias` and `unalias` themselves can't
 /// be redirected or the player can't reach them after one bad set.
 const RESERVED_ALIAS_NAMES: &[&str] = &["quit", "alias", "unalias"];
-
-
-
-
 
 // COLOR_BLIND is the underlying flag (semantics inverted relative to
 // the command name): COLOR_BLIND ON ⇒ colors stripped. The messages
@@ -4216,20 +4181,8 @@ const RESERVED_ALIAS_NAMES: &[&str] = &["quit", "alias", "unalias"];
 // also set, so clearing the flag is sufficient to disable; we still
 // drop the component on `off` to keep state tidy.
 
-
-
-
-
-
-
-
-
-
 // `dice` is the legacy verb for SHOW_DICE_ROLLS — when on, combat
 // surfaces hit/damage rolls in the output.
-
-
-
 
 // `holylight` is admin/builder-only in legacy FieryMUD: with the flag
 // on you can see invisible/dark/hidden things in `look`. The flag is
@@ -4240,7 +4193,6 @@ const RESERVED_ALIAS_NAMES: &[&str] = &["quit", "alias", "unalias"];
 // `showids` exposes (zone, id) coordinates in command output for
 // builders/admins. The flag is set; renderers that want to surface
 // IDs check it.
-
 
 /// Parse a direction word or its short alias to a Direction enum.
 /// Returns None for anything that doesn't match a movement direction.
@@ -4464,7 +4416,6 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
     send_to(world, player, out);
 }
 
-
 pub(crate) fn direction_order(d: mud_db::enums::Direction) -> u8 {
     use mud_db::enums::Direction::{
         Down, East, In, North, Northeast, Northwest, Out, Portal, South, Southeast, Southwest, Up,
@@ -4508,12 +4459,6 @@ pub(crate) fn flip_door_both_sides(world: &mut World, room: Entity, dir: Directi
         ed.state = new_state;
     }
 }
-
-
-
-
-
-
 
 /// `motd` / `news` / `credits` / `policies`: static-text dumps.
 /// Each command prints a hardcoded constant for now; once a
@@ -4569,13 +4514,6 @@ const POLICIES_TEXT: &str = "\
 This is a hobby server; please be kind.\r\n\
 ";
 
-
-
-
-
-
-
-
 /// `commands`: flat alphabetical list of every command the player has
 /// access to (after role + permission gating). Each command appears
 /// once under its primary name; aliases are folded into the same slot
@@ -4585,8 +4523,6 @@ This is a hobby server; please be kind.\r\n\
 // command names today (`autoassist`, `description`, `lasttells`).
 const COMMANDS_LIST_COLS: usize = 4;
 const COMMANDS_LIST_COL_WIDTH: usize = 18;
-
-
 
 /// Ordinal suffix for a day-of-month number ("1st", "22nd", "13th").
 /// Handles the standard 11/12/13 exception. Used by `time` for the
@@ -4603,10 +4539,6 @@ pub(crate) fn ordinal_suffix(n: i64) -> &'static str {
         _ => "th",
     }
 }
-
-
-
-
 
 /// Carry capacity in pounds. Level-scaled: a fresh character can
 /// haul ~100 lbs, an endgame character ~600. Mobs and entities
@@ -4668,7 +4600,6 @@ pub(crate) fn carried_weight(world: &mut World, actor: Entity) -> f64 {
     total
 }
 
-
 /// Split `<item> from <container>` into `(item, container)` if the
 /// `from` keyword appears as a separator. Returns None for inputs
 /// without the keyword.
@@ -4696,7 +4627,6 @@ pub(crate) fn find_in_container(world: &mut World, needle: &str, container: Enti
         .map(|(e, _, _, _)| e)
 }
 
-
 /// Mirror of `split_from_keyword` for the `in` preposition. Returns
 /// `Some((before, after))` when the input contains a standalone ` in `
 /// separator. Used by `put` to support `put X in Y` natural phrasing.
@@ -4713,21 +4643,6 @@ pub(crate) fn split_in_keyword(input: &str) -> Option<(&str, &str)> {
     }
     Some((a, b))
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// `eat <item>` / `quaff <item>`: consume a Food / Potion. Looks up
 /// the item's proto, checks the type, then despawns. Effects are a
@@ -4847,8 +4762,6 @@ pub(crate) fn spawn_consumable_effect(
     ));
 }
 
-
-
 /// `drink <container>` / `sip <container>`: take a swig from a
 /// DRINKCONTAINER. `drink` consumes 4 units, `sip` consumes 1.
 /// Empty containers refuse; reaching 0 mid-action leaves the
@@ -4941,14 +4854,6 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
         );
     }
 }
-
-
-
-
-
-
-
-
 
 /// Shared body for `recite` / `wave` / `tap`: look up the held
 /// item's `ObjectAbilities` bindings, dispatch each through the
@@ -5195,8 +5100,6 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
 }
 
-
-
 /// Match by Keywords substring first, falling back to Name substring.
 pub(crate) fn matches(needle: &str, name: &Named, kw: Option<&Keywords>) -> bool {
     if let Some(kw) = kw
@@ -5272,18 +5175,6 @@ pub(crate) fn find_actor_in_room(
         })
         .map(|(e, _, _, _, _)| e)
 }
-
-
-
-// ---------------------------------------------------------------------------
-// Communication handlers
-// ---------------------------------------------------------------------------
-
-// `say` migrated to commands/room_chat.rs.
-
-// `report` migrated to commands/status_lists.rs.
-
-
 
 /// `home` — teleport to the foyer of the player's house. Lazily
 /// synthesizes ECS Room entities for each `PlayerHouseRoom` on
@@ -5455,7 +5346,6 @@ pub(crate) fn spawn_house_item(
         bundle.insert(Description(desc));
     }
 }
-
 
 /// `house place <item>` — moves an item from the player's
 /// inventory into the current house room (player must be standing
@@ -5859,14 +5749,6 @@ pub(crate) fn name_or_keyword_matches(target: &str, name: &str, kw: Option<&Keyw
     false
 }
 
-// `ask` / `whisper` migrated to commands/room_chat.rs.
-
-
-// bug / idea / typo / submit_feedback migrated to commands/feedback.rs.
-
-
-
-
 /// Resolve a spell name to (`ability_id`, circle) for the player's
 /// class. Returns Err with a player-facing message on failure.
 pub(crate) fn resolve_spell_for_class(
@@ -5896,7 +5778,6 @@ pub(crate) fn resolve_spell_for_class(
     };
     Ok((def.id, circle))
 }
-
 
 /// Kind-filtered listing for `skills` / `songs` / `chants`. Walks
 /// the ability catalog like `cmd_spells` but restricts to a single
@@ -5959,12 +5840,6 @@ pub(crate) fn cmd_abilities_kind(
     }
     send_to(world, player, out);
 }
-
-
-
-
-
-
 
 /// `skill <name> [<target>]` — Phase A of the data-driven migration.
 /// Sibling to `cast`/`chant`/`perform`: looks up an `Ability` row of
@@ -8486,8 +8361,6 @@ pub(crate) fn capitalize(s: &str) -> String {
     }
 }
 
-// `socials` migrated to commands/status_lists.rs.
-
 /// Try to dispatch `verb` as a social. Returns true if a matching social was
 /// found (regardless of outcome — includes cases where target wasn't found).
 pub(crate) fn try_dispatch_social(world: &mut World, player: Entity, verb: &str, args: &str) -> bool {
@@ -8691,44 +8564,6 @@ pub(crate) fn broadcast_room_except_players_rendered(
     }
 }
 
-// tells / reply / ignore / unignore / lasttells migrated to commands/tells.rs.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// `gossip` / `music` migrated to commands/channels.rs.
-
-// `insult` migrated to commands/room_chat.rs.
-
-
-// `petition` migrated to commands/feedback.rs.
-// `wiznet` migrated to commands/channels.rs.
-
-// `clan` / `ctell` migrated to commands/clan_chat.rs.
-
-
-// `emote` migrated to commands/room_chat.rs.
-
-// `shout` migrated to commands/channels.rs.
-
-// ---------------------------------------------------------------------------
-// Combat handler
-// ---------------------------------------------------------------------------
-
 /// Combat-action stamina costs (one stop in scope so a balance pass can
 /// retune them in one place).
 pub(crate) const ATTACK_COST: i32 = 2;
@@ -8875,7 +8710,6 @@ pub(crate) fn require_alert_posture(world: &mut World, player: Entity, action: &
     }
 }
 
-
 /// Mob HELPER behavior: every mob in `room` (other than attacker /
 /// defender) carrying the `Helper` `MobBehavior` auto-engages the
 /// attacker. Mirrors `auto_assist_followers_of` for mobs and
@@ -9021,11 +8855,6 @@ pub(crate) fn engage_skill_shim(
     }
 }
 
-
-
-
-
-
 /// Find the root of a follow chain — walks `Follower` upward until
 /// it hits an entity with no `Follower` component. Returns `start`
 /// itself if it's already a root.
@@ -9065,7 +8894,6 @@ pub(crate) fn group_members(world: &mut World, root: Entity) -> Vec<Entity> {
     }
     group
 }
-
 
 /// Remove one direct follower by name. Used by `group dismiss`. The
 /// named player must currently be following `dismisser` (Follower
@@ -9109,14 +8937,6 @@ pub(crate) fn group_dismiss_one(world: &mut World, dismisser: Entity, target_nam
     );
 }
 
-
-
-
-// `gsay` / `gtell` / `gecho` migrated to commands/room_chat.rs.
-
-
-
-
 /// Walk the Follower chain from `start`. Return true if `end` is reachable
 /// (would create a cycle if `end` then started following `start`).
 pub(crate) fn would_create_cycle(world: &mut World, start: Entity, end: Entity) -> bool {
@@ -9136,19 +8956,10 @@ pub(crate) fn would_create_cycle(world: &mut World, start: Entity, end: Entity) 
     false
 }
 
-
-
-// ---------------------------------------------------------------------------
-// Movement (12 directions, all delegate to cmd_move)
-// ---------------------------------------------------------------------------
-
-// Directional shims (cmd_north etc) live in
-// commands/movement_directions.rs alongside their inventory::submit!
-// Command records.
-
 // Walk + follower cascade + per-mover notifications + auto-look + stamina
 // drain — naturally a long sequence; splitting into helpers would just
-// shuffle the order.
+// shuffle the order. Directional shims (cmd_north etc) call this from
+// commands/movement_directions.rs.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     if !require_alert_posture(world, player, "move") {
@@ -9475,22 +9286,6 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
     let Some(mob) = aggro else { return };
     engage_combat(world, mob, player, room);
 }
-
-// ---------------------------------------------------------------------------
-// Admin handlers
-// ---------------------------------------------------------------------------
-
-
-// admin_inspect bodies moved to commands/admin_inspect.rs.
-
-
-// admin_inspect bodies moved to commands/admin_inspect.rs.
-
-// admin_world bodies moved to commands/admin_world.rs.
-
-// ---------------------------------------------------------------------------
-// Direction name helpers
-// ---------------------------------------------------------------------------
 
 /// Stamina drained when moving INTO a room of this sector. The mapping
 /// roughly tracks classic CircleMUD/FieryMUD: paved/easy = 1, normal
