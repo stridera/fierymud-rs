@@ -2701,6 +2701,7 @@ mod tests {
             flying: false,
             mount_name: None,
             house: Some((3, 1000, 17)),
+            cooldowns_active: 2,
         }
     }
 
@@ -2764,6 +2765,11 @@ mod tests {
         assert!(
             out.contains("House:    3 rooms at [1000:17]"),
             "house line: {out}",
+        );
+        // Cooldowns from the fixture (2 active).
+        assert!(
+            out.contains("Cooldowns: 2 abilities recharging"),
+            "cooldowns line: {out}",
         );
     }
 
@@ -4487,6 +4493,12 @@ pub(crate) struct ScoreData<'a> {
     /// without re-running `house info` first). `None` for the
     /// landless majority — the line is then suppressed entirely.
     house: Option<(usize, i32, i32)>,
+    /// Count of abilities still on cooldown (`Cooldowns.ready_at`
+    /// entries whose deadline is in the future). Skill-rotation
+    /// planning info — answers "how many of my abilities are
+    /// recharging right now" without typing `cooldowns`. `0`
+    /// suppresses the line.
+    cooldowns_active: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -4612,6 +4624,13 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!(
             "  Effects: {}    (`effects` for durations)\r\n",
             d.active_effects.join(", "),
+        ));
+    }
+    if d.cooldowns_active > 0 {
+        let count = d.cooldowns_active;
+        let suffix = if count == 1 { "ability" } else { "abilities" };
+        out.push_str(&format!(
+            "  Cooldowns: {count} {suffix} recharging\r\n",
         ));
     }
     if let Some(line) = group_status_line(&d.group_status) {
@@ -4951,6 +4970,11 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         // truncates rather than overflowing. Detail lives in
         // `cmd_effects`.
         row(format!("Effects:   {}", d.active_effects.join(", ")));
+    }
+    if d.cooldowns_active > 0 {
+        let count = d.cooldowns_active;
+        let suffix = if count == 1 { "ability" } else { "abilities" };
+        row(format!("Cooldowns: {count} {suffix} recharging"));
     }
     if let Some(line) = group_status_line(&d.group_status) {
         row(line);

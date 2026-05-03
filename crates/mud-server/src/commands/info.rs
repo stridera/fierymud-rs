@@ -4508,6 +4508,12 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         house: world.get::<HouseSummary>(player).map(|h| {
             (h.rooms.len(), h.entrance_room.zone, h.entrance_room.id)
         }),
+        cooldowns_active: world
+            .get::<mud_world::Cooldowns>(player)
+            .map_or(0, |c| {
+                let now = std::time::Instant::now();
+                c.ready_at.values().filter(|when| **when > now).count()
+            }),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
