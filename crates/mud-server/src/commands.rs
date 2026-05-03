@@ -9668,6 +9668,14 @@ pub(crate) fn require_alert_posture(world: &mut World, player: Entity, action: &
 /// in combat — they don't switch targets just because someone
 /// nearby is being attacked.
 pub(crate) fn mob_helpers_engage(world: &mut World, defender: Entity, attacker: Entity, room: Entity) {
+    // PeacefulRoom blocks helper aggro — same contract as
+    // `engage_combat` and `cmd_attack`. cmd_attack already
+    // refuses, so this guard mostly catches the case where
+    // attacker / defender entered combat outside the room and
+    // walked back in (e.g. portal misdirection).
+    if world.get::<mud_world::PeacefulRoom>(room).is_some() {
+        return;
+    }
     let helpers: Vec<Entity> = {
         let mut q = world.query_filtered::<
             (Entity, &Located, &mud_world::MobBehaviors, Option<&Fighting>),
@@ -10214,6 +10222,14 @@ pub(crate) fn engage_combat(
     defender: Entity,
     room: Entity,
 ) {
+    // PeacefulRoom blocks every auto-engage path that routes
+    // through this helper — remembered grudges, alignment aggro,
+    // scripted ambushes. The defender doesn't even see a swing
+    // come in, matching the "violence simply won't happen here"
+    // guard already on cmd_attack.
+    if world.get::<mud_world::PeacefulRoom>(room).is_some() {
+        return;
+    }
     let attacker_name = name_of(world, attacker);
     let defender_name = name_of(world, defender);
     try_insert(world, attacker, Fighting(defender));
