@@ -6582,7 +6582,18 @@ pub(crate) fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
     active.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let mut out = format!("\r\n{} ability/abilities on cooldown:\r\n", active.len());
     for (name, remaining) in active {
-        out.push_str(&format!("  {name:<24} {remaining:.1}s remaining\r\n"));
+        // Sub-minute cooldowns deserve fractional seconds so the
+        // player sees the precise re-arm point for tight rotations
+        // (kick, backstab); longer cooldowns fall back to the
+        // human-friendly "Xm" / "Xh" shape used elsewhere.
+        let label = if remaining < 60.0 {
+            format!("{remaining:.1}s")
+        } else {
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let secs = remaining.max(0.0) as u64;
+            format_idle(secs)
+        };
+        out.push_str(&format!("  {name:<24} {label} remaining\r\n"));
     }
     send_to(world, player, out);
 }
