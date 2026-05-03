@@ -3902,6 +3902,11 @@ pub(crate) struct ScoreData<'a> {
     /// circle 1 yet. Score sheet renders one compact line; the full
     /// "preparing" breakdown lives in `cmd_slots`.
     slots: &'a [(i32, i32, i32)],
+    /// Names of active `EffectInstance` rows on the player. Empty
+    /// when none are applied. Score sheet renders a comma-joined
+    /// one-line summary; full duration / source detail stays in
+    /// the dedicated `effects` command.
+    active_effects: &'a [String],
 }
 
 pub(crate) fn render_score_standard(d: &ScoreData) -> String {
@@ -3981,6 +3986,12 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             .collect::<Vec<_>>()
             .join("  ");
         out.push_str(&format!("  Slots:  {summary}    (`slots` for prep details)\r\n"));
+    }
+    if !d.active_effects.is_empty() {
+        out.push_str(&format!(
+            "  Effects: {}    (`effects` for durations)\r\n",
+            d.active_effects.join(", "),
+        ));
     }
     out
 }
@@ -4094,6 +4105,12 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
             .collect::<Vec<_>>()
             .join("  ");
         row(format!("Slots:     {summary}"));
+    }
+    if !d.active_effects.is_empty() {
+        // Effects can be many; the fancy box's fixed-width row
+        // truncates rather than overflowing. Detail lives in
+        // `cmd_effects`.
+        row(format!("Effects:   {}", d.active_effects.join(", ")));
     }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out

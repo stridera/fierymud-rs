@@ -3958,6 +3958,16 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             )
         });
     let core_stats = world.get::<CoreStats>(player).copied();
+    // Active effect names — compact list for the score sheet.
+    // Detail (duration + source) stays in `cmd_effects`. Filter
+    // by AppliedTo so we only get the player's own effects.
+    let active_effects: Vec<String> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, a)| a.0 == player)
+            .map(|(inst, _)| inst.name.clone())
+            .collect()
+    };
     // Per-circle slot summary for spellcasters. Reads
     // SpellSlotData (level + class → slot caps) and the player's
     // MemorizedSpells (used vs ready). Empty for classless / non-
@@ -4021,6 +4031,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .as_ref()
             .map(|(n, a, r)| (n.as_str(), a.as_str(), r.as_str())),
         slots: &slots,
+        active_effects: &active_effects,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
