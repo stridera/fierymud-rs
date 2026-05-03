@@ -98,6 +98,17 @@ pub enum Stage {
         character_name: String,
         password_plaintext: String,
     },
+    /// Pick a class for the new character. Prompt lists every
+    /// `ClassCatalog` row with `is_subclass = false`; subclasses
+    /// (Paladin, Anti-Paladin, Conjurer, …) require a follow-on
+    /// specialization step that lands later. Input is matched
+    /// case-insensitively against `plain_name`.
+    AwaitingClass {
+        email: Option<String>,
+        character_name: String,
+        password_plaintext: String,
+        race: &'static str,
+    },
     CharSelect { user: User, characters: Vec<CharacterRow> },
 }
 
@@ -493,16 +504,46 @@ impl ConnRouter {
                     send_race_prompt(&ctx.outbound);
                     return;
                 };
-                // Class / gender / stat roll and the eventual DB
-                // INSERTs land in follow-up slices. Terminate here
-                // with an explicit "next steps coming" line so the
-                // contract for the rest of the flow stays visible.
+                // Advance to class selection. Catalog comes from the
+                // world-scope resource the loader populated at boot.
+                ctx.stage = Stage::AwaitingClass {
+                    email,
+                    character_name,
+                    password_plaintext,
+                    race,
+                };
+                send_class_prompt(&ctx.outbound, world);
+            }
+
+            Stage::AwaitingClass {
+                email,
+                character_name,
+                password_plaintext,
+                race,
+            } => {
+                let Some((class_id, class_plain_name)) = match_base_class(world, trimmed) else {
+                    let _ = ctx.outbound.send(
+                        format!("`{trimmed}` isn't one of the available classes.\r\n")
+                            .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingClass {
+                        email,
+                        character_name,
+                        password_plaintext,
+                        race,
+                    };
+                    send_class_prompt(&ctx.outbound, world);
+                    return;
+                };
+                // Gender, stat roll, and DB INSERTs land in follow-up
+                // slices. Terminate with an explicit "next steps
+                // coming" line so the contract stays visible.
                 let _ = ctx.outbound.send(
                     format!(
-                        "Race `{race}` set for `{character_name}`. Class, \
-                         gender, and stat roll land in a follow-up slice. \
-                         For now please enter an existing email or \
-                         character name.\r\n"
+                        "Class `{class_plain_name}` (id {class_id}) set for \
+                         `{character_name}` ({race}). Gender and stat roll \
+                         land in a follow-up slice. For now please enter \
+                         an existing email or character name.\r\n"
                     )
                     .into_bytes(),
                 );
@@ -1450,6 +1491,40 @@ fn send_race_prompt(outbound: &Outbound) {
 fn match_playable_race(input: &str) -> Option<&'static str> {
     let needle = input.trim().to_ascii_uppercase();
     PLAYABLE_RACES.iter().copied().find(|r| *r == needle)
+}
+
+/// Render the class-selection prompt. Lists every `ClassCatalog`
+/// entry with `is_subclass = false` — the four base classes today
+/// (Sorcerer / Cleric / Warrior / Rogue). Subclass specializations
+/// (Paladin, Diabolist, Pyromancer, …) lock in via a follow-on
+/// stage once the gating data lands.
+fn send_class_prompt(outbound: &Outbound, world: &World) {
+    let mut bases: Vec<String> = world
+        .resource::<mud_world::ClassCatalog>()
+        .by_id
+        .values()
+        .filter(|c| !c.is_subclass)
+        .map(|c| c.plain_name.clone())
+        .collect();
+    bases.sort();
+    let mut msg = String::from("Available classes: ");
+    msg.push_str(&bases.join(", "));
+    msg.push_str("\r\nClass: ");
+    let _ = outbound.send(msg.into_bytes());
+}
+
+/// Look up a base class by `plain_name`, case-insensitively.
+/// Returns `(class_id, canonical_plain_name)` on hit so the caller
+/// can echo the canonical-cased form and stash the id for the
+/// future `Characters` INSERT.
+fn match_base_class(world: &World, input: &str) -> Option<(i32, String)> {
+    let needle = input.trim().to_ascii_lowercase();
+    world
+        .resource::<mud_world::ClassCatalog>()
+        .by_id
+        .values()
+        .find(|c| !c.is_subclass && c.plain_name.to_ascii_lowercase() == needle)
+        .map(|c| (c.id, c.plain_name.clone()))
 }
 
 /// Shared prompt for the `ConfirmCreate` doorway. `is_email`
