@@ -2393,6 +2393,35 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     {
         out.push_str(&format!("{name_rendered} is {} here.\r\n", p.label()));
     }
+    // Identity line: level + race + class for actors. Helps a
+    // player gauge mob difficulty before engaging and pick the
+    // right ally for a group. Pulled from Profile (players + any
+    // mob with one) or the mob proto for level-only mobs.
+    if let Some(prof) = world.get::<Profile>(target) {
+        let class_name = prof.class_id.and_then(|cid| {
+            world
+                .resource::<ClassCatalog>()
+                .by_id
+                .get(&cid)
+                .map(|c| c.plain_name.clone())
+        });
+        let race_label = capitalize(&prof.race);
+        let class_label = class_name
+            .as_deref()
+            .map_or_else(String::new, |c| format!(" {c}"));
+        out.push_str(&format!(
+            "{name_rendered} is a level {} {race_label}{class_label}.\r\n",
+            prof.level,
+        ));
+    } else if world.get::<Mob>(target).is_some()
+        && let Some(key) = world.get::<WorldKey>(target).copied()
+        && let Some(proto) = world
+            .get_resource::<MobPrototypes>()
+            .and_then(|p| p.by_key.get(&(key.zone, key.id)))
+        && proto.level > 0
+    {
+        out.push_str(&format!("{name_rendered} is level {}.\r\n", proto.level));
+    }
     if let Some(hp) = world.get::<Health>(target).copied() {
         out.push_str(&format!(
             "{name_rendered} {condition}.\r\n",
