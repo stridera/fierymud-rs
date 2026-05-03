@@ -357,12 +357,15 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "who [<min-level> [<max-level>]]",
+            usage: "who [<min-level> [<max-level>]] | who clan <abbrev>",
             summary: "List players currently online.",
             long: "With no args, shows every connected player. \
                    With one numeric arg, filters to players at \
                    that level or higher. With two numeric args, \
-                   filters to the inclusive level range.",
+                   filters to the inclusive level range. \
+                   `who clan <abbrev>` filters to players in the \
+                   named clan (case-insensitive match against the \
+                   `[ABBR]` tag shown alongside each name).",
         },
         run: cmd_who,
     }
@@ -4010,6 +4013,19 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     // rather than printing an error — the help text is the gate
     // for users who care to read it.
     let level_filter: Option<(i32, i32)> = parse_who_level_filter(args);
+    // `who clan <abbrev>` is a parallel filter mode. Captured as
+    // the lowercased abbreviation when present so the row filter
+    // can match against `clan_abbrev` case-insensitively. Empty
+    // string after `clan ` is treated as a no-op (no filter)
+    // rather than silently matching nothing — same charity rule
+    // as garbage level args.
+    let clan_filter: Option<String> = args
+        .split_whitespace()
+        .next()
+        .filter(|head| head.eq_ignore_ascii_case("clan"))
+        .and_then(|_| args.split_whitespace().nth(1))
+        .filter(|abbrev| !abbrev.is_empty())
+        .map(str::to_ascii_lowercase);
     // Two-pass: first collect rows, then resolve group roots so we
     // can mark grouped players with [G].
     let raw: Vec<WhoRow> = {
@@ -4062,14 +4078,31 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
 
     // Filter by level range when args narrowed the view.
     let total_online = raw.len();
-    let raw_filtered: Vec<WhoRow> = if let Some((lo, hi)) = level_filter {
+    let raw_filtered: Vec<WhoRow> = if let Some(needle) = &clan_filter {
+        // Clan abbreviations are stored as authored (typically
+        // upper-case) but match case-insensitively here so a
+        // player typing the lowercase form still gets results.
+        raw.into_iter()
+            .filter(|r| {
+                r.clan_abbrev
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(needle))
+            })
+            .collect()
+    } else if let Some((lo, hi)) = level_filter {
         raw.into_iter()
             .filter(|r| r.level >= lo && r.level <= hi)
             .collect()
     } else {
         raw
     };
-    let header = if let Some((lo, hi)) = level_filter {
+    let header = if let Some(needle) = &clan_filter {
+        format!(
+            "\r\n{} of {} online (clan {needle}):\r\n",
+            raw_filtered.len(),
+            total_online,
+        )
+    } else if let Some((lo, hi)) = level_filter {
         if lo == hi {
             format!(
                 "\r\n{} of {} online (level {lo}):\r\n",
