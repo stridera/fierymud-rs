@@ -1300,6 +1300,19 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
     if let Some(s) = world.get::<RoomSector>(room) {
         out.push_str(&format!("sector:        {:?}\r\n", s.0));
     }
+    if world.get::<mud_world::PeacefulRoom>(room).is_some() {
+        out.push_str("flags:         peaceful\r\n");
+    }
+    if let Some(extras) = world.get::<mud_world::RoomExtras>(room) {
+        if extras.entries.is_empty() {
+            out.push_str("extras:        <none>\r\n");
+        } else {
+            out.push_str(&format!("extras:        {} entries\r\n", extras.entries.len()));
+            for (kws, _) in &extras.entries {
+                out.push_str(&format!("               keywords: {}\r\n", kws.join(", ")));
+            }
+        }
+    }
     if let Some(exits) = world.get::<Exits>(room).cloned() {
         if exits.0.is_empty() {
             out.push_str("exits:         <none>\r\n");
