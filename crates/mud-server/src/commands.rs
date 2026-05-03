@@ -2660,6 +2660,7 @@ mod tests {
             equipment,
             practice_points: 3,
             achievements: (5, 47),
+            title: Some("the Daring Adventurer"),
         }
     }
 
@@ -2700,6 +2701,10 @@ mod tests {
         assert!(out.contains("Practice:"), "practice line: {out}");
         assert!(out.contains("Achievements: 5 / 47"), "achievements: {out}");
         assert!(out.contains("Location: Town Square"), "location: {out}");
+        assert!(
+            out.contains("Title: the Daring Adventurer"),
+            "title line: {out}",
+        );
     }
 
     #[test]
@@ -4285,6 +4290,12 @@ pub(crate) struct ScoreData<'a> {
     /// character doesn't see "0 / 47" when 12 of those 47 are
     /// secret challenges. Both `0` suppress the line.
     achievements: (usize, usize),
+    /// Player-set epithet from the `Title` component. Carries
+    /// XML-Lite color tags as authored — score's send path runs
+    /// the same `render_color_tags` pipeline as `who`, so they
+    /// resolve to ANSI rather than literal markup. `None` when
+    /// the column is NULL or empty.
+    title: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -4309,6 +4320,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!(
             "  Level {level} {gender_label} {race_label} ({class})    XP: {xp}\r\n",
         ));
+    }
+    if let Some(t) = d.title {
+        out.push_str(&format!("  Title: {t}\r\n"));
     }
     if let Some(hp) = d.hp {
         out.push_str(&format!("  HP: {} / {}\r\n", hp.hp, hp.max));
@@ -4593,6 +4607,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
             capitalize(race),
         ));
         row(format!("XP:        {xp}"));
+    }
+    if let Some(t) = d.title {
+        row(format!("Title:     {t}"));
     }
     if let Some(hp) = d.hp {
         row(format!("HP:        {} / {}", hp.hp, hp.max));

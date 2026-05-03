@@ -4324,6 +4324,14 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let clan_owned: Option<(String, String, String)> = world
         .get::<mud_world::ClanMembership>(player)
         .map(|c| (c.clan_name.clone(), c.clan_abbrev.clone(), c.rank.clone()));
+    // Player-set epithet. Title strings can be empty in practice
+    // (login filters NULL but a blank string would still slip in)
+    // so guard with `.is_empty()` before threading it into the
+    // renderers to avoid an empty "Title:  " line.
+    let title_owned: Option<String> = world
+        .get::<Title>(player)
+        .map(|t| t.0.clone())
+        .filter(|s| !s.is_empty());
     let data = ScoreData {
         name: &name,
         hp,
@@ -4418,6 +4426,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 });
             (unlocked, visible_total + unlocked_hidden)
         },
+        title: title_owned.as_deref(),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
