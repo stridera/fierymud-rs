@@ -7861,6 +7861,39 @@ fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             "{name_rendered} is a merchant — try `list` to see their wares.\r\n"
         ));
     }
+    // Surface non-shopkeeper professions on examine so players
+    // know whom to talk to. Looks up the proto via WorldKey.
+    if world.get::<Mob>(target).is_some()
+        && let Some(key) = world.get::<WorldKey>(target).copied()
+        && let Some(proto) = world
+            .get_resource::<MobPrototypes>()
+            .and_then(|p| p.by_key.get(&(key.zone, key.id)))
+    {
+        for prof in &proto.professions {
+            let line = match prof {
+                mud_db::enums::MobProfession::Banker => {
+                    Some("a banker — try `deposit` / `withdraw`.")
+                }
+                mud_db::enums::MobProfession::Trainer => {
+                    Some("a trainer — try `train` / `practice <ability>`.")
+                }
+                mud_db::enums::MobProfession::Postmaster => {
+                    Some("a postmaster — try `mail <name>`.")
+                }
+                mud_db::enums::MobProfession::Receptionist => {
+                    Some("a receptionist — they handle lodging.")
+                }
+                mud_db::enums::MobProfession::Guildmaster => {
+                    Some("a guildmaster — manages guild services.")
+                }
+                // Shopkeeper already announced via the marker above.
+                mud_db::enums::MobProfession::Shopkeeper => None,
+            };
+            if let Some(line) = line {
+                out.push_str(&format!("{name_rendered} is {line}\r\n"));
+            }
+        }
+    }
     if world.get::<mud_world::Flying>(target).is_some() {
         out.push_str(&format!("{name_rendered} hovers in mid-air.\r\n"));
     }
