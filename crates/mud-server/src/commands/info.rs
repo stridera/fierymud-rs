@@ -2336,6 +2336,20 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     if needle == "me" || needle == "self" {
         let name = name_of(world, player);
         let mut out = format!("\r\nYou look at yourself: {name}.\r\n");
+        // Self-Description: lets the player confirm what other
+        // players would see when examining them. Set with the
+        // `description` command. Empty / unset → skipped silently
+        // so the line doesn't add noise for players who haven't
+        // bothered.
+        if let Some(d) = world.get::<Description>(player)
+            && !d.0.trim().is_empty()
+        {
+            let mode = color_mode_for(world, player);
+            out.push_str(&format!(
+                "{}\r\n",
+                render_color_tags(d.0.trim_end(), mode),
+            ));
+        }
         if world.get::<mud_world::Flying>(player).is_some() {
             out.push_str("You're hovering in mid-air.\r\n");
         }
