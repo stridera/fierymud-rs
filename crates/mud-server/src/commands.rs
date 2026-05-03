@@ -5477,6 +5477,12 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
         send_to(world, player, "You see nothing in that direction.\r\n");
         return;
     };
+    // Hidden exits report identically to "no exit" — until `search`
+    // reveals them, looking that way must betray nothing.
+    if ed.is_hidden {
+        send_to(world, player, "You see nothing in that direction.\r\n");
+        return;
+    }
     // Builder-authored exit description wins over the destination
     // peek — a "curtain of beads" should describe the curtain
     // itself, not what's beyond it. Render even when the exit is
@@ -9813,6 +9819,13 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "You can't go that way.\r\n");
         return;
     };
+    // Hidden exits behave like walls until `search` reveals them.
+    // The wording matches the no-exit branch so blind-walking the
+    // direction can't confirm the secret.
+    if exit.is_hidden {
+        send_to(world, player, "You can't go that way.\r\n");
+        return;
+    }
     if exit.state != ExitState::Open {
         send_to(world, player, "The way is closed.\r\n");
         return;

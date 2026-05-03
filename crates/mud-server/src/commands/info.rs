@@ -3731,8 +3731,17 @@ pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "No exits to scan.\r\n");
         return;
     }
-    // Sort by direction enum order so output is stable.
-    let mut entries: Vec<(Direction, ExitData)> = exits.0.into_iter().collect();
+    // Hidden exits stay invisible to scan as well — same reveal
+    // contract as look / `exits` / movement.
+    let mut entries: Vec<(Direction, ExitData)> = exits
+        .0
+        .into_iter()
+        .filter(|(_, ed)| !ed.is_hidden)
+        .collect();
+    if entries.is_empty() {
+        send_to(world, player, "No exits to scan.\r\n");
+        return;
+    }
     entries.sort_by_key(|(d, _)| direction_rank(*d));
 
     let mut out = String::from("\r\n");
@@ -3959,9 +3968,17 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     if room_is_dark(world, room) && !room_has_light(world, room) {
         let mut out = String::from("\r\nIt is pitch black; you can see nothing.\r\n");
         if has_flag(world, player, PlayerFlag::AutoExit) {
+            // Hidden exits stay out of the auto-listing even in
+            // pitch-black — secret passages don't betray themselves
+            // through any sense.
             let exits: Vec<Direction> = world
                 .get::<Exits>(room)
-                .map(|e| e.0.keys().copied().collect())
+                .map(|e| {
+                    e.0.iter()
+                        .filter(|(_, ed)| !ed.is_hidden)
+                        .map(|(d, _)| *d)
+                        .collect()
+                })
                 .unwrap_or_default();
             if !exits.is_empty() {
                 let names: Vec<&str> = exits.iter().map(|d| direction_name(*d)).collect();
@@ -3979,9 +3996,15 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         .unwrap_or_default();
     // Carry the (direction, state) pair so the auto-exit line can
     // tag closed/locked doors. Sorted later for stable output.
+    // Hidden exits stay out of the listing — `search` reveals them.
     let exits: Vec<(Direction, ExitState)> = world
         .get::<Exits>(room)
-        .map(|e| e.0.iter().map(|(d, ed)| (*d, ed.state)).collect())
+        .map(|e| {
+            e.0.iter()
+                .filter(|(_, ed)| !ed.is_hidden)
+                .map(|(d, ed)| (*d, ed.state))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Players in the room — names go in "Also here:". Non-standing players
@@ -5272,9 +5295,14 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
     // Resolve each exit's target room name + door state. Sort by
     // direction's canonical order. State trailer signals whether
     // the exit needs `open` / `unlock` before the player can pass.
+    // Hidden exits stay invisible until `search` reveals them —
+    // the listing here is the canonical "what can I see going
+    // out" view. Movement and `look <dir>` apply the same filter
+    // so the secret stays self-consistent.
     let mut rows: Vec<(mud_db::enums::Direction, String, ExitState)> = exits
         .0
         .iter()
+        .filter(|(_, ed)| !ed.is_hidden)
         .map(|(dir, ed)| {
             let target_name = ed
                 .to
@@ -5283,6 +5311,10 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
             (*dir, target_name, ed.state)
         })
         .collect();
+    if rows.is_empty() {
+        send_to(world, player, "\r\nNo exits.\r\n");
+        return;
+    }
     rows.sort_by_key(|(d, _, _)| direction_order(*d));
     let mut out = String::from("\r\nExits:\r\n");
     for (dir, room, state) in &rows {
