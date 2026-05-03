@@ -1391,7 +1391,7 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
 }
 
 #[allow(clippy::too_many_lines)]
-async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
+pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
     let Some(account) = world.get::<Account>(entity).cloned() else {
         return;
     };

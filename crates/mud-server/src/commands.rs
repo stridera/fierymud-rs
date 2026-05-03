@@ -291,6 +291,8 @@ mod recall;
 mod room_chat;
 #[path = "commands/release.rs"]
 mod release;
+#[path = "commands/save.rs"]
+mod save;
 #[path = "commands/setrecall.rs"]
 mod setrecall;
 #[path = "commands/spells.rs"]
