@@ -2455,6 +2455,22 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_ctell,
     },
+    Command {
+        names: &["clan"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "clan",
+            summary: "Show your clan's info, MOTD, and roster.",
+            long: "Prints clan name + abbreviation + MOTD plus the \
+                   roster (sorted leader→officer→member, then by \
+                   level desc, then name). Online members are \
+                   marked with a `*`. Refused for players not in a \
+                   clan.",
+        },
+        run: cmd_clan_stub,
+    },
     // ----- Combat -----
     Command {
         names: &["attack", "kill", "k", "hit", "murder"],
@@ -19163,6 +19179,70 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
         };
         send_to(world, t, line);
     }
+}
+
+/// Sync stub: builds the recipient's outbound + clan id, then
+/// dispatches an async task that does the joined DB read and
+/// renders the listing back through the outbound channel.
+fn cmd_clan_stub(world: &mut World, player: Entity, _args: &str) {
+    let Some((clan_id, name, abbrev, motd_present)) = world
+        .get::<mud_world::ClanMembership>(player)
+        .map(|c| (c.clan_id, c.clan_name.clone(), c.clan_abbrev.clone(), false))
+    else {
+        send_to(world, player, "You aren't in a clan.\r\n");
+        return;
+    };
+    let _ = motd_present;
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    let pool = world.get_resource::<DbPool>().map(|p| p.0.clone());
+    // Snapshot which members are online so the roster line gets
+    // a `*` next to them. Look up by character_id since the
+    // ClanMembership component carries clan_id, not member ids.
+    let online_cids: std::collections::HashSet<String> = {
+        let mut q = world.query_filtered::<
+            (&Account, &mud_world::ClanMembership),
+            (With<Player>, With<Online>),
+        >();
+        q.iter(world)
+            .filter(|(_, c)| c.clan_id == clan_id)
+            .map(|(a, _)| a.character_id.clone())
+            .collect()
+    };
+    let (Some(out), Some(pool)) = (outbound, pool) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let Ok(Some(clan_row)) = mud_db::clans::get_clan(&pool, clan_id).await else {
+            let _ = out.send(b"Couldn't load clan info.\r\n".to_vec());
+            return;
+        };
+        let roster = mud_db::clans::members_of(&pool, clan_id)
+            .await
+            .unwrap_or_default();
+        let mut buf = format!("\r\n=== {name} [{abbrev}] ===\r\n");
+        if let Some(motd) = clan_row.motd.as_deref()
+            && !motd.trim().is_empty()
+        {
+            buf.push_str(&format!("MOTD: {}\r\n", motd.trim()));
+        }
+        buf.push_str(&format!(
+            "Members ({}, {} online):\r\n",
+            roster.len(),
+            online_cids.len()
+        ));
+        for r in &roster {
+            let online = if online_cids.contains(&r.character_id) {
+                "*"
+            } else {
+                " "
+            };
+            buf.push_str(&format!(
+                "  {online} [{:>7}] L{:>3} {}\r\n",
+                r.rank, r.level, r.name
+            ));
+        }
+        let _ = out.send(buf.into_bytes());
+    });
 }
 
 fn cmd_ctell(world: &mut World, player: Entity, args: &str) {

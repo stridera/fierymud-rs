@@ -35,6 +35,58 @@ pub async fn list_clans(pool: &PgPool) -> sqlx::Result<Vec<ClanRow>> {
     .await
 }
 
+/// All members of a clan, joined against Characters so the
+/// `clan` info readout can show names + levels in one query.
+pub async fn members_of(
+    pool: &PgPool,
+    clan_id: i32,
+) -> sqlx::Result<Vec<ClanRosterRow>> {
+    sqlx::query_as!(
+        ClanRosterRow,
+        r#"
+        SELECT
+            cm.character_id AS "character_id!: String",
+            cm.rank::text AS "rank!: String",
+            c.name AS "name!: String",
+            c.level AS "level!: i32"
+        FROM clan_member cm
+        JOIN "Characters" c ON c.id = cm.character_id
+        WHERE cm.clan_id = $1
+        ORDER BY
+            CASE cm.rank::text
+                WHEN 'LEADER' THEN 0
+                WHEN 'OFFICER' THEN 1
+                WHEN 'MEMBER' THEN 2
+                ELSE 3
+            END,
+            c.level DESC,
+            c.name ASC
+        "#,
+        clan_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClanRosterRow {
+    pub character_id: String,
+    pub rank: String,
+    pub name: String,
+    pub level: i32,
+}
+
+/// Look up one clan by id. Returns Ok(None) for missing rows.
+pub async fn get_clan(pool: &PgPool, clan_id: i32) -> sqlx::Result<Option<ClanRow>> {
+    sqlx::query_as!(
+        ClanRow,
+        r#"SELECT id, name, abbrev, motd FROM clan WHERE id = $1"#,
+        clan_id,
+    )
+    .fetch_optional(pool)
+    .await
+}
+
 /// One row per character per (at-most-one) clan. Joined against
 /// `Clan` so the runtime gets the abbrev / name in a single
 /// query at login.
