@@ -5486,8 +5486,12 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
     }
     if weight > 0.0 {
         let cap = carry_capacity(world, player);
+        // Same encumbrance band the score sheet uses, so a player
+        // checking inventory immediately sees whether they're
+        // bumping their move-stamina penalty bracket.
         out.push_str(&format!(
-            "\r\nTotal weight carried: {weight:.1} / {cap:.0} lbs.\r\n",
+            "\r\nTotal weight carried: {weight:.1} / {cap:.0} lbs.  ({})\r\n",
+            encumbrance_band(weight, cap),
         ));
     }
     send_to(world, player, out);
