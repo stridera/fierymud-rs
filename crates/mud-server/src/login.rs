@@ -1989,4 +1989,65 @@ mod tests {
         // current_room_id stays None — pick_starting_room should skip it.
         assert_eq!(pick_starting_room(&r), (10, 1));
     }
+
+    // --- creation-flow validators ---
+    //
+    // These guard the user-typed inputs to the login creation flow
+    // (slices 3-6). Snapshot tests in spirit — the per-validator
+    // contract should stay stable as the picker lists evolve.
+
+    #[test]
+    fn character_name_rejects_too_short() {
+        assert!(validate_new_character_name("ab").is_err());
+    }
+
+    #[test]
+    fn character_name_rejects_too_long() {
+        let too_long = "a".repeat(MAX_CHARACTER_NAME_LEN + 1);
+        assert!(validate_new_character_name(&too_long).is_err());
+    }
+
+    #[test]
+    fn character_name_rejects_non_letters() {
+        assert!(validate_new_character_name("Strider2").is_err());
+        assert!(validate_new_character_name("Hax0r").is_err());
+        assert!(validate_new_character_name("hyphen-name").is_err());
+        assert!(validate_new_character_name("with space").is_err());
+    }
+
+    #[test]
+    fn character_name_accepts_mixed_case_letters() {
+        assert!(validate_new_character_name("Strider").is_ok());
+        assert!(validate_new_character_name("aragorn").is_ok());
+        assert!(validate_new_character_name("MAGES").is_ok());
+    }
+
+    #[test]
+    fn race_match_is_case_insensitive() {
+        assert_eq!(match_playable_race("human"), Some("HUMAN"));
+        assert_eq!(match_playable_race("Half_Elf"), Some("HALF_ELF"));
+        assert_eq!(match_playable_race("ELF"), Some("ELF"));
+    }
+
+    #[test]
+    fn race_match_rejects_partial_or_unknown() {
+        // No prefix matching — ELF and HALF_ELF would collide.
+        assert_eq!(match_playable_race("hu"), None);
+        // Schema enum value but not in the playable subset.
+        assert_eq!(match_playable_race("DEMON"), None);
+        assert_eq!(match_playable_race("DRAGON_FIRE"), None);
+    }
+
+    #[test]
+    fn gender_match_is_case_insensitive() {
+        assert_eq!(match_playable_gender("male"), Some("male"));
+        assert_eq!(match_playable_gender("FEMALE"), Some("female"));
+        assert_eq!(match_playable_gender("Neutral"), Some("neutral"));
+    }
+
+    #[test]
+    fn gender_match_rejects_unknown() {
+        assert_eq!(match_playable_gender("nonbinary"), None);
+        assert_eq!(match_playable_gender(""), None);
+    }
 }
