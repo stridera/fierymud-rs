@@ -663,28 +663,73 @@ impl ConnRouter {
                     };
                     return;
                 }
-                // Accepted. The DB INSERT (Users + Characters) and
-                // the world-spawn step land in the final slices.
-                // Terminate here with the explicit "next step coming"
-                // line so the contract stays visible.
-                let _ = ctx.outbound.send(
-                    format!(
-                        "Stats accepted for `{character_name}` ({gender} {race} \
-                         {class_plain_name}, class id {class_id}; STR {} INT {} \
-                         WIS {} DEX {} CON {} CHA {}). The User/Character INSERT \
-                         and the world spawn land in the final slice. For now \
-                         please enter an existing email or character name.\r\n",
-                        stats.strength,
-                        stats.intelligence,
-                        stats.wisdom,
-                        stats.dexterity,
-                        stats.constitution,
-                        stats.charisma,
-                    )
-                    .into_bytes(),
-                );
+                // Accepted. Email path INSERTs the `Users` row now;
+                // the character row + world spawn land in the final
+                // slice. Character-name path delays the user
+                // INSERT to the next slice (which will synthesize
+                // an email from the character name).
+                if let Some(email_str) = email.as_ref() {
+                    let display_name = email_str
+                        .split('@')
+                        .next()
+                        .unwrap_or(email_str)
+                        .to_string();
+                    let hashed = match bcrypt::hash(&password_plaintext, bcrypt::DEFAULT_COST) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            warn!(conn_id, error = %e, "bcrypt hash failed");
+                            let _ = ctx.outbound.send(
+                                "Server error securing your password. Please try again.\r\n"
+                                    .as_bytes()
+                                    .to_vec(),
+                            );
+                            ctx.stage = Stage::AwaitingIdentifier;
+                            let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                            return;
+                        }
+                    };
+                    match users::create(pool, email_str, &display_name, &hashed).await {
+                        Ok(user_id) => {
+                            let _ = ctx.outbound.send(
+                                format!(
+                                    "Account created for `{email_str}` (id {user_id}). \
+                                     Character row INSERT + world spawn land in the \
+                                     final slice. For now please enter an existing \
+                                     email or character name.\r\n"
+                                )
+                                .into_bytes(),
+                            );
+                        }
+                        Err(e) => {
+                            warn!(conn_id, error = %e, "user create failed");
+                            let _ = ctx.outbound.send(
+                                format!(
+                                    "Couldn't create the account: {e}. Please try \
+                                     again with a different email.\r\n"
+                                )
+                                .into_bytes(),
+                            );
+                        }
+                    }
+                } else {
+                    let _ = ctx.outbound.send(
+                        format!(
+                            "Stats accepted for `{character_name}` ({gender} {race} \
+                             {class_plain_name}, class id {class_id}; STR {} INT {} \
+                             WIS {} DEX {} CON {} CHA {}). User/Character INSERT \
+                             lands in the final slice for the character-name path. \
+                             For now please enter an existing email or character name.\r\n",
+                            stats.strength,
+                            stats.intelligence,
+                            stats.wisdom,
+                            stats.dexterity,
+                            stats.constitution,
+                            stats.charisma,
+                        )
+                        .into_bytes(),
+                    );
+                }
                 drop(password_plaintext);
-                let _ = email;
                 ctx.stage = Stage::AwaitingIdentifier;
                 let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
             }

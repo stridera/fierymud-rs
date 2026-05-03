@@ -49,3 +49,33 @@ pub async fn find_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<User>> {
     .fetch_optional(pool)
     .await
 }
+
+/// INSERT a fresh `Users` row from the creation flow. Generates
+/// the id via Postgres' `gen_random_uuid()` (matching the
+/// existing seeded rows), defaults role to `PLAYER`, and
+/// sets `updated_at = now()`. Returns the new id so the caller
+/// can stash it on the next pipeline stage.
+///
+/// Email + `display_name` uniqueness is enforced by the table's
+/// indexes; collisions surface as `sqlx::Error::Database` and
+/// the caller should re-prompt the user.
+pub async fn create(
+    pool: &PgPool,
+    email: &str,
+    display_name: &str,
+    password_hash: &str,
+) -> sqlx::Result<String> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO "Users" (id, email, display_name, password_hash, role, updated_at)
+        VALUES (gen_random_uuid()::text, $1, $2, $3, 'PLAYER'::"UserRole", NOW())
+        RETURNING id
+        "#,
+        email,
+        display_name,
+        password_hash,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.id)
+}
