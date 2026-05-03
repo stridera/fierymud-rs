@@ -3446,15 +3446,24 @@ pub(crate) fn cmd_train(world: &mut World, player: Entity, args: &str) {
         .get::<mud_world::SkillPoints>(player)
         .map_or(0, |s| s.0);
     if arg.is_empty() {
+        // Show each stat with its derived bonus so a player can see
+        // what training a stat would actually do for their rolls
+        // (a 13 → 14 bump still gives +2 bonus; 14 → 15 unlocks +3
+        // at the next odd-step boundary). Same `(stat - 10) / 2`
+        // formula the score sheet uses via `CoreStats::bonus`.
         let mut out = format!("\r\nCurrent stats (cap {TRAIN_STAT_CAP}):\r\n");
+        let pair = |val: i32| format!("{val:>2}({:+})", CoreStats::bonus(val));
         out.push_str(&format!(
-            "  str {:>2}   dex {:>2}   con {:>2}   int {:>2}   wis {:>2}   cha {:>2}\r\n",
-            stats.strength,
-            stats.dexterity,
-            stats.constitution,
-            stats.intelligence,
-            stats.wisdom,
-            stats.charisma,
+            "  str {}   dex {}   con {}\r\n",
+            pair(stats.strength),
+            pair(stats.dexterity),
+            pair(stats.constitution),
+        ));
+        out.push_str(&format!(
+            "  int {}   wis {}   cha {}\r\n",
+            pair(stats.intelligence),
+            pair(stats.wisdom),
+            pair(stats.charisma),
         ));
         out.push_str(&format!("Practice points: {points}\r\n"));
         out.push_str("Use `train <stat>` to spend one.\r\n");
