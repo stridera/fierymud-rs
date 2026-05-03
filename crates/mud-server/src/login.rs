@@ -38,6 +38,15 @@ pub enum Stage {
         /// path). When `Some`, the menu is skipped on auth success.
         preselected: Option<Box<CharacterRow>>,
     },
+    /// Identifier didn't match anything in the database. Ask the
+    /// user whether they want to create a new account / character
+    /// rather than silently bouncing them through a doomed
+    /// password check. The actual creation flow is the multi-wake
+    /// follow-up; this stage is the doorway.
+    ConfirmCreate {
+        identifier: String,
+        is_email: bool,
+    },
     CharSelect { user: User, characters: Vec<CharacterRow> },
 }
 
@@ -174,17 +183,20 @@ impl ConnRouter {
                     password_hash: None,
                     role: mud_db::enums::UserRole::Player,
                 };
+                let mut routed_to_password = false;
                 if is_email {
                     let lookup = users::find_by_email(pool, trimmed).await;
                     match lookup {
                         Ok(Some(user)) => {
                             ctx.stage = Stage::AwaitingPassword { user, preselected: None };
+                            routed_to_password = true;
                         }
                         Ok(None) => {
-                            ctx.stage = Stage::AwaitingPassword {
-                                user: sentinel_user(),
-                                preselected: None,
+                            ctx.stage = Stage::ConfirmCreate {
+                                identifier: trimmed.to_string(),
+                                is_email: true,
                             };
+                            send_confirm_create_prompt(&ctx.outbound, trimmed, true);
                         }
                         Err(e) => {
                             warn!(conn_id, error = %e, "user lookup failed");
@@ -196,9 +208,10 @@ impl ConnRouter {
                     }
                 } else {
                     // Character-name path. Look up the row by name; if found,
-                    // resolve its user_id → User. Don't leak whether the name
-                    // exists — always advance to password and let bcrypt
-                    // verify fail.
+                    // resolve its user_id → User. Unknown names route to
+                    // ConfirmCreate so the player gets a clear "no such
+                    // character — make a new one?" prompt instead of a
+                    // silent bcrypt-fail bounce.
                     let char_lookup = characters::find_by_name(pool, trimmed).await;
                     match char_lookup {
                         Ok(Some(c)) => {
@@ -216,12 +229,14 @@ impl ConnRouter {
                                 user: user_lookup.unwrap_or_else(sentinel_user),
                                 preselected: Some(Box::new(c)),
                             };
+                            routed_to_password = true;
                         }
                         Ok(None) => {
-                            ctx.stage = Stage::AwaitingPassword {
-                                user: sentinel_user(),
-                                preselected: None,
+                            ctx.stage = Stage::ConfirmCreate {
+                                identifier: trimmed.to_string(),
+                                is_email: false,
                             };
+                            send_confirm_create_prompt(&ctx.outbound, trimmed, false);
                         }
                         Err(e) => {
                             warn!(conn_id, error = %e, "character lookup failed");
@@ -232,7 +247,48 @@ impl ConnRouter {
                         }
                     }
                 }
-                let _ = ctx.outbound.send(PASSWORD_PROMPT.as_bytes().to_vec());
+                if routed_to_password {
+                    let _ = ctx.outbound.send(PASSWORD_PROMPT.as_bytes().to_vec());
+                }
+            }
+
+            Stage::ConfirmCreate { identifier, is_email } => {
+                let answer = trimmed.to_ascii_lowercase();
+                let yes = matches!(answer.as_str(), "y" | "yes");
+                let no = matches!(answer.as_str(), "n" | "no" | "");
+                if yes {
+                    // Creation flow proper is the multi-wake follow-up.
+                    // For now, surface the explicit "not yet wired" line
+                    // so the player isn't left wondering what happened —
+                    // and so the contract for the future flow is
+                    // documented in this branch.
+                    let kind_label = if is_email { "account" } else { "character" };
+                    let _ = ctx.outbound.send(
+                        format!(
+                            "Creating a new {kind_label} for `{identifier}` is not yet \
+                             implemented. The login flow has the doorway wired but \
+                             the creation steps (password set, character details, \
+                             stats roll) land in a follow-up. For now, please \
+                             enter an existing email or character name.\r\n"
+                        )
+                        .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                } else if no {
+                    let _ = ctx.outbound.send(
+                        "Okay — please enter an existing email or character name.\r\n"
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                } else {
+                    let _ = ctx.outbound.send(
+                        "Please answer 'yes' or 'no'.\r\n".as_bytes().to_vec(),
+                    );
+                    ctx.stage = Stage::ConfirmCreate { identifier, is_email };
+                }
             }
 
             Stage::AwaitingPassword { user, preselected } => {
@@ -1128,6 +1184,19 @@ pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[Charact
         }
     }
     spawned.len()
+}
+
+/// Shared prompt for the `ConfirmCreate` doorway. `is_email`
+/// switches the noun so the player sees "account" / "character"
+/// matching the identifier they typed.
+fn send_confirm_create_prompt(outbound: &Outbound, identifier: &str, is_email: bool) {
+    let kind_label = if is_email { "account" } else { "character" };
+    let _ = outbound.send(
+        format!(
+            "I don't see a {kind_label} for `{identifier}`. Create a new one? (yes/no): "
+        )
+        .into_bytes(),
+    );
 }
 
 fn pick_starting_room(c: &CharacterRow) -> (i32, i32) {
