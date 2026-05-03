@@ -15,8 +15,8 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{
-    AdminAuditLog, Category, Command, Help, direction_name, direction_rank, drain_lua_outbox,
-    find_actor_in_room, find_in_room, matches, name_of, name_or, send_to,
+    AdminAuditLog, Category, Command, Connection, DbPool, Help, direction_name, direction_rank,
+    drain_lua_outbox, find_actor_in_room, find_in_room, matches, name_of, name_or, send_to,
 };
 
 inventory::submit! {
@@ -1549,6 +1549,34 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             account.role.label(),
             account.character_id,
         ));
+    }
+    // Staff notes (Builder+ only readers — gate via min_role on the
+    // Command record itself, so reaching here implies authorization).
+    // Fire-and-forget DB read; the formatted block ships as a
+    // follow-up message after the main `stat` body.
+    let staff_notes_target: Option<(String, String)> = world
+        .get::<Account>(target)
+        .map(|a| (a.character_id.clone(), name_of(world, target)));
+    if let Some((cid, target_name_owned)) = staff_notes_target
+        && let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone())
+        && let Some(out_chan) = world.get::<Connection>(player).map(|c| c.0.clone())
+    {
+        tokio::spawn(async move {
+            match mud_db::characters::load_staff_notes(&pool, &cid).await {
+                Ok(Some(notes)) if !notes.trim().is_empty() => {
+                    let _ = out_chan.send(
+                        format!(
+                            "\r\n=== Staff notes for {target_name_owned} ===\r\n{notes}\r\n",
+                        )
+                        .into_bytes(),
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "stat: load_staff_notes failed");
+                }
+            }
+        });
     }
     if let Some(fl) = world.get::<PlayerFlags>(target) {
         let labels: Vec<&'static str> = fl.0.iter().map(|f| f.label()).collect();
