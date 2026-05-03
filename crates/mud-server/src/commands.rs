@@ -5655,7 +5655,21 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
         .get::<Description>(target_room)
         .map(|d| render_color_tags(&d.0, mode))
         .unwrap_or_default();
-    let mut out = format!("\r\nYou peer {}.\r\n  {name}\r\n", direction_name(dir));
+    // Mirror the cmd_look [peaceful] tag for the destination so a
+    // player previewing a sanctuary doesn't get surprised when they
+    // step in and find combat refused.
+    let peaceful_tag = if world
+        .get::<mud_world::PeacefulRoom>(target_room)
+        .is_some()
+    {
+        render_color_tags("  <green>[peaceful]</>", mode)
+    } else {
+        String::new()
+    };
+    let mut out = format!(
+        "\r\nYou peer {}.\r\n  {name}{peaceful_tag}\r\n",
+        direction_name(dir),
+    );
     if !desc.trim().is_empty() {
         out.push_str("  ");
         out.push_str(desc.trim_end());
