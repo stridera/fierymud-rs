@@ -2703,6 +2703,7 @@ mod tests {
             house: Some((3, 1000, 17)),
             cooldowns_active: 2,
             guarding_name: None,
+            mail_draft: None,
         }
     }
 
@@ -2771,6 +2772,24 @@ mod tests {
         assert!(
             out.contains("Cooldowns: 2 abilities recharging"),
             "cooldowns line: {out}",
+        );
+    }
+
+    #[test]
+    fn score_mail_draft_line_only_when_in_flight() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = Vec::new();
+        let effects: Vec<String> = Vec::new();
+        let equipment: Vec<(&'static str, String)> = Vec::new();
+        let mut data =
+            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let off = super::render_score_standard(&data);
+        assert!(!off.contains("Mail draft:"), "no draft row: {off}");
+        data.mail_draft = Some(("Samui", 3));
+        let on = super::render_score_standard(&data);
+        assert!(
+            on.contains("Mail draft: to Samui, 3 lines"),
+            "draft row: {on}",
         );
     }
 
@@ -4522,6 +4541,12 @@ pub(crate) struct ScoreData<'a> {
     /// `guard <name>` an hour ago and forgot would otherwise
     /// keep eating swings without any reminder.
     guarding_name: Option<&'a str>,
+    /// In-flight mail draft summary: `(recipient, body_line_count)`
+    /// when the player has an open `MailDraft`. Score's reminder
+    /// is the use case — it's easy to walk away from a partially
+    /// composed message and forget. Suppressed when no draft is
+    /// active.
+    mail_draft: Option<(&'a str, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -4657,6 +4682,13 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         let suffix = if count == 1 { "ability" } else { "abilities" };
         out.push_str(&format!(
             "  Cooldowns: {count} {suffix} recharging\r\n",
+        ));
+    }
+    if let Some((to, lines)) = d.mail_draft {
+        let suffix = if lines == 1 { "" } else { "s" };
+        out.push_str(&format!(
+            "  Mail draft: to {to}, {lines} line{suffix} so far    \
+             (`mail .send` / `.preview` / `.abort`)\r\n",
         ));
     }
     if let Some(line) = group_status_line(&d.group_status) {
@@ -5004,6 +5036,10 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         let count = d.cooldowns_active;
         let suffix = if count == 1 { "ability" } else { "abilities" };
         row(format!("Cooldowns: {count} {suffix} recharging"));
+    }
+    if let Some((to, lines)) = d.mail_draft {
+        let suffix = if lines == 1 { "" } else { "s" };
+        row(format!("Draft:     mail to {to}, {lines} line{suffix}"));
     }
     if let Some(line) = group_status_line(&d.group_status) {
         row(line);

@@ -4314,6 +4314,13 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .map_or_else(String::new, |n| n.name.clone());
             render_color_tags(&raw, ColorMode::Strip)
         });
+    // Mail-draft summary. Players walk away from half-composed
+    // messages all the time — surfacing the recipient + line
+    // count keeps the in-flight draft visible from any score
+    // render.
+    let mail_draft_owned: Option<(String, usize)> = world
+        .get::<MailDraft>(player)
+        .map(|d| (d.recipient_label.clone(), d.body.len()));
     // Equipment summary in canonical slot order. Same shape as
     // `cmd_equipment` but pre-flattened to (label, name) tuples
     // with color tags stripped — render layer just pads.
@@ -4529,6 +4536,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 c.ready_at.values().filter(|when| **when > now).count()
             }),
         guarding_name: guarding_name_owned.as_deref(),
+        mail_draft: mail_draft_owned
+            .as_ref()
+            .map(|(to, lines)| (to.as_str(), *lines)),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
