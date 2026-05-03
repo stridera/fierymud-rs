@@ -138,11 +138,81 @@ lookup uses `source_ability_id` to find the right
 
 ### AbilityEffect
 
-Stays a junction table linking `Ability` to `Effect`. `override_params`
-JSON keeps the per-ability overrides for `duration` / `strength` /
-`amount` formulas (these legitimately vary per ability + per caster
-level), but the **flag override is gone** — the ability points at the
-specific Effect row by id.
+Restructured around a **kind discriminator** so authoring is
+ability-centric. The C++ port (see
+`~/Code/mud/fierymud/docs/game-systems/EFFECTS_REVIEW.md`)
+landed on 33 parameterized kinds; we collapse to **9** because our
+Lua-in-DB hooks let the Effect catalog carry per-status behavior
+that C++ had to express as separate kinds.
+
+```
+AbilityEffectKind enum:
+  DAMAGE          # weapon-type / spell damage; supports multi-element splits via multiple rows
+  HEAL            # restore HP / Stamina / Mana
+  MODIFY          # bump a typed stat for a duration; references a catalog row
+  STATUS          # apply a persistent flag; references a catalog row
+  CLEANSE         # remove EffectInstances by tag filter
+  DISPEL          # filtered effect-removal (powered)
+  REVEAL          # one-shot reveal (identify, locate, faerie fire)
+  KNOCKDOWN       # instant posture-change to SITTING/RESTING (with optional follow-up Prone STATUS)
+  CHAIN_DAMAGE    # bouncing-target damage with attenuation (chain lightning shape)
+```
+
+`AbilityEffect` carries `effect_kind` + per-kind columns. Most rows
+populate 1–4 columns; the runtime branches on `effect_kind` and
+reads the relevant set:
+
+| Column | Populated when | Notes |
+|---|---|---|
+| `damage_amount` | DAMAGE, CHAIN_DAMAGE | formula string |
+| `damage_type` | DAMAGE, CHAIN_DAMAGE | `DamageType` enum |
+| `damage_pct` | DAMAGE | for multi-element splits; default 100 |
+| `chain_max_jumps` | CHAIN_DAMAGE | how many hops through the room |
+| `chain_attenuation` | CHAIN_DAMAGE | multiplier per jump (0.0–1.0) |
+| `heal_amount` | HEAL | formula |
+| `heal_resource` | HEAL | `HealResource` enum: HEALTH, STAMINA, MANA |
+| `status_effect_id` | STATUS, MODIFY | FK → `Effect` catalog row |
+| `override_params` | STATUS, MODIFY | JSON — duration / strength / per-instance kvs |
+| `cleanse_tags` | CLEANSE | `EffectTag[]` to clear |
+| `dispel_filter` | DISPEL | `EffectTag` to match |
+| `dispel_scope` | DISPEL | `DispelScope` enum: FIRST, ALL |
+| `dispel_power` | DISPEL | formula |
+| `reveal_kind` | REVEAL | `RevealKind` enum: IDENTIFY_ITEM, LOCATE_OBJECT, LOCATE_PERSON, DETECT_INVIS, etc. |
+| `knockdown_to` | KNOCKDOWN | `Posture` enum: SITTING, RESTING |
+
+### What about teleport / summon / create / interrupt / etc.?
+
+The existing fierylib catalog has world-mutating "instant" kinds
+(`teleport`, `summon`, `create`, `extract`, `interrupt`, `move`,
+`dismount`, `stop_combat`, `enchant`, `room`, `portal`, `resurrect`).
+These don't get their own AbilityEffect kinds in our 9. Instead,
+each becomes a **STATUS catalog row whose `on_apply_lua` performs the
+action and self-removes:**
+
+```lua
+-- "Word of Recall" Effect catalog row, on_apply_lua:
+self:teleport_to(self.recall_room)
+effect:remove()
+```
+
+```lua
+-- "Animate Dead" Effect catalog row, on_apply_lua:
+self.room:spawn_mobile(15, 23)        -- skeleton proto
+effect:remove()
+```
+
+```lua
+-- "Word of Stop" Effect catalog row, on_apply_lua (a stop_combat row):
+self:stop_combat()
+effect:remove()
+```
+
+This keeps the kind enum small (9 instead of 33) and pushes the
+"what does it actually do" into Lua where content authors can
+iterate without schema changes. Trade-off: one indirection at runtime
+(spawn EffectInstance → run Lua → despawn) vs C++'s direct
+function call. The cost is a few microseconds and worth it for the
+authoring win.
 
 ## Runtime
 
@@ -207,17 +277,119 @@ hit with; can dispel to clear.
 
 ## Migration plan
 
-1. Add the new columns on `Effect`. Drop `prevents_speaking` /
-   `prevents_casting` / `prevents_movement` once `prevents` is
-   populated.
-2. fierylib seeder: split the generic `status` row into per-flag rows
-   for every flag the legacy data references. Re-point existing
-   `AbilityEffect` rows.
-3. Rename `EffectInstance.kind` → `effect_id` in the runtime
-   component (and any persistence).
-4. Drop `AbilityEffect.override_params.flag` — the only remaining
-   `override_params` keys are `duration`, `amount`, `strength`,
-   `target` (formula or constant).
+The starting point is `fierylib/data/effects.json` (28 polymorphic
+"kind" entries with parameter schemas) and
+`fierylib/data/abilities.json` (~370 abilities with `effects[]`
+arrays referencing those kinds). The new shape splits:
+
+- **Kinds** become a Rust enum (`AbilityEffectKind`) baked into the
+  runtime — no longer data.
+- **Status flags** (currently the polymorphic `status.flag` enum
+  with ~35 values) become individual rows in the `Effect` catalog
+  table, each with its own prevent flags, tags, Lua hooks, default
+  duration.
+- **World-mutating actions** (currently kinds like `teleport`,
+  `summon`, `create`) become Effect catalog rows with `on_apply_lua`
+  that performs the action and self-removes.
+- **Abilities** keep their `effects[]` arrays but each entry shifts
+  from `{effect: <kind>, params: {...}}` to `{kind: <enum>, …per-kind columns…}`.
+
+### Step 1 — reshape `fierylib/data/effects.json`
+
+The existing 28 entries map as follows:
+
+| Existing entry | New shape |
+|---|---|
+| `damage` | Removed from effects.json — kind is now an enum |
+| `heal` | Removed — kind |
+| `modify` | Removed — kind. The `target` enum (str / dex / con / acc / eva / ap / ward / max_hp / regen_hp etc.) survives as `ModifyTarget` enum on the catalog row. |
+| `status` (polymorphic w/ `flag` enum) | Expand into ~35 individual rows, one per flag — bless, sanctuary, fly, haste, paralyzed, sleeping, charmed, feared, confused, silenced, slowed, webbed, blinded, hidden, invisible, detect_*, infravision, ultravision, resistance, vulnerability, reflect, elemental_hands, lifesteal, taunted, poisoned, diseased, cursed, glowing, empowered, meditating, aware, berserk, featherfall, waterwalk, waterbreath. Each row carries its own prevent flags + tags + Lua hooks. |
+| `cleanse` | Removed — kind |
+| `dispel` | Removed — kind |
+| `reveal`, `inspect` | Removed — kind (REVEAL with `reveal_kind` enum covers both) |
+| `knockdown` | Removed — kind |
+| `teleport`, `summon`, `create`, `resurrect`, `extract`, `interrupt`, `move`, `dismount`, `stop_combat`, `enchant`, `room`, `portal`, `conceal_item` | Each becomes a **STATUS catalog row** with `on_apply_lua` that does the work. Naming: `teleport_pending`, `summon_pending`, `create_food`, `resurrection_blessing`, `room_aura_<name>`, etc. |
+| `globe`, `transform`, `intercept`, `redirect`, `drag`, `stun` | STATUS catalog rows — these are persistent statuses, not instants |
+
+Net result: effects.json shrinks the kind list to zero, expands the
+catalog to ~50–60 rows.
+
+### Step 2 — runtime + schema migration
+
+1. Add `EffectKind` Rust enum (compile-time).
+2. Drop `Effect.preventsSpeaking` / `preventsCasting` / `preventsMovement`
+   once the new `prevents Action[]` column is populated.
+3. Add the typed columns on `AbilityEffect` (per-kind, mostly nullable).
+4. fierylib seeder reshape: rename `effects.json` → `effect_catalog.json`
+   to reflect that it's now a catalog of *statuses + on-apply actions*,
+   not a kind dictionary. The existing damage/heal/modify entries are
+   deleted entirely; new per-flag rows added.
+5. Rename `EffectInstance.kind` → `effect_id` everywhere (search-replace).
+
+### Step 3 — re-import abilities.json
+
+Each `ability.effects[]` entry transforms based on its current
+`effect` kind:
+
+```yaml
+# OLD
+{ effect: "damage", params: { type: "fire", amount: "level + 6d6" } }
+
+# NEW
+{ kind: DAMAGE, damage_type: FIRE, damage_amount: "level + 6d6", damage_pct: 100 }
+```
+
+```yaml
+# OLD
+{ effect: "status", params: { flag: "bless", duration: "skill / 4" } }
+
+# NEW
+{ kind: STATUS, status_effect_id: <bless catalog row id>,
+  override_params: { duration: "skill / 4" } }
+```
+
+```yaml
+# OLD
+{ effect: "modify", params: { target: "str", amount: 4, duration: "level * 2" } }
+
+# NEW
+{ kind: MODIFY, status_effect_id: <strength_buff catalog row id>,
+  override_params: { strength: 4, duration: "level * 2" } }
+```
+
+```yaml
+# OLD
+{ effect: "teleport", params: { destination: "home" } }
+
+# NEW
+{ kind: STATUS, status_effect_id: <word_of_recall catalog row>,
+  override_params: { destination: "home" } }
+# (Catalog row's on_apply_lua reads override params and teleports.)
+```
+
+A fierylib migration script does the bulk transformation; manual
+review handles edge cases (rare per-ability oddities).
+
+### Step 4 — verify
+
+- Spot-check 10 abilities across kinds (damage spell, buff, debuff,
+  heal, summon, teleport, room aura).
+- Smoke test: cast each, verify the Effect lands, verify the prevent
+  flags fire when expected, verify wearoff messages emit.
+- Diff the live `Ability` row count: should be unchanged.
+- Diff the live `AbilityEffect` row count: should be roughly
+  preserved (some abilities will gain rows when multi-element damage
+  splits into multiple AbilityEffects).
+
+## Decisions locked (review pass 2, 2026-05-03)
+
+| Question | Locked |
+|---|---|
+| Number of AbilityEffect kinds | **9** (DAMAGE, HEAL, MODIFY, STATUS, CLEANSE, DISPEL, REVEAL, KNOCKDOWN, CHAIN_DAMAGE) |
+| World-mutating actions (teleport/summon/create/etc.) | STATUS catalog rows with `on_apply_lua` that performs the action and self-removes. Not their own kinds. |
+| Multi-element damage | Multiple DAMAGE rows on the ability, each with its own type + pct |
+| Migration source | `fierylib/data/effects.json` + `fierylib/data/abilities.json` reshaped per Migration Plan section |
+| C++ divergence | Tagged in `docs/design/README.md`. Suggested: tag + branch `legacy-parity-snapshot` in `~/Code/mud/fierymud` before any Rust changes that conflict with parity ship |
 
 ## Decisions locked (review pass 1, 2026-05-03)
 

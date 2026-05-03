@@ -64,3 +64,36 @@ implemented for the C++ port. Those docs are accurate descriptions of
 what the legacy game does; they are not the design target for this
 project. Where a new doc here lifts a concept from the C++ side, it
 says so explicitly and explains the deviation.
+
+## Divergence point — 2026-05-03
+
+As of this date, the runtime intentionally diverges from the C++
+port. Every locked design doc here describes a target that breaks
+parity in the name of a cleaner modern shape. The key breaks:
+
+- **Combat** — accuracy/evasion comparison replaces AC/THAC0/dice.
+  See `combat.md`.
+- **Effects** — per-flag catalog rows + 9 `AbilityEffect` kinds
+  replace the legacy 142 EFF_* / APPLY_* flags and the C++ port's
+  intermediate 33-kind consolidation. See `effects.md`.
+- **Object data** — typed columns on `Objects` replace the
+  legacy `Object.values` JSONB blob (kills the CircleMUD vnum
+  residue). See `objects.md`.
+- **Posture** — voluntary `Posture` enum split from
+  incapacitation markers. See `posture-and-lifestate.md`.
+
+**Operational note for the C++ side:** before changes that match
+this divergence land here, snapshot or branch
+`~/Code/mud/fierymud/` so the legacy parity work isn't lost.
+Suggested:
+
+```bash
+cd ~/Code/mud/fierymud
+git tag legacy-parity-snapshot
+git checkout -b legacy-parity-frozen
+```
+
+After the tag, the C++ tree can either be retired or kept as a
+reference implementation. The Rust runtime no longer aims to
+reproduce its behavior — the modern docs in this directory are
+the design target.
