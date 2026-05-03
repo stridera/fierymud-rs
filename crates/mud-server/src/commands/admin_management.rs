@@ -8,8 +8,8 @@ use mud_db::enums::UserRole;
 use mud_world::{Account, Located, WorldKey};
 
 use crate::commands::{
-    Category, Command, Connection, DbPool, Help, name_of, record_admin_action, send_to,
-    try_remove,
+    AsyncCommand, Category, Command, Connection, DbPool, Help, cmd_mail_stub, name_of,
+    record_admin_action, send_to, try_remove,
 };
 
 inventory::submit! {
@@ -123,6 +123,36 @@ inventory::submit! {
                    they reconnect — bounce them if they're online.",
         },
         run: cmd_hrevoke,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["hgoto"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "hgoto <player>",
+            summary: "Teleport into the named player's house foyer.",
+            long: "Builder+. Looks up the target's PlayerHouse, \
+                   synthesizes the ECS Room entities for it (if not \
+                   yet cached in HousingIndex), then warps you to the \
+                   foyer (`local_index = 0`). Works for offline \
+                   owners — reads the snapshot straight from the DB. \
+                   Routed through the async dispatcher; the sync stub \
+                   only fires on dispatcher misconfig.",
+        },
+        run: cmd_mail_stub,
+    }
+}
+
+inventory::submit! {
+    AsyncCommand {
+        dispatch: |world, player, pool, head, args| match head {
+            "hgoto" => Some(Box::pin(cmd_hgoto(world, player, pool, args))),
+            _ => None,
+        },
     }
 }
 
@@ -688,4 +718,151 @@ pub(crate) fn cmd_hinfo(world: &mut World, player: Entity, args: &str) {
         }
         let _ = out.send(buf.into_bytes());
     });
+}
+
+/// `hgoto <player>` — teleport the admin into the named player's
+/// house foyer (`local_index = 0`). Loads the house snapshot
+/// straight from the DB so it works for offline owners; reuses
+/// the same `HousingIndex` cache + `synthesize_house_rooms` path
+/// `cmd_home` does, so subsequent admin / owner enters land in
+/// the same Room entities. Async to keep the multi-table fetch
+/// off the world tick; mutations apply between awaits via the
+/// shared `&mut World`.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn cmd_hgoto(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    record_admin_action(world, player, "hgoto", args);
+    let name = args.trim();
+    if name.is_empty() {
+        send_to(world, player, "Usage: hgoto <player>\r\n");
+        return;
+    }
+    let target = match mud_db::characters::find_by_name(pool, name).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            send_to(world, player, format!("No character named '{name}'.\r\n"));
+            return;
+        }
+        Err(e) => {
+            send_to(world, player, format!("DB error: {e}\r\n"));
+            return;
+        }
+    };
+    let house = match mud_db::housing::for_character(pool, &target.id).await {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            send_to(
+                world,
+                player,
+                format!("{} doesn't own a house.\r\n", target.name),
+            );
+            return;
+        }
+        Err(e) => {
+            send_to(world, player, format!("DB error: {e}\r\n"));
+            return;
+        }
+    };
+    let rooms = mud_db::housing::rooms_for_house(pool, house.id)
+        .await
+        .unwrap_or_default();
+    if rooms.is_empty() {
+        send_to(
+            world,
+            player,
+            format!("{}'s house has no rooms.\r\n", target.name),
+        );
+        return;
+    }
+    let exits = mud_db::housing::exits_for_house(pool, house.id)
+        .await
+        .unwrap_or_default();
+    let items = mud_db::housing::items_for_house(pool, house.id)
+        .await
+        .unwrap_or_default();
+    let guests = mud_db::housing::guests_for_house(pool, house.id)
+        .await
+        .unwrap_or_default();
+    let summary = mud_world::HouseSummary {
+        house_id: house.id,
+        entrance_room: mud_world::WorldKey {
+            zone: house.entrance_room_zone_id,
+            id: house.entrance_room_id,
+        },
+        return_room: match (house.return_room_zone_id, house.return_room_id) {
+            (Some(z), Some(i)) => Some(mud_world::WorldKey { zone: z, id: i }),
+            _ => None,
+        },
+        rooms: rooms
+            .into_iter()
+            .map(|r| mud_world::HouseRoomEntry {
+                id: r.id,
+                local_index: r.local_index,
+                name: r.name,
+                description: r.description,
+                is_peaceful: r.is_peaceful,
+                capacity: r.capacity,
+            })
+            .collect(),
+        exits: exits
+            .into_iter()
+            .map(|e| mud_world::HouseExitEntry {
+                from_room_id: e.from_room_id,
+                to_room_id: e.to_room_id,
+                direction: e.direction,
+            })
+            .collect(),
+        items: items
+            .into_iter()
+            .map(|i| mud_world::HouseItemEntry {
+                id: i.id,
+                room_id: i.room_id,
+                object_zone_id: i.object_zone_id,
+                object_id: i.object_id,
+            })
+            .collect(),
+        guests: guests
+            .into_iter()
+            .map(|g| mud_world::HouseGuestEntry {
+                character_id: g.character_id,
+                can_place: g.can_place,
+            })
+            .collect(),
+    };
+    // Synthesize rooms once per house, gated by the index so a
+    // repeat hgoto on the same house doesn't double-spawn.
+    let foyer_local = summary
+        .rooms
+        .iter()
+        .find(|r| r.local_index == 0)
+        .map_or(summary.rooms[0].local_index, |r| r.local_index);
+    let already_spawned = world
+        .resource::<mud_world::HousingIndex>()
+        .by_key
+        .contains_key(&(summary.house_id, foyer_local));
+    if !already_spawned {
+        crate::commands::synthesize_house_rooms(world, &summary);
+    }
+    let foyer = world
+        .resource::<mud_world::HousingIndex>()
+        .by_key
+        .get(&(summary.house_id, foyer_local))
+        .copied();
+    let Some(foyer_entity) = foyer else {
+        send_to(world, player, "Couldn't resolve the house foyer.\r\n");
+        return;
+    };
+    if let Some(mut l) = world.get_mut::<mud_world::Located>(player) {
+        l.0 = foyer_entity;
+    }
+    send_to(
+        world,
+        player,
+        format!("You step into {}'s house.\r\n", target.name),
+    );
+    crate::commands::cmd_look(world, player, "");
 }
