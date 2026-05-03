@@ -658,6 +658,14 @@ pub(crate) fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
         ));
     }
     out.push_str(&format!("triggers:      {trig_count}\r\n"));
+    if p.extras.is_empty() {
+        out.push_str("extras:        <none>\r\n");
+    } else {
+        out.push_str(&format!("extras:        {} entries\r\n", p.extras.len()));
+        for (kws, _) in &p.extras {
+            out.push_str(&format!("               keywords: {}\r\n", kws.join(", ")));
+        }
+    }
     out.push_str(&format!("live count:    {live}\r\n"));
     send_to(world, player, out);
 }
