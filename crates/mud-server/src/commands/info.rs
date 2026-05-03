@@ -2515,6 +2515,18 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         if weight > 0.0 {
             out.push_str(&format!("It weighs about {weight:.1} lbs.\r\n"));
         }
+        // Wearable slot. Tells a player "this fits on the head" /
+        // "this is wielded" without making them try `wear it` and
+        // see where it lands. Skipped silently for non-wearable
+        // items (most consumables, decorations).
+        if let Some(slot) = world.get::<WearableIn>(target).map(|w| w.0) {
+            let verb = match slot {
+                Slot::Wield => "wielded",
+                Slot::Hold => "held",
+                _ => "worn",
+            };
+            out.push_str(&format!("It is {verb} on the {}.\r\n", slot.label()));
+        }
         let contents: Vec<String> = {
             let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
             q.iter(world)
