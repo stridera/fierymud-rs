@@ -7047,12 +7047,26 @@ pub(crate) fn cmd_level(world: &mut World, player: Entity, _args: &str) {
     let xp = p.experience;
     let table = world.resource::<LevelTable>();
     let level_name = table.name_for(level);
+    let prev_threshold = table.exp_for(level).unwrap_or(0);
     let next_threshold = table.exp_for(level + 1);
     let mut out = format!("\r\n{level_name} (level {level})\r\n");
     out.push_str(&format!("Experience: {xp}\r\n"));
     if let Some(threshold) = next_threshold {
         let to_go = (threshold - xp).max(0);
         let next_name = table.name_for(level + 1);
+        // Progress bar within the current bracket. Uses the live
+        // LevelTable thresholds rather than the score sheet's
+        // legacy `level^2.5 * 1000` curve so the percent here
+        // matches what the level table actually requires for
+        // this character class. Visual format mirrors score.
+        let bracket = (threshold - prev_threshold).max(1);
+        let into_bracket = (xp - prev_threshold).max(0);
+        let percent = ((i64::from(into_bracket) * 100) / i64::from(bracket)).clamp(0, 100);
+        let percent_i32 = i32::try_from(percent).unwrap_or(0);
+        out.push_str(&format!(
+            "Progress: {} {percent_i32}%  ({xp} / {threshold})\r\n",
+            crate::commands::progress_bar(percent_i32),
+        ));
         out.push_str(&format!(
             "Next level ({next_name}, level {next_level}) at {threshold} XP — {to_go} to go.\r\n",
             next_level = level + 1
