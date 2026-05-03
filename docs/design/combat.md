@@ -1,6 +1,6 @@
 # Combat
 
-**Status:** proposal — awaiting review.
+**Status:** locked except where noted (review pass 1, 2026-05-03).
 
 ## Design intent
 
@@ -27,18 +27,17 @@ formulas per weapon:
 
 ```
 1. Hit roll
-   attacker_score = attacker.accuracy  + d100
-   defender_score = defender.evasion   + d100
-   if attacker_score <= defender_score: MISS, stop.
+   attacker_score = attacker.accuracy + d100        # d100 ∈ [1, 100]
+   defender_score = defender.evasion  + d100
+   if attacker_score <= defender_score: MISS, stop.   # ties go to attacker
 
 2. Crit roll
-   crit = d100 <= attacker.crit_chance
-   crit_mult = 1.5 if crit else 1.0
+   crit_mult = 2.0 if d100 <= attacker.crit_chance else 1.0
 
 3. Base damage
    base = weapon.base_damage * (1 + attacker.attack_power / 100)
    base *= crit_mult
-   base *= 1 + uniform(-VARIANCE, +VARIANCE)        # default ±25%
+   base *= 1 + uniform(-0.25, +0.25)                 # ±25% variance band
 
 4. Penetration vs armor
    effective_armor_pct = max(0, defender.armor_pct - attacker.pen_pct)
@@ -49,7 +48,8 @@ formulas per weapon:
    base *= 1 - defender.ward_pct / 100
 
 6. Type resistance
-   resist = defender.resistances[weapon.damage_type] or 0    # signed -100..+100
+   resist = defender.resistances[weapon.damage_type] or 0
+   # range: capped at +100 (immunity); negative is UNBOUNDED (vulnerability)
    base *= 1 - resist / 100
 
 7. Hardness floor
@@ -59,6 +59,55 @@ formulas per weapon:
 Magical attacks (`Ability.uses_stat == MAGICAL`) substitute `spell_power`
 for `attack_power` and use the ability's own `base_damage` formula
 instead of `weapon.base_damage`. Everything else is identical.
+
+### Stat reference
+
+**Accuracy / Evasion**
+
+- Baseline 50 produces a 50% hit rate against an equal-stat opponent.
+  A 5-point stat advantage shifts hit rate by ~5%.
+- No hard maximum. Level-50 trained warriors might run 200; boss-tier
+  defenders 250. Content authors are trusted not to push absurdly.
+- Negative is fine. A blinded attacker with `accuracy = -20` still
+  lands occasionally when their d100 rolls high. Posture penalties,
+  debuff effects, and cursed gear all push these into the negative.
+- Tie semantics: ties go to the attacker, so equal stats produce
+  exactly 50% (not 49.5%).
+
+**Crit chance / multiplier**
+
+- `crit_chance` is 0–100. Default 5.
+- Crit multiplier is a flat **2×**. No `crit_damage` stat for v1; add
+  the column later if a class needs "rogue crits do 3×."
+
+**Variance band**
+
+- Uniform multiplier on damage: ±25% means a 100-base hit lands
+  somewhere in [75, 125]. Compounds with crit: critical hits land
+  in [150, 250] for the same 100-base swing.
+- Per-target. In a room AOE the variance rolls fresh for each target
+  (so two enemies don't take exactly the same damage from one fireball).
+
+**armor_flat vs hardness — the same shape, different layer**
+
+Both subtract a flat amount, but at different points:
+
+- `armor_flat` sits at step 4. Counterable by `pen_flat`. This is
+  what player gear contributes to.
+- `hardness` sits at step 7, after type resist and after armor. **Not
+  counterable.** This is "this dragon has adamantine scales" — boss
+  content authors use this to guarantee a fight stays meaningful no
+  matter how much pen the party stacks.
+
+Most mobs ship with `hardness = 0`. It's a content lever for big
+encounters, not a default.
+
+**Vulnerability is unbounded**
+
+A boss with `resistances: { "LIGHTNING": -500 }` takes 6× lightning
+damage. This is the design intent: content authors can express
+"raid puzzle: bring lightning damage." Immunity caps at +100; there's
+no symmetric vulnerability cap.
 
 ## Schema
 
@@ -110,19 +159,47 @@ Without the toggle, the line is just the first row.
 
 ## Mobs and weapons
 
-A mob without a wielded item still attacks. Two options:
+A mob without a wielded item still attacks. **Locked: option (B)** —
+two columns on `Mobs`:
 
-- **(A)** Mobs always wield an implicit "natural attack" weapon: a
-  virtual `Weapon { base_damage: <mob.attack_power*0.4>, damage_type:
-  Bludgeoning }`. No per-mob weapon row needed.
-- **(B)** `Mobs.natural_base_damage Int @default(5)` and
-  `Mobs.natural_damage_type DamageType @default(BLUDGEONING)` columns,
-  with `MobResetEquipment` overriding when the mob spawns wielding
-  something. Builders can author "the dragon's bite is FIRE base 30."
+- `natural_base_damage Int @default(5)`
+- `natural_damage_type DamageType @default(BLUDGEONING)`
 
-Recommendation: (B). Two columns, one default row per mob, makes
-fanged/clawed/breath-attacker mobs author cleanly without a separate
-"natural weapon" object table.
+`MobResetEquipment` overrides at spawn time when the mob actually
+wields something. Builders can author "the dragon's bite is FIRE
+base 30" cleanly; no virtual-weapon table.
+
+### Mob armor and loot are decoupled
+
+A clean separation that's worth highlighting because it lets content
+authors describe armored mobs without forcing a full equipment drop:
+
+- **Mob defensive numbers** (`armor_pct`, `armor_flat`, `ward_pct`,
+  `hardness`, `resistances`) are intrinsic columns on `Mobs`. They
+  do **not** come from equipped items.
+- **Visual armor** is just text in `Mobs.description` /
+  `Mobs.room_description`. The runtime never reads it for combat.
+- **Loot** is a separate system (`MobResetEquipment` rows that drop
+  on death, plus future `MobLoot` tables for non-equipment drops).
+  Most mobs drop little or nothing.
+
+So a content author can write:
+
+```
+description:       a hulking ogre clad in iron plates
+armor_pct:         40
+armor_flat:        8
+loot:              100 copper, a bone fragment
+```
+
+The player sees armor, fights armor, doesn't get a free suit of
+plate from every kill. Intentional.
+
+For *humanoid* mobs that should drop their gear (bandits, guards),
+`MobResetEquipment` is the existing mechanism: the mob spawns
+wielding/wearing the item, the item's stats stack additively on top
+of the mob's intrinsic armor (clothes don't make the man — they
+augment), and the item drops on death. Opt-in per mob.
 
 ## Healing and overkill
 
@@ -153,25 +230,32 @@ Effective armor_pct = 20. `8 * 1.5 * (1±0.25) ≈ 9–15`, after 20% armor
 fire, defender fire_resist −50 (vulnerable).
 `30 * (1+0.5) = 45 base`, no armor, no ward.
 
-## Open questions
+## Decisions locked (review pass 1, 2026-05-03)
 
-1. **Variance band.** ±25% (sketched), ±10% (predictable), or ±50%
-   (lottery)?
-2. **Crit multiplier.** 1.5× (proposal), 2× (classic), or stat-driven
-   (`crit_damage` column too)?
-3. **Negative resistance cap.** Vulnerability lets `resist` go below 0,
-   amplifying damage. Cap at −100% (2× damage), or unbounded?
-4. **Mob natural weapon shape.** (A) implicit virtual weapon vs (B) two
-   columns on `Mobs`. I recommended B.
-5. **`ward_pct` source.** A flat column on the entity, or always from
-   active `EffectInstance`s with a "ward" tag and the runtime sums
-   them? Stat column is simpler; effect-tag is more dynamic. I'd
-   default to **a stat column that gets *modified* by ward effects**
-   via the existing `modify` effect-type — same pattern as
-   strength buffs.
-6. **PvP scaling.** Should accuracy/evasion be scaled when both sides
-   are players? Today equal-stat players hit each other 50% which is
-   probably fine. Note for review.
+| Question | Locked |
+|---|---|
+| Variance band | **±25%** (uniform multiplier; per-target in AOE) |
+| Crit multiplier | **2×** (flat; no `crit_damage` stat for v1) |
+| Negative resistance cap | **Unbounded vulnerability**; +100 immunity cap stays |
+| Mob natural weapon | **(B)** two columns on `Mobs` — `natural_base_damage`, `natural_damage_type` |
+| `ward_pct` source | **Stat column** on entity, modified by ward-tagged `modify` effects |
+| PvP scaling | **No scaling** — equal players hit at 50%, which is fine |
+| Tie-break on hit roll | Ties go to **attacker** (so equal stats = exactly 50% hit) |
+| Accuracy/Evasion baseline | **50/50 = 50% hit rate**; no hard cap; negatives allowed |
+| Hardness vs armor_flat | Both flat subtract; `pen_flat` counters `armor_flat` only — `hardness` is **unbypassable** |
+
+## Remaining open questions
+
+None blocking the migration. The following are tuning knobs we can
+revisit after the first content pass:
+
+- Whether to add a soft cap on accuracy/evasion (e.g. 300) once
+  content scales reveal whether numbers run away.
+- Whether crit needs a `crit_damage` column for class differentiation
+  (rogues 3× crits, etc.) — easy to add later.
+- Whether `armor_flat` should be readable from the equipped armor
+  item proto and the mob's intrinsic value summed at swing time, or
+  pre-summed onto the entity at equip time. Implementation detail.
 
 ## Migration plan
 
