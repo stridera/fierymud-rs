@@ -10,8 +10,8 @@ use tracing::info;
 use crate::TickCount;
 use crate::commands::{
     apply_damage, broadcast_room_except_players_rendered, broadcast_room_except_rendered,
-    cmd_flee, color_mode_for, direction_name, disengage_attackers_of, drain_stamina, name_of,
-    opposite, render_color_tags, send_to, try_insert, try_remove,
+    cmd_flee, direction_name, disengage_attackers_of, drain_stamina, name_of, opposite, send_to,
+    try_insert, try_remove,
 };
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
@@ -604,23 +604,15 @@ fn apply_swing(world: &mut World, s: &Swing) {
         roll_evasion(world, s.target)
     };
     if let Some(via) = evaded_via {
-        let attacker_mode = color_mode_for(world, s.attacker);
-        let target_mode = color_mode_for(world, s.target);
         send_to(
             world,
             s.attacker,
-            render_color_tags(
-                &format!("{target_name} {via}s your attack!\r\n"),
-                attacker_mode,
-            ),
+            format!("{target_name} {via}s your attack!\r\n"),
         );
         send_to(
             world,
             s.target,
-            render_color_tags(
-                &format!("You {via} {}'s attack!\r\n", s.attacker_name),
-                target_mode,
-            ),
+            format!("You {via} {}'s attack!\r\n", s.attacker_name),
         );
         broadcast_room_except_rendered(
             world,
@@ -635,23 +627,15 @@ fn apply_swing(world: &mut World, s: &Swing) {
         return;
     }
     if outcome == SwingOutcome::Miss {
-        let attacker_mode = color_mode_for(world, s.attacker);
-        let target_mode = color_mode_for(world, s.target);
         send_to(
             world,
             s.attacker,
-            render_color_tags(
-                &format!("You swing at {target_name} but miss.\r\n"),
-                attacker_mode,
-            ),
+            format!("You swing at {target_name} but miss.\r\n"),
         );
         send_to(
             world,
             s.target,
-            render_color_tags(
-                &format!("{} swings at you but misses.\r\n", s.attacker_name),
-                target_mode,
-            ),
+            format!("{} swings at you but misses.\r\n", s.attacker_name),
         );
         broadcast_room_except_rendered(
             world,
@@ -685,28 +669,21 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
     let (dead, threshold_msg) = apply_damage(world, s.target, damage);
 
-    // Names may carry XML-Lite tags; render per-recipient so each player
-    // gets ANSI or stripped output according to their own COLOR_BLIND flag.
-    let attacker_mode = color_mode_for(world, s.attacker);
-    let target_mode = color_mode_for(world, s.target);
+    // Names may carry XML-Lite tags; send_to renders per-recipient so each
+    // player gets ANSI or stripped output according to their own COLOR_BLIND
+    // flag.
     let crit_tag = if outcome == SwingOutcome::Crit { " (critical hit!)" } else { "" };
     send_to(
         world,
         s.attacker,
-        render_color_tags(
-            &format!("You hit {target_name} for {damage} damage{crit_tag}.\r\n"),
-            attacker_mode,
-        ),
+        format!("You hit {target_name} for {damage} damage{crit_tag}.\r\n"),
     );
     send_to(
         world,
         s.target,
-        render_color_tags(
-            &format!(
-                "{} hits you for {damage} damage{crit_tag}.\r\n",
-                s.attacker_name
-            ),
-            target_mode,
+        format!(
+            "{} hits you for {damage} damage{crit_tag}.\r\n",
+            s.attacker_name
         ),
     );
     if was_sleeping && !dead {
