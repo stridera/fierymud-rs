@@ -783,18 +783,74 @@ impl ConnRouter {
                     let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
+                // Both rows are committed. Re-fetch the User + the
+                // freshly-INSERTed CharacterRow so we can hand them
+                // to the same `complete_login` path the password
+                // arm uses — spawns the player entity, hydrates
+                // empty inventory / aliases / etc., and migrates
+                // the conn from `login` to `playing`. Failures here
+                // are bizarre (we just wrote these rows) but stay
+                // recoverable: bounce back to the identifier prompt
+                // and the player can log in fresh.
+                let new_user = match users::find_by_id(pool, &user_id).await {
+                    Ok(Some(u)) => u,
+                    Ok(None) => {
+                        warn!(conn_id, %user_id, "fresh user vanished post-commit");
+                        let _ = ctx.outbound.send(
+                            "Account created but couldn't reload it. Please log in.\r\n"
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        return;
+                    }
+                    Err(e) => {
+                        warn!(conn_id, error = %e, "user reload failed");
+                        let _ = ctx.outbound.send(
+                            "Account created but couldn't reload it. Please log in.\r\n"
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        return;
+                    }
+                };
+                let new_char = match characters::find_by_name(pool, &character_name).await {
+                    Ok(Some(c)) => c,
+                    Ok(None) => {
+                        warn!(conn_id, %character_name, "fresh character vanished post-commit");
+                        let _ = ctx.outbound.send(
+                            "Character created but couldn't reload it. Please log in.\r\n"
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        return;
+                    }
+                    Err(e) => {
+                        warn!(conn_id, error = %e, "character reload failed");
+                        let _ = ctx.outbound.send(
+                            "Character created but couldn't reload it. Please log in.\r\n"
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        return;
+                    }
+                };
                 let _ = ctx.outbound.send(
                     format!(
-                        "Welcome to FieryMUD! `{character_name}` ({gender} {race} \
-                         {class_plain_name}) has been created (character id {character_id}, \
-                         user id {user_id}). The world-spawn-on-success step lands in \
-                         the next slice; for now, log in with `{effective_email}` (or \
-                         `{character_name}`) and the password you just set.\r\n"
+                        "Welcome to FieryMUD, {character_name}! Your {gender} {race} \
+                         {class_plain_name} is ready (character id {character_id}, user \
+                         id {user_id}). Stepping into the world…\r\n"
                     )
                     .into_bytes(),
                 );
-                ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                self.complete_login(conn_id, world, pool, new_user, new_char).await;
             }
 
             Stage::AwaitingPassword { user, preselected } => {
