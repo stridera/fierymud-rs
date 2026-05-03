@@ -7028,6 +7028,33 @@ fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBum
                     tracing::warn!(error = %e, "objective upsert failed");
                     continue;
                 }
+                // After a completing bump, try advancing the phase
+                // (or finishing the quest entirely).
+                if completed {
+                    match mud_db::quest_objectives::try_advance_phase(
+                        &pool,
+                        &row.character_quest_id,
+                    )
+                    .await
+                    {
+                        Ok(mud_db::quest_objectives::PhaseAdvance::Advanced { name, .. }) => {
+                            let _ = out.send(
+                                format!("Quest phase complete — moving to: {name}\r\n")
+                                    .into_bytes(),
+                            );
+                        }
+                        Ok(mud_db::quest_objectives::PhaseAdvance::QuestComplete) => {
+                            let _ = out.send(
+                                b"*** Quest complete! Speak with the questgiver to claim rewards. ***\r\n"
+                                    .to_vec(),
+                            );
+                        }
+                        Ok(mud_db::quest_objectives::PhaseAdvance::Pending) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "phase advance check failed");
+                        }
+                    }
+                }
                 let prefix = if is_actor {
                     String::new()
                 } else {

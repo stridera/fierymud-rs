@@ -293,6 +293,158 @@ pub async fn list_visit_room_progress(
     .await
 }
 
+/// Outcome of the post-completion phase-advance check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhaseAdvance {
+    /// Some objectives in the current phase are still incomplete.
+    Pending,
+    /// Phase complete — quest moved to the next phase. Carries
+    /// the new phase id and its name for the player message.
+    Advanced { new_phase_id: i32, name: String },
+    /// All phases complete — quest flipped to COMPLETED.
+    QuestComplete,
+}
+
+/// Decide whether the just-bumped objective finished the current
+/// phase, and if so either advance to the next phase or mark the
+/// whole quest complete. Idempotent — safe to call after every
+/// objective bump; bails early when the phase isn't fully done.
+#[allow(clippy::too_many_lines)]
+pub async fn try_advance_phase(
+    pool: &PgPool,
+    character_quest_id: &str,
+) -> sqlx::Result<PhaseAdvance> {
+    let mut tx = pool.begin().await?;
+    // Pull the quest row + its current phase. If current_phase_id
+    // is NULL, treat as "first phase" (lowest order).
+    let cq = sqlx::query!(
+        r#"
+        SELECT
+            cq.character_id, cq.quest_zone_id, cq.quest_id, cq.current_phase_id,
+            cq.status::text AS "status!: String"
+        FROM "CharacterQuest" cq
+        WHERE cq.id = $1
+        "#,
+        character_quest_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(cq) = cq else {
+        return Ok(PhaseAdvance::Pending);
+    };
+    if cq.status != "IN_PROGRESS" {
+        return Ok(PhaseAdvance::Pending);
+    }
+    let current_phase_id = if let Some(id) = cq.current_phase_id {
+        id
+    } else {
+        // First-phase resolve: pick lowest order.
+        let row = sqlx::query!(
+            r#"
+            SELECT id FROM "QuestPhase"
+            WHERE quest_zone_id = $1 AND quest_id = $2
+            ORDER BY "order" ASC, id ASC
+            LIMIT 1
+            "#,
+            cq.quest_zone_id,
+            cq.quest_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(PhaseAdvance::Pending);
+        };
+        // Stamp the first phase so subsequent bumps see it.
+        sqlx::query!(
+            r#"UPDATE "CharacterQuest" SET current_phase_id = $1 WHERE id = $2"#,
+            row.id,
+            character_quest_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        row.id
+    };
+    // Are all objectives in the current phase marked complete?
+    // Note: rows that don't exist in CharacterQuestObjective count
+    // as not-complete (LEFT JOIN + COALESCE).
+    let pending = sqlx::query!(
+        r#"
+        SELECT COUNT(*) AS "n!: i64"
+        FROM "QuestObjective" qo
+        LEFT JOIN "CharacterQuestObjective" cqo
+            ON cqo.character_quest_id = $1
+           AND cqo.quest_zone_id = qo.quest_zone_id
+           AND cqo.quest_id = qo.quest_id
+           AND cqo.phase_id = qo.phase_id
+           AND cqo.objective_id = qo.id
+        WHERE qo.quest_zone_id = $2
+          AND qo.quest_id = $3
+          AND qo.phase_id = $4
+          AND COALESCE(cqo.completed, false) = false
+        "#,
+        character_quest_id,
+        cq.quest_zone_id,
+        cq.quest_id,
+        current_phase_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if pending.n > 0 {
+        tx.commit().await?;
+        return Ok(PhaseAdvance::Pending);
+    }
+    // Phase complete. Find the next phase by order; tie-break on id.
+    let next = sqlx::query!(
+        r#"
+        SELECT next.id, next.name
+        FROM "QuestPhase" cur
+        JOIN "QuestPhase" next
+          ON next.quest_zone_id = cur.quest_zone_id
+         AND next.quest_id = cur.quest_id
+         AND (next."order", next.id) > (cur."order", cur.id)
+        WHERE cur.quest_zone_id = $1
+          AND cur.quest_id = $2
+          AND cur.id = $3
+        ORDER BY next."order" ASC, next.id ASC
+        LIMIT 1
+        "#,
+        cq.quest_zone_id,
+        cq.quest_id,
+        current_phase_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(next) = next {
+        sqlx::query!(
+            r#"UPDATE "CharacterQuest" SET current_phase_id = $1 WHERE id = $2"#,
+            next.id,
+            character_quest_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(PhaseAdvance::Advanced {
+            new_phase_id: next.id,
+            name: next.name,
+        });
+    }
+    // No next phase — quest done.
+    sqlx::query!(
+        r#"
+        UPDATE "CharacterQuest"
+        SET status = 'COMPLETED'::"QuestStatus",
+            completed_at = NOW(),
+            completion_count = completion_count + 1
+        WHERE id = $1
+        "#,
+        character_quest_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(PhaseAdvance::QuestComplete)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_progress(
     pool: &PgPool,
