@@ -16,12 +16,12 @@ use mud_net::Outbound;
 use mud_world::{
     AbilityCatalog, Account, AccountSummary, AppliedTo, AttachedTriggers, ClassCatalog,
     CombatStats, Cooldowns, CoreStats, Description, EffectCatalog, EffectInstance, EffectSource,
-    EquippedSlot, ExitData, Exits, Fighting, Follower, FromObjectReset, Frozen, Health, IgnoreList,
-    Item, Keywords, KnownAbilities, LastInputAt, LastTeller, Located, LoggedInAt, Mob,
+    EquippedSlot, ExitData, Exits, Fighting, Follower, FromObjectReset, Frozen, Health,
+    Item, Keywords, KnownAbilities, LastInputAt, Located, LoggedInAt, Mob,
     MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind,
     Profile, Prompt, BankWealth, BoardCatalog, BoardDraft, BoardLink, MailDraft, RecallPoint,
     RoomSector, ShopCatalog, Shopkeeper, Slot, SocialDef, SocialRegistry, Stamina, Stealth,
-    Stunned, TellLog, Title, TriggerCatalog, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    Stunned, Title, TriggerCatalog, UiStyle, Wealth, WearableIn, WorldKey, WorldKeyIndex,
     ZoneClimate,
 };
 use tracing::{info, info_span};
@@ -234,6 +234,8 @@ mod recall;
 mod release;
 #[path = "commands/setrecall.rs"]
 mod setrecall;
+#[path = "commands/tells.rs"]
+mod tells;
 #[path = "commands/unban.rs"]
 mod unban;
 
@@ -2129,19 +2131,8 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_report,
     },
-    Command {
-        names: &["tell", "t"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "tell <player> <message>",
-            summary: "Send a private message to an online player.",
-            long: "The target must be online. Match is case-insensitive and \
-                   exact (no substring) to avoid ambiguity.",
-        },
-        run: cmd_tell,
-    },
+    // tell / reply / ignore / unignore / lasttells migrated to
+    // commands/tells.rs.
     Command {
         names: &["emote", ":"],
         min_role: UserRole::Player,
@@ -2157,61 +2148,6 @@ const COMMANDS: &[Command] = &[
         run: cmd_emote,
     },
     // `shout` migrated to commands/channels.rs.
-    Command {
-        names: &["reply", "r"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "reply <message>",
-            summary: "Reply to the last person who told you.",
-            long: "Sends a tell to whoever last sent you a private message. \
-                   If they've gone offline, you'll get a useful error.",
-        },
-        run: cmd_reply,
-    },
-    Command {
-        names: &["ignore"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "ignore [<player> | -<player> | clear]",
-            summary: "Block tells from a specific player.",
-            long: "With no arg, lists ignored names. With a name, adds \
-                   them to your ignore list. With `-name` (or `unignore \
-                   name`), removes them. With `clear`, drops all. \
-                   Session-scoped — list resets on disconnect.",
-        },
-        run: cmd_ignore,
-    },
-    Command {
-        names: &["unignore"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "unignore <player>",
-            summary: "Stop ignoring a player.",
-            long: "Removes a name from your ignore list. Equivalent to \
-                   `ignore -<name>`.",
-        },
-        run: cmd_unignore,
-    },
-    Command {
-        names: &["lasttells", "lt"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "lasttells",
-            summary: "Show recent senders of `tell` to you (up to 10).",
-            long: "Newest first, with how long ago each was received. \
-                   Tracks names at receipt time, so the list is stable \
-                   even if a sender disconnects.",
-        },
-        run: cmd_lasttells,
-    },
     Command {
         names: &["mail"],
         min_role: UserRole::Player,
@@ -5469,6 +5405,13 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "channel `{name}` missing"
+            );
+        }
+        // tells.rs (private comms + ignore list + history)
+        for name in ["tell", "t", "reply", "r", "ignore", "unignore", "lasttells", "lt"] {
+            assert!(
+                names.contains(&name),
+                "tells command `{name}` missing"
             );
         }
     }
@@ -9640,7 +9583,7 @@ fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-fn format_idle(secs: u64) -> String {
+pub(crate) fn format_idle(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {
@@ -18338,218 +18281,8 @@ pub(crate) fn broadcast_room_except_players_rendered(
     }
 }
 
-fn cmd_tell(world: &mut World, player: Entity, args: &str) {
-    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
-    if parts.len() != 2 || parts[1].trim().is_empty() {
-        send_to(world, player, "Usage: tell <player> <message>\r\n");
-        return;
-    }
-    if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
-        return;
-    }
-    let target_name = parts[0].trim();
-    let message = parts[1].trim();
-    let target_lower = target_name.to_ascii_lowercase();
+// tells / reply / ignore / unignore / lasttells migrated to commands/tells.rs.
 
-    let target = {
-        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
-        q.iter(world)
-            .find(|(_, n)| n.name.eq_ignore_ascii_case(target_name)
-                || n.name.to_ascii_lowercase() == target_lower)
-            .map(|(e, _)| e)
-    };
-    let Some(target) = target else {
-        send_rendered(world, player, &format!("'{target_name}' isn't online.\r\n"));
-        return;
-    };
-    if target == player {
-        send_to(world, player, "You mutter quietly to yourself.\r\n");
-        return;
-    }
-    if has_flag(world, target, PlayerFlag::NoTell) {
-        let actual = name_of(world, target);
-        send_rendered(world, player, &format!("{actual} is not accepting tells right now.\r\n"),
-        );
-        return;
-    }
-    // Per-target ignore: if the receiver has us on their IgnoreList,
-    // refuse with a generic message (don't leak which players ignore
-    // them — the exact wording matches `NoTell` to keep social
-    // friction low).
-    let player_name_for_check = name_of(world, player);
-    if world
-        .get::<IgnoreList>(target)
-        .is_some_and(|l| l.contains(&player_name_for_check))
-    {
-        let actual = name_of(world, target);
-        send_rendered(
-            world,
-            player,
-            &format!("{actual} is not accepting tells right now.\r\n"),
-        );
-        return;
-    }
-
-    let player_name = name_of(world, player);
-    let target_name = name_of(world, target);
-
-    send_rendered(world, player, &format!("You tell {target_name}, \"{message}\"\r\n"));
-    if has_flag(world, target, PlayerFlag::Afk) {
-        send_rendered(world, player, &format!("({target_name} is AFK and may not respond right away.)\r\n"),
-        );
-    }
-    send_rendered(
-        world,
-        target,
-        &format!("{player_name} tells you, \"{message}\"\r\n"),
-    );
-
-    // Stamp the receiver so they can `reply`.
-    try_insert(world, target, LastTeller(player));
-    // Append to the bounded history shown by `lasttells`. Created on
-    // first inbound tell; subsequent pushes mutate in place.
-    let player_name_owned = player_name.clone();
-    if let Some(mut log) = world.get_mut::<TellLog>(target) {
-        log.push(player_name_owned);
-    } else {
-        let mut log = TellLog::with_cap(10);
-        log.push(player_name_owned);
-        try_insert(world, target, log);
-    }
-    // Persist to the `tell_message` table so the receiver's
-    // `lasttells` survives logout / restart. Fire-and-forget;
-    // the in-memory `TellLog` already holds the entry for the
-    // common case where the recipient is online.
-    let recipient_id = world
-        .get::<Account>(target)
-        .map(|a| a.character_id.clone());
-    if let (Some(rid), Some(pool)) = (
-        recipient_id,
-        world.get_resource::<DbPool>().map(|p| p.0.clone()),
-    ) {
-        let sender_name = player_name.clone();
-        let body = message.to_string();
-        tokio::spawn(async move {
-            if let Err(e) =
-                mud_db::tell_messages::record(&pool, &rid, &sender_name, &body).await
-            {
-                tracing::warn!(error = %e, "tell persist failed");
-            }
-        });
-    }
-}
-
-fn cmd_reply(world: &mut World, player: Entity, args: &str) {
-    let message = args.trim();
-    if message.is_empty() {
-        send_to(world, player, "Reply with what?\r\n");
-        return;
-    }
-    let Some(LastTeller(last)) = world.get::<LastTeller>(player).copied() else {
-        send_to(world, player, "Nobody has tell'd you recently.\r\n");
-        return;
-    };
-    if world.get_entity(last).is_err() || world.get::<Online>(last).is_none() {
-        send_to(world, player, "They're no longer online.\r\n");
-        return;
-    }
-    let last_name = name_of(world, last);
-    // Forward through cmd_tell so we get the LastTeller stamping for free.
-    cmd_tell(world, player, &format!("{last_name} {message}"));
-}
-
-/// `ignore [<name> | -<name> | clear]`: manage a per-session list of
-/// blocked tell senders. A no-arg call lists current entries.
-fn cmd_ignore(world: &mut World, player: Entity, args: &str) {
-    let arg = args.trim();
-    if arg.is_empty() {
-        let entries = world.get::<IgnoreList>(player).map(|l| l.0.clone()).unwrap_or_default();
-        if entries.is_empty() {
-            send_to(world, player, "You're ignoring nobody.\r\n");
-        } else {
-            let mut out = format!("\r\nIgnoring {} player(s):\r\n", entries.len());
-            for n in &entries {
-                out.push_str(&format!("  {n}\r\n"));
-            }
-            send_to(world, player, out);
-        }
-        return;
-    }
-    if arg.eq_ignore_ascii_case("clear") {
-        if let Ok(mut e) = world.get_entity_mut(player) {
-            e.remove::<IgnoreList>();
-        }
-        send_to(world, player, "Ignore list cleared.\r\n");
-        return;
-    }
-    if let Some(name) = arg.strip_prefix('-') {
-        let name = name.trim();
-        if name.is_empty() {
-            send_to(world, player, "Unignore whom?\r\n");
-            return;
-        }
-        cmd_unignore(world, player, name);
-        return;
-    }
-    // Add a name. `IgnoreList` is created on first use.
-    let added = if let Some(mut list) = world.get_mut::<IgnoreList>(player) {
-        list.add(arg)
-    } else {
-        let mut l = IgnoreList::default();
-        let added = l.add(arg);
-        try_insert(world, player, l);
-        added
-    };
-    if added {
-        send_to(world, player, format!("You will now ignore {arg}.\r\n"));
-    } else {
-        send_to(world, player, format!("You're already ignoring {arg}.\r\n"));
-    }
-}
-
-fn cmd_unignore(world: &mut World, player: Entity, args: &str) {
-    let name = args.trim();
-    if name.is_empty() {
-        send_to(world, player, "Unignore whom?\r\n");
-        return;
-    }
-    let removed = world
-        .get_mut::<IgnoreList>(player)
-        .is_some_and(|mut l| l.remove(name));
-    if removed {
-        send_to(world, player, format!("You no longer ignore {name}.\r\n"));
-    } else {
-        send_to(world, player, format!("You aren't ignoring {name}.\r\n"));
-    }
-}
-
-fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {
-    let entries: Vec<(String, u64)> = world
-        .get::<TellLog>(player)
-        .map(|log| {
-            log.entries
-                .iter()
-                .map(|(name, when)| {
-                    let secs = when
-                        .elapsed()
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    (name.clone(), secs)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    if entries.is_empty() {
-        send_to(world, player, "No recent tells.\r\n");
-        return;
-    }
-    let mut out = format!("\r\nRecent tells ({}):\r\n", entries.len());
-    for (name, secs_ago) in &entries {
-        out.push_str(&format!("  {:<20} ({} ago)\r\n", name, format_idle(*secs_ago)));
-    }
-    send_to(world, player, out);
-}
 
 /// Stub for the help/registry path — mail commands are intercepted by
 /// the async pre-dispatch hook before this ever runs. If somehow it
