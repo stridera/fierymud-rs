@@ -1236,12 +1236,15 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "idle",
+            usage: "idle [<min-minutes>]",
             summary: "Show online players sorted by idle time, longest first.",
             long: "Same population as `who`, but ordered by how long since \
                    each player last typed something. Players who just \
                    connected and haven't typed yet show as `fresh`; anyone \
-                   under a minute shows as `active`.",
+                   under a minute shows as `active`. \
+                   With a numeric arg, filters to players idle that many \
+                   minutes or more — handy for spotting AFK staff or stuck \
+                   sessions.",
         },
         run: cmd_idle,
     }
@@ -3968,7 +3971,14 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     send_rendered(world, player, &out);
 }
 
-pub(crate) fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_idle(world: &mut World, player: Entity, args: &str) {
+    // Optional minimum-idle filter in minutes. Lenient parser:
+    // non-numeric args fall back to "no filter" — matches `who`'s
+    // arg-handling shape so the two info commands feel consistent.
+    let min_idle_secs: Option<u64> = args
+        .split_whitespace()
+        .find_map(|t| t.parse::<u64>().ok())
+        .map(|m| m.saturating_mul(60));
     let mut rows: Vec<(String, Option<u64>, Option<u64>)> = {
         let mut q = world.query_filtered::<(
             &Named,
@@ -3985,6 +3995,10 @@ pub(crate) fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
             })
             .collect()
     };
+    let total_online = rows.len();
+    if let Some(threshold) = min_idle_secs {
+        rows.retain(|(_, idle, _)| idle.is_some_and(|s| s >= threshold));
+    }
     // Highest idle first; fresh-never-typed go to the bottom.
     rows.sort_by(|a, b| match (a.1, b.1) {
         (Some(x), Some(y)) => y.cmp(&x),
@@ -3992,7 +4006,16 @@ pub(crate) fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => a.0.cmp(&b.0),
     });
-    let mut out = format!("\r\n{} online by idle:\r\n", rows.len());
+    let mut out = if let Some(threshold) = min_idle_secs {
+        format!(
+            "\r\n{} of {} online idle ≥ {}:\r\n",
+            rows.len(),
+            total_online,
+            format_idle(threshold),
+        )
+    } else {
+        format!("\r\n{total_online} online by idle:\r\n")
+    };
     out.push_str("  Name                     Idle      Online\r\n");
     for (name, idle, online) in &rows {
         let idle_label = match idle {
