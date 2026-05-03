@@ -534,8 +534,11 @@ impl ConnRouter {
         // Track the spawn room toward zone-clear, so a player who
         // logs in inside the last unvisited room of a zone gets the
         // unlock immediately instead of having to step out and back.
+        // Also apply any environmental effects bound to the room so
+        // logging in mid-aura doesn't skip the application.
         if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
             commands::mark_room_visited(world, entity, room);
+            commands::apply_room_environment_at_login(world, entity, room);
         }
         self.playing.insert(conn_id, entity);
         commands::send_prompt(world, entity);

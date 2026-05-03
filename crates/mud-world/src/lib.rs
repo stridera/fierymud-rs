@@ -33,7 +33,7 @@ pub use resources::{
     ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
     LightFuelProto, PrecipKind, SavingThrow, ScriptError, ScriptErrorLog, Season, ShopAcceptRule,
     ShopCatalog, ShopDef,
-    ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, SpellSlotData, TargetingRule,
+    RoomEnvironmentalEffects, ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, SpellSlotData, TargetingRule,
     TempBand, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, WeatherCatalog,
     WeatherState, WorldKeyIndex,
 };

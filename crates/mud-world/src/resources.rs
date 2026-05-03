@@ -51,6 +51,16 @@ pub struct WorldKeyIndex {
     pub legacy_vnums: HashMap<i32, (i32, i32)>,
 }
 
+/// Per-room environmental effects keyed by composite world key.
+/// Loaded from the `RoomEnvironmentalEffect` junction table at
+/// boot. The runtime applies each linked effect to a player on
+/// arrival into the room — short duration so leaving lets the
+/// effect decay naturally without bookkeeping at the move site.
+#[derive(Resource, Debug, Default)]
+pub struct RoomEnvironmentalEffects {
+    pub by_room: HashMap<(i32, i32), Vec<i32>>,
+}
+
 /// Catalog of effect *types* loaded from the Effect table at startup.
 /// Active applications live as ECS entities (`EffectInstance` + `AppliedTo`);
 /// the catalog supplies metadata that doesn't change per-application.

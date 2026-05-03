@@ -32,6 +32,7 @@ pub mod quests;
 pub mod race_abilities;
 pub mod reports;
 pub mod room_exits;
+pub mod room_environmental_effects;
 pub mod rooms;
 pub mod script_errors;
 pub mod shops;

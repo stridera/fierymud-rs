@@ -633,6 +633,24 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         "liquid index loaded"
     );
 
+    // RoomEnvironmentalEffect: per-room link to Effect rows. The
+    // runtime applies these on arrival (short duration so leaving
+    // the room lets them decay).
+    let env_rows = mud_db::room_environmental_effects::list_all(pool).await?;
+    let mut room_env_effects = crate::resources::RoomEnvironmentalEffects::default();
+    for row in &env_rows {
+        room_env_effects
+            .by_room
+            .entry((row.room_zone_id, row.room_id))
+            .or_default()
+            .push(row.effect_id);
+    }
+    info!(
+        rooms = room_env_effects.by_room.len(),
+        bindings = env_rows.len(),
+        "room environmental effects loaded"
+    );
+
     // Pass 4.5: load Shop catalog. Each shop maps to a keeper mob via
     // (keeper_zone_id, keeper_id); the spawn pass below attaches a
     // Shopkeeper component to each spawned mob whose proto matches.
@@ -720,6 +738,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(object_ability_catalog);
     world.insert_resource(consumable_catalog);
     world.insert_resource(liquid_index);
+    world.insert_resource(room_env_effects);
     world.insert_resource(shop_catalog);
 
     // Pass 4.6: load Board catalog. Just metadata (id/alias/title/lock) —

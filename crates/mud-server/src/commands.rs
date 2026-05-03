@@ -6750,6 +6750,72 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
     }
 }
 
+/// Apply each environmental effect bound to `room` to `player`,
+/// spawning a fresh `EffectInstance` child for each (with
+/// `EffectSource::Room`). Skips effects already present on the
+/// entity from the same source so re-entry within the duration
+/// doesn't pile duplicates. Effects decay through the normal
+/// `effects_tick` once the player leaves the room.
+pub(crate) fn apply_room_environment_at_login(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+) {
+    apply_room_environment(world, player, room);
+}
+
+fn apply_room_environment(world: &mut World, player: Entity, room: Entity) {
+    let key = match world.get::<WorldKey>(room) {
+        Some(k) => *k,
+        None => return,
+    };
+    let effect_ids: Vec<i32> = world
+        .get_resource::<mud_world::RoomEnvironmentalEffects>()
+        .and_then(|r| r.by_room.get(&(key.zone, key.id)).cloned())
+        .unwrap_or_default();
+    if effect_ids.is_empty() {
+        return;
+    }
+    // Snapshot which Room-sourced effects are already on the
+    // player so we don't pile duplicates on quick re-entries.
+    let already_on: std::collections::HashSet<i32> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(ei, at)| at.0 == player && ei.source == EffectSource::Room)
+            .map(|(ei, _)| ei.kind)
+            .collect()
+    };
+    for eid in effect_ids {
+        if already_on.contains(&eid) {
+            continue;
+        }
+        let def = world
+            .get_resource::<EffectCatalog>()
+            .and_then(|c| c.by_id.get(&eid).cloned());
+        let Some(def) = def else { continue };
+        // Default duration: schema's effect default_params.duration
+        // if present, else 60s. Short enough that leaving the room
+        // sobers off in a minute; long enough that two adjacent
+        // env-effect rooms don't constantly re-tick.
+        let dur_secs = def
+            .default_params
+            .get("duration")
+            .and_then(serde_json::Value::as_i64)
+            .map_or(60, |v| i32::try_from(v).unwrap_or(60));
+        world.spawn((
+            EffectInstance {
+                kind: def.id,
+                name: def.name.clone(),
+                strength: 1,
+                remaining_secs: dur_secs,
+                source: EffectSource::Room,
+                ability_id: None,
+            },
+            AppliedTo(player),
+        ));
+    }
+}
+
 /// Bump the player's lifetime-kill counter, persist to the
 /// `kill_tracking_data` JSON, and grant any milestone achievement
 /// the new total has just crossed (`kills_100`, `kills_500`, ...).
@@ -21124,6 +21190,14 @@ fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // Followers who happen to be NPCs are filtered inside the helper.
     for &mover in &movers {
         mark_room_visited(world, mover, target);
+    }
+    // Room environmental effects: apply each linked effect to
+    // every player mover. Short duration so leaving the room
+    // lets the effect decay; re-entry refreshes naturally.
+    for &mover in &movers {
+        if world.get::<Player>(mover).is_some() {
+            apply_room_environment(world, mover, target);
+        }
     }
 
     // Drain the leader's stamina by the target sector's cost. Followers
