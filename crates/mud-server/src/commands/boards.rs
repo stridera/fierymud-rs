@@ -309,6 +309,7 @@ pub(crate) async fn cmd_delpost(
         send_to(world, player, "Slots are 1-based.\r\n");
         return;
     }
+    let allowed_ids = local_board_ids(world, player);
     let board = match mud_db::boards::find_board_by_alias(pool, alias).await {
         Ok(Some(b)) => b,
         Ok(None) => {
@@ -320,6 +321,17 @@ pub(crate) async fn cmd_delpost(
             return;
         }
     };
+    if let Some(allowed) = allowed_ids.as_ref()
+        && !allowed.contains(&board.id)
+    {
+        send_to(
+            world,
+            player,
+            "There is no such board here. Stand near the board you \
+             want to delete from.\r\n",
+        );
+        return;
+    }
     let messages = match mud_db::boards::messages_for_board(pool, board.id).await {
         Ok(m) => m,
         Err(e) => {
@@ -384,11 +396,27 @@ pub(crate) async fn cmd_post(
     pool: &mud_db::sqlx::PgPool,
     args: &str,
 ) {
-    let alias = args.trim();
-    if alias.is_empty() {
-        send_to(world, player, "Usage: post <board-alias>\r\n");
-        return;
-    }
+    let trimmed = args.trim();
+    // No args → default to the in-room board for mortals (and for
+    // staff in a board room — same UX). If they're nowhere near a
+    // board, refuse with a hint instead of "Usage:".
+    let alias_owned = if trimmed.is_empty() {
+        if let Some((_, alias)) = in_room_board_alias(world, player) {
+            alias
+        } else {
+            send_to(
+                world,
+                player,
+                "Stand near the board you want to post on, or use \
+                 `post <alias>` (Builder+) to post remotely.\r\n",
+            );
+            return;
+        }
+    } else {
+        trimmed.to_string()
+    };
+    let alias = alias_owned.as_str();
+    let allowed_ids = local_board_ids(world, player);
     let board = match mud_db::boards::find_board_by_alias(pool, alias).await {
         Ok(Some(b)) => b,
         Ok(None) => {
@@ -400,6 +428,17 @@ pub(crate) async fn cmd_post(
             return;
         }
     };
+    if let Some(allowed) = allowed_ids.as_ref()
+        && !allowed.contains(&board.id)
+    {
+        send_to(
+            world,
+            player,
+            "There is no such board here. Stand near the board you \
+             want to post on.\r\n",
+        );
+        return;
+    }
     if board.locked {
         send_to(
             world,
@@ -459,6 +498,7 @@ pub(crate) async fn cmd_editpost(
         send_to(world, player, "Slots are 1-based.\r\n");
         return;
     }
+    let allowed_ids = local_board_ids(world, player);
     let board = match mud_db::boards::find_board_by_alias(pool, alias).await {
         Ok(Some(b)) => b,
         Ok(None) => {
@@ -470,6 +510,17 @@ pub(crate) async fn cmd_editpost(
             return;
         }
     };
+    if let Some(allowed) = allowed_ids.as_ref()
+        && !allowed.contains(&board.id)
+    {
+        send_to(
+            world,
+            player,
+            "There is no such board here. Stand near the board you \
+             want to edit on.\r\n",
+        );
+        return;
+    }
     if board.locked {
         send_to(
             world,
@@ -680,18 +731,80 @@ pub(crate) async fn cmd_boards(world: &mut World, player: Entity, pool: &mud_db:
 /// `board <alias> [#]`: list messages on a board, or read a specific
 /// one if a slot number is appended. Sticky messages float to the top
 /// of the listing and are flagged.
+/// Mortal scope gate. Builders+ get None (no restriction — they
+/// can query any board globally). Mortals get a Some set of board
+/// ids visible from their current room (via `BoardLink` items).
+/// Empty set means the mortal is in a room with no board at all
+/// — every alias-targeted board command refuses for them.
+fn local_board_ids(world: &mut World, player: Entity) -> Option<std::collections::HashSet<i32>> {
+    let is_staff = world
+        .get::<Account>(player)
+        .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder));
+    if is_staff {
+        return None;
+    }
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        return Some(std::collections::HashSet::new());
+    };
+    let mut q = world.query_filtered::<(&Located, &BoardLink), With<Item>>();
+    Some(
+        q.iter(world)
+            .filter(|(l, _)| l.0 == room)
+            .map(|(_, b)| b.0)
+            .collect(),
+    )
+}
+
+/// Return the alias of the (first) board in the player's current
+/// room, if any. Used to default `board` / `boards` (no args) to
+/// "this room's board" for mortals.
+fn in_room_board_alias(world: &mut World, player: Entity) -> Option<(i32, String)> {
+    let room = world.get::<Located>(player).map(|l| l.0)?;
+    let mut q = world.query_filtered::<(&Located, &BoardLink), With<Item>>();
+    let board_id = q
+        .iter(world)
+        .find(|(l, _)| l.0 == room)
+        .map(|(_, b)| b.0)?;
+    let catalog = world.get_resource::<BoardCatalog>()?;
+    catalog
+        .by_id
+        .get(&board_id)
+        .map(|b| (board_id, b.alias.clone()))
+}
+
 pub(crate) async fn cmd_board(
     world: &mut World,
     player: Entity,
     pool: &mud_db::sqlx::PgPool,
     args: &str,
 ) {
-    let mut parts = args.split_whitespace();
-    let Some(alias) = parts.next() else {
-        send_to(world, player, "Usage: board <alias> [#]\r\n");
-        return;
+    let trimmed = args.trim();
+    // No args / `board list` → default to the in-room board.
+    let resolved_args = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("list") {
+        if let Some((_, alias)) = in_room_board_alias(world, player) {
+            alias
+        } else {
+            send_to(
+                world,
+                player,
+                "There is no board here. Stand near a board to read it, \
+                 or use `boards` to see what's available.\r\n",
+            );
+            return;
+        }
+    } else {
+        trimmed.to_string()
     };
+    let mut parts = resolved_args.split_whitespace();
+    let alias = parts.next().unwrap_or("");
     let slot = parts.next().and_then(|s| s.parse::<usize>().ok());
+
+    // Mortal scope gate: builders+ can query any board by alias;
+    // mortals can only address boards whose `BoardLink` item is in
+    // their current room. Reading a board you can't physically see
+    // ("board mortal" from across the world) was the user complaint.
+    let allowed_ids = local_board_ids(world, player);
+
     let board = match mud_db::boards::find_board_by_alias(pool, alias).await {
         Ok(Some(b)) => b,
         Ok(None) => {
@@ -703,6 +816,19 @@ pub(crate) async fn cmd_board(
             return;
         }
     };
+
+    if let Some(allowed) = allowed_ids.as_ref()
+        && !allowed.contains(&board.id)
+    {
+        // Mortal targeted a board they can't physically see.
+        send_to(
+            world,
+            player,
+            "There is no such board here. Stand near the board you \
+             want to read from.\r\n",
+        );
+        return;
+    }
     let messages = match mud_db::boards::messages_for_board(pool, board.id).await {
         Ok(m) => m,
         Err(e) => {
