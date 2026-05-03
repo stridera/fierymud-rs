@@ -4170,7 +4170,21 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
 
     let mode = color_mode_for(world, player);
     let mut out = String::new();
-    out.push_str(&format!("\r\n{}\r\n", render_color_tags(&room_name, mode)));
+    // Append a `[peaceful]` tag to the room title when the room is
+    // marked `Room.is_peaceful` — combat is refused here, so a
+    // visible cue saves the player from typing `attack` and
+    // wondering why nothing happened.
+    let peaceful_tag =
+        if world.get::<mud_world::PeacefulRoom>(room).is_some() {
+            "  <green>[peaceful]</>"
+        } else {
+            ""
+        };
+    out.push_str(&format!(
+        "\r\n{}{}\r\n",
+        render_color_tags(&room_name, mode),
+        render_color_tags(peaceful_tag, mode),
+    ));
     // BRIEF flag suppresses the description — name/occupants/exits only.
     // CircleMUD-standard "brief mode".
     if !has_flag(world, player, PlayerFlag::Brief) && !room_desc.trim().is_empty() {
