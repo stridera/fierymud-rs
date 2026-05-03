@@ -3767,6 +3767,76 @@ pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
+inventory::submit! {
+    Command {
+        names: &["diagnose"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "diagnose [<target>]",
+            summary: "Verbose health readout for self or a target in your room.",
+            long: "With no arg, reports your own condition band (e.g. \
+                   `mortally wounded`), your raw HP / Stamina, and your \
+                   posture. With a target, reports their condition band \
+                   and posture only — exact numbers are private. Pair with \
+                   `glance` for a one-line summary or `score` for the full \
+                   sheet.",
+        },
+        run: cmd_diagnose,
+    }
+}
+
+/// `diagnose [<target>]`: descriptive HP readout. Mirrors the
+/// legacy C++ `diagnose` command — uses the same six-band
+/// `condition_label` `glance` does. Self target also surfaces raw
+/// HP / Stamina numbers; targets stay private (other players /
+/// mobs only get the descriptive band, no exact values).
+pub(crate) fn cmd_diagnose(world: &mut World, player: Entity, args: &str) {
+    let target_word = args.trim();
+    let (target, is_self) = if target_word.is_empty() {
+        (player, true)
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere; can't diagnose.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, target_word, located.0, player)
+        else {
+            send_to(
+                world,
+                player,
+                format!("You don't see '{target_word}' here.\r\n"),
+            );
+            return;
+        };
+        (t, t == player)
+    };
+    let cond = world
+        .get::<Health>(target)
+        .copied()
+        .map_or("looks fine", condition_label);
+    let posture = world
+        .get::<Posture>(target)
+        .map_or("standing", |p| p.0.label());
+    let mut out = String::from("\r\n");
+    if is_self {
+        out.push_str(&format!("You diagnose yourself:\r\n  You {cond}.\r\n"));
+        if let Some(hp) = world.get::<Health>(player).copied() {
+            out.push_str(&format!("  HP: {} / {}\r\n", hp.hp, hp.max));
+        }
+        if let Some(s) = world.get::<Stamina>(player).copied() {
+            out.push_str(&format!("  Stamina: {} / {}\r\n", s.current, s.max));
+        }
+        out.push_str(&format!("  You are currently {posture}.\r\n"));
+    } else {
+        let name = name_of(world, target);
+        out.push_str(&format!("You diagnose {name}:\r\n  {name} {cond}.\r\n"));
+        out.push_str(&format!("  {name} is currently {posture}.\r\n"));
+    }
+    send_rendered(world, player, &out);
+}
+
 /// One-line snapshot: name + posture + HP condition + current target.
 /// Useful for a quick teammate / enemy check without the wall of text
 /// from `examine`.
