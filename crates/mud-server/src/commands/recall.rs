@@ -35,7 +35,9 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
         send_to(
             world,
             player,
-            "You have no recall point set. Use `setrecall` somewhere to bind one.\r\n",
+            "You have no recall point set. Touch a touchstone room object \
+             with `touch <object>` to bind one. (Builders can use `setrecall` \
+             from any room.)\r\n",
         );
         return;
     };
