@@ -2239,7 +2239,45 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
         }
         send_to(world, player, out);
     } else {
-        send_to(world, player, format!("No help on '{topic}'.\r\n"));
+        // No exact match — surface visible commands whose primary
+        // or alias name starts with the typed prefix. Players who
+        // type "sl" usually want one of slay / sleep / slots; the
+        // suggestion list saves them a second `help` round-trip.
+        let mut suggestions: Vec<&'static str> = all_commands()
+            .filter(|cmd| visible(cmd, role, &perms))
+            .filter(|cmd| {
+                cmd.names
+                    .iter()
+                    .any(|n: &&'static str| n.starts_with(topic.as_str()))
+            })
+            .map(|cmd| cmd.names[0])
+            .collect();
+        suggestions.sort_unstable();
+        suggestions.dedup();
+        if suggestions.is_empty() {
+            send_to(world, player, format!("No help on '{topic}'.\r\n"));
+        } else {
+            const MAX_SUGGESTIONS: usize = 8;
+            let shown: Vec<&str> = suggestions
+                .iter()
+                .take(MAX_SUGGESTIONS)
+                .copied()
+                .collect();
+            let trailer = if suggestions.len() > MAX_SUGGESTIONS {
+                format!(" ({} more)", suggestions.len() - MAX_SUGGESTIONS)
+            } else {
+                String::new()
+            };
+            send_to(
+                world,
+                player,
+                format!(
+                    "No exact help for '{topic}'. Did you mean: {}{}?\r\n",
+                    shown.join(", "),
+                    trailer,
+                ),
+            );
+        }
     }
 }
 
