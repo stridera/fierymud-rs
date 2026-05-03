@@ -2691,6 +2691,7 @@ mod tests {
             practice_points: 3,
             achievements: (5, 47),
             title: Some("the Daring Adventurer"),
+            wimpy: Some(25),
         }
     }
 
@@ -2737,6 +2738,11 @@ mod tests {
         );
         // Age: 20 + 25 = 45 years; (25*3) % 12 = 3 months.
         assert!(out.contains("Age: 45 years, 3 months"), "age line: {out}");
+        // Wimpy threshold from the fixture.
+        assert!(
+            out.contains("Wimpy:  flee at HP < 25%"),
+            "wimpy line: {out}",
+        );
     }
 
     #[test]
@@ -4328,6 +4334,13 @@ pub(crate) struct ScoreData<'a> {
     /// resolve to ANSI rather than literal markup. `None` when
     /// the column is NULL or empty.
     title: Option<&'a str>,
+    /// Auto-flee threshold (1..=99) when `PlayerFlag::Wimpy` is
+    /// on; `None` when wimpy mode is off. Combat consults the same
+    /// state to decide when to break a fight, so showing it on
+    /// the score sheet mirrors the in-combat behavior. Off
+    /// suppresses the line entirely so a non-wimpy character
+    /// doesn't have a noisy "Wimpy: off" entry.
+    wimpy: Option<i32>,
 }
 
 #[derive(Clone, Copy)]
@@ -4417,6 +4430,11 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             "  Drunk:  {} / 100  ({})\r\n",
             d.drunkenness,
             drunk_band(d.drunkenness),
+        ));
+    }
+    if let Some(pct) = d.wimpy {
+        out.push_str(&format!(
+            "  Wimpy:  flee at HP < {pct}%\r\n",
         ));
     }
     if d.kill_total > 0 {
@@ -4729,6 +4747,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
             d.drunkenness,
             drunk_band(d.drunkenness),
         ));
+    }
+    if let Some(pct) = d.wimpy {
+        row(format!("Wimpy:     flee at HP < {pct}%"));
     }
     if d.kill_total > 0 {
         row(format!("Kills:     {}", d.kill_total));

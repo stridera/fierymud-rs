@@ -4332,6 +4332,19 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         .get::<Title>(player)
         .map(|t| t.0.clone())
         .filter(|s| !s.is_empty());
+    // Wimpy auto-flee threshold. Surfaced when `PlayerFlag::Wimpy`
+    // is set; combat reads the same state so this matches actual
+    // behavior. Default 25% applies when the flag is on but no
+    // explicit `WimpyThreshold` was set — same fallback combat
+    // uses (combat.rs:858).
+    let wimpy_pct: Option<i32> = world
+        .get::<PlayerFlags>(player)
+        .filter(|pf| pf.has(PlayerFlag::Wimpy))
+        .map(|_| {
+            world
+                .get::<mud_world::WimpyThreshold>(player)
+                .map_or(25, |w| w.0)
+        });
     let data = ScoreData {
         name: &name,
         hp,
@@ -4427,6 +4440,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             (unlocked, visible_total + unlocked_hidden)
         },
         title: title_owned.as_deref(),
+        wimpy: wimpy_pct,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
