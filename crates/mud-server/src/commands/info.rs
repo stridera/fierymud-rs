@@ -4300,6 +4300,20 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .map_or_else(String::new, |n| n.name.clone());
             render_color_tags(&raw, ColorMode::Strip)
         });
+    // Guard target. `Guarding(Entity)` means combat redirects
+    // swings aimed at the protected entity onto this player —
+    // worth a passive reminder so a guarder who set it long ago
+    // doesn't keep eating swings without realizing.
+    let guarding_name_owned: Option<String> = world
+        .get::<Guarding>(player)
+        .map(|g| g.0)
+        .filter(|target| world.get_entity(*target).is_ok())
+        .map(|target| {
+            let raw = world
+                .get::<Named>(target)
+                .map_or_else(String::new, |n| n.name.clone());
+            render_color_tags(&raw, ColorMode::Strip)
+        });
     // Equipment summary in canonical slot order. Same shape as
     // `cmd_equipment` but pre-flattened to (label, name) tuples
     // with color tags stripped — render layer just pads.
@@ -4514,6 +4528,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 let now = std::time::Instant::now();
                 c.ready_at.values().filter(|when| **when > now).count()
             }),
+        guarding_name: guarding_name_owned.as_deref(),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

@@ -2702,6 +2702,7 @@ mod tests {
             mount_name: None,
             house: Some((3, 1000, 17)),
             cooldowns_active: 2,
+            guarding_name: None,
         }
     }
 
@@ -2771,6 +2772,21 @@ mod tests {
             out.contains("Cooldowns: 2 abilities recharging"),
             "cooldowns line: {out}",
         );
+    }
+
+    #[test]
+    fn score_guarding_line_only_when_set() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = Vec::new();
+        let effects: Vec<String> = Vec::new();
+        let equipment: Vec<(&'static str, String)> = Vec::new();
+        let mut data =
+            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let off = super::render_score_standard(&data);
+        assert!(!off.contains("Guarding:"), "no guarding row: {off}");
+        data.guarding_name = Some("Samui");
+        let on = super::render_score_standard(&data);
+        assert!(on.contains("Guarding: Samui"), "guarding row: {on}");
     }
 
     #[test]
@@ -4499,6 +4515,13 @@ pub(crate) struct ScoreData<'a> {
     /// recharging right now" without typing `cooldowns`. `0`
     /// suppresses the line.
     cooldowns_active: usize,
+    /// Guard target name when the player is `Guarding(Entity)`
+    /// — combat redirects swings aimed at the target onto the
+    /// guarder. Color tags pre-stripped. `None` when not
+    /// guarding so the row is suppressed; a player who set
+    /// `guard <name>` an hour ago and forgot would otherwise
+    /// keep eating swings without any reminder.
+    guarding_name: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -4586,6 +4609,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(target) = d.fight_target {
         out.push_str(&format!("  Fighting: {target}\r\n"));
+    }
+    if let Some(target) = d.guarding_name {
+        out.push_str(&format!("  Guarding: {target}\r\n"));
     }
     if !d.flags.is_empty() {
         out.push_str(&format!("  Flags: {}\r\n", d.flags.join(", ")));
@@ -4933,6 +4959,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(target) = d.fight_target {
         row(format!("Fighting:  {target}"));
+    }
+    if let Some(target) = d.guarding_name {
+        row(format!("Guarding:  {target}"));
     }
     if !d.flags.is_empty() {
         row(format!("Flags:     {}", d.flags.join(", ")));
