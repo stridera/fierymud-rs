@@ -3897,6 +3897,11 @@ pub(crate) struct ScoreData<'a> {
     kill_total: i32,
     /// `(name, abbrev, rank)` from `ClanMembership` when present.
     clan: Option<(&'a str, &'a str, &'a str)>,
+    /// Per-circle spell slot summary as `(circle, ready, max)`. Empty
+    /// for non-spellcasters and for spellcasters who haven't reached
+    /// circle 1 yet. Score sheet renders one compact line; the full
+    /// "preparing" breakdown lives in `cmd_slots`.
+    slots: &'a [(i32, i32, i32)],
 }
 
 pub(crate) fn render_score_standard(d: &ScoreData) -> String {
@@ -3967,6 +3972,15 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some((name, abbrev, rank)) = d.clan {
         out.push_str(&format!("  Clan:   {name} [{abbrev}] ({rank})\r\n"));
+    }
+    if !d.slots.is_empty() {
+        let summary = d
+            .slots
+            .iter()
+            .map(|(circle, ready, max)| format!("{circle}:{ready}/{max}"))
+            .collect::<Vec<_>>()
+            .join("  ");
+        out.push_str(&format!("  Slots:  {summary}    (`slots` for prep details)\r\n"));
     }
     out
 }
@@ -4071,6 +4085,15 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some((name, abbrev, rank)) = d.clan {
         row(format!("Clan:      {name} [{abbrev}] ({rank})"));
+    }
+    if !d.slots.is_empty() {
+        let summary = d
+            .slots
+            .iter()
+            .map(|(circle, ready, max)| format!("{circle}:{ready}/{max}"))
+            .collect::<Vec<_>>()
+            .join("  ");
+        row(format!("Slots:     {summary}"));
     }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out

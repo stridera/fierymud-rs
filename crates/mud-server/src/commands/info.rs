@@ -3958,6 +3958,28 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             )
         });
     let core_stats = world.get::<CoreStats>(player).copied();
+    // Per-circle slot summary for spellcasters. Reads
+    // SpellSlotData (level + class → slot caps) and the player's
+    // MemorizedSpells (used vs ready). Empty for classless / non-
+    // spellcaster characters; the score renderer skips the line.
+    let slots: Vec<(i32, i32, i32)> = (|| {
+        let prof = world.get::<Profile>(player)?;
+        let class_id = prof.class_id?;
+        let level = prof.level;
+        let mem = world
+            .get::<mud_world::MemorizedSpells>(player)
+            .cloned()
+            .unwrap_or_default();
+        let caps = world
+            .resource::<mud_world::SpellSlotData>()
+            .slots_for(class_id, level);
+        Some(
+            caps.into_iter()
+                .map(|(circle, max)| (circle, mem.ready_in_circle(circle), max))
+                .collect(),
+        )
+    })()
+    .unwrap_or_default();
 
     let wealth = world.get::<Wealth>(player).map_or(0, |w| w.0);
     let bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
@@ -3998,6 +4020,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         clan: clan_owned
             .as_ref()
             .map(|(n, a, r)| (n.as_str(), a.as_str(), r.as_str())),
+        slots: &slots,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
