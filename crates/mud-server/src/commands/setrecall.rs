@@ -1,4 +1,8 @@
 //! `setrecall` — bind the current room as the player's recall point.
+//!
+//! Admin-only. Mortals reset their recall by interacting with a
+//! touchstone object placed in a designated room (see the `touch`
+//! command, pending content-side flagging of touchstone items).
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
@@ -9,14 +13,16 @@ use crate::commands::{Category, Command, Help, name_or, send_to, try_insert};
 inventory::submit! {
     Command {
         names: &["setrecall"],
-        min_role: UserRole::Player,
+        min_role: UserRole::Builder,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Admin,
         help: Help {
             usage: "setrecall",
-            summary: "Bind your recall point to the current room.",
-            long: "Saves the current room as your recall destination. \
-                   Persists across logins.",
+            summary: "Bind your recall point to the current room (admin).",
+            long: "Builder+. Saves the room you're standing in as \
+                   your recall destination. Persists across logins. \
+                   Mortals reset their recall via a touchstone item \
+                   (see `touch <object>`).",
         },
         run: cmd_setrecall,
     }
