@@ -7683,7 +7683,11 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
     ));
     out.push_str(&format!("  Type:      {:?}\r\n", p.r#type));
     out.push_str(&format!("  Weight:    {:.1}\r\n", p.weight));
-    out.push_str(&format!("  Level:     {}\r\n", p.level));
+    // Level 0 is the schema default — don't pad the readout with
+    // "Level: 0" when the proto carries no requirement.
+    if p.level > 0 {
+        out.push_str(&format!("  Level:     {}\r\n", p.level));
+    }
     if p.cost > 0
         && let Some(coin) = format_wealth(i64::from(p.cost))
     {
@@ -7694,9 +7698,19 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!("  Wear:      {}\r\n", labels.join(", ")));
     }
     if p.weapon_dice_num > 0 {
+        // Match compare's bonus formatting: positive bonus gets a
+        // "+", negative shows verbatim, zero hides. Keeps the line
+        // readable for "1d8" weapons that don't carry a flat bonus.
+        let bonus = match p.weapon_dice_bonus.cmp(&0) {
+            std::cmp::Ordering::Equal => String::new(),
+            std::cmp::Ordering::Greater => format!("+{}", p.weapon_dice_bonus),
+            std::cmp::Ordering::Less => format!("{}", p.weapon_dice_bonus),
+        };
         out.push_str(&format!(
-            "  Damage:    {}d{}+{}\r\n",
-            p.weapon_dice_num, p.weapon_dice_size, p.weapon_dice_bonus
+            "  Damage:    {}d{}{bonus}  (avg {})\r\n",
+            p.weapon_dice_num,
+            p.weapon_dice_size,
+            p.avg_damage(),
         ));
     }
     if let Some(liq) = &p.liquid {
