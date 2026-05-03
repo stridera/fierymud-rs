@@ -4370,7 +4370,14 @@ pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
     let mut parts = vec![d.name.to_string()];
     if let Some((level, class, race, _gender, xp)) = d.profile {
         parts.push(format!("L{level} {race}/{class}"));
-        parts.push(format!("xp:{xp}"));
+        // Show level progress as a percent rather than raw xp
+        // when available — far more useful in a one-line glance
+        // ("am I close to leveling?") than the absolute number.
+        if let Some(p) = d.level_progress {
+            parts.push(format!("xp:{}%", p.percent));
+        } else {
+            parts.push(format!("xp:{xp}"));
+        }
     }
     if let Some(hp) = d.hp {
         parts.push(format!("hp:{}/{}", hp.hp, hp.max));
@@ -4407,6 +4414,12 @@ pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
     }
     if let Some((_, abbrev, _)) = d.clan {
         parts.push(format!("clan:{abbrev}"));
+    }
+    if !d.active_effects.is_empty() {
+        parts.push(format!("eff:{}", d.active_effects.len()));
+    }
+    if d.practice_points > 0 {
+        parts.push(format!("prac:{}", d.practice_points));
     }
     format!("{}\r\n", parts.join("  "))
 }
