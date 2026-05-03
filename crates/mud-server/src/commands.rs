@@ -5759,10 +5759,20 @@ pub(crate) fn invoke_ability_with(
     // types (`status`, `modify`, ...) spawn an `EffectInstance` whose
     // duration the effect/regen ticks decrement.
     let caster_level = world.get::<Profile>(player).map_or(1, |p| p.level.max(1));
+    let known_entries: Option<usize> = world.get::<KnownAbilities>(player).map(|k| k.entries.len());
     let caster_skill = world
         .get::<KnownAbilities>(player)
         .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).map(|(_, p, _)| *p))
         .unwrap_or(0);
+    tracing::debug!(
+        ability_id = def.id,
+        ability_name = def.plain_name.as_str(),
+        caster_skill,
+        caster_level,
+        known_total = known_entries.unwrap_or(0),
+        has_known_component = known_entries.is_some(),
+        "invoke_ability formula context"
+    );
     let caster_weapon_damage = caster_weapon_damage(world, player);
     let caster_stats = world.get::<CoreStats>(player).copied().unwrap_or_default();
     let caster_hidden = i32::from(world.get::<Stealth>(player).is_some());
