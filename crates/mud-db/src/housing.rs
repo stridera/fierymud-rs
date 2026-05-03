@@ -264,6 +264,62 @@ pub async fn delete_house(pool: &PgPool, house_id: i32) -> sqlx::Result<u64> {
     Ok(res.rows_affected())
 }
 
+/// Insert a brand-new room into an existing house. Allocates the
+/// next free `local_index` (max + 1) and links it to `from_room_id`
+/// with a bidirectional pair of exits along `direction` /
+/// `opposite_direction`. Whole thing wraps in a transaction so a
+/// failure between the room insert and the exit insert leaves no
+/// orphan room. Returns the new room's `(id, local_index)`.
+pub async fn add_room(
+    pool: &PgPool,
+    house_id: i32,
+    from_room_id: i32,
+    direction: &str,
+    opposite: &str,
+    name: &str,
+    description: &str,
+) -> sqlx::Result<(i32, i32)> {
+    let mut tx = pool.begin().await?;
+    let next_local = sqlx::query!(
+        r#"
+        SELECT COALESCE(MAX(local_index), -1) + 1 AS "next!: i32"
+        FROM player_house_rooms
+        WHERE house_id = $1
+        "#,
+        house_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?
+    .next;
+    let new_room = sqlx::query!(
+        r#"
+        INSERT INTO player_house_rooms (house_id, local_index, name, description)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+        "#,
+        house_id,
+        next_local,
+        name,
+        description,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO player_house_exits (from_room_id, to_room_id, direction)
+        VALUES ($1, $2, $3::"Direction"), ($2, $1, $4::"Direction")
+        "#,
+    )
+    .bind(from_room_id)
+    .bind(new_room.id)
+    .bind(direction)
+    .bind(opposite)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((new_room.id, next_local))
+}
+
 /// Rename a house room (and optionally update its description).
 /// Either field can be passed as `None` to leave it untouched.
 pub async fn rename_room(
