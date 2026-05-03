@@ -4268,6 +4268,25 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .map_or((-1, -1), |k| (k.zone, k.id));
             (name, zone, id)
         });
+    // Bound recall destination — surfaces where `recall` would
+    // teleport. Same name-stripping treatment as location so the
+    // fancy box's padding stays consistent. Skipped entirely when
+    // the player hasn't touched a touchstone yet (the `recall`
+    // command itself nudges them toward one).
+    let recall_owned: Option<(String, i32, i32)> = world
+        .get::<RecallPoint>(player)
+        .map(|r| r.0)
+        .filter(|room| world.get_entity(*room).is_ok())
+        .map(|room| {
+            let raw = world
+                .get::<Named>(room)
+                .map_or_else(String::new, |n| n.name.clone());
+            let name = render_color_tags(&raw, ColorMode::Strip);
+            let (zone, id) = world
+                .get::<WorldKey>(room)
+                .map_or((-1, -1), |k| (k.zone, k.id));
+            (name, zone, id)
+        });
     // Equipment summary in canonical slot order. Same shape as
     // `cmd_equipment` but pre-flattened to (label, name) tuples
     // with color tags stripped — render layer just pads.
@@ -4467,6 +4486,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         wimpy: wimpy_pct,
         level_title: level_title_owned.as_deref(),
         next_level_gains,
+        recall: recall_owned
+            .as_ref()
+            .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

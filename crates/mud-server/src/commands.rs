@@ -2696,6 +2696,7 @@ mod tests {
             // for the staff path are local to specific tests.
             level_title: None,
             next_level_gains: Some((26, 18, 9)),
+            recall: Some(("The Inn", 30, 1)),
         }
     }
 
@@ -2751,6 +2752,10 @@ mod tests {
         assert!(
             out.contains("Next level (#26): +18 HP, +9 Stamina"),
             "next-level line: {out}",
+        );
+        assert!(
+            out.contains("Recall:   The Inn  [30:1]"),
+            "recall line: {out}",
         );
     }
 
@@ -4397,6 +4402,13 @@ pub(crate) struct ScoreData<'a> {
     /// the planning info lives next to the experience progress
     /// rather than only on the dedicated `level` command.
     next_level_gains: Option<(i32, i32, i32)>,
+    /// Bound recall destination as `(display_name, zone, id)`.
+    /// `None` when the player hasn't touched a touchstone yet —
+    /// the score sheet then quietly omits the line rather than
+    /// printing "Recall: none" boilerplate (the `recall` command
+    /// itself nudges the player toward `touch`). Display name has
+    /// color tags pre-stripped so the fancy box stays aligned.
+    recall: Option<(&'a str, i32, i32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -4534,6 +4546,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some((name, zone, id)) = d.location {
         out.push_str(&format!("  Location: {name}  [{zone}:{id}]\r\n"));
+    }
+    if let Some((name, zone, id)) = d.recall {
+        out.push_str(&format!("  Recall:   {name}  [{zone}:{id}]\r\n"));
     }
     if !d.equipment.is_empty() {
         out.push_str("  Equipment:\r\n");
@@ -4854,6 +4869,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some((name, zone, id)) = d.location {
         row(format!("Location:  {name}  [{zone}:{id}]"));
+    }
+    if let Some((name, zone, id)) = d.recall {
+        row(format!("Recall:    {name}  [{zone}:{id}]"));
     }
     if !d.equipment.is_empty() {
         row(String::from("Equipment:"));
