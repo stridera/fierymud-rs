@@ -2482,6 +2482,73 @@ mod tests {
             "effects on other entities are untouched"
         );
     }
+
+    // --- score-sheet helpers ---
+
+    #[test]
+    fn experience_for_level_floor_at_one() {
+        assert_eq!(super::experience_for_level(0), 0);
+        assert_eq!(super::experience_for_level(1), 0);
+    }
+
+    #[test]
+    fn experience_for_level_is_monotonic() {
+        let curve: Vec<i64> = (1..=20).map(super::experience_for_level).collect();
+        for window in curve.windows(2) {
+            assert!(window[0] <= window[1], "curve must be monotonic: {curve:?}");
+        }
+    }
+
+    #[test]
+    fn level_progress_capped_at_99() {
+        // level 100 = max; no progress shown.
+        assert!(super::level_progress_for(100, 1).is_none());
+        // level 0 = invalid; no progress shown.
+        assert!(super::level_progress_for(0, 1).is_none());
+    }
+
+    #[test]
+    fn level_progress_clamps_negative_xp_to_zero() {
+        // Death penalty can drive xp below the bracket floor —
+        // make sure the bar shows 0% rather than a negative
+        // percent or wraparound.
+        let p = super::level_progress_for(5, -100).expect("inside range");
+        assert_eq!(p.percent, 0);
+    }
+
+    #[test]
+    fn progress_bar_is_fixed_width() {
+        // Always 22 chars: '[' + 20 cells + ']'.
+        for pct in [0, 1, 50, 99, 100] {
+            assert_eq!(super::progress_bar(pct).len(), 22, "pct={pct}");
+        }
+    }
+
+    #[test]
+    fn drunk_band_thresholds() {
+        assert_eq!(super::drunk_band(0), "sober");
+        assert_eq!(super::drunk_band(1), "Buzzed");
+        assert_eq!(super::drunk_band(39), "Buzzed");
+        assert_eq!(super::drunk_band(40), "Tipsy");
+        assert_eq!(super::drunk_band(65), "Tipsy");
+        assert_eq!(super::drunk_band(66), "Very Drunk");
+        assert_eq!(super::drunk_band(79), "Very Drunk");
+        assert_eq!(super::drunk_band(80), "Blackout");
+        assert_eq!(super::drunk_band(100), "Blackout");
+    }
+
+    #[test]
+    fn encumbrance_band_thresholds() {
+        // Floor at 0/0 capacity returns the unburdened label.
+        assert_eq!(super::encumbrance_band(0.0, 0.0), "unburdened");
+        assert_eq!(super::encumbrance_band(0.0, 100.0), "unburdened");
+        assert_eq!(super::encumbrance_band(49.9, 100.0), "unburdened");
+        assert_eq!(super::encumbrance_band(50.0, 100.0), "burdened");
+        assert_eq!(super::encumbrance_band(75.0, 100.0), "encumbered");
+        assert_eq!(super::encumbrance_band(90.0, 100.0), "heavy");
+        assert_eq!(super::encumbrance_band(100.0, 100.0), "overloaded");
+        assert_eq!(super::encumbrance_band(150.0, 100.0), "overloaded");
+    }
 }
 
 /// Send the player's prompt template with variables substituted. Falls back
