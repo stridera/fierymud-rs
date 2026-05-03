@@ -8767,6 +8767,40 @@ fn cmd_value(world: &mut World, player: Entity, args: &str) {
     send_rendered(world, player, &msg);
 }
 
+/// Returns true (and lets the caller proceed) if a mob with the
+/// requested profession occupies the player's current room. Emits
+/// "You need a <kind> here to handle that." and returns false
+/// when none is present. Common gate for service interactions
+/// (deposit/withdraw, train, mailbox, rent).
+fn require_profession_in_room(
+    world: &mut World,
+    player: Entity,
+    profession: mud_db::enums::MobProfession,
+    kind: &str,
+) -> bool {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return false;
+    };
+    let present = {
+        let mut q = world.query_filtered::<(&Located, &WorldKey), With<Mob>>();
+        q.iter(world).any(|(l, k)| {
+            l.0 == located.0
+                && world
+                    .get_resource::<MobPrototypes>()
+                    .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+                    .is_some_and(|m| m.professions.contains(&profession))
+        })
+    };
+    if !present {
+        send_to(
+            world,
+            player,
+            format!("You need a {kind} here to handle that.\r\n").as_str(),
+        );
+    }
+    present
+}
+
 /// `deposit <amount>`: move on-hand copper into the bank. Refuses
 /// when the player doesn't have enough on hand. v1 is location-
 /// agnostic — any room works, since banker-mob detection isn't
@@ -8797,29 +8831,7 @@ fn bank_transfer(world: &mut World, player: Entity, args: &str, direction: &str)
             return;
         }
     };
-    // Require a banker mob in the same room. Looks up each mob's
-    // proto via WorldKey to find the MobProfession::Banker tag.
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let banker_present = {
-        let mut q = world.query_filtered::<(&Located, &WorldKey), With<Mob>>();
-        q.iter(world).any(|(l, k)| {
-            l.0 == located.0
-                && world
-                    .get_resource::<MobPrototypes>()
-                    .and_then(|p| p.by_key.get(&(k.zone, k.id)))
-                    .is_some_and(|m| {
-                        m.professions.contains(&mud_db::enums::MobProfession::Banker)
-                    })
-        })
-    };
-    if !banker_present {
-        send_to(
-            world,
-            player,
-            "You need a banker here to handle that.\r\n",
-        );
+    if !require_profession_in_room(world, player, mud_db::enums::MobProfession::Banker, "banker") {
         return;
     }
     let on_hand = world.get::<Wealth>(player).map_or(0, |w| w.0);
@@ -9068,6 +9080,18 @@ const TRAIN_STAT_CAP: i32 = 18;
 
 fn cmd_train(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim().to_ascii_lowercase();
+    // Stat-up requires a trainer mob; reading the stat list does
+    // not (so a no-arg `train` works as a self-check anywhere).
+    if !arg.is_empty()
+        && !require_profession_in_room(
+            world,
+            player,
+            mud_db::enums::MobProfession::Trainer,
+            "trainer",
+        )
+    {
+        return;
+    }
     let stats = world
         .get::<CoreStats>(player)
         .copied()
