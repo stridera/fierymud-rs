@@ -7079,7 +7079,7 @@ pub(crate) fn cmd_flags(world: &mut World, player: Entity, _args: &str) {
 
 /// Parse a direction word or its short alias to a Direction enum.
 /// Returns None for anything that doesn't match a movement direction.
-fn parse_direction(s: &str) -> Option<Direction> {
+pub(crate) fn parse_direction(s: &str) -> Option<Direction> {
     match s.to_ascii_lowercase().as_str() {
         "north" | "n" => Some(Direction::North),
         "south" | "s" => Some(Direction::South),
@@ -7360,7 +7360,7 @@ fn direction_order(d: mud_db::enums::Direction) -> u8 {
 /// `opposite(dir)` from the exit's `to` room). One-sided edits would
 /// drift over time as players walk through and re-open the same
 /// door from each side.
-fn flip_door_both_sides(world: &mut World, room: Entity, dir: Direction, new_state: ExitState) {
+pub(crate) fn flip_door_both_sides(world: &mut World, room: Entity, dir: Direction, new_state: ExitState) {
     let mut other_room: Option<Entity> = None;
     if let Some(mut exits) = world.get_mut::<Exits>(room)
         && let Some(ed) = exits.0.get_mut(&dir)
@@ -7424,113 +7424,6 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
 /// `unlock <direction>`: find a key item in inventory whose name or
 /// keyword matches the exit's `key` and flip Locked → Closed (still
 /// needs `open` afterward). Two-sided sync.
-/// `pick <direction>`: rogue lock-pick. Refuses if the exit isn't
-/// locked, lacks a keyhole, the player hasn't trained `PICK_LOCK`,
-/// or they're out of stamina. Costs 5 stamina either way; success
-/// flips Locked → Closed.
-pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
-    const STAMINA_COST: i32 = 5;
-    let arg = args.trim();
-    let Some(dir) = parse_direction(arg) else {
-        send_to(world, player, "Pick which way?\r\n");
-        return;
-    };
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let room = located.0;
-    let Some((state, key_req)) = world
-        .get::<Exits>(room)
-        .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key)))
-    else {
-        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
-        return;
-    };
-    if state != ExitState::Locked {
-        send_to(
-            world,
-            player,
-            format!("It's not locked {}.\r\n", direction_name(dir)),
-        );
-        return;
-    }
-    if key_req.is_none() {
-        send_to(
-            world,
-            player,
-            format!("There's no keyhole {}.\r\n", direction_name(dir)),
-        );
-        return;
-    }
-
-    // PICK_LOCK ability id 272.
-    let proficiency = world
-        .get::<KnownAbilities>(player)
-        .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == 272).copied())
-        .map(|(_, p, _)| p);
-    let Some(proficiency) = proficiency else {
-        send_to(
-            world,
-            player,
-            "You don't know how to pick locks.\r\n",
-        );
-        return;
-    };
-
-    let stamina_ok = world
-        .get::<Stamina>(player)
-        .is_some_and(|s| s.current >= STAMINA_COST);
-    if !stamina_ok {
-        send_to(
-            world,
-            player,
-            "You don't have the stamina for a steady hand.\r\n",
-        );
-        return;
-    }
-    if let Some(mut s) = world.get_mut::<Stamina>(player) {
-        s.current = (s.current - STAMINA_COST).max(0);
-    }
-
-    // d100 roll vs proficiency. Proficiency is 0–1000 in the schema;
-    // divide by 10 to get a 0–100 chance.
-    let roll = rand::random_range(1..=100);
-    let chance = (proficiency / 10).clamp(0, 100);
-    let player_name = name_of(world, player);
-    if roll <= chance {
-        flip_door_both_sides(world, room, dir, ExitState::Closed);
-        send_to(
-            world,
-            player,
-            format!(
-                "*click* The lock {} yields to your tools.\r\n",
-                direction_name(dir)
-            ),
-        );
-        broadcast_room_except_players_rendered(
-            world,
-            room,
-            &[player],
-            &format!("{player_name} picks the lock {}.\r\n", direction_name(dir)),
-        );
-    } else {
-        send_to(
-            world,
-            player,
-            format!(
-                "Your tools slip — the lock {} stays shut.\r\n",
-                direction_name(dir)
-            ),
-        );
-        broadcast_room_except_players_rendered(
-            world,
-            room,
-            &[player],
-            &format!("{player_name} fumbles with the lock {}.\r\n", direction_name(dir)),
-        );
-    }
-}
-
 pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Some(dir) = parse_direction(arg) else {
@@ -10021,69 +9914,6 @@ pub(crate) fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
 /// `cancel [<effect>]`: drop a non-permanent effect from yourself.
 /// Empty arg lists cancellable effects; named arg matches by
 /// case-insensitive substring on the effect's name.
-/// `abort`: stub for the legacy in-progress-cast / queued-spell
-/// mechanic — neither exists in this runtime today (casts resolve
-/// immediately, no queue), so the command's only job is to give a
-/// clearer-than-default response to `FieryMUD` veterans typing it.
-pub(crate) fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
-    send_to(
-        world,
-        player,
-        "You aren't casting anything. (Use `cancel <effect>` to drop an active buff.)\r\n",
-    );
-}
-
-pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
-    let needle = args.trim().to_ascii_lowercase();
-    let cancellable: Vec<(Entity, String, i32)> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, inst, a)| a.0 == player && inst.remaining_secs >= 0)
-            .map(|(e, inst, _)| (e, inst.name.clone(), inst.remaining_secs))
-            .collect()
-    };
-    if cancellable.is_empty() {
-        send_to(
-            world,
-            player,
-            "You have no effects you can cancel.\r\n",
-        );
-        return;
-    }
-    if needle.is_empty() {
-        let mut out = format!("\r\n{} cancellable effect(s):\r\n", cancellable.len());
-        for (_, name, remaining) in &cancellable {
-            out.push_str(&format!("  {name} ({remaining}s)\r\n"));
-        }
-        out.push_str("\r\nUse `cancel <name>` to drop one.\r\n");
-        send_to(world, player, out);
-        return;
-    }
-    let target = cancellable
-        .iter()
-        .find(|(_, name, _)| name.to_ascii_lowercase().contains(&needle))
-        .map(|(e, _, _)| *e);
-    let Some(target_effect) = target else {
-        send_to(
-            world,
-            player,
-            format!("No cancellable effect matching '{needle}' on you.\r\n"),
-        );
-        return;
-    };
-    let removed_name = world
-        .get::<EffectInstance>(target_effect)
-        .map_or_else(|| "?".to_string(), |i| i.name.clone());
-    if let Ok(e) = world.get_entity_mut(target_effect) {
-        e.despawn();
-    }
-    send_to(
-        world,
-        player,
-        format!("You cancel {removed_name}.\r\n"),
-    );
-}
-
 pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     // Snapshot effects on the player; pull the optional ModifyDelta
     // companion in the same query so the renderer can show
@@ -10973,72 +10803,9 @@ pub(crate) fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-/// `study <spell>`: permanently add a spell to the player's
-/// `KnownAbilities` at proficiency=1, gated on the spell being on
-/// the player's class list. Persisted to `CharacterAbilities` on
-/// disconnect.
-pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
-    use mud_world::SpellSlotData;
-    let Some(profile) = world.get::<Profile>(player).cloned() else {
-        send_to(world, player, "You have no profile.\r\n");
-        return;
-    };
-    let Some(class_id) = profile.class_id else {
-        send_to(world, player, "You have no class.\r\n");
-        return;
-    };
-    let key = args.trim().to_ascii_lowercase();
-    if key.is_empty() {
-        send_to(world, player, "Study what?\r\n");
-        return;
-    }
-    let Some(def) = world.resource::<AbilityCatalog>().by_name.get(&key).cloned() else {
-        send_to(world, player, format!("'{key}' isn't a known ability.\r\n"));
-        return;
-    };
-    if !world
-        .resource::<SpellSlotData>()
-        .ability_circle
-        .contains_key(&(class_id, def.id))
-    {
-        send_to(
-            world,
-            player,
-            format!("{} isn't on your class's list.\r\n", def.plain_name),
-        );
-        return;
-    }
-    if let Some(known) = world.get::<KnownAbilities>(player)
-        && known.has_any(def.id)
-    {
-        send_to(
-            world,
-            player,
-            format!("You already know {}.\r\n", def.plain_name),
-        );
-        return;
-    }
-    if let Some(mut known) = world.get_mut::<KnownAbilities>(player) {
-        known.entries.push((def.id, 1, true));
-        known.entries.sort_by_key(|(id, _, _)| *id);
-    } else {
-        world.entity_mut(player).insert(KnownAbilities {
-            entries: vec![(def.id, 1, true)],
-        });
-    }
-    send_to(
-        world,
-        player,
-        format!(
-            "You commit {} to memory. (proficiency 1)\r\n",
-            def.plain_name
-        ),
-    );
-}
-
 /// Resolve a spell name to (`ability_id`, circle) for the player's
 /// class. Returns Err with a player-facing message on failure.
-fn resolve_spell_for_class(
+pub(crate) fn resolve_spell_for_class(
     world: &World,
     class_id: i32,
     name: &str,
@@ -11064,128 +10831,6 @@ fn resolve_spell_for_class(
         ));
     };
     Ok((def.id, circle))
-}
-
-/// `memorize <spell>`: prepare a spell into one of your circle slots.
-pub(crate) fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
-    use mud_world::{MemorizedSpells, SpellSlotData};
-    let Some(profile) = world.get::<Profile>(player).cloned() else {
-        send_to(world, player, "You have no profile.\r\n");
-        return;
-    };
-    let Some(class_id) = profile.class_id else {
-        send_to(world, player, "You have no class.\r\n");
-        return;
-    };
-    let (ability_id, circle) = match resolve_spell_for_class(world, class_id, args) {
-        Ok(t) => t,
-        Err(e) => {
-            send_to(world, player, format!("{e}\r\n"));
-            return;
-        }
-    };
-    let max = world
-        .resource::<SpellSlotData>()
-        .progression
-        .get(&(profile.level, circle))
-        .copied()
-        .unwrap_or(0);
-    if max <= 0 {
-        send_to(
-            world,
-            player,
-            format!("You can't memorize circle {circle} spells yet.\r\n"),
-        );
-        return;
-    }
-    let used = world
-        .get::<MemorizedSpells>(player)
-        .map_or(0, |m| m.used_in_circle(circle));
-    if used >= max {
-        send_to(
-            world,
-            player,
-            format!("All circle {circle} slots ({used}/{max}) are already prepared.\r\n"),
-        );
-        return;
-    }
-    let plain_name = world
-        .resource::<AbilityCatalog>()
-        .by_name
-        .values()
-        .find(|d| d.id == ability_id)
-        .map_or_else(String::new, |d| d.plain_name.clone());
-    let prep_secs = (circle * 5).max(5); // default 5s/circle until Ability.memorization_time is seeded
-    let entry = mud_world::MemEntry {
-        ability_id,
-        circle,
-        ready: false,
-        prep_secs_remaining: prep_secs,
-    };
-    if let Some(mut mem) = world.get_mut::<MemorizedSpells>(player) {
-        mem.entries.push(entry);
-    } else {
-        world
-            .entity_mut(player)
-            .insert(MemorizedSpells { entries: vec![entry] });
-    }
-    send_to(
-        world,
-        player,
-        format!(
-            "You begin memorizing {plain_name} (circle {circle}, ~{prep_secs}s while resting).\r\n"
-        ),
-    );
-}
-
-/// `forget <spell>`: drop the first matching memorized spell.
-pub(crate) fn cmd_forget(world: &mut World, player: Entity, args: &str) {
-    use mud_world::MemorizedSpells;
-    let Some(profile) = world.get::<Profile>(player).cloned() else {
-        return;
-    };
-    let Some(class_id) = profile.class_id else {
-        send_to(world, player, "You have no class.\r\n");
-        return;
-    };
-    let (ability_id, _) = match resolve_spell_for_class(world, class_id, args) {
-        Ok(t) => t,
-        Err(e) => {
-            send_to(world, player, format!("{e}\r\n"));
-            return;
-        }
-    };
-    let plain_name = world
-        .resource::<AbilityCatalog>()
-        .by_name
-        .values()
-        .find(|d| d.id == ability_id)
-        .map_or_else(String::new, |d| d.plain_name.clone());
-    let removed = if let Some(mut mem) = world.get_mut::<MemorizedSpells>(player) {
-        // Prefer dropping a not-yet-ready entry (cheaper to lose).
-        let idx = mem
-            .entries
-            .iter()
-            .position(|e| e.ability_id == ability_id && !e.ready)
-            .or_else(|| mem.entries.iter().position(|e| e.ability_id == ability_id));
-        if let Some(idx) = idx {
-            mem.entries.remove(idx);
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    if removed {
-        send_to(world, player, format!("You forget {plain_name}.\r\n"));
-    } else {
-        send_to(
-            world,
-            player,
-            format!("{plain_name} isn't currently memorized.\r\n"),
-        );
-    }
 }
 
 pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
@@ -11331,29 +10976,12 @@ pub(crate) fn cmd_chants(world: &mut World, player: Entity, args: &str) {
     cmd_abilities_kind(world, player, args, mud_db::abilities::AbilityKind::Chant);
 }
 
-pub(crate) fn cmd_cast(world: &mut World, player: Entity, args: &str) {
-    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Spell, "cast");
-}
 
-pub(crate) fn cmd_chant(world: &mut World, player: Entity, args: &str) {
-    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Chant, "chant");
-}
 
-pub(crate) fn cmd_perform(world: &mut World, player: Entity, args: &str) {
-    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Song, "perform");
-}
 
 /// `skill <name> [<target>]` — Phase A of the data-driven migration.
 /// Sibling to `cast`/`chant`/`perform`: looks up an `Ability` row of
 /// kind SKILL by name and invokes it through the same `invoke_ability`
-/// pipeline (effects, restrictions, posture gate, target resolution).
-/// Once Phase B effect-type consumers land, this dispatcher will be
-/// the entry point for any combat skill that's just data — gouge,
-/// stomp, berserk, etc. all migrate to plain Ability rows.
-pub(crate) fn cmd_skill(world: &mut World, player: Entity, args: &str) {
-    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Skill, "use");
-}
-
 /// Default duration when an ability spawns an `EffectInstance` from one
 /// of its `AbilityEffect` rows. Real per-effect duration lives in
 /// `override_params` / `Effect.duration`, but the runtime doesn't yet
@@ -11368,7 +10996,7 @@ const APPLIED_EFFECT_DURATION_SECS: i32 = 60;
 /// still a follow-up.
 // Linear top-to-bottom flow with a few inline metadata blocks; splitting
 // into helpers would just hide the ordering.
-fn invoke_ability(
+pub(crate) fn invoke_ability(
     world: &mut World,
     player: Entity,
     args: &str,
