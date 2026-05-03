@@ -982,6 +982,34 @@ fn world_from_lua<R>(lua: &Lua, f: impl FnOnce(&World) -> R) -> mlua::Result<R> 
     Ok(f(world))
 }
 
+/// Resolve an entity's gender (player Profile or `MobProto` fall-through)
+/// and pass it to the renderer to produce the right pronoun. Used by
+/// `actor.possessive` / `subjective` / `objective` plus their legacy
+/// `hisher` / `heshe` / `himher` aliases. The closure is fed the
+/// lower-case gender string (`male` / `female` / `neutral` /
+/// `non_binary` / `""`); it picks the gendered form and returns it
+/// owned, since each pronoun set has different defaults.
+fn pronoun_for(
+    entity: Entity,
+    lua: &Lua,
+    pick: fn(&str) -> &'static str,
+) -> mlua::Result<String> {
+    world_from_lua(lua, |w| {
+        let gender = if let Some(p) = w.get::<Profile>(entity) {
+            p.gender.clone()
+        } else if let Some(wk) = w.get::<WorldKey>(entity) {
+            w.resource::<MobPrototypes>()
+                .by_key
+                .get(&(wk.zone, wk.id))
+                .map(|p| p.gender.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        pick(&gender).to_string()
+    })
+}
+
 fn world_mut_from_lua<R>(lua: &Lua, f: impl FnOnce(&mut World) -> R) -> mlua::Result<R> {
     let ptr = lua
         .app_data_ref::<WorldPtr>()
@@ -1739,25 +1767,29 @@ impl UserData for LuaActor {
                     // now that the column is plumbed. Anything else
                     // (or unrecognized gender like `non_binary` /
                     // `neutral`) falls through to "its".
-                    "possessive" => {
-                        let s = world_from_lua(lua, |w| {
-                            let gender = if let Some(p) = w.get::<Profile>(this.entity) {
-                                p.gender.clone()
-                            } else if let Some(wk) = w.get::<WorldKey>(this.entity) {
-                                w.resource::<MobPrototypes>()
-                                    .by_key
-                                    .get(&(wk.zone, wk.id))
-                                    .map(|p| p.gender.clone())
-                                    .unwrap_or_default()
-                            } else {
-                                String::new()
-                            };
-                            match gender.as_str() {
-                                "male" => "his",
-                                "female" => "her",
-                                _ => "its",
-                            }
-                            .to_string()
+                    "possessive" | "hisher" => {
+                        let s = pronoun_for(this.entity, lua, |g| match g {
+                            "male" => "his",
+                            "female" => "her",
+                            _ => "its",
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    // 2 corpus refs — subjective gender pronoun.
+                    "subjective" | "heshe" => {
+                        let s = pronoun_for(this.entity, lua, |g| match g {
+                            "male" => "he",
+                            "female" => "she",
+                            _ => "it",
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    // 2 corpus refs — objective gender pronoun.
+                    "objective" | "himher" => {
+                        let s = pronoun_for(this.entity, lua, |g| match g {
+                            "male" => "him",
+                            "female" => "her",
+                            _ => "it",
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
