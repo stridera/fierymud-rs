@@ -19402,18 +19402,58 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-/// Sync stub: builds the recipient's outbound + clan id, then
-/// dispatches an async task that does the joined DB read and
-/// renders the listing back through the outbound channel.
-fn cmd_clan_stub(world: &mut World, player: Entity, _args: &str) {
-    let Some((clan_id, name, abbrev, motd_present)) = world
+/// `clan` (no args) shows the readout. `clan motd <text>` lets
+/// the LEADER (or empty text to clear) update their clan's
+/// MOTD; OFFICER+ can also set it. Anything else falls back to
+/// the readout.
+fn cmd_clan_stub(world: &mut World, player: Entity, args: &str) {
+    let Some((clan_id, name, abbrev, rank)) = world
         .get::<mud_world::ClanMembership>(player)
-        .map(|c| (c.clan_id, c.clan_name.clone(), c.clan_abbrev.clone(), false))
+        .map(|c| {
+            (
+                c.clan_id,
+                c.clan_name.clone(),
+                c.clan_abbrev.clone(),
+                c.rank.clone(),
+            )
+        })
     else {
         send_to(world, player, "You aren't in a clan.\r\n");
         return;
     };
-    let _ = motd_present;
+    let trimmed = args.trim();
+    if let Some(rest) = trimmed.strip_prefix("motd") {
+        if !matches!(rank.as_str(), "LEADER" | "OFFICER") {
+            send_to(
+                world,
+                player,
+                "Only clan leaders / officers can set the MOTD.\r\n",
+            );
+            return;
+        }
+        let body = rest.trim().to_string();
+        let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+            send_to(world, player, "Database unavailable.\r\n");
+            return;
+        };
+        let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+        let Some(out) = outbound else { return };
+        let abbrev_for_msg = abbrev.clone();
+        tokio::spawn(async move {
+            let new_motd = if body.is_empty() { None } else { Some(body.as_str()) };
+            match mud_db::clans::set_motd(&pool, clan_id, new_motd).await {
+                Ok(_) => {
+                    let _ = out.send(
+                        format!("MOTD updated on {abbrev_for_msg}.\r\n").into_bytes(),
+                    );
+                }
+                Err(e) => {
+                    let _ = out.send(format!("MOTD set failed: {e}\r\n").into_bytes());
+                }
+            }
+        });
+        return;
+    }
     let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
     let pool = world.get_resource::<DbPool>().map(|p| p.0.clone());
     // Snapshot which members are online so the roster line gets
