@@ -16,7 +16,7 @@ pub use components::{
     MemorizedSpells,
     Mob, MobBehaviors, ModifyDelta, Mountable, Mounted, Named, Online, Player, PlayerFlags, Posture,
     PostureKind, Profile, Prompt, RecallPoint, RiddenBy, Room, RoomSector, Shopkeeper, SkillPoints,
-    RevealedExits, Slot, Stamina, Stealth, Stunned, TellLog, Thirst, Title, UiStyle, Wealth, WearableIn,
+    PeacefulRoom, RevealedExits, Slot, Stamina, Stealth, Stunned, TellLog, Thirst, Title, UiStyle, Wealth, WearableIn,
     WimpyThreshold,
     WorldKey, Zone, ZoneClimate, ZoneVisits,
 };

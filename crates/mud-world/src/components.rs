@@ -484,6 +484,14 @@ pub struct RevealedExits {
     pub set: std::collections::HashSet<(Entity, mud_db::enums::Direction)>,
 }
 
+/// Marker on rooms with `Room.is_peaceful = true`. Combat
+/// refuses any engage attempt against another player or mob in
+/// a peaceful room (`attack` / `kill` / hostile spell targeting
+/// / `assist` aiming at a target with no Fighting). Loaded once
+/// at startup; admin re-flag would need a reload pass.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PeacefulRoom;
+
 /// Per-item finite charges for `ObjectAbilities`-bound items
 /// (wands, staves). `-1` means unlimited (never decremented).
 /// `0` means depleted — the item should despawn or refuse to

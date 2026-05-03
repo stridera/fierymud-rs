@@ -12,6 +12,10 @@ pub struct Room {
     pub sector: Sector,
     pub base_light_level: i32,
     pub capacity: i32,
+    /// Schema's `is_peaceful` flag — combat is refused in these
+    /// rooms (sanctuaries, shop interiors, quest hubs). Loaded
+    /// into a `PeacefulRoom` marker on the spawned room entity.
+    pub is_peaceful: bool,
 }
 
 pub async fn list_rooms(pool: &PgPool) -> sqlx::Result<Vec<Room>> {
@@ -25,7 +29,8 @@ pub async fn list_rooms(pool: &PgPool) -> sqlx::Result<Vec<Room>> {
             room_description,
             sector AS "sector: Sector",
             base_light_level,
-            capacity
+            capacity,
+            is_peaceful
         FROM "Room"
         WHERE deleted_at IS NULL
         ORDER BY zone_id, id

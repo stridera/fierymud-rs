@@ -761,6 +761,19 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         return;
     };
 
+    // PeacefulRoom gate — `Room.is_peaceful` marks sanctuaries /
+    // shop interiors / quest hubs where combat is refused outright.
+    // Catches both PvP and PvE engage attempts before any state
+    // mutates (no Fighting set, no stamina drained).
+    if world.get::<mud_world::PeacefulRoom>(located.0).is_some() {
+        send_to(
+            world,
+            player,
+            "A peaceful aura fills this place — violence simply won't happen here.\r\n",
+        );
+        return;
+    }
+
     // Peaceful mob gate — `MobBehavior::Peaceful` mobs refuse to be
     // attacked. Mirrors the legacy aura that quest-givers and
     // shopkeepers tend to have so a misclick doesn't aggro a

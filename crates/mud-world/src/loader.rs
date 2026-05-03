@@ -122,6 +122,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 Exits::default(),
             ))
             .id();
+        if r.is_peaceful {
+            world.entity_mut(entity).insert(crate::PeacefulRoom);
+        }
         room_index.insert((r.zone_id, r.id), entity);
     }
     stats.rooms = room_index.len();
