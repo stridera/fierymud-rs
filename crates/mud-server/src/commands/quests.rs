@@ -13,6 +13,22 @@ use mud_world::*;
 use crate::commands::*;
 
 inventory::submit! {
+    AsyncCommand {
+        dispatch: |world, player, pool, head, args| match head {
+            "quests" | "qstat" | "qlist" => Some(Box::pin(cmd_quests(world, player, pool))),
+            "abandon" => Some(Box::pin(cmd_abandon(world, player, pool, args))),
+            "questinfo" => Some(Box::pin(cmd_questinfo(world, player, pool, args))),
+            "innate" => Some(Box::pin(cmd_innate(world, player, pool))),
+            "qload" => Some(Box::pin(cmd_qload(world, player, pool, args))),
+            "qaccept" => Some(Box::pin(cmd_qaccept(world, player, pool, args))),
+            "qgive" => Some(Box::pin(cmd_qgive(world, player, pool, args))),
+            "qcomplete" => Some(Box::pin(cmd_qcomplete(world, player, pool, args))),
+            _ => None,
+        },
+    }
+}
+
+inventory::submit! {
     Command {
         names: &["quests", "qstat", "qlist"],
         min_role: UserRole::Player,

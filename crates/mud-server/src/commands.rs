@@ -27,7 +27,7 @@ use mud_world::{
     Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, Exits, Fighting,
     Follower, Frozen, Health, Item, Keywords, KnownAbilities, LastInputAt, Located, LoggedInAt,
     Mob, MobPrototypes, Named, ObjectPrototypes, Player, PlayerFlags, Posture,
-    PostureKind, Profile, Prompt, BankWealth, BoardDraft, BoardLink, MailDraft,
+    PostureKind, Profile, Prompt, BankWealth, BoardDraft, MailDraft,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, Wealth,
     WearableIn, WorldKey, WorldKeyIndex,
 };
@@ -217,9 +217,33 @@ pub struct Command {
 
 // Distributed-registration entry point. Anywhere in the binary
 // can `inventory::submit! { Command { ... } }` and the entry
-// will land in `inventory::iter::<Command>()` at runtime. Used
-// alongside the static `COMMANDS` array — see `all_commands()`.
+// will land in `inventory::iter::<Command>()` at runtime.
 inventory::collect!(Command);
+
+/// Boxed-future return type for `AsyncDispatchFn`. The dispatcher
+/// is single-threaded (`current_thread` runtime), so futures don't
+/// need `Send`.
+pub type DispatchFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>;
+
+/// Per-file async-command dispatch hook. The function inspects
+/// the lowercase command head + args; if its module owns this
+/// command, it returns `Some(Box::pin(handler(...)))`; otherwise
+/// `None` so the dispatcher tries the next registration. This is
+/// the async analogue of `inventory::submit!(Command { ... })` —
+/// adding a new async command means one file edit.
+pub type AsyncDispatchFn = for<'a> fn(
+    world: &'a mut World,
+    player: Entity,
+    pool: &'a mud_db::sqlx::PgPool,
+    head: &'a str,
+    args: &'a str,
+) -> Option<DispatchFuture<'a>>;
+
+pub struct AsyncCommand {
+    pub dispatch: AsyncDispatchFn,
+}
+
+inventory::collect!(AsyncCommand);
 
 // Migrated commands — each lives in its own file under
 // `commands/` and registers itself via `inventory::submit!`.
@@ -237,10 +261,7 @@ mod admin_world;
 mod balance;
 #[path = "commands/boards.rs"]
 mod boards;
-pub(crate) use boards::{
-    cmd_board, cmd_boards, cmd_delpost, cmd_editpost, cmd_look_board, cmd_post,
-    cmd_read_board_msg, compose_board_step,
-};
+pub(crate) use boards::compose_board_step;
 #[path = "commands/channels.rs"]
 mod channels;
 #[path = "commands/clan_chat.rs"]
@@ -257,17 +278,11 @@ mod info;
 pub(crate) use info::cmd_look;
 #[path = "commands/mail.rs"]
 mod mail;
-pub(crate) use mail::{
-    cmd_delmail, cmd_mail, cmd_mail_stub, cmd_mailbox, cmd_readmail, compose_mail_step,
-};
+pub(crate) use mail::{cmd_mail_stub, compose_mail_step};
 #[path = "commands/movement_directions.rs"]
 mod movement_directions;
 #[path = "commands/quests.rs"]
 mod quests;
-pub(crate) use quests::{
-    cmd_abandon, cmd_innate, cmd_qaccept, cmd_qcomplete, cmd_qgive, cmd_qload, cmd_questinfo,
-    cmd_quests,
-};
 #[path = "commands/recall.rs"]
 mod recall;
 #[path = "commands/room_chat.rs"]
@@ -418,123 +433,18 @@ pub async fn try_dispatch_async(
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("").to_ascii_lowercase();
     let args = parts.next().unwrap_or("").trim();
-    match head.as_str() {
-        "mail" => {
-            cmd_mail(world, player, pool, args).await;
-            true
+
+    // Iterate every distributed `AsyncCommand`. The first one whose
+    // dispatch fn returns `Some(future)` for this `head` claims the
+    // line. Per-file modules submit AsyncCommand records the same
+    // way they submit sync `Command` records — `inventory::submit!`.
+    for cmd in inventory::iter::<AsyncCommand>() {
+        if let Some(fut) = (cmd.dispatch)(world, player, pool, &head, args) {
+            fut.await;
+            return true;
         }
-        "boards" => {
-            cmd_boards(world, player, pool).await;
-            true
-        }
-        "quests" | "qstat" | "qlist" => {
-            cmd_quests(world, player, pool).await;
-            true
-        }
-        "abandon" => {
-            cmd_abandon(world, player, pool, args).await;
-            true
-        }
-        "questinfo" => {
-            cmd_questinfo(world, player, pool, args).await;
-            true
-        }
-        "innate" => {
-            cmd_innate(world, player, pool).await;
-            true
-        }
-        "qload" => {
-            cmd_qload(world, player, pool, args).await;
-            true
-        }
-        "qaccept" => {
-            cmd_qaccept(world, player, pool, args).await;
-            true
-        }
-        "qgive" => {
-            cmd_qgive(world, player, pool, args).await;
-            true
-        }
-        "qcomplete" => {
-            cmd_qcomplete(world, player, pool, args).await;
-            true
-        }
-        // Numeric `read <#>` while standing near a board → render
-        // that board's message body. Non-numeric `read <item>`
-        // falls through to the sync handler that looks at item
-        // Description.
-        "read" if args.trim().parse::<usize>().is_ok() => {
-            let target_room = world.get::<Located>(player).map(|l| l.0);
-            let board_id_in_room = target_room.and_then(|room| {
-                let mut q = world
-                    .query_filtered::<(&Located, &BoardLink), With<Item>>();
-                q.iter(world)
-                    .find(|(l, _)| l.0 == room)
-                    .map(|(_, b)| b.0)
-            });
-            if let Some(board_id) = board_id_in_room {
-                cmd_read_board_msg(world, player, pool, board_id, args).await;
-                true
-            } else {
-                false
-            }
-        }
-        // `look <keyword>` / `examine <keyword>` where the keyword
-        // resolves to a BOARD-tagged item in the room → render the
-        // board's full listing inline. Falls through when no such
-        // item is matched, so plain look/examine on non-board
-        // targets goes through the sync handler.
-        "look" | "examine" | "exa" => {
-            let target_room = world.get::<Located>(player).map(|l| l.0);
-            let needle = args.trim().to_ascii_lowercase();
-            let board_id = target_room.and_then(|room| {
-                let mut q = world
-                    .query_filtered::<(&Located, &Named, Option<&Keywords>, &BoardLink), With<Item>>();
-                q.iter(world)
-                    .find(|(l, n, kw, _)| {
-                        l.0 == room && (needle.is_empty() || matches(&needle, n, *kw))
-                    })
-                    .map(|(_, _, _, b)| b.0)
-            });
-            if !needle.is_empty()
-                && let Some(board_id) = board_id
-            {
-                cmd_look_board(world, player, pool, board_id).await;
-                true
-            } else {
-                false
-            }
-        }
-        "board" => {
-            cmd_board(world, player, pool, args).await;
-            true
-        }
-        "post" => {
-            cmd_post(world, player, pool, args).await;
-            true
-        }
-        "editpost" => {
-            cmd_editpost(world, player, pool, args).await;
-            true
-        }
-        "delpost" => {
-            cmd_delpost(world, player, pool, args).await;
-            true
-        }
-        "mailbox" | "mailboxes" => {
-            cmd_mailbox(world, player, pool).await;
-            true
-        }
-        "readmail" => {
-            cmd_readmail(world, player, pool, args).await;
-            true
-        }
-        "delmail" => {
-            cmd_delmail(world, player, pool, args).await;
-            true
-        }
-        _ => false,
     }
+    false
 }
 
 /// State summary of one composition step — needed because we have to

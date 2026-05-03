@@ -13,6 +13,18 @@ use mud_world::*;
 use crate::commands::*;
 
 inventory::submit! {
+    AsyncCommand {
+        dispatch: |world, player, pool, head, args| match head {
+            "mail" => Some(Box::pin(cmd_mail(world, player, pool, args))),
+            "mailbox" | "mailboxes" => Some(Box::pin(cmd_mailbox(world, player, pool))),
+            "readmail" => Some(Box::pin(cmd_readmail(world, player, pool, args))),
+            "delmail" => Some(Box::pin(cmd_delmail(world, player, pool, args))),
+            _ => None,
+        },
+    }
+}
+
+inventory::submit! {
     Command {
         names: &["mail"],
         min_role: UserRole::Player,

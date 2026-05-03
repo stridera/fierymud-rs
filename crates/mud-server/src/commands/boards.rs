@@ -5,11 +5,56 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::wildcard_imports)]
 
-use bevy_ecs::prelude::{Entity, World};
+use bevy_ecs::prelude::{Entity, With, World};
 use mud_db::enums::UserRole;
 use mud_world::*;
 
 use crate::commands::*;
+
+inventory::submit! {
+    AsyncCommand {
+        dispatch: |world, player, pool, head, args| match head {
+            "boards" => Some(Box::pin(cmd_boards(world, player, pool))),
+            "board" => Some(Box::pin(cmd_board(world, player, pool, args))),
+            "post" => Some(Box::pin(cmd_post(world, player, pool, args))),
+            "editpost" => Some(Box::pin(cmd_editpost(world, player, pool, args))),
+            "delpost" => Some(Box::pin(cmd_delpost(world, player, pool, args))),
+            // Numeric `read <#>` while standing near a board → render
+            // that message body. Non-numeric `read` falls through to
+            // the sync handler.
+            "read" if args.trim().parse::<usize>().is_ok() => {
+                let target_room = world.get::<Located>(player).map(|l| l.0);
+                let board_id = target_room.and_then(|room| {
+                    let mut q = world.query_filtered::<(&Located, &BoardLink), With<Item>>();
+                    q.iter(world).find(|(l, _)| l.0 == room).map(|(_, b)| b.0)
+                })?;
+                Some(Box::pin(cmd_read_board_msg(world, player, pool, board_id, args)))
+            }
+            // `look`/`examine <keyword>` resolving to a BOARD-tagged
+            // item in the room → render the board listing inline.
+            // Falls through when no match so plain look/examine still
+            // works on non-board targets.
+            "look" | "examine" | "exa" => {
+                let target_room = world.get::<Located>(player).map(|l| l.0);
+                let needle = args.trim().to_ascii_lowercase();
+                if needle.is_empty() {
+                    return None;
+                }
+                let board_id = target_room.and_then(|room| {
+                    let mut q = world.query_filtered::<
+                        (&Located, &Named, Option<&Keywords>, &BoardLink),
+                        With<Item>,
+                    >();
+                    q.iter(world)
+                        .find(|(l, n, kw, _)| l.0 == room && matches(&needle, n, *kw))
+                        .map(|(_, _, _, b)| b.0)
+                })?;
+                Some(Box::pin(cmd_look_board(world, player, pool, board_id)))
+            }
+            _ => None,
+        },
+    }
+}
 
 inventory::submit! {
     Command {
