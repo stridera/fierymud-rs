@@ -958,6 +958,10 @@ pub struct MobProto {
     pub name: String,
     pub keywords: Vec<String>,
     pub room_description: String,
+    /// Long-form description shown by `examine <mob>`. Empty when
+    /// the builder didn't author one — spawn-side falls back to
+    /// `room_description` for consistency with the legacy.
+    pub examine_description: String,
     pub level: i32,
     pub alignment: i32,
     pub role: mud_db::enums::MobRole,

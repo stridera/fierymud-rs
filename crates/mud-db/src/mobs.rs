@@ -10,6 +10,11 @@ pub struct Mob {
     pub name: String,
     pub keywords: Vec<String>,
     pub room_description: String,
+    /// Long-form description shown by `examine <mob>`. Empty
+    /// string when the builder hasn't authored one — the runtime
+    /// then falls back to the short `room_description` so examine
+    /// always has *something* to render.
+    pub examine_description: String,
     pub level: i32,
     pub alignment: i32,
     pub role: MobRole,
@@ -50,6 +55,7 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             name,
             keywords AS "keywords!: Vec<String>",
             room_description,
+            examine_description,
             level,
             alignment,
             role AS "role: MobRole",

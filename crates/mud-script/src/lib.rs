@@ -2031,6 +2031,9 @@ fn spawn_mob_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<
         if let Some(keys) = trigger_keys {
             em.insert(AttachedTriggers(keys));
         }
+        if !proto.examine_description.trim().is_empty() {
+            em.insert(mud_world::ExamineText(proto.examine_description.clone()));
+        }
         Some(em.id())
     })?;
     match entity {

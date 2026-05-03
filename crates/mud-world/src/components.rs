@@ -502,6 +502,16 @@ pub struct RoomExtras {
     pub entries: Vec<(Vec<String>, String)>,
 }
 
+/// Long-form examine text, distinct from the short room-list
+/// `Description`. Mobs spawn with the schema's
+/// `examine_description` here when authored; `cmd_examine`
+/// prefers `ExamineText` over `Description` so the room-list
+/// "the goblin is here" (`Description`) and the deeper "A wiry
+/// goblin in patchwork leather..." (`ExamineText`) stay separate
+/// without re-using a single field for two contracts.
+#[derive(Component, Debug, Clone)]
+pub struct ExamineText(pub String);
+
 /// Per-item finite charges for `ObjectAbilities`-bound items
 /// (wands, staves). `-1` means unlimited (never decremented).
 /// `0` means depleted — the item should despawn or refuse to

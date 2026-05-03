@@ -851,6 +851,7 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     let proto_name = proto.name.clone();
     let proto_keywords = proto.keywords.clone();
     let proto_room_desc = proto.room_description.clone();
+    let proto_examine_desc = proto.examine_description.clone();
     let proto_alignment = proto.alignment;
     let proto_hit_roll = proto.hit_roll;
     let proto_armor_class = proto.armor_class;
@@ -872,6 +873,11 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
             Posture(PostureKind::Standing),
         ))
         .id();
+    if !proto_examine_desc.trim().is_empty()
+        && let Ok(mut em) = world.get_entity_mut(mob_entity)
+    {
+        em.insert(mud_world::ExamineText(proto_examine_desc));
+    }
 
     send_rendered(
         world,

@@ -2429,9 +2429,14 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     };
 
     let name = name_of(world, target);
+    // Prefer the long-form ExamineText (mob `examine_description`)
+    // over the short room-list Description. Falls back to
+    // Description so mobs / objects without a separate examine
+    // body still render something instead of going silent.
     let description = world
-        .get::<Description>(target)
-        .map(|d| d.0.clone())
+        .get::<mud_world::ExamineText>(target)
+        .map(|t| t.0.clone())
+        .or_else(|| world.get::<Description>(target).map(|d| d.0.clone()))
         .unwrap_or_default();
     let posture = world.get::<Posture>(target).map(|p| p.0);
 
@@ -3244,6 +3249,11 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
             Follower(player),
         ))
         .id();
+    if !proto.examine_description.trim().is_empty()
+        && let Ok(mut em) = world.get_entity_mut(pet_entity)
+    {
+        em.insert(mud_world::ExamineText(proto.examine_description.clone()));
+    }
     let _ = pet_entity;
     let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
     send_rendered(

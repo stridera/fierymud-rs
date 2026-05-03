@@ -1528,6 +1528,9 @@ fn spawn_into(
             if let Some(keys) = trigger_keys {
                 em.insert(AttachedTriggers(keys));
             }
+            if !proto.examine_description.trim().is_empty() {
+                em.insert(mud_world::ExamineText(proto.examine_description.clone()));
+            }
             let entity = em.id();
             Ok(json!({
                 "success": true,
