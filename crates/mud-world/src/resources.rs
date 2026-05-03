@@ -1120,4 +1120,74 @@ mod tests {
             assert_eq!(clock_for_month(m).season(), Season::Autumn);
         }
     }
+
+    // --- SpellSlotData ---
+
+    fn spell_data_two_classes() -> SpellSlotData {
+        let mut data = SpellSlotData::default();
+        // Class 1 (Sorcerer): circles 1 at lvl 1, 2 at lvl 5.
+        data.class_circles.insert(1, vec![(1, 1), (2, 5)]);
+        // Class 4 (Warrior): no circles.
+        // Slot progression: at lvl 1 you get 1 circle-1 slot;
+        //                   at lvl 5 you get 2 circle-1 + 1 circle-2.
+        data.progression.insert((1, 1), 1);
+        data.progression.insert((5, 1), 2);
+        data.progression.insert((5, 2), 1);
+        data
+    }
+
+    #[test]
+    fn slots_for_unknown_class_is_empty() {
+        let data = spell_data_two_classes();
+        assert_eq!(data.slots_for(99, 5), Vec::<(i32, i32)>::new());
+    }
+
+    #[test]
+    fn slots_for_filters_by_min_level() {
+        let data = spell_data_two_classes();
+        // At level 1, only circle 1 is available (circle 2 needs lvl 5).
+        assert_eq!(data.slots_for(1, 1), vec![(1, 1)]);
+        // At level 5, both circles available.
+        assert_eq!(data.slots_for(1, 5), vec![(1, 2), (2, 1)]);
+    }
+
+    #[test]
+    fn slots_for_classless_warrior_returns_empty() {
+        let data = spell_data_two_classes();
+        // Warrior has no circles → no slot list.
+        assert_eq!(data.slots_for(4, 50), Vec::<(i32, i32)>::new());
+    }
+
+    // --- ClassSkillsData ---
+
+    fn class_skills_warrior_only() -> ClassSkillsData {
+        let mut data = ClassSkillsData::default();
+        // Warrior (class 4) gets BASH (id 5) at level 1, RIPOSTE
+        // (id 287) at level 40.
+        data.min_level.insert((4, 5), 1);
+        data.min_level.insert((4, 287), 40);
+        data.proficiency_cap.insert((4, 5), 100);
+        data.proficiency_cap.insert((4, 287), 100);
+        data
+    }
+
+    #[test]
+    fn class_skill_count_returns_zero_for_uncovered_class() {
+        let data = class_skills_warrior_only();
+        // Sorcerer has no rows yet.
+        assert_eq!(data.class_skill_count(1), 0);
+        // Warrior has 2 rows.
+        assert_eq!(data.class_skill_count(4), 2);
+    }
+
+    #[test]
+    fn min_level_for_returns_none_when_class_lacks_ability() {
+        let data = class_skills_warrior_only();
+        // Sorcerer can't BASH.
+        assert_eq!(data.min_level_for(1, 5), None);
+        // Warrior can — at level 1.
+        assert_eq!(data.min_level_for(4, 5), Some(1));
+        // Warrior eventually learns RIPOSTE — at level 40.
+        assert_eq!(data.min_level_for(4, 287), Some(40));
+    }
 }
