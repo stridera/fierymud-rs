@@ -222,8 +222,16 @@ inventory::collect!(Command);
 // (or shipping a new one) — no central array touch.
 #[path = "commands/balance.rs"]
 mod balance;
+#[path = "commands/enter.rs"]
+mod enter;
 #[path = "commands/movement_directions.rs"]
 mod movement_directions;
+#[path = "commands/recall.rs"]
+mod recall;
+#[path = "commands/release.rs"]
+mod release;
+#[path = "commands/setrecall.rs"]
+mod setrecall;
 #[path = "commands/unban.rs"]
 mod unban;
 
@@ -3378,65 +3386,13 @@ const COMMANDS: &[Command] = &[
         run: cmd_gsay,
     },
     // ----- Movement -----
-    // 12 directional commands (n/s/e/w/u/d, diagonals, in/out)
-    // migrated to commands/movement_directions.rs.
-    Command {
-        names: &["recall", "home"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: Help {
-            usage: "recall",
-            summary: "Teleport to your recall point.",
-            long: "Move instantly to your saved recall room. If you haven't \
-                   set one, you're told so. Use `setrecall` in your current \
-                   room to bind it as your recall point.",
-        },
-        run: cmd_recall,
-    },
-    Command {
-        names: &["release"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: Help {
-            usage: "release",
-            summary: "End the ghost cycle: restore HP, return to recall.",
-            long: "When you die, your spirit is left where you fell while \
-                   your corpse drops at the death scene. `release` returns \
-                   you to your recall point at full HP. Refused when you \
-                   aren't currently dead.",
-        },
-        run: cmd_release,
-    },
-    Command {
-        names: &["enter"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: Help {
-            usage: "enter <portal>",
-            summary: "Step into a portal in the room.",
-            long: "Reads the portal's `Destination` and teleports you to \
-                   the matching room. Refused while fighting. Portals \
-                   with a missing or unresolved destination shimmer \
-                   harmlessly.",
-        },
-        run: cmd_enter,
-    },
-    Command {
-        names: &["setrecall"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "setrecall",
-            summary: "Bind your recall point to the current room.",
-            long: "Saves the current room as your recall destination. \
-                   Persists across logins.",
-        },
-        run: cmd_setrecall,
-    },
+    // Whole category migrated:
+    //   - 12 directionals → commands/movement_directions.rs
+    //   - recall/home    → commands/recall.rs
+    //   - release        → commands/release.rs
+    //   - enter          → commands/enter.rs
+    //   - setrecall      → commands/setrecall.rs
+    //     (technically Info category — moved with the rest)
     // ----- Admin -----
     Command {
         names: &["goto"],
@@ -5543,17 +5499,19 @@ mod tests {
                 "{name} not in all_commands()"
             );
         }
-        // movement_directions.rs — full Movement-category sweep
+        // Movement category — fully migrated. Directionals from
+        // movement_directions.rs, plus recall/release/enter/setrecall.
         for name in [
             "north", "n", "south", "s", "east", "e", "west", "w",
             "up", "u", "down", "d",
             "northeast", "ne", "northwest", "nw",
             "southeast", "se", "southwest", "sw",
             "in", "out",
+            "recall", "home", "release", "enter", "setrecall",
         ] {
             assert!(
                 names.contains(&name),
-                "movement direction `{name}` missing"
+                "movement command `{name}` missing"
             );
         }
     }
@@ -9424,7 +9382,7 @@ fn cmd_glance(world: &mut World, player: Entity, args: &str) {
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_look(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if !arg.is_empty() {
         if let Some(dir) = parse_direction(arg) {
@@ -13492,7 +13450,7 @@ fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
 }
 
 /// Match by Keywords substring first, falling back to Name substring.
-fn matches(needle: &str, name: &Named, kw: Option<&Keywords>) -> bool {
+pub(crate) fn matches(needle: &str, name: &Named, kw: Option<&Keywords>) -> bool {
     if let Some(kw) = kw
         && kw.0.iter().any(|k| k.to_ascii_lowercase().contains(needle))
     {
@@ -24776,252 +24734,9 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-/// `enter <portal>`: walk into a Portal-typed Item in the room. Reads
-/// the portal's `Destination` legacy vnum, resolves to a (zone, id) →
-/// room entity via `WorldKeyIndex.legacy_vnums`, and teleports. No
-/// stamina cost (matches `recall`); refuses while fighting.
-#[allow(clippy::too_many_lines)]
-fn cmd_enter(world: &mut World, player: Entity, args: &str) {
-    let needle = args.trim();
-    if needle.is_empty() {
-        send_to(world, player, "Enter what?\r\n");
-        return;
-    }
-    if world.get::<Fighting>(player).is_some() {
-        send_to(world, player, "You can't slip into a portal mid-fight.\r\n");
-        return;
-    }
-    let Some(located) = world.get::<Located>(player).copied() else {
-        send_to(world, player, "You are nowhere.\r\n");
-        return;
-    };
-    let from_room = located.0;
-    let lc = needle.to_ascii_lowercase();
-    let portal_match = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>, &WorldKey), With<Item>>();
-        q.iter(world)
-            .find(|(_, l, n, kw, _)| l.0 == from_room && matches(&lc, n, *kw))
-            .map(|(e, _, _, _, k)| (e, *k))
-    };
-    let Some((portal, key)) = portal_match else {
-        send_rendered(
-            world,
-            player,
-            &format!("There's no portal called '{needle}' here.\r\n"),
-        );
-        return;
-    };
-    let proto = world
-        .resource::<ObjectPrototypes>()
-        .by_key
-        .get(&(key.zone, key.id))
-        .cloned();
-    let Some(proto) = proto else {
-        send_to(world, player, "That portal's prototype is missing.\r\n");
-        return;
-    };
-    if !matches!(proto.r#type, mud_db::enums::ObjectType::Portal) {
-        let portal_name = name_of(world, portal);
-        send_rendered(
-            world,
-            player,
-            &format!("{portal_name} isn't something you can enter.\r\n"),
-        );
-        return;
-    }
-    let Some(vnum) = proto.portal_destination_vnum else {
-        send_rendered(
-            world,
-            player,
-            &format!("{} leads nowhere right now.\r\n", proto.name),
-        );
-        return;
-    };
-    let dest_key = world
-        .resource::<WorldKeyIndex>()
-        .legacy_vnums
-        .get(&vnum)
-        .copied();
-    let dest_room = dest_key.and_then(|k| {
-        world
-            .resource::<WorldKeyIndex>()
-            .rooms
-            .get(&k)
-            .copied()
-    });
-    let Some(dest) = dest_room else {
-        send_rendered(
-            world,
-            player,
-            &format!("{} shimmers, but the destination is gone.\r\n", proto.name),
-        );
-        return;
-    };
-    if dest == from_room {
-        send_to(world, player, "It would just spit you back out where you are.\r\n");
-        return;
-    }
-    let mover_name = name_of(world, player);
-    let portal_name = proto.name.clone();
-    broadcast_room_except_players_rendered(
-        world,
-        from_room,
-        &[player],
-        &format!("{mover_name} steps into {portal_name} and vanishes.\r\n"),
-    );
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = dest;
-    }
-    broadcast_room_except_players_rendered(
-        world,
-        dest,
-        &[player],
-        &format!("{mover_name} steps out of a swirling portal.\r\n"),
-    );
-    send_rendered(
-        world,
-        player,
-        &format!("You step into {portal_name}...\r\n"),
-    );
-    cmd_look(world, player, "");
-}
 
-fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
-    if world.get::<Fighting>(player).is_some() {
-        send_to(world, player, "You can't recall while fighting!\r\n");
-        return;
-    }
-    let Some(target) = world.get::<RecallPoint>(player).map(|r| r.0) else {
-        send_to(
-            world,
-            player,
-            "You have no recall point set. Use `setrecall` somewhere to bind one.\r\n",
-        );
-        return;
-    };
-    if world.get_entity(target).is_err() {
-        send_to(world, player, "Your recall point has vanished.\r\n");
-        try_remove::<RecallPoint>(world, player);
-        return;
-    }
-    let Some(located) = world.get::<Located>(player).copied() else {
-        send_to(world, player, "You are nowhere; can't recall.\r\n");
-        return;
-    };
-    let from_room = located.0;
-    if from_room == target {
-        send_to(world, player, "You're already at your recall point.\r\n");
-        return;
-    }
+// Movement commands moved to commands/{enter,recall,release,setrecall}.rs.
 
-    let mover_name = name_of(world, player);
-
-    // Notify source room.
-    broadcast_room_except_players_rendered(
-        world,
-        from_room,
-        &[player],
-        &format!("{mover_name} fades away in a flash of light.\r\n"),
-    );
-
-    let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = target;
-    }
-    if let Some(mount) = mount
-        && let Some(mut l) = world.get_mut::<Located>(mount)
-    {
-        l.0 = target;
-    }
-
-    // Notify destination room.
-    broadcast_room_except_players_rendered(
-        world,
-        target,
-        &[player],
-        &format!("{mover_name} appears in a flash of light.\r\n"),
-    );
-
-    send_to(world, player, "The world swirls around you...\r\n");
-    cmd_look(world, player, "");
-}
-
-/// `release`: end the ghost cycle. Restores HP to max, clears the
-/// `Ghost` marker, and moves the player to their `RecallPoint` (or
-/// the fallback start when no recall is set). Refuses when the
-/// player isn't currently a ghost — the only state that produces
-/// ghosts is dying via `combat::handle_death`.
-fn cmd_release(world: &mut World, player: Entity, _args: &str) {
-    if world.get::<mud_world::Ghost>(player).is_none() {
-        send_to(
-            world,
-            player,
-            "You aren't dead. Nothing to release.\r\n",
-        );
-        return;
-    }
-    // Restore. Stamina is intentionally left at whatever it was when
-    // they died — the death-corpse cycle's recovery cost is the move
-    // back to recall plus losing stamina momentum, not a hard reset.
-    if let Some(mut hp) = world.get_mut::<Health>(player) {
-        hp.hp = hp.max;
-    }
-    try_remove::<mud_world::Ghost>(world, player);
-    // Resolve target room: RecallPoint, falling back to the same
-    // (0, 0) Void as login::FALLBACK_START when not set.
-    let target = world
-        .get::<RecallPoint>(player)
-        .map(|r| r.0)
-        .or_else(|| {
-            world
-                .resource::<WorldKeyIndex>()
-                .rooms
-                .get(&(0, 0))
-                .copied()
-        });
-    let Some(target) = target else {
-        send_to(
-            world,
-            player,
-            "Your spirit has nowhere to return to. Speak with an immortal.\r\n",
-        );
-        return;
-    };
-    if world.get_entity(target).is_err() {
-        send_to(
-            world,
-            player,
-            "Your recall point has vanished. Speak with an immortal.\r\n",
-        );
-        return;
-    }
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = target;
-    } else {
-        try_insert(world, player, Located(target));
-    }
-    send_to(
-        world,
-        player,
-        "Your spirit settles back into your body. You return, alive once more.\r\n",
-    );
-    cmd_look(world, player, "");
-}
-
-fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
-    let Some(located) = world.get::<Located>(player).copied() else {
-        send_to(world, player, "You are nowhere; can't bind a recall point.\r\n");
-        return;
-    };
-    try_insert(world, player, RecallPoint(located.0));
-    let room_name = name_or(world, located.0, "(unknown)");
-    send_to(
-        world,
-        player,
-        format!("Recall point bound: {room_name}.\r\n"),
-    );
-}
 
 fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "freeze", args);
