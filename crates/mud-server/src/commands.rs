@@ -8076,8 +8076,7 @@ pub(crate) fn broadcast_room_except_rendered(
             .collect()
     };
     for t in targets {
-        let mode = color_mode_for(world, t);
-        send_to(world, t, render_color_tags(raw_msg, mode));
+        send_to(world, t, raw_msg);
     }
 }
 
@@ -8100,8 +8099,7 @@ pub(crate) fn broadcast_room_except_players_rendered(
             .collect()
     };
     for t in targets {
-        let mode = color_mode_for(world, t);
-        send_to(world, t, render_color_tags(raw_msg, mode));
+        send_to(world, t, raw_msg);
     }
 }
 
