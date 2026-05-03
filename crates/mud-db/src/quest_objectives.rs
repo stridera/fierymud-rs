@@ -293,6 +293,69 @@ pub async fn list_visit_room_progress(
     .await
 }
 
+/// One objective + its current progress for the listing view.
+/// Fetched via `list_for_quest` after `cmd_quests` shows the
+/// per-quest header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectiveListingRow {
+    pub phase_id: i32,
+    pub phase_name: String,
+    pub phase_order: i32,
+    pub objective_id: i32,
+    pub player_description: String,
+    pub required_count: i32,
+    pub current_count: i32,
+    pub completed: bool,
+    pub show_progress: bool,
+    pub scope: String,
+    pub current_phase_id: Option<i32>,
+}
+
+/// Per-objective snapshot for one CharacterQuest. Returns rows
+/// across all phases, sorted by phase order then objective id,
+/// so the listing render can group by phase.
+pub async fn list_for_quest(
+    pool: &PgPool,
+    character_quest_id: &str,
+) -> sqlx::Result<Vec<ObjectiveListingRow>> {
+    sqlx::query_as!(
+        ObjectiveListingRow,
+        r#"
+        SELECT
+            qo.phase_id AS "phase_id!: i32",
+            qp.name AS "phase_name!: String",
+            qp."order" AS "phase_order!: i32",
+            qo.id AS "objective_id!: i32",
+            qo.player_description AS "player_description!: String",
+            qo.required_count AS "required_count!: i32",
+            COALESCE(cqo.current_count, 0) AS "current_count!: i32",
+            COALESCE(cqo.completed, false) AS "completed!: bool",
+            qo.show_progress AS "show_progress!: bool",
+            qo.scope::text AS "scope!: String",
+            cq.current_phase_id AS "current_phase_id: i32"
+        FROM "CharacterQuest" cq
+        JOIN "QuestObjective" qo
+            ON qo.quest_zone_id = cq.quest_zone_id
+           AND qo.quest_id = cq.quest_id
+        JOIN "QuestPhase" qp
+            ON qp.quest_zone_id = qo.quest_zone_id
+           AND qp.quest_id = qo.quest_id
+           AND qp.id = qo.phase_id
+        LEFT JOIN "CharacterQuestObjective" cqo
+            ON cqo.character_quest_id = cq.id
+           AND cqo.quest_zone_id = qo.quest_zone_id
+           AND cqo.quest_id = qo.quest_id
+           AND cqo.phase_id = qo.phase_id
+           AND cqo.objective_id = qo.id
+        WHERE cq.id = $1
+        ORDER BY qp."order", qo.id
+        "#,
+        character_quest_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Outcome of the post-completion phase-advance check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhaseAdvance {

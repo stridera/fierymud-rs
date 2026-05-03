@@ -18002,6 +18002,49 @@ pub(crate) async fn cmd_quests(
             {
                 out.push_str(&format!("        {}\r\n", desc.trim()));
             }
+            // Per-quest objective listing. Group by phase; mark
+            // the current phase with a "▶" so the player sees
+            // which step they're on. Past phases show "✓".
+            match mud_db::quest_objectives::list_for_quest(pool, &q.id).await {
+                Ok(rows) => {
+                    let mut last_phase: Option<i32> = None;
+                    let current_phase_id = rows.first().and_then(|r| r.current_phase_id);
+                    for r in &rows {
+                        if last_phase != Some(r.phase_id) {
+                            let marker = if Some(r.phase_id) == current_phase_id {
+                                "▶"
+                            } else if rows
+                                .iter()
+                                .filter(|x| x.phase_id == r.phase_id)
+                                .all(|x| x.completed)
+                            {
+                                "✓"
+                            } else {
+                                " "
+                            };
+                            out.push_str(&format!(
+                                "      {marker} Phase {}: {}\r\n",
+                                r.phase_order, r.phase_name
+                            ));
+                            last_phase = Some(r.phase_id);
+                        }
+                        let status = if r.completed {
+                            "[done]".to_string()
+                        } else if r.show_progress {
+                            format!("[{}/{}]", r.current_count, r.required_count)
+                        } else {
+                            "[ ]".to_string()
+                        };
+                        out.push_str(&format!(
+                            "          {status} {}\r\n",
+                            r.player_description
+                        ));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "objective listing failed");
+                }
+            }
         }
         out.push_str("\r\n");
     }
