@@ -541,6 +541,23 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     world.insert_resource(spell_slot_data);
 
+    // ClassSkills: per-class, per-skill (class_id, ability_id) →
+    // (min_level, proficiency_cap). Drives the SKILL invoke gate
+    // ("can this class use this skill at this level?"). Loaded
+    // alongside the spell-slot triple since they share the same
+    // (class_id, ability_id) shape and authoring lifecycle.
+    let class_skill_rows = spell_slots::list_class_skills(pool).await?;
+    let mut class_skills_data = crate::resources::ClassSkillsData::default();
+    for r in class_skill_rows {
+        class_skills_data
+            .min_level
+            .insert((r.class_id, r.ability_id), r.min_level);
+        class_skills_data
+            .proficiency_cap
+            .insert((r.class_id, r.ability_id), r.proficiency_cap);
+    }
+    world.insert_resource(class_skills_data);
+
     // Pass 4d: object-ability catalog (scrolls / wands / staves
     // bound abilities). Lookups are by `(zone, id)` matching an item
     // entity's `WorldKey`.

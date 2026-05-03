@@ -5794,19 +5794,84 @@ pub(crate) fn invoke_ability_with(
             );
             return;
         }
-    } else if let Some(known) = world.get::<KnownAbilities>(player)
-        && !known.entries.is_empty()
-        && !known.has_any(def.id)
-    {
-        // Skill path with non-empty KnownAbilities: enforce the
-        // explicit-entry rule so trained mortals stay restricted to
-        // what they've practiced. Empty list still bypasses.
-        send_to(
-            world,
-            player,
-            format!("You don't know how to {} {}.\r\n", verb, def.plain_name),
-        );
-        return;
+    } else if matches!(kind, mud_db::abilities::AbilityKind::Skill) {
+        // Mortal SKILL gate: check ClassSkills if the caster has
+        // a class. The class's row sets the minimum level
+        // required; missing row = wrong class for this skill.
+        // Classless mortals still fall through to the legacy
+        // "empty KnownAbilities bypass" so they can try anything
+        // — once Profile.class_id is enforced non-NULL by login,
+        // this branch goes away.
+        let profile_data = world
+            .get::<Profile>(player)
+            .map(|p| (p.class_id, p.level));
+        if let Some((Some(class_id), level)) = profile_data {
+            let csd = world.resource::<mud_world::ClassSkillsData>();
+            // Defensive: a class with zero ClassSkills rows means
+            // content hasn't authored its kit yet. Bypass rather
+            // than refuse every skill — once data lands the gate
+            // engages naturally.
+            if csd.class_skill_count(class_id) > 0 {
+                match csd.min_level_for(class_id, def.id) {
+                    Some(min_level) if min_level <= level => {
+                        // Allowed by class. Layer the per-character
+                        // KnownAbilities rule on top: if the player
+                        // has trained anything at all, restrict to
+                        // their practiced list. Empty list still
+                        // bypasses so brand-new characters keep
+                        // their starter kit.
+                        if let Some(known) = world.get::<KnownAbilities>(player)
+                            && !known.entries.is_empty()
+                            && !known.has_any(def.id)
+                        {
+                            send_to(
+                                world,
+                                player,
+                                format!(
+                                    "You haven't practiced {} yet.\r\n",
+                                    def.plain_name
+                                ),
+                            );
+                            return;
+                        }
+                    }
+                    Some(min_level) => {
+                        send_to(
+                            world,
+                            player,
+                            format!(
+                                "You must reach level {min_level} before you can use {}.\r\n",
+                                def.plain_name
+                            ),
+                        );
+                        return;
+                    }
+                    None => {
+                        send_to(
+                            world,
+                            player,
+                            format!(
+                                "Your class can't use {}.\r\n",
+                                def.plain_name
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
+        } else if let Some(known) = world.get::<KnownAbilities>(player)
+            && !known.entries.is_empty()
+            && !known.has_any(def.id)
+        {
+            // Classless mortal with practiced kit: enforce the
+            // explicit-entry rule.
+            send_to(
+                world,
+                player,
+                format!("You don't know how to {} {}.\r\n", verb, def.plain_name),
+            );
+            return;
+        }
     }
 
     // Gate on memorization when the ability is a Spell AND the

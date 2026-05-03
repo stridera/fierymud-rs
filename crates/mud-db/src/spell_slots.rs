@@ -53,3 +53,20 @@ pub async fn list_class_abilities(pool: &PgPool) -> sqlx::Result<Vec<ClassAbilit
     .fetch_all(pool)
     .await
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ClassSkillRow {
+    pub class_id: i32,
+    pub ability_id: i32,
+    pub min_level: i32,
+    pub proficiency_cap: i32,
+}
+
+pub async fn list_class_skills(pool: &PgPool) -> sqlx::Result<Vec<ClassSkillRow>> {
+    sqlx::query_as!(
+        ClassSkillRow,
+        r#"SELECT class_id, ability_id, min_level, proficiency_cap FROM "ClassSkills""#
+    )
+    .fetch_all(pool)
+    .await
+}

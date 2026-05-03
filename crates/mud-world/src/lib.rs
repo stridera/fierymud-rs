@@ -26,7 +26,8 @@ pub use loader::{
 };
 pub use resources::{
     AbilityCatalog, AbilityComponentReq, AbilityDef, AbilityMessageSet, AchievementCatalog,
-    AchievementDef, BoardCatalog, BoardSummary, ClassCatalog, ClassDef, ConsumableEffectBinding,
+    AchievementDef, BoardCatalog, BoardSummary, ClassCatalog, ClassDef, ClassSkillsData,
+    ConsumableEffectBinding,
     ConsumableEffectCatalog, DamageComponent, EffectCatalog, EffectDef, HousingIndex, LevelRow,
     LevelTable, LiquidIndex, LiquidProto, LuaOutbox, MobProto,
     MobPrototypes, MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding,

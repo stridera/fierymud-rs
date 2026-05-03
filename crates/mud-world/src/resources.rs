@@ -491,6 +491,39 @@ pub struct SpellSlotData {
     pub ability_cap: HashMap<(i32, i32), i32>,
 }
 
+/// `ClassSkills` table flattened for runtime lookup. Keyed by
+/// `(class_id, ability_id)` → `min_level` so the SKILL invoke gate
+/// can answer "can this class use this skill at this level?" in
+/// O(1). Cap data lives in a parallel map for `practice`'s gain
+/// limiter, mirroring `SpellSlotData.ability_cap`.
+#[derive(Resource, Debug, Default)]
+pub struct ClassSkillsData {
+    pub min_level: HashMap<(i32, i32), i32>,
+    pub proficiency_cap: HashMap<(i32, i32), i32>,
+}
+
+impl ClassSkillsData {
+    /// `Some(min_level)` if `class_id` has a row for `ability_id`,
+    /// otherwise `None`. Callers compare against player level to
+    /// decide allow / refuse.
+    #[must_use]
+    pub fn min_level_for(&self, class_id: i32, ability_id: i32) -> Option<i32> {
+        self.min_level.get(&(class_id, ability_id)).copied()
+    }
+
+    /// Number of distinct rows the class has — useful for the
+    /// "no data loaded" defensive branch in the SKILL gate. A class
+    /// with zero rows triggers the legacy bypass so a content gap
+    /// doesn't lock players out of their kit.
+    #[must_use]
+    pub fn class_skill_count(&self, class_id: i32) -> usize {
+        self.min_level
+            .keys()
+            .filter(|(c, _)| *c == class_id)
+            .count()
+    }
+}
+
 impl SpellSlotData {
     /// Maximum slots for `class_id` at character `level`, broken
     /// down by circle. Includes only circles whose `min_level <=
