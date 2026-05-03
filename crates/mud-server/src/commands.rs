@@ -3953,8 +3953,10 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if d.carry.0 > 0.0 {
         out.push_str(&format!(
-            "  Load:   {:.1} / {:.0} lbs.\r\n",
-            d.carry.0, d.carry.1,
+            "  Load:   {:.1} / {:.0} lbs.  ({})\r\n",
+            d.carry.0,
+            d.carry.1,
+            encumbrance_band(d.carry.0, d.carry.1),
         ));
     }
     if let Some(l) = d.logged_in {
@@ -3994,6 +3996,31 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         ));
     }
     out
+}
+
+/// Map the carried-weight ratio into a one-word band so the score
+/// sheet can show "47 / 200 lbs. (burdened)" rather than expecting
+/// the player to do the percentage math. Thresholds line up with
+/// the move-stamina penalty bands in `cmd_move`: 75% adds +1
+/// stamina cost, 90% adds +2, 100%+ refuses pickup at the
+/// boundary so over-capacity should be a transient state.
+#[must_use]
+pub(crate) fn encumbrance_band(carried: f64, capacity: f64) -> &'static str {
+    if capacity <= 0.0 {
+        return "unburdened";
+    }
+    let ratio = carried / capacity;
+    if ratio >= 1.0 {
+        "overloaded"
+    } else if ratio >= 0.90 {
+        "heavy"
+    } else if ratio >= 0.75 {
+        "encumbered"
+    } else if ratio >= 0.50 {
+        "burdened"
+    } else {
+        "unburdened"
+    }
 }
 
 /// Comma-joined hunger/thirst descriptors, or None if both are
@@ -4074,7 +4101,12 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         row(format!("Bank:      {coin}"));
     }
     if d.carry.0 > 0.0 {
-        row(format!("Load:      {:.1} / {:.0} lbs.", d.carry.0, d.carry.1));
+        row(format!(
+            "Load:      {:.1} / {:.0} lbs.  ({})",
+            d.carry.0,
+            d.carry.1,
+            encumbrance_band(d.carry.0, d.carry.1),
+        ));
     }
     if let Some(l) = d.logged_in {
         row(format!("Online:    {}", format_idle(l.0.elapsed().as_secs())));
