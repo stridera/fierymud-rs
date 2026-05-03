@@ -2475,6 +2475,25 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         };
         out.push_str(&format!("{line}\r\n"));
     }
+    // Active effects on actors (Player or Mob). Quick "is this mob
+    // blessed / bleeding?" read without needing your own `effects`
+    // command (which is self-only). Items skip this — their effects
+    // are bound differently.
+    if world.get::<Item>(target).is_none() {
+        let names: Vec<String> = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .filter(|(_, a)| a.0 == target)
+                .map(|(inst, _)| inst.name.clone())
+                .collect()
+        };
+        if !names.is_empty() {
+            out.push_str(&format!(
+                "{name_rendered} is affected by: {}.\r\n",
+                names.join(", "),
+            ));
+        }
+    }
     // If the target is an Item-typed container (corpse, bag, chest, ...),
     // list anything Located on it. Mirrors the legacy "you peek inside"
     // behavior — looters don't have to guess what to `get`.
