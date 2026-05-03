@@ -909,6 +909,14 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
             out.push_str("Its eyes follow you with malice — it would attack on sight.\r\n");
         }
     }
+    // PeacefulRoom hint — if this room won't let combat happen,
+    // the verdict is moot. Surfaced last so the rest of the
+    // analysis still renders (useful when debugging encounters).
+    if world.get::<mud_world::PeacefulRoom>(located.0).is_some() {
+        out.push_str(
+            "But a peaceful aura fills this place — violence won't happen here.\r\n",
+        );
+    }
     send_rendered(world, player, &out);
 }
 pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
