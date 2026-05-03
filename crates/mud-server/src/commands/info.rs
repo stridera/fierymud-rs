@@ -1036,12 +1036,16 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "compare <item-a> <item-b>",
-            summary: "Compare two carried/worn items by weight and level.",
+            usage: "compare <item-a> [<item-b>]",
+            summary: "Compare two carried/worn items by weight, level, and weapon damage.",
             long: "Each item is matched by keyword the same way `wear` \
                    matches. Both items must be on you (inventory or \
-                   equipped). Prints the deltas with arrows pointing at \
-                   the lighter / lower-level side.",
+                   equipped). With a single arg, the second item is \
+                   inferred from whatever you're currently wearing in \
+                   that item's wearable slot — handy for the \
+                   \"should I switch?\" decision. Prints weight + \
+                   level deltas, plus a weapon-damage row when both \
+                   sides have non-zero average damage.",
         },
         run: cmd_compare,
     }
@@ -5099,30 +5103,68 @@ pub(crate) fn cmd_read(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 
-/// `compare <a> <b>`: side-by-side weight + level + type comparison
-/// for two carried-or-worn items, plus a small deltas line. Splits
-/// the args at the first run of whitespace; multi-word keywords on
-/// either side aren't supported (a quoted-arg parser would be more
-/// general but no other command needs one yet).
+/// `compare <a> [<b>]`: side-by-side weight + level + type comparison.
+/// With one arg, compares against whatever's equipped in the same
+/// slot (the "should I switch?" workflow). With two args, compares
+/// the two named items directly. Splits the args at the first run
+/// of whitespace; multi-word keywords aren't supported (a quoted-
+/// arg parser would be more general but no other command needs
+/// one yet).
 pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     let mut parts = args.trim().splitn(2, char::is_whitespace);
     let Some(a_word) = parts.next().filter(|s| !s.is_empty()) else {
         send_to(world, player, "Compare what to what?\r\n");
         return;
     };
-    let Some(b_word) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
-        send_to(world, player, "Compare to what?\r\n");
-        return;
-    };
+    let b_word: Option<&str> = parts.next().map(str::trim).filter(|s| !s.is_empty());
 
     let Some(a) = find_carried_by(world, a_word, player, EquipFilter::Anywhere) else {
         send_to(world, player, format!("You don't have '{a_word}'.\r\n"));
         return;
     };
-    let Some(b) = find_carried_by(world, b_word, player, EquipFilter::Anywhere) else {
-        send_to(world, player, format!("You don't have '{b_word}'.\r\n"));
-        return;
+    // Resolve B. With an explicit second arg, look it up the same way
+    // as A. With no second arg, find the item the player currently
+    // wears in A's wearable slot — saves a manual `equipment` lookup
+    // for the "is this new sword better?" question.
+    let target_b: Entity = if let Some(word) = b_word {
+        let Some(found) = find_carried_by(world, word, player, EquipFilter::Anywhere)
+        else {
+            send_to(world, player, format!("You don't have '{word}'.\r\n"));
+            return;
+        };
+        found
+    } else {
+        let Some(target_slot) = world.get::<WearableIn>(a).map(|w| w.0) else {
+            send_to(
+                world,
+                player,
+                "That item isn't wearable, so there's nothing in a matching slot to compare.\r\n",
+            );
+            return;
+        };
+        let equipped = {
+            let mut q = world.query_filtered::<
+                (Entity, &Located, &EquippedSlot),
+                With<Item>,
+            >();
+            q.iter(world)
+                .find(|(_, l, eq)| l.0 == player && eq.0 == target_slot)
+                .map(|(ent, _, _)| ent)
+        };
+        let Some(found) = equipped else {
+            send_to(
+                world,
+                player,
+                format!(
+                    "You're not wearing anything in the {} slot to compare against.\r\n",
+                    target_slot.label(),
+                ),
+            );
+            return;
+        };
+        found
     };
+    let b = target_b;
     if a == b {
         send_to(world, player, "That's the same item.\r\n");
         return;
