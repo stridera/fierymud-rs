@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 
 use crate::enums::UserRole;
 
@@ -56,11 +56,15 @@ pub async fn find_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<User>> {
 /// sets `updated_at = now()`. Returns the new id so the caller
 /// can stash it on the next pipeline stage.
 ///
+/// Takes any `PgExecutor` so callers can pass either `&pool`
+/// for a stand-alone INSERT or `&mut *tx` for a transactional
+/// pair with the matching `Characters` INSERT.
+///
 /// Email + `display_name` uniqueness is enforced by the table's
 /// indexes; collisions surface as `sqlx::Error::Database` and
 /// the caller should re-prompt the user.
-pub async fn create(
-    pool: &PgPool,
+pub async fn create<'e, E: PgExecutor<'e>>(
+    executor: E,
     email: &str,
     display_name: &str,
     password_hash: &str,
@@ -75,7 +79,7 @@ pub async fn create(
         display_name,
         password_hash,
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
     Ok(row.id)
 }

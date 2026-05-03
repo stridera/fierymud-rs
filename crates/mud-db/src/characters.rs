@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 
 use crate::enums::{Permission, PlayerFlag};
 
@@ -102,7 +102,10 @@ pub struct NewCharacter<'a> {
 /// have already checked uniqueness via `find_by_name`, but this
 /// remains the defense in depth in case of a race with a
 /// concurrent creation.
-pub async fn create(pool: &PgPool, new: &NewCharacter<'_>) -> sqlx::Result<String> {
+pub async fn create<'e, E: PgExecutor<'e>>(
+    executor: E,
+    new: &NewCharacter<'_>,
+) -> sqlx::Result<String> {
     // sqlx::query (untyped) here so the runtime can pass the
     // race string straight into the SQL `::"Race"` cast — the
     // typed `query!` macro can't auto-map the schema's `Race`
@@ -110,6 +113,11 @@ pub async fn create(pool: &PgPool, new: &NewCharacter<'_>) -> sqlx::Result<Strin
     // `Race` enum would mean keeping the 36-variant list in
     // sync with the schema. Cast does the validation: any
     // unknown variant errors at INSERT time.
+    //
+    // Generic over `PgExecutor` so callers can pair this with
+    // `users::create` inside a transaction (the login-creation
+    // flow uses `&mut *tx` for both INSERTs to keep the row
+    // pair atomic).
     let row = sqlx::query_scalar::<_, String>(
         r#"
         INSERT INTO "Characters" (
@@ -136,7 +144,7 @@ pub async fn create(pool: &PgPool, new: &NewCharacter<'_>) -> sqlx::Result<Strin
     .bind(new.dexterity)
     .bind(new.constitution)
     .bind(new.charisma)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
     Ok(row)
 }

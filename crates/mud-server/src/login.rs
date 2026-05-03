@@ -695,8 +695,31 @@ impl ConnRouter {
                     }
                 };
                 drop(password_plaintext);
-                let user_id = match users::create(pool, &effective_email, &display_name, &hashed)
-                    .await
+                // Wrap both INSERTs in a transaction so a failure
+                // on the character side rolls the user row back —
+                // the player can retry from the identifier prompt
+                // without leaving an orphan account behind.
+                let mut tx = match pool.begin().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(conn_id, error = %e, "creation tx begin failed");
+                        let _ = ctx.outbound.send(
+                            "Server error opening a transaction. Please try again.\r\n"
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        return;
+                    }
+                };
+                let user_id = match users::create(
+                    &mut *tx,
+                    &effective_email,
+                    &display_name,
+                    &hashed,
+                )
+                .await
                 {
                     Ok(id) => id,
                     Err(e) => {
@@ -708,6 +731,9 @@ impl ConnRouter {
                             )
                             .into_bytes(),
                         );
+                        // Drop the tx — uncommitted, so the user
+                        // INSERT (if any) gets rolled back.
+                        drop(tx);
                         ctx.stage = Stage::AwaitingIdentifier;
                         let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
@@ -726,23 +752,37 @@ impl ConnRouter {
                     constitution: stats.constitution,
                     charisma: stats.charisma,
                 };
-                let character_id = match mud_db::characters::create(pool, &new_character).await {
+                let character_id = match mud_db::characters::create(&mut *tx, &new_character).await
+                {
                     Ok(id) => id,
                     Err(e) => {
                         warn!(conn_id, error = %e, "character create failed");
                         let _ = ctx.outbound.send(
                             format!(
-                                "Account created but character INSERT failed ({e}). Please \
-                                 contact a staff member or log in to your new account and \
-                                 retry character creation.\r\n"
+                                "Couldn't create the character ({e}). The account \
+                                 INSERT was rolled back; please try again.\r\n"
                             )
                             .into_bytes(),
                         );
+                        drop(tx);
                         ctx.stage = Stage::AwaitingIdentifier;
                         let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
+                if let Err(e) = tx.commit().await {
+                    warn!(conn_id, error = %e, "creation tx commit failed");
+                    let _ = ctx.outbound.send(
+                        format!(
+                            "Couldn't finalize creation ({e}). Both rows have been \
+                             rolled back; please try again.\r\n"
+                        )
+                        .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    return;
+                }
                 let _ = ctx.outbound.send(
                     format!(
                         "Welcome to FieryMUD! `{character_name}` ({gender} {race} \
