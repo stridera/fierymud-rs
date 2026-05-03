@@ -272,9 +272,7 @@ mod unban;
 /// determined). A future migration can drain the static array
 /// entirely without touching dispatch.
 pub fn all_commands() -> impl Iterator<Item = &'static Command> {
-    COMMANDS
-        .iter()
-        .chain(inventory::iter::<Command>())
+    inventory::iter::<Command>()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -320,13 +318,6 @@ impl Category {
 
 const MAX_NAME_TOKENS: usize = 3;
 
-/// All built-in commands. Order doesn't affect dispatch (lookup is by name)
-/// but does set fallback ordering for `help` listing within a category.
-///
-/// The array is now empty — every command is distributed via
-/// `inventory::submit!` in commands/<file>.rs. `all_commands()`
-/// chains the (empty) static slice with `inventory::iter`.
-const COMMANDS: &[Command] = &[];
 
 pub(crate) const MOVE_HELP: Help = Help {
     usage: "<direction>",
