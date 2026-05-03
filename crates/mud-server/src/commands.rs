@@ -3470,6 +3470,26 @@ const COMMANDS: &[Command] = &[
         run: cmd_teleport,
     },
     Command {
+        names: &["cclan"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "cclan create <name> <abbrev>\n       cclan assign <player> <abbrev> [rank]\n       cclan kick <player>\n       cclan motd <abbrev> <text>",
+            summary: "Manage clans (create / assign / kick / MOTD).",
+            long: "Implementor-only.\n\
+                   - `create` opens a new clan; name + abbrev must \
+                     both be unique.\n\
+                   - `assign` puts a character into a clan, defaulting \
+                     to MEMBER. Rank can be LEADER / OFFICER / MEMBER \
+                     / APPLICANT.\n\
+                   - `kick` removes their clan_member row entirely.\n\
+                   - `motd` sets a clan's message-of-the-day; empty \
+                     text clears it.",
+        },
+        run: cmd_cclan,
+    },
+    Command {
         names: &["pnote", "playernote"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -14010,6 +14030,148 @@ fn cmd_house_take(
             }
         });
     }
+}
+
+/// `cclan` admin dispatch: create / assign / kick / motd.
+/// Implementor-only — gated upstream by `min_role`.
+#[allow(clippy::too_many_lines)]
+fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "cclan", args);
+    let mut parts = args.splitn(2, char::is_whitespace);
+    let action = parts.next().unwrap_or("").to_ascii_lowercase();
+    let rest = parts.next().unwrap_or("").trim();
+    if action.is_empty() {
+        send_to(world, player, "Usage: cclan <create|assign|kick|motd> ...\r\n");
+        return;
+    }
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    let rest = rest.to_string();
+    tokio::spawn(async move {
+        let Some(out) = outbound else { return };
+        match action.as_str() {
+            "create" => {
+                let mut tokens = rest.split_whitespace();
+                let abbrev = tokens.next_back();
+                let name: String = tokens.collect::<Vec<_>>().join(" ");
+                let (Some(abbrev), false) = (abbrev, name.is_empty()) else {
+                    let _ = out.send(b"Usage: cclan create <name> <abbrev>\r\n".to_vec());
+                    return;
+                };
+                match mud_db::clans::create_clan(&pool, &name, abbrev).await {
+                    Ok(id) => {
+                        let _ = out.send(
+                            format!("Clan #{id} '{name}' [{abbrev}] created.\r\n")
+                                .into_bytes(),
+                        );
+                    }
+                    Err(e) => {
+                        let _ = out
+                            .send(format!("Couldn't create clan: {e}\r\n").into_bytes());
+                    }
+                }
+            }
+            "assign" => {
+                let mut tokens = rest.split_whitespace();
+                let player_name = tokens.next();
+                let abbrev = tokens.next();
+                let rank = tokens.next().unwrap_or("MEMBER").to_ascii_uppercase();
+                let (Some(player_name), Some(abbrev)) = (player_name, abbrev) else {
+                    let _ = out.send(
+                        b"Usage: cclan assign <player> <abbrev> [rank]\r\n".to_vec(),
+                    );
+                    return;
+                };
+                if !matches!(rank.as_str(), "LEADER" | "OFFICER" | "MEMBER" | "APPLICANT")
+                {
+                    let _ = out.send(
+                        b"Rank must be LEADER, OFFICER, MEMBER, or APPLICANT.\r\n".to_vec(),
+                    );
+                    return;
+                }
+                let Ok(Some(target)) =
+                    mud_db::characters::find_by_name(&pool, player_name).await
+                else {
+                    let _ = out
+                        .send(format!("No character named '{player_name}'.\r\n").into_bytes());
+                    return;
+                };
+                let Ok(Some(clan)) = mud_db::clans::get_by_abbrev(&pool, abbrev).await else {
+                    let _ = out
+                        .send(format!("No clan with abbrev '{abbrev}'.\r\n").into_bytes());
+                    return;
+                };
+                if let Err(e) =
+                    mud_db::clans::assign_member(&pool, &target.id, clan.id, &rank).await
+                {
+                    let _ = out.send(format!("Assign failed: {e}\r\n").into_bytes());
+                } else {
+                    let _ = out.send(
+                        format!("{} → {} as {rank}.\r\n", target.name, clan.abbrev)
+                            .into_bytes(),
+                    );
+                }
+            }
+            "kick" => {
+                let player_name = rest.trim();
+                if player_name.is_empty() {
+                    let _ = out.send(b"Usage: cclan kick <player>\r\n".to_vec());
+                    return;
+                }
+                let Ok(Some(target)) =
+                    mud_db::characters::find_by_name(&pool, player_name).await
+                else {
+                    let _ = out
+                        .send(format!("No character named '{player_name}'.\r\n").into_bytes());
+                    return;
+                };
+                match mud_db::clans::remove_member(&pool, &target.id).await {
+                    Ok(0) => {
+                        let _ = out
+                            .send(format!("{} isn't in any clan.\r\n", target.name).into_bytes());
+                    }
+                    Ok(_) => {
+                        let _ = out
+                            .send(format!("{} kicked from clan.\r\n", target.name).into_bytes());
+                    }
+                    Err(e) => {
+                        let _ = out.send(format!("Kick failed: {e}\r\n").into_bytes());
+                    }
+                }
+            }
+            "motd" => {
+                let mut tokens = rest.splitn(2, char::is_whitespace);
+                let abbrev = tokens.next();
+                let body = tokens.next().unwrap_or("").trim();
+                let Some(abbrev) = abbrev else {
+                    let _ = out
+                        .send(b"Usage: cclan motd <abbrev> <text>\r\n".to_vec());
+                    return;
+                };
+                let Ok(Some(clan)) = mud_db::clans::get_by_abbrev(&pool, abbrev).await else {
+                    let _ = out
+                        .send(format!("No clan with abbrev '{abbrev}'.\r\n").into_bytes());
+                    return;
+                };
+                let new_motd = if body.is_empty() { None } else { Some(body) };
+                if let Err(e) = mud_db::clans::set_motd(&pool, clan.id, new_motd).await {
+                    let _ = out.send(format!("MOTD set failed: {e}\r\n").into_bytes());
+                } else {
+                    let _ = out.send(
+                        format!("MOTD updated on {}.\r\n", clan.abbrev).into_bytes(),
+                    );
+                }
+            }
+            other => {
+                let _ = out.send(
+                    format!("Unknown cclan action '{other}'.\r\n").into_bytes(),
+                );
+            }
+        }
+    });
 }
 
 /// `pnote <player> [<text>|clear]` — staff annotations on a

@@ -76,6 +76,95 @@ pub struct ClanRosterRow {
     pub level: i32,
 }
 
+/// Look up a clan by case-insensitive abbreviation.
+pub async fn get_by_abbrev(
+    pool: &PgPool,
+    abbrev: &str,
+) -> sqlx::Result<Option<ClanRow>> {
+    sqlx::query_as!(
+        ClanRow,
+        r#"SELECT id, name, abbrev, motd FROM clan WHERE LOWER(abbrev) = LOWER($1)"#,
+        abbrev,
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Create a new clan. The unique constraints on name and abbrev
+/// are enforced by the schema; on conflict the caller gets an
+/// `Err(_)` they can surface as "name/abbrev already taken."
+pub async fn create_clan(
+    pool: &PgPool,
+    name: &str,
+    abbrev: &str,
+) -> sqlx::Result<i32> {
+    let row = sqlx::query!(
+        r#"INSERT INTO clan (name, abbrev) VALUES ($1, $2) RETURNING id"#,
+        name,
+        abbrev,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.id)
+}
+
+/// Update a clan's MOTD. Empty string clears it (NULL in DB).
+pub async fn set_motd(
+    pool: &PgPool,
+    clan_id: i32,
+    motd: Option<&str>,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query!(
+        r#"UPDATE clan SET motd = $1 WHERE id = $2"#,
+        motd,
+        clan_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Assign a character to a clan with the given rank. Idempotent
+/// on `(character_id)` — the schema's PK is `character_id`, so a
+/// player already in a clan gets reassigned (or have their rank
+/// updated).
+pub async fn assign_member(
+    pool: &PgPool,
+    character_id: &str,
+    clan_id: i32,
+    rank: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO clan_member (character_id, clan_id, rank)
+        VALUES ($1, $2, $3::"ClanRank")
+        ON CONFLICT (character_id) DO UPDATE
+        SET clan_id = EXCLUDED.clan_id,
+            rank = EXCLUDED.rank
+        "#,
+    )
+    .bind(character_id)
+    .bind(clan_id)
+    .bind(rank)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove a character from their clan (if any).
+pub async fn remove_member(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query!(
+        r#"DELETE FROM clan_member WHERE character_id = $1"#,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// Look up one clan by id. Returns Ok(None) for missing rows.
 pub async fn get_clan(pool: &PgPool, clan_id: i32) -> sqlx::Result<Option<ClanRow>> {
     sqlx::query_as!(
