@@ -44,6 +44,104 @@ pub struct Connection(pub Outbound);
 #[derive(Resource)]
 pub struct DbPool(pub mud_db::sqlx::PgPool);
 
+/// One pending mutation an async task wants applied to a player
+/// entity. The tick reads `character_id` to find the matching
+/// online entity (or drops the message silently if the player
+/// disconnected before the tick fires).
+#[derive(Debug, Clone)]
+pub enum PendingPlayerUpdate {
+    /// Add to `Profile.experience` (and re-check level-ups).
+    ExperienceDelta { character_id: String, amount: i32 },
+    /// Add to `Wealth`.
+    WealthDelta { character_id: String, amount: i64 },
+    /// Add to `SkillPoints`.
+    SkillPointsDelta { character_id: String, amount: i32 },
+    /// Insert into `KnownAbilities` if not present.
+    AbilityKnown {
+        character_id: String,
+        ability_id: i32,
+    },
+}
+
+impl PendingPlayerUpdate {
+    /// The character id this update targets — looked up against
+    /// `Account.character_id` in the drain tick.
+    #[must_use]
+    pub fn character_id(&self) -> &str {
+        match self {
+            Self::ExperienceDelta { character_id, .. }
+            | Self::WealthDelta { character_id, .. }
+            | Self::SkillPointsDelta { character_id, .. }
+            | Self::AbilityKnown { character_id, .. } => character_id,
+        }
+    }
+}
+
+/// Sender side of the async-to-world channel for player ECS
+/// updates. Cloned by command handlers before `tokio::spawn`.
+#[derive(Resource, Clone)]
+pub struct PlayerUpdateTx(pub tokio::sync::mpsc::UnboundedSender<PendingPlayerUpdate>);
+
+/// Receiver side, drained once per tick by `drain_player_updates`.
+#[derive(Resource)]
+pub struct PlayerUpdateInbox(
+    pub std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<PendingPlayerUpdate>>,
+);
+
+/// Tick system that drains the player-update inbox and applies
+/// each message to the matching online player. Idempotent —
+/// missing characters (offline players) silently drop.
+pub fn drain_player_updates(world: &mut World) {
+    let drained: Vec<PendingPlayerUpdate> = {
+        let inbox = world.resource::<PlayerUpdateInbox>();
+        let Ok(mut rx) = inbox.0.lock() else {
+            return;
+        };
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            out.push(msg);
+        }
+        out
+    };
+    for msg in drained {
+        let target_cid = msg.character_id().to_string();
+        // Resolve the entity by Account.character_id.
+        let entity: Option<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Account), With<Player>>();
+            q.iter(world)
+                .find(|(_, a)| a.character_id == target_cid)
+                .map(|(e, _)| e)
+        };
+        let Some(entity) = entity else {
+            continue;
+        };
+        match msg {
+            PendingPlayerUpdate::ExperienceDelta { amount, .. } => {
+                if let Some(mut p) = world.get_mut::<Profile>(entity) {
+                    p.experience = p.experience.saturating_add(amount);
+                }
+            }
+            PendingPlayerUpdate::WealthDelta { amount, .. } => {
+                if let Some(mut w) = world.get_mut::<Wealth>(entity) {
+                    w.0 = w.0.saturating_add(amount);
+                }
+            }
+            PendingPlayerUpdate::SkillPointsDelta { amount, .. } => {
+                if let Some(mut s) = world.get_mut::<mud_world::SkillPoints>(entity) {
+                    s.0 = s.0.saturating_add(amount);
+                }
+            }
+            PendingPlayerUpdate::AbilityKnown { ability_id, .. } => {
+                if let Some(mut k) = world.get_mut::<KnownAbilities>(entity)
+                    && !k.entries.iter().any(|(id, _, _)| *id == ability_id)
+                {
+                    k.entries.push((ability_id, 1, true));
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Command contract
 // ---------------------------------------------------------------------------
@@ -6995,9 +7093,13 @@ fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBum
             Some((e, cid, out))
         })
         .collect();
+    let update_tx_root = world
+        .get_resource::<PlayerUpdateTx>()
+        .map(|t| t.0.clone());
     for (entity, cid, out) in recipients {
         let is_actor = entity == actor;
         let pool = pool.clone();
+        let update_tx = update_tx_root.clone();
         tokio::spawn(async move {
             let rows_res = match kind {
                 QuestObjectiveBump::KillMob { zone, id } => {
@@ -7105,6 +7207,42 @@ fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBum
                                     .await
                                 {
                                     tracing::warn!(error = %e, "reward grant failed");
+                                }
+                                // Mirror the DB updates onto the
+                                // running ECS components so the
+                                // player sees the gain immediately
+                                // (without logout/login).
+                                for r in &rewards {
+                                    let update = match r.reward_type.as_str() {
+                                        "EXPERIENCE" => r.amount.map(|a| {
+                                            PendingPlayerUpdate::ExperienceDelta {
+                                                character_id: cid.clone(),
+                                                amount: a,
+                                            }
+                                        }),
+                                        "GOLD" => r.amount.map(|a| {
+                                            PendingPlayerUpdate::WealthDelta {
+                                                character_id: cid.clone(),
+                                                amount: i64::from(a),
+                                            }
+                                        }),
+                                        "SKILL_POINTS" => r.amount.map(|a| {
+                                            PendingPlayerUpdate::SkillPointsDelta {
+                                                character_id: cid.clone(),
+                                                amount: a,
+                                            }
+                                        }),
+                                        "ABILITY" => r.ability_id.map(|id| {
+                                            PendingPlayerUpdate::AbilityKnown {
+                                                character_id: cid.clone(),
+                                                ability_id: id,
+                                            }
+                                        }),
+                                        _ => None,
+                                    };
+                                    if let (Some(u), Some(tx)) = (update, update_tx.as_ref()) {
+                                        let _ = tx.send(u);
+                                    }
                                 }
                                 let mut buf = String::from("Rewards:\r\n");
                                 for r in &rewards {

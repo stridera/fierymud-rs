@@ -199,6 +199,14 @@ async fn main() {
     // through any dispatch path, including the admin port's sync path
     // that doesn't go through try_dispatch_async).
     world.insert_resource(commands::DbPool(pool.clone()));
+    // Channel for async tasks to push live ECS deltas back to the
+    // world (quest reward grants, etc.). Tick drains the inbox.
+    let (player_update_tx, player_update_rx) =
+        tokio::sync::mpsc::unbounded_channel::<commands::PendingPlayerUpdate>();
+    world.insert_resource(commands::PlayerUpdateTx(player_update_tx));
+    world.insert_resource(commands::PlayerUpdateInbox(std::sync::Mutex::new(
+        player_update_rx,
+    )));
 
     let mut router = ConnRouter::new();
     let mut schedule = Schedule::default();
@@ -207,26 +215,33 @@ async fn main() {
     // the rest of the world is frozen. Everything else stops on pause.
     schedule.add_systems(
         (
-            advance_tick,
-            mud_clock_tick,
-            combat::combat_tick,
-            combat::corpse_decay_tick,
-            effects::effects_tick,
-            regen::regen_tick,
-            regen::hunger_thirst_tick,
-            regen::light_fuel_tick,
-            regen::drunkenness_tick,
-            drowning::drowning_tick,
-            weather::weather_tick,
-            weather::ambient_tick,
-            sleep::mob_sleep_tick,
-            wander::wander_tick,
-            wander::scavenger_tick,
-            idle::idle_kick_tick,
-            memorize::memorize_tick,
-            respawn::respawn_tick,
-            triggers::lua_coroutine_tick,
-            log_heartbeat,
+            (
+                advance_tick,
+                mud_clock_tick,
+                combat::combat_tick,
+                combat::corpse_decay_tick,
+                effects::effects_tick,
+                regen::regen_tick,
+                regen::hunger_thirst_tick,
+                regen::light_fuel_tick,
+                regen::drunkenness_tick,
+                drowning::drowning_tick,
+                weather::weather_tick,
+                weather::ambient_tick,
+                sleep::mob_sleep_tick,
+            )
+                .chain(),
+            (
+                wander::wander_tick,
+                wander::scavenger_tick,
+                idle::idle_kick_tick,
+                memorize::memorize_tick,
+                respawn::respawn_tick,
+                triggers::lua_coroutine_tick,
+                commands::drain_player_updates,
+                log_heartbeat,
+            )
+                .chain(),
         )
             .chain(),
     );
