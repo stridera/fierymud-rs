@@ -4259,9 +4259,34 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             leader: leader_name.as_deref(),
             member_count: group_size,
         },
-        level_progress: profile_owned
-            .as_ref()
-            .and_then(|(lvl, _, _, _, xp)| level_progress_for(*lvl, *xp)),
+        // Score's level-progress reads from the live LevelTable so
+        // the percent agrees with `level` command output. Falls
+        // back to the legacy `level^2.5 * 1000` curve via
+        // `level_progress_for` only if the table doesn't carry a
+        // next-level row (e.g. brand-new boot before levels are
+        // loaded). Capped at level >= 100 the same way score did
+        // before the LevelTable hookup.
+        level_progress: profile_owned.as_ref().and_then(|(lvl, _, _, _, xp)| {
+            if !(1..100).contains(lvl) {
+                return None;
+            }
+            let table = world.resource::<mud_world::LevelTable>();
+            if let (prev, Some(next)) = (
+                table.exp_for(*lvl).unwrap_or(0),
+                table.exp_for(*lvl + 1),
+            ) {
+                let bracket = (next - prev).max(1);
+                let into = (*xp - prev).max(0);
+                let percent = ((i64::from(into) * 100) / i64::from(bracket)).clamp(0, 100);
+                Some(LevelProgress {
+                    current_xp: i64::from(*xp),
+                    next_level_xp: i64::from(next),
+                    percent: i32::try_from(percent).unwrap_or(0),
+                })
+            } else {
+                level_progress_for(*lvl, *xp)
+            }
+        }),
         location: location_owned
             .as_ref()
             .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
