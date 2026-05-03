@@ -2704,6 +2704,7 @@ mod tests {
             cooldowns_active: 2,
             guarding_name: None,
             mail_draft: None,
+            board_draft: None,
         }
     }
 
@@ -2772,6 +2773,24 @@ mod tests {
         assert!(
             out.contains("Cooldowns: 2 abilities recharging"),
             "cooldowns line: {out}",
+        );
+    }
+
+    #[test]
+    fn score_board_draft_line_only_when_in_flight() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = Vec::new();
+        let effects: Vec<String> = Vec::new();
+        let equipment: Vec<(&'static str, String)> = Vec::new();
+        let mut data =
+            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let off = super::render_score_standard(&data);
+        assert!(!off.contains("Board draft:"), "no board row: {off}");
+        data.board_draft = Some(("mortal", 5));
+        let on = super::render_score_standard(&data);
+        assert!(
+            on.contains("Board draft: on mortal, 5 lines"),
+            "board row: {on}",
         );
     }
 
@@ -4547,6 +4566,10 @@ pub(crate) struct ScoreData<'a> {
     /// composed message and forget. Suppressed when no draft is
     /// active.
     mail_draft: Option<(&'a str, usize)>,
+    /// Same idea for `BoardDraft`: `(board_alias, body_line_count)`
+    /// when the player is mid-post. Surfaced so a half-written
+    /// post that's been parked for a while doesn't go unnoticed.
+    board_draft: Option<(&'a str, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -4689,6 +4712,13 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!(
             "  Mail draft: to {to}, {lines} line{suffix} so far    \
              (`mail .send` / `.preview` / `.abort`)\r\n",
+        ));
+    }
+    if let Some((board, lines)) = d.board_draft {
+        let suffix = if lines == 1 { "" } else { "s" };
+        out.push_str(&format!(
+            "  Board draft: on {board}, {lines} line{suffix} so far    \
+             (`post .send` / `.preview` / `.abort`)\r\n",
         ));
     }
     if let Some(line) = group_status_line(&d.group_status) {
@@ -5040,6 +5070,10 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     if let Some((to, lines)) = d.mail_draft {
         let suffix = if lines == 1 { "" } else { "s" };
         row(format!("Draft:     mail to {to}, {lines} line{suffix}"));
+    }
+    if let Some((board, lines)) = d.board_draft {
+        let suffix = if lines == 1 { "" } else { "s" };
+        row(format!("Draft:     board {board}, {lines} line{suffix}"));
     }
     if let Some(line) = group_status_line(&d.group_status) {
         row(line);

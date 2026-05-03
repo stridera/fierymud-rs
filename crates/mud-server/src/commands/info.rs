@@ -4321,6 +4321,10 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let mail_draft_owned: Option<(String, usize)> = world
         .get::<MailDraft>(player)
         .map(|d| (d.recipient_label.clone(), d.body.len()));
+    // Same shape for in-flight board posts via `BoardDraft`.
+    let board_draft_owned: Option<(String, usize)> = world
+        .get::<BoardDraft>(player)
+        .map(|d| (d.board_alias.clone(), d.body.len()));
     // Equipment summary in canonical slot order. Same shape as
     // `cmd_equipment` but pre-flattened to (label, name) tuples
     // with color tags stripped — render layer just pads.
@@ -4539,6 +4543,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         mail_draft: mail_draft_owned
             .as_ref()
             .map(|(to, lines)| (to.as_str(), *lines)),
+        board_draft: board_draft_owned
+            .as_ref()
+            .map(|(alias, lines)| (alias.as_str(), *lines)),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
