@@ -6636,8 +6636,15 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
         if remaining < 0 {
             out.push_str(&format!("  {name}{delta_label} (permanent){suffix}\r\n"));
         } else {
+            // Render long durations as "37m" / "2h15m" instead of
+            // raw "2245s remaining" so the player gets a useful
+            // sense of timeline at a glance. format_idle handles
+            // the hour/minute/second decomposition.
+            #[allow(clippy::cast_sign_loss)]
+            let secs = remaining.max(0) as u64;
             out.push_str(&format!(
-                "  {name}{delta_label} ({remaining}s remaining){suffix}\r\n"
+                "  {name}{delta_label} ({} remaining){suffix}\r\n",
+                format_idle(secs),
             ));
         }
     }
