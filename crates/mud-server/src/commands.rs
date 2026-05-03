@@ -8929,6 +8929,17 @@ pub(crate) fn format_wealth(total: i64) -> Option<String> {
 fn cmd_practice(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     if !trimmed.is_empty() {
+        // Spending a practice point requires a Trainer (matches
+        // Guildmasters who tag both — guildmasters teach class
+        // abilities). Listing (no-arg path) stays anywhere.
+        if !require_profession_in_room(
+            world,
+            player,
+            mud_db::enums::MobProfession::Trainer,
+            "trainer",
+        ) {
+            return;
+        }
         return practice_one(world, player, trimmed);
     }
     let known = world
