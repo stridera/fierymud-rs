@@ -855,6 +855,7 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
             out.push_str("  resets    mob/object reset catalog counts\r\n");
             out.push_str("  corpses   active corpses + decay timers + item counts\r\n");
             out.push_str("  audit     recent admin-mutating actions\r\n");
+            out.push_str("  rooms     world room totals + peaceful / light / hidden / extras counts\r\n");
         }
         "players" => {
             let mut rows: Vec<(String, String, i32, String)> = {
@@ -1039,6 +1040,59 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
                     ));
                 }
             }
+        }
+        "rooms" => {
+            let total = world
+                .query_filtered::<&WorldKey, With<mud_world::Room>>()
+                .iter(world)
+                .count();
+            let peaceful = world
+                .query_filtered::<&mud_world::PeacefulRoom, With<mud_world::Room>>()
+                .iter(world)
+                .count();
+            let (lit_override, dark_override) = {
+                let mut q = world
+                    .query_filtered::<&mud_world::BaseLightLevel, With<mud_world::Room>>();
+                let mut lit = 0_usize;
+                let mut dark = 0_usize;
+                for level in q.iter(world) {
+                    if level.0 > 0 {
+                        lit += 1;
+                    } else if level.0 < 0 {
+                        dark += 1;
+                    }
+                }
+                (lit, dark)
+            };
+            let (extras_rooms, extras_entries) = {
+                let mut q = world
+                    .query_filtered::<&mud_world::RoomExtras, With<mud_world::Room>>();
+                let mut rooms_with = 0_usize;
+                let mut total_entries = 0_usize;
+                for extras in q.iter(world) {
+                    if !extras.entries.is_empty() {
+                        rooms_with += 1;
+                    }
+                    total_entries += extras.entries.len();
+                }
+                (rooms_with, total_entries)
+            };
+            let hidden_exits = {
+                let mut q = world
+                    .query_filtered::<&Exits, With<mud_world::Room>>();
+                let mut count = 0_usize;
+                for exits in q.iter(world) {
+                    count += exits.0.values().filter(|ed| ed.is_hidden).count();
+                }
+                count
+            };
+            out.push_str(&format!("Rooms loaded:        {total}\r\n"));
+            out.push_str(&format!("  peaceful:          {peaceful}\r\n"));
+            out.push_str(&format!("  light overrides:   {lit_override} lit / {dark_override} dark\r\n"));
+            out.push_str(&format!("  hidden exits:      {hidden_exits}\r\n"));
+            out.push_str(&format!(
+                "  extras:            {extras_rooms} rooms / {extras_entries} entries\r\n"
+            ));
         }
         other => {
             out.push_str(&format!(
