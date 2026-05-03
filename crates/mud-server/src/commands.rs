@@ -4216,6 +4216,16 @@ pub(crate) fn room_is_dark(world: &World, room: Entity) -> bool {
     if !sector_is_outdoor_for_weather(sector) {
         return false;
     }
+    // Civic sectors are presumed lit at night by streetlamps /
+    // torch posts / civic lighting — cities and main roads never
+    // go pitch-black on the clock alone. Wilderness sectors go
+    // dark at night per the legacy CircleMUD model. Content
+    // authors who want a *dark* alley can place an unlit alley
+    // room with a non-civic sector (RUINS, SWAMP) or override via
+    // intrinsic-dark room flags once those land.
+    if matches!(sector, Sector::City | Sector::Road) {
+        return false;
+    }
     let hour = world.resource::<mud_world::MudClock>().hour;
     matches!(hour, 0..=4 | 22..=23)
 }
