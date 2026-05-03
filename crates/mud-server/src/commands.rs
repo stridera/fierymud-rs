@@ -9179,6 +9179,7 @@ struct WhoRow {
     afk: bool,
     idle: Option<u64>,
     level: i32,
+    clan_abbrev: Option<String>,
 }
 
 fn cmd_who(world: &mut World, player: Entity, _args: &str) {
@@ -9197,15 +9198,17 @@ fn cmd_who(world: &mut World, player: Entity, _args: &str) {
             Option<&PlayerFlags>,
             Option<&LastInputAt>,
             Option<&Profile>,
+            Option<&mud_world::ClanMembership>,
         ), (With<Player>, With<Online>)>();
         q.iter(world)
-            .map(|(e, n, t, f, last, prof)| WhoRow {
+            .map(|(e, n, t, f, last, prof, clan)| WhoRow {
                 entity: e,
                 name: n.name.clone(),
                 title: t.map(|t| t.0.clone()),
                 afk: f.is_some_and(|pf| pf.has(PlayerFlag::Afk)),
                 idle: last.map(|l| l.0.elapsed().as_secs()),
                 level: prof.map_or(0, |p| p.level),
+                clan_abbrev: clan.map(|c| c.clan_abbrev.clone()),
             })
             .collect()
     };
@@ -9237,6 +9240,9 @@ fn cmd_who(world: &mut World, player: Entity, _args: &str) {
             out.push_str("       ");
         }
         out.push_str(&pad_visible(&r.name, NAME_COL));
+        if let Some(abbrev) = &r.clan_abbrev {
+            out.push_str(&format!(" [{abbrev}]"));
+        }
         if let Some(t) = &r.title {
             out.push(' ');
             out.push_str(t);
