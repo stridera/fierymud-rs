@@ -492,6 +492,16 @@ pub struct RevealedExits {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PeacefulRoom;
 
+/// `RoomExtraDescriptions` flattened onto the room entity:
+/// keyword-addressable flavor text builders use to add detail
+/// without modeling the thing as an Object. `look fountain` /
+/// `examine painting` consult this list before falling through
+/// to the no-target error. Each entry is `(keywords, description)`.
+#[derive(Component, Debug, Clone, Default)]
+pub struct RoomExtras {
+    pub entries: Vec<(Vec<String>, String)>,
+}
+
 /// Per-item finite charges for `ObjectAbilities`-bound items
 /// (wands, staves). `-1` means unlimited (never decremented).
 /// `0` means depleted — the item should despawn or refuse to

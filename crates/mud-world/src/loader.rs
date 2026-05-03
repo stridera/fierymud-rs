@@ -169,6 +169,28 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
     }
 
+    // Pass 3.5: room extra descriptions. Builder-authored flavor
+    // text addressable by keyword (e.g. "look fountain") without
+    // a backing Object entity. Grouped by (zone_id, room_id) so
+    // each room gets its own RoomExtras component.
+    let extra_rows = mud_db::room_extra_descriptions::list_extras(pool).await?;
+    #[allow(clippy::type_complexity)]
+    let mut extras_by_room: HashMap<(i32, i32), Vec<(Vec<String>, String)>> =
+        HashMap::new();
+    for r in extra_rows {
+        extras_by_room
+            .entry((r.room_zone_id, r.room_id))
+            .or_default()
+            .push((r.keywords, r.description));
+    }
+    for ((zone_id, room_id), entries) in extras_by_room {
+        if let Some(&room_entity) = room_index.get(&(zone_id, room_id))
+            && let Ok(mut e) = world.get_entity_mut(room_entity)
+        {
+            e.insert(crate::RoomExtras { entries });
+        }
+    }
+
     // Pass 4: catalog data. Mob, Object, Effect, and Social catalogs all
     // become Resources since commands look them up by name/key.
     let mob_rows = mobs::list_mobs(pool).await?;

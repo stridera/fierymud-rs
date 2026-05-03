@@ -2376,6 +2376,25 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _, _, _)| e)
     };
     let Some(target) = target else {
+        // Fall through to the room's RoomExtraDescriptions
+        // before reporting "you don't see that here". Keyword
+        // match is case-insensitive substring against any
+        // entry's keyword list. The first match wins; builders
+        // ordering things in the schema controls precedence.
+        if let Some(extras) = world.get::<mud_world::RoomExtras>(room) {
+            let needle_lc = needle.to_ascii_lowercase();
+            let hit = extras.entries.iter().find(|(keywords, _)| {
+                keywords
+                    .iter()
+                    .any(|kw| kw.to_ascii_lowercase().contains(&needle_lc))
+            });
+            if let Some((_, description)) = hit {
+                let mode = color_mode_for(world, player);
+                let body = render_color_tags(description.trim_end(), mode);
+                send_to(world, player, format!("\r\n{body}\r\n"));
+                return;
+            }
+        }
         send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
         );
         return;
