@@ -1816,8 +1816,11 @@ mod tests {
 
     #[test]
     fn formula_eval_unknown_still_returns_none() {
-        // Unknown identifiers and unsupported calls still fall through.
-        assert_eq!(evaluate_simple_formula("base_damage + skill", 10, 5), None);
+        // base_damage is now a known symbol — `base` (FormulaCtx::base)
+        // builds with base_damage=0, so `base_damage + skill` = 5.
+        // The full invoke_ability path computes the real circle-based
+        // value at cast time.
+        assert_eq!(evaluate_simple_formula("base_damage + skill", 10, 5), Some(5));
         // pow() is now supported (see formula_eval_pow_with_float_exp).
         assert_eq!(evaluate_simple_formula("foo(1, 2)", 0, 0), None);
         // Malformed: dangling operator.
@@ -1897,10 +1900,22 @@ mod tests {
         // Short aliases match.
         assert_eq!(evaluate_formula("str + dex", &ctx, &mut zero), Some(5));
         assert_eq!(evaluate_formula("wis + cha", &ctx, &mut zero), Some(4));
-        // Unrecognized symbol still returns None.
+        // base_damage resolves from ctx.base_damage (0 by default for
+        // FormulaCtx::default()-derived ctx; populated in the
+        // invoke_ability path from level+circle*2+max(int,wis)).
         assert_eq!(
             evaluate_formula("base_damage + 5", &ctx, &mut zero),
-            None
+            Some(5),
+        );
+        let ctx_with_base = FormulaCtx {
+            base_damage: 30,
+            ..ctx
+        };
+        // FIRESTORM-style: base_damage + (skill^2 / 100). For
+        // skill=30 in ctx, skill^2/100 = 9. 30 + 9 = 39.
+        assert_eq!(
+            evaluate_formula("base_damage + (pow(skill, 2) / 100)", &ctx_with_base, &mut zero),
+            Some(39),
         );
         // hidden symbol resolves from ctx.hidden (0/1 from Stealth marker presence).
         let mut ctx_hidden = FormulaCtx {
@@ -7067,6 +7082,26 @@ pub(crate) fn invoke_ability_with(
     let caster_weapon_damage = caster_weapon_damage(world, player);
     let caster_stats = world.get::<CoreStats>(player).copied().unwrap_or_default();
     let caster_hidden = i32::from(world.get::<Stealth>(player).is_some());
+    let int_bonus = CoreStats::bonus(caster_stats.intelligence);
+    let wis_bonus = CoreStats::bonus(caster_stats.wisdom);
+    // `base_damage` = level + spell_circle*2 + max(int_bonus, wis_bonus)
+    // mirrors the legacy C++ formula. Spell circle comes from
+    // `SpellSlotData.ability_circle` keyed by (class_id, ability_id) —
+    // 0 when the caster has no class assigned or when the ability isn't
+    // a spell. Skill-only abilities (BACKSTAB / KICK / etc.) treat
+    // base_damage as zero, which matches the data: their formulas
+    // fall back to `weapon_damage`-based math instead.
+    let caster_class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    let spell_circle = caster_class_id
+        .and_then(|cid| {
+            world
+                .resource::<mud_world::SpellSlotData>()
+                .ability_circle
+                .get(&(cid, def.id))
+                .copied()
+        })
+        .unwrap_or(0);
+    let base_damage = caster_level + spell_circle * 2 + int_bonus.max(wis_bonus);
     let formula_ctx = FormulaCtx {
         level: caster_level,
         skill: caster_skill,
@@ -7074,10 +7109,11 @@ pub(crate) fn invoke_ability_with(
         str_bonus: CoreStats::bonus(caster_stats.strength),
         dex_bonus: CoreStats::bonus(caster_stats.dexterity),
         con_bonus: CoreStats::bonus(caster_stats.constitution),
-        int_bonus: CoreStats::bonus(caster_stats.intelligence),
-        wis_bonus: CoreStats::bonus(caster_stats.wisdom),
+        int_bonus,
+        wis_bonus,
         cha_bonus: CoreStats::bonus(caster_stats.charisma),
         hidden: caster_hidden,
+        base_damage,
     };
     let effect_specs: Vec<EffectSpec> = {
         let mappings = world
@@ -8869,6 +8905,15 @@ pub(crate) struct FormulaCtx {
     /// 1 when the caster has the `Stealth` marker, 0 otherwise.
     /// Used by rogue abilities (BACKSTAB's `bonusIfHidden`).
     hidden: i32,
+    /// Spell-baseline damage: `level + spell_circle * 2 +
+    /// max(int_bonus, wis_bonus)`. Computed at invoke time when
+    /// the caster's class + ability spell circle are known. Most
+    /// damage spells have `amount` formulas of shape
+    /// `base_damage + (skill^2 * X) / Y` so a missing
+    /// `base_damage` turns those into pure skill-scaling math; the
+    /// runtime now supplies the additive term so untrained casters
+    /// at high level still get circle/level-baseline damage.
+    base_damage: i32,
 }
 
 impl FormulaCtx {
@@ -8896,6 +8941,7 @@ impl FormulaCtx {
             "wis_bonus" | "wis" => Some(self.wis_bonus),
             "cha_bonus" | "cha" => Some(self.cha_bonus),
             "hidden" => Some(self.hidden),
+            "base_damage" | "base" => Some(self.base_damage),
             _ => None,
         }
     }
