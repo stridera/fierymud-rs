@@ -9585,6 +9585,14 @@ struct ScoreData<'a> {
     /// the encumbrance numbers are visible without `inventory`.
     /// Capacity is always positive — `carry_capacity` floors at 1.
     carry: (f64, f64),
+    /// Drunkenness counter (0–100). Rendered when nonzero with a
+    /// "Drunk: N" line.
+    drunkenness: i32,
+    /// Lifetime kill count, surfaced on the sheet so players see
+    /// progress toward kills_<N> achievements at a glance.
+    kill_total: i32,
+    /// `(name, abbrev, rank)` from `ClanMembership` when present.
+    clan: Option<(&'a str, &'a str, &'a str)>,
 }
 
 fn cmd_score(world: &mut World, player: Entity, _args: &str) {
@@ -9623,7 +9631,12 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
     let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
     let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
+    let drunkenness = world.get::<mud_world::Drunkenness>(player).map_or(0, |d| d.0);
+    let kill_total = world.get::<mud_world::KillStats>(player).map_or(0, |k| k.total);
     let carry = (carried_weight(world, player), carry_capacity(world, player));
+    let clan_owned: Option<(String, String, String)> = world
+        .get::<mud_world::ClanMembership>(player)
+        .map(|c| (c.clan_name.clone(), c.clan_abbrev.clone(), c.rank.clone()));
     let data = ScoreData {
         name: &name,
         hp,
@@ -9641,6 +9654,11 @@ fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         hunger,
         thirst,
         carry,
+        drunkenness,
+        kill_total,
+        clan: clan_owned
+            .as_ref()
+            .map(|(n, a, r)| (n.as_str(), a.as_str(), r.as_str())),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
@@ -9695,6 +9713,15 @@ fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(c) = condition_summary(d.hunger, d.thirst) {
         out.push_str(&format!("  Condition: {c}\r\n"));
+    }
+    if d.drunkenness > 0 {
+        out.push_str(&format!("  Drunk:  {} / 100\r\n", d.drunkenness));
+    }
+    if d.kill_total > 0 {
+        out.push_str(&format!("  Kills:  {}\r\n", d.kill_total));
+    }
+    if let Some((name, abbrev, rank)) = d.clan {
+        out.push_str(&format!("  Clan:   {name} [{abbrev}] ({rank})\r\n"));
     }
     out
 }
