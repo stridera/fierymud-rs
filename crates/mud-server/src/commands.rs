@@ -2322,6 +2322,22 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     Command {
+        names: &["qaccept"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "qaccept <zone> <quest-id>",
+            summary: "Accept a quest by composite id.",
+            long: "Self-service quest acceptance. Validates level \
+                   range, checks every required prerequisite, and \
+                   refuses if you already have it in progress (or \
+                   completed it once already on a non-repeatable \
+                   quest).",
+        },
+        run: cmd_mail_stub,
+    },
+    Command {
         names: &["qgive"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -4210,6 +4226,12 @@ pub async fn try_dispatch_async(
             mark_for_prompt(player);
             try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_qload(world, player, pool, args).await;
+            true
+        }
+        "qaccept" => {
+            mark_for_prompt(player);
+            try_insert(world, player, LastInputAt(std::time::Instant::now()));
+            cmd_qaccept(world, player, pool, args).await;
             true
         }
         "qgive" => {
@@ -18925,6 +18947,76 @@ pub(crate) async fn cmd_quests(
 /// character with status `IN_PROGRESS`. Skips if the row already
 /// exists. Useful for testing the quest listing/abandon loop without
 /// the full trigger-acceptance flow.
+/// `qaccept <zone> <id>` — player-driven quest acceptance.
+/// Validates level / hidden / prereqs / no-duplicate via
+/// `quests::accept_for_player` and prints a clear refusal line
+/// per outcome.
+pub(crate) async fn cmd_qaccept(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let mut parts = args.split_whitespace();
+    let (Some(zone_raw), Some(id_raw)) = (parts.next(), parts.next()) else {
+        send_to(world, player, "Usage: qaccept <zone> <quest-id>\r\n");
+        return;
+    };
+    let (Ok(zone), Ok(id)) = (zone_raw.parse::<i32>(), id_raw.parse::<i32>()) else {
+        send_to(world, player, "Zone and id must be integers.\r\n");
+        return;
+    };
+    let character_id = world.get::<Account>(player).map(|a| a.character_id.clone());
+    let level = world.get::<Profile>(player).map_or(1, |p| p.level);
+    let Some(character_id) = character_id else {
+        send_to(world, player, "No account info.\r\n");
+        return;
+    };
+    let outcome = match mud_db::quests::accept_for_player(
+        pool,
+        &character_id,
+        level,
+        zone,
+        id,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            send_to(world, player, format!("DB error: {e}\r\n"));
+            return;
+        }
+    };
+    let line = match outcome {
+        mud_db::quests::AcceptOutcome::Accepted => {
+            format!("Quest ({zone}, {id}) accepted.\r\n")
+        }
+        mud_db::quests::AcceptOutcome::NotFound => {
+            format!("No quest at ({zone}, {id}).\r\n")
+        }
+        mud_db::quests::AcceptOutcome::Hidden => {
+            "That quest can't be accepted directly.\r\n".to_string()
+        }
+        mud_db::quests::AcceptOutcome::LevelTooLow(min) => {
+            format!("You must be at least level {min} to accept this quest.\r\n")
+        }
+        mud_db::quests::AcceptOutcome::LevelTooHigh(max) => {
+            format!("This quest is for characters up to level {max}.\r\n")
+        }
+        mud_db::quests::AcceptOutcome::AlreadyInProgress => {
+            "You're already on that quest.\r\n".to_string()
+        }
+        mud_db::quests::AcceptOutcome::AlreadyCompletedNonRepeatable => {
+            "You've already finished that quest and it can't be repeated.\r\n"
+                .to_string()
+        }
+        mud_db::quests::AcceptOutcome::PrerequisiteIncomplete { zone, id } => {
+            format!("You need to finish quest ({zone}, {id}) first.\r\n")
+        }
+    };
+    send_to(world, player, line);
+}
+
 pub(crate) async fn cmd_qload(
     world: &mut World,
     player: Entity,

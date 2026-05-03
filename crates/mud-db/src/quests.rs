@@ -86,6 +86,125 @@ pub async fn quest_exists(pool: &PgPool, zone_id: i32, id: i32) -> sqlx::Result<
     Ok(row.is_some())
 }
 
+/// Outcome of a player-initiated `qaccept`. Caller picks the
+/// right user-facing message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptOutcome {
+    Accepted,
+    NotFound,
+    Hidden,
+    LevelTooLow(i32),
+    LevelTooHigh(i32),
+    AlreadyInProgress,
+    AlreadyCompletedNonRepeatable,
+    PrerequisiteIncomplete { zone: i32, id: i32 },
+}
+
+/// Player-initiated quest acceptance. Validates level + prereqs +
+/// non-duplicate before inserting the `IN_PROGRESS` row.
+pub async fn accept_for_player(
+    pool: &PgPool,
+    character_id: &str,
+    character_level: i32,
+    zone_id: i32,
+    quest_id: i32,
+) -> sqlx::Result<AcceptOutcome> {
+    // Quest existence + level / hidden gates.
+    let Some(quest) = get_quest(pool, zone_id, quest_id).await? else {
+        return Ok(AcceptOutcome::NotFound);
+    };
+    if quest.hidden {
+        return Ok(AcceptOutcome::Hidden);
+    }
+    if character_level < quest.min_level {
+        return Ok(AcceptOutcome::LevelTooLow(quest.min_level));
+    }
+    if quest.max_level > 0 && character_level > quest.max_level {
+        return Ok(AcceptOutcome::LevelTooHigh(quest.max_level));
+    }
+    // Existing CharacterQuest row gates.
+    let existing = sqlx::query!(
+        r#"
+        SELECT status::text AS "status!: String"
+        FROM "CharacterQuest"
+        WHERE character_id = $1 AND quest_zone_id = $2 AND quest_id = $3
+        "#,
+        character_id,
+        zone_id,
+        quest_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    if let Some(row) = existing {
+        if row.status == "IN_PROGRESS" {
+            return Ok(AcceptOutcome::AlreadyInProgress);
+        }
+        if row.status == "COMPLETED" && !quest.repeatable {
+            return Ok(AcceptOutcome::AlreadyCompletedNonRepeatable);
+        }
+    }
+    // Prerequisite check: every required prereq must have a
+    // COMPLETED CharacterQuest row.
+    let prereqs = sqlx::query!(
+        r#"
+        SELECT prerequisite_quest_zone_id AS pz,
+               prerequisite_quest_id AS pid
+        FROM "QuestPrerequisite"
+        WHERE quest_zone_id = $1
+          AND quest_id = $2
+          AND require_completion = true
+        "#,
+        zone_id,
+        quest_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    for p in &prereqs {
+        let done = sqlx::query!(
+            r#"
+            SELECT 1 AS found
+            FROM "CharacterQuest"
+            WHERE character_id = $1
+              AND quest_zone_id = $2
+              AND quest_id = $3
+              AND status = 'COMPLETED'::"QuestStatus"
+            LIMIT 1
+            "#,
+            character_id,
+            p.pz,
+            p.pid,
+        )
+        .fetch_optional(pool)
+        .await?;
+        if done.is_none() {
+            return Ok(AcceptOutcome::PrerequisiteIncomplete {
+                zone: p.pz,
+                id: p.pid,
+            });
+        }
+    }
+    // All gates passed. Insert (or revive) the row.
+    sqlx::query!(
+        r#"
+        INSERT INTO "CharacterQuest"
+            (id, character_id, quest_zone_id, quest_id, status)
+        VALUES (gen_random_uuid()::text, $1, $2, $3, 'IN_PROGRESS'::"QuestStatus")
+        ON CONFLICT (character_id, quest_zone_id, quest_id)
+        DO UPDATE SET
+            status = 'IN_PROGRESS'::"QuestStatus",
+            accepted_at = NOW(),
+            completed_at = NULL,
+            current_phase_id = NULL
+        "#,
+        character_id,
+        zone_id,
+        quest_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(AcceptOutcome::Accepted)
+}
+
 /// Insert a fresh `IN_PROGRESS` `CharacterQuest` row for testing /
 /// admin tooling. Skips if the unique `(character_id, zone_id, id)`
 /// row already exists. Returns the row id when inserted, None when
