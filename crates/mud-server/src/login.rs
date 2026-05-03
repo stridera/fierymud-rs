@@ -89,8 +89,31 @@ pub enum Stage {
         email: String,
         password_plaintext: String,
     },
+    /// Pick a race for the new character. Prompt lists the
+    /// `PLAYABLE_RACES` set; input matches case-insensitively. The
+    /// `email` field is `None` when the character-name path skipped
+    /// `AwaitingCharacterName` (the identifier was already a name).
+    AwaitingRace {
+        email: Option<String>,
+        character_name: String,
+        password_plaintext: String,
+    },
     CharSelect { user: User, characters: Vec<CharacterRow> },
 }
+
+/// Player-eligible races for the creation flow's race prompt.
+/// A subset of the schema's `Race` enum — monster / NPC variants
+/// (DRAGON, DEMON, GOBLIN, etc.) stay out of the picker. Order
+/// drives the listing the player sees.
+const PLAYABLE_RACES: &[&str] = &[
+    "HUMAN",
+    "ELF",
+    "HALF_ELF",
+    "DWARF",
+    "HALFLING",
+    "GNOME",
+    "GOLIATH",
+];
 
 pub struct LoginCtx {
     pub outbound: Outbound,
@@ -381,21 +404,13 @@ impl ConnRouter {
                         .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
                 } else {
                     // Character-name path: identifier IS the
-                    // character name. Race / class / gender / stat
-                    // roll and the DB INSERTs land in follow-up
-                    // slices; terminate here with an explicit
-                    // "next steps coming" line.
-                    let _ = ctx.outbound.send(
-                        format!(
-                            "Password set for `{identifier}`. Race, class, \
-                             gender, and stat roll land in a follow-up slice. \
-                             For now please enter an existing email or \
-                             character name.\r\n"
-                        )
-                        .into_bytes(),
-                    );
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    // character name. Advance to race selection.
+                    ctx.stage = Stage::AwaitingRace {
+                        email: None,
+                        character_name: identifier,
+                        password_plaintext: first_attempt,
+                    };
+                    send_race_prompt(&ctx.outbound);
                 }
             }
 
@@ -433,26 +448,14 @@ impl ConnRouter {
                             .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
                     }
                     Ok(None) => {
-                        // Name is available. Race / class / gender /
-                        // stat roll and the DB INSERTs land in
-                        // follow-up slices.
-                        let _ = ctx.outbound.send(
-                            format!(
-                                "Name `{name}` reserved for your new character. \
-                                 Race, class, gender, and stat roll land in a \
-                                 follow-up slice. For now please enter an \
-                                 existing email or character name.\r\n"
-                            )
-                            .into_bytes(),
-                        );
-                        // Drop the password plaintext explicitly so
-                        // the move into AwaitingIdentifier doesn't
-                        // leave it on the heap any longer than the
-                        // surrounding stage value.
-                        drop(password_plaintext);
-                        let _ = email;
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        // Name is available. Advance to race
+                        // selection.
+                        ctx.stage = Stage::AwaitingRace {
+                            email: Some(email),
+                            character_name: name.to_string(),
+                            password_plaintext,
+                        };
+                        send_race_prompt(&ctx.outbound);
                     }
                     Err(e) => {
                         warn!(conn_id, error = %e, "character-name uniqueness check failed");
@@ -470,6 +473,43 @@ impl ConnRouter {
                             .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
                     }
                 }
+            }
+
+            Stage::AwaitingRace {
+                email,
+                character_name,
+                password_plaintext,
+            } => {
+                let Some(race) = match_playable_race(trimmed) else {
+                    let _ = ctx.outbound.send(
+                        format!("`{trimmed}` isn't one of the available races.\r\n")
+                            .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingRace {
+                        email,
+                        character_name,
+                        password_plaintext,
+                    };
+                    send_race_prompt(&ctx.outbound);
+                    return;
+                };
+                // Class / gender / stat roll and the eventual DB
+                // INSERTs land in follow-up slices. Terminate here
+                // with an explicit "next steps coming" line so the
+                // contract for the rest of the flow stays visible.
+                let _ = ctx.outbound.send(
+                    format!(
+                        "Race `{race}` set for `{character_name}`. Class, \
+                         gender, and stat roll land in a follow-up slice. \
+                         For now please enter an existing email or \
+                         character name.\r\n"
+                    )
+                    .into_bytes(),
+                );
+                drop(password_plaintext);
+                let _ = email;
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
             }
 
             Stage::AwaitingPassword { user, preselected } => {
@@ -1386,6 +1426,30 @@ fn validate_new_character_name(name: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Render the race-selection prompt. Lists `PLAYABLE_RACES` in a
+/// single comma-joined line; players type any of the names back.
+fn send_race_prompt(outbound: &Outbound) {
+    let mut msg = String::from("Available races: ");
+    for (i, race) in PLAYABLE_RACES.iter().enumerate() {
+        if i > 0 {
+            msg.push_str(", ");
+        }
+        msg.push_str(race);
+    }
+    msg.push_str("\r\nRace: ");
+    let _ = outbound.send(msg.into_bytes());
+}
+
+/// Match a freshly-typed race against the playable list. Returns
+/// the canonical SHOUTCASE form on success — used as both the
+/// pretty echo and the `Characters.race` enum value at INSERT
+/// time. Case-insensitive equality only; partial-match would be
+/// ambiguous between e.g. ELF and `HALF_ELF`.
+fn match_playable_race(input: &str) -> Option<&'static str> {
+    let needle = input.trim().to_ascii_uppercase();
+    PLAYABLE_RACES.iter().copied().find(|r| *r == needle)
 }
 
 /// Shared prompt for the `ConfirmCreate` doorway. `is_email`
