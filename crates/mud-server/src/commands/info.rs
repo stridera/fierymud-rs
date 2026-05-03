@@ -3968,6 +3968,15 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .map(|(inst, _)| inst.name.clone())
             .collect()
     };
+    // Group / follow status for the score sheet. `leader_name` is
+    // populated when the player is following someone directly;
+    // `group_size` is the total transitive member count from the
+    // group root (`1` = solo).
+    let leader_name: Option<String> = world
+        .get::<Follower>(player)
+        .map(|f| name_or(world, f.0, "(unknown)"));
+    let group_root_e = group_root(world, player);
+    let group_size = group_members(world, group_root_e).len();
     // Per-circle slot summary for spellcasters. Reads
     // SpellSlotData (level + class → slot caps) and the player's
     // MemorizedSpells (used vs ready). Empty for classless / non-
@@ -4032,6 +4041,10 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .map(|(n, a, r)| (n.as_str(), a.as_str(), r.as_str())),
         slots: &slots,
         active_effects: &active_effects,
+        group_status: GroupStatus {
+            leader: leader_name.as_deref(),
+            member_count: group_size,
+        },
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

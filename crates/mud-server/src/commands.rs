@@ -3907,6 +3907,17 @@ pub(crate) struct ScoreData<'a> {
     /// one-line summary; full duration / source detail stays in
     /// the dedicated `effects` command.
     active_effects: &'a [String],
+    /// Group / follow status. `leader` is the name of the entity
+    /// the player is following directly (None when the player is
+    /// either solo or the group root). `member_count` includes the
+    /// player and every transitive follower; `1` means solo.
+    group_status: GroupStatus<'a>,
+}
+
+#[derive(Default)]
+pub(crate) struct GroupStatus<'a> {
+    pub leader: Option<&'a str>,
+    pub member_count: usize,
 }
 
 pub(crate) fn render_score_standard(d: &ScoreData) -> String {
@@ -3995,7 +4006,33 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             d.active_effects.join(", "),
         ));
     }
+    if let Some(line) = group_status_line(&d.group_status) {
+        out.push_str(&format!("  {line}\r\n"));
+    }
     out
+}
+
+/// One-line group/follow summary for the score sheet, or `None`
+/// when the player is solo. Shape depends on the player's role:
+/// followers see `"Following: X    (group of N)"`, the group root
+/// sees `"Followers: N other(s)"`, and solo players get nothing.
+fn group_status_line(g: &GroupStatus) -> Option<String> {
+    if let Some(leader) = g.leader {
+        if g.member_count > 1 {
+            Some(format!(
+                "Following: {leader}    (group of {})",
+                g.member_count
+            ))
+        } else {
+            Some(format!("Following: {leader}"))
+        }
+    } else if g.member_count > 1 {
+        let others = g.member_count - 1;
+        let suffix = if others == 1 { "" } else { "s" };
+        Some(format!("Followers: {others} other{suffix}"))
+    } else {
+        None
+    }
 }
 
 /// Map the carried-weight ratio into a one-word band so the score
@@ -4143,6 +4180,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         // truncates rather than overflowing. Detail lives in
         // `cmd_effects`.
         row(format!("Effects:   {}", d.active_effects.join(", ")));
+    }
+    if let Some(line) = group_status_line(&d.group_status) {
+        row(line);
     }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out
