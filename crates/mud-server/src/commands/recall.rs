@@ -19,8 +19,9 @@ inventory::submit! {
             usage: "recall",
             summary: "Teleport to your recall point.",
             long: "Move instantly to your saved recall room. If you haven't \
-                   set one, you're told so. Use `setrecall` in your current \
-                   room to bind it as your recall point.",
+                   bound one yet you're told so — `touch <touchstone>` in a \
+                   sanctuary room to bind your recall there. Builders can \
+                   use `setrecall` from any room.",
         },
         run: cmd_recall,
     }
