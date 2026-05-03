@@ -3770,9 +3770,11 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         .get::<Description>(room)
         .map(|d| d.0.clone())
         .unwrap_or_default();
-    let exits: Vec<Direction> = world
+    // Carry the (direction, state) pair so the auto-exit line can
+    // tag closed/locked doors. Sorted later for stable output.
+    let exits: Vec<(Direction, ExitState)> = world
         .get::<Exits>(room)
-        .map(|e| e.0.keys().copied().collect())
+        .map(|e| e.0.iter().map(|(d, ed)| (*d, ed.state)).collect())
         .unwrap_or_default();
 
     // Players in the room — names go in "Also here:". Non-standing players
@@ -3870,12 +3872,24 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // Auto-exits: only render the exits line on look when the player has the
     // AUTO_EXIT flag set. Without it, the room shows clean and the player
     // types `exits` (or peeks with `look <dir>`) on demand. Classic CircleMUD
-    // semantics — kept opt-in to avoid clutter.
+    // semantics — kept opt-in to avoid clutter. Closed / locked exits get
+    // a one-letter trailer ([C] / [L]) so the player notices a barrier
+    // before they try to walk through.
     if has_flag(world, player, PlayerFlag::AutoExit) {
         if exits.is_empty() {
             out.push_str("Exits: none\r\n");
         } else {
-            let names: Vec<&str> = exits.iter().map(|d| direction_name(*d)).collect();
+            let names: Vec<String> = exits
+                .iter()
+                .map(|(d, state)| {
+                    let suffix = match state {
+                        ExitState::Open => "",
+                        ExitState::Closed => "[C]",
+                        ExitState::Locked => "[L]",
+                    };
+                    format!("{}{}", direction_name(*d), suffix)
+                })
+                .collect();
             out.push_str(&format!("Exits: {}\r\n", names.join(", ")));
         }
     }
