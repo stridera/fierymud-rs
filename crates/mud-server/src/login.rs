@@ -121,6 +121,21 @@ pub enum Stage {
         class_id: i32,
         class_plain_name: String,
     },
+    /// Show the freshly-rolled stat block and ask the player
+    /// whether to keep it or roll again. `accept` advances
+    /// (today: terminator with the "DB INSERT comes next" line);
+    /// `reroll` (or `r`) generates a fresh 3d6×6 spread without
+    /// resetting earlier draft fields.
+    ReviewStatRoll {
+        email: Option<String>,
+        character_name: String,
+        password_plaintext: String,
+        race: &'static str,
+        class_id: i32,
+        class_plain_name: String,
+        gender: &'static str,
+        stats: CoreStats,
+    },
     CharSelect { user: User, characters: Vec<CharacterRow> },
 }
 
@@ -590,15 +605,81 @@ impl ConnRouter {
                     send_gender_prompt(&ctx.outbound);
                     return;
                 };
-                // Stat roll and DB INSERTs land in subsequent
-                // slices. Terminate with the "next steps coming"
+                let stats = roll_starting_stats();
+                send_stat_review(&ctx.outbound, &stats);
+                ctx.stage = Stage::ReviewStatRoll {
+                    email,
+                    character_name,
+                    password_plaintext,
+                    race,
+                    class_id,
+                    class_plain_name,
+                    gender,
+                    stats,
+                };
+            }
+
+            Stage::ReviewStatRoll {
+                email,
+                character_name,
+                password_plaintext,
+                race,
+                class_id,
+                class_plain_name,
+                gender,
+                stats,
+            } => {
+                let answer = trimmed.to_ascii_lowercase();
+                let accepted = matches!(answer.as_str(), "a" | "accept" | "y" | "yes" | "");
+                let rerolled = matches!(answer.as_str(), "r" | "reroll" | "n" | "no");
+                if rerolled {
+                    let new_stats = roll_starting_stats();
+                    send_stat_review(&ctx.outbound, &new_stats);
+                    ctx.stage = Stage::ReviewStatRoll {
+                        email,
+                        character_name,
+                        password_plaintext,
+                        race,
+                        class_id,
+                        class_plain_name,
+                        gender,
+                        stats: new_stats,
+                    };
+                    return;
+                }
+                if !accepted {
+                    let _ = ctx.outbound.send(
+                        "Please answer 'accept' or 'reroll'.\r\n".as_bytes().to_vec(),
+                    );
+                    ctx.stage = Stage::ReviewStatRoll {
+                        email,
+                        character_name,
+                        password_plaintext,
+                        race,
+                        class_id,
+                        class_plain_name,
+                        gender,
+                        stats,
+                    };
+                    return;
+                }
+                // Accepted. The DB INSERT (Users + Characters) and
+                // the world-spawn step land in the final slices.
+                // Terminate here with the explicit "next step coming"
                 // line so the contract stays visible.
                 let _ = ctx.outbound.send(
                     format!(
-                        "Gender `{gender}` set for `{character_name}` \
-                         ({race} {class_plain_name}, class id {class_id}). \
-                         Stat roll lands in a follow-up slice. For now \
-                         please enter an existing email or character name.\r\n"
+                        "Stats accepted for `{character_name}` ({gender} {race} \
+                         {class_plain_name}, class id {class_id}; STR {} INT {} \
+                         WIS {} DEX {} CON {} CHA {}). The User/Character INSERT \
+                         and the world spawn land in the final slice. For now \
+                         please enter an existing email or character name.\r\n",
+                        stats.strength,
+                        stats.intelligence,
+                        stats.wisdom,
+                        stats.dexterity,
+                        stats.constitution,
+                        stats.charisma,
                     )
                     .into_bytes(),
                 );
@@ -1599,6 +1680,52 @@ fn send_gender_prompt(outbound: &Outbound) {
 fn match_playable_gender(input: &str) -> Option<&'static str> {
     let needle = input.trim().to_ascii_lowercase();
     PLAYABLE_GENDERS.iter().copied().find(|g| *g == needle)
+}
+
+/// Classic 3d6-per-stat roll for a brand-new character. No race
+/// or class adjustments here — those layer on at spawn time
+/// from per-race / per-class modifier tables once the gating
+/// data lands. Returns six stats in the canonical order STR /
+/// INT / WIS / DEX / CON / CHA.
+fn roll_starting_stats() -> CoreStats {
+    let roll = || -> i32 {
+        (0..3)
+            .map(|_| i32::try_from(rand::random_range(1u32..=6)).unwrap_or(1))
+            .sum()
+    };
+    CoreStats {
+        strength: roll(),
+        intelligence: roll(),
+        wisdom: roll(),
+        dexterity: roll(),
+        constitution: roll(),
+        charisma: roll(),
+    }
+}
+
+/// Render the freshly-rolled stat block + accept/reroll prompt.
+/// Bonuses come from the same `CoreStats::bonus` helper used by
+/// score so the player sees what their numbers will mean before
+/// committing.
+fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
+    let line = format!(
+        "Rolled stats:\r\n  STR {:>2} ({:+})  INT {:>2} ({:+})  WIS {:>2} ({:+})\r\n  \
+         DEX {:>2} ({:+})  CON {:>2} ({:+})  CHA {:>2} ({:+})\r\nAccept or reroll? \
+         (accept/reroll): ",
+        stats.strength,
+        CoreStats::bonus(stats.strength),
+        stats.intelligence,
+        CoreStats::bonus(stats.intelligence),
+        stats.wisdom,
+        CoreStats::bonus(stats.wisdom),
+        stats.dexterity,
+        CoreStats::bonus(stats.dexterity),
+        stats.constitution,
+        CoreStats::bonus(stats.constitution),
+        stats.charisma,
+        CoreStats::bonus(stats.charisma),
+    );
+    let _ = outbound.send(line.into_bytes());
 }
 
 /// Shared prompt for the `ConfirmCreate` doorway. `is_email`
