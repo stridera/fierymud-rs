@@ -4489,6 +4489,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         recall: recall_owned
             .as_ref()
             .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
+        stealth: world.get::<Stealth>(player).is_some(),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

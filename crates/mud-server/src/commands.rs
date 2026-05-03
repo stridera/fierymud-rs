@@ -2697,6 +2697,7 @@ mod tests {
             level_title: None,
             next_level_gains: Some((26, 18, 9)),
             recall: Some(("The Inn", 30, 1)),
+            stealth: false,
         }
     }
 
@@ -2756,6 +2757,29 @@ mod tests {
         assert!(
             out.contains("Recall:   The Inn  [30:1]"),
             "recall line: {out}",
+        );
+    }
+
+    #[test]
+    fn score_stealth_line_only_when_hidden() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = Vec::new();
+        let effects: Vec<String> = Vec::new();
+        let equipment: Vec<(&'static str, String)> = Vec::new();
+        let mut data =
+            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        // Default fixture: no stealth → no line.
+        let visible = super::render_score_standard(&data);
+        assert!(
+            !visible.contains("Stealth:"),
+            "no stealth row when visible: {visible}",
+        );
+        // Toggle the marker.
+        data.stealth = true;
+        let hidden = super::render_score_standard(&data);
+        assert!(
+            hidden.contains("Stealth: hidden"),
+            "stealth row when hidden: {hidden}",
         );
     }
 
@@ -4409,6 +4433,12 @@ pub(crate) struct ScoreData<'a> {
     /// itself nudges the player toward `touch`). Display name has
     /// color tags pre-stripped so the fancy box stays aligned.
     recall: Option<(&'a str, i32, i32)>,
+    /// `true` when the player carries the `Stealth` marker (set
+    /// by `hide`, cleared by `visible` / `vis`). Score surfaces
+    /// it so a player who slipped into stealth a long time ago
+    /// doesn't forget — combat already drops the marker on
+    /// engage, so seeing it on score means "still hidden".
+    stealth: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -4467,6 +4497,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(p) = d.posture {
         out.push_str(&format!("  Posture: {}\r\n", p.0.label()));
+    }
+    if d.stealth {
+        out.push_str("  Stealth: hidden\r\n");
     }
     if let Some(coin) = format_wealth(d.wealth) {
         out.push_str(&format!("  Wealth: {coin}\r\n"));
@@ -4792,6 +4825,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(p) = d.posture {
         row(format!("Posture:   {}", p.0.label()));
+    }
+    if d.stealth {
+        row(String::from("Stealth:   hidden"));
     }
     if let Some(coin) = format_wealth(d.wealth) {
         row(format!("Wealth:    {coin}"));
