@@ -741,7 +741,7 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
             core_stats,
             Posture(PostureKind::Standing),
             PlayerFlags(c.player_flags.clone()),
-            Prompt(c.prompt.clone()),
+            Prompt(commands::sanitize_prompt_template(&c.prompt)),
             LoggedInAt(std::time::Instant::now()),
             (
                 Profile {

@@ -1482,6 +1482,35 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_prompt_template_collapses_double_percent_for_known_vars() {
+        // The schema's old default was `<%%h/%%Hhp %%v/%%Vmv>`; that
+        // text after the two-pass render produces literal `%h` etc.
+        // Sanitizer collapses each `%%X` (X = known variable) to `%X`
+        // so the next render hits the actual substitution path.
+        assert_eq!(
+            super::sanitize_prompt_template("<%%h/%%Hhp %%v/%%Vmv>"),
+            "<%h/%Hhp %v/%Vmv>"
+        );
+        // All known variables: h/H/v/V/B/M/n/r/g/t/s/d.
+        for v in ['h', 'H', 'v', 'V', 'B', 'M', 'n', 'r', 'g', 't', 's', 'd'] {
+            let input = format!("%%{v}");
+            let want = format!("%{v}");
+            assert_eq!(super::sanitize_prompt_template(&input), want);
+        }
+        // Unknown letter after `%%` stays untouched (the `%%` is a
+        // valid literal-percent escape in render_prompt for that case).
+        assert_eq!(super::sanitize_prompt_template("100%%"), "100%%");
+        assert_eq!(super::sanitize_prompt_template("%%X"), "%%X");
+        // Already-correct templates pass through.
+        assert_eq!(super::sanitize_prompt_template("<%h/%H>"), "<%h/%H>");
+        // Mixed: only the known-variable form collapses.
+        assert_eq!(
+            super::sanitize_prompt_template("100%% complete <%%h/%%H>"),
+            "100%% complete <%h/%H>"
+        );
+    }
+
+    #[test]
     fn render_prompt_substitutes_hp_and_stamina() {
         // Use a healthy ratio (>=50%) so vitals don't get colored.
         // Color-threshold cases live in their own test below.
@@ -3345,6 +3374,50 @@ pub(crate) struct PromptCtx<'a> {
     /// "day" or "night" — surfaces as `%d`. Matches `room_is_dark`'s
     /// 22..=05 window so players can theme prompts by daylight.
     pub day_night: Option<&'a str>,
+}
+
+/// Repair `%%X` patterns where X is a recognized prompt variable.
+///
+/// Background: an early version of the schema set
+/// `Characters.prompt @default("<%%h/%%Hhp %%v/%%Vmv>")` thinking
+/// Prisma would unescape `%%` → `%`. Prisma stores the literal,
+/// so every newly-created character (including all seeded test
+/// users) ended up with a prompt template that — after the
+/// `%%` → literal-`%` rule in `render_prompt` — displays
+/// literal `%h` / `%H` instead of HP values.
+///
+/// Login calls this on the loaded template before constructing the
+/// `Prompt` component; the next save persists the cleaned form so
+/// the broken row repairs itself across one disconnect cycle. New
+/// characters get the corrected default from the schema.
+///
+/// Conservative scope: only collapses `%%X` where X is a known
+/// prompt variable letter. A user who genuinely wants `%h` as
+/// literal text in their prompt loses that capability — but no
+/// player has ever wanted that.
+#[must_use]
+pub(crate) fn sanitize_prompt_template(template: &str) -> String {
+    const KNOWN: &[char] = &[
+        'h', 'H', 'v', 'V', 'B', 'M', 'n', 'r', 'g', 't', 's', 'd',
+    ];
+    let chars: Vec<char> = template.chars().collect();
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '%'
+            && chars.get(i + 1) == Some(&'%')
+            && chars.get(i + 2).is_some_and(|c| KNOWN.contains(c))
+        {
+            // Saw `%%X` where X is a known variable — collapse to `%X`.
+            out.push('%');
+            out.push(chars[i + 2]);
+            i += 3;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 pub(crate) fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
