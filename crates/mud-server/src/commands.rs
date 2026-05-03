@@ -2700,6 +2700,7 @@ mod tests {
             stealth: false,
             flying: false,
             mount_name: None,
+            house: Some((3, 1000, 17)),
         }
     }
 
@@ -2759,6 +2760,10 @@ mod tests {
         assert!(
             out.contains("Recall:   The Inn  [30:1]"),
             "recall line: {out}",
+        );
+        assert!(
+            out.contains("House:    3 rooms at [1000:17]"),
+            "house line: {out}",
         );
     }
 
@@ -4475,6 +4480,13 @@ pub(crate) struct ScoreData<'a> {
     /// reminder is the use case — players forget they're still
     /// astride a horse from a quest 30 minutes ago.
     mount_name: Option<&'a str>,
+    /// `(room_count, entrance_zone, entrance_id)` from the
+    /// `HouseSummary` component when the player owns a house.
+    /// Score uses it to remind owners of their property + the
+    /// entrance composite key (so `goto <zone> <id>` works
+    /// without re-running `house info` first). `None` for the
+    /// landless majority — the line is then suppressed entirely.
+    house: Option<(usize, i32, i32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -4624,6 +4636,12 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some((name, zone, id)) = d.recall {
         out.push_str(&format!("  Recall:   {name}  [{zone}:{id}]\r\n"));
+    }
+    if let Some((rooms, zone, id)) = d.house {
+        let suffix = if rooms == 1 { "" } else { "s" };
+        out.push_str(&format!(
+            "  House:    {rooms} room{suffix} at [{zone}:{id}]\r\n",
+        ));
     }
     if !d.equipment.is_empty() {
         out.push_str("  Equipment:\r\n");
@@ -4956,6 +4974,10 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some((name, zone, id)) = d.recall {
         row(format!("Recall:    {name}  [{zone}:{id}]"));
+    }
+    if let Some((rooms, zone, id)) = d.house {
+        let suffix = if rooms == 1 { "" } else { "s" };
+        row(format!("House:     {rooms} room{suffix} at [{zone}:{id}]"));
     }
     if !d.equipment.is_empty() {
         row(String::from("Equipment:"));

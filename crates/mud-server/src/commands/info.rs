@@ -4505,6 +4505,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         stealth: world.get::<Stealth>(player).is_some(),
         flying: world.get::<Flying>(player).is_some(),
         mount_name: mount_name_owned.as_deref(),
+        house: world.get::<HouseSummary>(player).map(|h| {
+            (h.rooms.len(), h.entrance_room.zone, h.entrance_room.id)
+        }),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
