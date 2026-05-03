@@ -5015,21 +5015,36 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
         return;
     }
 
-    // Check the slot is free.
-    let slot_taken = {
+    // Resolve to the actual destination slot. Paired slots (today
+    // only LeftFinger / RightFinger — rings) try both sides in
+    // order so a second ring falls through cleanly when the first
+    // side is occupied. Other "paired" anatomies (ears, wrists)
+    // are modeled as single bins that cover both sides, so they
+    // keep the existing single-slot refusal.
+    let occupied: std::collections::HashSet<Slot> = {
         let mut q = world.query_filtered::<(&Located, &EquippedSlot), With<Item>>();
         q.iter(world)
-            .any(|(l, eq)| l.0 == player && eq.0 == slot)
+            .filter(|(l, _)| l.0 == player)
+            .map(|(_, eq)| eq.0)
+            .collect()
     };
-    if slot_taken {
-        send_rendered(world, player, &format!("Your {} is already occupied.\r\n", slot.label()),
-        );
+    let candidates: &[Slot] = match slot {
+        Slot::LeftFinger | Slot::RightFinger => &[Slot::LeftFinger, Slot::RightFinger],
+        _ => std::slice::from_ref(&slot),
+    };
+    let Some(&dest_slot) = candidates.iter().find(|s| !occupied.contains(s)) else {
+        let msg = if candidates.len() > 1 {
+            format!("Both {}s are already occupied.\r\n", slot.label())
+        } else {
+            format!("Your {} is already occupied.\r\n", slot.label())
+        };
+        send_rendered(world, player, &msg);
         return;
-    }
+    };
 
-    try_insert(world, item, EquippedSlot(slot));
+    try_insert(world, item, EquippedSlot(dest_slot));
 
-    let verb = match slot {
+    let verb = match dest_slot {
         Slot::Wield => "wield",
         Slot::Hold => "hold",
         _ => "wear",
