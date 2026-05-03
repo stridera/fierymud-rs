@@ -2348,7 +2348,17 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         }
         let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
         let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
-        if let Some(c) = condition_summary(hunger, thirst) {
+        // Same active-effect query the score sheet uses, so
+        // examine-self surfaces nourished/refreshed alongside
+        // hungry/thirsty when condition_summary picks them up.
+        let self_effects: Vec<String> = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .filter(|(_, a)| a.0 == player)
+                .map(|(inst, _)| inst.name.clone())
+                .collect()
+        };
+        if let Some(c) = condition_summary(hunger, thirst, &self_effects) {
             out.push_str(&format!("You feel {c}.\r\n"));
         }
         send_to(world, player, out);

@@ -2631,24 +2631,49 @@ mod tests {
     #[test]
     fn condition_summary_silent_below_thresholds() {
         // hunger 23 < HUNGRY_AT 24, thirst 11 < THIRSTY_AT 12.
-        assert_eq!(super::condition_summary(0, 0), None);
-        assert_eq!(super::condition_summary(23, 11), None);
+        let none: &[String] = &[];
+        assert_eq!(super::condition_summary(0, 0, none), None);
+        assert_eq!(super::condition_summary(23, 11, none), None);
     }
 
     #[test]
     fn condition_summary_bands_promote_at_each_threshold() {
+        let none: &[String] = &[];
         assert_eq!(
-            super::condition_summary(24, 0),
+            super::condition_summary(24, 0, none),
             Some("hungry".to_string()),
         );
         assert_eq!(
-            super::condition_summary(48, 24),
+            super::condition_summary(48, 24, none),
             Some("starving, parched".to_string()),
         );
         // Thirst-only.
         assert_eq!(
-            super::condition_summary(0, 12),
+            super::condition_summary(0, 12, none),
             Some("thirsty".to_string()),
+        );
+    }
+
+    #[test]
+    fn condition_summary_includes_positive_effects() {
+        // Nourished/Refreshed render before negative bands.
+        let nourished = vec!["Nourished".to_string()];
+        assert_eq!(
+            super::condition_summary(0, 0, &nourished),
+            Some("nourished".to_string()),
+        );
+        // Both positives + a negative band stack in stable order.
+        let both = vec!["Refreshed".to_string(), "Nourished".to_string()];
+        assert_eq!(
+            super::condition_summary(24, 0, &both),
+            Some("nourished, refreshed, hungry".to_string()),
+        );
+        // Match is case-insensitive — effect catalog rows can use
+        // any casing without breaking the score render.
+        let lower = vec!["nourished".to_string()];
+        assert_eq!(
+            super::condition_summary(0, 0, &lower),
+            Some("nourished".to_string()),
         );
     }
 
@@ -4681,7 +4706,7 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     if !d.flags.is_empty() {
         out.push_str(&format!("  Flags: {}\r\n", d.flags.join(", ")));
     }
-    if let Some(c) = condition_summary(d.hunger, d.thirst) {
+    if let Some(c) = condition_summary(d.hunger, d.thirst, d.active_effects) {
         out.push_str(&format!("  Condition: {c}\r\n"));
     }
     if d.drunkenness > 0 {
@@ -4931,11 +4956,29 @@ pub(crate) fn format_age(level: i32) -> Option<String> {
     ))
 }
 
-/// Comma-joined hunger/thirst descriptors, or None if both are
-/// below their warning thresholds. Bands match the tick consumer's
-/// `HUNGRY_AT` / `STARVING_AT` / `THIRSTY_AT` / `PARCHED_AT`.
-pub(crate) fn condition_summary(hunger: i32, thirst: i32) -> Option<String> {
-    let mut parts = Vec::new();
+/// Comma-joined condition descriptors mixing hunger/thirst negative
+/// bands with positive effect states (Nourished / Refreshed) when
+/// they're active. None when neither side has anything to say.
+/// Bands match the tick consumer's `HUNGRY_AT` / `STARVING_AT` /
+/// `THIRSTY_AT` / `PARCHED_AT`. Effect-name match is
+/// case-insensitive.
+pub(crate) fn condition_summary(
+    hunger: i32,
+    thirst: i32,
+    active_effects: &[String],
+) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let has_effect = |name: &str| {
+        active_effects
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(name))
+    };
+    if has_effect("Nourished") {
+        parts.push("nourished");
+    }
+    if has_effect("Refreshed") {
+        parts.push("refreshed");
+    }
     if hunger >= 48 {
         parts.push("starving");
     } else if hunger >= 24 {
@@ -5045,7 +5088,7 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     if !d.flags.is_empty() {
         row(format!("Flags:     {}", d.flags.join(", ")));
     }
-    if let Some(c) = condition_summary(d.hunger, d.thirst) {
+    if let Some(c) = condition_summary(d.hunger, d.thirst, d.active_effects) {
         row(format!("Condition: {c}"));
     }
     if d.drunkenness > 0 {
@@ -5175,7 +5218,7 @@ pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
     if let Some(target) = d.fight_target {
         parts.push(format!("vs:{target}"));
     }
-    if let Some(c) = condition_summary(d.hunger, d.thirst) {
+    if let Some(c) = condition_summary(d.hunger, d.thirst, d.active_effects) {
         parts.push(c);
     }
     if d.drunkenness > 0 {
