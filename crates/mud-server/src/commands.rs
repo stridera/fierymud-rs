@@ -236,6 +236,8 @@ mod feedback;
 mod mail;
 #[path = "commands/movement_directions.rs"]
 mod movement_directions;
+#[path = "commands/quests.rs"]
+mod quests;
 #[path = "commands/recall.rs"]
 mod recall;
 #[path = "commands/room_chat.rs"]
@@ -2040,131 +2042,8 @@ const COMMANDS: &[Command] = &[
     // `shout` migrated to commands/channels.rs.
     // `mail` migrated to commands/mail.rs.
     // `boards` / `board` migrated to commands/boards.rs.
-    Command {
-        names: &["quests", "qstat", "qlist"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "quests",
-            summary: "List your accepted quests.",
-            long: "In-progress quests appear first with their short \
-                   description; completed/abandoned quests follow with \
-                   their final status. The Quest table is empty in the \
-                   current world; this verb is wired so it'll surface \
-                   content the moment builders add it.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["abandon"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "abandon <#>",
-            summary: "Drop an in-progress quest.",
-            long: "Argument is the slot number from the in-progress \
-                   section of `quests`. Marks the row ABANDONED \
-                   rather than deleting it, preserving the audit \
-                   trail and the (char, zone, id) unique key.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["innate"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "innate",
-            summary: "List your race's innate abilities.",
-            long: "Reads the `RaceAbilities` rows for your character's \
-                   race and prints each ability's name, category \
-                   (PRIMARY / SECONDARY / ...), starting bonus, and \
-                   proficiency cap. Race is stamped on the character \
-                   at creation; you don't pick or change innates here.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["questinfo"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "questinfo <zone> <id>",
-            summary: "Show details for a single quest definition.",
-            long: "Reads the `Quest` row for `(zone, id)` and prints \
-                   name, level range, flags (repeatable / shareable / \
-                   hidden / auto-accept), short description, and full \
-                   description. Doesn't check whether you've accepted \
-                   it — for your own quests, use `quests`.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["qload"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "qload <zone> <quest-id>",
-            summary: "Admin: assign a quest to your character (testing).",
-            long: "Inserts a CharacterQuest row with status \
-                   IN_PROGRESS for the caller's character. No-op if \
-                   that quest is already assigned to you. Useful for \
-                   exercising the quests / abandon loop without the \
-                   full trigger-acceptance flow.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["qaccept"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "qaccept <zone> <quest-id>",
-            summary: "Accept a quest by composite id.",
-            long: "Self-service quest acceptance. Validates level \
-                   range, checks every required prerequisite, and \
-                   refuses if you already have it in progress (or \
-                   completed it once already on a non-repeatable \
-                   quest).",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["qgive"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "qgive <player> <zone> <quest-id>",
-            summary: "Admin: assign a quest to another online player.",
-            long: "Same as `qload` but targets a named online player \
-                   instead of the caller. Target must be currently \
-                   online (offline-character assignment is left for a \
-                   future iteration).",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["qcomplete"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "qcomplete <#>",
-            summary: "Admin: force-complete an in-progress quest.",
-            long: "Slot number from the `quests` in-progress section. \
-                   Flips IN_PROGRESS → COMPLETED, stamps completed_at, \
-                   bumps completion_count. Useful for testing reward \
-                   flow without the full objective pipeline.",
-        },
-        run: cmd_mail_stub,
-    },
+    // quest verbs (quests/abandon/innate/questinfo/qload/qaccept/qgive/qcomplete)
+    // migrated to commands/quests.rs.
     // `post` / `delpost` / `editpost` migrated to commands/boards.rs.
     // `mailbox` / `readmail` / `delmail` migrated to commands/mail.rs.
     // `gossip` / `music` migrated to commands/channels.rs.
@@ -5138,6 +5017,16 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "mail/board `{name}` missing"
+            );
+        }
+        // quests.rs (Info + Admin verbs)
+        for name in [
+            "quests", "qstat", "qlist", "abandon", "innate",
+            "questinfo", "qload", "qaccept", "qgive", "qcomplete",
+        ] {
+            assert!(
+                names.contains(&name),
+                "quest verb `{name}` missing"
             );
         }
     }
