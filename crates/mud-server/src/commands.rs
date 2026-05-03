@@ -5496,8 +5496,20 @@ pub(crate) fn invoke_ability_with(
         ));
     }
     // Resolve the target. Empty / "me" / "self" → the caster.
-    // Anything else → look up an actor in the caster's room. If the
-    // word doesn't resolve, abort before applying any effects.
+    // Anything else → if the ability's targeting list includes
+    // OBJECT_INV, look up a carried item by keyword first
+    // (covers `cast identify brooch` and friends); otherwise fall
+    // through to actor-in-room. If nothing resolves, abort before
+    // applying any effects.
+    let allows_inventory_target = world
+        .resource::<AbilityCatalog>()
+        .targeting
+        .get(&def.id)
+        .is_some_and(|r| {
+            r.valid_targets
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case("OBJECT_INV"))
+        });
     let target_entity = if let Some(word) = target_word
         && !word.eq_ignore_ascii_case("me")
         && !word.eq_ignore_ascii_case("self")
@@ -5506,7 +5518,13 @@ pub(crate) fn invoke_ability_with(
             send_to(world, player, "You are nowhere; can't target.\r\n");
             return;
         };
-        let Some(found) = find_actor_in_room(world, word, located.0, player) else {
+        let inv_match = if allows_inventory_target {
+            find_carried_by(world, word, player, EquipFilter::Anywhere)
+        } else {
+            None
+        };
+        let Some(found) = inv_match.or_else(|| find_actor_in_room(world, word, located.0, player))
+        else {
             send_to(
                 world,
                 player,
