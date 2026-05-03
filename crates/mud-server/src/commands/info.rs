@@ -2619,13 +2619,24 @@ pub(crate) fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
 /// 1000 copper) so the four-coin breakdown matches `FieryMUD`'s score
 /// sheet. Zero-value coins are skipped; "no coin" prints when broke.
 pub(crate) fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
-    let total = world.get::<Wealth>(player).map_or(0, |w| w.0);
-    let msg = if let Some(parts) = format_wealth(total) {
-        format!("\r\nYou have {parts}.\r\n")
+    let on_hand = world.get::<Wealth>(player).map_or(0, |w| w.0);
+    let bank = world.get::<mud_world::BankWealth>(player).map_or(0, |b| b.0);
+    let main_line = if let Some(parts) = format_wealth(on_hand) {
+        format!("You have {parts}.")
     } else {
-        "\r\nYou have no coin to your name.\r\n".to_string()
+        "You have no coin to your name.".to_string()
     };
-    send_to(world, player, msg);
+    // Surface the bank balance as a footnote so a player who
+    // cashed out earlier can see their saved stash without
+    // typing `balance`. Suppressed when the bank is empty so
+    // the readout stays a one-liner for unbanked players.
+    let mut out = format!("\r\n{main_line}\r\n");
+    if bank > 0
+        && let Some(parts) = format_wealth(bank)
+    {
+        out.push_str(&format!("(Bank: {parts}.)\r\n"));
+    }
+    send_to(world, player, out);
 }
 
 /// `bribe <amount> <target>`: transfer copper to a mob and fire
