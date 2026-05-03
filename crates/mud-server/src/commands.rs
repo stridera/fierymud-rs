@@ -4003,7 +4003,11 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!("  Condition: {c}\r\n"));
     }
     if d.drunkenness > 0 {
-        out.push_str(&format!("  Drunk:  {} / 100\r\n", d.drunkenness));
+        out.push_str(&format!(
+            "  Drunk:  {} / 100  ({})\r\n",
+            d.drunkenness,
+            drunk_band(d.drunkenness),
+        ));
     }
     if d.kill_total > 0 {
         out.push_str(&format!("  Kills:  {}\r\n", d.kill_total));
@@ -4150,6 +4154,23 @@ pub(crate) fn encumbrance_band(carried: f64, capacity: f64) -> &'static str {
     }
 }
 
+/// One-word descriptor for the score sheet's drunkenness line. The
+/// bands track our 0..=100 alcohol scale: at 80+ the runtime emits
+/// the room-spinning blackout warning on drink (`cmd_drink_amount`),
+/// so "Blackout" matches that threshold. Below that the bands
+/// roughly mirror the legacy 0..=15 scale's slurred (~40%) and
+/// too-drunk (~66%) cutoffs scaled up to our 0..=100 range.
+#[must_use]
+pub(crate) fn drunk_band(drunk: i32) -> &'static str {
+    match drunk {
+        ..=0 => "sober",
+        1..=39 => "Buzzed",
+        40..=65 => "Tipsy",
+        66..=79 => "Very Drunk",
+        _ => "Blackout",
+    }
+}
+
 /// Comma-joined hunger/thirst descriptors, or None if both are
 /// below their warning thresholds. Bands match the tick consumer's
 /// `HUNGRY_AT` / `STARVING_AT` / `THIRSTY_AT` / `PARCHED_AT`.
@@ -4249,7 +4270,11 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         row(format!("Condition: {c}"));
     }
     if d.drunkenness > 0 {
-        row(format!("Drunk:     {} / 100", d.drunkenness));
+        row(format!(
+            "Drunk:     {} / 100  ({})",
+            d.drunkenness,
+            drunk_band(d.drunkenness),
+        ));
     }
     if d.kill_total > 0 {
         row(format!("Kills:     {}", d.kill_total));
