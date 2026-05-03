@@ -2256,6 +2256,7 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
         if cmd.names.len() > 1 {
             out.push_str(&format!("\r\n  Aliases: {}\r\n", cmd.names[1..].join(", ")));
         }
+        out.push_str(&format!("  Category: {}\r\n", cmd.category.label()));
         send_to(world, player, out);
     } else {
         // No exact match — surface visible commands whose primary
