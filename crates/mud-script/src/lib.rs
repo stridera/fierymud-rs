@@ -1010,6 +1010,40 @@ fn pronoun_for(
     })
 }
 
+/// Walk the Follower chain starting at `actor`, find the root, and
+/// BFS every entity that follows back to it. Returns a vec with the
+/// root at index 0; solo actors return `[actor]`. Used by Lua
+/// `actor.group_size` and `actor.group_member[N]` so they share the
+/// same chain-walking logic.
+fn group_for_actor(world: &mut World, actor: Entity) -> Vec<Entity> {
+    let mut root = actor;
+    let mut steps = 0;
+    while let Some(f) = world.get::<Follower>(root) {
+        if steps > 32 {
+            break;
+        }
+        root = f.0;
+        steps += 1;
+    }
+    let mut group = vec![root];
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        let children: Vec<Entity> = {
+            let mut q = world
+                .query_filtered::<(Entity, &Follower), With<Player>>();
+            q.iter(world)
+                .filter(|(e, f)| f.0 == parent && !group.contains(e))
+                .map(|(e, _)| e)
+                .collect()
+        };
+        for c in &children {
+            group.push(*c);
+            frontier.push(*c);
+        }
+    }
+    group
+}
+
 fn world_mut_from_lua<R>(lua: &Lua, f: impl FnOnce(&mut World) -> R) -> mlua::Result<R> {
     let ptr = lua
         .app_data_ref::<WorldPtr>()
@@ -1820,34 +1854,28 @@ impl UserData for LuaActor {
                     // 1 means solo (the actor itself). Used by death-
                     // event triggers (`for i = 1, actor.group_size`).
                     "group_size" => Ok(world_mut_from_lua(lua, |w| {
-                        let mut root = this.entity;
-                        let mut steps = 0;
-                        while let Some(f) = w.get::<Follower>(root) {
-                            if steps > 32 {
-                                break;
-                            }
-                            root = f.0;
-                            steps += 1;
-                        }
-                        // BFS through Follower edges from the root.
-                        let mut group = vec![root];
-                        let mut frontier = vec![root];
-                        while let Some(parent) = frontier.pop() {
-                            let children: Vec<Entity> = {
-                                let mut q = w
-                                    .query_filtered::<(Entity, &Follower), With<Player>>();
-                                q.iter(w)
-                                    .filter(|(e, f)| f.0 == parent && !group.contains(e))
-                                    .map(|(e, _)| e)
-                                    .collect()
-                            };
-                            for c in &children {
-                                group.push(*c);
-                                frontier.push(*c);
-                            }
-                        }
-                        Value::Integer(i64::try_from(group.len()).unwrap_or(0))
+                        Value::Integer(
+                            i64::try_from(group_for_actor(w, this.entity).len())
+                                .unwrap_or(0),
+                        )
                     })?),
+                    // Indexed access — `actor.group_member[i]` returns
+                    // the i-th group member as a LuaActor wrapper.
+                    // Lua is 1-indexed; `actor.group_member[1]` is the
+                    // group root (leader). Out-of-range indices return
+                    // nil naturally via Lua table semantics.
+                    "group_member" => {
+                        let members = world_mut_from_lua(lua, |w| {
+                            group_for_actor(w, this.entity)
+                        })?;
+                        let tbl = lua.create_table()?;
+                        for (i, e) in members.iter().enumerate() {
+                            let actor = LuaActor { entity: *e };
+                            let idx = i64::try_from(i + 1).unwrap_or(i64::MAX);
+                            tbl.set(idx, lua.create_userdata(actor)?)?;
+                        }
+                        Ok(Value::Table(tbl))
+                    }
                     // 95 corpus refs — character alignment (good/evil
                     // axis as integer). Sourced from CombatStats so
                     // both players and mobs return their loaded value.
