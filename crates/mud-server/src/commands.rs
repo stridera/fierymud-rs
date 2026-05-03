@@ -3930,6 +3930,11 @@ pub(crate) struct ScoreData<'a> {
     /// when the player has nothing equipped — the renderer
     /// suppresses the section in that case.
     equipment: &'a [(&'static str, String)],
+    /// Unspent practice points (`SkillPoints` component). Score
+    /// sheet shows the number whenever it's nonzero so a player
+    /// can see they have something to spend without running
+    /// `practice` first. Zero suppresses the line.
+    practice_points: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -4056,6 +4061,13 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         for (slot_label, item_name) in d.equipment {
             out.push_str(&format!("    {slot_label:>14}: {item_name}\r\n"));
         }
+    }
+    if d.practice_points > 0 {
+        let pts = d.practice_points;
+        let suffix = if pts == 1 { "" } else { "s" };
+        out.push_str(&format!(
+            "  Practice: {pts} point{suffix} available    (`practice` to spend)\r\n",
+        ));
     }
     out
 }
@@ -4329,6 +4341,11 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         for (slot_label, item_name) in d.equipment {
             row(format!("  {slot_label:>12}: {item_name}"));
         }
+    }
+    if d.practice_points > 0 {
+        let pts = d.practice_points;
+        let suffix = if pts == 1 { "" } else { "s" };
+        row(format!("Practice:  {pts} point{suffix} available"));
     }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out

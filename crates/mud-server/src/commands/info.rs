@@ -4094,6 +4094,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .as_ref()
             .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
         equipment: &equipment_owned,
+        practice_points: world
+            .get::<mud_world::SkillPoints>(player)
+            .map_or(0, |s| s.0),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
