@@ -582,6 +582,14 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     out.push_str(&format!("name:          {}\r\n", p.name));
     out.push_str(&format!("keywords:      {}\r\n", p.keywords.join(", ")));
     out.push_str(&format!("room_desc:     {}\r\n", p.room_description));
+    if !p.examine_description.trim().is_empty() {
+        // Examine text can be multi-line; render as a labelled
+        // block followed by an indented body for readability.
+        out.push_str("examine_desc:\r\n");
+        for line in p.examine_description.lines() {
+            out.push_str(&format!("  {line}\r\n"));
+        }
+    }
     out.push_str(&format!("level:         {}\r\n", p.level));
     out.push_str(&format!("alignment:     {}\r\n", p.alignment));
     out.push_str(&format!("role:          {:?}\r\n", p.role));
