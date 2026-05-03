@@ -5427,6 +5427,19 @@ pub(crate) fn parse_direction(s: &str) -> Option<Direction> {
 /// (player or mob) before declaring the player blind — torches /
 /// lanterns / luminous-glow items still work.
 pub(crate) fn room_is_dark(world: &World, room: Entity) -> bool {
+    // `Room.base_light_level` overrides the sector/clock check at
+    // both ends — positive means "always lit" (skylights, magical
+    // glow), negative means "always dark" (magical voids,
+    // never-carry-a-torch areas). Zero (the default for most
+    // rooms) falls through to the legacy logic below.
+    if let Some(level) = world.get::<mud_world::BaseLightLevel>(room) {
+        if level.0 > 0 {
+            return false;
+        }
+        if level.0 < 0 {
+            return true;
+        }
+    }
     let Some(sector) = world.get::<RoomSector>(room).map(|s| s.0) else {
         return false;
     };

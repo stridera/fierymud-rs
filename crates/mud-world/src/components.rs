@@ -492,6 +492,16 @@ pub struct RevealedExits {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PeacefulRoom;
 
+/// Per-room ambient light override loaded from
+/// `Room.base_light_level`. Positive forces the room lit
+/// regardless of clock (skylights, magical glow); negative forces
+/// it dark regardless of carried torches at the strict floor
+/// (magical voids); zero falls through to the runtime's
+/// sector-and-clock dark check. Most rooms have 0 and don't
+/// carry the component.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct BaseLightLevel(pub i32);
+
 /// `RoomExtraDescriptions` flattened onto the room entity:
 /// keyword-addressable flavor text builders use to add detail
 /// without modeling the thing as an Object. `look fountain` /
