@@ -4439,9 +4439,15 @@ pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
             player,
             format!(
                 "Your prompt is: {current}\r\n\
-                 Variables: %h current HP, %H max HP, %v current stamina, \
-                 %V max stamina, %n character name, %r room name, \
-                 %g on-hand wealth (copper), %% literal %.\r\n"
+                 \r\n\
+                 Vitals:    %h current HP   %H max HP   \
+                 %B 10-cell HP bar (color-graded)\r\n\
+                 \x20          %v current stamina  %V max stamina  \
+                 %M 10-cell stamina bar\r\n\
+                 Identity:  %n character name   %r room name\r\n\
+                 Wealth:    %g on-hand copper\r\n\
+                 Calendar:  %t hour (00-23)   %s season   %d day/night\r\n\
+                 Literal:   %% emits a single `%`.\r\n"
             ),
         );
         return;
