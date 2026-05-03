@@ -3388,7 +3388,10 @@ pub(crate) fn cmd_practice(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let catalog = world.resource::<AbilityCatalog>();
-    let mut rows: Vec<(String, String, i32, bool)> = Vec::with_capacity(known.len());
+    let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    let spell_caps = world.resource::<mud_world::SpellSlotData>();
+    let skill_caps = world.resource::<mud_world::ClassSkillsData>();
+    let mut rows: Vec<(String, String, i32, bool, Option<i32>)> = Vec::with_capacity(known.len());
     for (id, prof, learned) in &known {
         let def = catalog.by_name.values().find(|d| d.id == *id);
         let name = def.map_or_else(|| format!("ability #{id}"), |d| d.plain_name.clone());
@@ -3398,11 +3401,22 @@ pub(crate) fn cmd_practice(world: &mut World, player: Entity, args: &str) {
             mud_db::abilities::AbilityKind::Song => "song",
             mud_db::abilities::AbilityKind::Chant => "chant",
         });
-        rows.push((name, kind.to_string(), *prof, *learned));
+        // Per-class proficiency cap (where modeled). Skills go
+        // through ClassSkillsData; spells/chants/songs go through
+        // SpellSlotData. None when the player is classless or the
+        // ability isn't on the class's sheet.
+        let cap = class_id.and_then(|cid| {
+            if matches!(def.map(|d| d.kind), Some(mud_db::abilities::AbilityKind::Skill)) {
+                skill_caps.proficiency_cap.get(&(cid, *id)).copied()
+            } else {
+                spell_caps.ability_cap.get(&(cid, *id)).copied()
+            }
+        });
+        rows.push((name, kind.to_string(), *prof, *learned, cap));
     }
     rows.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     let mut out = format!("\r\nKnown abilities ({}):\r\n", rows.len());
-    for (name, kind, prof, learned) in &rows {
+    for (name, kind, prof, learned, cap) in &rows {
         // Proficiency 0-1000 in schema; render as 0-100% with a tier
         // label that legacy MUDs use.
         let pct = (*prof / 10).clamp(0, 100);
@@ -3415,8 +3429,9 @@ pub(crate) fn cmd_practice(world: &mut World, player: Entity, args: &str) {
             _ => "master",
         };
         let learn_mark = if *learned { " " } else { "*" };
+        let cap_label = cap.map_or(String::new(), |c| format!(" / {c}"));
         out.push_str(&format!(
-            "  {learn_mark}{kind:<8} {name:<24} {pct:>3}% ({tier})\r\n"
+            "  {learn_mark}{kind:<8} {name:<24} {pct:>3}%{cap_label} ({tier})\r\n"
         ));
     }
     out.push_str("\r\n* = learning (not yet mastered).\r\n");
