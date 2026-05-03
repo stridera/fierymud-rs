@@ -1136,9 +1136,11 @@ pub(crate) fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColorMode, PromptCtx, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
+        ColorMode, FormulaCtx, PromptCtx, amount_from_blob, apply_damage, apply_heal_hp,
+        apply_heal_stamina,
         apply_knockdown_posture, check_ability_restrictions, check_target_type, condition_label,
-        direction_name, evaluate_formula, evaluate_simple_formula, format_idle, has_effect_named,
+        direction_name, duration_from_blob, evaluate_formula, evaluate_simple_formula,
+        format_idle, has_effect_named,
         is_being_attacked, is_immobilized, normalize_dice_notation, parse_direction,
         remove_effect_named, render_color_tags, render_prompt, resolve_dispel_filter,
         resolve_dispel_scope, resolve_effect_conditions, resolve_effect_resource,
@@ -2710,6 +2712,62 @@ mod tests {
         assert!(out.contains("Strider"), "name: {out}");
         // Achievements line still rendered inside the box.
         assert!(out.contains("Achievements: 5 / 47"), "achievements: {out}");
+    }
+
+    // --- duration_from_blob ---
+    //
+    // Surfaces the BERSERK-style "skill / 10" hours-unit case
+    // SUGGESTIONS flagged: at skill=100 the expected duration is
+    // 10 game-hours ≈ 750 real seconds; at skill=0 it clamps to
+    // the 1-second floor. These tests guard the formula
+    // evaluator + unit conversion so a regression there is
+    // caught before it lands in player-visible "1 sec berserk".
+
+    #[test]
+    fn duration_from_blob_handles_skill_division_in_hours() {
+        let blob = serde_json::json!({
+            "duration": "skill / 10",
+            "durationUnit": "hours",
+        });
+        let ctx = FormulaCtx::base(1, 100);
+        // 100 / 10 = 10 hours × 75 seconds/hour = 750 seconds.
+        assert_eq!(duration_from_blob(Some(&blob), &ctx), Some(750));
+    }
+
+    #[test]
+    fn duration_from_blob_clamps_zero_skill_to_one_second_floor() {
+        let blob = serde_json::json!({
+            "duration": "skill / 10",
+            "durationUnit": "hours",
+        });
+        let ctx = FormulaCtx::base(1, 0);
+        // 0 hours × 75 = 0 → clamp to 1 second floor.
+        assert_eq!(duration_from_blob(Some(&blob), &ctx), Some(1));
+    }
+
+    #[test]
+    fn duration_from_blob_passes_integer_literal_through_unit() {
+        let blob = serde_json::json!({
+            "duration": 4,
+            "durationUnit": "minutes",
+        });
+        let ctx = FormulaCtx::base(1, 0);
+        assert_eq!(duration_from_blob(Some(&blob), &ctx), Some(4 * 60));
+    }
+
+    #[test]
+    fn duration_from_blob_defaults_to_hours_when_unit_missing() {
+        let blob = serde_json::json!({ "duration": 2 });
+        let ctx = FormulaCtx::base(1, 0);
+        // 2 game-hours × 75 = 150 seconds.
+        assert_eq!(duration_from_blob(Some(&blob), &ctx), Some(150));
+    }
+
+    #[test]
+    fn duration_from_blob_returns_none_on_missing_field() {
+        let blob = serde_json::json!({ "amount": 10 });
+        let ctx = FormulaCtx::base(1, 0);
+        assert_eq!(duration_from_blob(Some(&blob), &ctx), None);
     }
 }
 
