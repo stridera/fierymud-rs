@@ -1,6 +1,6 @@
 # Abilities
 
-**Status:** proposal — awaiting review.
+**Status:** locked except where noted (review pass 1, 2026-05-03).
 
 ## Design intent
 
@@ -37,15 +37,14 @@ allied. `ROOM_ALL` is admin / chaos territory.
 
 | Column | Type | Default | Notes |
 |---|---|---|---|
-| `stamina_cost` | Int | 0 | Drops the 20 `*_COST` consts in `commands.rs` |
-| `mana_cost` | Int | 0 | 0 today; reserved for class differentiation |
+| `stamina_cost` | Int | 0 | Replaces the 20 `*_COST` consts. Used by SKILL kind only. SPELLs use slots; SONG/CHANT use cooldown. |
 | `target_scope` | TargetScope | SINGLE | Replaces today's free-string `targeting.scope` |
 | `valid_targets` | TargetType[] | `[]` | enum array — see below |
 | `weapon_required` | WeaponClass[] | `[]` | empty = any/none; otherwise restricts to those weapon classes |
 | `posture_required` | Posture | STANDING | min posture to invoke |
 | `combat_only` | Bool | false | refused outside combat |
 | `noncombat_only` | Bool | false | refused while engaged |
-| `cooldown_ms` | Int | 0 | already exists |
+| `cooldown_ms` | Int | 0 | already exists. Primary resource gate for SONG/CHANT. |
 | `cast_time_rounds` | Int | 0 | already exists; 0 = instant |
 
 ### `TargetType` enum (the per-ability validity filter)
@@ -74,16 +73,70 @@ target_scope still needs `ALLY_PC` in the validity filter.
 - the legacy "use" / "cast" / "perform" verb hint — runtime picks the
   verb from `kind` enum.
 
-## Stamina/mana — single pool first
+## Resources — circles, stamina, cooldowns (no mana)
 
-Recommendation: **one resource pool** today (`Stamina`), with
-`stamina_cost` driving every ability. `mana_cost` exists in the schema
-but is `0` everywhere until a class is built that explicitly wants a
-mana pool. When that lands, add a `Mana(i32, i32)` component and the
-runtime branches on `Ability.uses_resource: STAMINA | MANA | KI`.
+FieryMUD has always used **Vancian magic** — spell slots tied to
+class circles, memorized while resting, consumed on cast. The
+schema already models this fully (`SpellSlotProgression`,
+`ClassAbilityCircles`, `RaceSpellSlotBonus`, `Ability.classes`
+JSON / `ClassAbilities.circle` for per-spell circle assignment).
+The runtime already has `MemorizedSpells` with `prep_secs_remaining`
+and `ready` flags. We're keeping all of it.
 
-That keeps content authoring clean now (one column to fill, one number
-to balance) and leaves the door open.
+There is no mana. Not now, not later. The Vancian model is more
+characterful, more interesting to play, and perfectly served by
+the existing tables.
+
+### Resource gate per ability kind
+
+| Ability kind | Gate | Notes |
+|---|---|---|
+| **SPELL** | Circle + memorized slot | `cast <spell> <target>` consumes one *ready* slot of the spell's class-circle. Slots regenerate by `memorize <spell>` while Sleeping / Resting / Sitting (handled by `regen::memorize_tick`). Class + level + race set circle availability and slot count. |
+| **SKILL** | Stamina | `Ability.stamina_cost` is the per-skill drain (replaces 20 `*_COST` consts). Out of stamina → "you're too winded to X." |
+| **SONG / CHANT** | Cooldown only | At-will with `cooldown_ms` gating re-use. Bards and mystics don't memorize — that's the whole point of the class. v2 can add stamina cost if class differentiation needs it. |
+
+### Spell circles in detail
+
+Per-class circle assignment lives in two places today:
+
+- `Ability.classes JSON` shorthand: `{"Pyromancer": 7, "Sorcerer": 3}`
+- `ClassAbilities(class_id, ability_id, circle, proficiency_cap)` normalized table
+
+Those duplicate. We treat `ClassAbilities` as the source of truth
+and propose dropping the JSON shorthand in
+[schema-reconciliation.md](schema-reconciliation.md) — one less
+place to keep in sync at content-author time.
+
+The `cast` pipeline:
+
+1. Parse `cast <spell> [target]`.
+2. Resolve the spell to an `Ability` row (kind = SPELL).
+3. Look up `ClassAbilities(player.class, spell)` — if no row, refuse
+   ("your class can't cast that").
+4. Look up the player's `MemorizedSpells` for a *ready* entry of
+   that ability — if none, refuse ("you haven't memorized that").
+5. Consume the slot (entry removed from MemorizedSpells; player
+   re-memorizes via `memorize <spell>` to refill).
+6. Continue with target resolution + restrictions + saving throw +
+   effect application.
+
+### Memorize / forget
+
+`memorize <spell>` adds a fresh entry to MemorizedSpells with
+`ready = false` and `prep_secs_remaining = ability.memorization_time +
+class_base_prep`. The `regen::memorize_tick` ticks down once per
+real second while the player is in a low-activity posture. When
+`prep_secs_remaining = 0`, `ready` flips true.
+
+Slot caps are enforced at memorize time: if you already have N
+slots used in circle C and the limit is M, you can't memorize
+another circle-C spell until one is consumed.
+
+`forget <spell>` removes the most recent ready entry of that ability
+(or all entries if `forget all`).
+
+`slots` displays per-circle `used / max` with a ready-vs-preparing
+breakdown.
 
 ## Schema cleanup tied to this proposal
 
@@ -135,55 +188,114 @@ target list of length 1.
 
 ## Examples
 
-**Single-target damage spell** (`magic missile`):
+**Single-target damage spell** (`magic_missile`, kind=SPELL):
 ```yaml
-target_scope: SINGLE
-valid_targets: [ENEMY_PC, ENEMY_NPC]
-stamina_cost: 0
-mana_cost: 8
-abilityEffects:
-  - effect_id: <damage row>, override_params: {amount: "level + 1d4"}
+ability:
+  name: magic_missile
+  kind: SPELL
+  classes:
+    - { class: Sorcerer, circle: 1 }
+    - { class: Pyromancer, circle: 1 }
+  target_scope: SINGLE
+  valid_targets: [ENEMY_PC, ENEMY_NPC]
+  effects:
+    - kind: DAMAGE
+      damage_amount: "level + 1d4"
+      damage_type: FORCE
+```
+No `stamina_cost` — the slot consumption IS the cost. Memorize a
+circle-1 slot; cast burns it.
+
+**Self-buff spell** (`bless`, kind=SPELL):
+```yaml
+ability:
+  name: bless
+  kind: SPELL
+  classes:
+    - { class: Cleric, circle: 1 }
+  target_scope: SELF
+  valid_targets: [SELF]
+  effects:
+    - kind: STATUS
+      status: bless                        # FK to Effect catalog
+      override:
+        duration: "skill / 4"
 ```
 
-**Self-buff** (`bless`):
+**Room AOE spell** (`fireball`, kind=SPELL):
 ```yaml
-target_scope: SELF
-valid_targets: [SELF]
-stamina_cost: 0
-mana_cost: 5
-abilityEffects:
-  - effect_id: <bless row>, override_params: {duration: "skill / 4"}
+ability:
+  name: fireball
+  kind: SPELL
+  classes:
+    - { class: Pyromancer, circle: 4 }
+    - { class: Sorcerer, circle: 5 }
+  target_scope: ROOM_ENEMIES
+  valid_targets: [ENEMY_PC, ENEMY_NPC]
+  effects:
+    - kind: DAMAGE
+      damage_amount: "level + 6d6"
+      damage_type: FIRE
+      damage_pct: 70
+    - kind: DAMAGE
+      damage_amount: "level + 6d6"
+      damage_type: FORCE
+      damage_pct: 30
 ```
 
-**Room AOE** (`fireball`):
+**Item-targeting spell** (`identify`, kind=SPELL):
 ```yaml
-target_scope: ROOM_ENEMIES
-valid_targets: [ENEMY_PC, ENEMY_NPC]
-stamina_cost: 0
-mana_cost: 20
-abilityEffects:
-  - effect_id: <fire damage row>, override_params: {amount: "level + 6d6"}
+ability:
+  name: identify
+  kind: SPELL
+  classes:
+    - { class: Sorcerer, circle: 2 }
+    - { class: Mystic, circle: 1 }
+  target_scope: SINGLE
+  valid_targets: [OBJECT_INV, OBJECT_ROOM]
+  effects:
+    - kind: REVEAL
+      reveal_kind: IDENTIFY_ITEM
 ```
 
-**Item targeting** (`identify`):
+**Combat skill** (`bash`, kind=SKILL):
 ```yaml
-target_scope: SINGLE
-valid_targets: [OBJECT_INV, OBJECT_ROOM]
-stamina_cost: 0
-mana_cost: 5
-abilityEffects:
-  - effect_id: <identify reveal row>
+ability:
+  name: bash
+  kind: SKILL
+  target_scope: SINGLE
+  valid_targets: [ENEMY_PC, ENEMY_NPC]
+  posture_required: STANDING
+  weapon_required: [SHIELD]
+  stamina_cost: 8                          # SKILLs cost stamina, not slots
+  cooldown_ms: 4000
+  effects:
+    - kind: DAMAGE
+      damage_amount: "skill / 3 + str_bonus"
+      damage_type: BLUDGEONING
+    - kind: KNOCKDOWN
+      knockdown_to: SITTING
 ```
 
-**Room aura** (`light room`):
+**Bard song** (`inspire_courage`, kind=SONG):
 ```yaml
-target_scope: ROOM_ENVIRONMENT
-valid_targets: [ROOM]
-stamina_cost: 0
-mana_cost: 3
-abilityEffects:
-  - effect_id: <room-light row>, override_params: {duration: "skill * 60"}
+ability:
+  name: inspire_courage
+  kind: SONG
+  classes:
+    - { class: Bard, circle: 2 }            # circle gates *learning*; cooldown gates *use*
+  target_scope: ROOM_ALLIES
+  valid_targets: [ALLY_PC]
+  cooldown_ms: 60000                        # 1 min between performances
+  effects:
+    - kind: STATUS
+      status: inspired                       # +accuracy + ward
+      override: { duration: "30 + skill / 2" }
 ```
+No memorize gate. Bard performs at-will between cooldowns. The
+class-circle assignment determines *when* the bard learns the song
+(level 8 if circle 2, level 16 if circle 4, etc., per
+ClassAbilityCircles), not whether they need to memorize it.
 
 ## AbilityRestrictions — additional rule types
 
@@ -213,7 +325,16 @@ This is a **target filter**, not a prevent flag. Once a calm effect
 *does* land, the prevent flags on the Effect row apply uniformly.
 The level gate is on the spawn side; the prevent is on the wear side.
 
-## Open questions
+## Decisions locked (review pass 1, 2026-05-03)
+
+| Question | Locked |
+|---|---|
+| Resource model | **No mana.** Vancian: SPELL = circle + memorized slot; SKILL = stamina; SONG/CHANT = cooldown only. Schema's `SpellSlotProgression` / `ClassAbilityCircles` / `RaceSpellSlotBonus` / `MemorizedSpells` runtime are the implementation; the existing `regen::memorize_tick` already handles slot regen during low-activity postures. |
+| Class-circle source of truth | **`ClassAbilities(class_id, ability_id, circle, proficiency_cap)`** (the normalized table). Drop `Ability.classes JSON` shorthand — duplicates the same data. Documented in [schema-reconciliation.md](schema-reconciliation.md). |
+| Multi-resource abilities | **One resource per ability**, picked by `kind`. No spell costs both a slot and stamina. |
+| AbilityEffect kinds | **9** — DAMAGE, HEAL, MODIFY, STATUS, CLEANSE, DISPEL, REVEAL, KNOCKDOWN, CHAIN_DAMAGE. World-mutating actions (teleport, summon, create, etc.) become STATUS catalog rows with `on_apply_lua`. See [effects.md](effects.md). |
+
+## Remaining open questions
 
 1. **Should ROOM_ALLIES include the caster?** ("Mass cure light"
    landing on you and your party.) Recommendation: yes, always —
@@ -231,6 +352,7 @@ The level gate is on the spawn side; the prevent is on the wear side.
    second cast while the first is mid-cast-time? Today it's
    instantaneous; if `cast_time_rounds > 0` ever ships, queueing
    policy needs a decision.
-5. **Multi-resource abilities.** Anything that costs both stamina and
-   mana? I'd default to "abilities pick one resource" — keeps the
-   model tractable.
+5. **Songs/chants stamina cost in v2.** Today they're cooldown-only.
+   When class differentiation calls for it, add `stamina_cost > 0`
+   on individual rows. No schema change needed — the column's already
+   there for SKILLs.

@@ -45,6 +45,19 @@ Same pattern: legacy text vs typed FK. Runtime reads `classId`.
 
 **Action:** drop `playerClass`.
 
+### `Ability.classes Json?` (duplicates `ClassAbilities`)
+
+Today the per-class circle assignment for a spell lives in two
+places: `Ability.classes` JSON shorthand
+(`{"Pyromancer": 7, "Sorcerer": 3}`) AND the normalized
+`ClassAbilities(class_id, ability_id, circle, proficiency_cap)`
+junction table. Two representations, content authors edit one, the
+other goes stale.
+
+**Action:** drop `Ability.classes`. `ClassAbilities` is the
+source of truth — it carries `circle` plus `proficiency_cap`
+which the JSON shorthand can't express.
+
 ### `MobCarrying` (overlaps `MobResetEquipment` and `EquipmentSets`)
 
 Three different schemas for "this mob spawns with these items":
