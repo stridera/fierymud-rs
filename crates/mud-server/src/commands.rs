@@ -6816,17 +6816,14 @@ fn apply_room_environment(world: &mut World, player: Entity, room: Entity) {
     }
 }
 
-/// Advance any active `KILL_MOB` objectives the killer holds whose
-/// target matches `victim`'s prototype `(zone, id)`. Fire-and-
-/// forget — the async task does the SQL read, computes new counts,
-/// upserts, and sends "X/Y" progress lines back via the player's
-/// outbound channel.
-///
-/// PARTY-scoped objectives are deferred to a follow-up — this
-/// pass only advances the killer's own progress. The hook on
-/// `combat::handle_death` calls this for every party-aware
-/// killer credit later, but for now the SOLO path is what's
-/// wired.
+/// Advance any active `KILL_MOB` objectives whose target matches
+/// `victim`'s prototype `(zone, id)`. Walks the killer's group
+/// (via `group_root` + `group_members`) and dispatches one async
+/// task per online member: SOLO-scoped objectives only count for
+/// the killer, PARTY-scoped objectives count for every group
+/// member who shares the quest. Each task does the SQL read,
+/// upserts, and sends progress lines back through that member's
+/// own outbound channel.
 pub(crate) fn bump_kill_quest_progress(
     world: &mut World,
     killer: Entity,
@@ -6836,63 +6833,84 @@ pub(crate) fn bump_kill_quest_progress(
     if world.get::<Player>(killer).is_none() {
         return;
     }
-    let character_id = world
-        .get::<Account>(killer)
-        .map(|a| a.character_id.clone());
-    let outbound = world.get::<Connection>(killer).map(|c| c.0.clone());
-    let pool = world.get_resource::<DbPool>().map(|p| p.0.clone());
-    let (Some(cid), Some(out), Some(pool)) = (character_id, outbound, pool) else {
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
-    tokio::spawn(async move {
-        let rows = match mud_db::quest_objectives::list_kill_mob_progress(
-            &pool,
-            &cid,
-            victim_proto_zone,
-            victim_proto_id,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "kill-objective lookup failed");
-                return;
-            }
-        };
-        for row in rows {
-            let new_count = (row.current_count + 1).min(row.required_count);
-            let completed = new_count >= row.required_count;
-            if let Err(e) = mud_db::quest_objectives::upsert_progress(
+    // Snapshot the group: leader is the chain root, members are
+    // every player in the follow tree. Filter to those with
+    // Account + Connection so we have something to send back to.
+    let root = group_root(world, killer);
+    let members = group_members(world, root);
+    let recipients: Vec<(Entity, String, mud_net::Outbound)> = members
+        .iter()
+        .filter_map(|&e| {
+            let cid = world.get::<Account>(e).map(|a| a.character_id.clone())?;
+            let out = world.get::<Connection>(e).map(|c| c.0.clone())?;
+            Some((e, cid, out))
+        })
+        .collect();
+    for (entity, cid, out) in recipients {
+        let is_killer = entity == killer;
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let rows = match mud_db::quest_objectives::list_kill_mob_progress(
                 &pool,
-                &row.character_quest_id,
-                row.quest_zone_id,
-                row.quest_id,
-                row.phase_id,
-                row.objective_id,
-                new_count,
-                completed,
+                &cid,
+                victim_proto_zone,
+                victim_proto_id,
+                is_killer,
             )
             .await
             {
-                tracing::warn!(error = %e, "kill-objective upsert failed");
-                continue;
-            }
-            let line = if completed {
-                format!(
-                    "Quest objective complete: {}\r\n",
-                    row.player_description
-                )
-            } else if row.show_progress {
-                format!(
-                    "Quest objective: {} ({}/{})\r\n",
-                    row.player_description, new_count, row.required_count
-                )
-            } else {
-                format!("Quest objective updated: {}\r\n", row.player_description)
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "kill-objective lookup failed");
+                    return;
+                }
             };
-            let _ = out.send(line.into_bytes());
-        }
-    });
+            for row in rows {
+                let new_count = (row.current_count + 1).min(row.required_count);
+                let completed = new_count >= row.required_count;
+                if let Err(e) = mud_db::quest_objectives::upsert_progress(
+                    &pool,
+                    &row.character_quest_id,
+                    row.quest_zone_id,
+                    row.quest_id,
+                    row.phase_id,
+                    row.objective_id,
+                    new_count,
+                    completed,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "kill-objective upsert failed");
+                    continue;
+                }
+                let prefix = if is_killer {
+                    String::new()
+                } else {
+                    "(party) ".to_string()
+                };
+                let line = if completed {
+                    format!(
+                        "{prefix}Quest objective complete: {}\r\n",
+                        row.player_description
+                    )
+                } else if row.show_progress {
+                    format!(
+                        "{prefix}Quest objective: {} ({}/{})\r\n",
+                        row.player_description, new_count, row.required_count
+                    )
+                } else {
+                    format!(
+                        "{prefix}Quest objective updated: {}\r\n",
+                        row.player_description
+                    )
+                };
+                let _ = out.send(line.into_bytes());
+            }
+        });
+    }
 }
 
 /// Bump the player's lifetime-kill counter, persist to the

@@ -25,13 +25,15 @@ pub struct ObjectiveProgressRow {
 
 /// Active KILL_MOB objectives for `character_id` whose target mob
 /// matches `(mob_zone, mob_id)` and whose row isn't already
-/// marked complete. Returned in the order the schema returns
-/// (no ORDER BY) — usually only one row matches per kill.
+/// marked complete. `is_killer` gates SOLO-scoped rows: when the
+/// caller is a non-killer party member, we still want PARTY-scoped
+/// objectives but skip SOLO ones. The killer always gets both.
 pub async fn list_kill_mob_progress(
     pool: &PgPool,
     character_id: &str,
     mob_zone: i32,
     mob_id: i32,
+    is_killer: bool,
 ) -> sqlx::Result<Vec<ObjectiveProgressRow>> {
     sqlx::query_as!(
         ObjectiveProgressRow,
@@ -63,10 +65,12 @@ pub async fn list_kill_mob_progress(
           AND qo.target_mob_zone_id = $2
           AND qo.target_mob_id = $3
           AND COALESCE(cqo.completed, false) = false
+          AND (qo.scope = 'PARTY'::"QuestObjectiveScope" OR $4)
         "#,
         character_id,
         mob_zone,
         mob_id,
+        is_killer,
     )
     .fetch_all(pool)
     .await
