@@ -109,8 +109,26 @@ pub enum Stage {
         password_plaintext: String,
         race: &'static str,
     },
+    /// Pick a gender for the new character. Prompt lists the
+    /// schema's `Characters.gender` accepted values (`male`,
+    /// `female`, `neutral`). Stored verbatim — gendered Lua
+    /// triggers read this string directly via `actor.gender`.
+    AwaitingGender {
+        email: Option<String>,
+        character_name: String,
+        password_plaintext: String,
+        race: &'static str,
+        class_id: i32,
+        class_plain_name: String,
+    },
     CharSelect { user: User, characters: Vec<CharacterRow> },
 }
+
+/// Gender values accepted by the `Characters.gender` column. The
+/// schema column is plain text but the runtime + triggers only
+/// handle these three casings; new options need a code-side
+/// review before adding here.
+const PLAYABLE_GENDERS: &[&str] = &["male", "female", "neutral"];
 
 /// Player-eligible races for the creation flow's race prompt.
 /// A subset of the schema's `Race` enum — monster / NPC variants
@@ -535,15 +553,52 @@ impl ConnRouter {
                     send_class_prompt(&ctx.outbound, world);
                     return;
                 };
-                // Gender, stat roll, and DB INSERTs land in follow-up
-                // slices. Terminate with an explicit "next steps
-                // coming" line so the contract stays visible.
+                ctx.stage = Stage::AwaitingGender {
+                    email,
+                    character_name,
+                    password_plaintext,
+                    race,
+                    class_id,
+                    class_plain_name,
+                };
+                send_gender_prompt(&ctx.outbound);
+            }
+
+            Stage::AwaitingGender {
+                email,
+                character_name,
+                password_plaintext,
+                race,
+                class_id,
+                class_plain_name,
+            } => {
+                let Some(gender) = match_playable_gender(trimmed) else {
+                    let _ = ctx.outbound.send(
+                        format!(
+                            "`{trimmed}` isn't a recognized gender — pick one of the listed values.\r\n"
+                        )
+                        .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingGender {
+                        email,
+                        character_name,
+                        password_plaintext,
+                        race,
+                        class_id,
+                        class_plain_name,
+                    };
+                    send_gender_prompt(&ctx.outbound);
+                    return;
+                };
+                // Stat roll and DB INSERTs land in subsequent
+                // slices. Terminate with the "next steps coming"
+                // line so the contract stays visible.
                 let _ = ctx.outbound.send(
                     format!(
-                        "Class `{class_plain_name}` (id {class_id}) set for \
-                         `{character_name}` ({race}). Gender and stat roll \
-                         land in a follow-up slice. For now please enter \
-                         an existing email or character name.\r\n"
+                        "Gender `{gender}` set for `{character_name}` \
+                         ({race} {class_plain_name}, class id {class_id}). \
+                         Stat roll lands in a follow-up slice. For now \
+                         please enter an existing email or character name.\r\n"
                     )
                     .into_bytes(),
                 );
@@ -1525,6 +1580,25 @@ fn match_base_class(world: &World, input: &str) -> Option<(i32, String)> {
         .values()
         .find(|c| !c.is_subclass && c.plain_name.to_ascii_lowercase() == needle)
         .map(|c| (c.id, c.plain_name.clone()))
+}
+
+/// Render the gender-selection prompt. Lists the three accepted
+/// values from `PLAYABLE_GENDERS` — neutral is the schema
+/// default and stays in the picker for nonbinary characters.
+fn send_gender_prompt(outbound: &Outbound) {
+    let mut msg = String::from("Available genders: ");
+    msg.push_str(&PLAYABLE_GENDERS.join(", "));
+    msg.push_str("\r\nGender: ");
+    let _ = outbound.send(msg.into_bytes());
+}
+
+/// Match a freshly-typed gender against the accepted list.
+/// Case-insensitive equality; returns the canonical lowercase
+/// form so the persisted `Characters.gender` value is consistent
+/// regardless of how the player typed it.
+fn match_playable_gender(input: &str) -> Option<&'static str> {
+    let needle = input.trim().to_ascii_lowercase();
+    PLAYABLE_GENDERS.iter().copied().find(|g| *g == needle)
 }
 
 /// Shared prompt for the `ConfirmCreate` doorway. `is_email`
