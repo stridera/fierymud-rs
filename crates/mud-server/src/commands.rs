@@ -3912,6 +3912,18 @@ pub(crate) struct ScoreData<'a> {
     /// either solo or the group root). `member_count` includes the
     /// player and every transitive follower; `1` means solo.
     group_status: GroupStatus<'a>,
+    /// XP toward the next level. `None` for max-level characters
+    /// (level >= 100) and entities without a Profile. Renders as a
+    /// "Exp: X / Y [bar] N%" line; the bar is computed here so
+    /// renderers stay free of math.
+    level_progress: Option<LevelProgress>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct LevelProgress {
+    pub current_xp: i64,
+    pub next_level_xp: i64,
+    pub percent: i32,
 }
 
 #[derive(Default)]
@@ -4009,6 +4021,15 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     if let Some(line) = group_status_line(&d.group_status) {
         out.push_str(&format!("  {line}\r\n"));
     }
+    if let Some(p) = d.level_progress {
+        out.push_str(&format!(
+            "  Exp: {} / {}  {} {}%\r\n",
+            p.current_xp,
+            p.next_level_xp,
+            progress_bar(p.percent),
+            p.percent,
+        ));
+    }
     out
 }
 
@@ -4033,6 +4054,64 @@ fn group_status_line(g: &GroupStatus) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Cumulative XP required to *reach* `level`, matching the legacy
+/// `level^2.5 * 1000` curve. Level 1 is the floor (returns 0); the
+/// curve is monotonic and stops mattering at level 100 where score
+/// suppresses the progress bar entirely.
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub(crate) fn experience_for_level(level: i32) -> i64 {
+    if level <= 1 {
+        return 0;
+    }
+    let raw = f64::from(level).powf(2.5) * 1000.0;
+    raw as i64
+}
+
+/// XP-to-next-level summary for the score sheet. `None` at the
+/// level cap (>= 100) so the renderer can quietly skip the line.
+/// Negative XP (death penalties, admin-set floors) clamps the
+/// percent at 0 rather than printing a negative bar.
+#[must_use]
+pub(crate) fn level_progress_for(level: i32, current_xp: i32) -> Option<LevelProgress> {
+    if !(1..100).contains(&level) {
+        return None;
+    }
+    let current_xp = i64::from(current_xp);
+    let floor = experience_for_level(level);
+    let ceiling = experience_for_level(level + 1);
+    let bracket = (ceiling - floor).max(1);
+    let into_bracket = (current_xp - floor).max(0);
+    let percent = ((into_bracket * 100) / bracket).clamp(0, 100);
+    Some(LevelProgress {
+        current_xp,
+        next_level_xp: ceiling,
+        percent: i32::try_from(percent).unwrap_or(0),
+    })
+}
+
+/// Render a fixed-width ASCII progress bar for the score sheet.
+/// Twenty cells wide; filled glyph `=`, empty glyph `-`. Color
+/// codes stay out — the runtime-side ANSI wrapper layers them in
+/// when the renderer pushes the line.
+#[must_use]
+pub(crate) fn progress_bar(percent: i32) -> String {
+    const WIDTH: usize = 20;
+    let pct = usize::try_from(percent.clamp(0, 100)).unwrap_or(0);
+    let filled = (pct * WIDTH) / 100;
+    let empty = WIDTH - filled;
+    let mut s = String::with_capacity(WIDTH + 2);
+    s.push('[');
+    for _ in 0..filled {
+        s.push('=');
+    }
+    for _ in 0..empty {
+        s.push('-');
+    }
+    s.push(']');
+    s
 }
 
 /// Map the carried-weight ratio into a one-word band so the score
@@ -4082,6 +4161,7 @@ pub(crate) fn condition_summary(hunger: i32, thirst: i32) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     // Box width = 56 chars between the borders.
     const W: usize = 56;
@@ -4183,6 +4263,15 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(line) = group_status_line(&d.group_status) {
         row(line);
+    }
+    if let Some(p) = d.level_progress {
+        row(format!(
+            "Exp:       {} / {}  {} {}%",
+            p.current_xp,
+            p.next_level_xp,
+            progress_bar(p.percent),
+            p.percent,
+        ));
     }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out

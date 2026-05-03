@@ -4045,6 +4045,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             leader: leader_name.as_deref(),
             member_count: group_size,
         },
+        level_progress: profile_owned
+            .as_ref()
+            .and_then(|(lvl, _, _, _, xp)| level_progress_for(*lvl, *xp)),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
