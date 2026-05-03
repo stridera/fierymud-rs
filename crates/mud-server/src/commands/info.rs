@@ -1102,14 +1102,14 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["policies", "rules"],
+        names: &["policies", "rules", "policy"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
         help: Help {
             usage: "policies",
             summary: "Server rules and code of conduct.",
-            long: "Static for now.",
+            long: "Static for now. Aliases: `rules`, `policy`.",
         },
         run: cmd_policies,
     }
@@ -3835,6 +3835,56 @@ pub(crate) fn cmd_diagnose(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!("  {name} is currently {posture}.\r\n"));
     }
     send_rendered(world, player, &out);
+}
+
+inventory::submit! {
+    Command {
+        names: &["whoami"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "whoami",
+            summary: "Print your character's name, level, race, and class.",
+            long: "One-line answer to \"which character am I logged in \
+                   as?\" — handy after a long session or when a script \
+                   needs to confirm identity. Pair with `score` for the \
+                   full sheet.",
+        },
+        run: cmd_whoami,
+    }
+}
+
+/// `whoami`: one-line "I am Strider the Wanderer, level 25 Human
+/// Wizard". Shows name + epithet + level + race + class. Mirrors
+/// the legacy convention of letting players confirm identity
+/// without scrolling through `score`.
+pub(crate) fn cmd_whoami(world: &mut World, player: Entity, _args: &str) {
+    let name = name_of(world, player);
+    let title_suffix = world
+        .get::<Title>(player)
+        .map(|t| t.0.clone())
+        .filter(|s| !s.is_empty())
+        .map_or_else(String::new, |t| format!(" {t}"));
+    let line = if let Some(prof) = world.get::<Profile>(player) {
+        let race = capitalize(&prof.race);
+        let class = prof
+            .class_id
+            .and_then(|id| {
+                world
+                    .get_resource::<ClassCatalog>()
+                    .and_then(|c| c.by_id.get(&id))
+                    .map(|d| d.plain_name.clone())
+            })
+            .unwrap_or_else(|| "Classless".to_string());
+        format!(
+            "You are {name}{title_suffix}, level {} {race} {class}.\r\n",
+            prof.level,
+        )
+    } else {
+        format!("You are {name}{title_suffix}.\r\n")
+    };
+    send_rendered(world, player, &line);
 }
 
 /// One-line snapshot: name + posture + HP condition + current target.
