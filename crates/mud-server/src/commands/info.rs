@@ -407,10 +407,13 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "inventory",
+            usage: "inventory [<filter>]",
             summary: "List items you are carrying.",
             long: "Shows everything in your inventory by name. \
-                   Use `get` to pick items up and `drop` to set them down.",
+                   Use `get` to pick items up and `drop` to set them down. \
+                   With a filter arg, only items whose name contains the \
+                   substring (case-insensitive) are shown — useful for \
+                   pruning a packed bag down to e.g. just potions.",
         },
         run: cmd_inventory,
     }
@@ -5521,7 +5524,13 @@ pub(crate) fn cmd_version(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-pub(crate) fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
+    // Optional substring filter so a packed bag is searchable —
+    // `inv potion` collapses to just the potion-shaped items.
+    // Match is case-insensitive against the rendered (color-
+    // stripped) item name so "vial" works even when the proto's
+    // name carries XML-Lite color tags.
+    let filter = args.trim().to_ascii_lowercase();
     // Snapshot in two passes so we can group identical names into a
     // single "3x <name>" line. Order is preserved by tracking the
     // first-seen position so duplicates fold without scrambling.
@@ -5531,6 +5540,12 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
         q.iter(world)
             .filter(|(l, _, eq)| l.0 == player && eq.is_none())
             .map(|(_, n, _)| n.name.clone())
+            .filter(|name| {
+                filter.is_empty()
+                    || render_color_tags(name, ColorMode::Strip)
+                        .to_ascii_lowercase()
+                        .contains(&filter)
+            })
             .collect()
     };
     let mut order: Vec<String> = Vec::new();
@@ -5545,9 +5560,18 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
     let weight = carried_weight(world, player);
     let mode = color_mode_for(world, player);
     let mut out = if items.is_empty() {
-        "\r\nYou are carrying nothing.\r\n".to_string()
-    } else {
+        if filter.is_empty() {
+            "\r\nYou are carrying nothing.\r\n".to_string()
+        } else {
+            format!("\r\nYou aren't carrying anything matching '{filter}'.\r\n")
+        }
+    } else if filter.is_empty() {
         format!("\r\nYou are carrying {} item(s):\r\n", items.len())
+    } else {
+        format!(
+            "\r\n{} item(s) match '{filter}':\r\n",
+            items.len(),
+        )
     };
     for name in &order {
         let n = counts.get(name).copied().unwrap_or(1);
@@ -5558,6 +5582,9 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
             out.push_str(&format!("      {rendered}\r\n"));
         }
     }
+    // Always show total carried weight when the player has any —
+    // even when filtering — so the encumbrance picture stays
+    // accurate regardless of which subset they're inspecting.
     if weight > 0.0 {
         let cap = carry_capacity(world, player);
         // Same encumbrance band the score sheet uses, so a player
