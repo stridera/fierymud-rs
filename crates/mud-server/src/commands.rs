@@ -24,9 +24,9 @@ use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRo
 use mud_net::Outbound;
 use mud_world::{
     AbilityCatalog, Account, AppliedTo, ClassCatalog, CombatStats, Cooldowns, CoreStats,
-    Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, Exits, Fighting,
-    Follower, Frozen, Health, Item, Keywords, KnownAbilities, LastInputAt, Located, LoggedInAt,
-    Mob, MobPrototypes, Named, ObjectPrototypes, Player, PlayerFlags, Posture,
+    Description, EffectCatalog, EffectDef, EffectInstance, EffectSource, EquippedSlot, Exits,
+    Fighting, Follower, Frozen, Health, Item, Keywords, KnownAbilities, LastInputAt, Located,
+    LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Player, PlayerFlags, Posture,
     PostureKind, Profile, Prompt, BankWealth, BoardDraft, MailDraft,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, Wealth,
     WearableIn, WorldKey, WorldKeyIndex,
@@ -7216,29 +7216,38 @@ pub(crate) enum Prevent {
     Movement,
 }
 
-/// True iff any active `EffectInstance` on `target` was sourced
-/// from an `EffectDef` whose corresponding `prevents_*` flag is
-/// set. Looks up each effect's catalog row by `EffectInstance.kind`
-/// — admin-spawned effects without a real catalog mapping fall
-/// through cleanly.
+/// True iff any active `EffectInstance` on `target` resolves to
+/// an `EffectDef` whose corresponding `prevents_*` flag is set.
+///
+/// Lookup order: the cast pipeline copies the override `flag`
+/// (e.g. `"web"`, `"berserk"`) into `EffectInstance.name`. Many
+/// abilities share a single generic `Effect` row (kind = "status")
+/// whose `prevents_*` flags can't be set per-flag. So we try
+/// `EffectCatalog.find_by_name(eff.name)` first to honor the
+/// per-status row, and fall through to `by_id.get(eff.kind)` for
+/// effects whose name == catalog name (no override happened) or
+/// whose name didn't land a match (admin-spawned, hardcoded).
+/// Either lookup yielding `prevents_*=true` is enough.
 pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) -> bool {
-    let active_kinds: Vec<i32> = {
+    let active: Vec<(i32, String)> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         q.iter(world)
             .filter(|(_, a)| a.0 == target)
-            .map(|(eff, _)| eff.kind)
+            .map(|(eff, _)| (eff.kind, eff.name.clone()))
             .collect()
     };
-    if active_kinds.is_empty() {
+    if active.is_empty() {
         return false;
     }
     let catalog = world.resource::<EffectCatalog>();
-    active_kinds.iter().any(|id| {
-        catalog.by_id.get(id).is_some_and(|def| match kind {
-            Prevent::Speaking => def.prevents_speaking,
-            Prevent::Casting => def.prevents_casting,
-            Prevent::Movement => def.prevents_movement,
-        })
+    let pick = |def: &EffectDef| match kind {
+        Prevent::Speaking => def.prevents_speaking,
+        Prevent::Casting => def.prevents_casting,
+        Prevent::Movement => def.prevents_movement,
+    };
+    active.iter().any(|(id, name)| {
+        catalog.find_by_name(name).is_some_and(pick)
+            || catalog.by_id.get(id).is_some_and(pick)
     })
 }
 
