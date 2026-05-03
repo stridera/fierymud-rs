@@ -1073,14 +1073,37 @@ pub(crate) fn pad_visible(s: &str, width: usize) -> String {
 }
 
 pub(crate) fn is_tag_shaped(tag: &str) -> bool {
-    let bytes = tag.as_bytes();
-    let body = if bytes.first() == Some(&b'/') {
-        &bytes[1..]
-    } else {
-        bytes
-    };
-    body.iter()
-        .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'#' | b'_' | b'-'))
+    // `<>` is the empty no-op tag (renderer drops it cleanly).
+    if tag.is_empty() {
+        return true;
+    }
+    // Closing form: `</>` is full reset; `</name>` requires a known
+    // single-modifier name (color or attribute, no `:`-compound).
+    if let Some(name) = tag.strip_prefix('/') {
+        return name.is_empty() || is_known_tag_part(name);
+    }
+    // Opening tags: every `:`-separated part must parse to a real
+    // attribute (modifier name, named color, `bg-NAME`, or `#RRGGBB`).
+    // Free-text-shaped tokens like `<unknown>` / `<gone>` fall through
+    // to literal text so callers can use them as placeholder markers
+    // without paying a tag-eats-the-text tax.
+    tag.split(':').all(is_known_tag_part)
+}
+
+fn is_known_tag_part(p: &str) -> bool {
+    if matches!(
+        p,
+        "b" | "u" | "i" | "s" | "d" | "dim" | "blink" | "reverse" | "hide"
+    ) {
+        return true;
+    }
+    if let Some(rest) = p.strip_prefix("bg-") {
+        return named_color(rest).is_some();
+    }
+    if let Some(rest) = p.strip_prefix('#') {
+        return rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    named_color(p).is_some()
 }
 
 /// Mutate the style stack in response to one parsed tag. Returns true
@@ -1424,7 +1447,7 @@ mod tests {
         assert_eq!(super::visible_width("<red>foo</>"), 3);
         assert_eq!(super::visible_width("<b:yellow>warning</> ahead"), "warning ahead".len());
         // Multi-tag: each pair contributes only its inner content.
-        assert_eq!(super::visible_width("<r>r</><g>g</><b>b</>"), 3);
+        assert_eq!(super::visible_width("<red>r</><green>g</><b>b</>"), 3);
         // Non-tag-shaped angle text: counts as literal.
         assert_eq!(super::visible_width("<%h/%H>"), "<%h/%H>".chars().count());
         // Unterminated `<` truncates (matches render_color_tags).
@@ -1451,7 +1474,7 @@ mod tests {
         // No tags: identity.
         assert_eq!(strip("plain text"), "plain text");
         // Single tag pair.
-        assert_eq!(strip("<r>red</>"), "red");
+        assert_eq!(strip("<red>red</>"), "red");
         // Multi-modifier open + full reset close.
         assert_eq!(strip("<b:yellow>warning:</> watch out"), "warning: watch out");
         // Unterminated tag: drains rest of string.
@@ -1523,6 +1546,18 @@ mod tests {
     #[test]
     fn render_color_tags_empty_tag_is_dropped() {
         assert_eq!(ansi("<>x<>y"), "xy");
+    }
+
+    #[test]
+    fn render_color_tags_unknown_alphabetic_tag_is_literal() {
+        // `<unknown>` / `<gone>` / `<dangling>` are placeholder strings
+        // a few callsites use as fallback text. They aren't recognized
+        // tag parts (no color, no modifier), so they pass through as
+        // literal angle-bracket text instead of being silently swallowed.
+        assert_eq!(strip("<unknown>"), "<unknown>");
+        assert_eq!(strip("<gone>"), "<gone>");
+        assert_eq!(strip("name=<dangling>"), "name=<dangling>");
+        assert_eq!(ansi("<unknown>"), "<unknown>");
     }
 
     #[test]
