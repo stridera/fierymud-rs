@@ -3019,6 +3019,72 @@ mod tests {
         let ctx = FormulaCtx::base(1, 0);
         assert_eq!(duration_from_blob(Some(&blob), &ctx), None);
     }
+
+    // --- exit_is_hidden_to / RevealedExits ---
+    //
+    // Pins the contract every exit-rendering / movement site
+    // depends on: hidden exits stay invisible to a fresh player,
+    // and become visible once the player's `RevealedExits` set
+    // contains the (room, dir) pair.
+
+    #[test]
+    fn exit_is_hidden_to_respects_revealed_exits() {
+        use mud_db::enums::{Direction, ExitState};
+        use mud_world::{ExitData, RevealedExits};
+
+        let mut world = World::new();
+        let player = world.spawn(()).id();
+        let room = world.spawn(()).id();
+
+        let visible_exit = ExitData {
+            to: None,
+            state: ExitState::Open,
+            key: None,
+            description: None,
+            keywords: Vec::new(),
+            is_hidden: false,
+            is_pickproof: false,
+        };
+        let hidden_exit = ExitData {
+            to: None,
+            state: ExitState::Open,
+            key: None,
+            description: None,
+            keywords: Vec::new(),
+            is_hidden: true,
+            is_pickproof: false,
+        };
+
+        // Non-hidden exit is visible regardless of reveal state.
+        assert!(!super::exit_is_hidden_to(
+            &world, player, room, Direction::North, &visible_exit
+        ));
+
+        // Hidden exit hides from a player with no RevealedExits.
+        assert!(super::exit_is_hidden_to(
+            &world, player, room, Direction::North, &hidden_exit
+        ));
+
+        // Adding the (room, north) pair to RevealedExits flips it.
+        let mut set = std::collections::HashSet::new();
+        set.insert((room, Direction::North));
+        world.entity_mut(player).insert(RevealedExits { set });
+        assert!(!super::exit_is_hidden_to(
+            &world, player, room, Direction::North, &hidden_exit
+        ));
+
+        // Different direction stays hidden — reveal is per-direction.
+        assert!(super::exit_is_hidden_to(
+            &world, player, room, Direction::South, &hidden_exit
+        ));
+
+        // Different room (same direction) stays hidden — reveal is
+        // per-(room, direction).
+        let other_room = world.spawn(()).id();
+        assert!(super::exit_is_hidden_to(
+            &world, player, other_room, Direction::North, &hidden_exit
+        ));
+    }
 }
 
 /// Send the player's prompt template with variables substituted. Falls back
