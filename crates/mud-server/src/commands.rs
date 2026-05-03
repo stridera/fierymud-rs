@@ -4846,6 +4846,14 @@ pub(crate) async fn cmd_mail(
         send_to(world, player, "Usage: mail <character>\r\n");
         return;
     }
+    if !require_profession_in_room(
+        world,
+        player,
+        mud_db::enums::MobProfession::Postmaster,
+        "postmaster",
+    ) {
+        return;
+    }
     let resolved = match mud_db::mail::user_for_character_name(pool, arg).await {
         Ok(r) => r,
         Err(e) => {
