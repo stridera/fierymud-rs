@@ -222,6 +222,8 @@ inventory::collect!(Command);
 // (or shipping a new one) — no central array touch.
 #[path = "commands/balance.rs"]
 mod balance;
+#[path = "commands/boards.rs"]
+mod boards;
 #[path = "commands/channels.rs"]
 mod channels;
 #[path = "commands/clan_chat.rs"]
@@ -230,6 +232,8 @@ mod clan_chat;
 mod enter;
 #[path = "commands/feedback.rs"]
 mod feedback;
+#[path = "commands/mail.rs"]
+mod mail;
 #[path = "commands/movement_directions.rs"]
 mod movement_directions;
 #[path = "commands/recall.rs"]
@@ -2034,52 +2038,8 @@ const COMMANDS: &[Command] = &[
     // commands/tells.rs.
     // `emote` migrated to commands/room_chat.rs.
     // `shout` migrated to commands/channels.rs.
-    Command {
-        names: &["mail"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "mail <character>",
-            summary: "Compose and send mail to another player.",
-            long: "Mail is account-scoped — addressing a character \
-                   delivers to whichever account owns them. After \
-                   `mail <name>`, your input enters compose mode: \
-                   first non-blank line is the subject, subsequent \
-                   lines accumulate as body. Control verbs: `.send` \
-                   ships the draft, `.abort` discards it, `.preview` \
-                   shows what's queued, `.clear` wipes the draft.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["boards"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "boards",
-            summary: "List every public message board.",
-            long: "Each board has an alias (`mortal`, `god`, `quest`, \
-                   etc.) and a title. Use `board <alias>` to list \
-                   messages on one.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["board"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "board <alias> [#]",
-            summary: "List or read messages on a board.",
-            long: "With just an alias, lists messages newest first \
-                   (sticky-marked entries float to the top). Append \
-                   a slot number to read that message's body.",
-        },
-        run: cmd_mail_stub,
-    },
+    // `mail` migrated to commands/mail.rs.
+    // `boards` / `board` migrated to commands/boards.rs.
     Command {
         names: &["quests", "qstat", "qlist"],
         min_role: UserRole::Player,
@@ -2205,98 +2165,8 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_mail_stub,
     },
-    Command {
-        names: &["post"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "post <board-alias>",
-            summary: "Compose a new message on a board.",
-            long: "Opens a multi-line composition session: first \
-                   non-blank line is the subject, subsequent lines \
-                   accumulate as body. `.send` ships, `.abort` \
-                   cancels, `.preview` shows the draft. Locked \
-                   boards refuse the open.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["delpost"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "delpost <board-alias> <#>",
-            summary: "Delete a board message (yours, or any if Builder+).",
-            long: "Hard-deletes the row at the given slot. Players \
-                   can only delete posts they made (case-insensitive \
-                   poster-name match); Builder-and-above can delete \
-                   anyone's. Edit history (`BoardMessageEdit`) cascades.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["editpost"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "editpost <board-alias> <#>",
-            summary: "Re-open a board post for editing.",
-            long: "Pre-loads the existing subject and body into a \
-                   composition session. Add lines to append, or \
-                   `.clear` to wipe and re-type from scratch. \
-                   `.send` commits (and records an audit row in \
-                   `BoardMessageEdit`); `.abort` discards. Players \
-                   can only edit their own posts; Builder+ can edit \
-                   any.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["mailbox"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "mailbox",
-            summary: "List inbound mail for your account.",
-            long: "Mail is account-scoped — every character on your \
-                   account shares one inbox. Each line shows the \
-                   slot index, an unread marker (`*`), the sender, \
-                   and the subject. Use `readmail <#>` to read; \
-                   `delmail <#>` to delete.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["readmail"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "readmail <#>",
-            summary: "Read a message from your mailbox.",
-            long: "Argument is the slot number from `mailbox`. Renders \
-                   the body, marks the row read.",
-        },
-        run: cmd_mail_stub,
-    },
-    Command {
-        names: &["delmail"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "delmail <#>",
-            summary: "Soft-delete a message from your mailbox.",
-            long: "Argument is the slot number from `mailbox`. Hides \
-                   the row from future listings (audit trail keeps it \
-                   in the table).",
-        },
-        run: cmd_mail_stub,
-    },
+    // `post` / `delpost` / `editpost` migrated to commands/boards.rs.
+    // `mailbox` / `readmail` / `delmail` migrated to commands/mail.rs.
     // `gossip` / `music` migrated to commands/channels.rs.
     // `insult` migrated to commands/room_chat.rs.
     // `petition` migrated to commands/feedback.rs.
@@ -5258,6 +5128,16 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "status-lists `{name}` missing"
+            );
+        }
+        // mail.rs + boards.rs (async-dispatched stubs)
+        for name in [
+            "mail", "mailbox", "readmail", "delmail",
+            "boards", "board", "post", "delpost", "editpost",
+        ] {
+            assert!(
+                names.contains(&name),
+                "mail/board `{name}` missing"
             );
         }
     }
@@ -17880,7 +17760,7 @@ pub(crate) fn broadcast_room_except_players_rendered(
 /// Stub for the help/registry path — mail commands are intercepted by
 /// the async pre-dispatch hook before this ever runs. If somehow it
 /// does (a future refactor moves dispatch order around), bail loudly.
-fn cmd_mail_stub(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_mail_stub(world: &mut World, player: Entity, _args: &str) {
     send_to(
         world,
         player,
