@@ -227,6 +227,11 @@ pub struct ObjectProto {
     /// enum-label string (HUMAN / ELF / ...) for direct
     /// comparison with `Profile.race`.
     pub restricted_races: Vec<String>,
+    /// `ObjectExtraDescriptions` for this proto: keyword-addressable
+    /// flavor text addressable from `examine <keyword>` against the
+    /// item ("look pommel" on an ornate sword shows the jeweled
+    /// pommel detail). Empty for plain items.
+    pub extras: Vec<(Vec<String>, String)>,
 }
 
 /// Static initial-spawn data for a `DrinkContainer` proto. Mirrors

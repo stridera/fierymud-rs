@@ -2381,8 +2381,8 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         // match is case-insensitive substring against any
         // entry's keyword list. The first match wins; builders
         // ordering things in the schema controls precedence.
+        let needle_lc = needle.to_ascii_lowercase();
         if let Some(extras) = world.get::<mud_world::RoomExtras>(room) {
-            let needle_lc = needle.to_ascii_lowercase();
             let hit = extras.entries.iter().find(|(keywords, _)| {
                 keywords
                     .iter()
@@ -2394,6 +2394,34 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 send_to(world, player, format!("\r\n{body}\r\n"));
                 return;
             }
+        }
+        // Then ObjectExtras on items in the room or in inventory.
+        // Item must be visible to the player to count — same
+        // located-in-room-or-on-player gate the entity search uses.
+        let extras_hit: Option<String> = {
+            let mut q = world
+                .query_filtered::<(&Located, &WorldKey), With<Item>>();
+            let protos = world.resource::<mud_world::ObjectPrototypes>();
+            q.iter(world)
+                .filter(|(l, _)| l.0 == room || l.0 == player)
+                .find_map(|(_, key)| {
+                    let proto = protos.by_key.get(&(key.zone, key.id))?;
+                    proto
+                        .extras
+                        .iter()
+                        .find(|(keywords, _)| {
+                            keywords
+                                .iter()
+                                .any(|kw| kw.to_ascii_lowercase().contains(&needle_lc))
+                        })
+                        .map(|(_, body)| body.clone())
+                })
+        };
+        if let Some(body) = extras_hit {
+            let mode = color_mode_for(world, player);
+            let rendered = render_color_tags(body.trim_end(), mode);
+            send_to(world, player, format!("\r\n{rendered}\r\n"));
+            return;
         }
         send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
         );

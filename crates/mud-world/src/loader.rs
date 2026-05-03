@@ -226,6 +226,19 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     stats.mobs_listed = mob_prototypes.by_key.len();
 
     let object_rows = objects::list_objects(pool).await?;
+    // Extras are loaded once and bucketed by (zone_id, object_id)
+    // so each proto can claim its rows in O(1).
+    let object_extra_rows =
+        mud_db::object_extra_descriptions::list_extras(pool).await?;
+    #[allow(clippy::type_complexity)]
+    let mut object_extras_by_key: HashMap<(i32, i32), Vec<(Vec<String>, String)>> =
+        HashMap::new();
+    for r in object_extra_rows {
+        object_extras_by_key
+            .entry((r.object_zone_id, r.object_id))
+            .or_default()
+            .push((r.keywords, r.description));
+    }
     let mut object_prototypes = ObjectPrototypes::default();
     for row in object_rows {
         let (weapon_dice_num, weapon_dice_size, weapon_dice_bonus) =
@@ -277,6 +290,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 restricted_alignments: row.restricted_alignments,
                 restricted_class_ids: row.restricted_class_ids,
                 restricted_races: row.restricted_races,
+                extras: object_extras_by_key
+                    .remove(&(row.zone_id, row.id))
+                    .unwrap_or_default(),
             },
         );
     }
