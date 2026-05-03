@@ -4173,13 +4173,17 @@ pub(crate) fn direction_rank(d: Direction) -> u8 {
 }
 
 pub(crate) struct WhoRow {
-    entity: Entity,
-    name: String,
-    title: Option<String>,
-    afk: bool,
-    idle: Option<u64>,
-    level: i32,
-    clan_abbrev: Option<String>,
+    pub entity: Entity,
+    pub name: String,
+    pub title: Option<String>,
+    pub afk: bool,
+    pub idle: Option<u64>,
+    pub level: i32,
+    pub clan_abbrev: Option<String>,
+    /// Plain class name resolved via `ClassCatalog`, when the
+    /// player has a class. None for classless characters; the
+    /// renderer omits the class slot in that case.
+    pub class_name: Option<String>,
 }
 
 pub(crate) fn format_idle(secs: u64) -> String {

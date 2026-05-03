@@ -3964,6 +3964,16 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     // Two-pass: first collect rows, then resolve group roots so we
     // can mark grouped players with [G].
     let raw: Vec<WhoRow> = {
+        // Snapshot the catalog once outside the query so it doesn't
+        // collide with the query's borrow on World. Class is
+        // looked up by Profile.class_id and rendered as plain_name
+        // (no color tags — color sneaks in via the title).
+        let class_lookup: std::collections::HashMap<i32, String> = world
+            .resource::<ClassCatalog>()
+            .by_id
+            .iter()
+            .map(|(id, def)| (*id, def.plain_name.clone()))
+            .collect();
         let mut q = world.query_filtered::<(
             Entity,
             &Named,
@@ -3982,6 +3992,9 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
                 idle: last.map(|l| l.0.elapsed().as_secs()),
                 level: prof.map_or(0, |p| p.level),
                 clan_abbrev: clan.map(|c| c.clan_abbrev.clone()),
+                class_name: prof
+                    .and_then(|p| p.class_id)
+                    .and_then(|cid| class_lookup.get(&cid).cloned()),
             })
             .collect()
     };
@@ -4039,6 +4052,9 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
             out.push_str("       ");
         }
         out.push_str(&pad_visible(&r.name, NAME_COL));
+        if let Some(class) = &r.class_name {
+            out.push_str(&format!(" [{class}]"));
+        }
         if let Some(abbrev) = &r.clan_abbrev {
             out.push_str(&format!(" [{abbrev}]"));
         }
