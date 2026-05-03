@@ -185,6 +185,34 @@ abilityEffects:
   - effect_id: <room-light row>, override_params: {duration: "skill * 60"}
 ```
 
+## AbilityRestrictions — additional rule types
+
+The existing AbilityRestrictions evaluator supports rule types like
+`alignment`, `target_standing`, `not_blind`, `in_combat`, `not_immobilized`,
+`npc_only`, `has_weapon`. Adding rule types as content needs them:
+
+### `target_level_relative`
+
+For "this ability only works on weaker targets" content (Calm Animal,
+Charm Person, Sleep). Compares target's level against caster's via an
+operator and offset:
+
+```yaml
+restrictions:
+  - type: target_level_relative
+    operator: <=
+    value: caster.level - 3
+    message: "{target.name} is too strong for {actor.you} to {ability.verb}."
+```
+
+Operators: `<`, `<=`, `==`, `>=`, `>`. The `value` field accepts the
+formula evaluator's grammar so authors can write
+`caster.level + caster.cha_bonus / 2` style scaling caps.
+
+This is a **target filter**, not a prevent flag. Once a calm effect
+*does* land, the prevent flags on the Effect row apply uniformly.
+The level gate is on the spawn side; the prevent is on the wear side.
+
 ## Open questions
 
 1. **Should ROOM_ALLIES include the caster?** ("Mass cure light"
