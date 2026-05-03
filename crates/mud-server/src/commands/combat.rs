@@ -1,16 +1,23 @@
-//! Combat verbs (35 commands). Bodies stay in commands.rs
-//! (promoted to pub(crate)); only the Command records + help
-//! text live here.
+//! Combat verbs (35 commands). Both Command records and handler
+//! bodies live here.
 
-use mud_db::enums::UserRole;
+use bevy_ecs::prelude::*;
+use mud_db::enums::{ExitState, UserRole};
+use mud_world::{
+    AppliedTo, CombatStats, EffectInstance, EquippedSlot, Exits, Fighting, Health, Item, Located,
+    Mob, Named, Posture, PostureKind, Profile, Slot,
+};
 
 use crate::commands::{
-    Category, Command, Help, cmd_assist, cmd_attack, cmd_backstab, cmd_bandage, cmd_bash,
-    cmd_berserk, cmd_breathe, cmd_buck, cmd_conceal, cmd_consider, cmd_corner, cmd_disarm,
-    cmd_disengage, cmd_doorbash, cmd_drag, cmd_firstaid, cmd_flee, cmd_gouge, cmd_guard,
-    cmd_hitall, cmd_kick, cmd_layhands, cmd_lure, cmd_rend, cmd_rescue, cmd_retreat,
-    cmd_roar, cmd_roundhouse, cmd_sneak, cmd_springleap, cmd_stomp, cmd_sweep, cmd_tame,
-    cmd_throatcut, cmd_tripup,
+    AGGRO_ALIGNMENT, ATTACK_COST, BACKSTAB_COST, BANDAGE_COST, BASH_COST, BERSERK_COST, Category,
+    Command, DISARM_COST, DOORBASH_COST, GOUGE_COST, HITALL_COST, Help, KICK_COST, LAYHANDS_COST,
+    REND_COST, RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST,
+    THROATCUT_COST, TRIPUP_COST, apply_damage, auto_assist_followers_of,
+    broadcast_room_except_players_rendered, broadcast_room_except_rendered, check_stamina,
+    cmd_look, direction_name, drain_stamina, engage_skill_shim, find_actor_in_room,
+    flip_door_both_sides, invoke_ability, invoke_ability_with, mob_helpers_engage, name_of,
+    name_or, opposite, parse_direction, remove_effect_named, require_alert_posture, send_rendered,
+    send_to, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -674,3 +681,1360 @@ inventory::submit! {
 
 
 //  `gsay` / `gtell` / `gecho` / `gt` migrated to commands/room_chat.rs.
+
+
+// ---- handler bodies ----
+
+pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "doorbash") {
+        return;
+    }
+    if !check_stamina(world, player, DOORBASH_COST, "doorbash") {
+        return;
+    }
+    let arg = args.trim();
+    let Some(dir) = parse_direction(arg) else {
+        send_to(world, player, "Doorbash which way?\r\n");
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let cur_state = world
+        .get::<Exits>(room)
+        .and_then(|e| e.0.get(&dir).map(|ed| ed.state));
+    let Some(state) = cur_state else {
+        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        return;
+    };
+    if state == ExitState::Open {
+        send_to(world, player, format!("It's already open {}.\r\n", direction_name(dir)));
+        return;
+    }
+    drain_stamina(world, player, DOORBASH_COST);
+    flip_door_both_sides(world, room, dir, ExitState::Open);
+
+    let player_name = name_of(world, player);
+    send_to(world, player, format!(
+        "You bash open the way {}!\r\n",
+        direction_name(dir),
+    ));
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} bashes the door {} wide open!\r\n", direction_name(dir)),
+    );
+}
+pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
+    if !require_alert_posture(world, player, "attack") {
+        return;
+    }
+    if !check_stamina(world, player, ATTACK_COST, "attack") {
+        return;
+    }
+    let target_name = target_name.trim();
+    if target_name.is_empty() {
+        send_to(world, player, "Attack what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let target_lower = target_name.to_ascii_lowercase();
+
+    let target = {
+        let mut q = world.query::<(Entity, &Located, &Named)>();
+        q.iter(world)
+            .find(|(e, l, n)| {
+                *e != player
+                    && l.0 == located.0
+                    && n.name.to_ascii_lowercase().contains(&target_lower)
+            })
+            .map(|(e, _, _)| e)
+    };
+
+    let Some(target) = target else {
+        send_rendered(world, player, &format!("You don't see '{target_name}' here.\r\n"),
+        );
+        return;
+    };
+
+    // Peaceful mob gate — `MobBehavior::Peaceful` mobs refuse to be
+    // attacked. Mirrors the legacy aura that quest-givers and
+    // shopkeepers tend to have so a misclick doesn't aggro a
+    // critical NPC. Doesn't apply to PvP — players never carry
+    // MobBehaviors and don't get covered.
+    if world
+        .get::<mud_world::MobBehaviors>(target)
+        .is_some_and(|b| b.has(mud_db::enums::MobBehavior::Peaceful))
+    {
+        let target_name_owned = name_of(world, target);
+        send_to(
+            world,
+            player,
+            format!("{target_name_owned} radiates a calm that turns your blow aside.\r\n"),
+        );
+        return;
+    }
+
+    let actual_name = name_of(world, target);
+    let player_name = name_of(world, player);
+
+    try_insert(world, player, Fighting(target));
+    if world.get::<CombatStats>(target).is_some()
+        && let Ok(mut e) = world.get_entity_mut(target)
+    {
+        e.insert(Fighting(player));
+    }
+    drain_stamina(world, player, ATTACK_COST);
+
+    send_to(world, player, format!("You attack {actual_name}!\r\n"));
+    send_rendered(world, target, &format!("{player_name} attacks you!\r\n"));
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{player_name} attacks {actual_name}.\r\n"),
+    );
+
+    // Auto-assist: anyone following `target` with AUTO_ASSIST set, in
+    // the same room, not already fighting — they engage `player`.
+    auto_assist_followers_of(world, target, player, located.0);
+
+    // Mob HELPER behavior: any mob in the room (other than the
+    // attacker / defender) with the `Helper` flag joins in and
+    // engages the attacker. Same room-mismatch auto-disengage as
+    // any other combat enrollment if the attacker leaves.
+    mob_helpers_engage(world, target, player, located.0);
+
+    // Fire ATTACK trigger on the target. Bodies typically run
+    // initial-aggression flavor or counter-attacks. `self` = target,
+    // `actor` = attacker.
+    crate::triggers::fire_event_with_actor(
+        world,
+        target,
+        player,
+        mud_world::TriggerEvent::Attack,
+    );
+}
+pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
+    let target_word = target_word.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Consider whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
+        send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+    let target_name = name_of(world, target);
+
+    let self_max_hp = world.get::<Health>(player).map_or(1, |h| h.max).max(1);
+    let self_stats = world.get::<CombatStats>(player).copied();
+    let self_dmg = self_stats.map_or(0, |c| c.dmg_roll);
+    let self_hit_roll = self_stats.map_or(0, |c| c.hit_roll);
+    let target_max_hp = world.get::<Health>(target).map_or(0, |h| h.max);
+    let target_stats = world.get::<CombatStats>(target).copied();
+    let target_dmg = target_stats.map_or(0, |c| c.dmg_roll);
+    let target_hit_roll = target_stats.map_or(0, |c| c.hit_roll);
+    let self_ac = self_stats.map_or(0, |c| c.ac);
+    let target_ac = target_stats.map_or(0, |c| c.ac);
+
+    if target_max_hp == 0 {
+        send_rendered(world, player, &format!("{target_name} doesn't look like a fighter at all.\r\n"),
+        );
+        return;
+    }
+
+    // Score = max_hp scaled by damage output (1 + dmg/10). Compare ratio to
+    // self. The cutoffs are chosen by feel — easy to retune later.
+    let self_score = f64::from(self_max_hp) * (1.0 + f64::from(self_dmg) / 10.0);
+    let target_score = f64::from(target_max_hp) * (1.0 + f64::from(target_dmg) / 10.0);
+    let ratio = target_score / self_score.max(1.0);
+
+    let verdict = if ratio < 0.30 {
+        "is no match for you."
+    } else if ratio < 0.70 {
+        "looks like an easy fight."
+    } else if ratio < 1.50 {
+        "might give you a fight."
+    } else if ratio < 3.00 {
+        "looks tougher than you."
+    } else {
+        "would slaughter you. Don't try it."
+    };
+
+    let mut out = format!("{target_name} {verdict}\r\n");
+    // Hit-chance hints both ways. Use the same formula combat does
+    // so what `consider` predicts matches what swings actually land.
+    let your_chance = crate::combat::hit_chance_pct(self_hit_roll, target_ac);
+    let their_chance = crate::combat::hit_chance_pct(target_hit_roll, self_ac);
+    out.push_str(&format!(
+        "Your strikes would land about {your_chance}%; theirs about {their_chance}%.\r\n",
+    ));
+    // Aggro hint: same threshold the room-entry check uses, so
+    // `consider` matches the auto-engage rule. Players passing
+    // through a known-hostile zone can size up the danger before
+    // walking back in. Memory check first — a remembered grudge
+    // is the more specific reason a particular target would
+    // attack you.
+    if world.get::<Mob>(target).is_some() {
+        let remembers_you = world
+            .get::<crate::combat::MobMemory>(target)
+            .is_some_and(|m| m.0.contains(&player));
+        let target_alignment = target_stats.map_or(0, |c| c.alignment);
+        if remembers_you {
+            out.push_str("It remembers you, and its hand goes to its weapon.\r\n");
+        } else if target_alignment <= AGGRO_ALIGNMENT {
+            out.push_str("Its eyes follow you with malice — it would attack on sight.\r\n");
+        }
+    }
+    send_rendered(world, player, &out);
+}
+pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let from_room = located.0;
+
+    // Collect open exits with valid targets.
+    let candidates: Vec<(mud_db::enums::Direction, Entity)> = world
+        .get::<Exits>(from_room)
+        .map(|e| {
+            e.0.iter()
+                .filter_map(|(dir, ed)| {
+                    if ed.state == mud_db::enums::ExitState::Open {
+                        ed.to.map(|t| (*dir, t))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if candidates.is_empty() {
+        send_to(world, player, "There's nowhere to run!\r\n");
+        return;
+    }
+
+    let pick = rand::random_range(0..candidates.len());
+    let (dir, target) = candidates[pick];
+    let dir_name = direction_name(dir);
+
+    let mover_name = name_of(world, player);
+
+    // Notify the source room you're fleeing.
+    broadcast_room_except_players_rendered(
+        world,
+        from_room,
+        &[player],
+        &format!("{mover_name} panics and flees {dir_name}!\r\n"),
+    );
+
+    // Drop our own Fighting; combat_tick auto-disengages attackers on
+    // the next 1Hz pass via the room-mismatch check.
+    try_remove::<Fighting>(world, player);
+
+    // Move + announce arrival + auto-look.
+    if let Some(mut l) = world.get_mut::<Located>(player) {
+        l.0 = target;
+    }
+    let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
+        format!("the {}", direction_name(d))
+    });
+    broadcast_room_except_players_rendered(
+        world,
+        target,
+        &[player],
+        &format!("{mover_name} arrives, panting, from {arrival_dir}.\r\n"),
+    );
+    send_to(world, player, format!("You flee {dir_name}!\r\n"));
+    cmd_look(world, player, "");
+}
+pub(crate) fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "kick") {
+        return;
+    }
+    let Some(fighting) = world.get::<Fighting>(player).copied() else {
+        send_to(world, player, "You aren't fighting anyone.\r\n");
+        return;
+    };
+    let target = fighting.0;
+    if world.get_entity(target).is_err() {
+        try_remove::<Fighting>(world, player);
+        send_to(world, player, "Your target is gone.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, KICK_COST, "kick") {
+        return;
+    }
+    drain_stamina(world, player, KICK_COST);
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("kick {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "berserk") {
+        return;
+    }
+    if !check_stamina(world, player, BERSERK_COST, "berserk") {
+        return;
+    }
+    drain_stamina(world, player, BERSERK_COST);
+    invoke_ability(
+        world,
+        player,
+        "berserk",
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "stomp") {
+        return;
+    }
+    if !check_stamina(world, player, STOMP_COST, "stomp") {
+        return;
+    }
+    let arg = args.trim();
+    let target = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Stomp whom? You aren't fighting.\r\n");
+            return;
+        };
+        t
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    if target == player {
+        send_to(world, player, "You can't stomp yourself.\r\n");
+        return;
+    }
+    let cur_posture = world.get::<Posture>(target).map(|p| p.0);
+    if !matches!(cur_posture, Some(PostureKind::Standing)) {
+        let target_name = name_or(world, target, "(unknown)");
+        send_to(world, player, format!(
+            "{target_name} is already on the ground.\r\n",
+        ));
+        return;
+    }
+    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
+        send_to(world, player, "Target is in limbo.\r\n");
+        return;
+    };
+
+    let dmg = world.get::<CombatStats>(player).map_or(1, |c| (c.dmg_roll / 2).max(1));
+    drain_stamina(world, player, STOMP_COST);
+
+    let player_name = name_of(world, player);
+    let target_name = name_or(world, target, "(unknown)");
+    let (dead, _) = apply_damage(world, target, dmg);
+
+    if !dead
+        && let Ok(mut e) = world.get_entity_mut(target)
+    {
+        e.insert(Posture(PostureKind::Sitting));
+    }
+
+    send_to(world, player, format!(
+        "You stomp on {target_name} for {dmg} damage; they go down!\r\n"
+    ));
+    if !dead {
+        send_rendered(world, target, &format!(
+            "{player_name} stomps you to the ground!\r\n"
+        ));
+    }
+    broadcast_room_except_rendered(
+        world,
+        target_room,
+        &[player, target],
+        &format!("{player_name} stomps {target_name} to the ground!\r\n"),
+    );
+
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, target_room);
+    }
+}
+pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "tripup") {
+        return;
+    }
+    let arg = args.trim();
+    // Empty-arg shortcut: current Fighting target. The data path
+    // doesn't synthesize this; we resolve it here and pass the name
+    // through.
+    let dispatched = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Trip up whom? You aren't fighting.\r\n");
+            return;
+        };
+        let target_name = name_of(world, t);
+        format!("trip_up {target_name}")
+    } else if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        // Targeting gate would also catch this, but refusing here
+        // skips wasted stamina.
+        send_to(world, player, "You can't trip yourself.\r\n");
+        return;
+    } else {
+        format!("trip_up {arg}")
+    };
+    if !check_stamina(world, player, TRIPUP_COST, "tripup") {
+        return;
+    }
+    drain_stamina(world, player, TRIPUP_COST);
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "sweep") {
+        return;
+    }
+    if !check_stamina(world, player, SWEEP_COST, "sweep") {
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let dmg = world.get::<CombatStats>(player).map_or(1, |c| (c.dmg_roll / 4).max(1));
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located, Option<&Posture>, Option<&Health>), With<Mob>>();
+        q.iter(world)
+            .filter(|(_, l, p, h)| {
+                l.0 == room
+                    && h.is_some()
+                    && matches!(p.map(|p| p.0), None | Some(PostureKind::Standing))
+            })
+            .map(|(e, _, _, _)| e)
+            .collect()
+    };
+    if targets.is_empty() {
+        send_to(world, player, "Nothing here to sweep.\r\n");
+        return;
+    }
+    drain_stamina(world, player, SWEEP_COST);
+    let player_name = name_of(world, player);
+    let count = targets.len();
+    for t in targets {
+        let target_name = name_or(world, t, "(unknown)");
+        let (dead, _) = apply_damage(world, t, dmg);
+        if dead {
+            crate::combat::handle_death(world, t, &target_name, room);
+        } else if let Ok(mut e) = world.get_entity_mut(t) {
+            e.insert(Posture(PostureKind::Sitting));
+        }
+    }
+    send_to(world, player, format!(
+        "You sweep your leg in a wide arc — {count} go down!\r\n"
+    ));
+    broadcast_room_except_rendered(
+        world, room, &[player],
+        &format!("{player_name} sweeps a wide kick across the room!\r\n"),
+    );
+}
+pub(crate) fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "roundhouse") {
+        return;
+    }
+    let Some(Fighting(target)) = world.get::<Fighting>(player).copied() else {
+        send_to(world, player, "You aren't fighting anyone.\r\n");
+        return;
+    };
+    if world.get_entity(target).is_err() {
+        try_remove::<Fighting>(world, player);
+        send_to(world, player, "Your target is gone.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, ROUNDHOUSE_COST, "roundhouse") {
+        return;
+    }
+    drain_stamina(world, player, ROUNDHOUSE_COST);
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("roundhouse {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "roar") {
+        return;
+    }
+    if !check_stamina(world, player, ROAR_COST, "roar") {
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+    // Skip already-feared targets — re-applying just resets duration
+    // but the visual repetition is annoying.
+    let feared: std::collections::HashSet<Entity> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(e, _)| e.name.eq_ignore_ascii_case("fear"))
+            .map(|(_, applied)| applied.0)
+            .collect()
+    };
+    let targets: Vec<String> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Mob>>();
+        q.iter(world)
+            .filter(|(e, l, _)| l.0 == room && !feared.contains(e))
+            .map(|(_, _, n)| n.name.clone())
+            .collect()
+    };
+    if targets.is_empty() {
+        send_to(world, player, "There's nothing here to roar at.\r\n");
+        return;
+    }
+    drain_stamina(world, player, ROAR_COST);
+    // First target gets the full description box; subsequent targets
+    // dispatch through the quiet variant so the box doesn't repeat
+    // N times in an N-mob room. Per-target success / effect summary
+    // lines still emit normally.
+    for (idx, target_name) in targets.iter().enumerate() {
+        invoke_ability_with(
+            world,
+            player,
+            &format!("roar {target_name}"),
+            mud_db::abilities::AbilityKind::Skill,
+            "use",
+            idx > 0,
+        );
+    }
+}
+pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "rend") {
+        return;
+    }
+    let arg = args.trim();
+    let target_word = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Rend whom? You aren't fighting.\r\n");
+            return;
+        };
+        name_of(world, t)
+    } else {
+        arg.to_string()
+    };
+    if !check_stamina(world, player, REND_COST, "rend") {
+        return;
+    }
+    drain_stamina(world, player, REND_COST);
+    invoke_ability(
+        world,
+        player,
+        &format!("rend {target_word}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "gouge") {
+        return;
+    }
+    let arg = args.trim();
+    let target_word = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Gouge whom? You aren't fighting.\r\n");
+            return;
+        };
+        name_of(world, t)
+    } else {
+        arg.to_string()
+    };
+    if !check_stamina(world, player, GOUGE_COST, "gouge") {
+        return;
+    }
+    drain_stamina(world, player, GOUGE_COST);
+    invoke_ability(
+        world,
+        player,
+        &format!("eye_gouge {target_word}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "springleap") {
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You can't springleap while already fighting.\r\n");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Springleap whom?\r\n");
+        return;
+    }
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        send_to(world, player, "You can't springleap yourself.\r\n");
+        return;
+    }
+    // Resolve the target up front so we can read its Fighting and
+    // know the entity for the post-dispatch auto-engage.
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if world.get::<Fighting>(target).is_some() {
+        send_to(world, player, "They're already fighting; no surprise.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, SPRINGLEAP_COST, "springleap") {
+        return;
+    }
+    drain_stamina(world, player, SPRINGLEAP_COST);
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("springleap {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+    // Auto-engage if the target survived. The data path doesn't model
+    // engagement; springleap's gameplay contract is "open combat with
+    // a leap kick".
+    if world.get_entity(target).is_ok() {
+        try_insert(world, player, Fighting(target));
+        if world.get::<CombatStats>(target).is_some()
+            && let Ok(mut e) = world.get_entity_mut(target)
+        {
+            e.insert(Fighting(player));
+        }
+    }
+}
+pub(crate) fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "throatcut") {
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "Your target is already aware of you.\r\n");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Throatcut whom?\r\n");
+        return;
+    }
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        send_to(world, player, "You can't throatcut yourself.\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if world.get::<Fighting>(target).is_some() {
+        send_to(world, player, "They're too alert.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, THROATCUT_COST, "throatcut") {
+        return;
+    }
+    drain_stamina(world, player, THROATCUT_COST);
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("throatcut {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+    if world.get_entity(target).is_ok() {
+        try_insert(world, player, Fighting(target));
+        if world.get::<CombatStats>(target).is_some()
+            && let Ok(mut e) = world.get_entity_mut(target)
+        {
+            e.insert(Fighting(player));
+        }
+    }
+}
+pub(crate) fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "backstab") {
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "Your target is already aware of you.\r\n");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Backstab whom?\r\n");
+        return;
+    }
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        send_to(world, player, "You can't backstab yourself.\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if world.get::<Fighting>(target).is_some() {
+        send_to(world, player, "They're too alert to backstab.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, BACKSTAB_COST, "backstab") {
+        return;
+    }
+    drain_stamina(world, player, BACKSTAB_COST);
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("backstab {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+    if world.get_entity(target).is_ok() {
+        try_insert(world, player, Fighting(target));
+        if world.get::<CombatStats>(target).is_some()
+            && let Ok(mut e) = world.get_entity_mut(target)
+        {
+            e.insert(Fighting(player));
+        }
+    }
+}
+pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "hitall") {
+        return;
+    }
+    if !check_stamina(world, player, HITALL_COST, "hitall") {
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+
+    let dmg = world
+        .get::<CombatStats>(player)
+        .map_or(1, |c| (c.dmg_roll / 2).max(1));
+    let mob_targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located, Option<&Health>), With<Mob>>();
+        q.iter(world)
+            .filter(|(_, l, h)| l.0 == room && h.is_some())
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    if mob_targets.is_empty() {
+        send_to(world, player, "Nothing here to swing at.\r\n");
+        return;
+    }
+    drain_stamina(world, player, HITALL_COST);
+
+    let player_name = name_of(world, player);
+    let already_fighting = world.get::<Fighting>(player).is_some();
+    let mut first_alive: Option<Entity> = None;
+    let mut hits: Vec<(String, bool)> = Vec::with_capacity(mob_targets.len());
+    for target in &mob_targets {
+        let target_name = name_or(world, *target, "(unknown)");
+        let (dead, _msg) = apply_damage(world, *target, dmg);
+        hits.push((target_name.clone(), dead));
+        if dead {
+            crate::combat::handle_death(world, *target, &target_name, room);
+        } else if first_alive.is_none() {
+            first_alive = Some(*target);
+        }
+    }
+
+    // Engage the first survivor if we weren't already fighting.
+    if !already_fighting
+        && let Some(first) = first_alive
+    {
+        try_insert(world, player, Fighting(first));
+        if world.get::<CombatStats>(first).is_some()
+            && let Ok(mut e) = world.get_entity_mut(first)
+        {
+            e.insert(Fighting(player));
+        }
+    }
+
+    let total_hits = hits.len();
+    let kills = hits.iter().filter(|(_, dead)| *dead).count();
+    send_to(
+        world,
+        player,
+        format!(
+            "You swing wildly: {total_hits} hit(s), {kills} kill(s) for {dmg} damage each.\r\n",
+        ),
+    );
+    broadcast_room_except_rendered(
+        world,
+        room,
+        &[player],
+        &format!(
+            "{player_name} swings wildly at everyone here.\r\n",
+        ),
+    );
+}
+pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "disarm") {
+        return;
+    }
+    if !check_stamina(world, player, DISARM_COST, "disarm") {
+        return;
+    }
+    let arg = args.trim();
+    let target = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Disarm whom? You aren't fighting.\r\n");
+            return;
+        };
+        t
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    if target == player {
+        send_to(world, player, "You can't disarm yourself.\r\n");
+        return;
+    }
+
+    // Find the target's wielded item.
+    let weapon: Option<Entity> = {
+        let mut q = world
+            .query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
+        q.iter(world)
+            .find(|(_, l, eq)| l.0 == target && eq.0 == Slot::Wield)
+            .map(|(e, _, _)| e)
+    };
+    let Some(weapon) = weapon else {
+        let target_name = name_or(world, target, "(unknown)");
+        send_to(world, player, format!("{target_name} isn't wielding anything.\r\n"));
+        return;
+    };
+    let Some(target_room) = world
+        .get::<Located>(target)
+        .copied()
+        .map(|l| l.0)
+    else {
+        send_to(world, player, "Target is in limbo; can't disarm.\r\n");
+        return;
+    };
+    drain_stamina(world, player, DISARM_COST);
+
+    // Drop weapon: remove EquippedSlot, re-Located to the room.
+    if let Ok(mut e) = world.get_entity_mut(weapon) {
+        e.remove::<EquippedSlot>();
+        e.insert(Located(target_room));
+    }
+    let weapon_name = name_or(world, weapon, "<weapon>");
+    let target_name = name_or(world, target, "(unknown)");
+    let player_name = name_of(world, player);
+    send_to(world, player, format!(
+        "You disarm {target_name}; {weapon_name} clatters to the ground.\r\n"
+    ));
+    if target != player {
+        send_rendered(world, target, &format!(
+            "{player_name} disarms you! {weapon_name} clatters to the ground.\r\n"
+        ));
+    }
+    broadcast_room_except_rendered(
+        world,
+        target_room,
+        &[player, target],
+        &format!("{player_name} disarms {target_name}; {weapon_name} drops.\r\n"),
+    );
+}
+pub(crate) fn cmd_guard(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        if let Some(g) = world.get::<mud_world::Guarding>(player) {
+            let n = name_of(world, g.0);
+            send_to(world, player, format!("You are guarding {n}.\r\n"));
+        } else {
+            send_to(world, player, "You aren't guarding anyone.\r\n");
+        }
+        return;
+    }
+    if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("none") {
+        let had = world.get::<mud_world::Guarding>(player).is_some();
+        try_remove::<mud_world::Guarding>(world, player);
+        if had {
+            send_to(world, player, "You stop guarding.\r\n");
+        } else {
+            send_to(world, player, "You aren't guarding anyone.\r\n");
+        }
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_rendered(world, player, &format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "You can't guard yourself.\r\n");
+        return;
+    }
+    world
+        .entity_mut(player)
+        .insert(mud_world::Guarding(target));
+    let n = name_of(world, target);
+    send_to(world, player, format!("You begin guarding {n}.\r\n"));
+    send_rendered(
+        world,
+        target,
+        &format!(
+            "{} stands ready to defend you.\r\n",
+            name_of(world, player)
+        ),
+    );
+}
+pub(crate) fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
+    if !require_alert_posture(world, player, "rescue") {
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You're already fighting.\r\n");
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Rescue whom?\r\n");
+        return;
+    }
+    // Self-target shortcut: refuse before draining stamina (the
+    // redirect arm in invoke_ability also refuses, but we'd waste
+    // the cost otherwise).
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        send_to(world, player, "You can't rescue yourself.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, RESCUE_COST, "rescue") {
+        return;
+    }
+    drain_stamina(world, player, RESCUE_COST);
+    invoke_ability(
+        world,
+        player,
+        &format!("rescue {arg}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_assist(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Assist whom?\r\n");
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You're already fighting.\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(ally) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    let Some(Fighting(ally_target)) = world.get::<Fighting>(ally).copied() else {
+        let ally_name = name_or(world, ally, "(unknown)");
+        send_to(world, player, format!("{ally_name} isn't fighting anyone.\r\n"));
+        return;
+    };
+    if world.get_entity(ally_target).is_err() {
+        send_to(world, player, "Their target is already gone.\r\n");
+        return;
+    }
+    let target_name = name_or(world, ally_target, "(unknown)");
+    cmd_attack(world, player, &target_name);
+}
+pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let Some(dir) = parse_direction(arg) else {
+        send_to(world, player, "Retreat which way?\r\n");
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let from_room = located.0;
+    let Some(exits) = world.get::<Exits>(from_room).cloned() else {
+        send_to(world, player, "No exits here.\r\n");
+        return;
+    };
+    let Some(ed) = exits.0.get(&dir).cloned() else {
+        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        return;
+    };
+    if ed.state != ExitState::Open {
+        send_to(world, player, format!("The exit {} is closed.\r\n", direction_name(dir)));
+        return;
+    }
+    let Some(target) = ed.to else {
+        send_to(world, player, "That exit goes nowhere.\r\n");
+        return;
+    };
+
+    let dir_name = direction_name(dir);
+    let mover_name = name_of(world, player);
+
+    broadcast_room_except_players_rendered(
+        world,
+        from_room,
+        &[player],
+        &format!("{mover_name} retreats {dir_name}!\r\n"),
+    );
+    try_remove::<Fighting>(world, player);
+    if let Some(mut l) = world.get_mut::<Located>(player) {
+        l.0 = target;
+    }
+    let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
+        format!("the {}", direction_name(d))
+    });
+    broadcast_room_except_players_rendered(
+        world,
+        target,
+        &[player],
+        &format!("{mover_name} retreats here from {arrival_dir}.\r\n"),
+    );
+    send_to(world, player, format!("You retreat {dir_name}.\r\n"));
+    cmd_look(world, player, "");
+}
+pub(crate) fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
+    if !check_stamina(world, player, LAYHANDS_COST, "lay hands") {
+        return;
+    }
+    drain_stamina(world, player, LAYHANDS_COST);
+    let arg = args.trim();
+    let dispatched = if arg.is_empty() {
+        String::from("lay_hands")
+    } else {
+        format!("lay_hands {arg}")
+    };
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_tame(world: &mut World, player: Entity, args: &str) {
+    const TAME_COST: i32 = 4;
+    if !require_alert_posture(world, player, "tame") {
+        return;
+    }
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Tame what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if world.get::<Mob>(target).is_none() {
+        send_to(world, player, "You can only tame animals.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, TAME_COST, "tame") {
+        return;
+    }
+    drain_stamina(world, player, TAME_COST);
+    let target_name = name_of(world, target);
+    invoke_ability(
+        world,
+        player,
+        &format!("tame {target_name}"),
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_drag(world: &mut World, player: Entity, _args: &str) {
+    const DRAG_COST: i32 = 3;
+    if !require_alert_posture(world, player, "drag") {
+        return;
+    }
+    if !check_stamina(world, player, DRAG_COST, "drag") {
+        return;
+    }
+    drain_stamina(world, player, DRAG_COST);
+    invoke_ability(
+        world,
+        player,
+        "drag",
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_buck(world: &mut World, player: Entity, args: &str) {
+    engage_skill_shim(world, player, args, "buck", 5);
+}
+pub(crate) fn cmd_breathe(world: &mut World, player: Entity, args: &str) {
+    const BREATHE_COST: i32 = 6;
+    let race = world
+        .get::<Profile>(player)
+        .map(|p| p.race.clone())
+        .unwrap_or_default();
+    let ability_name = match race.as_str() {
+        "DRAGONBORN_FIRE" => "breathe_fire",
+        "DRAGONBORN_FROST" => "breathe_frost",
+        "DRAGONBORN_ACID" => "breathe_acid",
+        "DRAGONBORN_GAS" => "breathe_gas",
+        "DRAGONBORN_LIGHTNING" => "breathe_lightning",
+        _ => {
+            send_to(world, player, "You have no breath weapon.\r\n");
+            return;
+        }
+    };
+    if !require_alert_posture(world, player, "breathe") {
+        return;
+    }
+    if !check_stamina(world, player, BREATHE_COST, "breathe") {
+        return;
+    }
+    drain_stamina(world, player, BREATHE_COST);
+    let arg = args.trim();
+    let dispatched = if arg.is_empty() {
+        ability_name.to_string()
+    } else {
+        format!("{ability_name} {arg}")
+    };
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_lure(world: &mut World, player: Entity, args: &str) {
+    engage_skill_shim(world, player, args, "lure", 4);
+}
+pub(crate) fn cmd_corner(world: &mut World, player: Entity, args: &str) {
+    engage_skill_shim(world, player, args, "corner", 4);
+}
+pub(crate) fn cmd_sneak(world: &mut World, player: Entity, _args: &str) {
+    const SNEAK_COST: i32 = 3;
+    if !check_stamina(world, player, SNEAK_COST, "sneak") {
+        return;
+    }
+    drain_stamina(world, player, SNEAK_COST);
+    invoke_ability(
+        world,
+        player,
+        "sneak",
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_conceal(world: &mut World, player: Entity, _args: &str) {
+    const CONCEAL_COST: i32 = 4;
+    if !check_stamina(world, player, CONCEAL_COST, "conceal") {
+        return;
+    }
+    drain_stamina(world, player, CONCEAL_COST);
+    invoke_ability(
+        world,
+        player,
+        "conceal",
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_firstaid(world: &mut World, player: Entity, args: &str) {
+    const FIRSTAID_COST: i32 = 4;
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You can't apply first aid in combat.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, FIRSTAID_COST, "firstaid") {
+        return;
+    }
+    drain_stamina(world, player, FIRSTAID_COST);
+    let arg = args.trim();
+    let dispatched = if arg.is_empty() {
+        String::from("first_aid")
+    } else {
+        format!("first_aid {arg}")
+    };
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You can't bandage in combat.\r\n");
+        return;
+    }
+    if !check_stamina(world, player, BANDAGE_COST, "bandage") {
+        return;
+    }
+    drain_stamina(world, player, BANDAGE_COST);
+    // Resolve target (for the bleed staunch — invoke_ability also
+    // resolves it but we need access to call remove_effect_named).
+    let arg = args.trim();
+    let target = if arg.is_empty()
+        || arg.eq_ignore_ascii_case("me")
+        || arg.eq_ignore_ascii_case("self")
+    {
+        Some(player)
+    } else if let Some(located) = world.get::<Located>(player).copied() {
+        find_actor_in_room(world, arg, located.0, player)
+    } else {
+        None
+    };
+    if let Some(t) = target {
+        let staunched = remove_effect_named(world, t, "bleed") > 0;
+        if staunched {
+            send_to(world, player, "Bleeding stops.\r\n");
+            if t != player {
+                send_rendered(world, t, "Your bleeding stops.\r\n");
+            }
+        }
+    }
+    let dispatched = if arg.is_empty() {
+        String::from("bandage")
+    } else {
+        format!("bandage {arg}")
+    };
+    invoke_ability(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
+    if !require_alert_posture(world, player, "bash") {
+        return;
+    }
+    if !check_stamina(world, player, BASH_COST, "bash") {
+        return;
+    }
+    let target_word = target_word.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Bash what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let target = find_actor_in_room(world, target_word, located.0, player);
+    let Some(target) = target else {
+        send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
+        return;
+    };
+
+    // Engage if not already.
+    let already_fighting = world.get::<Fighting>(player).is_some();
+    if !already_fighting
+        && let Ok(mut e) = world.get_entity_mut(player)
+    {
+        e.insert(Fighting(target));
+    }
+    if world.get::<CombatStats>(target).is_some()
+        && let Ok(mut e) = world.get_entity_mut(target)
+    {
+        e.insert(Fighting(player));
+    }
+
+    let dmg_roll = world
+        .get::<CombatStats>(player)
+        .map_or(1, |cs| cs.dmg_roll);
+    let damage = (dmg_roll + 3).max(1);
+    drain_stamina(world, player, BASH_COST);
+
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
+
+    let (dead, threshold_msg) = apply_damage(world, target, damage);
+
+    // Knockdown — set target to Sitting.
+    if !dead && let Ok(mut e) = world.get_entity_mut(target) {
+        e.insert(Posture(PostureKind::Sitting));
+    }
+
+    send_rendered(world, player, &format!("You bash {target_name} for {damage} damage, knocking them down!\r\n"),
+    );
+    send_rendered(world, target, &format!("{player_name} bashes you for {damage} damage, knocking you down!\r\n"),
+    );
+    if let Some(m) = threshold_msg {
+        send_to(world, target, m);
+    }
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{player_name} bashes {target_name}, knocking them down.\r\n"),
+    );
+
+    if dead {
+        crate::combat::handle_death(world, target, &target_name, located.0);
+    }
+}
+pub(crate) fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<Fighting>(player).is_none() {
+        send_to(world, player, "You aren't fighting anyone.\r\n");
+        return;
+    }
+    try_remove::<Fighting>(world, player);
+    send_to(world, player, "You stop fighting.\r\n");
+}
