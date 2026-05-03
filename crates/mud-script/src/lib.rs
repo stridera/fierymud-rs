@@ -15,10 +15,10 @@ use mlua::{
     UserDataMethods, Value, Variadic,
 };
 use mud_world::{
-    AbilityCatalog, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats, Description,
+    AbilityCatalog, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats, CoreStats, Description,
     EffectCatalog, EffectInstance, EquippedSlot, Fighting, Follower, Health, Item, Keywords,
     KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player,
-    Posture, PostureKind, Profile, TriggerCatalog, WorldKey, WorldKeyIndex,
+    Posture, PostureKind, Profile, Title, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 
 /// One trigger body that ran into `wait(N)` and got parked. We hold the
@@ -1723,8 +1723,96 @@ impl UserData for LuaActor {
                     "is_player" => world_from_lua(lua, |w| {
                         Value::Boolean(w.get::<Player>(this.entity).is_some())
                     }),
-                    "is_mob" => world_from_lua(lua, |w| {
+                    "is_mob" | "is_npc" => world_from_lua(lua, |w| {
                         Value::Boolean(w.get::<Mob>(this.entity).is_some())
+                    }),
+                    // `actor.maxhit` aliases the existing `max_hp`
+                    // accessor — legacy DG-Script code uses the
+                    // shorter name.
+                    "maxhit" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<Health>(this.entity).map_or(0, |h| h.max).into(),
+                        )
+                    }),
+                    // Player Title — `who`-line epithet. Empty string
+                    // for unset. Mobs return empty since they don't
+                    // carry the component.
+                    "title" => {
+                        let s = world_from_lua(lua, |w| {
+                            w.get::<Title>(this.entity)
+                                .map_or_else(String::new, |t| t.0.clone())
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    // Profile.experience for players. Mobs return 0
+                    // (they don't carry XP).
+                    "exp" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<Profile>(this.entity)
+                                .map_or(0, |p| p.experience)
+                                .into(),
+                        )
+                    }),
+                    // CombatStats fields for `actor.armor` /
+                    // `actor.damroll`. Both default 0 if no stats.
+                    "armor" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CombatStats>(this.entity)
+                                .map_or(0, |c| c.ac)
+                                .into(),
+                        )
+                    }),
+                    "damroll" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CombatStats>(this.entity)
+                                .map_or(0, |c| c.dmg_roll)
+                                .into(),
+                        )
+                    }),
+                    // CoreStats raw scores ("real_X" — distinguishes
+                    // from buffed/effective values once those land).
+                    // Default 0 for entities without stats.
+                    "real_str" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CoreStats>(this.entity)
+                                .map_or(0, |s| s.strength)
+                                .into(),
+                        )
+                    }),
+                    "real_dex" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CoreStats>(this.entity)
+                                .map_or(0, |s| s.dexterity)
+                                .into(),
+                        )
+                    }),
+                    "real_con" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CoreStats>(this.entity)
+                                .map_or(0, |s| s.constitution)
+                                .into(),
+                        )
+                    }),
+                    "real_int" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CoreStats>(this.entity)
+                                .map_or(0, |s| s.intelligence)
+                                .into(),
+                        )
+                    }),
+                    "real_wis" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CoreStats>(this.entity)
+                                .map_or(0, |s| s.wisdom)
+                                .into(),
+                        )
+                    }),
+                    "real_cha" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CoreStats>(this.entity)
+                                .map_or(0, |s| s.charisma)
+                                .into(),
+                        )
                     }),
                     // 95 corpus refs — character alignment (good/evil
                     // axis as integer). Sourced from CombatStats so
