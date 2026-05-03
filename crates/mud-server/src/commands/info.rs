@@ -5170,6 +5170,39 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
         std::cmp::Ordering::Less => format!("B higher level by {}.", -level_delta),
     };
     out.push_str(&format!("  {weight_line}  {level_line}\r\n"));
+    // Weapon-vs-weapon damage comparison. Skipped silently when
+    // either side has zero average damage (i.e. it's not a weapon
+    // proto) so non-weapon comparisons stay terse. Surfacing avg
+    // damage and the dice pretty-print together gives players
+    // both the at-a-glance comparison ("A higher by 3.5 avg") and
+    // the underlying NdM+B that produced it.
+    let a_avg = ap.avg_damage();
+    let b_avg = bp.avg_damage();
+    if a_avg > 0 && b_avg > 0 {
+        let dice_line = |p: &mud_world::ObjectProto| -> String {
+            let bonus = match p.weapon_dice_bonus.cmp(&0) {
+                std::cmp::Ordering::Equal => String::new(),
+                std::cmp::Ordering::Greater => format!("+{}", p.weapon_dice_bonus),
+                std::cmp::Ordering::Less => format!("{}", p.weapon_dice_bonus),
+            };
+            format!("{}d{}{bonus}", p.weapon_dice_num, p.weapon_dice_size)
+        };
+        let damage_delta = a_avg - b_avg;
+        let damage_line = match damage_delta.cmp(&0) {
+            std::cmp::Ordering::Equal => "Same average damage.".to_string(),
+            std::cmp::Ordering::Greater => {
+                format!("A higher avg damage by {damage_delta}.")
+            }
+            std::cmp::Ordering::Less => {
+                format!("B higher avg damage by {}.", -damage_delta)
+            }
+        };
+        out.push_str(&format!(
+            "  A: {} (avg {a_avg})    B: {} (avg {b_avg})    {damage_line}\r\n",
+            dice_line(&ap),
+            dice_line(&bp),
+        ));
+    }
     send_to(world, player, out);
 }
 
