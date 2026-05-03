@@ -2598,6 +2598,119 @@ mod tests {
             Some("thirsty".to_string()),
         );
     }
+
+    // --- score renderer smoke tests ---
+    //
+    // Build a fully-populated ScoreData and assert each renderer
+    // includes the expected sections. These guard against a future
+    // refactor accidentally dropping a section line.
+
+    fn build_smoke_score_data<'a>(
+        name: &'a str,
+        flags: &'a [&'static str],
+        slots: &'a [(i32, i32, i32)],
+        effects: &'a [String],
+        equipment: &'a [(&'static str, String)],
+    ) -> super::ScoreData<'a> {
+        super::ScoreData {
+            name,
+            hp: Some(Health { hp: 95, max: 100 }),
+            stamina: Some(Stamina {
+                current: 80,
+                max: 100,
+            }),
+            cs: Some(super::CombatStats {
+                hit_roll: 5,
+                dmg_roll: 8,
+                ac: 12,
+                alignment: 250,
+            }),
+            core_stats: Some(super::CoreStats {
+                strength: 16,
+                dexterity: 14,
+                constitution: 13,
+                intelligence: 12,
+                wisdom: 11,
+                charisma: 10,
+            }),
+            posture: Some(super::Posture(super::PostureKind::Standing)),
+            logged_in: None,
+            fight_target: None,
+            flags,
+            profile: Some((25, "Warrior", "human", "male", 1234)),
+            wealth: 1234,
+            bank: 5000,
+            hunger: 0,
+            thirst: 0,
+            carry: (47.5, 200.0),
+            drunkenness: 50,
+            kill_total: 42,
+            clan: Some(("Test Clan", "TC", "Member")),
+            slots,
+            active_effects: effects,
+            group_status: super::GroupStatus::default(),
+            level_progress: super::level_progress_for(25, 1234),
+            location: Some(("Town Square", 30, 1)),
+            equipment,
+            practice_points: 3,
+            achievements: (5, 47),
+        }
+    }
+
+    #[test]
+    fn score_minimal_includes_core_fields() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = Vec::new();
+        let effects: Vec<String> = vec!["bless".to_string()];
+        let equipment: Vec<(&'static str, String)> = Vec::new();
+        let data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let out = super::render_score_minimal(&data);
+        assert!(out.contains("Strider"), "name: {out}");
+        assert!(out.contains("L25"), "level: {out}");
+        assert!(out.contains("hp:95/100"), "hp: {out}");
+        assert!(out.contains("st:80/100"), "stamina: {out}");
+        assert!(out.contains("xp:"), "xp present: {out}");
+        assert!(out.contains("eff:1"), "effect count: {out}");
+        assert!(out.contains("prac:3"), "practice points: {out}");
+        assert!(out.contains("kills:42"), "kill total: {out}");
+        assert!(out.contains("clan:TC"), "clan abbrev: {out}");
+    }
+
+    #[test]
+    fn score_standard_includes_section_headings() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = vec![(1, 2, 3)];
+        let effects: Vec<String> = vec!["bless".to_string(), "haste".to_string()];
+        let equipment: Vec<(&'static str, String)> =
+            vec![("Wielded", "longsword".to_string()), ("Body", "leather".to_string())];
+        let data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let out = super::render_score_standard(&data);
+        assert!(out.contains("Strider"), "name: {out}");
+        assert!(out.contains("HP: 95 / 100"), "hp line: {out}");
+        assert!(out.contains("Slots:"), "slots line: {out}");
+        assert!(out.contains("bless, haste"), "effects line: {out}");
+        assert!(out.contains("Equipment:"), "equipment heading: {out}");
+        assert!(out.contains("longsword"), "wielded item: {out}");
+        assert!(out.contains("Practice:"), "practice line: {out}");
+        assert!(out.contains("Achievements: 5 / 47"), "achievements: {out}");
+        assert!(out.contains("Location: Town Square"), "location: {out}");
+    }
+
+    #[test]
+    fn score_fancy_box_borders_render() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = Vec::new();
+        let effects: Vec<String> = Vec::new();
+        let equipment: Vec<(&'static str, String)> = Vec::new();
+        let data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let out = super::render_score_fancy(&data);
+        // Fancy renderer wraps in a box; both top + bottom borders
+        // start with '+' and end with '+'.
+        assert!(out.contains("+--"), "top border: {out}");
+        assert!(out.contains("Strider"), "name: {out}");
+        // Achievements line still rendered inside the box.
+        assert!(out.contains("Achievements: 5 / 47"), "achievements: {out}");
+    }
 }
 
 /// Send the player's prompt template with variables substituted. Falls back
