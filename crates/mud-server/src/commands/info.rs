@@ -4345,6 +4345,17 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .get::<mud_world::WimpyThreshold>(player)
                 .map_or(25, |w| w.0)
         });
+    // Per-level rank title — `LevelDefinition.name` carries
+    // "Avatar" / "Implementer" / etc. only for staff rows; mortal
+    // levels return None and the Level line stays unchanged.
+    let level_title_owned: Option<String> = profile_owned
+        .as_ref()
+        .and_then(|(lvl, ..)| {
+            world
+                .resource::<mud_world::LevelTable>()
+                .title_for(*lvl)
+                .map(str::to_string)
+        });
     let data = ScoreData {
         name: &name,
         hp,
@@ -4441,6 +4452,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         },
         title: title_owned.as_deref(),
         wimpy: wimpy_pct,
+        level_title: level_title_owned.as_deref(),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

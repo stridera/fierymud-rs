@@ -2692,6 +2692,9 @@ mod tests {
             achievements: (5, 47),
             title: Some("the Daring Adventurer"),
             wimpy: Some(25),
+            // Mortal-level fixture has no rank title — assertions
+            // for the staff path are local to specific tests.
+            level_title: None,
         }
     }
 
@@ -2742,6 +2745,39 @@ mod tests {
         assert!(
             out.contains("Wimpy:  flee at HP < 25%"),
             "wimpy line: {out}",
+        );
+    }
+
+    #[test]
+    fn score_level_title_appended_for_staff() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = Vec::new();
+        let effects: Vec<String> = Vec::new();
+        let equipment: Vec<(&'static str, String)> = Vec::new();
+        let mut data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        data.level_title = Some("Implementer");
+        let out = super::render_score_standard(&data);
+        // Title sits between the level number and gender/race.
+        assert!(
+            out.contains("Level 25 Implementer Male Human"),
+            "rank title in level row: {out}",
+        );
+    }
+
+    #[test]
+    fn score_level_title_omitted_when_none() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = Vec::new();
+        let effects: Vec<String> = Vec::new();
+        let equipment: Vec<(&'static str, String)> = Vec::new();
+        let data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let out = super::render_score_standard(&data);
+        // Mortal rendering keeps the original "Level N <gender>"
+        // shape with no extra spaces — guard against a regression
+        // that injects an empty rank slot.
+        assert!(
+            out.contains("Level 25 Male Human"),
+            "mortal level row unchanged: {out}",
         );
     }
 
@@ -4341,6 +4377,13 @@ pub(crate) struct ScoreData<'a> {
     /// suppresses the line entirely so a non-wimpy character
     /// doesn't have a noisy "Wimpy: off" entry.
     wimpy: Option<i32>,
+    /// Per-level rank title from `LevelTable.title_for` —
+    /// `Some("Avatar")` / `Some("Implementer")` for staff levels
+    /// that carry an explicit name, `None` for ordinary numeric
+    /// levels. When present it's appended to the Level row so
+    /// "Level 105 Implementer Male Human (Wizard)" reads as a
+    /// proper character-sheet header. Mortals see no change.
+    level_title: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -4362,8 +4405,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     if let Some((level, class, race, gender, xp)) = d.profile {
         let gender_label = capitalize(gender);
         let race_label = capitalize(race);
+        let rank = d.level_title.map_or(String::new(), |t| format!(" {t}"));
         out.push_str(&format!(
-            "  Level {level} {gender_label} {race_label} ({class})    XP: {xp}\r\n",
+            "  Level {level}{rank} {gender_label} {race_label} ({class})    XP: {xp}\r\n",
         ));
     }
     if let Some(t) = d.title {
@@ -4673,8 +4717,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         out.push_str(&format!("| {s:<width$} |\r\n", width = W - 2));
     };
     if let Some((level, class, race, gender, xp)) = d.profile {
+        let rank = d.level_title.map_or(String::new(), |t| format!(" {t}"));
         row(format!(
-            "Level:     {level} {} {} ({class})",
+            "Level:     {level}{rank} {} {} ({class})",
             capitalize(gender),
             capitalize(race),
         ));

@@ -467,6 +467,20 @@ impl LevelTable {
             .unwrap_or_else(|| format!("Level {level}"))
     }
 
+    /// Just the `name` column — `Some("Avatar")` for staff levels
+    /// that have an explicit title, `None` for ordinary numeric
+    /// levels. Score uses this to render only meaningful titles
+    /// (immortal ranks today: Avatar / Demi-God / Lesser God /
+    /// Greater God / Implementer / Overlord at levels 100..=105)
+    /// instead of "Level 25" boilerplate.
+    #[must_use]
+    pub fn title_for(&self, level: i32) -> Option<&str> {
+        self.rows
+            .iter()
+            .find(|r| r.level == level)
+            .and_then(|r| r.name.as_deref())
+    }
+
     /// Snapshot of the underlying rows. Used by callers that need
     /// to mutate the world while inspecting level data without
     /// holding a `Res<LevelTable>` borrow.
