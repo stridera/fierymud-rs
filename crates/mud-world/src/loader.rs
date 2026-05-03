@@ -211,7 +211,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         } else {
             None
         };
-        let liquid = if matches!(row.r#type, mud_db::enums::ObjectType::Drinkcontainer) {
+        let liquid = if matches!(
+            row.r#type,
+            mud_db::enums::ObjectType::Drinkcontainer | mud_db::enums::ObjectType::Fountain
+        ) {
             parse_liquid(&row.values)
         } else {
             None

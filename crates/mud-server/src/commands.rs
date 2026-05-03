@@ -4686,8 +4686,21 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
         send_to(world, player, format!("{} from what?\r\n", capitalize(verb)));
         return;
     }
-    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
-        send_to(world, player, format!("You aren't carrying '{target_word}'.\r\n"));
+    // Inventory match wins over room match — players carrying a
+    // canteen want to drink from it before a roomside fountain.
+    let inv_match = find_carried_by(world, target_word, player, EquipFilter::Anywhere);
+    let item = inv_match.or_else(|| {
+        world
+            .get::<Located>(player)
+            .copied()
+            .and_then(|l| find_in_room(world, target_word, l.0))
+    });
+    let Some(item) = item else {
+        send_to(
+            world,
+            player,
+            format!("You don't see '{target_word}' here to {verb} from.\r\n"),
+        );
         return;
     };
     let item_name = name_of(world, item);
@@ -4699,13 +4712,26 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
         );
         return;
     };
-    if state.remaining <= 0 {
+    // Fountains are bottomless: their proto stores a `remaining`
+    // value but the runtime treats it as "always topped up". Recognize
+    // them via the proto type and skip both the empty-check and the
+    // post-swig decrement. Drinkcontainers stay quantitative.
+    let is_fountain = world.get::<WorldKey>(item).is_some_and(|k| {
+        world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(k.zone, k.id))
+            .is_some_and(|p| p.r#type == mud_db::enums::ObjectType::Fountain)
+    });
+    if !is_fountain && state.remaining <= 0 {
         send_rendered(world, player, &format!("{item_name} is empty.\r\n"));
         return;
     }
-    let drank = state.remaining.min(units);
+    let drank = if is_fountain { units } else { state.remaining.min(units) };
     let liquid_lc = state.liquid.to_ascii_lowercase();
-    if let Some(mut lc) = world.get_mut::<mud_world::LiquidContainer>(item) {
+    if !is_fountain
+        && let Some(mut lc) = world.get_mut::<mud_world::LiquidContainer>(item)
+    {
         lc.remaining -= drank;
     }
     send_rendered(
@@ -4757,7 +4783,7 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     if let Some(mut t) = world.get_mut::<mud_world::Thirst>(player) {
         t.0 = (t.0 - drank.saturating_mul(6)).max(0);
     }
-    let was_last = state.remaining == drank;
+    let was_last = !is_fountain && state.remaining == drank;
     if was_last {
         send_rendered(
             world,
