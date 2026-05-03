@@ -1133,6 +1133,9 @@ pub struct ExitData {
     /// look / exits should suppress hidden exits until they're
     /// revealed.
     pub is_hidden: bool,
+    /// Schema `ExitFlag::PICKPROOF`. `pick` refuses regardless of
+    /// proficiency; the lock is keyed-only or magically sealed.
+    pub is_pickproof: bool,
 }
 
 #[derive(Component, Debug, Clone, Default)]

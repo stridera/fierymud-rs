@@ -149,6 +149,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             _ => None,
         };
         let is_hidden = e.flags.contains(&mud_db::enums::ExitFlag::Hidden);
+        let is_pickproof = e.flags.contains(&mud_db::enums::ExitFlag::Pickproof);
         if let Some(mut exits) = world.get_mut::<Exits>(source) {
             exits.0.insert(
                 e.direction,
@@ -159,6 +160,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                     description: e.description,
                     keywords: e.keywords,
                     is_hidden,
+                    is_pickproof,
                 },
             );
         }

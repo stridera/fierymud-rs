@@ -393,6 +393,7 @@ fn synthesize_single_room(
                     description: None,
                     keywords: Vec::new(),
                     is_hidden: false,
+                    is_pickproof: false,
                 },
             );
         }
@@ -406,6 +407,7 @@ fn synthesize_single_room(
                     description: None,
                     keywords: Vec::new(),
                     is_hidden: false,
+                    is_pickproof: false,
                 },
             );
         }

@@ -215,6 +215,7 @@ inventory::submit! {
 
 // ---- handler bodies ----
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     const STAMINA_COST: i32 = 5;
     let arg = args.trim();
@@ -226,9 +227,12 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
-    let Some((state, key_req)) = world
+    let Some((state, key_req, is_pickproof)) = world
         .get::<Exits>(room)
-        .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key)))
+        .and_then(|e| {
+            e.0.get(&dir)
+                .map(|ed| (ed.state, ed.key, ed.is_pickproof))
+        })
     else {
         send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
         return;
@@ -238,6 +242,16 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
             world,
             player,
             format!("It's not locked {}.\r\n", direction_name(dir)),
+        );
+        return;
+    }
+    // Pickproof doors refuse regardless of proficiency — keyed-only
+    // or magically sealed. Mirrors the schema's `ExitFlag::PICKPROOF`.
+    if is_pickproof {
+        send_to(
+            world,
+            player,
+            "The lock resists your tools — there's no tumbler to feel for.\r\n",
         );
         return;
     }

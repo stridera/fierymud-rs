@@ -6435,6 +6435,7 @@ pub(crate) fn synthesize_house_rooms(world: &mut World, summary: &mud_world::Hou
                     description: None,
                     keywords: Vec::new(),
                     is_hidden: false,
+                    is_pickproof: false,
                 },
             );
         }
