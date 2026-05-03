@@ -955,54 +955,14 @@ fn fire_trigger(
 /// picks up additions/removals naturally; reloading existing
 /// instances would risk surprising live combat.
 fn reload_triggers(world: &mut World, new: mud_world::TriggerCatalog) -> Value {
-    use bevy_ecs::prelude::With;
-    use mud_world::{AttachedTriggers, Room};
-
-    let total = new.by_key.len();
-    let mob_links = new.mob_attachments.len();
-    let object_links = new.object_attachments.len();
-    let room_links = new.room_attachments.len();
-
-    // Snapshot every Room entity's WorldKey so we can clear and
-    // re-apply attachments without holding a query borrow during
-    // the entity edits.
-    let rooms_to_refresh: Vec<(Entity, (i32, i32))> = {
-        let mut q = world.query_filtered::<(Entity, &WorldKey), With<Room>>();
-        q.iter(world).map(|(e, k)| (e, (k.zone, k.id))).collect()
-    };
-    let mut rooms_with_triggers = 0usize;
-    for (room, key) in rooms_to_refresh {
-        let attached = new.room_attachments.get(&key).cloned();
-        if let Ok(mut em) = world.get_entity_mut(room) {
-            // Always clear, then re-add only when the new catalog
-            // has something — avoids leaving stale keys on rooms
-            // that lost all their attachments.
-            em.remove::<AttachedTriggers>();
-            if let Some(list) = attached
-                && !list.is_empty()
-            {
-                em.insert(AttachedTriggers(list));
-                rooms_with_triggers += 1;
-            }
-        }
-    }
-
-    world.insert_resource(new);
-    info!(
-        total,
-        mob_links,
-        object_links,
-        room_links,
-        rooms_with_triggers,
-        "trigger catalog reloaded",
-    );
+    let stats = crate::triggers::apply_reloaded_catalog(world, new);
     json!({
         "ok": true,
-        "total": total,
-        "mob_links": mob_links,
-        "object_links": object_links,
-        "room_links": room_links,
-        "rooms_with_triggers": rooms_with_triggers,
+        "total": stats.total,
+        "mob_links": stats.mob_links,
+        "object_links": stats.object_links,
+        "room_links": stats.room_links,
+        "rooms_with_triggers": stats.rooms_with_triggers,
         "note": "mob/object instance attachments unchanged; next respawn picks up catalog edits",
     })
 }

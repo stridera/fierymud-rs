@@ -13,7 +13,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AttachedTriggers, Located, Mob, ScriptError, ScriptErrorLog, TriggerCatalog, TriggerEvent,
+    AttachedTriggers, Located, Mob, Room, ScriptError, ScriptErrorLog, TriggerCatalog,
+    TriggerEvent, WorldKey,
 };
 use tracing::warn;
 
@@ -537,6 +538,65 @@ pub fn fire_command_in_room(
 /// `AttachedTriggers`. Used once at boot after `load_from_db` so
 /// proto-attached mob triggers (e.g. `skills.set_level`) run before
 /// the first player connects.
+/// Counts surfaced after a `treload` / admin reload so callers can
+/// format a status message. All zero is a valid response — empty
+/// catalog, no rooms refreshed.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReloadStats {
+    pub total: usize,
+    pub mob_links: usize,
+    pub object_links: usize,
+    pub room_links: usize,
+    pub rooms_with_triggers: usize,
+}
+
+/// Atomically swap the world's `TriggerCatalog` resource for the
+/// new one and refresh every `Room` entity's `AttachedTriggers`
+/// from the new catalog's `room_attachments` map. Mob/object
+/// instance attachments stay put — next respawn picks up catalog
+/// edits on those naturally.
+///
+/// Centralized here so the HTTP admin endpoint and the in-game
+/// `treload` command share one path; neither has to redo the
+/// per-room rewire.
+pub fn apply_reloaded_catalog(world: &mut World, new: TriggerCatalog) -> ReloadStats {
+    let mut stats = ReloadStats {
+        total: new.by_key.len(),
+        mob_links: new.mob_attachments.len(),
+        object_links: new.object_attachments.len(),
+        room_links: new.room_attachments.len(),
+        rooms_with_triggers: 0,
+    };
+
+    let rooms_to_refresh: Vec<(Entity, (i32, i32))> = {
+        let mut q = world.query_filtered::<(Entity, &WorldKey), With<Room>>();
+        q.iter(world).map(|(e, k)| (e, (k.zone, k.id))).collect()
+    };
+    for (room, key) in rooms_to_refresh {
+        let attached = new.room_attachments.get(&key).cloned();
+        if let Ok(mut em) = world.get_entity_mut(room) {
+            em.remove::<AttachedTriggers>();
+            if let Some(list) = attached
+                && !list.is_empty()
+            {
+                em.insert(AttachedTriggers(list));
+                stats.rooms_with_triggers += 1;
+            }
+        }
+    }
+
+    world.insert_resource(new);
+    tracing::info!(
+        total = stats.total,
+        mob_links = stats.mob_links,
+        object_links = stats.object_links,
+        room_links = stats.room_links,
+        rooms_with_triggers = stats.rooms_with_triggers,
+        "trigger catalog reloaded",
+    );
+    stats
+}
+
 pub fn fire_load_for_all_mobs(world: &mut World) {
     let mobs: Vec<Entity> = {
         let mut q = world.query_filtered::<Entity, (With<Mob>, With<AttachedTriggers>)>();

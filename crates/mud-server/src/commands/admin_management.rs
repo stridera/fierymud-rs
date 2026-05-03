@@ -148,9 +148,33 @@ inventory::submit! {
 }
 
 inventory::submit! {
+    Command {
+        names: &["treload"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "treload",
+            summary: "Reload the trigger catalog from the database.",
+            long: "Builder+. Re-queries the Triggers + attachment \
+                   tables, atomically swaps the live `TriggerCatalog` \
+                   resource, and re-stamps every Room's `AttachedTriggers`. \
+                   Mob and object instances keep their current bindings — \
+                   next respawn picks up catalog edits naturally. \
+                   Mirrors the `/api/admin/triggers/reload` endpoint so \
+                   builders can iterate without round-tripping through MCP. \
+                   Routed through the async dispatcher; the sync stub \
+                   only fires on dispatcher misconfig.",
+        },
+        run: cmd_mail_stub,
+    }
+}
+
+inventory::submit! {
     AsyncCommand {
         dispatch: |world, player, pool, head, args| match head {
             "hgoto" => Some(Box::pin(cmd_hgoto(world, player, pool, args))),
+            "treload" => Some(Box::pin(cmd_treload(world, player, pool, args))),
             _ => None,
         },
     }
@@ -865,4 +889,41 @@ pub(crate) async fn cmd_hgoto(
         format!("You step into {}'s house.\r\n", target.name),
     );
     crate::commands::cmd_look(world, player, "");
+}
+
+/// `treload` — Re-pull the trigger catalog from the database and
+/// hot-swap it into the live `TriggerCatalog` resource. Async so
+/// the DB round-trip doesn't stall the world tick. Reuses the
+/// shared `triggers::apply_reloaded_catalog` helper that the
+/// admin HTTP endpoint also calls.
+pub(crate) async fn cmd_treload(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    record_admin_action(world, player, "treload", args);
+    let new = match mud_world::load_trigger_catalog(pool).await {
+        Ok(c) => c,
+        Err(e) => {
+            send_to(world, player, format!("Trigger reload failed: {e}\r\n"));
+            return;
+        }
+    };
+    let stats = crate::triggers::apply_reloaded_catalog(world, new);
+    send_to(
+        world,
+        player,
+        format!(
+            "Trigger catalog reloaded: {} rows ({} mob, {} object, {} room \
+             attachment groups; {} rooms now carry triggers).\r\n\
+             Mob/object instance attachments unchanged — next respawn \
+             picks up catalog edits.\r\n",
+            stats.total,
+            stats.mob_links,
+            stats.object_links,
+            stats.room_links,
+            stats.rooms_with_triggers,
+        ),
+    );
 }
