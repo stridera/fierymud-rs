@@ -966,6 +966,13 @@ pub(crate) fn handle_death(
             crate::commands::grant_achievement(world, killer, "first_kill");
             crate::commands::bump_kill_count(world, killer);
             apply_protected_kill_penalty(world, killer, victim);
+            // Quest objective: advance KILL_MOB objectives whose
+            // target matches the victim's prototype. Fire-and-
+            // forget; the async task sends progress lines back
+            // via the player's outbound channel.
+            if let Some(key) = world.get::<mud_world::WorldKey>(victim).copied() {
+                crate::commands::bump_kill_quest_progress(world, killer, key.zone, key.id);
+            }
         }
         // Fire DEATH triggers BEFORE despawn so the body can read
         // self.room, broadcast last words, etc. The trigger

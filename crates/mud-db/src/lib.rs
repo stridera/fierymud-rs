@@ -28,6 +28,7 @@ pub mod object_abilities;
 pub mod object_reset_contents;
 pub mod object_resets;
 pub mod objects;
+pub mod quest_objectives;
 pub mod quests;
 pub mod race_abilities;
 pub mod reports;

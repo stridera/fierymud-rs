@@ -6816,6 +6816,85 @@ fn apply_room_environment(world: &mut World, player: Entity, room: Entity) {
     }
 }
 
+/// Advance any active `KILL_MOB` objectives the killer holds whose
+/// target matches `victim`'s prototype `(zone, id)`. Fire-and-
+/// forget — the async task does the SQL read, computes new counts,
+/// upserts, and sends "X/Y" progress lines back via the player's
+/// outbound channel.
+///
+/// PARTY-scoped objectives are deferred to a follow-up — this
+/// pass only advances the killer's own progress. The hook on
+/// `combat::handle_death` calls this for every party-aware
+/// killer credit later, but for now the SOLO path is what's
+/// wired.
+pub(crate) fn bump_kill_quest_progress(
+    world: &mut World,
+    killer: Entity,
+    victim_proto_zone: i32,
+    victim_proto_id: i32,
+) {
+    if world.get::<Player>(killer).is_none() {
+        return;
+    }
+    let character_id = world
+        .get::<Account>(killer)
+        .map(|a| a.character_id.clone());
+    let outbound = world.get::<Connection>(killer).map(|c| c.0.clone());
+    let pool = world.get_resource::<DbPool>().map(|p| p.0.clone());
+    let (Some(cid), Some(out), Some(pool)) = (character_id, outbound, pool) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let rows = match mud_db::quest_objectives::list_kill_mob_progress(
+            &pool,
+            &cid,
+            victim_proto_zone,
+            victim_proto_id,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "kill-objective lookup failed");
+                return;
+            }
+        };
+        for row in rows {
+            let new_count = (row.current_count + 1).min(row.required_count);
+            let completed = new_count >= row.required_count;
+            if let Err(e) = mud_db::quest_objectives::upsert_progress(
+                &pool,
+                &row.character_quest_id,
+                row.quest_zone_id,
+                row.quest_id,
+                row.phase_id,
+                row.objective_id,
+                new_count,
+                completed,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "kill-objective upsert failed");
+                continue;
+            }
+            let line = if completed {
+                format!(
+                    "Quest objective complete: {}\r\n",
+                    row.player_description
+                )
+            } else if row.show_progress {
+                format!(
+                    "Quest objective: {} ({}/{})\r\n",
+                    row.player_description, new_count, row.required_count
+                )
+            } else {
+                format!("Quest objective updated: {}\r\n", row.player_description)
+            };
+            let _ = out.send(line.into_bytes());
+        }
+    });
+}
+
 /// Bump the player's lifetime-kill counter, persist to the
 /// `kill_tracking_data` JSON, and grant any milestone achievement
 /// the new total has just crossed (`kills_100`, `kills_500`, ...).
