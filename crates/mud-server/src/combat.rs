@@ -1,9 +1,9 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AppliedTo, CombatStats, Corpse, CorpseDecay, Description, EffectInstance, Exits, Fighting,
-    Ghost, Guarding, Health, Item, Keywords, KnownAbilities, Located, Mob, MobPrototypes, Named,
-    Player, PlayerFlags, Posture, PostureKind, Slot, Stunned, Wealth, WearableIn, WorldKey,
-    WorldKeyIndex,
+    AppliedTo, CombatStats, Corpse, CorpseDecay, Description, EffectInstance, EquippedSlot, Exits,
+    Fighting, Ghost, Guarding, Health, Item, Keywords, KnownAbilities, Located, Mob,
+    MobPrototypes, Named, ObjectPrototypes, Player, PlayerFlags, Posture, PostureKind, Slot,
+    Stunned, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -454,6 +454,39 @@ pub fn combat_tick(world: &mut World) {
             })
             .collect()
     };
+    // Pre-pass: snapshot every wielded weapon's dice so the swing-
+    // map step can reach them without a fresh borrow. Players have
+    // dmg_roll = 0 by default; the weapon dice are the actual
+    // damage source. Mobs already bake their proto's avg_damage
+    // into dmg_roll at spawn — this map stays empty for them. Test
+    // worlds without an ObjectPrototypes resource just skip the
+    // pre-pass and fall through to the dmg_roll branch.
+    let weapon_dice: std::collections::HashMap<Entity, (i32, i32, i32)> =
+        if world.get_resource::<ObjectPrototypes>().is_some() {
+            let protos: Vec<(Entity, (i32, i32))> = {
+                let mut q = world.query::<(&Located, &EquippedSlot, &WorldKey)>();
+                q.iter(world)
+                    .filter(|(_, eq, _)| eq.0 == Slot::Wield)
+                    .map(|(loc, _, key)| (loc.0, (key.zone, key.id)))
+                    .collect()
+            };
+            let proto_catalog = world.resource::<ObjectPrototypes>();
+            protos
+                .into_iter()
+                .filter_map(|(wielder, key)| {
+                    let p = proto_catalog.by_key.get(&key)?;
+                    if p.weapon_dice_num <= 0 || p.weapon_dice_size <= 0 {
+                        return None;
+                    }
+                    Some((
+                        wielder,
+                        (p.weapon_dice_num, p.weapon_dice_size, p.weapon_dice_bonus),
+                    ))
+                })
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
     let swings: Vec<Swing> = {
         let mut q = world
             .query::<(
@@ -470,7 +503,19 @@ pub fn combat_tick(world: &mut World) {
                     && matches!(posture.map(|p| p.0), None | Some(PostureKind::Standing))
             })
             .map(|(attacker, fighting, cs, name, _, _)| {
-                let base = cs.dmg_roll.max(1);
+                // Weapon dice (if wielded) plus dmg_roll as flat
+                // bonus. Unarmed attackers fall back to dmg_roll
+                // alone — matches the legacy "fists do flat str_mod
+                // damage" semantics.
+                let base = if let Some(&(num, sides, bonus)) = weapon_dice.get(&attacker) {
+                    let mut roll = bonus;
+                    for _ in 0..num {
+                        roll = roll.saturating_add(rand::random_range(1..=sides));
+                    }
+                    roll.saturating_add(cs.dmg_roll).max(1)
+                } else {
+                    cs.dmg_roll.max(1)
+                };
                 let damage = if berserk_attackers.contains(&attacker) {
                     (base * 3) / 2
                 } else {
