@@ -4126,6 +4126,18 @@ pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("Unknown flag '{raw}'.\r\n"));
         return;
     };
+    // God-only flags (HOLY_LIGHT, SHOW_IDS) are gated on the
+    // dedicated cmd_holylight / cmd_showids commands; the generic
+    // toggle path must not become a bypass.
+    if flag.is_god_only() {
+        let allowed = world
+            .get::<mud_world::Account>(player)
+            .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder));
+        if !allowed {
+            send_to(world, player, format!("'{raw}' is not a flag you can toggle.\r\n"));
+            return;
+        }
+    }
     let now_on = world
         .get_mut::<PlayerFlags>(player)
         .map(|mut pf| pf.toggle(flag));

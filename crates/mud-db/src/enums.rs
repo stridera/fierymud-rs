@@ -439,6 +439,14 @@ impl PlayerFlag {
         }
     }
 
+    /// Flags that should only ever be toggled by Builder+ accounts.
+    /// `cmd_toggle` consults this so the generic-toggle path can't
+    /// be used to bypass the dedicated god-toggle commands.
+    #[must_use]
+    pub fn is_god_only(self) -> bool {
+        matches!(self, Self::HolyLight | Self::ShowIds)
+    }
+
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
