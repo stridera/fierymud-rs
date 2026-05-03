@@ -1308,6 +1308,17 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
     if let Some(s) = world.get::<RoomSector>(room) {
         out.push_str(&format!("sector:        {:?}\r\n", s.0));
     }
+    if let Some(level) = world.get::<mud_world::BaseLightLevel>(room) {
+        // Builders need to confirm magical-glow / void overrides
+        // are landing on the right rooms; positive = lit override,
+        // negative = dark override, zero rooms don't carry the
+        // component (and so this row stays absent for them).
+        let direction = if level.0 > 0 { "lit" } else { "dark" };
+        out.push_str(&format!(
+            "light_level:   {} ({direction} override)\r\n",
+            level.0
+        ));
+    }
     if world.get::<mud_world::PeacefulRoom>(room).is_some() {
         out.push_str("flags:         peaceful\r\n");
     }
