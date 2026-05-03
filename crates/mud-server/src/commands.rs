@@ -222,6 +222,8 @@ inventory::collect!(Command);
 // (or shipping a new one) — no central array touch.
 #[path = "commands/balance.rs"]
 mod balance;
+#[path = "commands/channels.rs"]
+mod channels;
 #[path = "commands/enter.rs"]
 mod enter;
 #[path = "commands/movement_directions.rs"]
@@ -2154,19 +2156,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_emote,
     },
-    Command {
-        names: &["shout"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "shout <message>",
-            summary: "Yell to every online player.",
-            long: "Reaches across rooms and zones; everyone connected sees \
-                   it. Use sparingly.",
-        },
-        run: cmd_shout,
-    },
+    // `shout` migrated to commands/channels.rs.
     Command {
         names: &["reply", "r"],
         min_role: UserRole::Player,
@@ -2485,33 +2475,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_mail_stub,
     },
-    Command {
-        names: &["gossip", "/"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "gossip <message>",
-            summary: "Chat on the global gossip channel.",
-            long: "Reaches every online player. Lower-volume than `shout` \
-                   but with the same global scope.",
-        },
-        run: cmd_gossip,
-    },
-    Command {
-        names: &["music"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "music <message>",
-            summary: "Sing or hum on the music channel.",
-            long: "Global channel for music / song RP — same scope as \
-                   gossip, distinct prefix. Respects the `Deaf` toggle \
-                   and per-receiver ignore lists.",
-        },
-        run: cmd_music,
-    },
+    // `gossip` / `music` migrated to commands/channels.rs.
     Command {
         names: &["insult"],
         min_role: UserRole::Player,
@@ -2541,21 +2505,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_petition,
     },
-    Command {
-        names: &["wiznet", ";"],
-        min_role: UserRole::Immortal,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "wiznet <message>",
-            summary: "Chat on the staff-only wiznet channel.",
-            long: "Immortal+. Sent to every online staff member \
-                   (Immortal or higher). Players never see wiznet \
-                   traffic. Convention: out-of-character coordination \
-                   between staff during play.",
-        },
-        run: cmd_wiznet,
-    },
+    // `wiznet` migrated to commands/channels.rs.
     Command {
         names: &["ctell", "ct"],
         min_role: UserRole::Player,
@@ -5514,6 +5464,13 @@ mod tests {
                 "movement command `{name}` missing"
             );
         }
+        // channels.rs (broadcast comm channels)
+        for name in ["gossip", "/", "music", "shout", "wiznet", ";"] {
+            assert!(
+                names.contains(&name),
+                "channel `{name}` missing"
+            );
+        }
     }
 
     #[test]
@@ -7643,7 +7600,7 @@ fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
     out
 }
 
-fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool {
+pub(crate) fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool {
     world
         .get::<PlayerFlags>(entity)
         .is_some_and(|f| f.has(flag))
@@ -19535,81 +19492,7 @@ pub(crate) async fn cmd_delmail(
     );
 }
 
-fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
-    let message = args.trim();
-    if message.is_empty() {
-        send_to(world, player, "Gossip what?\r\n");
-        return;
-    }
-    if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
-        return;
-    }
-    let player_name = name_of(world, player);
-
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
-        q.iter(world).collect()
-    };
-    for t in targets {
-        if t != player && has_flag(world, t, PlayerFlag::Deaf) {
-            continue;
-        }
-        // Per-target ignore: receiver hides messages from senders on
-        // their list. Sender sees their own message normally.
-        if t != player
-            && world
-                .get::<IgnoreList>(t)
-                .is_some_and(|l| l.contains(&player_name))
-        {
-            continue;
-        }
-        let line = if t == player {
-            format!("You gossip, \"{message}\"\r\n")
-        } else {
-            format!("{player_name} gossips, \"{message}\"\r\n")
-        };
-        send_to(world, t, line);
-    }
-}
-
-/// `music <message>`: global RP-flavored channel. Same broadcast
-/// rules as gossip — every online player sees it unless they're
-/// `Deaf` or have ignored the speaker.
-fn cmd_music(world: &mut World, player: Entity, args: &str) {
-    let message = args.trim();
-    if message.is_empty() {
-        send_to(world, player, "Sing what?\r\n");
-        return;
-    }
-    if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
-        return;
-    }
-    let player_name = name_of(world, player);
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
-        q.iter(world).collect()
-    };
-    for t in targets {
-        if t != player && has_flag(world, t, PlayerFlag::Deaf) {
-            continue;
-        }
-        if t != player
-            && world
-                .get::<IgnoreList>(t)
-                .is_some_and(|l| l.contains(&player_name))
-        {
-            continue;
-        }
-        let line = if t == player {
-            format!("You sing, \"{message}\"\r\n")
-        } else {
-            format!("{player_name} sings, \"{message}\"\r\n")
-        };
-        send_to(world, t, line);
-    }
-}
+// `gossip` / `music` migrated to commands/channels.rs.
 
 const INSULT_LINES: &[&str] = &[
     "You smell like a troll's armpit!",
@@ -19708,32 +19591,7 @@ fn cmd_petition(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-/// `wiznet <message>`: staff-only chat. Reaches every online
-/// player whose Account.role is at least Immortal. Players never
-/// see wiznet traffic.
-fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
-    let message = args.trim();
-    if message.is_empty() {
-        send_to(world, player, "Wiznet what?\r\n");
-        return;
-    }
-    let player_name = name_of(world, player);
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Account), (With<Player>, With<Online>)>();
-        q.iter(world)
-            .filter(|(_, a)| a.role.at_least(UserRole::Immortal))
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for t in targets {
-        let line = if t == player {
-            format!("[wiznet] You: {message}\r\n")
-        } else {
-            format!("[wiznet] {player_name}: {message}\r\n")
-        };
-        send_to(world, t, line);
-    }
-}
+// `wiznet` migrated to commands/channels.rs.
 
 /// `clan` (no args) shows the readout. `clan motd <text>` lets
 /// the LEADER (or empty text to clear) update their clan's
@@ -19955,41 +19813,7 @@ fn cmd_emote(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_shout(world: &mut World, player: Entity, args: &str) {
-    let message = args.trim();
-    if message.is_empty() {
-        send_to(world, player, "Shout what?\r\n");
-        return;
-    }
-    if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
-        return;
-    }
-    let player_name = name_of(world, player);
-
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
-        q.iter(world).collect()
-    };
-    for t in targets {
-        if t != player && has_flag(world, t, PlayerFlag::Deaf) {
-            continue;
-        }
-        if t != player
-            && world
-                .get::<IgnoreList>(t)
-                .is_some_and(|l| l.contains(&player_name))
-        {
-            continue;
-        }
-        let line = if t == player {
-            format!("You shout, \"{message}\"\r\n")
-        } else {
-            format!("{player_name} shouts, \"{message}\"\r\n")
-        };
-        send_to(world, t, line);
-    }
-}
+// `shout` migrated to commands/channels.rs.
 
 // ---------------------------------------------------------------------------
 // Combat handler
