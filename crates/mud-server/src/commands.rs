@@ -385,10 +385,37 @@ const COMMANDS: &[Command] = &[
             usage: "balance",
             summary: "Show your bank-stored coin.",
             long: "Read-only display of the `bank_wealth` column from \
-                   your character row. `deposit` / `withdraw` land with \
-                   the banker NPC component and shop economy.",
+                   your character row. Pair with `deposit` / \
+                   `withdraw` to move coin to / from the bank.",
         },
         run: cmd_balance,
+    },
+    Command {
+        names: &["deposit"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "deposit <amount>",
+            summary: "Move copper into the bank.",
+            long: "Refuses if you don't have that much on hand. v1 \
+                   is location-agnostic; banker-mob gating arrives \
+                   once `MobProfession::Banker` is hydrated.",
+        },
+        run: cmd_deposit,
+    },
+    Command {
+        names: &["withdraw"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "withdraw <amount>",
+            summary: "Move copper from the bank to on-hand wealth.",
+            long: "Refuses if your bank balance can't cover the \
+                   amount. Inverse of `deposit`.",
+        },
+        run: cmd_withdraw,
     },
     Command {
         names: &["value", "appraise"],
@@ -8738,6 +8765,80 @@ fn cmd_value(world: &mut World, player: Entity, args: &str) {
         format!("{item_name} is worthless.\r\n")
     };
     send_rendered(world, player, &msg);
+}
+
+/// `deposit <amount>`: move on-hand copper into the bank. Refuses
+/// when the player doesn't have enough on hand. v1 is location-
+/// agnostic — any room works, since banker-mob detection isn't
+/// wired yet (it'll gate via `MobProfession::Banker` once that's
+/// hydrated). `save_player` persists both balances.
+fn cmd_deposit(world: &mut World, player: Entity, args: &str) {
+    bank_transfer(world, player, args, "deposit");
+}
+
+/// `withdraw <amount>`: pull copper from the bank back on-hand.
+/// Mirrors `deposit` with the opposite sign / refusal text.
+fn cmd_withdraw(world: &mut World, player: Entity, args: &str) {
+    bank_transfer(world, player, args, "withdraw");
+}
+
+/// Shared body for `deposit` / `withdraw`. `direction` is "deposit"
+/// or "withdraw"; the function picks the source / destination
+/// component and refusal text accordingly.
+fn bank_transfer(world: &mut World, player: Entity, args: &str, direction: &str) {
+    let amount = match args.trim().parse::<i64>() {
+        Ok(n) if n > 0 => n,
+        _ => {
+            send_to(
+                world,
+                player,
+                format!("Usage: {direction} <amount of copper>\r\n").as_str(),
+            );
+            return;
+        }
+    };
+    let on_hand = world.get::<Wealth>(player).map_or(0, |w| w.0);
+    let in_bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
+    let (from, to, can_afford) = match direction {
+        "deposit" => (on_hand, in_bank, on_hand >= amount),
+        "withdraw" => (in_bank, on_hand, in_bank >= amount),
+        _ => return,
+    };
+    let _ = (from, to);
+    if !can_afford {
+        let where_ = if direction == "deposit" {
+            "on hand"
+        } else {
+            "in the bank"
+        };
+        send_to(
+            world,
+            player,
+            format!("You don't have that much {where_}.\r\n").as_str(),
+        );
+        return;
+    }
+    if direction == "deposit" {
+        if let Some(mut w) = world.get_mut::<Wealth>(player) {
+            w.0 -= amount;
+        }
+        if let Some(mut b) = world.get_mut::<BankWealth>(player) {
+            b.0 += amount;
+        } else {
+            try_insert(world, player, BankWealth(amount));
+        }
+        send_to(world, player, format!("Deposited {amount} copper.\r\n"));
+    } else {
+        if let Some(mut b) = world.get_mut::<BankWealth>(player) {
+            b.0 -= amount;
+        }
+        if let Some(mut w) = world.get_mut::<Wealth>(player) {
+            w.0 += amount;
+        } else {
+            try_insert(world, player, Wealth(amount));
+        }
+        send_to(world, player, format!("Withdrew {amount} copper.\r\n"));
+    }
 }
 
 /// `balance` / `bal`: show the bank-stored balance separate from

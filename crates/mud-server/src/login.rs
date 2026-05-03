@@ -869,6 +869,17 @@ async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
         warn!(error = %e, character_id = %account.character_id, "drunkenness save failed");
     }
 
+    // Persist BankWealth separately from save_state (which doesn't
+    // own the column). Skipped when zero — fresh characters and
+    // perma-broke players don't take a write.
+    let bank = world.get::<BankWealth>(entity).map_or(0, |b| b.0);
+    if bank != 0
+        && let Err(e) =
+            mud_db::characters::save_bank_wealth(pool, &account.character_id, bank).await
+    {
+        warn!(error = %e, character_id = %account.character_id, "bank_wealth save failed");
+    }
+
     // Persist KnownAbilities → CharacterAbilities so `study`-acquired
     // spells round-trip across reconnect.
     let ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow> = world

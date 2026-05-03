@@ -174,6 +174,24 @@ pub async fn save_state(
     Ok(())
 }
 
+/// Persist the bank balance separately from `save_state` (which
+/// already takes too many args). Called from `save_player` when the
+/// in-memory `BankWealth` differs from boot.
+pub async fn save_bank_wealth(
+    pool: &PgPool,
+    character_id: &str,
+    bank_wealth: i64,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET bank_wealth = $1 WHERE id = $2"#,
+        bank_wealth,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Load the persisted drunkenness counter. Returns 0 for null /
 /// missing rows. The runtime ticks this down over time (a future
 /// pass) and bumps on alcoholic drinks.
