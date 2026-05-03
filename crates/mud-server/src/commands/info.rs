@@ -357,9 +357,12 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "who",
+            usage: "who [<min-level> [<max-level>]]",
             summary: "List players currently online.",
-            long: "Shows the names of every connected player.",
+            long: "With no args, shows every connected player. \
+                   With one numeric arg, filters to players at \
+                   that level or higher. With two numeric args, \
+                   filters to the inclusive level range.",
         },
         run: cmd_who,
     }
@@ -3832,12 +3835,36 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 
-pub(crate) fn cmd_who(world: &mut World, player: Entity, _args: &str) {
+/// Parse `who`'s optional level-range args. `""` → None (no
+/// filter). `"50"` → Some(50, i32::MAX). `"1 50"` → Some(1, 50)
+/// (always in ascending order, so `who 50 1` is normalised to
+/// 1..=50). Non-numeric args silently fall back to None — the
+/// help text is the canonical reference for users who care.
+fn parse_who_level_filter(args: &str) -> Option<(i32, i32)> {
+    let mut nums = args
+        .split_whitespace()
+        .filter_map(|t| t.parse::<i32>().ok());
+    let lo = nums.next()?;
+    let hi = nums.next();
+    let (lo, hi) = match hi {
+        Some(h) => (lo.min(h), lo.max(h)),
+        None => (lo, i32::MAX),
+    };
+    Some((lo, hi))
+}
+
+pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     // Width-aware columns: pad the name to NAME_COL visible chars
     // (skipping XML-Lite color tags via pad_visible) so titles and
     // flags line up across players regardless of name length or
     // colors. NAME_COL covers the canonical Characters.name limit.
     const NAME_COL: usize = 20;
+    // Parse optional level filter args. `who` shows everyone;
+    // `who N` shows level >= N; `who LO HI` shows the inclusive
+    // [LO, HI] range. Garbage args fall through to "show all"
+    // rather than printing an error — the help text is the gate
+    // for users who care to read it.
+    let level_filter: Option<(i32, i32)> = parse_who_level_filter(args);
     // Two-pass: first collect rows, then resolve group roots so we
     // can mark grouped players with [G].
     let raw: Vec<WhoRow> = {
@@ -3875,10 +3902,36 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, _args: &str) {
         *group_size.entry(*root).or_insert(0) += 1;
     }
 
-    let mut out = format!("\r\n{} online:\r\n", raw.len());
+    // Filter by level range when args narrowed the view.
+    let total_online = raw.len();
+    let raw_filtered: Vec<WhoRow> = if let Some((lo, hi)) = level_filter {
+        raw.into_iter()
+            .filter(|r| r.level >= lo && r.level <= hi)
+            .collect()
+    } else {
+        raw
+    };
+    let header = if let Some((lo, hi)) = level_filter {
+        if lo == hi {
+            format!(
+                "\r\n{} of {} online (level {lo}):\r\n",
+                raw_filtered.len(),
+                total_online,
+            )
+        } else {
+            format!(
+                "\r\n{} of {} online (levels {lo}-{hi}):\r\n",
+                raw_filtered.len(),
+                total_online,
+            )
+        }
+    } else {
+        format!("\r\n{total_online} online:\r\n")
+    };
+    let mut out = header;
     // Sort by level desc so endgame players surface first; same-
     // level players sort alphabetically for stable output.
-    let mut raw_sorted = raw;
+    let mut raw_sorted = raw_filtered;
     raw_sorted.sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.name.cmp(&b.name)));
     for r in &raw_sorted {
         let root = roots.get(&r.entity).copied().unwrap_or(r.entity);
