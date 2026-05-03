@@ -220,6 +220,8 @@ inventory::collect!(Command);
 // without renaming it to `commands/mod.rs`. Adding a new file
 // here is the only edit needed when migrating an existing command
 // (or shipping a new one) — no central array touch.
+#[path = "commands/admin_management.rs"]
+mod admin_management;
 #[path = "commands/balance.rs"]
 mod balance;
 #[path = "commands/boards.rs"]
@@ -2890,103 +2892,8 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_teleport,
     },
-    Command {
-        names: &["ban"],
-        min_role: UserRole::Implementor,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "ban <player> <reason>",
-            summary: "Ban a player's account.",
-            long: "Implementor-only. Looks up the player by name, \
-                   resolves the owning Users row, inserts a \
-                   BanRecords row. The login flow refuses any of \
-                   that account's characters until `unban` lifts.",
-        },
-        run: cmd_ban,
-    },
-    // `unban` migrated to commands/unban.rs (inventory::submit!).
-    Command {
-        names: &["cclan"],
-        min_role: UserRole::Implementor,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "cclan create <name> <abbrev>\n       cclan assign <player> <abbrev> [rank]\n       cclan kick <player>\n       cclan motd <abbrev> <text>",
-            summary: "Manage clans (create / assign / kick / MOTD).",
-            long: "Implementor-only.\n\
-                   - `create` opens a new clan; name + abbrev must \
-                     both be unique.\n\
-                   - `assign` puts a character into a clan, defaulting \
-                     to MEMBER. Rank can be LEADER / OFFICER / MEMBER \
-                     / APPLICANT.\n\
-                   - `kick` removes their clan_member row entirely.\n\
-                   - `motd` sets a clan's message-of-the-day; empty \
-                     text clears it.",
-        },
-        run: cmd_cclan,
-    },
-    Command {
-        names: &["pnote", "playernote"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "pnote <player> [<text> | clear]",
-            summary: "Read / append / clear staff notes on a character.",
-            long: "Builder+. Without args after the name, prints the \
-                   current staff notes. With text, appends a new line \
-                   prefixed with the timestamp and your character name. \
-                   `clear` is Implementor-only and wipes the entire log.",
-        },
-        run: cmd_pnote,
-    },
-    Command {
-        names: &["hinfo"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "hinfo <player>",
-            summary: "Inspect any player's house from anywhere.",
-            long: "Builder+. Loads the named player's PlayerHouse row \
-                   plus rooms / item count / guest list and prints the \
-                   summary. Doesn't require the target to be online.",
-        },
-        run: cmd_hinfo,
-    },
-    Command {
-        names: &["hgrant"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "hgrant <player>",
-            summary: "Assign a fresh house to a player.",
-            long: "Builder+. Creates a `PlayerHouse` row for the named \
-                   character with the entrance set to the room you're \
-                   currently standing in. Seeds one foyer room \
-                   (`local_index = 0`). Fails if the character already \
-                   owns a house — use `hrevoke` first.",
-        },
-        run: cmd_hgrant,
-    },
-    Command {
-        names: &["hrevoke"],
-        min_role: UserRole::Implementor,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "hrevoke <player>",
-            summary: "Delete a player's house and all its rooms / items.",
-            long: "Implementor-only. Deletes the named character's \
-                   PlayerHouse row; FK cascades remove all rooms, \
-                   exits, placed items, and guest entries. The owner's \
-                   in-memory `HouseSummary` component remains until \
-                   they reconnect — bounce them if they're online.",
-        },
-        run: cmd_hrevoke,
-    },
+    // ban / cclan / pnote / hinfo / hgrant / hrevoke migrated to
+    // commands/admin_management.rs.
     Command {
         names: &["force"],
         min_role: UserRole::Implementor,
@@ -5027,6 +4934,16 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "quest verb `{name}` missing"
+            );
+        }
+        // admin_management.rs
+        for name in [
+            "ban", "cclan", "pnote", "playernote",
+            "hinfo", "hgrant", "hrevoke",
+        ] {
+            assert!(
+                names.contains(&name),
+                "admin-mgmt `{name}` missing"
             );
         }
     }
@@ -13736,7 +13653,7 @@ fn cmd_house_take(
 /// to find the owning `Users.id`, then inserts a `BanRecords` row.
 /// Permanent ban (no duration today; a `[Nh|Nd]` argument can
 /// land later).
-fn cmd_ban(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_ban(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "ban", args);
     let mut parts = args.splitn(2, char::is_whitespace);
     let target_name = parts.next().unwrap_or("").trim();
@@ -13794,7 +13711,7 @@ fn cmd_ban(world: &mut World, player: Entity, args: &str) {
 /// `cclan` admin dispatch: create / assign / kick / motd.
 /// Implementor-only — gated upstream by `min_role`.
 #[allow(clippy::too_many_lines)]
-fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "cclan", args);
     let mut parts = args.splitn(2, char::is_whitespace);
     let action = parts.next().unwrap_or("").to_ascii_lowercase();
@@ -13936,7 +13853,7 @@ fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
 /// `pnote <player> [<text>|clear]` — staff annotations on a
 /// character. Single shared blob on `Characters.staff_notes`;
 /// appends prefix each new note with timestamp + author name.
-fn cmd_pnote(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_pnote(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "pnote", args);
     let mut parts = args.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or("").trim();
@@ -14040,7 +13957,7 @@ fn cmd_pnote(world: &mut World, player: Entity, args: &str) {
 /// for the named character, with the entrance set to the admin's
 /// current room. Refuses (via DB unique constraint) if the
 /// character already owns one.
-fn cmd_hgrant(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_hgrant(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "hgrant", args);
     let name = args.trim();
     if name.is_empty() {
@@ -14099,7 +14016,7 @@ fn cmd_hgrant(world: &mut World, player: Entity, args: &str) {
 /// `hrevoke <player>` — admin command. Deletes the named
 /// character's `PlayerHouse` row; FK cascades clean up every
 /// dependent table.
-fn cmd_hrevoke(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_hrevoke(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "hrevoke", args);
     let name = args.trim();
     if name.is_empty() {
@@ -14162,7 +14079,7 @@ fn cmd_hrevoke(world: &mut World, player: Entity, args: &str) {
 /// `hinfo <player>` — admin command. Loads the named player's
 /// `PlayerHouse` (plus rooms / items / guests) from the DB and
 /// renders a summary. Doesn't require the target to be online.
-fn cmd_hinfo(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_hinfo(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "hinfo", args);
     let name = args.trim();
     if name.is_empty() {
