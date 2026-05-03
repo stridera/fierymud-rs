@@ -24,16 +24,16 @@ use crate::commands::{
 inventory::submit! {
     Command {
         names: &["where"],
-        min_role: UserRole::Builder,
+        min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Admin,
+        category: Category::Info,
         help: Help {
-            usage: "where [player]",
-            summary: "Show where a player is, or list all online.",
-            long: "Builder+. With a name argument, prints the named \
-                   player's current room (zone, id, name). With no \
-                   argument, lists every online player and where \
-                   they are.",
+            usage: "where [<player> | all]",
+            summary: "Show your location, a named player's location, or list all online.",
+            long: "With no argument, prints your own current room \
+                   (name, zone, id). With a player name, prints that \
+                   online player's current room. `where all` (Builder+ \
+                   only) lists every online player and where they are.",
         },
         run: cmd_where,
     }
@@ -250,25 +250,90 @@ inventory::submit! {
 
 // ---- handler bodies ----
 
-pub(crate) fn cmd_where(world: &mut World, player: Entity, _args: &str) {
-    let mut rows: Vec<(String, String)> = {
-        let mut q = world
-            .query_filtered::<(&Named, &Located), (With<Player>, With<Online>)>();
-        q.iter(world)
-            .map(|(n, l)| {
-                let room_name = name_or(world, l.0, "(unknown)");
-                (n.name.clone(), room_name)
-            })
-            .collect()
-    };
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut out = format!("\r\n{} player(s) online:\r\n", rows.len());
-    for (name, room) in &rows {
-        // pad_visible: counts visible chars, skipping XML-Lite tags.
-        let padded = pad_visible(name, 24);
-        out.push_str(&format!("  {padded} {room}\r\n"));
+pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let role = world.get::<Account>(player).map(|a| a.role);
+    let is_builder_plus = role.is_some_and(|r| r.at_least(UserRole::Builder));
+
+    // No args: report the caller's own location with the same
+    // (name, zone, id) format the listing form uses for parity.
+    if arg.is_empty() {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let name = name_or(world, located.0, "(unknown)");
+        let (zone, id) = world
+            .get::<WorldKey>(located.0)
+            .map_or((-1, -1), |k| (k.zone, k.id));
+        send_rendered(
+            world,
+            player,
+            &format!("You are in: {name}  [{zone}:{id}]\r\n"),
+        );
+        return;
     }
-    send_to(world, player, out);
+
+    // `where all` / `where list` retains the original Builder+ listing
+    // — every online player + their room. Mortals get the gate refusal
+    // here rather than at the dispatcher so the help-text contract
+    // matches the implementation contract.
+    if arg.eq_ignore_ascii_case("all") || arg.eq_ignore_ascii_case("list") {
+        if !is_builder_plus {
+            send_to(
+                world,
+                player,
+                "Only Builders+ can list every online player.\r\n",
+            );
+            return;
+        }
+        let mut rows: Vec<(String, String)> = {
+            let mut q = world
+                .query_filtered::<(&Named, &Located), (With<Player>, With<Online>)>();
+            q.iter(world)
+                .map(|(n, l)| {
+                    let room_name = name_or(world, l.0, "(unknown)");
+                    (n.name.clone(), room_name)
+                })
+                .collect()
+        };
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut out = format!("\r\n{} player(s) online:\r\n", rows.len());
+        for (name, room) in &rows {
+            // pad_visible: counts visible chars, skipping XML-Lite tags.
+            let padded = pad_visible(name, 24);
+            out.push_str(&format!("  {padded} {room}\r\n"));
+        }
+        send_to(world, player, out);
+        return;
+    }
+
+    // `where <name>` — locate one online player. Match is case-
+    // insensitive against `Characters.name`. Offline characters
+    // intentionally fall through to "isn't online" rather than
+    // disclosing their last-known room.
+    let needle = arg.to_ascii_lowercase();
+    let target = {
+        let mut q = world
+            .query_filtered::<(Entity, &Named, &Located), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n, _)| n.name.eq_ignore_ascii_case(&needle))
+            .map(|(e, _, l)| (e, l.0))
+    };
+    let Some((target_entity, room)) = target else {
+        send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+        return;
+    };
+    let target_name = name_of(world, target_entity);
+    let room_name = name_or(world, room, "(unknown)");
+    let (zone, id) = world
+        .get::<WorldKey>(room)
+        .map_or((-1, -1), |k| (k.zone, k.id));
+    send_rendered(
+        world,
+        player,
+        &format!("{target_name} is in: {room_name}  [{zone}:{id}]\r\n"),
+    );
 }
 pub(crate) fn cmd_slay(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "slay", args);
