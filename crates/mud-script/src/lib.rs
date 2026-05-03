@@ -1865,6 +1865,24 @@ impl UserData for LuaActor {
                             w.get::<Stealth>(this.entity).is_some(),
                         ))
                     }),
+                    // `actor.flags` / `aff_flags` / `eff_flags` —
+                    // legacy CircleMUD-style concatenation of active
+                    // effect names, used by trigger bodies via
+                    // `string.find(actor.flags, "BLIND")` etc. Each
+                    // effect name is uppercased and joined with
+                    // spaces; absent → empty string.
+                    "flags" | "aff_flags" | "eff_flags" => {
+                        let s = world_mut_from_lua(lua, |w| {
+                            let mut q = w.query::<(&EffectInstance, &AppliedTo)>();
+                            let names: Vec<String> = q
+                                .iter(w)
+                                .filter(|(_, a)| a.0 == this.entity)
+                                .map(|(inst, _)| inst.name.to_ascii_uppercase())
+                                .collect();
+                            names.join(" ")
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
                     // Total transitive group size for the actor.
                     // Walks the Follower chain to find the root, then
                     // counts every entity that follows back to it.
