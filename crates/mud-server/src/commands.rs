@@ -232,6 +232,8 @@ mod feedback;
 mod movement_directions;
 #[path = "commands/recall.rs"]
 mod recall;
+#[path = "commands/room_chat.rs"]
+mod room_chat;
 #[path = "commands/release.rs"]
 mod release;
 #[path = "commands/setrecall.rs"]
@@ -2001,19 +2003,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_quit,
     },
     // ----- Communication -----
-    Command {
-        names: &["say", "'"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "say <message>",
-            summary: "Speak to everyone in your current room.",
-            long: "All players in the same room see your message. Use ' as a \
-                   shorthand: 'hello there.",
-        },
-        run: cmd_say,
-    },
+    // `say` migrated to commands/room_chat.rs.
     Command {
         names: &["achievements", "achieve"],
         min_role: UserRole::Player,
@@ -2047,36 +2037,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_house,
     },
-    Command {
-        names: &["ask"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "ask <mob> <topic>",
-            summary: "Ask an NPC about a topic; fires their SPEECH triggers.",
-            long: "Targets a single mob in the room and fires its \
-                   SPEECH triggers with the topic as the speech \
-                   keyword. Bystanders see that you asked but not \
-                   the topic. NPCs whose triggers match the topic \
-                   reply via room.send / actor.send from the body.",
-        },
-        run: cmd_ask,
-    },
-    Command {
-        names: &["whisper"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "whisper <target> <message>",
-            summary: "Speak privately to one person in the same room.",
-            long: "The target hears the message verbatim; bystanders see \
-                   only that you whispered something to them, not the \
-                   contents. The target must be in the same room.",
-        },
-        run: cmd_whisper,
-    },
+    // `ask` / `whisper` migrated to commands/room_chat.rs.
     Command {
         names: &["report"],
         min_role: UserRole::Player,
@@ -2094,20 +2055,7 @@ const COMMANDS: &[Command] = &[
     },
     // tell / reply / ignore / unignore / lasttells migrated to
     // commands/tells.rs.
-    Command {
-        names: &["emote", ":"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "emote <action>",
-            summary: "Perform a third-person action visible to the room.",
-            long: "Your name is prepended to the text. \
-                   `emote smiles broadly.` shows everyone (including you): \
-                   `Strider smiles broadly.`",
-        },
-        run: cmd_emote,
-    },
+    // `emote` migrated to commands/room_chat.rs.
     // `shout` migrated to commands/channels.rs.
     Command {
         names: &["mail"],
@@ -2373,20 +2321,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_mail_stub,
     },
     // `gossip` / `music` migrated to commands/channels.rs.
-    Command {
-        names: &["insult"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "insult <target>",
-            summary: "Hurl a random insult at someone in the room.",
-            long: "Picks a random insult and emits it to you, the \
-                   target, and the rest of the room. Self-targeting \
-                   leaves you feeling insulted at yourself.",
-        },
-        run: cmd_insult,
-    },
+    // `insult` migrated to commands/room_chat.rs.
     // `petition` migrated to commands/feedback.rs.
     // `wiznet` migrated to commands/channels.rs.
     Command {
@@ -3204,20 +3139,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_decline,
     },
-    Command {
-        names: &["gsay", "gtell", "gecho", "gt"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "gsay <message>",
-            summary: "Speak to your group regardless of location.",
-            long: "Reaches every member of your follow-chain group — \
-                   leader and all transitive followers — even across \
-                   rooms. Players outside the group don't hear it.",
-        },
-        run: cmd_gsay,
-    },
+    // `gsay` / `gtell` / `gecho` / `gt` migrated to commands/room_chat.rs.
     // ----- Movement -----
     // Whole category migrated:
     //   - 12 directionals → commands/movement_directions.rs
@@ -5366,6 +5288,16 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "feedback `{name}` missing"
+            );
+        }
+        // room_chat.rs
+        for name in [
+            "say", "'", "emote", ":", "ask", "whisper", "insult",
+            "gsay", "gtell", "gecho", "gt",
+        ] {
+            assert!(
+                names.contains(&name),
+                "room-chat `{name}` missing"
             );
         }
     }
@@ -13364,7 +13296,7 @@ fn find_in_room(world: &mut World, needle: &str, room: Entity) -> Option<Entity>
 
 /// Find a non-Item entity in `room` (player or mob) for give/attack-style
 /// targeting.
-fn find_actor_in_room(
+pub(crate) fn find_actor_in_room(
     world: &mut World,
     needle: &str,
     room: Entity,
@@ -13544,44 +13476,7 @@ fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
 // Communication handlers
 // ---------------------------------------------------------------------------
 
-fn cmd_say(world: &mut World, player: Entity, message: &str) {
-    let message = message.trim();
-    if message.is_empty() {
-        send_to(world, player, "Say what?\r\n");
-        return;
-    }
-    if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
-        return;
-    }
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let speaker = name_of(world, player);
-
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-
-    for target in targets {
-        let line = if target == player {
-            format!("You say, \"{message}\"\r\n")
-        } else {
-            format!("{speaker} says, \"{message}\"\r\n")
-        };
-        send_rendered(world, target, &line);
-    }
-
-    // Fire SPEECH-flagged triggers for every entity in the room
-    // that carries AttachedTriggers (skipping the speaker
-    // themselves). Bodies do their own keyword matching against
-    // the `speech` Lua global.
-    crate::triggers::fire_speech_in_room(world, player, located.0, message);
-}
+// `say` migrated to commands/room_chat.rs.
 
 /// `report`: announce your current HP/stamina to your group (when
 /// you're in one) or to everyone in the room (when solo). Group
@@ -14878,88 +14773,8 @@ fn name_or_keyword_matches(target: &str, name: &str, kw: Option<&Keywords>) -> b
     false
 }
 
-/// `ask <mob> <topic>` — target a single mob and fire its SPEECH
-/// triggers with the topic as the `speech` Lua global. Bystanders
-/// see that you asked something but not what. Mobs without
-/// matching SPEECH bodies stay silent.
-fn cmd_ask(world: &mut World, player: Entity, args: &str) {
-    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
-    if parts.len() != 2 || parts[1].trim().is_empty() {
-        send_to(world, player, "Usage: ask <mob> <topic>\r\n");
-        return;
-    }
-    let target_word = parts[0].trim();
-    let topic = parts[1].trim();
-    let Some(located) = world.get::<Located>(player).copied() else {
-        send_to(world, player, "You are nowhere.\r\n");
-        return;
-    };
-    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
-        send_rendered(
-            world,
-            player,
-            &format!("You don't see '{target_word}' here.\r\n"),
-        );
-        return;
-    };
-    let target_name = name_of(world, target);
-    let player_name = name_of(world, player);
-    send_to(
-        world,
-        player,
-        format!("You ask {target_name} about \"{topic}\".\r\n"),
-    );
-    broadcast_room_except_players_rendered(
-        world,
-        located.0,
-        &[player],
-        &format!("{player_name} asks {target_name} about something.\r\n"),
-    );
-    crate::triggers::fire_speech_at(world, target, player, topic);
-    // TALK_TO_NPC objective progression. Only fires when the
-    // target is a mob with a known prototype — chats between
-    // players don't advance NPC objectives.
-    if world.get::<Mob>(target).is_some()
-        && let Some(key) = world.get::<WorldKey>(target).copied()
-    {
-        bump_talk_quest_progress(world, player, key.zone, key.id);
-    }
-}
+// `ask` / `whisper` migrated to commands/room_chat.rs.
 
-fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
-    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
-    if parts.len() != 2 || parts[1].trim().is_empty() {
-        send_to(world, player, "Usage: whisper <target> <message>\r\n");
-        return;
-    }
-    let target_word = parts[0].trim();
-    let message = parts[1].trim();
-    let Some(located) = world.get::<Located>(player).copied() else {
-        send_to(world, player, "You are nowhere.\r\n");
-        return;
-    };
-    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
-        send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
-        );
-        return;
-    };
-    let speaker = name_of(world, player);
-    let target_name = name_of(world, target);
-
-    send_rendered(world, player, &format!("You whisper to {target_name}, \"{message}\"\r\n"),
-    );
-    send_to(
-        world,
-        target,
-        format!("{speaker} whispers to you, \"{message}\"\r\n"),
-    );
-    broadcast_room_except_players_rendered(
-        world,
-        located.0,
-        &[player, target],
-        &format!("{speaker} whispers something to {target_name}.\r\n"),
-    );
-}
 
 // bug / idea / typo / submit_feedback migrated to commands/feedback.rs.
 
@@ -19110,67 +18925,8 @@ pub(crate) async fn cmd_delmail(
 
 // `gossip` / `music` migrated to commands/channels.rs.
 
-const INSULT_LINES: &[&str] = &[
-    "You smell like a troll's armpit!",
-    "Your mother was a bugbear!",
-    "You fight like a dairy farmer!",
-    "I've seen better-looking rust monsters!",
-    "Even a gelatinous cube has more personality!",
-    "Your sword is dull and your wits are duller!",
-    "I've met kobolds with sharper tongues!",
-    "Your aim is as bad as your cooking!",
-];
+// `insult` migrated to commands/room_chat.rs.
 
-/// `insult <target>`: random-line jab at another actor in the room.
-/// Self-target collapses to "You feel insulted." per legacy.
-fn cmd_insult(world: &mut World, player: Entity, args: &str) {
-    let arg = args.trim();
-    if arg.is_empty() {
-        send_to(world, player, "You feel insulted.\r\n");
-        return;
-    }
-    if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
-        return;
-    }
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
-        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
-        return;
-    };
-    if target == player {
-        send_to(world, player, "You feel insulted.\r\n");
-        return;
-    }
-    let line = INSULT_LINES[rand::random_range(0..INSULT_LINES.len())];
-    let actor_name = name_of(world, player);
-    let target_name = name_of(world, target);
-
-    send_to(
-        world,
-        player,
-        format!("You insult {target_name}: {line}\r\n"),
-    );
-    send_to(
-        world,
-        target,
-        format!("{actor_name} insults you: {line}\r\n"),
-    );
-
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == located.0 && *e != player && *e != target)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    let line_room = format!("{actor_name} insults {target_name}.\r\n");
-    for e in bystanders {
-        send_to(world, e, line_room.clone());
-    }
-}
 
 // `petition` migrated to commands/feedback.rs.
 // `wiznet` migrated to commands/channels.rs.
@@ -19371,29 +19127,7 @@ fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_emote(world: &mut World, player: Entity, args: &str) {
-    let action = args.trim();
-    if action.is_empty() {
-        send_to(world, player, "Emote what?\r\n");
-        return;
-    }
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let player_name = name_of(world, player);
-    let line = format!("{player_name} {action}\r\n");
-
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for t in targets {
-        send_to(world, t, line.clone());
-    }
-}
+// `emote` migrated to commands/room_chat.rs.
 
 // `shout` migrated to commands/channels.rs.
 
@@ -21529,36 +21263,7 @@ fn cmd_split(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-/// `gsay <msg>` / `gtell` / `gecho`: broadcast a message to every
-/// member of the player's group, regardless of what room they're in.
-/// Players outside the group don't see it. Empty group = no-op with
-/// helpful message.
-fn cmd_gsay(world: &mut World, player: Entity, args: &str) {
-    let message = args.trim();
-    if message.is_empty() {
-        send_to(world, player, "Group-say what?\r\n");
-        return;
-    }
-    let root = group_root(world, player);
-    let members = group_members(world, root);
-    if members.len() <= 1 {
-        send_to(
-            world,
-            player,
-            "You're not in a group — nobody to say that to.\r\n",
-        );
-        return;
-    }
-    let speaker = name_of(world, player);
-    for m in members {
-        let line = if m == player {
-            format!("You group-say, \"{message}\"\r\n")
-        } else {
-            format!("({speaker} group-says) \"{message}\"\r\n")
-        };
-        send_rendered(world, m, &line);
-    }
-}
+// `gsay` / `gtell` / `gecho` migrated to commands/room_chat.rs.
 
 /// `disband`: clear every direct `Follower(self)` link, breaking the
 /// group apart. Members deeper in the chain stay connected to each
