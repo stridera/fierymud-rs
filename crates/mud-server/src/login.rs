@@ -247,6 +247,32 @@ impl ConnRouter {
                     let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
+                // Ban check. Refuses post-auth so we don't leak
+                // whether an email exists pre-password. The conn
+                // stays in AwaitingIdentifier (mirrors auth-failure
+                // path); player can't proceed past the ban message.
+                if let Ok(Some(ban)) = mud_db::bans::active_for(pool, &user.id).await {
+                    info!(
+                        conn_id,
+                        user_id = %user.id,
+                        reason = %ban.reason,
+                        "auth refused: banned"
+                    );
+                    let until = ban
+                        .expires_at
+                        .map(|t| format!(" (expires {t} UTC)"))
+                        .unwrap_or_default();
+                    let _ = ctx.outbound.send(
+                        format!(
+                            "Your account is banned: {}{until}\r\n",
+                            ban.reason
+                        )
+                        .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    return;
+                }
                 info!(conn_id, user_id = %user.id, email = %user.email, "auth success");
 
                 // Character-name path: preselected character → spawn it
