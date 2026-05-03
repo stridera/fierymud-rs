@@ -396,18 +396,21 @@ pub async fn try_dispatch_async(
     if trimmed.is_empty() {
         return false;
     }
+    // Every successful arm needs the same prompt-marking + activity
+    // stamp before its handler runs. Stamp once up front; on the
+    // `false` paths the caller falls through to the sync `dispatch`,
+    // which re-marks idempotently.
+    mark_for_prompt(player);
+    try_insert(world, player, LastInputAt(std::time::Instant::now()));
+
     // Composition mode: when the player has a `MailDraft` or
     // `BoardDraft` component, every line is routed to the matching
     // composer until `.send` / `.abort` clears it.
     if world.get::<MailDraft>(player).is_some() {
-        mark_for_prompt(player);
-        try_insert(world, player, LastInputAt(std::time::Instant::now()));
         compose_mail_step(world, player, pool, trimmed).await;
         return true;
     }
     if world.get::<BoardDraft>(player).is_some() {
-        mark_for_prompt(player);
-        try_insert(world, player, LastInputAt(std::time::Instant::now()));
         compose_board_step(world, player, pool, trimmed).await;
         return true;
     }
@@ -417,62 +420,42 @@ pub async fn try_dispatch_async(
     let args = parts.next().unwrap_or("").trim();
     match head.as_str() {
         "mail" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_mail(world, player, pool, args).await;
             true
         }
         "boards" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_boards(world, player, pool).await;
             true
         }
         "quests" | "qstat" | "qlist" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_quests(world, player, pool).await;
             true
         }
         "abandon" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_abandon(world, player, pool, args).await;
             true
         }
         "questinfo" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_questinfo(world, player, pool, args).await;
             true
         }
         "innate" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_innate(world, player, pool).await;
             true
         }
         "qload" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_qload(world, player, pool, args).await;
             true
         }
         "qaccept" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_qaccept(world, player, pool, args).await;
             true
         }
         "qgive" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_qgive(world, player, pool, args).await;
             true
         }
         "qcomplete" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_qcomplete(world, player, pool, args).await;
             true
         }
@@ -490,8 +473,6 @@ pub async fn try_dispatch_async(
                     .map(|(_, b)| b.0)
             });
             if let Some(board_id) = board_id_in_room {
-                mark_for_prompt(player);
-                try_insert(world, player, LastInputAt(std::time::Instant::now()));
                 cmd_read_board_msg(world, player, pool, board_id, args).await;
                 true
             } else {
@@ -518,8 +499,6 @@ pub async fn try_dispatch_async(
             if !needle.is_empty()
                 && let Some(board_id) = board_id
             {
-                mark_for_prompt(player);
-                try_insert(world, player, LastInputAt(std::time::Instant::now()));
                 cmd_look_board(world, player, pool, board_id).await;
                 true
             } else {
@@ -527,44 +506,30 @@ pub async fn try_dispatch_async(
             }
         }
         "board" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_board(world, player, pool, args).await;
             true
         }
         "post" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_post(world, player, pool, args).await;
             true
         }
         "editpost" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_editpost(world, player, pool, args).await;
             true
         }
         "delpost" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_delpost(world, player, pool, args).await;
             true
         }
         "mailbox" | "mailboxes" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_mailbox(world, player, pool).await;
             true
         }
         "readmail" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_readmail(world, player, pool, args).await;
             true
         }
         "delmail" => {
-            mark_for_prompt(player);
-            try_insert(world, player, LastInputAt(std::time::Instant::now()));
             cmd_delmail(world, player, pool, args).await;
             true
         }
