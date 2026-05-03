@@ -222,6 +222,8 @@ inventory::collect!(Command);
 // (or shipping a new one) — no central array touch.
 #[path = "commands/balance.rs"]
 mod balance;
+#[path = "commands/movement_directions.rs"]
+mod movement_directions;
 #[path = "commands/unban.rs"]
 mod unban;
 
@@ -3376,86 +3378,8 @@ const COMMANDS: &[Command] = &[
         run: cmd_gsay,
     },
     // ----- Movement -----
-    Command {
-        names: &["north", "n"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_north,
-    },
-    Command {
-        names: &["south", "s"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_south,
-    },
-    Command {
-        names: &["east", "e"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_east,
-    },
-    Command {
-        names: &["west", "w"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_west,
-    },
-    Command {
-        names: &["up", "u"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_up,
-    },
-    Command {
-        names: &["down", "d"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_down,
-    },
-    Command {
-        names: &["northeast", "ne"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_northeast,
-    },
-    Command {
-        names: &["northwest", "nw"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_northwest,
-    },
-    Command {
-        names: &["southeast", "se"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_southeast,
-    },
-    Command {
-        names: &["southwest", "sw"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_southwest,
-    },
+    // 12 directional commands (n/s/e/w/u/d, diagonals, in/out)
+    // migrated to commands/movement_directions.rs.
     Command {
         names: &["recall", "home"],
         min_role: UserRole::Player,
@@ -3512,22 +3436,6 @@ const COMMANDS: &[Command] = &[
                    Persists across logins.",
         },
         run: cmd_setrecall,
-    },
-    Command {
-        names: &["in"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_in,
-    },
-    Command {
-        names: &["out"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Movement,
-        help: MOVE_HELP,
-        run: cmd_out,
     },
     // ----- Admin -----
     Command {
@@ -4111,7 +4019,7 @@ const COMMANDS: &[Command] = &[
     },
 ];
 
-const MOVE_HELP: Help = Help {
+pub(crate) const MOVE_HELP: Help = Help {
     usage: "<direction>",
     summary: "Walk through an exit.",
     long: "Moves you through the named exit if one is open. Standard \
@@ -5619,20 +5527,35 @@ mod tests {
         render_color_tags(s, ColorMode::Ansi)
     }
 
-    /// Smoke test: the inventory-distributed `balance` command
-    /// shows up in `all_commands()`. Proves the registry actually
-    /// links the `inventory::submit!` block — a regression here
-    /// means a future migrated command would silently disappear.
+    /// Smoke test: every inventory-distributed command shows up
+    /// in `all_commands()`. Proves the registry actually links
+    /// each `inventory::submit!` block — a regression here means
+    /// migrated commands would silently disappear.
     #[test]
-    fn inventory_distributed_balance_is_registered() {
+    fn inventory_distributed_commands_are_registered() {
         let names: Vec<&'static str> = super::all_commands()
             .flat_map(|c| c.names.iter().copied())
             .collect();
-        assert!(
-            names.contains(&"balance"),
-            "balance not in all_commands()"
-        );
-        assert!(names.contains(&"bal"), "bal alias not in all_commands()");
+        // balance / unban (steps 1 + 1.5)
+        for name in ["balance", "bal", "unban"] {
+            assert!(
+                names.contains(&name),
+                "{name} not in all_commands()"
+            );
+        }
+        // movement_directions.rs — full Movement-category sweep
+        for name in [
+            "north", "n", "south", "s", "east", "e", "west", "w",
+            "up", "u", "down", "d",
+            "northeast", "ne", "northwest", "nw",
+            "southeast", "se", "southwest", "sw",
+            "in", "out",
+        ] {
+            assert!(
+                names.contains(&name),
+                "movement direction `{name}` missing"
+            );
+        }
     }
 
     #[test]
@@ -22465,31 +22388,15 @@ fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
 // Movement (12 directions, all delegate to cmd_move)
 // ---------------------------------------------------------------------------
 
-macro_rules! mv {
-    ($name:ident, $dir:ident) => {
-        fn $name(world: &mut World, player: Entity, _args: &str) {
-            cmd_move(world, player, Direction::$dir);
-        }
-    };
-}
-mv!(cmd_north, North);
-mv!(cmd_south, South);
-mv!(cmd_east, East);
-mv!(cmd_west, West);
-mv!(cmd_up, Up);
-mv!(cmd_down, Down);
-mv!(cmd_northeast, Northeast);
-mv!(cmd_northwest, Northwest);
-mv!(cmd_southeast, Southeast);
-mv!(cmd_southwest, Southwest);
-mv!(cmd_in, In);
-mv!(cmd_out, Out);
+// Directional shims (cmd_north etc) live in
+// commands/movement_directions.rs alongside their inventory::submit!
+// Command records.
 
 // Walk + follower cascade + per-mover notifications + auto-look + stamina
 // drain — naturally a long sequence; splitting into helpers would just
 // shuffle the order.
 #[allow(clippy::too_many_lines)]
-fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
+pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     if !require_alert_posture(world, player, "move") {
         return;
     }
