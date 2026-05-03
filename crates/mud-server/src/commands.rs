@@ -2549,6 +2549,55 @@ mod tests {
         assert_eq!(super::encumbrance_band(100.0, 100.0), "overloaded");
         assert_eq!(super::encumbrance_band(150.0, 100.0), "overloaded");
     }
+
+    #[test]
+    fn format_wealth_zero_or_negative_is_none() {
+        assert_eq!(super::format_wealth(0), None);
+        assert_eq!(super::format_wealth(-5), None);
+    }
+
+    #[test]
+    fn format_wealth_decomposes_in_canonical_order() {
+        // 1234 copper = 1 platinum, 2 gold, 3 silver, 4 copper.
+        assert_eq!(
+            super::format_wealth(1234),
+            Some("1 platinum, 2 gold, 3 silver, 4 copper".to_string()),
+        );
+    }
+
+    #[test]
+    fn format_wealth_omits_zero_denominations() {
+        // 1100 copper = 1 platinum, 1 gold (no silver, no copper).
+        assert_eq!(
+            super::format_wealth(1100),
+            Some("1 platinum, 1 gold".to_string()),
+        );
+        assert_eq!(super::format_wealth(7), Some("7 copper".to_string()));
+    }
+
+    #[test]
+    fn condition_summary_silent_below_thresholds() {
+        // hunger 23 < HUNGRY_AT 24, thirst 11 < THIRSTY_AT 12.
+        assert_eq!(super::condition_summary(0, 0), None);
+        assert_eq!(super::condition_summary(23, 11), None);
+    }
+
+    #[test]
+    fn condition_summary_bands_promote_at_each_threshold() {
+        assert_eq!(
+            super::condition_summary(24, 0),
+            Some("hungry".to_string()),
+        );
+        assert_eq!(
+            super::condition_summary(48, 24),
+            Some("starving, parched".to_string()),
+        );
+        // Thirst-only.
+        assert_eq!(
+            super::condition_summary(0, 12),
+            Some("thirsty".to_string()),
+        );
+    }
 }
 
 /// Send the player's prompt template with variables substituted. Falls back
