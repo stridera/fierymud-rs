@@ -6520,27 +6520,43 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
-    // Build a Slot -> name map in canonical order.
-    let mut by_slot: Vec<(Slot, String)> = {
-        let mut q =
-            world.query_filtered::<(&Located, &Named, &EquippedSlot), With<Item>>();
+    // Snapshot (slot, name, weight) per worn item. Weight comes from
+    // the proto via WorldKey; synthetic items without a proto count
+    // as 0 (matches the carried_weight contract).
+    let mut by_slot: Vec<(Slot, String, f64)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &Named, &EquippedSlot),
+            With<Item>,
+        >();
         q.iter(world)
-            .filter(|(l, _, _)| l.0 == player)
-            .map(|(_, n, eq)| (eq.0, n.name.clone()))
+            .filter(|(_, l, _, _)| l.0 == player)
+            .map(|(e, _, n, eq)| (eq.0, n.name.clone(), item_weight(world, e)))
             .collect()
     };
     if by_slot.is_empty() {
         send_to(world, player, "\r\nYou aren't wearing anything.\r\n");
         return;
     }
-    by_slot.sort_by_key(|(s, _)| Slot::ORDER.iter().position(|x| x == s).unwrap_or(usize::MAX));
+    by_slot.sort_by_key(|(s, _, _)| Slot::ORDER.iter().position(|x| x == s).unwrap_or(usize::MAX));
     let mode = color_mode_for(world, player);
+    let total_weight: f64 = by_slot.iter().map(|(_, _, w)| w).sum();
     let mut out = String::from("\r\nEquipment:\r\n");
-    for (slot, name) in &by_slot {
+    for (slot, name, weight) in &by_slot {
+        let weight_label = if *weight > 0.0 {
+            format!(" ({weight:.1} lbs)")
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "  {:>14}: {}\r\n",
+            "  {:>14}: {}{}\r\n",
             slot.label(),
-            render_color_tags(name, mode)
+            render_color_tags(name, mode),
+            weight_label,
+        ));
+    }
+    if total_weight > 0.0 {
+        out.push_str(&format!(
+            "\r\nTotal worn weight: {total_weight:.1} lbs.\r\n",
         ));
     }
     send_to(world, player, out);
