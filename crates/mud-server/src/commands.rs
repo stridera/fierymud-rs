@@ -19789,8 +19789,10 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
 
 /// `clan` (no args) shows the readout. `clan motd <text>` lets
 /// the LEADER (or empty text to clear) update their clan's
-/// MOTD; OFFICER+ can also set it. Anything else falls back to
-/// the readout.
+/// MOTD; OFFICER+ can also set it. `clan kick <player>` lets
+/// the leader remove a member. Anything else falls back to the
+/// readout.
+#[allow(clippy::too_many_lines)]
 fn cmd_clan_stub(world: &mut World, player: Entity, args: &str) {
     let Some((clan_id, name, abbrev, rank)) = world
         .get::<mud_world::ClanMembership>(player)
@@ -19807,6 +19809,58 @@ fn cmd_clan_stub(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let trimmed = args.trim();
+    // `clan kick <player>` — leader-only.
+    if let Some(rest) = trimmed.strip_prefix("kick") {
+        if rank.as_str() != "LEADER" {
+            send_to(world, player, "Only the clan leader can kick.\r\n");
+            return;
+        }
+        let target_name = rest.trim().to_string();
+        if target_name.is_empty() {
+            send_to(world, player, "Usage: clan kick <player>\r\n");
+            return;
+        }
+        let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+            send_to(world, player, "Database unavailable.\r\n");
+            return;
+        };
+        let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+        let Some(out) = outbound else { return };
+        tokio::spawn(async move {
+            let Ok(Some(target)) =
+                mud_db::characters::find_by_name(&pool, &target_name).await
+            else {
+                let _ = out
+                    .send(format!("No character named '{target_name}'.\r\n").into_bytes());
+                return;
+            };
+            // Verify they're in *this* clan; don't let a leader
+            // kick from another clan they happen to know about.
+            let in_clan = mud_db::clans::membership_for(&pool, &target.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.clan_id == clan_id);
+            if !in_clan {
+                let _ = out.send(
+                    format!("{} isn't in your clan.\r\n", target.name).into_bytes(),
+                );
+                return;
+            }
+            match mud_db::clans::remove_member(&pool, &target.id).await {
+                Ok(_) => {
+                    let _ = out.send(
+                        format!("{} kicked from {}.\r\n", target.name, abbrev)
+                            .into_bytes(),
+                    );
+                }
+                Err(e) => {
+                    let _ = out.send(format!("Kick failed: {e}\r\n").into_bytes());
+                }
+            }
+        });
+        return;
+    }
     if let Some(rest) = trimmed.strip_prefix("motd") {
         if !matches!(rank.as_str(), "LEADER" | "OFFICER") {
             send_to(
