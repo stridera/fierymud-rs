@@ -328,7 +328,7 @@ fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
 /// special cases of the natural-100 / natural-1 corners; the
 /// in-between resolves against the computed hit chance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SwingOutcome {
+pub(crate) enum SwingOutcome {
     Crit,
     Hit,
     Miss,
@@ -339,16 +339,82 @@ enum SwingOutcome {
 /// chance band. A 100% `hit_chance` attacker therefore lands 99% as
 /// regular hits and 1% as crits — never misses. Sleeping defenders
 /// bypass this at the call site (auto-hit).
-fn resolve_swing(hit_roll: i32, target_ac: i32) -> SwingOutcome {
+fn resolve_swing(hit_roll: i32, target_ac: i32) -> SwingDetail {
     let chance = hit_chance_pct(hit_roll, target_ac);
     let roll = rand::random_range(1..=100);
-    if roll == 100 {
+    let outcome = if roll == 100 {
         SwingOutcome::Crit
     } else if roll <= chance {
         SwingOutcome::Hit
     } else {
         SwingOutcome::Miss
+    };
+    SwingDetail { outcome, roll, chance }
+}
+
+/// Roll details surfaced by `resolve_swing` so the showdice toggle
+/// can render them to the attacker. Outcome alone isn't enough —
+/// players want to see the d100 vs threshold.
+#[derive(Clone, Copy)]
+pub(crate) struct SwingDetail {
+    pub outcome: SwingOutcome,
+    pub roll: i32,    // d100 result
+    pub chance: i32,  // need <= this to land a regular hit
+}
+
+/// True iff the attacker has the `SHOW_DICE_ROLLS` `PlayerFlag` set.
+/// Cheap (component lookup); call sites guard their detail-line
+/// construction on this rather than always formatting the string.
+fn show_dice_for(world: &World, attacker: Entity) -> bool {
+    world
+        .get::<PlayerFlags>(attacker)
+        .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::ShowDiceRolls))
+}
+
+/// Build the per-attacker showdice tail for one swing. Returns
+/// empty string when the flag isn't set; otherwise a parenthesized
+/// summary suitable for appending to the attacker's swing line.
+///
+/// Format examples (legacy combat math; will be revised when the
+/// modern accuracy/evasion pipeline lands per docs/design/combat.md):
+///
+///   (d100 33 ≤ 65 — dmg 8 ±var = 6)             // hit
+///   (d100 88 > 65 — miss)                       // miss
+///   (d100 100 — CRIT — dmg 8 × 1.5 ±var = 14)   // crit
+///   (auto-hit on sleeping target — dmg 6 ±var = 7)
+///   (defender evaded via parry)                 // evade
+fn show_dice_swing(detail: SwingDetail, base_damage: i32, final_damage: i32) -> String {
+    match detail.outcome {
+        SwingOutcome::Miss => {
+            format!("  (d100 {} > {} — miss)\r\n", detail.roll, detail.chance)
+        }
+        SwingOutcome::Hit if detail.roll == 0 => {
+            // Sleeping defender: auto-hit, no roll happened.
+            format!("  (auto-hit on sleeping target — dmg {base_damage} ±var = {final_damage})\r\n")
+        }
+        SwingOutcome::Hit => {
+            format!(
+                "  (d100 {} ≤ {} — dmg {base_damage} ±var = {final_damage})\r\n",
+                detail.roll, detail.chance,
+            )
+        }
+        SwingOutcome::Crit => {
+            // Crit promotes pre-variance damage by 1.5×. base_damage is
+            // post-promotion; show the math anyway for clarity.
+            let pre_promote = (base_damage * 2) / 3;
+            format!(
+                "  (d100 {} — CRIT — dmg {pre_promote} × 1.5 ±var = {final_damage})\r\n",
+                detail.roll,
+            )
+        }
     }
+}
+
+/// Showdice tail when the defender evaded — no damage roll
+/// happened, but the attacker still wants to see what defeated
+/// the swing.
+fn show_dice_evade(via: &str) -> String {
+    format!("  (defender evaded via {via})\r\n")
 }
 
 /// Atmospheric line for the tick that crossed a decay threshold.
@@ -633,11 +699,12 @@ fn apply_swing(world: &mut World, s: &Swing) {
         .get::<Posture>(s.target)
         .map_or(0, |p| posture_ac_modifier(p.0));
     let target_ac = base_ac + posture_mod;
-    let outcome = if was_sleeping {
-        SwingOutcome::Hit
+    let detail = if was_sleeping {
+        SwingDetail { outcome: SwingOutcome::Hit, roll: 0, chance: 100 }
     } else {
         resolve_swing(hit_roll, target_ac)
     };
+    let outcome = detail.outcome;
     // Active evasion (Dodge / Parry): a defender with the trained
     // skill rolls against a small chance to turn an incoming hit
     // into a miss. Sleeping targets bypass — they can't dodge.
@@ -648,11 +715,13 @@ fn apply_swing(world: &mut World, s: &Swing) {
     } else {
         roll_evasion(world, s.target)
     };
+    let dice_on = show_dice_for(world, s.attacker);
     if let Some(via) = evaded_via {
+        let tail = if dice_on { show_dice_evade(via) } else { String::new() };
         send_to(
             world,
             s.attacker,
-            format!("{target_name} {via}s your attack!\r\n"),
+            format!("{target_name} {via}s your attack!\r\n{tail}"),
         );
         send_to(
             world,
@@ -672,10 +741,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
         return;
     }
     if outcome == SwingOutcome::Miss {
+        let tail = if dice_on { show_dice_swing(detail, s.damage, 0) } else { String::new() };
         send_to(
             world,
             s.attacker,
-            format!("You swing at {target_name} but miss.\r\n"),
+            format!("You swing at {target_name} but miss.\r\n{tail}"),
         );
         send_to(
             world,
@@ -702,6 +772,9 @@ fn apply_swing(world: &mut World, s: &Swing) {
     } else {
         s.damage
     };
+    // Snapshot the post-crit, pre-variance value so showdice can
+    // render the "× 1.5 ±var = N" math without re-deriving it.
+    let damage_pre_variance = damage;
     // Per-swing damage variance: ±25% of the post-crit base, integer
     // floor. Bigger swings get a wider band; sub-4 damage swings
     // pin at variance=0. Floor at 1 so a low roll never zeroes out
@@ -718,10 +791,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // player gets ANSI or stripped output according to their own COLOR_BLIND
     // flag.
     let crit_tag = if outcome == SwingOutcome::Crit { " (critical hit!)" } else { "" };
+    let tail = if dice_on { show_dice_swing(detail, damage_pre_variance, damage) } else { String::new() };
     send_to(
         world,
         s.attacker,
-        format!("You hit {target_name} for {damage} damage{crit_tag}.\r\n"),
+        format!("You hit {target_name} for {damage} damage{crit_tag}.\r\n{tail}"),
     );
     send_to(
         world,
