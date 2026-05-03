@@ -4356,6 +4356,19 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .title_for(*lvl)
                 .map(str::to_string)
         });
+    // Next-level HP / Stamina preview — reads the row for
+    // `level + 1` so the player sees what they'll gain on the
+    // upcoming level-up. None at the cap (no row above max) or
+    // when the table hasn't loaded yet.
+    let next_level_gains: Option<(i32, i32, i32)> = profile_owned
+        .as_ref()
+        .and_then(|(lvl, ..)| {
+            let next = lvl + 1;
+            world
+                .resource::<mud_world::LevelTable>()
+                .gains_for(next)
+                .map(|(hp, st)| (next, hp, st))
+        });
     let data = ScoreData {
         name: &name,
         hp,
@@ -4453,6 +4466,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         title: title_owned.as_deref(),
         wimpy: wimpy_pct,
         level_title: level_title_owned.as_deref(),
+        next_level_gains,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

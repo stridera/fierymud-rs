@@ -481,6 +481,19 @@ impl LevelTable {
             .and_then(|r| r.name.as_deref())
     }
 
+    /// Per-level HP / Stamina gains for `level`. Returns `None`
+    /// when the level isn't in the table (above max). Score uses
+    /// this for the "Next level: +N HP, +M Stamina" preview so
+    /// players can plan around upcoming level-ups without running
+    /// `level` separately.
+    #[must_use]
+    pub fn gains_for(&self, level: i32) -> Option<(i32, i32)> {
+        self.rows
+            .iter()
+            .find(|r| r.level == level)
+            .map(|r| (r.hp_gain, r.stamina_gain))
+    }
+
     /// Snapshot of the underlying rows. Used by callers that need
     /// to mutate the world while inspecting level data without
     /// holding a `Res<LevelTable>` borrow.

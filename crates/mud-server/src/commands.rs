@@ -2695,6 +2695,7 @@ mod tests {
             // Mortal-level fixture has no rank title — assertions
             // for the staff path are local to specific tests.
             level_title: None,
+            next_level_gains: Some((26, 18, 9)),
         }
     }
 
@@ -2745,6 +2746,11 @@ mod tests {
         assert!(
             out.contains("Wimpy:  flee at HP < 25%"),
             "wimpy line: {out}",
+        );
+        // Next-level gains preview (level 25 -> 26: +18 hp, +9 st).
+        assert!(
+            out.contains("Next level (#26): +18 HP, +9 Stamina"),
+            "next-level line: {out}",
         );
     }
 
@@ -4384,6 +4390,13 @@ pub(crate) struct ScoreData<'a> {
     /// "Level 105 Implementer Male Human (Wizard)" reads as a
     /// proper character-sheet header. Mortals see no change.
     level_title: Option<&'a str>,
+    /// `(next_level_number, hp_gain, stamina_gain)` for the row
+    /// at `level + 1`. None for max-level characters and for
+    /// brand-new boots before `LevelTable` is populated. Score
+    /// uses this for a "Next level: +N HP, +M Stamina" preview so
+    /// the planning info lives next to the experience progress
+    /// rather than only on the dedicated `level` command.
+    next_level_gains: Option<(i32, i32, i32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -4512,6 +4525,11 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             p.next_level_xp,
             progress_bar(p.percent),
             p.percent,
+        ));
+    }
+    if let Some((next, hp_gain, st_gain)) = d.next_level_gains {
+        out.push_str(&format!(
+            "  Next level (#{next}): +{hp_gain} HP, +{st_gain} Stamina\r\n",
         ));
     }
     if let Some((name, zone, id)) = d.location {
@@ -4827,6 +4845,11 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
             p.next_level_xp,
             progress_bar(p.percent),
             p.percent,
+        ));
+    }
+    if let Some((next, hp_gain, st_gain)) = d.next_level_gains {
+        row(format!(
+            "Next #{next}:  +{hp_gain} HP, +{st_gain} Stamina",
         ));
     }
     if let Some((name, zone, id)) = d.location {
