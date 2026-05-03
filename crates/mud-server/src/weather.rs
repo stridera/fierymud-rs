@@ -35,9 +35,18 @@ pub fn weather_tick(world: &mut World) {
     }
     // Snapshot zone_id → Climate. WeatherCatalog stores by zone_id;
     // climate lives on a Zone entity's ZoneClimate component.
+    // Climate::None marks metaphysical / interior-only zones (the
+    // Void, plane spaces) where weather doesn't make sense. Skip
+    // them at collection time so they never get an entry in
+    // `WeatherCatalog.by_zone` — that lets the look-room weather
+    // hint and `look sky` cleanly read "no weather" via a missing
+    // map key, with no per-call zone lookup.
     let climates: Vec<(i32, Climate)> = {
         let mut q = world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
-        q.iter(world).map(|(wk, c)| (wk.zone, c.0)).collect()
+        q.iter(world)
+            .filter(|(_, c)| !matches!(c.0, Climate::None))
+            .map(|(wk, c)| (wk.zone, c.0))
+            .collect()
     };
     // Read the current season once — drift_temp uses it to shift the
     // climate's allowed band. Without this, a Temperate zone in deep
@@ -490,12 +499,34 @@ pub fn load_snapshot(world: &mut World) {
                 return;
             }
         };
+    // Snapshot the set of Climate::None zone ids before borrowing
+    // the catalog mutably — those should never carry weather, so a
+    // legacy on-disk entry for zone 0 (the Void) needs to drop on
+    // restore rather than re-poison the runtime.
+    let none_zones: std::collections::HashSet<i32> = {
+        let mut q = world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
+        q.iter(world)
+            .filter(|(_, c)| matches!(c.0, Climate::None))
+            .map(|(wk, _)| wk.zone)
+            .collect()
+    };
     let mut catalog = world.resource_mut::<WeatherCatalog>();
-    let restored = snapshot.len();
+    let mut restored = 0usize;
+    let mut skipped = 0usize;
     for (zone_id, state) in snapshot {
+        if none_zones.contains(&zone_id) {
+            skipped += 1;
+            continue;
+        }
         catalog.by_zone.insert(zone_id, state);
+        restored += 1;
     }
-    tracing::info!(zones = restored, path = %WEATHER_SNAPSHOT_PATH, "weather snapshot loaded");
+    tracing::info!(
+        zones = restored,
+        skipped_none_climate = skipped,
+        path = %WEATHER_SNAPSHOT_PATH,
+        "weather snapshot loaded",
+    );
 }
 
 /// Persist the current `WeatherCatalog` to `state/weather.json`.
