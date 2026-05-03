@@ -6748,6 +6748,10 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
         let code = format!("zone_{}_cleared", key.zone);
         grant_achievement(world, player, &code);
     }
+    // Quest objective: VISIT_ROOM. Same group-walk path as kill,
+    // gated by the SOLO/PARTY scope so a scout in a group brings
+    // the rest of the party along on shared visit objectives.
+    bump_visit_quest_progress(world, player, key.zone, key.id);
 }
 
 /// Apply each environmental effect bound to `room` to `player`,
@@ -6816,21 +6820,60 @@ fn apply_room_environment(world: &mut World, player: Entity, room: Entity) {
     }
 }
 
+/// What kind of objective progress to advance. The DB query is
+/// distinct per kind; everything else (group walk, dedup, async
+/// dispatch, progress message) is shared in `bump_quest_progress`.
+#[derive(Debug, Clone, Copy)]
+enum QuestObjectiveBump {
+    KillMob { zone: i32, id: i32 },
+    VisitRoom { zone: i32, id: i32 },
+}
+
 /// Advance any active `KILL_MOB` objectives whose target matches
-/// `victim`'s prototype `(zone, id)`. Walks the killer's group
-/// (via `group_root` + `group_members`) and dispatches one async
-/// task per online member: SOLO-scoped objectives only count for
-/// the killer, PARTY-scoped objectives count for every group
-/// member who shares the quest. Each task does the SQL read,
-/// upserts, and sends progress lines back through that member's
-/// own outbound channel.
+/// `victim`'s prototype `(zone, id)`. Thin wrapper for the
+/// generic group-walk path.
 pub(crate) fn bump_kill_quest_progress(
     world: &mut World,
     killer: Entity,
     victim_proto_zone: i32,
     victim_proto_id: i32,
 ) {
-    if world.get::<Player>(killer).is_none() {
+    bump_quest_progress(
+        world,
+        killer,
+        QuestObjectiveBump::KillMob {
+            zone: victim_proto_zone,
+            id: victim_proto_id,
+        },
+    );
+}
+
+/// Advance any active `VISIT_ROOM` objectives whose target matches
+/// the room the player just entered. Called from `cmd_move`'s
+/// arrival path (and login spawn) for every player mover.
+pub(crate) fn bump_visit_quest_progress(
+    world: &mut World,
+    visitor: Entity,
+    room_zone: i32,
+    room_id: i32,
+) {
+    bump_quest_progress(
+        world,
+        visitor,
+        QuestObjectiveBump::VisitRoom {
+            zone: room_zone,
+            id: room_id,
+        },
+    );
+}
+
+/// Group-walk + async dispatch shared by every objective-bump
+/// path. Walks the actor's follower chain to find every online
+/// party member, then dispatches one task per member that does
+/// the kind-specific DB read + upsert and sends a progress line
+/// through that member's own outbound channel.
+fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBump) {
+    if world.get::<Player>(actor).is_none() {
         return;
     }
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
@@ -6839,7 +6882,7 @@ pub(crate) fn bump_kill_quest_progress(
     // Snapshot the group: leader is the chain root, members are
     // every player in the follow tree. Filter to those with
     // Account + Connection so we have something to send back to.
-    let root = group_root(world, killer);
+    let root = group_root(world, actor);
     let members = group_members(world, root);
     let recipients: Vec<(Entity, String, mud_net::Outbound)> = members
         .iter()
@@ -6850,21 +6893,27 @@ pub(crate) fn bump_kill_quest_progress(
         })
         .collect();
     for (entity, cid, out) in recipients {
-        let is_killer = entity == killer;
+        let is_actor = entity == actor;
         let pool = pool.clone();
         tokio::spawn(async move {
-            let rows = match mud_db::quest_objectives::list_kill_mob_progress(
-                &pool,
-                &cid,
-                victim_proto_zone,
-                victim_proto_id,
-                is_killer,
-            )
-            .await
-            {
+            let rows_res = match kind {
+                QuestObjectiveBump::KillMob { zone, id } => {
+                    mud_db::quest_objectives::list_kill_mob_progress(
+                        &pool, &cid, zone, id, is_actor,
+                    )
+                    .await
+                }
+                QuestObjectiveBump::VisitRoom { zone, id } => {
+                    mud_db::quest_objectives::list_visit_room_progress(
+                        &pool, &cid, zone, id, is_actor,
+                    )
+                    .await
+                }
+            };
+            let rows = match rows_res {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(error = %e, "kill-objective lookup failed");
+                    tracing::warn!(error = %e, ?kind, "objective lookup failed");
                     return;
                 }
             };
@@ -6883,10 +6932,10 @@ pub(crate) fn bump_kill_quest_progress(
                 )
                 .await
                 {
-                    tracing::warn!(error = %e, "kill-objective upsert failed");
+                    tracing::warn!(error = %e, "objective upsert failed");
                     continue;
                 }
-                let prefix = if is_killer {
+                let prefix = if is_actor {
                     String::new()
                 } else {
                     "(party) ".to_string()
