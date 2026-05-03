@@ -3663,12 +3663,19 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
     }
 
     // BFS: queue carries (room, first_direction_taken, distance).
+    // Hidden exits the player hasn't found via `search` are
+    // skipped on both frontier edges — otherwise track would
+    // direct the player toward a passage they can't see / walk,
+    // which would expose the secret indirectly.
     let mut visited: HashSet<Entity> = HashSet::new();
     visited.insert(start);
     let mut queue: VecDeque<(Entity, Direction, i32)> = VecDeque::new();
     if let Some(exits) = world.get::<Exits>(start) {
         for (dir, ed) in &exits.0 {
             if ed.state != ExitState::Open {
+                continue;
+            }
+            if exit_is_hidden_to(world, player, start, *dir, ed) {
                 continue;
             }
             let Some(to) = ed.to else { continue };
@@ -3696,8 +3703,11 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
             continue;
         }
         if let Some(exits) = world.get::<Exits>(room) {
-            for ed in exits.0.values() {
+            for (dir, ed) in &exits.0 {
                 if ed.state != ExitState::Open {
+                    continue;
+                }
+                if exit_is_hidden_to(world, player, room, *dir, ed) {
                     continue;
                 }
                 let Some(to) = ed.to else { continue };
