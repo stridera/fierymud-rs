@@ -6956,6 +6956,24 @@ pub(crate) fn invoke_ability_with(
         .unwrap_or_default();
     let allows_inventory_target = valid_targets.iter().any(|t| t == "OBJECT_INV");
     let prefers_rider_default = valid_targets.iter().any(|t| t == "RIDER");
+    // Hostile abilities (any ENEMY_* / AREA_FOES targeting) refuse
+    // in PeacefulRoom — same contract cmd_attack and engage_combat
+    // honor. Beneficial casts (FRIEND_PC / SELF / etc.) still work
+    // so a healer can patch up a party in a sanctuary.
+    let is_hostile_ability = valid_targets
+        .iter()
+        .any(|t| t.starts_with("ENEMY") || t == "AREA_FOES" || t == "AREA_HOSTILE");
+    if is_hostile_ability
+        && let Some(located) = world.get::<Located>(player)
+        && world.get::<mud_world::PeacefulRoom>(located.0).is_some()
+    {
+        send_to(
+            world,
+            player,
+            "A peaceful aura forbids hostile magic here.\r\n",
+        );
+        return;
+    }
     let target_entity = if let Some(word) = target_word
         && !word.eq_ignore_ascii_case("me")
         && !word.eq_ignore_ascii_case("self")
