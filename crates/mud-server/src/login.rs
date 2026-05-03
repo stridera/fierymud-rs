@@ -28,6 +28,14 @@ const CONFIRM_PASSWORD_PROMPT: &str = "Re-enter password to confirm: ";
 /// enforce a length, but anything shorter than this is a
 /// hard pass for a new account regardless.
 const MIN_NEW_PASSWORD_LEN: usize = 6;
+const NEW_CHARACTER_NAME_PROMPT: &str = "Character name: ";
+/// Inclusive length window for a new character name. Lower bound
+/// keeps single-letter ambiguity out of `who`-style listings;
+/// upper bound matches the existing `Characters.name` column
+/// width assumption (column itself is wider but UX past 20 chars
+/// gets unwieldy in fixed-width prompts).
+const MIN_CHARACTER_NAME_LEN: usize = 3;
+const MAX_CHARACTER_NAME_LEN: usize = 20;
 
 /// Default starting room when a character has no current/recall location set.
 /// (0, 0) is "The Void" — fitting.
@@ -69,6 +77,17 @@ pub enum Stage {
         identifier: String,
         is_email: bool,
         first_attempt: String,
+    },
+    /// Email-path creation flow: we've got the email + a confirmed
+    /// password; ask the user what their character should be named.
+    /// Validates length / charset and checks the database for an
+    /// existing character with the same name. Plaintext password
+    /// rides along until the eventual `Users` + `Characters`
+    /// INSERT slice. Character-name-path skips this stage entirely
+    /// since the identifier IS the character name.
+    AwaitingCharacterName {
+        email: String,
+        password_plaintext: String,
     },
     CharSelect { user: User, characters: Vec<CharacterRow> },
 }
@@ -341,24 +360,116 @@ impl ConnRouter {
                     let _ = ctx.outbound.send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
                     return;
                 }
-                // Password confirmed. Account/character row INSERTs
-                // and the spawn-into-world steps land in follow-up
-                // slices; this slice ends the doorway with an
-                // explicit "next steps coming" line so the contract
-                // is visible without wiring the body.
-                let kind_label = if is_email { "account" } else { "character" };
-                let _ = ctx.outbound.send(
-                    format!(
-                        "Password confirmed. Creating a new {kind_label} for \
-                         `{identifier}` still needs character details (name, \
-                         race, class, gender, stat roll) which land in a \
-                         follow-up slice. For now please enter an existing \
-                         email or character name.\r\n"
-                    )
-                    .into_bytes(),
-                );
-                ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                // Password confirmed. Email path needs to collect a
+                // character name next; character-name path already
+                // has the name (= the identifier they typed).
+                if is_email {
+                    let _ = ctx.outbound.send(
+                        format!(
+                            "Password set for `{identifier}`. Now choose your \
+                             character's name ({MIN_CHARACTER_NAME_LEN}–{MAX_CHARACTER_NAME_LEN} \
+                             letters).\r\n"
+                        )
+                        .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingCharacterName {
+                        email: identifier,
+                        password_plaintext: first_attempt,
+                    };
+                    let _ = ctx
+                        .outbound
+                        .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                } else {
+                    // Character-name path: identifier IS the
+                    // character name. Race / class / gender / stat
+                    // roll and the DB INSERTs land in follow-up
+                    // slices; terminate here with an explicit
+                    // "next steps coming" line.
+                    let _ = ctx.outbound.send(
+                        format!(
+                            "Password set for `{identifier}`. Race, class, \
+                             gender, and stat roll land in a follow-up slice. \
+                             For now please enter an existing email or \
+                             character name.\r\n"
+                        )
+                        .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                }
+            }
+
+            Stage::AwaitingCharacterName {
+                email,
+                password_plaintext,
+            } => {
+                let name = trimmed;
+                if let Err(reason) = validate_new_character_name(name) {
+                    let _ = ctx.outbound.send(format!("{reason}\r\n").into_bytes());
+                    ctx.stage = Stage::AwaitingCharacterName {
+                        email,
+                        password_plaintext,
+                    };
+                    let _ = ctx
+                        .outbound
+                        .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                    return;
+                }
+                match characters::find_by_name(pool, name).await {
+                    Ok(Some(_)) => {
+                        let _ = ctx.outbound.send(
+                            format!(
+                                "Sorry, the name `{name}` is already taken. \
+                                 Pick another.\r\n"
+                            )
+                            .into_bytes(),
+                        );
+                        ctx.stage = Stage::AwaitingCharacterName {
+                            email,
+                            password_plaintext,
+                        };
+                        let _ = ctx
+                            .outbound
+                            .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                    }
+                    Ok(None) => {
+                        // Name is available. Race / class / gender /
+                        // stat roll and the DB INSERTs land in
+                        // follow-up slices.
+                        let _ = ctx.outbound.send(
+                            format!(
+                                "Name `{name}` reserved for your new character. \
+                                 Race, class, gender, and stat roll land in a \
+                                 follow-up slice. For now please enter an \
+                                 existing email or character name.\r\n"
+                            )
+                            .into_bytes(),
+                        );
+                        // Drop the password plaintext explicitly so
+                        // the move into AwaitingIdentifier doesn't
+                        // leave it on the heap any longer than the
+                        // surrounding stage value.
+                        drop(password_plaintext);
+                        let _ = email;
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    }
+                    Err(e) => {
+                        warn!(conn_id, error = %e, "character-name uniqueness check failed");
+                        let _ = ctx.outbound.send(
+                            "Server error checking the name. Please try again.\r\n"
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        ctx.stage = Stage::AwaitingCharacterName {
+                            email,
+                            password_plaintext,
+                        };
+                        let _ = ctx
+                            .outbound
+                            .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                    }
+                }
             }
 
             Stage::AwaitingPassword { user, preselected } => {
@@ -1254,6 +1365,27 @@ pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[Charact
         }
     }
     spawned.len()
+}
+
+/// Validate a freshly-typed character name against the runtime's
+/// length / charset rules. Returns `Ok(())` on success, or an
+/// `Err(message)` ready to ship straight to the player. Doesn't
+/// hit the DB — uniqueness is checked separately so the cheap
+/// rejection path doesn't waste a query.
+fn validate_new_character_name(name: &str) -> Result<(), String> {
+    let len = name.chars().count();
+    if !(MIN_CHARACTER_NAME_LEN..=MAX_CHARACTER_NAME_LEN).contains(&len) {
+        return Err(format!(
+            "Character name must be {MIN_CHARACTER_NAME_LEN}–{MAX_CHARACTER_NAME_LEN} \
+             characters."
+        ));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(String::from(
+            "Character name may only contain letters (A-Z, a-z).",
+        ));
+    }
+    Ok(())
 }
 
 /// Shared prompt for the `ConfirmCreate` doorway. `is_email`
