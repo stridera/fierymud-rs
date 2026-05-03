@@ -234,6 +234,8 @@ mod boards;
 mod channels;
 #[path = "commands/clan_chat.rs"]
 mod clan_chat;
+#[path = "commands/combat.rs"]
+mod combat_commands;
 #[path = "commands/enter.rs"]
 mod enter;
 #[path = "commands/feedback.rs"]
@@ -2047,332 +2049,6 @@ const COMMANDS: &[Command] = &[
     // `ctell` / `clan` migrated to commands/clan_chat.rs.
     // ----- Combat -----
     Command {
-        names: &["attack", "kill", "k", "hit", "murder"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "attack <target>",
-            summary: "Engage a target in melee combat.",
-            long: "Match is by case-insensitive substring on visible names. \
-                   Targets with combat stats will fight back. Combat \
-                   resolves once per second on the world tick.",
-        },
-        run: cmd_attack,
-    },
-    Command {
-        names: &["consider", "con"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "consider <target>",
-            summary: "Size up a potential opponent.",
-            long: "Compares the target's max HP and damage roll to yours \
-                   and reports a rough difficulty band. Doesn't engage \
-                   the target — just a flavor read.",
-        },
-        run: cmd_consider,
-    },
-    Command {
-        names: &["flee"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "flee",
-            summary: "Run away from combat through a random open exit.",
-            long: "Picks an open exit at random and moves you through it. \
-                   You stop fighting; attackers stop on the next combat \
-                   tick (they auto-disengage when their target leaves the \
-                   room).",
-        },
-        run: cmd_flee,
-    },
-    Command {
-        names: &["kick"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "kick",
-            summary: "Make an immediate kick attack on your current target.",
-            long: "Extra attack outside the normal combat-tick rhythm. \
-                   Damage = dmg_roll + 4. You must already be fighting \
-                   someone.",
-        },
-        run: cmd_kick,
-    },
-    Command {
-        names: &["berserk"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "berserk",
-            summary: "Self-buff: rage state for 60s.",
-            long: "Costs 8 stamina, spawns a `berserk` EffectInstance \
-                   on yourself for 60s. Refused if already berserk. \
-                   Combat damage scaling is a follow-up — for now \
-                   this is the visible buff state.",
-        },
-        run: cmd_berserk,
-    },
-    Command {
-        names: &["tripup", "trip"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "tripup [<target>]",
-            summary: "Trip target into Resting posture (lighter than stomp).",
-            long: "Costs 5 stamina, deals 1/4 your dmg_roll, sets the \
-                   target to Resting. Like stomp but cheaper and \
-                   leaves them slightly less prone.",
-        },
-        run: cmd_tripup,
-    },
-    Command {
-        names: &["sweep"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "sweep",
-            summary: "Sweeping kick — knock every standing mob in room prone.",
-            long: "Costs 12 stamina. Deals 1/4 dmg_roll to every \
-                   Standing Mob in the room and sets each to Sitting. \
-                   Players never targeted.",
-        },
-        run: cmd_sweep,
-    },
-    Command {
-        names: &["roundhouse"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "roundhouse",
-            summary: "Powerful kick — 1.5x dmg_roll on your current target.",
-            long: "Costs 7 stamina. Heavier kick than the basic `kick` \
-                   skill (which adds +4); pure dmg_roll multiplier. \
-                   Requires you to be fighting someone.",
-        },
-        run: cmd_roundhouse,
-    },
-    Command {
-        names: &["stomp"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "stomp [<target>]",
-            summary: "Knock the target prone (Sitting posture).",
-            long: "Costs 6 stamina, deals half your dmg_roll, sets the \
-                   target's posture to Sitting. Default target is your \
-                   current Fighting target. Refused on already-prone \
-                   targets.",
-        },
-        run: cmd_stomp,
-    },
-    Command {
-        names: &["roar", "howl"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "roar",
-            summary: "Intimidate every mob in the room with a fear effect.",
-            long: "Costs 8 stamina. Spawns a `fear` EffectInstance on \
-                   each mob currently in your room (skipping any \
-                   already feared) for 20s. Doesn't damage anyone, \
-                   doesn't engage. Players are not targeted.",
-        },
-        run: cmd_roar,
-    },
-    Command {
-        names: &["rend"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "rend [<target>]",
-            summary: "Tearing attack — damage plus bleed effect.",
-            long: "Costs 7 stamina, deals dmg_roll damage, applies a \
-                   `bleed` EffectInstance for 30s. Default target is \
-                   the current Fighting target. Refused if the target \
-                   is already bleeding.",
-        },
-        run: cmd_rend,
-    },
-    Command {
-        names: &["gouge"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "gouge [<target>]",
-            summary: "Eye gouge — damage plus a temporary blind effect.",
-            long: "Costs 7 stamina, deals dmg_roll damage, applies a \
-                   `blind` EffectInstance for 30s. Default target is \
-                   your current Fighting target. Refused if the target \
-                   is already blinded.",
-        },
-        run: cmd_gouge,
-    },
-    Command {
-        names: &["springleap"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "springleap <target>",
-            summary: "Out-of-combat leaping kick — 1.5x damage opener.",
-            long: "Deals 1.5x your dmg_roll on the opening swing and \
-                   engages the target. Refused if you're already \
-                   fighting or if the target is already in combat.",
-        },
-        run: cmd_springleap,
-    },
-    Command {
-        names: &["throatcut"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "throatcut <target>",
-            summary: "Out-of-combat assassination — 2.5x damage opener.",
-            long: "Like backstab but heavier: 2.5x your dmg_roll on \
-                   the opening swing. Costs 8 stamina. Same engagement \
-                   rules — refused if you or target are already in \
-                   combat.",
-        },
-        run: cmd_throatcut,
-    },
-    Command {
-        names: &["backstab", "bs"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "backstab <target>",
-            summary: "Surprise opener for double damage; out-of-combat only.",
-            long: "Deals 2x your dmg_roll on the opening swing and \
-                   engages the target. Refused if you're already \
-                   fighting (the target sees you coming) or if your \
-                   target is already in combat with someone else.",
-        },
-        run: cmd_backstab,
-    },
-    Command {
-        names: &["hitall", "tantrum"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "hitall",
-            summary: "One swing at every hostile mob in your room.",
-            long: "Costs 10 stamina. Damages each Mob in the room \
-                   for half your dmg_roll. Mobs with no Health (test \
-                   dummy) are skipped. The first surviving mob \
-                   becomes your Fighting target if you weren't \
-                   already fighting. Players are never targeted.",
-        },
-        run: cmd_hitall,
-    },
-    Command {
-        names: &["disarm"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "disarm [<target>]",
-            summary: "Knock your opponent's weapon to the ground.",
-            long: "Removes the target's wielded item; the weapon drops \
-                   to the floor where any combatant can pick it up. \
-                   Default target is your current Fighting target. \
-                   Costs 5 stamina. Refused if the target isn't \
-                   wielding anything.",
-        },
-        run: cmd_disarm,
-    },
-    Command {
-        names: &["rescue"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "rescue <player>",
-            summary: "Take an enemy's aggression onto yourself.",
-            long: "Find <player> in your room. Their attacker now \
-                   targets you instead and you target them. The ally \
-                   is freed from combat. Costs 6 stamina. Refused if \
-                   you're already fighting and refused if your ally \
-                   isn't being attacked.",
-        },
-        run: cmd_rescue,
-    },
-    Command {
-        names: &["guard"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "guard <player|off>",
-            summary: "Stand bodyguard — intercept incoming swings on a target.",
-            long: "Sets a `Guarding` link from you onto the named \
-                   player; while you're in the same room, attackers \
-                   targeting them swing at you instead. `guard off` \
-                   clears the link. `guard` with no arg reports \
-                   the current target.",
-        },
-        run: cmd_guard,
-    },
-    Command {
-        names: &["assist"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "assist <player>",
-            summary: "Engage your ally's current target.",
-            long: "Looks up <player> in your current room, finds whom \
-                   they're fighting, and engages that target — same \
-                   stamina cost and rules as `attack`. Refused if \
-                   they're not fighting, if their target is gone, or \
-                   if you're already fighting someone else.",
-        },
-        run: cmd_assist,
-    },
-    Command {
-        names: &["layhands", "lay"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "layhands [<target>]",
-            summary: "Holy heal — bigger than bandage, works in combat.",
-            long: "Heals 30 HP at a cost of 12 stamina. Works while \
-                   fighting (unlike `bandage`). Refused on full-HP \
-                   targets. Default target is yourself.",
-        },
-        run: cmd_layhands,
-    },
-    Command {
-        names: &["retreat"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "retreat <direction>",
-            summary: "Flee combat in a specific direction.",
-            long: "Like `flee` but you choose where to go. Refused if \
-                   the direction has no exit, the door's closed, or \
-                   the target room is dangling.",
-        },
-        run: cmd_retreat,
-    },
-    Command {
         names: &["train"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2388,175 +2064,6 @@ const COMMANDS: &[Command] = &[
                    no points available. Persists across reconnect.",
         },
         run: cmd_train,
-    },
-    Command {
-        names: &["tame"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "tame <target>",
-            summary: "Befriend an animal mob into following you.",
-            long: "Drains 4 stamina and dispatches the TAME skill at \
-                   the named target. The schema's `charmed` status \
-                   effect spawns on the mob; the runtime also installs \
-                   `Follower(you)` so existing pet-handling treats it \
-                   as your follower. Mob charm persists until dismiss \
-                   or the mob dies — animal-control checks against \
-                   the will save aren't modeled yet, so v1 always \
-                   succeeds at the schema-formula amount.",
-        },
-        run: cmd_tame,
-    },
-    Command {
-        names: &["drag"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "drag",
-            summary: "Self-apply the DRAG speed penalty.",
-            long: "Drains 3 stamina and dispatches the DRAG skill via \
-                   the data path. The schema's `drag` effect doubles \
-                   movement stamina cost (speedPenalty 0.5). Legacy \
-                   `drag <body>` for hauling corpses isn't modeled — \
-                   we have no corpse mechanic — so v1 is a self-cast \
-                   that exercises the speed-penalty runtime.",
-        },
-        run: cmd_drag,
-    },
-    Command {
-        names: &["buck"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "buck <target>",
-            summary: "Throw a rider — dismount + knockdown.",
-            long: "Drains 5 stamina and dispatches the BUCK skill at \
-                   the named target. The schema's data path runs \
-                   `dismount` (forced=true) → clears Mounted/RiddenBy, \
-                   then `knockdown` (duration=1) → drops the target's \
-                   posture. v1 dispatches as a player skill so \
-                   characters with BUCK trained (Sorcerer/Druid/etc.) \
-                   can fire it; mob-AI usage waits for an autonomous \
-                   ability scheduler.",
-        },
-        run: cmd_buck,
-    },
-    Command {
-        names: &["breathe"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "breathe [<target>]",
-            summary: "Dragonborn breath weapon — race-typed.",
-            long: "Dispatches one of BREATHE_FIRE / BREATHE_FROST / \
-                   BREATHE_ACID / BREATHE_GAS / BREATHE_LIGHTNING \
-                   based on your race (only the DRAGONBORN_* races \
-                   carry one). Refuses for races with no breath \
-                   weapon. Drains 6 stamina; the actual damage / \
-                   target gating runs through the data path.",
-        },
-        run: cmd_breathe,
-    },
-    Command {
-        names: &["lure"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "lure <target>",
-            summary: "Bait a mob into engaging you with a stinging hit.",
-            long: "Drains 4 stamina and dispatches the LURE skill at \
-                   the named target. Effect is a level-scaling \
-                   physical-damage application; combat starts via the \
-                   normal damage→engage path. Same arg-resolution as \
-                   `backstab`.",
-        },
-        run: cmd_lure,
-    },
-    Command {
-        names: &["corner"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "corner <target>",
-            summary: "Pin a mob with a hard hit to keep them in melee.",
-            long: "Drains 4 stamina and dispatches the CORNER skill at \
-                   the named target. Effect is a level-scaling \
-                   physical-damage application like LURE; \
-                   pin-in-place mechanics aren't modeled in the schema, \
-                   so v1 is the damage hit and the engage.",
-        },
-        run: cmd_corner,
-    },
-    Command {
-        names: &["sneak"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "sneak",
-            summary: "Move silently — stealth that survives footsteps.",
-            long: "Drains 3 stamina and dispatches the SNEAK skill \
-                   via the data path. Spawns a `sneak` status effect \
-                   and installs the Stealth marker (same gate as \
-                   `hide`). Movement-stealth-break logic isn't wired \
-                   yet, so sneak is functionally identical to hide \
-                   until that lands.",
-        },
-        run: cmd_sneak,
-    },
-    Command {
-        names: &["conceal"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "conceal",
-            summary: "Magical concealment — improved hiding.",
-            long: "Drains 4 stamina and dispatches the CONCEAL skill \
-                   via the data path. Spawns a `hidden` status effect \
-                   and installs the Stealth marker. Difference vs. \
-                   `hide` is in the schema (different proficiency \
-                   curve, longer duration), not in the runtime path.",
-        },
-        run: cmd_conceal,
-    },
-    Command {
-        names: &["firstaid"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "firstaid [<target>]",
-            summary: "Quick self/ally heal — wisdom-scaling.",
-            long: "Drains 4 stamina and dispatches the FIRST_AID \
-                   skill via the data path. Heal amount comes from \
-                   the schema formula `skill / 4` scaled by wisdom. \
-                   Defaults to self when no target given. The shim \
-                   gates `Fighting` since first aid isn't an in-combat \
-                   action.",
-        },
-        run: cmd_firstaid,
-    },
-    Command {
-        names: &["bandage"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "bandage [<target>]",
-            summary: "Apply first aid for a small heal (out of combat).",
-            long: "Heals 10 HP at a cost of 4 stamina. With no arg or \
-                   `me`/`self`, bandages yourself. Otherwise tries to \
-                   find the target in your room. Refused while fighting \
-                   and refused on full-HP targets.",
-        },
-        run: cmd_bandage,
     },
     Command {
         names: &["stand"],
@@ -2637,49 +2144,6 @@ const COMMANDS: &[Command] = &[
                    room and stands them up; everyone in the room sees it.",
         },
         run: cmd_wake,
-    },
-    Command {
-        names: &["disengage"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "disengage",
-            summary: "Stop fighting your current target.",
-            long: "Removes your Fighting state — you stop swinging. \
-                   Opponents may keep attacking until they auto-disengage \
-                   or you leave the room.",
-        },
-        run: cmd_disengage,
-    },
-    Command {
-        names: &["doorbash"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "doorbash <direction>",
-            summary: "Force-open a closed or locked door.",
-            long: "Costs 10 stamina. Flips closed/locked exits to \
-                   Open on both sides — useful when you don't have \
-                   the key. Refused on already-open exits and when \
-                   no exit exists in the named direction.",
-        },
-        run: cmd_doorbash,
-    },
-    Command {
-        names: &["bash", "bodyslam", "maul"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "bash <target>",
-            summary: "Slam a target, knocking them off their feet.",
-            long: "Deals dmg_roll+3 damage and forces the target into a \
-                   sitting posture. Targets without combat stats simply \
-                   take the damage.",
-        },
-        run: cmd_bash,
     },
     Command {
         names: &["follow", "shadow"],
@@ -4375,6 +3839,7 @@ mod tests {
     /// each `inventory::submit!` block — a regression here means
     /// migrated commands would silently disappear.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn inventory_distributed_commands_are_registered() {
         let names: Vec<&'static str> = super::all_commands()
             .flat_map(|c| c.names.iter().copied())
@@ -4497,6 +3962,24 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "admin-inspect `{name}` missing"
+            );
+        }
+        // combat.rs
+        for name in [
+            "attack", "kill", "k", "hit", "murder",
+            "consider", "con", "flee", "kick", "berserk",
+            "tripup", "trip", "sweep", "roundhouse", "stomp",
+            "roar", "howl", "rend", "gouge", "springleap",
+            "throatcut", "backstab", "bs", "hitall", "tantrum",
+            "disarm", "rescue", "guard", "assist",
+            "layhands", "lay", "retreat", "tame", "drag",
+            "buck", "breathe", "lure", "corner", "sneak",
+            "conceal", "firstaid", "bandage", "disengage",
+            "doorbash", "bash", "bodyslam", "maul",
+        ] {
+            assert!(
+                names.contains(&name),
+                "combat `{name}` missing"
             );
         }
     }
@@ -8055,7 +7538,7 @@ fn practice_one(world: &mut World, player: Entity, name: &str) {
 /// values aren't clamped.
 const TRAIN_STAT_CAP: i32 = 18;
 
-fn cmd_train(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_train(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim().to_ascii_lowercase();
     // Stat-up requires a trainer mob; reading the stat list does
     // not (so a no-arg `train` works as a self-check anywhere).
@@ -9024,7 +8507,7 @@ fn cmd_sleep(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Sleeping);
 }
 
-fn cmd_wake(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_wake(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         if world.get::<Posture>(player).map(|p| p.0) == Some(PostureKind::Sleeping) {
@@ -9564,7 +9047,7 @@ fn cmd_holylight(world: &mut World, player: Entity, _args: &str) {
 // `showids` exposes (zone, id) coordinates in command output for
 // builders/admins. The flag is set; renderers that want to surface
 // IDs check it.
-fn cmd_showids(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_showids(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -9891,7 +9374,7 @@ fn flip_door_both_sides(world: &mut World, room: Entity, dir: Direction, new_sta
 
 /// `doorbash <direction>`: force-open a closed/locked exit via
 /// stamina. Same two-sided sync as `open`/`close`.
-fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "doorbash") {
         return;
     }
@@ -9941,7 +9424,7 @@ fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
 /// locked, lacks a keyhole, the player hasn't trained `PICK_LOCK`,
 /// or they're out of stamina. Costs 5 stamina either way; success
 /// flips Locked → Closed.
-fn cmd_pick(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     const STAMINA_COST: i32 = 5;
     let arg = args.trim();
     let Some(dir) = parse_direction(arg) else {
@@ -10102,7 +9585,7 @@ fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
 
 /// `open <direction>`: flip a closed exit to Open. Refused on
 /// locked exits and on exits that don't exist.
-fn cmd_open(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_open(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Some(dir) = parse_direction(arg) else {
         send_to(world, player, "Open which way?\r\n");
@@ -12558,7 +12041,7 @@ fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
 /// mechanic — neither exists in this runtime today (casts resolve
 /// immediately, no queue), so the command's only job is to give a
 /// clearer-than-default response to `FieryMUD` veterans typing it.
-fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
     send_to(
         world,
         player,
@@ -12566,7 +12049,7 @@ fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     let needle = args.trim().to_ascii_lowercase();
     let cancellable: Vec<(Entity, String, i32)> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
@@ -13966,7 +13449,7 @@ fn cmd_level(world: &mut World, player: Entity, _args: &str) {
 
 /// `slots`: display the player's per-circle slot count along with
 /// how many are currently memorized. Format: `Circle N: used/max`.
-fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
     use mud_world::{MemorizedSpells, SpellSlotData};
     let Some(profile) = world.get::<Profile>(player) else {
         send_to(world, player, "You have no profile.\r\n");
@@ -14014,7 +13497,7 @@ fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
 /// `KnownAbilities` at proficiency=1, gated on the spell being on
 /// the player's class list. Persisted to `CharacterAbilities` on
 /// disconnect.
-fn cmd_study(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
     use mud_world::SpellSlotData;
     let Some(profile) = world.get::<Profile>(player).cloned() else {
         send_to(world, player, "You have no profile.\r\n");
@@ -14104,7 +13587,7 @@ fn resolve_spell_for_class(
 }
 
 /// `memorize <spell>`: prepare a spell into one of your circle slots.
-fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
     use mud_world::{MemorizedSpells, SpellSlotData};
     let Some(profile) = world.get::<Profile>(player).cloned() else {
         send_to(world, player, "You have no profile.\r\n");
@@ -14176,7 +13659,7 @@ fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
 }
 
 /// `forget <spell>`: drop the first matching memorized spell.
-fn cmd_forget(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_forget(world: &mut World, player: Entity, args: &str) {
     use mud_world::MemorizedSpells;
     let Some(profile) = world.get::<Profile>(player).cloned() else {
         return;
@@ -14364,19 +13847,19 @@ fn cmd_songs(world: &mut World, player: Entity, args: &str) {
     cmd_abilities_kind(world, player, args, mud_db::abilities::AbilityKind::Song);
 }
 
-fn cmd_chants(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_chants(world: &mut World, player: Entity, args: &str) {
     cmd_abilities_kind(world, player, args, mud_db::abilities::AbilityKind::Chant);
 }
 
-fn cmd_cast(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_cast(world: &mut World, player: Entity, args: &str) {
     invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Spell, "cast");
 }
 
-fn cmd_chant(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_chant(world: &mut World, player: Entity, args: &str) {
     invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Chant, "chant");
 }
 
-fn cmd_perform(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_perform(world: &mut World, player: Entity, args: &str) {
     invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Song, "perform");
 }
 
@@ -14387,7 +13870,7 @@ fn cmd_perform(world: &mut World, player: Entity, args: &str) {
 /// Once Phase B effect-type consumers land, this dispatcher will be
 /// the entry point for any combat skill that's just data — gouge,
 /// stomp, berserk, etc. all migrate to plain Ability rows.
-fn cmd_skill(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_skill(world: &mut World, player: Entity, args: &str) {
     invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Skill, "use");
 }
 
@@ -18222,7 +17705,7 @@ fn require_alert_posture(world: &mut World, player: Entity, action: &str) -> boo
     }
 }
 
-fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
+pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     if !require_alert_posture(world, player, "attack") {
         return;
     }
@@ -18406,7 +17889,7 @@ fn auto_assist_followers_of(
     }
 }
 
-fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
+pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
     let target_word = target_word.trim();
     if target_word.is_empty() {
         send_to(world, player, "Consider whom?\r\n");
@@ -18553,7 +18036,7 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
 /// `dex_bonus` unmodeled, falls back to default `1d6`). Posture and
 /// stamina gates stay; target/effect/messaging via `invoke_ability`.
 /// Empty arg uses caster's current Fighting target.
-fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "kick") {
         return;
     }
@@ -18592,7 +18075,7 @@ fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
 /// `AbilityMessages` rows haven't been added for BERSERK yet, so
 /// the success emit falls back to a generic line; user should add
 /// `success_to_caster` + `success_to_room` rows in Muditor.
-fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "berserk") {
         return;
     }
@@ -18612,7 +18095,7 @@ fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
 /// `stomp [<target>]`: damage + knock target prone. Default target
 /// is your current Fighting target. Refused on already-prone
 /// targets.
-fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "stomp") {
         return;
     }
@@ -18694,7 +18177,7 @@ fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
 /// stamina gates stay in the shim; target/effect/messaging flow
 /// through `invoke_ability`. Empty arg falls back to the caster's
 /// current `Fighting` target so legacy `trip` (no arg) keeps working.
-fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "tripup") {
         return;
     }
@@ -18732,7 +18215,7 @@ fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
 
 /// `sweep`: room-wide kick — knock every standing mob in the room
 /// to Sitting and deal 1/4 `dmg_roll`. Players are filtered out.
-fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "sweep") {
         return;
     }
@@ -18784,7 +18267,7 @@ fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
 /// data path (damage formula `"skill"`; falls back to default `1d6`
 /// for untrained casters). Posture / stamina / fighting / dead-target
 /// gates stay; messaging via `invoke_ability`.
-fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "roundhouse") {
         return;
     }
@@ -18820,7 +18303,7 @@ fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
 /// a multi-target refactor of `invoke_ability` itself — the
 /// per-target description box repeats N times, which is noisy but
 /// correct; cleaner per-call output is a follow-up.
-fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "roar") {
         return;
     }
@@ -18876,7 +18359,7 @@ fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
 /// (`amount = "level + str_bonus + skill / 4"`) and a status
 /// mapping (`flag=bleed`, 30s, `on_hit`). Default target is the
 /// current Fighting target.
-fn cmd_rend(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "rend") {
         return;
     }
@@ -18910,7 +18393,7 @@ fn cmd_rend(world: &mut World, player: Entity, args: &str) {
 /// (`amount = "level + dex_bonus + skill / 4"`) and a status mapping
 /// (`flag=blind`, 30s, `on_hit`). Default target (no arg) is the
 /// current Fighting target — same as the old hardcoded behavior.
-fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "gouge") {
         return;
     }
@@ -18943,7 +18426,7 @@ fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
 /// when target is already engaged. After dispatching the data
 /// effect, manually engages Fighting on both sides so subsequent
 /// combat ticks fire (the data path doesn't auto-engage targets).
-fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "springleap") {
         return;
     }
@@ -19002,7 +18485,7 @@ fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
 /// `throatcut <target>` — Phase C migration: shimmed over the
 /// `THROATCUT` data path (damage formula `"skill"`). Out-of-combat
 /// opener like springleap; auto-engages on success.
-fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "throatcut") {
         return;
     }
@@ -19059,7 +18542,7 @@ fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
 /// piercing weapon equipped to pass the `weapon_type` restriction
 /// (logged in SUGGESTIONS — runtime currently passes any rule it
 /// can't evaluate). Out-of-combat opener with auto-engage.
-fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "backstab") {
         return;
     }
@@ -19114,7 +18597,7 @@ fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
 /// hit deals half the player's `dmg_roll`. Engages the first surviving
 /// mob if not already fighting. Mobs without Health (the training
 /// dummy) are skipped.
-fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "hitall") {
         return;
     }
@@ -19192,7 +18675,7 @@ fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
 /// `disarm [<target>]`: remove the target's wielded weapon. Default
 /// target is the current Fighting target; arg-form accepts any mob/
 /// player in the room.
-fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "disarm") {
         return;
     }
@@ -19277,7 +18760,7 @@ fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
 /// `guard <player|off>`: insert a `Guarding(target)` component on
 /// the player so combat-tick redirects swings against the target
 /// onto the guard. Bare `guard` reports the current target.
-fn cmd_guard(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_guard(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         if let Some(g) = world.get::<mud_world::Guarding>(player) {
@@ -19324,7 +18807,7 @@ fn cmd_guard(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "rescue") {
         return;
     }
@@ -19361,7 +18844,7 @@ fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
 /// Resolves the teammate's `Fighting` target, then forwards to
 /// `cmd_attack` with the target's name so we get all the standard
 /// engagement bookkeeping (stamina, posture gate, broadcast).
-fn cmd_assist(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_assist(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "Assist whom?\r\n");
@@ -19395,7 +18878,7 @@ fn cmd_assist(world: &mut World, player: Entity, args: &str) {
 /// `retreat <direction>`: directional flee. Same combat-disengage
 /// + arrival broadcast as `flee`, but you pick the exit. Refused
 ///   when the direction has no open exit.
-fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Some(dir) = parse_direction(arg) else {
         send_to(world, player, "Retreat which way?\r\n");
@@ -19455,7 +18938,7 @@ fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
 /// `AbilityEffect` heal effect with formula `level * 2`). This shim
 /// preserves the stamina cost and the legacy command names; the rest
 /// flows through `invoke_ability`.
-fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
     if !check_stamina(world, player, LAYHANDS_COST, "lay hands") {
         return;
     }
@@ -19488,7 +18971,7 @@ fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
 /// dispatches via the data path. Combat is NOT engaged on tame —
 /// the charmed effect's runtime installs `Follower(player)` on the
 /// mob so it joins the caster's group instead.
-fn cmd_tame(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_tame(world: &mut World, player: Entity, args: &str) {
     const TAME_COST: i32 = 4;
     if !require_alert_posture(world, player, "tame") {
         return;
@@ -19528,7 +19011,7 @@ fn cmd_tame(world: &mut World, player: Entity, args: &str) {
 /// (`speedPenalty: 0.5`) which the movement code already reads to
 /// double stamina cost. v1 is self-target — corpse-dragging needs
 /// a corpse system first.
-fn cmd_drag(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_drag(world: &mut World, player: Entity, _args: &str) {
     const DRAG_COST: i32 = 3;
     if !require_alert_posture(world, player, "drag") {
         return;
@@ -19549,7 +19032,7 @@ fn cmd_drag(world: &mut World, player: Entity, _args: &str) {
 /// `buck <target>`: dispatches BUCK. Same engage-skill shim shape
 /// as `lure`/`corner`. Combat is engaged on use because the
 /// knockdown sub-effect is hostile.
-fn cmd_buck(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_buck(world: &mut World, player: Entity, args: &str) {
     engage_skill_shim(world, player, args, "buck", 5);
 }
 
@@ -19557,7 +19040,7 @@ fn cmd_buck(world: &mut World, player: Entity, args: &str) {
 /// the player's race in a static DRAGONBORN_* → ability-name map;
 /// non-dragonborn races refuse with a flavor line. Drains 6 stamina
 /// and dispatches via the data path.
-fn cmd_breathe(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_breathe(world: &mut World, player: Entity, args: &str) {
     const BREATHE_COST: i32 = 6;
     let race = world
         .get::<Profile>(player)
@@ -19650,18 +19133,18 @@ fn engage_skill_shim(
     }
 }
 
-fn cmd_lure(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_lure(world: &mut World, player: Entity, args: &str) {
     engage_skill_shim(world, player, args, "lure", 4);
 }
 
-fn cmd_corner(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_corner(world: &mut World, player: Entity, args: &str) {
     engage_skill_shim(world, player, args, "corner", 4);
 }
 
 /// `sneak`: data-path SNEAK skill shim. Stealth marker installation
 /// happens in the status effect-type arm via the runtime wired in
 /// 404fa6c.
-fn cmd_sneak(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_sneak(world: &mut World, player: Entity, _args: &str) {
     const SNEAK_COST: i32 = 3;
     if !check_stamina(world, player, SNEAK_COST, "sneak") {
         return;
@@ -19678,7 +19161,7 @@ fn cmd_sneak(world: &mut World, player: Entity, _args: &str) {
 
 /// `conceal`: data-path CONCEAL skill shim. Same pattern as sneak;
 /// catalog separates the two only by proficiency curve / duration.
-fn cmd_conceal(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_conceal(world: &mut World, player: Entity, _args: &str) {
     const CONCEAL_COST: i32 = 4;
     if !check_stamina(world, player, CONCEAL_COST, "conceal") {
         return;
@@ -19697,7 +19180,7 @@ fn cmd_conceal(world: &mut World, player: Entity, _args: &str) {
 /// as `bandage` but dispatches `FIRST_AID` instead of `BANDAGE`; no
 /// hardcoded bleed-staunch (`first_aid` only carries the heal
 /// effect in the schema).
-fn cmd_firstaid(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_firstaid(world: &mut World, player: Entity, args: &str) {
     const FIRSTAID_COST: i32 = 4;
     if world.get::<Fighting>(player).is_some() {
         send_to(world, player, "You can't apply first aid in combat.\r\n");
@@ -19722,7 +19205,7 @@ fn cmd_firstaid(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
     if world.get::<Fighting>(player).is_some() {
         send_to(world, player, "You can't bandage in combat.\r\n");
         return;
@@ -19877,7 +19360,7 @@ fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
 }
 
 /// `decline`: discard the pending group invite without joining.
-fn cmd_decline(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_decline(world: &mut World, player: Entity, _args: &str) {
     let Some(invite) = world.get::<mud_world::GroupInvite>(player).copied() else {
         send_to(world, player, "You have no pending group invites.\r\n");
         return;
@@ -20316,7 +19799,7 @@ fn would_create_cycle(world: &mut World, start: Entity, end: Entity) -> bool {
     false
 }
 
-fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
+pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     if !require_alert_posture(world, player, "bash") {
         return;
     }
@@ -20385,7 +19868,7 @@ fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     }
 }
 
-fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Fighting>(player).is_none() {
         send_to(world, player, "You aren't fighting anyone.\r\n");
         return;
