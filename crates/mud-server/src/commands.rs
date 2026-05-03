@@ -3862,14 +3862,18 @@ pub(crate) struct ScoreData<'a> {
     hp: Option<Health>,
     stamina: Option<Stamina>,
     cs: Option<CombatStats>,
+    /// Core attributes (STR/DEX/CON/INT/WIS/CHA). Score sheet
+    /// renders the six values + their bonuses on a single line.
+    core_stats: Option<CoreStats>,
     posture: Option<Posture>,
     logged_in: Option<LoggedInAt>,
     fight_target: Option<&'a str>,
     flags: &'a [&'static str],
-    /// `(level, class_label, race, experience)` from the Profile component.
-    /// `class_label` is the catalog `name` (with color tags) when the
-    /// character has a class assigned, "Classless" otherwise.
-    profile: Option<(i32, &'a str, &'a str, i32)>,
+    /// `(level, class_label, race, gender, experience)` from the
+    /// Profile component. `class_label` is the catalog `name` (with
+    /// color tags) when the character has a class assigned,
+    /// "Classless" otherwise.
+    profile: Option<(i32, &'a str, &'a str, &'a str, i32)>,
     /// On-hand copper total. Rendered as a `wealth`-style platinum/
     /// gold/silver/copper line. Zero is omitted from the score sheet.
     wealth: i64,
@@ -3897,9 +3901,11 @@ pub(crate) struct ScoreData<'a> {
 
 pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     let mut out = format!("\r\n{}\r\n", d.name);
-    if let Some((level, class, race, xp)) = d.profile {
+    if let Some((level, class, race, gender, xp)) = d.profile {
+        let gender_label = capitalize(gender);
+        let race_label = capitalize(race);
         out.push_str(&format!(
-            "  Level {level} {race} ({class})    XP: {xp}\r\n",
+            "  Level {level} {gender_label} {race_label} ({class})    XP: {xp}\r\n",
         ));
     }
     if let Some(hp) = d.hp {
@@ -3908,10 +3914,22 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     if let Some(s) = d.stamina {
         out.push_str(&format!("  Stamina: {} / {}\r\n", s.current, s.max));
     }
-    if let Some(cs) = d.cs {
+    if let Some(stats) = d.core_stats {
         out.push_str(&format!(
-            "  Hit roll: {}    Damage roll: {}    AC: {}    Alignment: {}\r\n",
-            cs.hit_roll, cs.dmg_roll, cs.ac, cs.alignment
+            "  STR {}({:+})  DEX {}({:+})  CON {}({:+})  INT {}({:+})  WIS {}({:+})  CHA {}({:+})\r\n",
+            stats.strength, CoreStats::bonus(stats.strength),
+            stats.dexterity, CoreStats::bonus(stats.dexterity),
+            stats.constitution, CoreStats::bonus(stats.constitution),
+            stats.intelligence, CoreStats::bonus(stats.intelligence),
+            stats.wisdom, CoreStats::bonus(stats.wisdom),
+            stats.charisma, CoreStats::bonus(stats.charisma),
+        ));
+    }
+    if let Some(cs) = d.cs {
+        let align_label = mud_db::enums::Alignment::from_score(cs.alignment).label();
+        out.push_str(&format!(
+            "  Hit roll: {}    Damage roll: {}    AC: {}    Alignment: {} ({})\r\n",
+            cs.hit_roll, cs.dmg_roll, cs.ac, align_label, cs.alignment,
         ));
     }
     if let Some(p) = d.posture {
@@ -3987,8 +4005,12 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     let mut row = |s: String| {
         out.push_str(&format!("| {s:<width$} |\r\n", width = W - 2));
     };
-    if let Some((level, class, race, xp)) = d.profile {
-        row(format!("Level:     {level} {race} ({class})"));
+    if let Some((level, class, race, gender, xp)) = d.profile {
+        row(format!(
+            "Level:     {level} {} {} ({class})",
+            capitalize(gender),
+            capitalize(race),
+        ));
         row(format!("XP:        {xp}"));
     }
     if let Some(hp) = d.hp {
@@ -3996,6 +4018,20 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(s) = d.stamina {
         row(format!("Stamina:   {} / {}", s.current, s.max));
+    }
+    if let Some(stats) = d.core_stats {
+        row(format!(
+            "STR {}({:+})  DEX {}({:+})  CON {}({:+})",
+            stats.strength, CoreStats::bonus(stats.strength),
+            stats.dexterity, CoreStats::bonus(stats.dexterity),
+            stats.constitution, CoreStats::bonus(stats.constitution),
+        ));
+        row(format!(
+            "INT {}({:+})  WIS {}({:+})  CHA {}({:+})",
+            stats.intelligence, CoreStats::bonus(stats.intelligence),
+            stats.wisdom, CoreStats::bonus(stats.wisdom),
+            stats.charisma, CoreStats::bonus(stats.charisma),
+        ));
     }
     if let Some(cs) = d.cs {
         row(format!(
@@ -4042,7 +4078,7 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
 
 pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
     let mut parts = vec![d.name.to_string()];
-    if let Some((level, class, race, xp)) = d.profile {
+    if let Some((level, class, race, _gender, xp)) = d.profile {
         parts.push(format!("L{level} {race}/{class}"));
         parts.push(format!("xp:{xp}"));
     }

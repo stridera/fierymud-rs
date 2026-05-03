@@ -3938,7 +3938,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     // renderers stay pure (no &World access). Uses `plain_name` (no color
     // tags) so the fixed-width fancy box aligns correctly; once a visible-
     // width-aware writer lands, this can switch to the colored `name`.
-    let profile_owned: Option<(i32, String, String, i32)> =
+    let profile_owned: Option<(i32, String, String, String, i32)> =
         world.get::<Profile>(player).map(|prof| {
             let class_label = prof
                 .class_id
@@ -3949,8 +3949,15 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                         .map(|d| d.plain_name.clone())
                 })
                 .unwrap_or_else(|| String::from("Classless"));
-            (prof.level, class_label, prof.race.clone(), prof.experience)
+            (
+                prof.level,
+                class_label,
+                prof.race.clone(),
+                prof.gender.clone(),
+                prof.experience,
+            )
         });
+    let core_stats = world.get::<CoreStats>(player).copied();
 
     let wealth = world.get::<Wealth>(player).map_or(0, |w| w.0);
     let bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
@@ -3967,13 +3974,20 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         hp,
         stamina,
         cs,
+        core_stats,
         posture,
         logged_in,
         fight_target: fight_target_name.as_deref(),
         flags: &flags,
-        profile: profile_owned
-            .as_ref()
-            .map(|(lvl, cls, race, xp)| (*lvl, cls.as_str(), race.as_str(), *xp)),
+        profile: profile_owned.as_ref().map(|(lvl, cls, race, gender, xp)| {
+            (
+                *lvl,
+                cls.as_str(),
+                race.as_str(),
+                gender.as_str(),
+                *xp,
+            )
+        }),
         wealth,
         bank,
         hunger,
