@@ -222,6 +222,8 @@ inventory::collect!(Command);
 // (or shipping a new one) — no central array touch.
 #[path = "commands/admin_management.rs"]
 mod admin_management;
+#[path = "commands/admin_world.rs"]
+mod admin_world;
 #[path = "commands/balance.rs"]
 mod balance;
 #[path = "commands/boards.rs"]
@@ -1331,19 +1333,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_version,
     },
-    Command {
-        names: &["where"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "where",
-            summary: "List all online players and their rooms.",
-            long: "Builder+ command. Shows each player's name and the room \
-                   they're currently in.",
-        },
-        run: cmd_where,
-    },
+    // `where` migrated to commands/admin_world.rs.
     Command {
         names: &["idle"],
         min_role: UserRole::Player,
@@ -2846,145 +2836,10 @@ const COMMANDS: &[Command] = &[
     //   - setrecall      → commands/setrecall.rs
     //     (technically Info category — moved with the rest)
     // ----- Admin -----
-    Command {
-        names: &["goto"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "goto <zone_id> <room_id>",
-            summary: "Teleport to any room by composite ID.",
-            long: "Builder+ command. Move directly to (zone_id, room_id) \
-                   without checking exits or doors.",
-        },
-        run: cmd_goto,
-    },
-    Command {
-        names: &["transfer"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "transfer <player>",
-            summary: "Pull an online player to your current room.",
-            long: "Builder+ command. Looks up an online player by exact \
-                   name (case-insensitive) and moves them to wherever \
-                   you are. Both the source and destination rooms see \
-                   the gesture; the transferred player gets a brief \
-                   notice and an automatic look at the new room.",
-        },
-        run: cmd_transfer,
-    },
-    Command {
-        names: &["teleport"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "teleport <player> <zone> <room>",
-            summary: "Send an online player to a specific room.",
-            long: "Builder+. Inverse of `transfer` (which pulls them \
-                   to you) and `goto` (which moves you). Looks up the \
-                   target by case-insensitive name, looks up the \
-                   destination via `WorldKeyIndex`, then re-attaches \
-                   their `Located` and (if mounted) their mount's. The \
-                   target gets an automatic `look` at the new room.",
-        },
-        run: cmd_teleport,
-    },
+    // goto / transfer / teleport / force / freeze / summon / apply /
+    // restore / slay migrated to commands/admin_world.rs.
     // ban / cclan / pnote / hinfo / hgrant / hrevoke migrated to
     // commands/admin_management.rs.
-    Command {
-        names: &["force"],
-        min_role: UserRole::Implementor,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "force <player> <command>",
-            summary: "Make a player run a command as themselves.",
-            long: "Implementor-only. Dispatches <command> with <player> \
-                   as the actor — exactly as if they had typed it. The \
-                   player sees their command's normal output and a note \
-                   that you forced it. Useful for testing and unsticking \
-                   stuck sessions.",
-        },
-        run: cmd_force,
-    },
-    Command {
-        names: &["freeze"],
-        min_role: UserRole::Implementor,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "freeze <player>",
-            summary: "Toggle a player's input-dispatch lockout.",
-            long: "Implementor-only. While frozen, the target's commands \
-                   are refused (except `quit`) and they see a sanction \
-                   notice. Run `freeze <player>` again to thaw them. \
-                   Session-scoped — disconnect clears it.",
-        },
-        run: cmd_freeze,
-    },
-    Command {
-        names: &["summon"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "summon <zone_id> <mob_id>",
-            summary: "Spawn a mob from its prototype into your current room.",
-            long: "Builder+. Looks up `MobPrototypes[(zone, id)]`, rolls HP \
-                   from the prototype's hp dice, derives damage from the \
-                   damage dice (average), and spawns a fresh entity with \
-                   Mob/Health/CombatStats/Posture/Located in your room.",
-        },
-        run: cmd_summon,
-    },
-    Command {
-        names: &["apply"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "apply <effect_name> <target> [seconds]",
-            summary: "Apply an effect to a target.",
-            long: "Spawns an EffectInstance attached to the target. Target \
-                   can be 'me'/'self' or a substring of any named entity \
-                   in your current room. Duration defaults to 30 seconds; \
-                   use -1 for permanent.",
-        },
-        run: cmd_apply,
-    },
-    Command {
-        names: &["restore"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "restore [target]",
-            summary: "Refill HP and stamina to max on yourself or another actor.",
-            long: "Builder+ debug/utility. Sets Health.hp = max and \
-                   Stamina.current = max. With no argument, restores the \
-                   caster. With a target (substring match in the room), \
-                   restores them and notifies the room.",
-        },
-        run: cmd_restore,
-    },
-    Command {
-        names: &["slay"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "slay <mob>",
-            summary: "Instantly destroy a mob in your current room.",
-            long: "Builder+ shortcut for combat testing. Despawns the mob \
-                   and ends any combat against it. Players are refused — \
-                   use `restore` if a player is in trouble, or `attack` \
-                   if you really mean to fight.",
-        },
-        run: cmd_slay,
-    },
     Command {
         names: &["zstat"],
         min_role: UserRole::Builder,
@@ -3215,70 +3070,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_stat,
     },
-    Command {
-        names: &["load"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "load <obj|mob> <zone> <id>",
-            summary: "Unified spawn dispatcher for obj or mob protos.",
-            long: "Builder+. `load obj <z> <i>` is `loadobj` and \
-                   `load mob <z> <i>` is `summon`. Same prototype \
-                   lookups; same room target (your current room).",
-        },
-        run: cmd_load,
-    },
-    Command {
-        names: &["loadobj", "loado"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "loadobj <zone_id> <obj_id>",
-            summary: "Spawn an object prototype into your current room.",
-            long: "Counterpart to `summon` for objects. Resolves the \
-                   prototype via ObjectPrototypes[(zone, id)], spawns a \
-                   fresh Item entity in your room with WorldKey + Named + \
-                   Keywords (+ Description if the proto has an examine \
-                   text). Builder+.",
-        },
-        run: cmd_loadobj,
-    },
-    Command {
-        names: &["dumpworld"],
-        min_role: UserRole::Implementor,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "dumpworld [<path>]",
-            summary: "JSON snapshot of live world state to disk.",
-            long: "Implementor-only diagnostic. Writes a JSON file \
-                   with current tick, MudClock, online player roster \
-                   (name/level/role/room/hp/stamina/wealth), entity \
-                   counts (mobs/items/effects), and trigger catalog \
-                   stats. Default path is \
-                   /tmp/world_dump_<unix_ts>.json. The world keeps \
-                   running — this is a checkpoint, not a freeze.",
-        },
-        run: cmd_dumpworld,
-    },
-    Command {
-        names: &["purge"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "purge [<target>]",
-            summary: "Despawn mobs + items in this room (or a single target).",
-            long: "With no argument, removes every mob and every \
-                   non-equipped item from the room — players are never \
-                   touched. With an argument, finds that mob/item by \
-                   keyword and despawns just it. Items inside containers \
-                   on a purged mob go with the mob (Located → mob).",
-        },
-        run: cmd_purge,
-    },
+    // load / loadobj / dumpworld / purge migrated to commands/admin_world.rs.
     Command {
         names: &["lua"],
         min_role: UserRole::Builder,
@@ -4944,6 +4736,17 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "admin-mgmt `{name}` missing"
+            );
+        }
+        // admin_world.rs
+        for name in [
+            "where", "goto", "transfer", "teleport", "force", "freeze",
+            "summon", "apply", "restore", "slay", "purge",
+            "load", "loadobj", "loado", "dumpworld",
+        ] {
+            assert!(
+                names.contains(&name),
+                "admin-world `{name}` missing"
             );
         }
     }
@@ -11205,7 +11008,7 @@ fn cmd_version(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-fn cmd_where(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_where(world: &mut World, player: Entity, _args: &str) {
     let mut rows: Vec<(String, String)> = {
         let mut q = world
             .query_filtered::<(&Named, &Located), (With<Player>, With<Online>)>();
@@ -21183,7 +20986,7 @@ fn try_engage_aggressive_mob(world: &mut World, player: Entity, room: Entity) {
 // Admin handlers
 // ---------------------------------------------------------------------------
 
-fn cmd_slay(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_slay(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "slay", args);
     let arg = args.trim();
     if arg.is_empty() {
@@ -21237,7 +21040,7 @@ fn cmd_slay(world: &mut World, player: Entity, args: &str) {
 /// and serialized into a `serde_json::Value` tree before being
 /// written to disk. Default path is `/tmp/world_dump_<unix>.json`.
 #[allow(clippy::too_many_lines)]
-fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
     let path = args.trim();
     let path = if path.is_empty() {
         let stamp = std::time::SystemTime::now()
@@ -21360,7 +21163,7 @@ fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
     info!(path = %path, bytes, "dumpworld checkpoint written");
 }
 
-fn cmd_purge(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "purge", args);
     let arg = args.trim();
     let Some(located) = world.get::<Located>(player).copied() else {
@@ -21437,7 +21240,7 @@ fn cmd_purge(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_restore(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let target = if arg.is_empty() || arg.eq_ignore_ascii_case("me")
         || arg.eq_ignore_ascii_case("self")
@@ -21471,7 +21274,7 @@ fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_apply(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_apply(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() < 2 || parts.len() > 3 {
         send_to(
@@ -23033,7 +22836,7 @@ fn cmd_stat(world: &mut World, player: Entity, args: &str) {
 /// `load <obj|mob> <zone> <id>`: front-end for `loadobj` / `summon`.
 /// Splits the type token and forwards the rest of the args verbatim
 /// to the existing handlers.
-fn cmd_load(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_load(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let kind = parts.next().unwrap_or("");
@@ -23057,7 +22860,7 @@ fn cmd_load(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "loadobj", args);
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
@@ -23157,7 +22960,7 @@ fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_summon(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "summon", args);
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
@@ -23237,7 +23040,7 @@ fn cmd_summon(world: &mut World, player: Entity, args: &str) {
 // Movement commands moved to commands/{enter,recall,release,setrecall}.rs.
 
 
-fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "freeze", args);
     let arg = args.trim();
     if arg.is_empty() {
@@ -23284,7 +23087,7 @@ fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_force(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_force(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "force", args);
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.len() != 2 || parts[1].trim().is_empty() {
@@ -23319,7 +23122,7 @@ fn cmd_force(world: &mut World, player: Entity, args: &str) {
     dispatch(world, target, cmd_text);
 }
 
-fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "Usage: transfer <player>\r\n");
@@ -23394,7 +23197,7 @@ fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
 
 /// `teleport <player> <zone> <room>`: send target to a room. Inverse
 /// of `transfer` (target → me) and `goto` (me → room).
-fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 3 {
         send_to(
@@ -23492,7 +23295,7 @@ fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
     cmd_look(world, target, "");
 }
 
-fn cmd_goto(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
         send_to(world, player, "Usage: goto <zone_id> <room_id>\r\n");
