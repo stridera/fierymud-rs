@@ -240,6 +240,8 @@ mod combat_commands;
 mod enter;
 #[path = "commands/feedback.rs"]
 mod feedback;
+#[path = "commands/info.rs"]
+mod info;
 #[path = "commands/mail.rs"]
 mod mail;
 #[path = "commands/movement_directions.rs"]
@@ -320,1848 +322,11 @@ const MAX_NAME_TOKENS: usize = 3;
 
 /// All built-in commands. Order doesn't affect dispatch (lookup is by name)
 /// but does set fallback ordering for `help` listing within a category.
-const COMMANDS: &[Command] = &[
-    // ----- Info -----
-    Command {
-        names: &["help"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "help [command]",
-            summary: "List commands or show details on a specific one.",
-            long: "With no arguments, shows commands available to you grouped \
-                   by category. With an argument, shows the usage and details \
-                   for that command.",
-        },
-        run: cmd_help,
-    },
-    Command {
-        names: &["scan"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "scan",
-            summary: "Peek at the adjacent rooms one step away.",
-            long: "For each unblocked exit, prints the target room's \
-                   name and how many mobs / players are there. Doors \
-                   that are closed or locked show their state instead. \
-                   Useful for spotting threats / hosts before walking \
-                   in.",
-        },
-        run: cmd_scan,
-    },
-    Command {
-        names: &["track", "hunt"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "track <target>",
-            summary: "Find the direction toward a named target.",
-            long: "BFS through open exits up to 50 rooms looking for \
-                   a mob or player matching the name. Reports the \
-                   direction and distance. Closed or locked doors \
-                   block the scan. No perception check yet — hidden \
-                   targets are tracked the same as visible ones.",
-        },
-        run: cmd_track,
-    },
-    Command {
-        names: &["practice", "prac"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "practice [<ability>]",
-            summary: "List trained abilities, or improve proficiency.",
-            long: "Without an argument, renders KnownAbilities with \
-                   proficiency 0-1000 and a tier label. With an \
-                   ability name, raises that ability's proficiency \
-                   by 5 (capped at the class's `proficiency_cap` \
-                   from `ClassAbilities`). Persists across \
-                   reconnect via `CharacterAbilities`.",
-        },
-        run: cmd_practice,
-    },
-    Command {
-        names: &["glance"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "glance <target>",
-            summary: "One-line condition check on someone in your room.",
-            long: "Tells you the target's name, posture, condition (e.g. \
-                   `bleeding`), and whether they're fighting. Faster than \
-                   `examine` for a quick teammate / enemy check.",
-        },
-        run: cmd_glance,
-    },
-    Command {
-        names: &["experience", "exp", "xp"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "experience",
-            summary: "Show your current experience and level.",
-            long: "Prints your level and total experience points. The \
-                   per-level table that turns this into a `to next` \
-                   readout will land with the levelling system.",
-        },
-        run: cmd_experience,
-    },
-    Command {
-        names: &["wealth", "gold", "money"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "wealth",
-            summary: "Show your on-hand coin in platinum/gold/silver/copper.",
-            long: "Prints the current coin total split across the four \
-                   denominations (1 platinum = 10 gold = 100 silver = \
-                   1000 copper). Use `balance` for bank-stored coin.",
-        },
-        run: cmd_wealth,
-    },
-    Command {
-        names: &["bribe"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "bribe <amount> <target>",
-            summary: "Hand a sum of copper to a mob — fires BRIBE triggers.",
-            long: "Decrements your on-hand coin by `amount` (copper \
-                   units) and pads the target mob's coin by the same. \
-                   Fires the target's BRIBE-flagged Lua triggers with \
-                   `actor` = you and `amount` as a Lua global so \
-                   bodies can react proportionally.",
-        },
-        run: cmd_bribe,
-    },
-    // `balance` migrated to commands/balance.rs (inventory::submit!).
-    Command {
-        names: &["deposit"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "deposit <amount>",
-            summary: "Move copper into the bank.",
-            long: "Refuses if you don't have that much on hand. v1 \
-                   is location-agnostic; banker-mob gating arrives \
-                   once `MobProfession::Banker` is hydrated.",
-        },
-        run: cmd_deposit,
-    },
-    Command {
-        names: &["withdraw"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "withdraw <amount>",
-            summary: "Move copper from the bank to on-hand wealth.",
-            long: "Refuses if your bank balance can't cover the \
-                   amount. Inverse of `deposit`.",
-        },
-        run: cmd_withdraw,
-    },
-    Command {
-        names: &["value", "appraise"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "value <item>",
-            summary: "Show an item's catalog value in coin.",
-            long: "Searches your inventory and the room for the named \
-                   item, then prints its base value (the schema's \
-                   `Objects.cost`) split into denominations. Shops will \
-                   pay some fraction of this on sell once that lands.",
-        },
-        run: cmd_value,
-    },
-    Command {
-        names: &["list"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "list",
-            summary: "Show what the shopkeeper here is selling.",
-            long: "Looks for a `Shopkeeper`-tagged mob in your room, \
-                   then prints the keeper's catalog with prices and \
-                   stock. `buy <#|name>` and `sell <item>` land next.",
-        },
-        run: cmd_list,
-    },
-    Command {
-        names: &["buy"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "buy <#|name>",
-            summary: "Buy an item from the shopkeeper here.",
-            long: "Argument is either the catalog index from `list` or \
-                   a substring of the item's name. Coin is deducted \
-                   from your `wealth`; the item lands in your \
-                   inventory. Stock is advisory until per-shop \
-                   instance state lands.",
-        },
-        run: cmd_buy,
-    },
-    Command {
-        names: &["sell"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "sell <item>",
-            summary: "Sell a carried item to the shopkeeper here.",
-            long: "Pays `proto.cost * sell_profit` rounded for any \
-                   carried item with positive cost. Equipped items \
-                   are refused (`remove` first). Item-type filters \
-                   (`ShopAccepts`) are not enforced yet.",
-        },
-        run: cmd_sell,
-    },
-    Command {
-        names: &["hire"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "hire <#|name>",
-            summary: "Hire a pet from a pet-shop keeper.",
-            long: "Spawns a fresh mob as your follower. Coin from \
-                   `wealth`. Pet is renamed to `<you>'s <mob>` so \
-                   it doesn't blend with wild mobs of the same kind.",
-        },
-        run: cmd_hire,
-    },
-    Command {
-        names: &["title"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "title [<new title> | clear]",
-            summary: "Show or change the epithet shown after your name.",
-            long: "With no argument, prints your current title. With a \
-                   new title, sets it (max 60 chars). With `clear` (or \
-                   `none` / `-`), removes it. Persists on disconnect.",
-        },
-        run: cmd_title,
-    },
-    Command {
-        names: &["description", "desc"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "description [<new prose> | clear]",
-            summary: "Show or set the prose `examine` shows for you.",
-            long: "With no argument, prints your current description. \
-                   With new text, replaces it (max 500 chars). With \
-                   `clear` / `none` / `-`, removes it. XML-Lite color \
-                   tags render the same as room descriptions. Persists \
-                   on disconnect.",
-        },
-        run: cmd_description,
-    },
-    Command {
-        names: &["examine", "exa"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "examine <target>",
-            summary: "Look closely at a person or thing in the room.",
-            long: "Match by name or keyword (case-insensitive substring) on \
-                   anything in your current room — mobs, other players, \
-                   items, or equipped gear. Shows their long description.",
-        },
-        run: cmd_examine,
-    },
-    Command {
-        names: &["look", "l"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "look",
-            summary: "Look at your surroundings.",
-            long: "Shows the current room's name, anyone or anything else \
-                   present, and the available exits.",
-        },
-        run: cmd_look,
-    },
-    Command {
-        names: &["who"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "who",
-            summary: "List players currently online.",
-            long: "Shows the names of every connected player.",
-        },
-        run: cmd_who,
-    },
-    Command {
-        names: &["score", "sc"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "score",
-            summary: "Display your character's stats.",
-            long: "Shows HP, combat stats (hit/damage roll, AC, alignment), \
-                   and your current combat target if any.",
-        },
-        run: cmd_score,
-    },
-    Command {
-        names: &["roles"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "roles",
-            summary: "Show your account role and permissions.",
-            long: "Diagnostic: prints the role and any extra permissions \
-                   attached to your account.",
-        },
-        run: cmd_roles,
-    },
-    Command {
-        names: &["inventory", "i", "inv"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "inventory",
-            summary: "List items you are carrying.",
-            long: "Shows everything in your inventory by name. \
-                   Use `get` to pick items up and `drop` to set them down.",
-        },
-        run: cmd_inventory,
-    },
-    Command {
-        names: &["get", "take", "g"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "get <item> | get <item> from <container>",
-            summary: "Pick up an item from the room or a container.",
-            long: "Match is by case-insensitive substring on the item's \
-                   keywords (or its name). With `from <container>`, \
-                   pulls from a container the player is carrying or \
-                   one in the room. The item moves into your \
-                   inventory; everyone else in the room sees the action.",
-        },
-        run: cmd_get,
-    },
-    Command {
-        names: &["put"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "put <item> <container>",
-            summary: "Move a carried item into a container.",
-            long: "Container can be a carried item or one in the \
-                   current room. Equipped items must be `remove`d \
-                   first. Bystanders see the action.",
-        },
-        run: cmd_put,
-    },
-    Command {
-        names: &["drop"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "drop <item>",
-            summary: "Drop an item from your inventory onto the floor.",
-            long: "Match is by case-insensitive substring on keywords. \
-                   The item is left in the current room; bystanders see \
-                   you drop it.",
-        },
-        run: cmd_drop,
-    },
-    Command {
-        names: &["donate"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "donate <item>",
-            summary: "Charitably leave an item for someone else.",
-            long: "Drops the item in the current room with a giving \
-                   message. A real donation-room flag lands later — \
-                   for now, donated items sit on the floor.",
-        },
-        run: cmd_donate,
-    },
-    Command {
-        names: &["junk", "trash"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "junk <item>",
-            summary: "Permanently destroy a carried item.",
-            long: "The item is despawned; nothing is dropped on the \
-                   floor and no coin is awarded. Refuses on equipped \
-                   gear — `remove` first.",
-        },
-        run: cmd_junk,
-    },
-    Command {
-        names: &["give"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "give <item> <target>",
-            summary: "Hand an item to another character in the room.",
-            long: "Both you and the target must be in the same room. The \
-                   item must be in your inventory (not equipped — `remove` \
-                   first if needed).",
-        },
-        run: cmd_give,
-    },
-    Command {
-        names: &["wear"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "wear <item>",
-            summary: "Equip a wearable item from your inventory.",
-            long: "The item must have a wear-slot, and that slot must be \
-                   free. Use `remove` to take something off first.",
-        },
-        run: cmd_wear,
-    },
-    Command {
-        names: &["wield"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "wield <item>",
-            summary: "Wield a weapon (shortcut for wear into the Wield slot).",
-            long: "Equivalent to wear, but only succeeds for items that go \
-                   into the wield slot.",
-        },
-        run: cmd_wield,
-    },
-    Command {
-        names: &["light"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "light <item>",
-            summary: "Light a torch or lantern.",
-            long: "Sets a `Lit` marker on a Light-type item in your \
-                   inventory. Refused on non-light items or items \
-                   that are already lit.",
-        },
-        run: cmd_light,
-    },
-    Command {
-        names: &["extinguish", "douse"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "extinguish <item>",
-            summary: "Put out a lit torch or lantern.",
-            long: "Removes the `Lit` marker from a held or carried \
-                   light source. Refused on items that aren't lit.",
-        },
-        run: cmd_extinguish,
-    },
-    Command {
-        names: &["mount"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "mount <mob>",
-            summary: "Climb onto a mountable mob.",
-            long: "Target must be `Mountable` (auto-applied to mobs \
-                   whose keywords contain horse / steed / mount / \
-                   donkey / mare). When you move, your mount comes \
-                   with you. Refused on already-mounted you, on \
-                   already-ridden mounts, or on mobs in combat.",
-        },
-        run: cmd_mount,
-    },
-    Command {
-        names: &["dismount"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "dismount",
-            summary: "Get off your current mount.",
-            long: "Clears the `Mounted` link on you and the \
-                   `RiddenBy` link on the mount. No-op when not \
-                   mounted.",
-        },
-        run: cmd_dismount,
-    },
-    Command {
-        names: &["fly"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "fly",
-            summary: "Take to the air (sets the Flying marker).",
-            long: "Movement charges a flat 2 stamina per move while \
-                   flying — great savings over water/swamp (4-6 \
-                   normally), slightly pricier on roads (1). Use \
-                   `walk` or `land` to come back down.",
-        },
-        run: cmd_fly,
-    },
-    Command {
-        names: &["walk", "land"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "walk",
-            summary: "Stop flying and walk again.",
-            long: "Clears the Flying marker. No-op when already \
-                   walking.",
-        },
-        run: cmd_walk,
-    },
-    Command {
-        names: &["hide"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "hide",
-            summary: "Slip into the shadows (sets the Stealth marker).",
-            long: "Currently a marker toggle — combat formulas that \
-                   reference `hidden` (e.g. BACKSTAB's bonus) read \
-                   the marker. The full rogue skill check, noise \
-                   gating, and look-time visibility filtering land \
-                   with the skill system.",
-        },
-        run: cmd_hide,
-    },
-    Command {
-        names: &["visible", "vis"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "visible",
-            summary: "Stop hiding (clears the Stealth marker).",
-            long: "Removes the `Stealth` marker — back to normal visibility.",
-        },
-        run: cmd_visible,
-    },
-    Command {
-        names: &["eat"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "eat <item>",
-            summary: "Consume a food item from your inventory.",
-            long: "Despawns the food. Refused on non-food items. \
-                   Effects (hunger, ConsumableEffects) are deferred.",
-        },
-        run: cmd_eat,
-    },
-    Command {
-        names: &["quaff"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "quaff <potion>",
-            summary: "Drink a potion from your inventory.",
-            long: "Despawns the potion. Refused on non-potion items. \
-                   Effect application (ConsumableEffects) is deferred.",
-        },
-        run: cmd_quaff,
-    },
-    Command {
-        names: &["drink"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "drink <container>",
-            summary: "Take a swig from a drink container.",
-            long: "Decrements the container's `remaining` liquid by \
-                   4 units. Empty containers refuse. Use `quaff` for \
-                   potions, `sip` for a smaller swig (1 unit), \
-                   `taste` to identify the liquid without drinking.",
-        },
-        run: cmd_drink,
-    },
-    Command {
-        names: &["sip"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "sip <container>",
-            summary: "Sip 1 unit from a drink container.",
-            long: "Lighter than `drink` (4 units). Same refusal on \
-                   empty containers; same poison handling.",
-        },
-        run: cmd_sip,
-    },
-    Command {
-        names: &["taste"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "taste <container>",
-            summary: "Identify a liquid without drinking it.",
-            long: "Reveals the liquid name; on poisoned containers, \
-                   adds an off-taste hint. No consumption.",
-        },
-        run: cmd_taste,
-    },
-    Command {
-        names: &["pour"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "pour <container> [target]",
-            summary: "Transfer liquid between containers, or empty.",
-            long: "With no target, dumps the source's liquid on the \
-                   ground. With a target container, transfers as much \
-                   as the target can accept; refuses on liquid-type \
-                   mismatch unless the target is empty (in which case \
-                   the target adopts the source's liquid + poison \
-                   flag).",
-        },
-        run: cmd_pour,
-    },
-    Command {
-        names: &["fill"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "fill <container> <source>",
-            summary: "Top up a container from another container.",
-            long: "Inverse-arg `pour`: same liquid-match rules, \
-                   transfers up to the destination's remaining \
-                   capacity.",
-        },
-        run: cmd_fill,
-    },
-    Command {
-        names: &["recite"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "recite <scroll> [<target>]",
-            summary: "Read a magic scroll, casting its inscribed spells.",
-            long: "Looks up the bound abilities via ObjectAbilities and \
-                   dispatches each through the cast pipeline. Despawns the \
-                   scroll regardless of outcome (single-use).",
-        },
-        run: cmd_recite,
-    },
-    Command {
-        names: &["wave"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "wave <wand> [<target>]",
-            summary: "Wave a wand to cast its bound spell.",
-            long: "Decrements the wand's Charges component on each use; \
-                   wand crumbles when charges hit 0. Refused on depleted \
-                   wands. Item type must be WAND.",
-        },
-        run: cmd_wave,
-    },
-    Command {
-        names: &["tap"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "tap <staff> [<target>]",
-            summary: "Tap a staff to invoke its bound abilities.",
-            long: "Same charge mechanic as wave but for STAFF items. \
-                   Useful for buff staves and AOE-style staff effects.",
-        },
-        run: cmd_tap,
-    },
-    Command {
-        names: &["hold", "grab"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "hold <item>",
-            summary: "Hold a non-weapon item in your offhand.",
-            long: "Equips an item in the Hold slot (lights, instruments, \
-                   wands). Refused on items that don't go in Hold.",
-        },
-        run: cmd_hold,
-    },
-    Command {
-        names: &["remove", "rem"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "remove <item>",
-            summary: "Unequip an item, returning it to your inventory.",
-            long: "The item must currently be equipped on you.",
-        },
-        run: cmd_remove,
-    },
-    Command {
-        names: &["equipment", "eq"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "equipment",
-            summary: "List items you are wearing/wielding.",
-            long: "Shows each occupied slot and the item filling it.",
-        },
-        run: cmd_equipment,
-    },
-    Command {
-        names: &["exits", "ex"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "exits",
-            summary: "List the exits from your current room.",
-            long: "Shows each direction with the destination room's name. \
-                   Exits whose target room isn't loaded show as '(beyond)'.",
-        },
-        run: cmd_exits,
-    },
-    Command {
-        names: &["commands"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "commands",
-            summary: "Flat alphabetical list of every command you can use.",
-            long: "Shows just the names you have access to, without the \
-                   per-category framing `help` uses. Aliases share their \
-                   primary name's slot.",
-        },
-        run: cmd_commands,
-    },
-    Command {
-        names: &["open"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "open <direction>",
-            summary: "Open a closed door in the given direction.",
-            long: "Refused if the exit is already open or locked. \
-                   Locked doors need a key (use `unlock`).",
-        },
-        run: cmd_open,
-    },
-    Command {
-        names: &["unlock"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "unlock <direction>",
-            summary: "Unlock a locked door using a key in your inventory.",
-            long: "Searches your carried items for a keyword that \
-                   matches the exit's required key. On match, the \
-                   door is unlocked (state Closed); use `open` to \
-                   then walk through. Refused if the exit isn't \
-                   locked or you have no matching key.",
-        },
-        run: cmd_unlock,
-    },
-    Command {
-        names: &["close"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "close <direction>",
-            summary: "Close an open door in the given direction.",
-            long: "Refused if the exit has no door, is already \
-                   closed, or doesn't exist.",
-        },
-        run: cmd_close,
-    },
-    Command {
-        names: &["lock"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "lock <direction>",
-            summary: "Lock a closed door using a key in your inventory.",
-            long: "Mirror of `unlock`: requires the exit to be closed \
-                   (not already locked, not open) and to have a key \
-                   requirement, and that you carry that key. On match, \
-                   the door is locked.",
-        },
-        run: cmd_lock,
-    },
-    Command {
-        names: &["read"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "read <item>",
-            summary: "Read the text on an item (book, sign, scroll).",
-            long: "Finds an item by keyword on you or in the room and \
-                   prints its description text. Refuses on mobs and \
-                   players — use `examine` for those.",
-        },
-        run: cmd_read,
-    },
-    Command {
-        names: &["compare"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "compare <item-a> <item-b>",
-            summary: "Compare two carried/worn items by weight and level.",
-            long: "Each item is matched by keyword the same way `wear` \
-                   matches. Both items must be on you (inventory or \
-                   equipped). Prints the deltas with arrows pointing at \
-                   the lighter / lower-level side.",
-        },
-        run: cmd_compare,
-    },
-    Command {
-        names: &["motd"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "motd",
-            summary: "Show the message-of-the-day.",
-            long: "Static welcome text for now — once a GameConfig \
-                   `motd` row lands, this will read from there.",
-        },
-        run: cmd_motd,
-    },
-    Command {
-        names: &["news"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "news",
-            summary: "Recent server news.",
-            long: "Static for now; will read from a future news table.",
-        },
-        run: cmd_news,
-    },
-    Command {
-        names: &["credits"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "credits",
-            summary: "Show contributors and credits.",
-            long: "Acknowledges the project's antecedents.",
-        },
-        run: cmd_credits,
-    },
-    Command {
-        names: &["policies", "rules"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "policies",
-            summary: "Server rules and code of conduct.",
-            long: "Static for now.",
-        },
-        run: cmd_policies,
-    },
-    Command {
-        names: &["account"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "account",
-            summary: "Show your account email, role, and character roster.",
-            long: "Read-only summary of who you're logged in as and \
-                   which character is currently active. Snapshot taken \
-                   at login — characters created mid-session won't \
-                   appear until you reconnect.",
-        },
-        run: cmd_account,
-    },
-    Command {
-        names: &["richtest"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "richtest",
-            summary: "Render a color-tag sampler.",
-            long: "Prints a sampler of every color and modifier the \
-                   XML-Lite renderer supports — handy for verifying \
-                   your client's color depth and for debugging \
-                   color-tag rendering.",
-        },
-        run: cmd_richtest,
-    },
-    Command {
-        names: &["clientinfo"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "clientinfo",
-            summary: "Show this session's connection info.",
-            long: "Reports your active character, role, session \
-                   uptime (since login), and idle time (since the \
-                   last command typed). Terminal capabilities — \
-                   color depth, dimensions, MCCP — aren't tracked \
-                   in the runtime today; the full RFC-1408 telnet \
-                   negotiation would lift them off the wire.",
-        },
-        run: cmd_clientinfo,
-    },
-    Command {
-        names: &["world", "users", "stats"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "world",
-            summary: "Live entity counts: zones, rooms, mobs, items, players.",
-            long: "Snapshot of the world state right now: how many zones \
-                   and rooms loaded, how many live mobs and items \
-                   spawned, how many players online, server tick + \
-                   uptime, and active effect-instance count. Aliases \
-                   `users` and `stats` mirror `world` since the player \
-                   count and per-system load are the most-asked pieces.",
-        },
-        run: cmd_world,
-    },
-    Command {
-        names: &["time", "date", "uptime"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "time",
-            summary: "Show server uptime and tick count.",
-            long: "Real-world time, how long the server has been running, \
-                   and the current world tick.",
-        },
-        run: cmd_time,
-    },
-    Command {
-        names: &["weather"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "weather",
-            summary: "Atmospheric flavor for your zone's climate.",
-            long: "Renders a single line based on your current zone's \
-                   `Climate` and the in-game time of day. Rule-of-thumb \
-                   only — no per-tick weather simulation yet, so the \
-                   same input produces the same output.",
-        },
-        run: cmd_weather,
-    },
-    Command {
-        names: &["version"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "version",
-            summary: "Show server build identity.",
-            long: "Crate name, version, and the rustc/profile combo the \
-                   binary was built with. For ops/debug; players will \
-                   rarely care.",
-        },
-        run: cmd_version,
-    },
-    // `where` migrated to commands/admin_world.rs.
-    Command {
-        names: &["idle"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "idle",
-            summary: "Show online players sorted by idle time, longest first.",
-            long: "Same population as `who`, but ordered by how long since \
-                   each player last typed something. Players who just \
-                   connected and haven't typed yet show as `fresh`; anyone \
-                   under a minute shows as `active`.",
-        },
-        run: cmd_idle,
-    },
-    // `socials` migrated to commands/status_lists.rs.
-    Command {
-        names: &["spells", "abilities", "abil"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "spells [filter]",
-            summary: "List loaded abilities (spells/chants/songs/skills).",
-            long: "Shows every ability the world has loaded, grouped by \
-                   kind. Optional filter narrows by case-insensitive \
-                   substring match on the name. Once a per-character \
-                   ability list lands this command will show only what \
-                   you know — for now it's the full catalog.",
-        },
-        run: cmd_spells,
-    },
-    Command {
-        names: &["level"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "level",
-            summary: "XP-curve readout: current level, XP, distance to next.",
-            long: "Reads `Profile.level` and `Profile.experience` and \
-                   shows the cumulative XP for this level, the next \
-                   level's threshold, and how far you have to go. \
-                   Capped levels (max in `LevelDefinition`) print a \
-                   max-level note instead.",
-        },
-        run: cmd_level,
-    },
-    Command {
-        names: &["slots"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "slots",
-            summary: "Show your spell-slot allotment per circle.",
-            long: "Read-only readout of how many slots per circle \
-                   your class+level grants you. Format `used / max`. \
-                   Refill-on-rest tick not yet implemented; memorize \
-                   only consumes slots, forget releases them.",
-        },
-        run: cmd_slots,
-    },
-    Command {
-        names: &["skills"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "skills [filter]",
-            summary: "List skills (kind=Skill abilities).",
-            long: "Like `spells` but filtered to skills only. Honors \
-                   KnownAbilities — shows only what you know when set. \
-                   Optional filter narrows by case-insensitive substring.",
-        },
-        run: cmd_skills,
-    },
-    Command {
-        names: &["songs"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "songs [filter]",
-            summary: "List bardic songs (kind=Song abilities).",
-            long: "Like `spells` but filtered to songs only. Use \
-                   `perform <song>` to invoke them.",
-        },
-        run: cmd_songs,
-    },
-    Command {
-        names: &["chants"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "chants [filter]",
-            summary: "List chants (kind=Chant abilities).",
-            long: "Like `spells` but filtered to chants only. Use \
-                   `chant <name>` to invoke them.",
-        },
-        run: cmd_chants,
-    },
-    // bug / idea / typo migrated to commands/feedback.rs.
-    Command {
-        names: &["prompt", "display"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "prompt [template]",
-            summary: "Show or change your status prompt template.",
-            long: "With no argument, prints your current template. With a \
-                   template, replaces it. Variables: %h current HP, %H max \
-                   HP, %v current stamina, %V max stamina, %n your name, \
-                   %r current room, %g on-hand wealth (copper), %t in-game \
-                   hour (zero-padded), %s season, %d day/night, %% literal \
-                   percent. Examples: \
-                     prompt <%h/%H hp %v/%V mv> \
-                     prompt [%t %h/%H %d] ",
-        },
-        run: cmd_prompt,
-    },
-    Command {
-        names: &["style"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "style [fancy | standard | minimal]",
-            summary: "Choose a UI style for info commands like score.",
-            long: "Three tiers: fancy (ASCII-art borders), standard (the \
-                   default — clean indented lines), and minimal (a single \
-                   dense line, useful in narrow viewports). With no \
-                   argument, shows the current style. Currently only score \
-                   honors this; more commands will follow.",
-        },
-        run: cmd_style,
-    },
-    Command {
-        names: &["toggle"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "toggle <flag>",
-            summary: "Flip a player flag on or off.",
-            long: "Examples: `toggle afk`, `toggle deaf`, `toggle notell`. \
-                   `flags` lists all currently-set flags. Recognised names \
-                   include AFK, DEAF, NO_TELL/NOTELL, BRIEF, COMPACT, \
-                   AUTO_LOOT, AUTO_GOLD, AUTO_EXIT, WIMPY, QUEST, PK, MSP, \
-                   MXP, HOLY_LIGHT, COLOR_BLIND, SHOW_DICE_ROLLS, SHOW_IDS, \
-                   NO_SUMMON, CONSENT, NO_REPEAT.",
-        },
-        run: cmd_toggle,
-    },
-    Command {
-        names: &["flags"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "flags",
-            summary: "List your active player flags.",
-            long: "Shows every flag currently set on you. Use `toggle <flag>` \
-                   to flip one on or off.",
-        },
-        run: cmd_flags,
-    },
-    Command {
-        names: &["afk"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "afk",
-            summary: "Flip your away-from-keyboard flag.",
-            long: "Marks you AFK so others see the indicator on `who` and on \
-                   incoming tells. Run again to come back.",
-        },
-        run: cmd_afk,
-    },
-    Command {
-        names: &["alias"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "alias [<name> [<command>]]",
-            summary: "Define a command shortcut.",
-            long: "With no args, lists every alias you've defined. With \
-                   `alias <name>`, shows that alias's expansion. With \
-                   `alias <name> <command>`, sets the alias — typing \
-                   `<name> [args]` will be rewritten to \
-                   `<command> [args]` before dispatch. Aliases persist \
-                   across sessions. v1 expands once (no $1/$* yet) and \
-                   the first token is replaced wholesale.",
-        },
-        run: cmd_alias,
-    },
-    Command {
-        names: &["unalias"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "unalias <name>",
-            summary: "Remove a defined alias.",
-            long: "Drops the named alias from your list. No-op if no \
-                   alias by that name exists.",
-        },
-        run: cmd_unalias,
-    },
-    Command {
-        names: &["notell"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "notell",
-            summary: "Refuse incoming `tell` messages.",
-            long: "When set, other players' `tell` to you is blocked with a \
-                   message. Run again to allow tells.",
-        },
-        run: cmd_notell,
-    },
-    Command {
-        names: &["deaf"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "deaf",
-            summary: "Stop hearing room-wide channels (gossip, shout).",
-            long: "When set, you no longer receive `gossip` or `shout` from \
-                   other players. Run again to hear them.",
-        },
-        run: cmd_deaf,
-    },
-    Command {
-        names: &["color", "colour"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "color",
-            summary: "Toggle ANSI color rendering for your output.",
-            long: "When colors are off, XML-Lite color tags are stripped \
-                   instead of rendered to ANSI. Persists for the session.",
-        },
-        run: cmd_color,
-    },
-    Command {
-        names: &["wimpy", "wi"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "wimpy [pct|off]",
-            summary: "Set the HP percentage at which combat auto-flees you.",
-            long: "`wimpy 30` enables wimpy mode and panics you out of \
-                   combat when your HP drops below 30% of max. `wimpy off` \
-                   (or `wimpy 0`) clears it. With no argument, prints the \
-                   current setting. Default threshold when no number was \
-                   set is 25%.",
-        },
-        run: cmd_wimpy,
-    },
-    Command {
-        names: &["autoexit"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "autoexit",
-            summary: "Toggle automatic exit listing on `look`.",
-            long: "When set, the room description is followed by the same \
-                   line `exits` would print. Already consumed by the look \
-                   path.",
-        },
-        run: cmd_autoexit,
-    },
-    Command {
-        names: &["autoloot"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "autoloot",
-            summary: "Toggle the auto-loot flag (no behavior wired yet).",
-            long: "Sets AUTO_LOOT. Once corpse loot lands, this controls \
-                   whether items on slain mobs jump to your inventory \
-                   automatically.",
-        },
-        run: cmd_autoloot,
-    },
-    Command {
-        names: &["autogold"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "autogold",
-            summary: "Toggle the auto-gold flag (no behavior wired yet).",
-            long: "Sets AUTO_GOLD. Once economy lands, this controls \
-                   whether coins from kills jump straight to your purse.",
-        },
-        run: cmd_autogold,
-    },
-    Command {
-        names: &["autoassist"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "autoassist",
-            summary: "Toggle the auto-assist flag (no behavior wired yet).",
-            long: "Sets AUTO_ASSIST. Once group combat lands, this \
-                   controls whether you automatically engage anyone \
-                   attacking your group leader.",
-        },
-        run: cmd_autoassist,
-    },
-    Command {
-        names: &["autosplit"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "autosplit",
-            summary: "Toggle the auto-split flag (no behavior wired yet).",
-            long: "Sets AUTO_SPLIT. Once the group system lands, this \
-                   controls whether kill rewards split automatically \
-                   between group members.",
-        },
-        run: cmd_autosplit,
-    },
-    Command {
-        names: &["brief"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "brief",
-            summary: "Toggle terse room descriptions.",
-            long: "When on, `look` skips the full room description \
-                   and shows just the title + exits + occupants.",
-        },
-        run: cmd_brief,
-    },
-    Command {
-        names: &["compact"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "compact",
-            summary: "Toggle compact output (suppresses leading blank lines).",
-            long: "Sets COMPACT. Renderers that respect it tighten \
-                   their leading whitespace.",
-        },
-        run: cmd_compact,
-    },
-    Command {
-        names: &["norepeat"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "norepeat",
-            summary: "Suppress consecutive duplicate output lines.",
-            long: "Sets NO_REPEAT. Renderers that respect it collapse \
-                   identical back-to-back lines into one.",
-        },
-        run: cmd_norepeat,
-    },
-    Command {
-        names: &["nosummon"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "nosummon",
-            summary: "Refuse incoming summon spells.",
-            long: "Sets NO_SUMMON. Once summon-class spells land, this \
-                   blocks remote teleport effects targeting you.",
-        },
-        run: cmd_nosummon,
-    },
-    Command {
-        names: &["dice", "showdicerolls"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "dice",
-            summary: "Toggle showing per-swing dice rolls in combat.",
-            long: "Sets SHOW_DICE_ROLLS. Combat output surfaces hit/dmg \
-                   rolls when the flag is set.",
-        },
-        run: cmd_dicerolls,
-    },
-    Command {
-        names: &["pk"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "pk",
-            summary: "Toggle player-kill participation.",
-            long: "Sets PK_ENABLED. Once the PK gate lands, this is the \
-                   self-elected switch for inter-player combat.",
-        },
-        run: cmd_pk,
-    },
-    Command {
-        names: &["quest"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "quest",
-            summary: "Toggle quest mode (placeholder; gates quest zones).",
-            long: "Sets QUEST. The quest system is unimplemented; this \
-                   ensures the flag persists for content that gates on it.",
-        },
-        run: cmd_quest_flag,
-    },
-    Command {
-        names: &["consent"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "consent",
-            summary: "Toggle consent for group/share interactions.",
-            long: "Sets CONSENT. Group invites and certain shared-effect \
-                   spells will check this flag once those systems land.",
-        },
-        run: cmd_consent,
-    },
-    Command {
-        names: &["holylight"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "holylight",
-            summary: "Toggle holy-light vision (admin/builder).",
-            long: "Sets HOLY_LIGHT. Renderer plumbing for invisibility \
-                   and darkness is pending; the flag persists so it's \
-                   live the moment those land.",
-        },
-        run: cmd_holylight,
-    },
-    Command {
-        names: &["showids"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "showids",
-            summary: "Toggle showing (zone, id) on entities you can see.",
-            long: "Sets SHOW_IDS. Look/inventory renderers that want to \
-                   surface coordinates check the flag.",
-        },
-        run: cmd_showids,
-    },
-    Command {
-        names: &["effects", "affects", "aff"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "effects",
-            summary: "List active effects on yourself.",
-            long: "Each line shows an effect name and its remaining \
-                   duration in seconds (or 'permanent' if it has no \
-                   timer).",
-        },
-        run: cmd_effects,
-    },
-    Command {
-        names: &["cooldowns", "cd"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "cooldowns",
-            summary: "List abilities currently on cooldown.",
-            long: "Each line shows an ability name and its remaining \
-                   cooldown in seconds, sorted longest-first. Empty \
-                   when nothing is on cooldown.",
-        },
-        run: cmd_cooldowns,
-    },
-    Command {
-        names: &["quit"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "quit",
-            summary: "Disconnect from the game.",
-            long: "Sends a goodbye message; close your client to fully \
-                   disconnect.",
-        },
-        run: cmd_quit,
-    },
-    // ----- Communication -----
-    // `say` migrated to commands/room_chat.rs.
-    Command {
-        names: &["achievements", "achieve"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "achievements [<category>]",
-            summary: "List your unlocked achievements (and visible-but-locked ones).",
-            long: "Filter by category: combat, exploration, social, \
-                   crafting, misc. Unlocked entries show with a tick; \
-                   locked-but-visible ones with a placeholder. Hidden \
-                   achievements stay invisible until unlocked — those \
-                   are the spoiler ones.",
-        },
-        run: cmd_achievements,
-    },
-    Command {
-        names: &["house"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "house [info|enter|guests|rooms]",
-            summary: "Inspect or enter your player house.",
-            long: "Players who own a house can inspect its layout, \
-                   guest list, room contents, or step inside via \
-                   `house enter`. `house` (no arg) defaults to the \
-                   info subcommand. Players without a house get a \
-                   polite refusal — house creation isn't yet wired \
-                   through the runtime.",
-        },
-        run: cmd_house,
-    },
-    // `ask` / `whisper` migrated to commands/room_chat.rs.
-    // `report` migrated to commands/status_lists.rs.
-    // tell / reply / ignore / unignore / lasttells migrated to
-    // commands/tells.rs.
-    // `emote` migrated to commands/room_chat.rs.
-    // `shout` migrated to commands/channels.rs.
-    // `mail` migrated to commands/mail.rs.
-    // `boards` / `board` migrated to commands/boards.rs.
-    // quest verbs (quests/abandon/innate/questinfo/qload/qaccept/qgive/qcomplete)
-    // migrated to commands/quests.rs.
-    // `post` / `delpost` / `editpost` migrated to commands/boards.rs.
-    // `mailbox` / `readmail` / `delmail` migrated to commands/mail.rs.
-    // `gossip` / `music` migrated to commands/channels.rs.
-    // `insult` migrated to commands/room_chat.rs.
-    // `petition` migrated to commands/feedback.rs.
-    // `wiznet` migrated to commands/channels.rs.
-    // `ctell` / `clan` migrated to commands/clan_chat.rs.
-    // ----- Combat -----
-    Command {
-        names: &["train"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "train [<stat>]",
-            summary: "Spend a practice point to bump a CoreStat by 1.",
-            long: "With no arg, lists your current six stats and \
-                   available practice points. With `train <stat>`, \
-                   spends 1 point from `SkillPoints` to raise the \
-                   named stat (str/dex/con/int/wis/cha) by 1. Refuses \
-                   on stats already at 18 (the trainable cap), and on \
-                   no points available. Persists across reconnect.",
-        },
-        run: cmd_train,
-    },
-    Command {
-        names: &["stand"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "stand",
-            summary: "Get to your feet.",
-            long: "Changes your posture to standing.",
-        },
-        run: cmd_stand,
-    },
-    Command {
-        names: &["sit"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "sit",
-            summary: "Sit down.",
-            long: "Changes your posture to sitting.",
-        },
-        run: cmd_sit,
-    },
-    Command {
-        names: &["kneel"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "kneel",
-            summary: "Kneel — lower-profile but still alert.",
-            long: "Changes your posture to kneeling. Ranks the same as \
-                   sitting for ability gating, but regenerates like \
-                   standing — useful for guards, prayer, or showing \
-                   respect.",
-        },
-        run: cmd_kneel,
-    },
-    Command {
-        names: &["rest", "recline"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "rest",
-            summary: "Rest in place.",
-            long: "Changes your posture to resting. Slightly more relaxed \
-                   than sitting; future hp/stamina regen will scale with \
-                   posture.",
-        },
-        run: cmd_rest,
-    },
-    Command {
-        names: &["sleep"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "sleep",
-            summary: "Lie down and sleep.",
-            long: "Changes your posture to sleeping. Wake with `wake`, \
-                   `stand`, `sit`, or `rest`.",
-        },
-        run: cmd_sleep,
-    },
-    Command {
-        names: &["wake"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "wake [target]",
-            summary: "Wake yourself, or rouse a sleeping companion.",
-            long: "With no argument, brings you out of sleep to standing. \
-                   With a target, finds a sleeping player or mob in the \
-                   room and stands them up; everyone in the room sees it.",
-        },
-        run: cmd_wake,
-    },
-    Command {
-        names: &["follow", "shadow"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "follow <name>",
-            summary: "Trail another character automatically.",
-            long: "When the target moves, you move with them through the \
-                   same exit. `follow self` (or `unfollow`) stops \
-                   following. Cycles are silently broken — you can't \
-                   follow someone who is already following you.",
-        },
-        run: cmd_follow,
-    },
-    Command {
-        names: &["unfollow"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "unfollow",
-            summary: "Stop following whoever you were following.",
-            long: "No-op if you weren't following anyone.",
-        },
-        run: cmd_unfollow,
-    },
-    Command {
-        names: &["group"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "group",
-            summary: "List your current group (follow chain).",
-            long: "Shows the chain leader and every member, with HP \
-                   and same-room indicator. Group membership today is \
-                   informally derived from `follow` chains; an \
-                   explicit invite/consent system can land later.",
-        },
-        run: cmd_group,
-    },
-    Command {
-        names: &["order"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "order <follower|all> <command>",
-            summary: "Issue a command to one or all of your followers.",
-            long: "Forwards `<command>` to a named mob follower (must \
-                   be in the same room and have `Follower(you)` set), \
-                   or `all` for every same-room follower at once. The \
-                   mob runs the command through the normal dispatcher \
-                   under its own identity, so target lookups, costs, \
-                   and triggers fire as if it had typed the line. \
-                   Admin commands are off-limits to mobs.",
-        },
-        run: cmd_order,
-    },
-    Command {
-        names: &["dismiss"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "dismiss <player>",
-            summary: "Drop a single direct follower from your group.",
-            long: "Equivalent to `group dismiss <player>` — removes the \
-                   target's `Follower` link to you (must be following \
-                   you directly, not transitively). `disband` clears \
-                   everyone at once.",
-        },
-        run: cmd_dismiss,
-    },
-    Command {
-        names: &["split"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "split <amount>",
-            summary: "Divide coin evenly among same-room group members.",
-            long: "Pulls `<amount>` from your wealth and splits it \
-                   evenly across every group member in your room \
-                   (including you). Remainder stays with the splitter. \
-                   Refuses if you're not grouped, the only group \
-                   member here, or carrying less than `amount`. Coin \
-                   amount is in copper; use `wealth` to check yours.",
-        },
-        run: cmd_split,
-    },
-    Command {
-        names: &["disband"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "disband",
-            summary: "Dismiss everyone directly following you.",
-            long: "Breaks the group apart at your level. Followers' \
-                   own followers stay attached unless they too \
-                   `disband` or `unfollow`.",
-        },
-        run: cmd_disband,
-    },
-    Command {
-        names: &["invite"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "invite <player>",
-            summary: "Send a group invite to another player.",
-            long: "Target gets a pending `GroupInvite`; they can \
-                   `accept` or `decline`. Invites expire after \
-                   5 minutes. Players already following you (in your \
-                   group) can't be re-invited.",
-        },
-        run: cmd_invite,
-    },
-    Command {
-        names: &["accept"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "accept",
-            summary: "Accept a pending group invite.",
-            long: "Installs Follower(inviter) on you, joining their \
-                   group. No-op if you have no pending invite.",
-        },
-        run: cmd_accept,
-    },
-    Command {
-        names: &["decline"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "decline",
-            summary: "Decline a pending group invite.",
-            long: "Clears the pending invite without joining. \
-                   No-op if you have no pending invite.",
-        },
-        run: cmd_decline,
-    },
-    // `gsay` / `gtell` / `gecho` / `gt` migrated to commands/room_chat.rs.
-    // ----- Movement -----
-    // Whole category migrated:
-    //   - 12 directionals → commands/movement_directions.rs
-    //   - recall/home    → commands/recall.rs
-    //   - release        → commands/release.rs
-    //   - enter          → commands/enter.rs
-    //   - setrecall      → commands/setrecall.rs
-    //     (technically Info category — moved with the rest)
-    // ----- Admin -----
-    // goto / transfer / teleport / force / freeze / summon / apply /
-    // restore / slay migrated to commands/admin_world.rs.
-    // ban / cclan / pnote / hinfo / hgrant / hrevoke migrated to
-    // commands/admin_management.rs.
-    // `zstat` migrated to commands/admin_inspect.rs.
-    Command {
-        names: &["identify", "id"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "identify <item>",
-            summary: "Magical analysis of a carried item.",
-            long: "Reveals the item's type, weight, base value, \
-                   wear slots, weapon dice (when applicable), bound \
-                   abilities (scrolls/wands/staves), liquid state \
-                   (drink containers), remaining charges, and any \
-                   active effects on the item.",
-        },
-        run: cmd_identify,
-    },
-    // load / loadobj / dumpworld / purge migrated to commands/admin_world.rs.
-];
+///
+/// The array is now empty — every command is distributed via
+/// `inventory::submit!` in commands/<file>.rs. `all_commands()`
+/// chains the (empty) static slice with `inventory::iter`.
+const COMMANDS: &[Command] = &[];
 
 pub(crate) const MOVE_HELP: Help = Help {
     usage: "<direction>",
@@ -5969,7 +4134,7 @@ pub(crate) fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool 
 // Info handlers
 // ---------------------------------------------------------------------------
 
-fn cmd_help(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
     let (role, perms) = world
         .get::<Account>(player)
         .map_or((UserRole::Player, Vec::new()), |a| (a.role, a.perms.clone()));
@@ -6022,7 +4187,7 @@ fn visible(cmd: &Command, role: UserRole, perms: &[Permission]) -> bool {
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_examine(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Examine whom or what?\r\n");
@@ -6258,7 +4423,7 @@ pub(crate) fn condition_label(hp: Health) -> &'static str {
 /// `Characters.title` on disconnect via `save_state`. Capped at 60
 /// chars to keep the `who` columns sane.
 const MAX_TITLE_LEN: usize = 60;
-fn cmd_title(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_title(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         let cur = world.get::<Title>(player).map(|t| t.0.clone());
@@ -6296,7 +4461,7 @@ fn cmd_title(world: &mut World, player: Entity, args: &str) {
 /// disconnect via `save_state`. Capped at 500 chars to keep examine
 /// from runaway-pasting.
 const MAX_DESCRIPTION_LEN: usize = 500;
-fn cmd_description(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_description(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         let cur = world.get::<Description>(player).map(|d| d.0.clone());
@@ -6331,7 +4496,7 @@ fn cmd_description(world: &mut World, player: Entity, args: &str) {
 /// `experience` / `exp` / `xp`: print level and total XP from Profile.
 /// Standalone readout for the same numbers `score` already shows; the
 /// loose level→required-XP table will join later.
-fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
     let Some(p) = world.get::<Profile>(player).cloned() else {
         send_to(world, player, "You have no profile.\r\n");
         return;
@@ -6349,7 +4514,7 @@ fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
 /// the standard 100/10/1 ratio (1 platinum = 10 gold = 100 silver =
 /// 1000 copper) so the four-coin breakdown matches `FieryMUD`'s score
 /// sheet. Zero-value coins are skipped; "no coin" prints when broke.
-fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
     let total = world.get::<Wealth>(player).map_or(0, |w| w.0);
     let msg = if let Some(parts) = format_wealth(total) {
         format!("\r\nYou have {parts}.\r\n")
@@ -6362,7 +4527,7 @@ fn cmd_wealth(world: &mut World, player: Entity, _args: &str) {
 /// `bribe <amount> <target>`: transfer copper to a mob and fire
 /// its BRIBE triggers. Refuses on insufficient funds, missing
 /// target, or self-target.
-fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.len() != 2 || parts[1].trim().is_empty() {
         send_to(world, player, "Usage: bribe <amount> <target>\r\n");
@@ -6455,7 +4620,7 @@ fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
 /// falls back to the proto's base `cost * buy_profit` when the row's
 /// override is `0`. No-op when no shopkeeper present.
 #[allow(clippy::too_many_lines)]
-fn cmd_list(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
@@ -6595,7 +4760,7 @@ fn shop_offer_price(offer: &mud_world::ShopOffering, base_cost: i32, buy_profit:
 /// resource is not mutated, so unlimited / 0 / N entries all sell.
 /// (Real stock decrement waits on per-shop instance state.)
 #[allow(clippy::too_many_lines)]
-fn cmd_buy(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "Buy what?\r\n");
@@ -6743,7 +4908,7 @@ fn cmd_buy(world: &mut World, player: Entity, args: &str) {
 /// (`AdminChar's wolf`). Cost is the offer's `price` or
 /// `mob.level * 100` when 0.
 #[allow(clippy::too_many_lines)]
-fn cmd_hire(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "Hire what?\r\n");
@@ -6898,7 +5063,7 @@ fn cmd_hire(world: &mut World, player: Entity, args: &str) {
 /// (`remove` first), zero-value items, rooms without a keeper, and
 /// items the keeper's `ShopAccepts` rules reject.
 #[allow(clippy::too_many_lines)]
-fn cmd_sell(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Sell what?\r\n");
@@ -7028,7 +5193,7 @@ fn cmd_sell(world: &mut World, player: Entity, args: &str) {
 /// the raw value in denominations. Real shop sell-price math (some
 /// fraction, race-specific copperFactor, durability modifier) lands
 /// with the shop system; this is the bare informational version.
-fn cmd_value(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_value(world: &mut World, player: Entity, args: &str) {
     let needle = args.trim();
     if needle.is_empty() {
         send_to(world, player, "Value what?\r\n");
@@ -7114,13 +5279,13 @@ fn require_profession_in_room(
 /// agnostic — any room works, since banker-mob detection isn't
 /// wired yet (it'll gate via `MobProfession::Banker` once that's
 /// hydrated). `save_player` persists both balances.
-fn cmd_deposit(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_deposit(world: &mut World, player: Entity, args: &str) {
     bank_transfer(world, player, args, "deposit");
 }
 
 /// `withdraw <amount>`: pull copper from the bank back on-hand.
 /// Mirrors `deposit` with the opposite sign / refusal text.
-fn cmd_withdraw(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_withdraw(world: &mut World, player: Entity, args: &str) {
     bank_transfer(world, player, args, "withdraw");
 }
 
@@ -7223,7 +5388,7 @@ pub(crate) fn format_wealth(total: i64) -> Option<String> {
 /// proficiency rendered as a tier label. With an ability name,
 /// raise that ability's proficiency by 5 (capped at the class's
 /// `proficiency_cap` from `ClassAbilities`).
-fn cmd_practice(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_practice(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     if !trimmed.is_empty() {
         // Spending a practice point requires a Trainer (matches
@@ -7490,7 +5655,7 @@ pub(crate) fn cmd_train(world: &mut World, player: Entity, args: &str) {
 /// Reports the first direction to head and the distance.
 /// Closed/locked exits block the scan; flying / hidden mobs are
 /// matched normally (no perception roll yet).
-fn cmd_track(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
     use std::collections::{HashSet, VecDeque};
     const MAX_DEPTH: i32 = 50;
     let needle = args.trim().to_ascii_lowercase();
@@ -7593,7 +5758,7 @@ fn cmd_track(world: &mut World, player: Entity, args: &str) {
 /// with the target room's name plus mob/player counts. Closed and
 /// locked exits print state instead of contents — you can see the
 /// door but not what's behind it.
-fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
@@ -7664,7 +5829,7 @@ fn direction_rank(d: Direction) -> u8 {
 /// One-line snapshot: name + posture + HP condition + current target.
 /// Useful for a quick teammate / enemy check without the wall of text
 /// from `examine`.
-fn cmd_glance(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_glance(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Glance at whom?\r\n");
@@ -7873,7 +6038,7 @@ struct WhoRow {
     clan_abbrev: Option<String>,
 }
 
-fn cmd_who(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_who(world: &mut World, player: Entity, _args: &str) {
     // Width-aware columns: pad the name to NAME_COL visible chars
     // (skipping XML-Lite color tags via pad_visible) so titles and
     // flags line up across players regardless of name length or
@@ -7956,7 +6121,7 @@ fn cmd_who(world: &mut World, player: Entity, _args: &str) {
     send_rendered(world, player, &out);
 }
 
-fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_idle(world: &mut World, player: Entity, _args: &str) {
     let mut rows: Vec<(String, Option<u64>, Option<u64>)> = {
         let mut q = world.query_filtered::<(
             &Named,
@@ -8053,7 +6218,7 @@ struct ScoreData<'a> {
     clan: Option<(&'a str, &'a str, &'a str)>,
 }
 
-fn cmd_score(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let name = name_of(world, player);
     let hp = world.get::<Health>(player).copied();
     let stamina = world.get::<Stamina>(player).copied();
@@ -8316,7 +6481,7 @@ fn render_score_minimal(d: &ScoreData) -> String {
     format!("{}\r\n", parts.join("  "))
 }
 
-fn cmd_style(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_style(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         let cur = world.get::<UiStyle>(player).copied().unwrap_or_default();
@@ -8339,19 +6504,19 @@ fn cmd_style(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, format!("UI style set to {}.\r\n", new.label()));
 }
 
-fn cmd_stand(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_stand(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Standing);
 }
-fn cmd_sit(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_sit(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Sitting);
 }
-fn cmd_kneel(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_kneel(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Kneeling);
 }
-fn cmd_rest(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_rest(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Resting);
 }
-fn cmd_sleep(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_sleep(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Sleeping);
 }
 
@@ -8431,7 +6596,7 @@ fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
     );
 }
 
-fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
     let Some(account) = world.get::<Account>(player).cloned() else {
         send_to(world, player, "No account info.\r\n");
         return;
@@ -8448,11 +6613,11 @@ fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, "Goodbye!\r\n");
 }
 
-fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
     let template = args.trim();
     if template.is_empty() {
         let current = world
@@ -8475,7 +6640,7 @@ fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, format!("Prompt set to: {template}\r\n"));
 }
 
-fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
     let raw = args.trim();
     if raw.is_empty() {
         send_to(world, player, "Toggle which flag? Try `flags` to see what's set, or `help toggle`.\r\n");
@@ -8522,7 +6687,7 @@ fn toggle_player_flag(
     send_to(world, player, format!("{}\r\n", if now_on { on_msg } else { off_msg }));
 }
 
-fn cmd_afk(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_afk(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8538,7 +6703,7 @@ fn cmd_afk(world: &mut World, player: Entity, _args: &str) {
 /// be redirected or the player can't reach them after one bad set.
 const RESERVED_ALIAS_NAMES: &[&str] = &["quit", "alias", "unalias"];
 
-fn cmd_alias(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_alias(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     if trimmed.is_empty() {
         // List
@@ -8607,7 +6772,7 @@ fn cmd_alias(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_unalias(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_unalias(world: &mut World, player: Entity, args: &str) {
     let name = args.trim().to_ascii_lowercase();
     if name.is_empty() || name.contains(char::is_whitespace) {
         send_to(world, player, "Usage: unalias <name>\r\n");
@@ -8630,7 +6795,7 @@ fn cmd_unalias(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_notell(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_notell(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8640,7 +6805,7 @@ fn cmd_notell(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_deaf(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_deaf(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8654,7 +6819,7 @@ fn cmd_deaf(world: &mut World, player: Entity, _args: &str) {
 // the command name): COLOR_BLIND ON ⇒ colors stripped. The messages
 // flip accordingly so the player reads the visible behaviour, not the
 // flag state.
-fn cmd_color(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_color(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8671,7 +6836,7 @@ fn cmd_color(world: &mut World, player: Entity, _args: &str) {
 // Combat checks `WimpyThreshold` (default 25%) only when the flag is
 // also set, so clearing the flag is sufficient to disable; we still
 // drop the component on `off` to keep state tidy.
-fn cmd_wimpy(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_wimpy(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
 
     let currently_on = world
@@ -8745,7 +6910,7 @@ fn cmd_wimpy(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_autoexit(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_autoexit(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8755,7 +6920,7 @@ fn cmd_autoexit(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_autoloot(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_autoloot(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8765,7 +6930,7 @@ fn cmd_autoloot(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_autogold(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_autogold(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8775,7 +6940,7 @@ fn cmd_autogold(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_autoassist(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_autoassist(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8785,7 +6950,7 @@ fn cmd_autoassist(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_autosplit(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_autosplit(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8795,7 +6960,7 @@ fn cmd_autosplit(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_brief(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_brief(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8805,7 +6970,7 @@ fn cmd_brief(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_compact(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_compact(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8815,7 +6980,7 @@ fn cmd_compact(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_norepeat(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_norepeat(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8825,7 +6990,7 @@ fn cmd_norepeat(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_nosummon(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_nosummon(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8837,7 +7002,7 @@ fn cmd_nosummon(world: &mut World, player: Entity, _args: &str) {
 
 // `dice` is the legacy verb for SHOW_DICE_ROLLS — when on, combat
 // surfaces hit/damage rolls in the output.
-fn cmd_dicerolls(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_dicerolls(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8847,7 +7012,7 @@ fn cmd_dicerolls(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_pk(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_pk(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8857,7 +7022,7 @@ fn cmd_pk(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_quest_flag(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_quest_flag(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8867,7 +7032,7 @@ fn cmd_quest_flag(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_consent(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_consent(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8882,7 +7047,7 @@ fn cmd_consent(world: &mut World, player: Entity, _args: &str) {
 // set, but no behaviour is wired into the renderer yet — this command
 // exists so the muscle-memory toggle works and lands the flag for
 // later renderer plumbing.
-fn cmd_holylight(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_holylight(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
         player,
@@ -8905,7 +7070,7 @@ pub(crate) fn cmd_showids(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-fn cmd_flags(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_flags(world: &mut World, player: Entity, _args: &str) {
     let flags: Vec<&'static str> = world
         .get::<PlayerFlags>(player)
         .map(|f| f.0.iter().map(|fl| fl.label()).collect())
@@ -9143,7 +7308,7 @@ fn look_direction(world: &mut World, player: Entity, dir: Direction) {
     send_to(world, player, out);
 }
 
-fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
@@ -9375,7 +7540,7 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Some(dir) = parse_direction(arg) else {
         send_to(world, player, "Unlock which way?\r\n");
@@ -9474,7 +7639,7 @@ pub(crate) fn cmd_open(world: &mut World, player: Entity, args: &str) {
 
 /// `close <direction>`: flip an open exit to Closed. Refused on
 /// already-closed/locked or non-existent exits.
-fn cmd_close(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_close(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Some(dir) = parse_direction(arg) else {
         send_to(world, player, "Close which way?\r\n");
@@ -9512,7 +7677,7 @@ fn cmd_close(world: &mut World, player: Entity, args: &str) {
 /// `lock <direction>`: mirror of `unlock`. Requires a Closed exit
 /// with a key requirement, and that the player carries that key.
 /// Already-locked / open / no-keyhole / no-key cases all refuse.
-fn cmd_lock(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Some(dir) = parse_direction(arg) else {
         send_to(world, player, "Lock which way?\r\n");
@@ -9594,7 +7759,7 @@ fn cmd_lock(world: &mut World, player: Entity, args: &str) {
 /// `examine`). The Description component is the same one
 /// `ObjectPrototypes.examine_description` feeds at load time, so books
 /// / signs / scrolls all surface their text via this path.
-fn cmd_read(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_read(world: &mut World, player: Entity, args: &str) {
     let needle = args.trim();
     if needle.is_empty() {
         send_to(world, player, "Read what?\r\n");
@@ -9642,7 +7807,7 @@ fn cmd_read(world: &mut World, player: Entity, args: &str) {
 /// the args at the first run of whitespace; multi-word keywords on
 /// either side aren't supported (a quoted-arg parser would be more
 /// general but no other command needs one yet).
-fn cmd_compare(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     let mut parts = args.trim().splitn(2, char::is_whitespace);
     let Some(a_word) = parts.next().filter(|s| !s.is_empty()) else {
         send_to(world, player, "Compare what to what?\r\n");
@@ -9771,19 +7936,19 @@ const POLICIES_TEXT: &str = "\
 This is a hobby server; please be kind.\r\n\
 ";
 
-fn cmd_motd(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_motd(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, MOTD_TEXT.to_string());
 }
 
-fn cmd_news(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_news(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, NEWS_TEXT.to_string());
 }
 
-fn cmd_credits(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_credits(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, CREDITS_TEXT.to_string());
 }
 
-fn cmd_policies(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_policies(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, POLICIES_TEXT.to_string());
 }
 
@@ -9796,7 +7961,7 @@ fn cmd_policies(world: &mut World, player: Entity, _args: &str) {
 /// output goes through `send_rendered` (same path as room
 /// descriptions) so what you see is what every other render path
 /// produces.
-fn cmd_richtest(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_richtest(world: &mut World, player: Entity, _args: &str) {
     let body = "\r\nXML-Lite color sampler:\r\n\
                 <red>red</> <green>green</> <yellow>yellow</> <blue>blue</> \
                 <magenta>magenta</> <cyan>cyan</> <white>white</>\r\n\
@@ -9817,7 +7982,7 @@ fn cmd_richtest(world: &mut World, player: Entity, _args: &str) {
 /// proper terminal-capability split (color depth, dimensions, MCCP)
 /// needs the telnet negotiation parsing that mud-net hasn't grown
 /// yet.
-fn cmd_clientinfo(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_clientinfo(world: &mut World, player: Entity, _args: &str) {
     let now = std::time::Instant::now();
     let uptime_secs = world
         .get::<LoggedInAt>(player)
@@ -9852,7 +8017,7 @@ fn cmd_clientinfo(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-fn cmd_account(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_account(world: &mut World, player: Entity, _args: &str) {
     let Some(summary) = world.get::<AccountSummary>(player).cloned() else {
         send_to(world, player, "No account info available.\r\n");
         return;
@@ -9884,7 +8049,7 @@ fn cmd_account(world: &mut World, player: Entity, _args: &str) {
 // command names today (`autoassist`, `description`, `lasttells`).
 const COMMANDS_LIST_COLS: usize = 4;
 const COMMANDS_LIST_COL_WIDTH: usize = 18;
-fn cmd_commands(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_commands(world: &mut World, player: Entity, _args: &str) {
     let (role, perms) = world
         .get::<Account>(player)
         .map_or((UserRole::Player, Vec::new()), |a| (a.role, a.perms.clone()));
@@ -9906,7 +8071,7 @@ fn cmd_commands(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-fn cmd_world(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_world(world: &mut World, player: Entity, _args: &str) {
     let zones = world.query_filtered::<Entity, With<mud_world::Zone>>().iter(world).count();
     let rooms = world.query_filtered::<Entity, With<mud_world::Room>>().iter(world).count();
     let mobs = world.query_filtered::<Entity, With<Mob>>().iter(world).count();
@@ -9934,7 +8099,7 @@ fn cmd_world(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-fn cmd_time(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     let tick = world.resource::<TickCount>().0;
     let started = world.resource::<ServerStart>().0;
     let uptime = started.elapsed();
@@ -10002,7 +8167,7 @@ fn ordinal_suffix(n: i64) -> &'static str {
 /// per-tick simulation; same input gives the same output. Players
 /// pull this when they want to feel the world's character; admins
 /// could also use it as a quick climate-tag readout.
-fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
     use mud_db::enums::Climate;
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere; the sky is blank.\r\n");
@@ -10077,7 +8242,7 @@ fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-fn cmd_version(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_version(world: &mut World, player: Entity, _args: &str) {
     let mut out = String::from("\r\n");
     out.push_str(&format!(
         "  {} {}\r\n",
@@ -10110,7 +8275,7 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
     // Snapshot in two passes so we can group identical names into a
     // single "3x <name>" line. Order is preserved by tracking the
     // first-seen position so duplicates fold without scrambling.
@@ -10217,7 +8382,7 @@ pub(crate) fn carried_weight(world: &mut World, actor: Entity) -> f64 {
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_get(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     if trimmed.is_empty() {
         send_to(world, player, "Get what?\r\n");
@@ -10437,7 +8602,7 @@ fn find_in_container(world: &mut World, needle: &str, container: Entity) -> Opti
 
 /// `put <item> <container>`: move a carried item into a container
 /// the player is carrying or which sits in the room.
-fn cmd_put(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_put(world: &mut World, player: Entity, args: &str) {
     // Support both `put <item> <container>` and `put <item> in <container>`.
     // The "in" keyword form is natural and matches how players type it.
     let trimmed = args.trim();
@@ -10561,7 +8726,7 @@ fn split_in_keyword(input: &str) -> Option<(&str, &str)> {
 /// `junk <item>` / `trash <item>`: destroy a carried item. Equipped
 /// items are refused — `remove` first. No coin is awarded; if the
 /// player is throwing it away, they're throwing it away.
-fn cmd_junk(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_junk(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Junk what?\r\n");
@@ -10597,7 +8762,7 @@ fn cmd_junk(world: &mut World, player: Entity, args: &str) {
 /// player's feet — but the message reads as a giving gesture rather
 /// than a discard, so admins / quest-givers can wire pickup
 /// behavior on top later.
-fn cmd_donate(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_donate(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Donate what?\r\n");
@@ -10633,7 +8798,7 @@ fn cmd_donate(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_drop(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Drop what?\r\n");
@@ -10699,7 +8864,7 @@ fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Drop);
 }
 
-fn cmd_give(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.len() != 2 || parts[1].trim().is_empty() {
         send_to(world, player, "Usage: give <item> <target>\r\n");
@@ -10789,7 +8954,7 @@ fn cmd_give(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_wear(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_wear(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     // `wear all` — try to equip every carried wearable. Items whose
     // primary slot is already filled get skipped silently (a single
@@ -10818,17 +8983,17 @@ fn cmd_wear(world: &mut World, player: Entity, args: &str) {
     wear_into(world, player, trimmed, None);
 }
 
-fn cmd_wield(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_wield(world: &mut World, player: Entity, args: &str) {
     wear_into(world, player, args.trim(), Some(Slot::Wield));
 }
 
-fn cmd_hold(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_hold(world: &mut World, player: Entity, args: &str) {
     wear_into(world, player, args.trim(), Some(Slot::Hold));
 }
 
 /// `light <item>`: mark a Light-type carried item as lit. Refused
 /// on non-Light items or already-lit ones.
-fn cmd_light(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_light(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Light what?\r\n");
@@ -10857,7 +9022,7 @@ fn cmd_light(world: &mut World, player: Entity, args: &str) {
 }
 
 /// `extinguish <item>`: clear the Lit marker.
-fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Extinguish what?\r\n");
@@ -10883,7 +9048,7 @@ fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
 /// movement (when the rider walks) carries the mount along. Refused
 /// on non-mountable mobs, on already-ridden mounts, when the rider
 /// is already mounted, or when the mob is in combat.
-fn cmd_mount(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_mount(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "Mount what?\r\n");
@@ -10929,7 +9094,7 @@ fn cmd_mount(world: &mut World, player: Entity, args: &str) {
 
 /// `dismount`: get off your current mount. Clears `Mounted` /
 /// `RiddenBy` on both sides. No-op when not mounted.
-fn cmd_dismount(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_dismount(world: &mut World, player: Entity, _args: &str) {
     let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(player).copied() else {
         send_to(world, player, "You aren't riding anything.\r\n");
         return;
@@ -10953,7 +9118,7 @@ fn cmd_dismount(world: &mut World, player: Entity, _args: &str) {
 /// movement charges a flat 2 stamina per move (sector-cost flattens
 /// to 1, plus a +1 wing-flap) — great over water/swamp, slightly
 /// pricier on roads. `walk` / `land` clears the marker.
-fn cmd_fly(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_fly(world: &mut World, player: Entity, _args: &str) {
     if world.get::<mud_world::Flying>(player).is_some() {
         send_to(world, player, "You're already flying.\r\n");
         return;
@@ -10972,7 +9137,7 @@ fn cmd_fly(world: &mut World, player: Entity, _args: &str) {
 }
 
 /// `walk` / `land`: clear the `Flying` marker.
-fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
     if world.get::<mud_world::Flying>(player).is_none() {
         send_to(world, player, "You're already on the ground.\r\n");
         return;
@@ -10995,7 +9160,7 @@ fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
 /// reads it) — there's no auto-fail on noisy actions, no skill check,
 /// and no visibility filtering in `look` yet. Those land with the
 /// rogue skill tree. The verb works so muscle memory is preserved.
-fn cmd_hide(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_hide(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Stealth>(player).is_some() {
         send_to(world, player, "You're already hidden.\r\n");
         return;
@@ -11009,7 +9174,7 @@ fn cmd_hide(world: &mut World, player: Entity, _args: &str) {
 }
 
 /// `visible` / `vis`: clear the `Stealth` marker. Always succeeds.
-fn cmd_visible(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_visible(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Stealth>(player).is_none() {
         send_to(world, player, "You're already visible.\r\n");
         return;
@@ -11136,7 +9301,7 @@ fn spawn_consumable_effect(
     ));
 }
 
-fn cmd_eat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_eat(world: &mut World, player: Entity, args: &str) {
     if consume_item(world, player, args, mud_db::enums::ObjectType::Food, "eat")
         && let Some(mut h) = world.get_mut::<mud_world::Hunger>(player)
     {
@@ -11146,7 +9311,7 @@ fn cmd_eat(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_quaff(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_quaff(world: &mut World, player: Entity, args: &str) {
     consume_item(world, player, args, mud_db::enums::ObjectType::Potion, "quaff");
 }
 
@@ -11243,11 +9408,11 @@ fn drink_amount(world: &mut World, player: Entity, args: &str, units: i32, verb:
     }
 }
 
-fn cmd_drink(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_drink(world: &mut World, player: Entity, args: &str) {
     drink_amount(world, player, args, 4, "drink");
 }
 
-fn cmd_sip(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_sip(world: &mut World, player: Entity, args: &str) {
     drink_amount(world, player, args, 1, "sip");
 }
 
@@ -11257,7 +9422,7 @@ fn cmd_sip(world: &mut World, player: Entity, args: &str) {
 /// by capacity − remaining). Liquid types must match — pouring
 /// water into wine refuses.
 #[allow(clippy::too_many_lines)]
-fn cmd_pour(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
     let mut parts = args.split_whitespace();
     let Some(src_word) = parts.next() else {
         send_to(world, player, "Usage: pour <container> [target]\r\n");
@@ -11354,7 +9519,7 @@ fn cmd_pour(world: &mut World, player: Entity, args: &str) {
 
 /// `fill <container> <source>`: top up the destination from the
 /// source. Inverse of `pour`. Same liquid-match rules apply.
-fn cmd_fill(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
     let mut parts = args.split_whitespace();
     let Some(dest_word) = parts.next() else {
         send_to(world, player, "Usage: fill <container> <source>\r\n");
@@ -11371,7 +9536,7 @@ fn cmd_fill(world: &mut World, player: Entity, args: &str) {
 /// `taste <container>`: identify the liquid without drinking. No
 /// state mutation, no consumption. On poisoned containers, gives a
 /// "tastes off" hint.
-fn cmd_taste(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_taste(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Taste what?\r\n");
@@ -11413,7 +9578,7 @@ fn cmd_taste(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_recite(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_recite(world: &mut World, player: Entity, args: &str) {
     invoke_object_abilities(
         world,
         player,
@@ -11425,7 +9590,7 @@ fn cmd_recite(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_wave(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_wave(world: &mut World, player: Entity, args: &str) {
     invoke_object_abilities(
         world,
         player,
@@ -11437,7 +9602,7 @@ fn cmd_wave(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_tap(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_tap(world: &mut World, player: Entity, args: &str) {
     invoke_object_abilities(
         world,
         player,
@@ -11694,7 +9859,7 @@ fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: O
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
 }
 
-fn cmd_remove(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Remove what?\r\n");
@@ -11738,7 +9903,7 @@ fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Remove);
 }
 
-fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
     // Build a Slot -> name map in canonical order.
     let mut by_slot: Vec<(Slot, String)> = {
         let mut q =
@@ -11845,7 +10010,7 @@ pub(crate) fn find_actor_in_room(
 /// Reads the `Cooldowns` component (set by `invoke_ability` after a
 /// successful cast). Stale entries (`ready_at` in the past) are
 /// skipped — they're effectively expired even if not pruned yet.
-fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
     let now = std::time::Instant::now();
     let mut active: Vec<(String, f32)> = {
         let Some(cd) = world.get::<Cooldowns>(player) else {
@@ -11948,7 +10113,7 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     // Snapshot effects on the player; pull the optional ModifyDelta
     // companion in the same query so the renderer can show
     // "ward (+60) (2245s)" for stat-bonus effects.
@@ -12015,7 +10180,7 @@ fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
 /// category. Unlocked ones show their title + description; locked
 /// (and not hidden) ones show a placeholder; hidden ones are
 /// suppressed until unlocked.
-fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
     use mud_db::enums::AchievementCategory;
     let filter = args.trim().to_ascii_lowercase();
     let unlocked = world
@@ -12080,7 +10245,7 @@ fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
 /// synthesizes ECS Room entities for each `PlayerHouseRoom` on
 /// first call (cached in `HousingIndex`); subsequent calls
 /// just look up and move.
-fn cmd_home(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_home(world: &mut World, player: Entity, _args: &str) {
     let summary = world.get::<mud_world::HouseSummary>(player).cloned();
     let Some(summary) = summary else {
         send_to(
@@ -12252,7 +10417,7 @@ fn spawn_house_item(
 /// commands (place, remove, expand, name) and the `home` /
 /// `visit` traversal commands land in subsequent slices.
 #[allow(clippy::too_many_lines)]
-fn cmd_house(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_house(world: &mut World, player: Entity, args: &str) {
     let sub = args.trim().to_ascii_lowercase();
     let sub = if sub.is_empty() { "info" } else { sub.as_str() };
     let house = world.get::<mud_world::HouseSummary>(player).cloned();
@@ -12362,7 +10527,7 @@ fn cmd_house(world: &mut World, player: Entity, args: &str) {
 /// fire-and-forget; the in-memory entity gets a `HouseItem(row_id)`
 /// component once the insert completes so `house take` can find
 /// the FK row.
-fn cmd_house_place(
+pub(crate) fn cmd_house_place(
     world: &mut World,
     player: Entity,
     house: &mud_world::HouseSummary,
@@ -12468,7 +10633,7 @@ fn cmd_house_place(
 /// `HouseItem(row_id)` component (which only fully-loaded house
 /// items have — items placed *this session* won't be takeable
 /// until next login, see the comment in `cmd_house_place`).
-fn cmd_house_take(
+pub(crate) fn cmd_house_take(
     world: &mut World,
     player: Entity,
     house: &mud_world::HouseSummary,
@@ -13043,7 +11208,7 @@ pub(crate) fn cmd_hinfo(world: &mut World, player: Entity, args: &str) {
 /// Single helper for both — `is_description=true` writes the
 /// description column instead of the name. The local index `#`
 /// must be a room belonging to *this* house.
-fn cmd_house_rename(
+pub(crate) fn cmd_house_rename(
     world: &mut World,
     player: Entity,
     house: &mud_world::HouseSummary,
@@ -13122,7 +11287,7 @@ fn cmd_house_rename(
 /// `can_place` flag so the guest can drop items in your rooms too.
 /// DB lookup against `Characters.name` (case-insensitive).
 #[allow(clippy::too_many_lines)]
-fn cmd_house_guest(
+pub(crate) fn cmd_house_guest(
     world: &mut World,
     player: Entity,
     house: &mud_world::HouseSummary,
@@ -13269,7 +11434,7 @@ fn name_or_keyword_matches(target: &str, name: &str, kw: Option<&Keywords>) -> b
 
 
 /// `level`: print level / XP / next-level delta.
-fn cmd_level(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_level(world: &mut World, player: Entity, _args: &str) {
     use mud_world::LevelTable;
     let Some(p) = world.get::<Profile>(player) else {
         send_to(world, player, "You have no profile.\r\n");
@@ -13556,7 +11721,7 @@ pub(crate) fn cmd_forget(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_spells(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
     use mud_db::abilities::AbilityKind;
 
     let filter = args.trim().to_ascii_lowercase();
@@ -13629,7 +11794,7 @@ fn cmd_spells(world: &mut World, player: Entity, args: &str) {
 /// the ability catalog like `cmd_spells` but restricts to a single
 /// `AbilityKind`. Honors `KnownAbilities` gating and the optional
 /// substring filter (passed as `args`).
-fn cmd_abilities_kind(
+pub(crate) fn cmd_abilities_kind(
     world: &mut World,
     player: Entity,
     args: &str,
@@ -13687,11 +11852,11 @@ fn cmd_abilities_kind(
     send_to(world, player, out);
 }
 
-fn cmd_skills(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_skills(world: &mut World, player: Entity, args: &str) {
     cmd_abilities_kind(world, player, args, mud_db::abilities::AbilityKind::Skill);
 }
 
-fn cmd_songs(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_songs(world: &mut World, player: Entity, args: &str) {
     cmd_abilities_kind(world, player, args, mud_db::abilities::AbilityKind::Song);
 }
 
@@ -19101,7 +17266,7 @@ pub(crate) fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
 /// `invite <player>`: send a group invite. Recipient gets a
 /// `GroupInvite` component carrying the inviter's entity; their
 /// `accept` will install Follower(self) for the sender.
-fn cmd_invite(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_invite(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "Invite whom?\r\n");
@@ -19161,7 +17326,7 @@ fn cmd_invite(world: &mut World, player: Entity, args: &str) {
 /// follow-chain group model). Refused if the invite has expired
 /// (older than 5 minutes), the inviter has disconnected, or no
 /// invite exists.
-fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
     let Some(invite) = world.get::<mud_world::GroupInvite>(player).copied() else {
         send_to(
             world,
@@ -19275,7 +17440,7 @@ pub(crate) fn group_members(world: &mut World, root: Entity) -> Vec<Entity> {
 /// `group dismiss <name>`: remove a single direct follower (the
 /// surgical version of `disband`). The named player must currently
 /// be following the caller.
-fn cmd_group(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_group(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if let Some(rest) = arg.strip_prefix("dismiss") {
         let target_word = rest.trim();
@@ -19365,7 +17530,7 @@ fn group_dismiss_one(world: &mut World, dismisser: Entity, target_name: &str) {
 /// reaches every same-room mob follower. The mob runs the command
 /// via the normal dispatcher — admin gates still apply (mobs only
 /// reach Player-level commands).
-fn cmd_order(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_order(world: &mut World, player: Entity, args: &str) {
     let mut parts = args.trim().splitn(2, char::is_whitespace);
     let target_word = parts.next().unwrap_or("");
     let cmd_text = parts.next().unwrap_or("").trim();
@@ -19444,14 +17609,14 @@ fn cmd_order(world: &mut World, player: Entity, args: &str) {
 }
 
 /// `dismiss <player>`: top-level alias for `group dismiss <player>`.
-fn cmd_dismiss(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_dismiss(world: &mut World, player: Entity, args: &str) {
     group_dismiss_one(world, player, args.trim());
 }
 
 /// `split <amount>`: pull `<amount>` from the caller's `Wealth` and
 /// distribute it evenly across every group member currently in the
 /// same room (including the caller). Remainder stays with the caller.
-fn cmd_split(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Ok(amount) = arg.parse::<i64>() else {
         send_to(world, player, "Usage: split <amount>\r\n");
@@ -19541,7 +17706,7 @@ fn cmd_split(world: &mut World, player: Entity, args: &str) {
 /// group apart. Members deeper in the chain stay connected to each
 /// other unless they too disband. Self has no Follower component to
 /// touch — only entities pointing at self.
-fn cmd_disband(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_disband(world: &mut World, player: Entity, _args: &str) {
     let to_release: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Follower), With<Player>>();
         q.iter(world)
@@ -19570,7 +17735,7 @@ fn cmd_disband(world: &mut World, player: Entity, _args: &str) {
     }
 }
 
-fn cmd_follow(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_follow(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Follow whom?\r\n");
@@ -19611,7 +17776,7 @@ fn cmd_follow(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
     let prev = world.get::<Follower>(player).copied();
     try_remove::<Follower>(world, player);
     if let Some(Follower(prev_target)) = prev {
@@ -20899,7 +19064,7 @@ pub(crate) fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
 
 /// `identify <item>`: dump proto + runtime state for a carried item.
 #[allow(clippy::too_many_lines)]
-fn cmd_identify(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
     let needle = args.trim();
     if needle.is_empty() {
         send_to(world, player, "Identify what?\r\n");
