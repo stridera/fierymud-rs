@@ -1814,6 +1814,40 @@ impl UserData for LuaActor {
                                 .into(),
                         )
                     }),
+                    // Total transitive group size for the actor.
+                    // Walks the Follower chain to find the root, then
+                    // counts every entity that follows back to it.
+                    // 1 means solo (the actor itself). Used by death-
+                    // event triggers (`for i = 1, actor.group_size`).
+                    "group_size" => Ok(world_mut_from_lua(lua, |w| {
+                        let mut root = this.entity;
+                        let mut steps = 0;
+                        while let Some(f) = w.get::<Follower>(root) {
+                            if steps > 32 {
+                                break;
+                            }
+                            root = f.0;
+                            steps += 1;
+                        }
+                        // BFS through Follower edges from the root.
+                        let mut group = vec![root];
+                        let mut frontier = vec![root];
+                        while let Some(parent) = frontier.pop() {
+                            let children: Vec<Entity> = {
+                                let mut q = w
+                                    .query_filtered::<(Entity, &Follower), With<Player>>();
+                                q.iter(w)
+                                    .filter(|(e, f)| f.0 == parent && !group.contains(e))
+                                    .map(|(e, _)| e)
+                                    .collect()
+                            };
+                            for c in &children {
+                                group.push(*c);
+                                frontier.push(*c);
+                            }
+                        }
+                        Value::Integer(i64::try_from(group.len()).unwrap_or(0))
+                    })?),
                     // 95 corpus refs — character alignment (good/evil
                     // axis as integer). Sourced from CombatStats so
                     // both players and mobs return their loaded value.
