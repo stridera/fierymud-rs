@@ -6829,6 +6829,12 @@ enum QuestObjectiveBump {
     VisitRoom { zone: i32, id: i32 },
     TalkToNpc { zone: i32, id: i32 },
     CollectItem { zone: i32, id: i32 },
+    DeliverItem {
+        item_zone: i32,
+        item_id: i32,
+        mob_zone: i32,
+        mob_id: i32,
+    },
 }
 
 /// Advance any active `KILL_MOB` objectives whose target matches
@@ -6865,6 +6871,29 @@ pub(crate) fn bump_visit_quest_progress(
         QuestObjectiveBump::VisitRoom {
             zone: room_zone,
             id: room_id,
+        },
+    );
+}
+
+/// Advance any active `DELIVER_ITEM` objectives matching the
+/// (item proto, recipient mob proto) pair. Called from `cmd_give`
+/// when an item changes hands to a mob.
+pub(crate) fn bump_deliver_quest_progress(
+    world: &mut World,
+    giver: Entity,
+    item_zone: i32,
+    item_id: i32,
+    mob_zone: i32,
+    mob_id: i32,
+) {
+    bump_quest_progress(
+        world,
+        giver,
+        QuestObjectiveBump::DeliverItem {
+            item_zone,
+            item_id,
+            mob_zone,
+            mob_id,
         },
     );
 }
@@ -6912,6 +6941,7 @@ pub(crate) fn bump_talk_quest_progress(
 /// party member, then dispatches one task per member that does
 /// the kind-specific DB read + upsert and sends a progress line
 /// through that member's own outbound channel.
+#[allow(clippy::too_many_lines)]
 fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBump) {
     if world.get::<Player>(actor).is_none() {
         return;
@@ -6958,6 +6988,17 @@ fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBum
                 QuestObjectiveBump::CollectItem { zone, id } => {
                     mud_db::quest_objectives::list_collect_item_progress(
                         &pool, &cid, zone, id, is_actor,
+                    )
+                    .await
+                }
+                QuestObjectiveBump::DeliverItem {
+                    item_zone,
+                    item_id,
+                    mob_zone,
+                    mob_id,
+                } => {
+                    mud_db::quest_objectives::list_deliver_item_progress(
+                        &pool, &cid, item_zone, item_id, mob_zone, mob_id, is_actor,
                     )
                     .await
                 }
@@ -11858,6 +11899,22 @@ fn cmd_give(world: &mut World, player: Entity, args: &str) {
     // Fire RECEIVE triggers on the recipient. Bodies typically gate
     // on `object.id` to handle quest item turn-ins.
     crate::triggers::fire_receive(world, target, player, item);
+    // DELIVER_ITEM objective progression. Only when the recipient
+    // is a mob with a known prototype (player-to-player gifts
+    // don't satisfy quest deliveries).
+    if world.get::<Mob>(target).is_some()
+        && let Some(item_key) = world.get::<WorldKey>(item).copied()
+        && let Some(mob_key) = world.get::<WorldKey>(target).copied()
+    {
+        bump_deliver_quest_progress(
+            world,
+            player,
+            item_key.zone,
+            item_key.id,
+            mob_key.zone,
+            mob_key.id,
+        );
+    }
 }
 
 fn cmd_wear(world: &mut World, player: Entity, args: &str) {
