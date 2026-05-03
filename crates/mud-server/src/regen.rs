@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    Fighting, Frozen, Ghost, Health, Hunger, LightFuel, Lit, Located, Mob, Named, Online, Player,
-    Posture, PostureKind, Stamina, Thirst,
+    Drunkenness, Fighting, Frozen, Ghost, Health, Hunger, LightFuel, Lit, Located, Mob, Named,
+    Online, Player, Posture, PostureKind, Stamina, Thirst,
 };
 
 use crate::TickCount;
@@ -230,6 +230,49 @@ pub fn light_fuel_tick(world: &mut World) {
             );
         } else {
             broadcast_room_except_rendered(world, room, &[], &line);
+        }
+    }
+}
+
+/// Drunkenness decay period: 300 ticks @ 10 Hz = 30 seconds per
+/// point of sobering up. A worst-case 100-drunk player thus
+/// sobers up over 50 minutes of real time.
+const DRUNKENNESS_PERIOD_TICKS: u64 = 300;
+
+/// Tick down `Drunkenness` for online players once per
+/// `DRUNKENNESS_PERIOD_TICKS`. Threshold crossings emit a flavor
+/// line so the player knows when they're regaining clarity.
+/// When the counter reaches 0 the component is removed so the
+/// idle case stops occupying a row in queries.
+pub fn drunkenness_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(DRUNKENNESS_PERIOD_TICKS) {
+        return;
+    }
+    let snapshot: Vec<(Entity, i32)> = {
+        let mut q = world
+            .query_filtered::<(Entity, &Drunkenness), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .filter(|(_, d)| d.0 > 0)
+            .map(|(e, d)| (e, d.0))
+            .collect()
+    };
+    for (entity, old) in snapshot {
+        let new = old - 1;
+        // Threshold crossings (going down).
+        if old >= 80 && new < 80 {
+            send_to(world, entity, "The room steadies — the worst is passing.\r\n");
+        }
+        if old >= 40 && new < 40 {
+            send_to(world, entity, "Your head clears a little.\r\n");
+        }
+        if new <= 0 {
+            send_to(world, entity, "You feel sober again.\r\n");
+            if let Ok(mut e) = world.get_entity_mut(entity) {
+                e.remove::<Drunkenness>();
+            }
+        } else if let Some(mut d) = world.get_mut::<Drunkenness>(entity) {
+            d.0 = new;
         }
     }
 }

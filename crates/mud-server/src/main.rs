@@ -215,6 +215,7 @@ async fn main() {
             regen::regen_tick,
             regen::hunger_thirst_tick,
             regen::light_fuel_tick,
+            regen::drunkenness_tick,
             drowning::drowning_tick,
             weather::weather_tick,
             weather::ambient_tick,
