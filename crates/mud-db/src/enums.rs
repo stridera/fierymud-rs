@@ -176,6 +176,20 @@ pub enum MobRole {
     RaidBoss,
 }
 
+/// Special NPC service roles. A mob can carry multiple
+/// professions (banker + receptionist, etc). Mirrors the schema
+/// enum verbatim.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = "MobProfession", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MobProfession {
+    Banker,
+    Shopkeeper,
+    Receptionist,
+    Postmaster,
+    Guildmaster,
+    Trainer,
+}
+
 /// Three-bucket alignment used for item restrictions. The
 /// schema's `Objects.restricted_alignments` column is an array
 /// of these. The runtime compares against the killer's i32

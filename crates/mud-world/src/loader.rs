@@ -190,6 +190,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 class_id: row.class_id,
                 behaviors: row.behaviors,
                 protected_kind: row.protected_kind,
+                professions: row.professions,
             },
         );
     }

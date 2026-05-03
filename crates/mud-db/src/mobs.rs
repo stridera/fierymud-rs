@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::enums::{MobBehavior, MobRole, ProtectedKind};
+use crate::enums::{MobBehavior, MobProfession, MobRole, ProtectedKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mob {
@@ -34,6 +34,10 @@ pub struct Mob {
     /// "Kill the wrong target" marker. Drives the alignment
     /// penalty applied to the killer in `combat::handle_death`.
     pub protected_kind: ProtectedKind,
+    /// Service roles (banker / shopkeeper / trainer / etc).
+    /// Empty for ordinary mobs. Drives gating on `deposit` /
+    /// shop interaction / etc.
+    pub professions: Vec<MobProfession>,
 }
 
 pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
@@ -60,7 +64,8 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             wealth,
             class_id,
             behaviors AS "behaviors!: Vec<MobBehavior>",
-            protected_kind AS "protected_kind!: ProtectedKind"
+            protected_kind AS "protected_kind!: ProtectedKind",
+            professions AS "professions!: Vec<MobProfession>"
         FROM "Mobs"
         ORDER BY zone_id, id
         "#

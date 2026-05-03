@@ -918,6 +918,8 @@ pub struct MobProto {
     /// vast majority of mobs; non-Normal triggers an alignment
     /// hit on the killer in `combat::handle_death`.
     pub protected_kind: mud_db::enums::ProtectedKind,
+    /// Service-role flags (banker / shopkeeper / trainer / ...).
+    pub professions: Vec<mud_db::enums::MobProfession>,
 }
 
 impl MobProto {

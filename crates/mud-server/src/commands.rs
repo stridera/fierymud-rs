@@ -8797,6 +8797,31 @@ fn bank_transfer(world: &mut World, player: Entity, args: &str, direction: &str)
             return;
         }
     };
+    // Require a banker mob in the same room. Looks up each mob's
+    // proto via WorldKey to find the MobProfession::Banker tag.
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let banker_present = {
+        let mut q = world.query_filtered::<(&Located, &WorldKey), With<Mob>>();
+        q.iter(world).any(|(l, k)| {
+            l.0 == located.0
+                && world
+                    .get_resource::<MobPrototypes>()
+                    .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+                    .is_some_and(|m| {
+                        m.professions.contains(&mud_db::enums::MobProfession::Banker)
+                    })
+        })
+    };
+    if !banker_present {
+        send_to(
+            world,
+            player,
+            "You need a banker here to handle that.\r\n",
+        );
+        return;
+    }
     let on_hand = world.get::<Wealth>(player).map_or(0, |w| w.0);
     let in_bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
     let (from, to, can_afford) = match direction {
