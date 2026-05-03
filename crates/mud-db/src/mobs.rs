@@ -43,6 +43,15 @@ pub struct Mob {
     /// Empty for ordinary mobs. Drives gating on `deposit` /
     /// shop interaction / etc.
     pub professions: Vec<MobProfession>,
+    /// Schema's `Gender` enum, kept as raw text for direct
+    /// comparison with player gender strings (`male` / `female`
+    /// / `neutral` / `non_binary`). Lua trigger bodies pattern-
+    /// match against this via `actor.gender`.
+    pub gender: String,
+    /// Schema's `Race` enum, kept as raw text. Default `HUMANOID`
+    /// for unspecified mobs. Lua bodies use this for
+    /// `actor.race == "elf"`-style gating.
+    pub race: String,
 }
 
 pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
@@ -71,7 +80,9 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             class_id,
             behaviors AS "behaviors!: Vec<MobBehavior>",
             protected_kind AS "protected_kind!: ProtectedKind",
-            professions AS "professions!: Vec<MobProfession>"
+            professions AS "professions!: Vec<MobProfession>",
+            gender::text AS "gender!",
+            race::text AS "race!"
         FROM "Mobs"
         ORDER BY zone_id, id
         "#

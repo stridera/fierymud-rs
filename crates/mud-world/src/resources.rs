@@ -962,6 +962,14 @@ pub struct MobProto {
     /// the builder didn't author one — spawn-side falls back to
     /// `room_description` for consistency with the legacy.
     pub examine_description: String,
+    /// Lower-cased gender string (`male` / `female` / `neutral` /
+    /// `non_binary`). Read by Lua `actor.gender` for trigger
+    /// bodies that gate on the mob's gender.
+    pub gender: String,
+    /// Lower-cased race string (`humanoid` / `elf` / `dragon` /
+    /// ...). Read by Lua `actor.race` and the gendered-pronoun
+    /// helpers for "his/her/its" rendering.
+    pub race: String,
     pub level: i32,
     pub alignment: i32,
     pub role: mud_db::enums::MobRole,

@@ -1590,16 +1590,24 @@ impl UserData for LuaActor {
                         Value::Integer(w.get::<Health>(this.entity).map_or(0, |h| h.max).into())
                     }),
                     // `actor.gender` reads `Profile.gender` for
-                    // players ("male" / "female" / "neutral"). Mobs
-                    // currently return empty since their schema
-                    // gender column isn't plumbed into MobProto yet
-                    // (most legacy mob bodies don't read it from
-                    // the mob anyway — they read it from the player).
+                    // players. Mobs source from `MobPrototypes` via
+                    // their `WorldKey` so triggers gating on a mob's
+                    // authored gender (`actor.gender == "female"`)
+                    // resolve correctly.
                     "gender" => {
                         let s = world_from_lua(lua, |w| {
-                            w.get::<Profile>(this.entity)
-                                .map(|p| p.gender.clone())
-                                .unwrap_or_default()
+                            if let Some(p) = w.get::<Profile>(this.entity) {
+                                return p.gender.clone();
+                            }
+                            if let Some(wk) = w.get::<WorldKey>(this.entity) {
+                                return w
+                                    .resource::<MobPrototypes>()
+                                    .by_key
+                                    .get(&(wk.zone, wk.id))
+                                    .map(|p| p.gender.clone())
+                                    .unwrap_or_default();
+                            }
+                            String::new()
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
@@ -1663,11 +1671,23 @@ impl UserData for LuaActor {
                     }
                     // 167 corpus refs: gating against race name in
                     // string compare patterns (`actor.race == "elf"`).
+                    // Mobs source from `MobPrototypes` so trigger
+                    // bodies on dragon / humanoid / elf-tagged mobs
+                    // resolve correctly.
                     "race" => {
                         let s = world_from_lua(lua, |w| {
-                            w.get::<Profile>(this.entity)
-                                .map(|p| p.race.to_ascii_lowercase())
-                                .unwrap_or_default()
+                            if let Some(p) = w.get::<Profile>(this.entity) {
+                                return p.race.to_ascii_lowercase();
+                            }
+                            if let Some(wk) = w.get::<WorldKey>(this.entity) {
+                                return w
+                                    .resource::<MobPrototypes>()
+                                    .by_key
+                                    .get(&(wk.zone, wk.id))
+                                    .map(|p| p.race.clone())
+                                    .unwrap_or_default();
+                            }
+                            String::new()
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }

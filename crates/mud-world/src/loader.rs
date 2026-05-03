@@ -210,6 +210,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 keywords: row.keywords,
                 room_description: row.room_description,
                 examine_description: row.examine_description,
+                gender: row.gender.to_ascii_lowercase(),
+                race: row.race.to_ascii_lowercase(),
                 level: row.level,
                 alignment: row.alignment,
                 role: row.role,
