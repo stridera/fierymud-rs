@@ -6828,6 +6828,7 @@ enum QuestObjectiveBump {
     KillMob { zone: i32, id: i32 },
     VisitRoom { zone: i32, id: i32 },
     TalkToNpc { zone: i32, id: i32 },
+    CollectItem { zone: i32, id: i32 },
 }
 
 /// Advance any active `KILL_MOB` objectives whose target matches
@@ -6864,6 +6865,25 @@ pub(crate) fn bump_visit_quest_progress(
         QuestObjectiveBump::VisitRoom {
             zone: room_zone,
             id: room_id,
+        },
+    );
+}
+
+/// Advance any active `COLLECT_ITEM` objectives whose target
+/// object matches the just-picked-up item's prototype. Called
+/// from `cmd_get` when an item moves into the player's inventory.
+pub(crate) fn bump_collect_quest_progress(
+    world: &mut World,
+    collector: Entity,
+    object_zone: i32,
+    object_id: i32,
+) {
+    bump_quest_progress(
+        world,
+        collector,
+        QuestObjectiveBump::CollectItem {
+            zone: object_zone,
+            id: object_id,
         },
     );
 }
@@ -6931,6 +6951,12 @@ fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBum
                 }
                 QuestObjectiveBump::TalkToNpc { zone, id } => {
                     mud_db::quest_objectives::list_talk_to_npc_progress(
+                        &pool, &cid, zone, id, is_actor,
+                    )
+                    .await
+                }
+                QuestObjectiveBump::CollectItem { zone, id } => {
+                    mud_db::quest_objectives::list_collect_item_progress(
                         &pool, &cid, zone, id, is_actor,
                     )
                     .await
@@ -11371,6 +11397,9 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
                     player,
                     mud_world::TriggerEvent::Get,
                 );
+                if let Some(key) = world.get::<WorldKey>(*item).copied() {
+                    bump_collect_quest_progress(world, player, key.zone, key.id);
+                }
                 moved += 1;
             }
             if moved > 0 {
@@ -11422,6 +11451,9 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
             &format!("{player_name} takes {item_name} from {container_name}.\r\n"),
         );
         crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Get);
+        if let Some(key) = world.get::<WorldKey>(item).copied() {
+            bump_collect_quest_progress(world, player, key.zone, key.id);
+        }
         return;
     }
 
@@ -11458,6 +11490,9 @@ fn cmd_get(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} picks up {item_name}.\r\n"),
     );
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Get);
+    if let Some(key) = world.get::<WorldKey>(item).copied() {
+        bump_collect_quest_progress(world, player, key.zone, key.id);
+    }
 }
 
 /// Split `<item> from <container>` into `(item, container)` if the
