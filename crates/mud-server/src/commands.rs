@@ -2698,6 +2698,8 @@ mod tests {
             next_level_gains: Some((26, 18, 9)),
             recall: Some(("The Inn", 30, 1)),
             stealth: false,
+            flying: false,
+            mount_name: None,
         }
     }
 
@@ -2757,6 +2759,29 @@ mod tests {
         assert!(
             out.contains("Recall:   The Inn  [30:1]"),
             "recall line: {out}",
+        );
+    }
+
+    #[test]
+    fn score_motion_state_lines_only_when_active() {
+        let flags: Vec<&'static str> = Vec::new();
+        let slots: Vec<(i32, i32, i32)> = Vec::new();
+        let effects: Vec<String> = Vec::new();
+        let equipment: Vec<(&'static str, String)> = Vec::new();
+        let mut data =
+            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        // Default fixture: on foot, walking → no rows.
+        let grounded = super::render_score_standard(&data);
+        assert!(!grounded.contains("Flying:"), "no fly row: {grounded}");
+        assert!(!grounded.contains("Mounted on:"), "no mount row: {grounded}");
+        // Toggle both.
+        data.flying = true;
+        data.mount_name = Some("a chestnut warhorse");
+        let aloft = super::render_score_standard(&data);
+        assert!(aloft.contains("Flying: aloft"), "fly row: {aloft}");
+        assert!(
+            aloft.contains("Mounted on: a chestnut warhorse"),
+            "mount row: {aloft}",
         );
     }
 
@@ -4439,6 +4464,17 @@ pub(crate) struct ScoreData<'a> {
     /// doesn't forget — combat already drops the marker on
     /// engage, so seeing it on score means "still hidden".
     stealth: bool,
+    /// `true` when the player has the `Flying` marker. `fly` /
+    /// `walk` / `land` toggle it. Surfaced on score so the player
+    /// remembers the +1 stamina-per-move surcharge they're
+    /// signing up for, especially on roads where flying isn't
+    /// needed.
+    flying: bool,
+    /// Mount display name when the player is `Mounted` on a mob
+    /// (color tags pre-stripped); `None` when on foot. Score's
+    /// reminder is the use case — players forget they're still
+    /// astride a horse from a quest 30 minutes ago.
+    mount_name: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -4500,6 +4536,12 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if d.stealth {
         out.push_str("  Stealth: hidden\r\n");
+    }
+    if d.flying {
+        out.push_str("  Flying: aloft\r\n");
+    }
+    if let Some(mount) = d.mount_name {
+        out.push_str(&format!("  Mounted on: {mount}\r\n"));
     }
     if let Some(coin) = format_wealth(d.wealth) {
         out.push_str(&format!("  Wealth: {coin}\r\n"));
@@ -4828,6 +4870,12 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if d.stealth {
         row(String::from("Stealth:   hidden"));
+    }
+    if d.flying {
+        row(String::from("Flying:    aloft"));
+    }
+    if let Some(mount) = d.mount_name {
+        row(format!("Mounted:   {mount}"));
     }
     if let Some(coin) = format_wealth(d.wealth) {
         row(format!("Wealth:    {coin}"));

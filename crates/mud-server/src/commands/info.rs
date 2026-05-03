@@ -4287,6 +4287,19 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .map_or((-1, -1), |k| (k.zone, k.id));
             (name, zone, id)
         });
+    // Mount display name. `Mounted` carries an Entity reference;
+    // resolve it through Named with color tags stripped so the
+    // fancy renderer's padding matches the visible width.
+    let mount_name_owned: Option<String> = world
+        .get::<Mounted>(player)
+        .map(|m| m.0)
+        .filter(|mount| world.get_entity(*mount).is_ok())
+        .map(|mount| {
+            let raw = world
+                .get::<Named>(mount)
+                .map_or_else(String::new, |n| n.name.clone());
+            render_color_tags(&raw, ColorMode::Strip)
+        });
     // Equipment summary in canonical slot order. Same shape as
     // `cmd_equipment` but pre-flattened to (label, name) tuples
     // with color tags stripped — render layer just pads.
@@ -4490,6 +4503,8 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .as_ref()
             .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
         stealth: world.get::<Stealth>(player).is_some(),
+        flying: world.get::<Flying>(player).is_some(),
+        mount_name: mount_name_owned.as_deref(),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
