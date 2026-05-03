@@ -8024,9 +8024,10 @@ pub(crate) fn name_of(world: &World, e: Entity) -> String {
 
 /// Same shape as `name_of` but with a caller-chosen fallback string —
 /// used by sites that prefer literal placeholders like `(unknown)`,
-/// `(gone)`, or `(nowhere)` when the entity lacks a Named.
-/// Round brackets so the output survives `render_color_tags` (which
-/// would parse and consume any angle-bracket form as a no-op tag).
+/// `<gone>`, or `(nowhere)` when the entity lacks a Named. Angle-bracket
+/// placeholders pass through `render_color_tags` literally so long as
+/// the body isn't a recognized tag part — pick whichever bracket style
+/// reads best.
 pub(crate) fn name_or(world: &World, e: Entity, fallback: &str) -> String {
     world
         .get::<Named>(e)
