@@ -3924,6 +3924,12 @@ pub(crate) struct ScoreData<'a> {
     /// "[void]"). Display name has color tags pre-stripped so the
     /// fancy renderer's fixed-width row padding stays correct.
     location: Option<(&'a str, i32, i32)>,
+    /// Worn / wielded items in canonical slot order, as
+    /// `(slot_label, item_name)`. Item names have color tags
+    /// pre-stripped so fancy-box padding stays aligned. Empty
+    /// when the player has nothing equipped — the renderer
+    /// suppresses the section in that case.
+    equipment: &'a [(&'static str, String)],
 }
 
 #[derive(Clone, Copy)]
@@ -4044,6 +4050,12 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some((name, zone, id)) = d.location {
         out.push_str(&format!("  Location: {name}  [{zone}:{id}]\r\n"));
+    }
+    if !d.equipment.is_empty() {
+        out.push_str("  Equipment:\r\n");
+        for (slot_label, item_name) in d.equipment {
+            out.push_str(&format!("    {slot_label:>14}: {item_name}\r\n"));
+        }
     }
     out
 }
@@ -4311,6 +4323,12 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some((name, zone, id)) = d.location {
         row(format!("Location:  {name}  [{zone}:{id}]"));
+    }
+    if !d.equipment.is_empty() {
+        row(String::from("Equipment:"));
+        for (slot_label, item_name) in d.equipment {
+            row(format!("  {slot_label:>12}: {item_name}"));
+        }
     }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out

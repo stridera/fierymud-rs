@@ -3996,6 +3996,29 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .map_or((-1, -1), |k| (k.zone, k.id));
             (name, zone, id)
         });
+    // Equipment summary in canonical slot order. Same shape as
+    // `cmd_equipment` but pre-flattened to (label, name) tuples
+    // with color tags stripped — render layer just pads.
+    let equipment_owned: Vec<(&'static str, String)> = {
+        let mut by_slot: Vec<(Slot, String)> = {
+            let mut q =
+                world.query_filtered::<(&Located, &Named, &EquippedSlot), With<Item>>();
+            q.iter(world)
+                .filter(|(l, _, _)| l.0 == player)
+                .map(|(_, n, eq)| {
+                    let plain = render_color_tags(&n.name, ColorMode::Strip);
+                    (eq.0, plain)
+                })
+                .collect()
+        };
+        by_slot.sort_by_key(|(s, _)| {
+            Slot::ORDER.iter().position(|x| x == s).unwrap_or(usize::MAX)
+        });
+        by_slot
+            .into_iter()
+            .map(|(slot, name)| (slot.label(), name))
+            .collect()
+    };
     // Per-circle slot summary for spellcasters. Reads
     // SpellSlotData (level + class → slot caps) and the player's
     // MemorizedSpells (used vs ready). Empty for classless / non-
@@ -4070,6 +4093,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         location: location_owned
             .as_ref()
             .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
+        equipment: &equipment_owned,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
