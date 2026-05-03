@@ -6835,6 +6835,7 @@ enum QuestObjectiveBump {
         mob_zone: i32,
         mob_id: i32,
     },
+    UseSkill { ability_id: i32 },
 }
 
 /// Advance any active `KILL_MOB` objectives whose target matches
@@ -6872,6 +6873,22 @@ pub(crate) fn bump_visit_quest_progress(
             zone: room_zone,
             id: room_id,
         },
+    );
+}
+
+/// Advance any active `USE_SKILL` objectives matching the just-
+/// invoked ability id. Called from the bottom of
+/// `invoke_ability_with` (post-cooldown), so failed casts don't
+/// credit.
+pub(crate) fn bump_use_skill_quest_progress(
+    world: &mut World,
+    caster: Entity,
+    ability_id: i32,
+) {
+    bump_quest_progress(
+        world,
+        caster,
+        QuestObjectiveBump::UseSkill { ability_id },
     );
 }
 
@@ -6999,6 +7016,12 @@ fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBum
                 } => {
                     mud_db::quest_objectives::list_deliver_item_progress(
                         &pool, &cid, item_zone, item_id, mob_zone, mob_id, is_actor,
+                    )
+                    .await
+                }
+                QuestObjectiveBump::UseSkill { ability_id } => {
+                    mud_db::quest_objectives::list_use_skill_progress(
+                        &pool, &cid, ability_id, is_actor,
                     )
                     .await
                 }
@@ -16172,6 +16195,11 @@ fn invoke_ability_with(
         cd.ready_at.insert(def.id, ready_at);
         crate::commands::try_insert(world, player, cd);
     }
+    // USE_SKILL quest objective: ability resolved successfully.
+    // Bumped here (post-cooldown) so failed-cast paths (early
+    // returns above) don't credit. PARTY scope still credits
+    // teammates per the shared bump_quest_progress dispatch.
+    bump_use_skill_quest_progress(world, player, def.id);
     let _ = spawn_count;
 }
 

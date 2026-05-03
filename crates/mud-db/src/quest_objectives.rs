@@ -132,6 +132,53 @@ pub async fn list_collect_item_progress(
     .await
 }
 
+/// Active USE_SKILL objectives for `character_id` whose target
+/// ability matches `ability_id`. Same SOLO/PARTY shape.
+pub async fn list_use_skill_progress(
+    pool: &PgPool,
+    character_id: &str,
+    ability_id: i32,
+    is_caster: bool,
+) -> sqlx::Result<Vec<ObjectiveProgressRow>> {
+    sqlx::query_as!(
+        ObjectiveProgressRow,
+        r#"
+        SELECT
+            cq.id AS "character_quest_id!: String",
+            qo.quest_zone_id AS "quest_zone_id!: i32",
+            qo.quest_id AS "quest_id!: i32",
+            qo.phase_id AS "phase_id!: i32",
+            qo.id AS "objective_id!: i32",
+            qo.required_count AS "required_count!: i32",
+            qo.scope::text AS "scope!: String",
+            qo.show_progress AS "show_progress!: bool",
+            qo.player_description AS "player_description!: String",
+            COALESCE(cqo.current_count, 0) AS "current_count!: i32"
+        FROM "CharacterQuest" cq
+        JOIN "QuestObjective" qo
+            ON qo.quest_zone_id = cq.quest_zone_id
+           AND qo.quest_id = cq.quest_id
+        LEFT JOIN "CharacterQuestObjective" cqo
+            ON cqo.character_quest_id = cq.id
+           AND cqo.quest_zone_id = qo.quest_zone_id
+           AND cqo.quest_id = qo.quest_id
+           AND cqo.phase_id = qo.phase_id
+           AND cqo.objective_id = qo.id
+        WHERE cq.character_id = $1
+          AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.objective_type = 'USE_SKILL'::"QuestObjectiveType"
+          AND qo.target_ability_id = $2
+          AND COALESCE(cqo.completed, false) = false
+          AND (qo.scope = 'PARTY'::"QuestObjectiveScope" OR $3)
+        "#,
+        character_id,
+        ability_id,
+        is_caster,
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Active DELIVER_ITEM objectives for `character_id` whose target
 /// object matches `(object_zone, object_id)` AND whose deliver-to
 /// mob matches `(mob_zone, mob_id)`. Same SOLO/PARTY shape.
