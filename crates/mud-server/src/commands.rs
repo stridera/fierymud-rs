@@ -532,7 +532,11 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         send_to(
             world,
             player,
-            format!("Unknown command: {}\r\n", tokens[0]),
+            format!(
+                "Unknown command: {}{}\r\n",
+                tokens[0],
+                unknown_command_hint(world, player, tokens[0]),
+            ),
         );
         return;
     };
@@ -3823,6 +3827,56 @@ pub(crate) fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool 
 
 pub(crate) fn visible(cmd: &Command, role: UserRole, perms: &[Permission]) -> bool {
     role.at_least(cmd.min_role) && cmd.required_perm.is_none_or(|p| perms.contains(&p))
+}
+
+/// Cap on how many prefix suggestions the unknown-command hint
+/// shows before truncating to "(+N)". Tight because the trailer
+/// rides on the same line as the original error.
+const UNKNOWN_HINT_MAX: usize = 5;
+
+/// Append a "  (did you mean: X, Y?)" trailer to "Unknown command"
+/// when at least one visible command's primary or alias name
+/// starts with what the player typed. Empty trailer when there's
+/// nothing to suggest, so the original error stays terse for a
+/// truly junk input. Mirrors the `help` command's prefix-match UX.
+pub(crate) fn unknown_command_hint(
+    world: &World,
+    player: Entity,
+    typed: &str,
+) -> String {
+    let needle = typed.to_ascii_lowercase();
+    if needle.is_empty() {
+        return String::new();
+    }
+    let (role, perms) = world.get::<Account>(player).map_or_else(
+        || (UserRole::Player, Vec::new()),
+        |a| (a.role, a.perms.clone()),
+    );
+    let mut suggestions: Vec<&'static str> = all_commands()
+        .filter(|cmd| visible(cmd, role, &perms))
+        .filter(|cmd| {
+            cmd.names
+                .iter()
+                .any(|n: &&'static str| n.starts_with(needle.as_str()))
+        })
+        .map(|cmd| cmd.names[0])
+        .collect();
+    if suggestions.is_empty() {
+        return String::new();
+    }
+    suggestions.sort_unstable();
+    suggestions.dedup();
+    let shown: Vec<&str> = suggestions
+        .iter()
+        .take(UNKNOWN_HINT_MAX)
+        .copied()
+        .collect();
+    let trailer = if suggestions.len() > UNKNOWN_HINT_MAX {
+        format!(" (+{})", suggestions.len() - UNKNOWN_HINT_MAX)
+    } else {
+        String::new()
+    };
+    format!("  (did you mean: {}{}?)", shown.join(", "), trailer)
 }
 
 /// Map an entity's Health to a flavorful condition string for `examine`.
