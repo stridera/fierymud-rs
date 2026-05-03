@@ -356,6 +356,120 @@ pub async fn list_for_quest(
     .await
 }
 
+/// One reward row joined for the post-completion grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestRewardRow {
+    pub reward_type: String,
+    pub amount: Option<i32>,
+    pub object_zone_id: Option<i32>,
+    pub object_id: Option<i32>,
+    pub ability_id: Option<i32>,
+    pub quantity: i32,
+}
+
+/// All non-choice rewards across every phase of a quest. Choice
+/// groups (one-of-N) are filtered out — the runtime grants only
+/// unconditional rewards in the auto-complete path; choice
+/// rewards wait on a `qreward` selection command (future).
+pub async fn list_quest_rewards(
+    pool: &PgPool,
+    quest_zone_id: i32,
+    quest_id: i32,
+) -> sqlx::Result<Vec<QuestRewardRow>> {
+    sqlx::query_as!(
+        QuestRewardRow,
+        r#"
+        SELECT
+            reward_type::text AS "reward_type!: String",
+            amount,
+            object_zone_id,
+            object_id,
+            ability_id,
+            quantity AS "quantity!: i32"
+        FROM "QuestReward"
+        WHERE quest_zone_id = $1
+          AND quest_id = $2
+          AND choice_group IS NULL
+        "#,
+        quest_zone_id,
+        quest_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Apply EXPERIENCE / GOLD / SKILL_POINTS / ABILITY rewards
+/// directly via DB updates. ITEM and HOUSING are skipped — they
+/// need world-side spawning that the async path can't do; the
+/// completion message tells the player to talk to the questgiver
+/// for those.
+pub async fn grant_simple_rewards(
+    pool: &PgPool,
+    character_id: &str,
+    rewards: &[QuestRewardRow],
+) -> sqlx::Result<()> {
+    let mut tx = pool.begin().await?;
+    for r in rewards {
+        match r.reward_type.as_str() {
+            "EXPERIENCE" => {
+                if let Some(amount) = r.amount {
+                    sqlx::query!(
+                        r#"UPDATE "Characters" SET experience = experience + $1 WHERE id = $2"#,
+                        amount,
+                        character_id,
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            "GOLD" => {
+                if let Some(amount) = r.amount {
+                    sqlx::query!(
+                        r#"UPDATE "Characters" SET wealth = wealth + $1 WHERE id = $2"#,
+                        i64::from(amount),
+                        character_id,
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            "SKILL_POINTS" => {
+                if let Some(amount) = r.amount {
+                    sqlx::query!(
+                        r#"UPDATE "Characters" SET skill_points = skill_points + $1 WHERE id = $2"#,
+                        amount,
+                        character_id,
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            "ABILITY" => {
+                if let Some(ability_id) = r.ability_id {
+                    sqlx::query!(
+                        r#"
+                        INSERT INTO "CharacterAbilities"
+                            (character_id, ability_id, proficiency, known)
+                        VALUES ($1, $2, 1, true)
+                        ON CONFLICT (character_id, ability_id)
+                        DO UPDATE SET known = true
+                        "#,
+                        character_id,
+                        ability_id,
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            // ITEM / HOUSING — skipped here; the runtime announces
+            // them and expects a turn-in flow.
+            _ => {}
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Outcome of the post-completion phase-advance check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhaseAdvance {

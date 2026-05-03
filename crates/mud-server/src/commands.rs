@@ -7045,9 +7045,56 @@ fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBum
                         }
                         Ok(mud_db::quest_objectives::PhaseAdvance::QuestComplete) => {
                             let _ = out.send(
-                                b"*** Quest complete! Speak with the questgiver to claim rewards. ***\r\n"
-                                    .to_vec(),
+                                b"*** Quest complete! ***\r\n".to_vec(),
                             );
+                            // Grant simple rewards (XP/gold/skill
+                            // points/ability) via DB; announce all
+                            // including ITEM/HOUSING which the
+                            // questgiver still needs to hand out.
+                            let rewards = mud_db::quest_objectives::list_quest_rewards(
+                                &pool,
+                                row.quest_zone_id,
+                                row.quest_id,
+                            )
+                            .await
+                            .unwrap_or_default();
+                            if !rewards.is_empty() {
+                                if let Err(e) =
+                                    mud_db::quest_objectives::grant_simple_rewards(
+                                        &pool, &cid, &rewards,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(error = %e, "reward grant failed");
+                                }
+                                let mut buf = String::from("Rewards:\r\n");
+                                for r in &rewards {
+                                    let line = match (r.reward_type.as_str(), r.amount, r.quantity) {
+                                        ("EXPERIENCE", Some(a), _) => {
+                                            format!("  +{a} experience\r\n")
+                                        }
+                                        ("GOLD", Some(a), _) => format!("  +{a} gold\r\n"),
+                                        ("SKILL_POINTS", Some(a), _) => {
+                                            format!("  +{a} skill points\r\n")
+                                        }
+                                        ("ABILITY", _, _) => {
+                                            "  +1 new ability\r\n".to_string()
+                                        }
+                                        ("ITEM", _, q) => format!(
+                                            "  +{q} item(s) — see questgiver\r\n"
+                                        ),
+                                        ("HOUSING", _, _) => {
+                                            "  +housing access — see questgiver\r\n"
+                                                .to_string()
+                                        }
+                                        _ => continue,
+                                    };
+                                    buf.push_str(&line);
+                                }
+                                if buf.len() > "Rewards:\r\n".len() {
+                                    let _ = out.send(buf.into_bytes());
+                                }
+                            }
                         }
                         Ok(mud_db::quest_objectives::PhaseAdvance::Pending) => {}
                         Err(e) => {
