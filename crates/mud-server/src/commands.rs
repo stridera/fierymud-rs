@@ -4859,6 +4859,17 @@ pub(crate) fn sector_is_outdoor_for_weather(sector: Sector) -> bool {
 }
 
 /// Roll up weather + time-of-day + season into a single response
+/// Look up a Zone's `Climate` by its `(zone)` id. Walks the
+/// world's Zone entities — fine for the rare callers (`look
+/// sky`, weather hint paths). Returns `None` if no Zone with
+/// that id exists.
+fn zone_climate(world: &mut World, zone_id: i32) -> Option<mud_db::enums::Climate> {
+    let mut q = world.query_filtered::<(&WorldKey, &mud_world::ZoneClimate), With<mud_world::Zone>>();
+    q.iter(world)
+        .find(|(wk, _)| wk.zone == zone_id)
+        .map(|(_, c)| c.0)
+}
+
 /// for `look (at) sky`. Indoor / cave / plane sectors get a
 /// contained answer instead — there's no sky to check.
 pub(crate) fn look_at_sky(world: &mut World, player: Entity) {
@@ -4878,6 +4889,21 @@ pub(crate) fn look_at_sky(world: &mut World, player: Entity) {
         return;
     }
     let zone_id = world.get::<WorldKey>(room).map(|k| k.zone);
+    // Climate::None marks metaphysical / interior-only zones (the
+    // Void, plane spaces). Their rooms can have outdoor sectors in
+    // the data — the Void is CITY — but they have no sky in any
+    // meaningful sense. Suppress the celestial flavor lines for
+    // them, matching the same gate in weather_tick.
+    if let Some(zid) = zone_id
+        && zone_climate(world, zid).is_some_and(|c| matches!(c, mud_db::enums::Climate::None))
+    {
+        send_to(
+            world,
+            player,
+            "There's no sky here — only an unmoving expanse.\r\n",
+        );
+        return;
+    }
     let live = zone_id
         .and_then(|zid| {
             world
