@@ -125,7 +125,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["wealth", "gold", "money"],
+        names: &["wealth", "gold", "money", "coins"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,
@@ -1846,7 +1846,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["quit"],
+        names: &["quit", "qu"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Info,

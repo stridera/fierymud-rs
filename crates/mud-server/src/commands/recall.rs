@@ -11,7 +11,7 @@ use crate::commands::{
 
 inventory::submit! {
     Command {
-        names: &["recall", "home"],
+        names: &["recall", "home", "rec"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Movement,
