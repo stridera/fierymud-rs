@@ -17,6 +17,7 @@ pub mod consumable_effects;
 pub mod character_items;
 pub mod housing;
 pub mod characters;
+pub mod clans;
 pub mod classes;
 pub mod effects;
 pub mod enums;

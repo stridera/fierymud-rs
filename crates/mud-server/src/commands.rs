@@ -2341,6 +2341,22 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_wiznet,
     },
+    Command {
+        names: &["ctell", "ct"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "ctell <message>",
+            summary: "Chat on your clan's private channel.",
+            long: "Broadcasts to every online clan member sharing \
+                   your `clan_id`. Refused for players not in a clan. \
+                   Each line is rendered with the clan abbreviation \
+                   prefix so cross-clan staff can tell the channels \
+                   apart in `wiznet` cross-traffic.",
+        },
+        run: cmd_ctell,
+    },
     // ----- Combat -----
     Command {
         names: &["attack", "kill", "k", "hit", "murder"],
@@ -19000,6 +19016,44 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
             format!("[wiznet] You: {message}\r\n")
         } else {
             format!("[wiznet] {player_name}: {message}\r\n")
+        };
+        send_to(world, t, line);
+    }
+}
+
+fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
+    let message = args.trim();
+    if message.is_empty() {
+        send_to(world, player, "Clan-tell what?\r\n");
+        return;
+    }
+    if effect_prevents(world, player, Prevent::Speaking) {
+        send_to(world, player, "Your voice is silenced.\r\n");
+        return;
+    }
+    let Some((clan_id, abbrev)) = world
+        .get::<mud_world::ClanMembership>(player)
+        .map(|c| (c.clan_id, c.clan_abbrev.clone()))
+    else {
+        send_to(world, player, "You aren't in a clan.\r\n");
+        return;
+    };
+    let player_name = name_of(world, player);
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<
+            (Entity, &mud_world::ClanMembership),
+            (With<Player>, With<Online>),
+        >();
+        q.iter(world)
+            .filter(|(_, c)| c.clan_id == clan_id)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        let line = if t == player {
+            format!("[{abbrev}] You: {message}\r\n")
+        } else {
+            format!("[{abbrev}] {player_name}: {message}\r\n")
         };
         send_to(world, t, line);
     }

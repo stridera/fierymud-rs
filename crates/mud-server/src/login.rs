@@ -353,6 +353,10 @@ impl ConnRouter {
                 warn!(conn_id, error = %e, "tell history load failed");
                 Vec::new()
             });
+        // Optional clan membership.
+        let clan = mud_db::clans::membership_for(pool, &char_row.id)
+            .await
+            .unwrap_or(None);
 
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
@@ -464,6 +468,14 @@ impl ConnRouter {
             e.insert(mud_world::KillStats { total: kill_total });
             if drunk > 0 {
                 e.insert(mud_world::Drunkenness(drunk));
+            }
+            if let Some(c) = clan {
+                e.insert(mud_world::ClanMembership {
+                    clan_id: c.clan_id,
+                    rank: c.rank,
+                    clan_name: c.clan_name,
+                    clan_abbrev: c.clan_abbrev,
+                });
             }
             // Hydrate TellLog from the persisted tail. Insertion
             // order: newest-first as returned by `recent_for`, but

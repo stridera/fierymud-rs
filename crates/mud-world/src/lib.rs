@@ -4,7 +4,7 @@ pub mod resources;
 
 pub use components::{
     Account, AccountSummary, Aliases, AppliedTo, AttachedTriggers, BankWealth, BoardDraft,
-    CharacterAchievements,
+    CharacterAchievements, ClanMembership,
     BoardLink, Charges, CombatStats, Cooldowns, CoreStats, Corpse, CorpseDecay, Description,
     Drunkenness, EffectInstance, EffectSource, EquippedSlot, ExitData, Exits, Fighting, Flying, Follower,
     FromMobReset, FromObjectReset, Frozen, Ghost,

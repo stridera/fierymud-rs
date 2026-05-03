@@ -121,6 +121,19 @@ pub struct ZoneVisits {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Drunkenness(pub i32);
 
+/// Clan membership, hydrated at login from `clan_member` joined
+/// with `clan`. `clan_abbrev` is a copy so the `who` tag and
+/// ctell prefix don't need a second resource lookup. Absent on
+/// players who aren't in a clan — query with `Option<&...>`
+/// rather than checking for a sentinel.
+#[derive(Component, Debug, Clone)]
+pub struct ClanMembership {
+    pub clan_id: i32,
+    pub rank: String,
+    pub clan_name: String,
+    pub clan_abbrev: String,
+}
+
 /// Lifetime kill counter for the kills-milestone achievement track
 /// (`kills_100`, `kills_500`, ...). Loads from / saves to the
 /// `kill_tracking_data` JSON on `Characters` so the count survives
