@@ -69,6 +69,78 @@ pub struct CharacterRow {
     pub thirst: i32,
 }
 
+/// Bundle of fields fed into `create` from the login-creation
+/// flow. The schema's `Characters` table has many columns; most
+/// have sensible defaults (level 1, hp 100, stamina 100, etc.).
+/// Only the values the player actually picked are explicit here.
+#[derive(Debug, Clone)]
+pub struct NewCharacter<'a> {
+    pub user_id: &'a str,
+    pub name: &'a str,
+    /// Schema enum text (`HUMAN` / `ELF` / …); cast to the
+    /// `Race` type at INSERT time.
+    pub race: &'a str,
+    pub gender: &'a str,
+    pub class_id: i32,
+    pub strength: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub dexterity: i32,
+    pub constitution: i32,
+    pub charisma: i32,
+}
+
+/// INSERT a fresh `Characters` row. Generates the id via
+/// `gen_random_uuid()`; sets only the columns the player chose +
+/// `password_hash = ''` (legacy column kept until the
+/// account-side hash supplants it for live verification — auth
+/// goes through `Users.password_hash` already, so this is
+/// vestigial). Returns the new id so callers can store / log it.
+///
+/// Name uniqueness is enforced by the table's index — duplicate
+/// names surface as `sqlx::Error::Database`. Callers should
+/// have already checked uniqueness via `find_by_name`, but this
+/// remains the defense in depth in case of a race with a
+/// concurrent creation.
+pub async fn create(pool: &PgPool, new: &NewCharacter<'_>) -> sqlx::Result<String> {
+    // sqlx::query (untyped) here so the runtime can pass the
+    // race string straight into the SQL `::"Race"` cast — the
+    // typed `query!` macro can't auto-map the schema's `Race`
+    // enum to a Rust `&str` parameter, and adding a Rust-side
+    // `Race` enum would mean keeping the 36-variant list in
+    // sync with the schema. Cast does the validation: any
+    // unknown variant errors at INSERT time.
+    let row = sqlx::query_scalar::<_, String>(
+        r#"
+        INSERT INTO "Characters" (
+            id, name, user_id, race, gender, class_id,
+            strength, intelligence, wisdom, dexterity, constitution, charisma,
+            password_hash, updated_at
+        )
+        VALUES (
+            gen_random_uuid()::text, $1, $2, $3::"Race", $4, $5,
+            $6, $7, $8, $9, $10, $11,
+            '', NOW()
+        )
+        RETURNING id
+        "#,
+    )
+    .bind(new.name)
+    .bind(new.user_id)
+    .bind(new.race)
+    .bind(new.gender)
+    .bind(new.class_id)
+    .bind(new.strength)
+    .bind(new.intelligence)
+    .bind(new.wisdom)
+    .bind(new.dexterity)
+    .bind(new.constitution)
+    .bind(new.charisma)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Persist mutable core attribute scores (str/dex/con/int/wis/cha)
 /// back to `Characters`. Split from `save_state` so the latter
 /// doesn't grow another 6 parameters; `train <stat>` is the first

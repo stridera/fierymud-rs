@@ -663,73 +663,96 @@ impl ConnRouter {
                     };
                     return;
                 }
-                // Accepted. Email path INSERTs the `Users` row now;
-                // the character row + world spawn land in the final
-                // slice. Character-name path delays the user
-                // INSERT to the next slice (which will synthesize
-                // an email from the character name).
-                if let Some(email_str) = email.as_ref() {
-                    let display_name = email_str
-                        .split('@')
-                        .next()
-                        .unwrap_or(email_str)
-                        .to_string();
-                    let hashed = match bcrypt::hash(&password_plaintext, bcrypt::DEFAULT_COST) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            warn!(conn_id, error = %e, "bcrypt hash failed");
-                            let _ = ctx.outbound.send(
-                                "Server error securing your password. Please try again.\r\n"
-                                    .as_bytes()
-                                    .to_vec(),
-                            );
-                            ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
-                            return;
-                        }
-                    };
-                    match users::create(pool, email_str, &display_name, &hashed).await {
-                        Ok(user_id) => {
-                            let _ = ctx.outbound.send(
-                                format!(
-                                    "Account created for `{email_str}` (id {user_id}). \
-                                     Character row INSERT + world spawn land in the \
-                                     final slice. For now please enter an existing \
-                                     email or character name.\r\n"
-                                )
-                                .into_bytes(),
-                            );
-                        }
-                        Err(e) => {
-                            warn!(conn_id, error = %e, "user create failed");
-                            let _ = ctx.outbound.send(
-                                format!(
-                                    "Couldn't create the account: {e}. Please try \
-                                     again with a different email.\r\n"
-                                )
-                                .into_bytes(),
-                            );
-                        }
+                // Accepted. Persist both rows: first `Users` (with
+                // a synthesized email if the player entered a
+                // character name rather than an email), then
+                // `Characters` linked to the new user_id. World-
+                // spawn-on-success lands in the final slice;
+                // today the player's bounced back to the identifier
+                // prompt to log in fresh and confirm the round-trip
+                // worked.
+                let effective_email = email
+                    .clone()
+                    .unwrap_or_else(|| format!("{character_name}@local.fierymud-rs"));
+                let display_name = effective_email
+                    .split('@')
+                    .next()
+                    .unwrap_or(&effective_email)
+                    .to_string();
+                let hashed = match bcrypt::hash(&password_plaintext, bcrypt::DEFAULT_COST) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        warn!(conn_id, error = %e, "bcrypt hash failed");
+                        let _ = ctx.outbound.send(
+                            "Server error securing your password. Please try again.\r\n"
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        drop(password_plaintext);
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        return;
                     }
-                } else {
-                    let _ = ctx.outbound.send(
-                        format!(
-                            "Stats accepted for `{character_name}` ({gender} {race} \
-                             {class_plain_name}, class id {class_id}; STR {} INT {} \
-                             WIS {} DEX {} CON {} CHA {}). User/Character INSERT \
-                             lands in the final slice for the character-name path. \
-                             For now please enter an existing email or character name.\r\n",
-                            stats.strength,
-                            stats.intelligence,
-                            stats.wisdom,
-                            stats.dexterity,
-                            stats.constitution,
-                            stats.charisma,
-                        )
-                        .into_bytes(),
-                    );
-                }
+                };
                 drop(password_plaintext);
+                let user_id = match users::create(pool, &effective_email, &display_name, &hashed)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        warn!(conn_id, error = %e, "user create failed");
+                        let _ = ctx.outbound.send(
+                            format!(
+                                "Couldn't create the account ({e}). Please try again \
+                                 with a different identifier.\r\n"
+                            )
+                            .into_bytes(),
+                        );
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        return;
+                    }
+                };
+                let new_character = mud_db::characters::NewCharacter {
+                    user_id: &user_id,
+                    name: &character_name,
+                    race,
+                    gender,
+                    class_id,
+                    strength: stats.strength,
+                    intelligence: stats.intelligence,
+                    wisdom: stats.wisdom,
+                    dexterity: stats.dexterity,
+                    constitution: stats.constitution,
+                    charisma: stats.charisma,
+                };
+                let character_id = match mud_db::characters::create(pool, &new_character).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        warn!(conn_id, error = %e, "character create failed");
+                        let _ = ctx.outbound.send(
+                            format!(
+                                "Account created but character INSERT failed ({e}). Please \
+                                 contact a staff member or log in to your new account and \
+                                 retry character creation.\r\n"
+                            )
+                            .into_bytes(),
+                        );
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        return;
+                    }
+                };
+                let _ = ctx.outbound.send(
+                    format!(
+                        "Welcome to FieryMUD! `{character_name}` ({gender} {race} \
+                         {class_plain_name}) has been created (character id {character_id}, \
+                         user id {user_id}). The world-spawn-on-success step lands in \
+                         the next slice; for now, log in with `{effective_email}` (or \
+                         `{character_name}`) and the password you just set.\r\n"
+                    )
+                    .into_bytes(),
+                );
                 ctx.stage = Stage::AwaitingIdentifier;
                 let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
             }
