@@ -7218,69 +7218,28 @@ pub(crate) enum Prevent {
 
 /// True iff any active `EffectInstance` on `target` was sourced
 /// from an `EffectDef` whose corresponding `prevents_*` flag is
-/// set. Looks up each effect's catalog row by `EffectInstance.kind`.
-/// As a safety net, also name-matches a small list of well-known
-/// immobilize-style status flags so a web/snare/paralysis cast
-/// blocks movement even when the underlying Effect row hasn't been
-/// flagged `prevents_movement` in the schema yet (the proper fix
-/// is data-side; this keeps gameplay sane while content catches
-/// up). Admin-spawned effects without a real catalog mapping
-/// fall through cleanly.
+/// set. Looks up each effect's catalog row by `EffectInstance.kind`
+/// — admin-spawned effects without a real catalog mapping fall
+/// through cleanly.
 pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) -> bool {
-    let active: Vec<(i32, String)> = {
+    let active_kinds: Vec<i32> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         q.iter(world)
             .filter(|(_, a)| a.0 == target)
-            .map(|(eff, _)| (eff.kind, eff.name.to_ascii_lowercase()))
+            .map(|(eff, _)| eff.kind)
             .collect()
     };
-    if active.is_empty() {
+    if active_kinds.is_empty() {
         return false;
     }
-    if name_based_prevent(&active, kind) {
-        return true;
-    }
     let catalog = world.resource::<EffectCatalog>();
-    active.iter().any(|(id, _)| {
+    active_kinds.iter().any(|id| {
         catalog.by_id.get(id).is_some_and(|def| match kind {
             Prevent::Speaking => def.prevents_speaking,
             Prevent::Casting => def.prevents_casting,
             Prevent::Movement => def.prevents_movement,
         })
     })
-}
-
-/// Fallback prevent-check by `EffectInstance.name`. Catches the
-/// well-known immobilize / silence statuses whose Effect rows
-/// haven't been data-flagged yet — the cast/dispatch path sets
-/// `EffectInstance.name` from the ability's `flag` override, so
-/// name matching is the cheapest safety net.
-fn name_based_prevent(active: &[(i32, String)], kind: Prevent) -> bool {
-    let movement_names = [
-        "web",
-        "snare",
-        "root",
-        "rooted",
-        "entangle",
-        "entangled",
-        "paralysis",
-        "paralyze",
-        "paralyzed",
-        "hold",
-        "hold person",
-        "immobilize",
-        "immobilized",
-    ];
-    let casting_names = ["silence", "silenced", "antimagic", "anti-magic"];
-    let speaking_names = ["silence", "silenced", "muted", "muffled"];
-    let needles: &[&str] = match kind {
-        Prevent::Movement => &movement_names,
-        Prevent::Casting => &casting_names,
-        Prevent::Speaking => &speaking_names,
-    };
-    active
-        .iter()
-        .any(|(_, name)| needles.iter().any(|n| name == n))
 }
 
 /// Despawn every `EffectInstance` on `target` whose name matches
