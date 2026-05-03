@@ -5459,12 +5459,44 @@ pub(crate) fn invoke_ability_with(
         return;
     }
 
-    // Gate on KnownAbilities when the player has any. Empty/missing
-    // component falls through (admin testing path).
-    if let Some(known) = world.get::<KnownAbilities>(player)
+    // Gate on KnownAbilities. Mortals must have an explicit entry
+    // for any spell/chant/song they invoke — empty/missing
+    // KnownAbilities doesn't bypass. Builder+ accounts and mob
+    // dispatchers (Lua-trigger / order paths) skip the gate; the
+    // first is admin-testing, the second is content-vetted.
+    //
+    // SKILL kind keeps the legacy "empty bypass" for now so a
+    // freshly-created warrior can use `bash` / `kick` without
+    // first running `practice`. Tightening skills further requires
+    // loading `ClassSkills` so the runtime knows what each class
+    // can use at level — tracked alongside the wider class-skill-
+    // gating story in PARITY_BACKLOG.
+    let is_staff_caster = world
+        .get::<Account>(player)
+        .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder));
+    let is_mob_caster = world.get::<Mob>(player).is_some();
+    let bypass_known_check = is_staff_caster || is_mob_caster;
+    let needs_explicit_known = !bypass_known_check
+        && !matches!(kind, mud_db::abilities::AbilityKind::Skill);
+    if needs_explicit_known {
+        let knows_it = world
+            .get::<KnownAbilities>(player)
+            .is_some_and(|k| k.has_any(def.id));
+        if !knows_it {
+            send_to(
+                world,
+                player,
+                format!("You don't know how to {} {}.\r\n", verb, def.plain_name),
+            );
+            return;
+        }
+    } else if let Some(known) = world.get::<KnownAbilities>(player)
         && !known.entries.is_empty()
         && !known.has_any(def.id)
     {
+        // Skill path with non-empty KnownAbilities: enforce the
+        // explicit-entry rule so trained mortals stay restricted to
+        // what they've practiced. Empty list still bypasses.
         send_to(
             world,
             player,
