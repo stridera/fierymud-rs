@@ -273,6 +273,8 @@ pub(crate) use combat_commands::cmd_flee;
 mod enter;
 #[path = "commands/feedback.rs"]
 mod feedback;
+#[path = "commands/housing.rs"]
+mod housing;
 #[path = "commands/info.rs"]
 mod info;
 pub(crate) use info::cmd_look;
