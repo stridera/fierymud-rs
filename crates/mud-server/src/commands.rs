@@ -9800,6 +9800,15 @@ fn render_score_fancy(d: &ScoreData) -> String {
     if let Some(c) = condition_summary(d.hunger, d.thirst) {
         row(format!("Condition: {c}"));
     }
+    if d.drunkenness > 0 {
+        row(format!("Drunk:     {} / 100", d.drunkenness));
+    }
+    if d.kill_total > 0 {
+        row(format!("Kills:     {}", d.kill_total));
+    }
+    if let Some((name, abbrev, rank)) = d.clan {
+        row(format!("Clan:      {name} [{abbrev}] ({rank})"));
+    }
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     out
 }
@@ -9836,6 +9845,15 @@ fn render_score_minimal(d: &ScoreData) -> String {
     }
     if let Some(c) = condition_summary(d.hunger, d.thirst) {
         parts.push(c);
+    }
+    if d.drunkenness > 0 {
+        parts.push(format!("drunk:{}", d.drunkenness));
+    }
+    if d.kill_total > 0 {
+        parts.push(format!("kills:{}", d.kill_total));
+    }
+    if let Some((_, abbrev, _)) = d.clan {
+        parts.push(format!("clan:{abbrev}"));
     }
     format!("{}\r\n", parts.join("  "))
 }
