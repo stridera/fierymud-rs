@@ -61,6 +61,14 @@ pub enum PendingPlayerUpdate {
         character_id: String,
         ability_id: i32,
     },
+    /// Spawn one or more instances of an object proto into the
+    /// player's inventory. Used by quest reward grants.
+    SpawnItem {
+        character_id: String,
+        object_zone: i32,
+        object_id: i32,
+        quantity: i32,
+    },
 }
 
 impl PendingPlayerUpdate {
@@ -72,7 +80,8 @@ impl PendingPlayerUpdate {
             Self::ExperienceDelta { character_id, .. }
             | Self::WealthDelta { character_id, .. }
             | Self::SkillPointsDelta { character_id, .. }
-            | Self::AbilityKnown { character_id, .. } => character_id,
+            | Self::AbilityKnown { character_id, .. }
+            | Self::SpawnItem { character_id, .. } => character_id,
         }
     }
 }
@@ -137,6 +146,45 @@ pub fn drain_player_updates(world: &mut World) {
                 {
                     k.entries.push((ability_id, 1, true));
                 }
+            }
+            PendingPlayerUpdate::SpawnItem {
+                object_zone,
+                object_id,
+                quantity,
+                ..
+            } => {
+                let proto = world
+                    .resource::<ObjectPrototypes>()
+                    .by_key
+                    .get(&(object_zone, object_id))
+                    .cloned();
+                let Some(proto) = proto else {
+                    continue;
+                };
+                for _ in 0..quantity.max(1) {
+                    let mut bundle = world.spawn((
+                        Item,
+                        Named { name: proto.name.clone() },
+                        Keywords(proto.keywords.clone()),
+                        WorldKey {
+                            zone: proto.zone_id,
+                            id: proto.id,
+                        },
+                        Located(entity),
+                    ));
+                    if let Some(desc) = proto.examine_description.clone() {
+                        bundle.insert(Description(desc));
+                    }
+                }
+                send_to(
+                    world,
+                    entity,
+                    format!(
+                        "You receive {} of {}.\r\n",
+                        quantity.max(1),
+                        proto.name
+                    ),
+                );
             }
         }
     }
@@ -7274,6 +7322,17 @@ fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBum
                                                 ability_id: id,
                                             }
                                         }),
+                                        "ITEM" => match (r.object_zone_id, r.object_id) {
+                                            (Some(z), Some(id)) => {
+                                                Some(PendingPlayerUpdate::SpawnItem {
+                                                    character_id: cid.clone(),
+                                                    object_zone: z,
+                                                    object_id: id,
+                                                    quantity: r.quantity,
+                                                })
+                                            }
+                                            _ => None,
+                                        },
                                         _ => None,
                                     };
                                     if let (Some(u), Some(tx)) = (update, update_tx.as_ref()) {
