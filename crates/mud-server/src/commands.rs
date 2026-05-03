@@ -5810,22 +5810,56 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
     // side is occupied. Other "paired" anatomies (ears, wrists)
     // are modeled as single bins that cover both sides, so they
     // keep the existing single-slot refusal.
-    let occupied: std::collections::HashSet<Slot> = {
-        let mut q = world.query_filtered::<(&Located, &EquippedSlot), With<Item>>();
+    // Per-slot occupancy with the worn item's name, so the
+    // refusal message can tell the player what's blocking them
+    // ("Your wield slot is already occupied (by a longsword)
+    // — `remove longsword` first."). Saves a round-trip
+    // through `equipment`.
+    let slot_occupants: Vec<(Slot, String)> = {
+        let mut q = world.query_filtered::<
+            (&Located, &Named, &EquippedSlot),
+            With<Item>,
+        >();
         q.iter(world)
-            .filter(|(l, _)| l.0 == player)
-            .map(|(_, eq)| eq.0)
+            .filter(|(l, _, _)| l.0 == player)
+            .map(|(_, n, eq)| (eq.0, n.name.clone()))
             .collect()
     };
+    let occupied: std::collections::HashSet<Slot> = slot_occupants
+        .iter()
+        .map(|(s, _)| *s)
+        .collect();
     let candidates: &[Slot] = match slot {
         Slot::LeftFinger | Slot::RightFinger => &[Slot::LeftFinger, Slot::RightFinger],
         _ => std::slice::from_ref(&slot),
     };
     let Some(&dest_slot) = candidates.iter().find(|s| !occupied.contains(s)) else {
-        let msg = if candidates.len() > 1 {
-            format!("Both {}s are already occupied.\r\n", slot.label())
+        // Surface the names of the items in the offending slot(s)
+        // so the player knows exactly what to remove.
+        let blockers: Vec<String> = candidates
+            .iter()
+            .filter_map(|s| {
+                slot_occupants
+                    .iter()
+                    .find(|(occ, _)| *occ == *s)
+                    .map(|(_, name)| name.clone())
+            })
+            .collect();
+        let blocker_clause = if blockers.is_empty() {
+            String::new()
         } else {
-            format!("Your {} is already occupied.\r\n", slot.label())
+            format!(" (by {})", blockers.join(", "))
+        };
+        let msg = if candidates.len() > 1 {
+            format!(
+                "Both {}s are already occupied{blocker_clause}.\r\n",
+                slot.label(),
+            )
+        } else {
+            format!(
+                "Your {} is already occupied{blocker_clause}.\r\n",
+                slot.label(),
+            )
         };
         send_rendered(world, player, &msg);
         return;
