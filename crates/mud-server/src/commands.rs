@@ -5651,21 +5651,23 @@ pub(crate) fn invoke_ability_with(
             if def.combat_ok { "" } else { "non-combat  " },
         ));
     }
-    // Resolve the target. Empty / "me" / "self" → the caster.
-    // Anything else → if the ability's targeting list includes
-    // OBJECT_INV, look up a carried item by keyword first
-    // (covers `cast identify brooch` and friends); otherwise fall
-    // through to actor-in-room. If nothing resolves, abort before
-    // applying any effects.
-    let allows_inventory_target = world
+    // Resolve the target. Empty / "me" / "self" → the caster
+    // (or the caster's mount when the ability targets RIDER —
+    // BUCK is the canonical case: `cast buck` with no arg should
+    // unseat *your* current rider). Anything else → if the
+    // ability's targeting list includes OBJECT_INV, look up a
+    // carried item by keyword first (covers `cast identify
+    // brooch` and friends); otherwise fall through to actor-in-
+    // room. If nothing resolves, abort before applying any
+    // effects.
+    let valid_targets: Vec<String> = world
         .resource::<AbilityCatalog>()
         .targeting
         .get(&def.id)
-        .is_some_and(|r| {
-            r.valid_targets
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case("OBJECT_INV"))
-        });
+        .map(|r| r.valid_targets.iter().map(|s| s.to_uppercase()).collect())
+        .unwrap_or_default();
+    let allows_inventory_target = valid_targets.iter().any(|t| t == "OBJECT_INV");
+    let prefers_rider_default = valid_targets.iter().any(|t| t == "RIDER");
     let target_entity = if let Some(word) = target_word
         && !word.eq_ignore_ascii_case("me")
         && !word.eq_ignore_ascii_case("self")
@@ -5689,6 +5691,14 @@ pub(crate) fn invoke_ability_with(
             return;
         };
         found
+    } else if prefers_rider_default
+        && let Some(mud_world::Mounted(mount)) =
+            world.get::<mud_world::Mounted>(player).copied()
+    {
+        // RIDER target with no arg: default to the caster's mount.
+        // BUCK reads "you buck *your* rider off"; without this default
+        // the cast resolves to caster and trips the targeting gate.
+        mount
     } else {
         player
     };
