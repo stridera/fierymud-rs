@@ -240,6 +240,8 @@ mod room_chat;
 mod release;
 #[path = "commands/setrecall.rs"]
 mod setrecall;
+#[path = "commands/status_lists.rs"]
+mod status_lists;
 #[path = "commands/tells.rs"]
 mod tells;
 #[path = "commands/unban.rs"]
@@ -1349,20 +1351,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_idle,
     },
-    Command {
-        names: &["socials"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "socials",
-            summary: "List every social emote command.",
-            long: "Shows all loaded socials (smile, bow, hug, …) in a \
-                   columnar grid. Type the social name directly to run it; \
-                   most accept an optional target.",
-        },
-        run: cmd_socials,
-    },
+    // `socials` migrated to commands/status_lists.rs.
     Command {
         names: &["spells", "abilities", "abil"],
         min_role: UserRole::Player,
@@ -2040,21 +2029,7 @@ const COMMANDS: &[Command] = &[
         run: cmd_house,
     },
     // `ask` / `whisper` migrated to commands/room_chat.rs.
-    Command {
-        names: &["report"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Communication,
-        help: Help {
-            usage: "report",
-            summary: "Announce your HP/stamina to the room.",
-            long: "Broadcasts a single line to everyone present: \
-                   `You report: HP 50/100, stamina 7/50.` Useful for \
-                   coordinating with healers / groupmates before the \
-                   group system lands.",
-        },
-        run: cmd_report,
-    },
+    // `report` migrated to commands/status_lists.rs.
     // tell / reply / ignore / unignore / lasttells migrated to
     // commands/tells.rs.
     // `emote` migrated to commands/room_chat.rs.
@@ -5276,6 +5251,13 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "clan-chat `{name}` missing"
+            );
+        }
+        // status_lists.rs (report + socials)
+        for name in ["report", "socials"] {
+            assert!(
+                names.contains(&name),
+                "status-lists `{name}` missing"
             );
         }
     }
@@ -13456,49 +13438,8 @@ fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
 
 // `say` migrated to commands/room_chat.rs.
 
-/// `report`: announce your current HP/stamina to your group (when
-/// you're in one) or to everyone in the room (when solo). Group
-/// reports cross rooms — useful for healers in adjacent rooms; room
-/// reports stay local to encourage situational coordination.
-fn cmd_report(world: &mut World, player: Entity, _args: &str) {
-    let hp = world.get::<Health>(player).copied();
-    let stamina = world.get::<Stamina>(player).copied();
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let speaker = name_of(world, player);
-    let body = match (hp, stamina) {
-        (Some(h), Some(s)) => format!(
-            "HP {}/{}, stamina {}/{}",
-            h.hp, h.max, s.current, s.max
-        ),
-        (Some(h), None) => format!("HP {}/{}", h.hp, h.max),
-        (None, Some(s)) => format!("stamina {}/{}", s.current, s.max),
-        (None, None) => "(no vital stats)".to_string(),
-    };
-    let root = group_root(world, player);
-    let group = group_members(world, root);
-    let (targets, self_label, third_label) = if group.len() > 1 {
-        (group, "your group", "the group")
-    } else {
-        let in_room: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-            q.iter(world)
-                .filter(|(_, l)| l.0 == located.0)
-                .map(|(e, _)| e)
-                .collect()
-        };
-        (in_room, "the room", "the room")
-    };
-    for target in targets {
-        let line = if target == player {
-            format!("You report to {self_label}: {body}.\r\n")
-        } else {
-            format!("{speaker} reports to {third_label}: {body}.\r\n")
-        };
-        send_rendered(world, target, &line);
-    }
-}
+// `report` migrated to commands/status_lists.rs.
+
 
 /// `achievements [<category>]` — list achievements grouped by
 /// category. Unlocked ones show their title + description; locked
@@ -17728,31 +17669,7 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-fn cmd_socials(world: &mut World, player: Entity, _args: &str) {
-    let mut names: Vec<String> = world
-        .resource::<SocialRegistry>()
-        .by_name
-        .keys()
-        .cloned()
-        .collect();
-    names.sort_unstable();
-    let mut out = format!("\r\n{} socials available:\r\n", names.len());
-    let cols = 6usize;
-    let col_width = 14usize;
-    for (i, name) in names.iter().enumerate() {
-        if i % cols == 0 {
-            out.push_str("  ");
-        }
-        out.push_str(&format!("{name:<col_width$}"));
-        if i % cols == cols - 1 {
-            out.push_str("\r\n");
-        }
-    }
-    if !names.len().is_multiple_of(cols) {
-        out.push_str("\r\n");
-    }
-    send_to(world, player, out);
-}
+// `socials` migrated to commands/status_lists.rs.
 
 /// Try to dispatch `verb` as a social. Returns true if a matching social was
 /// found (regardless of outcome — includes cases where target wasn't found).
