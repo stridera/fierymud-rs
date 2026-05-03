@@ -208,6 +208,33 @@ pub struct Command {
     pub run: CommandFn,
 }
 
+// Distributed-registration entry point. Anywhere in the binary
+// can `inventory::submit! { Command { ... } }` and the entry
+// will land in `inventory::iter::<Command>()` at runtime. Used
+// alongside the static `COMMANDS` array — see `all_commands()`.
+inventory::collect!(Command);
+
+// Migrated commands — each lives in its own file under
+// `commands/` and registers itself via `inventory::submit!`.
+// `#[path]` lets us keep `commands.rs` as the parent module
+// without renaming it to `commands/mod.rs`. Adding a new file
+// here is the only edit needed when migrating an existing command
+// (or shipping a new one) — no central array touch.
+#[path = "commands/balance.rs"]
+mod balance;
+
+/// Iterate every registered command — both the static `COMMANDS`
+/// array and any `inventory::submit!`-distributed entries. The
+/// dispatcher walks this; help / `cmd_dispatch_async` walk it too.
+/// Order: static array first, then submitted entries (linker-
+/// determined). A future migration can drain the static array
+/// entirely without touching dispatch.
+pub fn all_commands() -> impl Iterator<Item = &'static Command> {
+    COMMANDS
+        .iter()
+        .chain(inventory::iter::<Command>())
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Help {
     pub usage: &'static str,
@@ -376,20 +403,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_bribe,
     },
-    Command {
-        names: &["balance", "bal"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Info,
-        help: Help {
-            usage: "balance",
-            summary: "Show your bank-stored coin.",
-            long: "Read-only display of the `bank_wealth` column from \
-                   your character row. Pair with `deposit` / \
-                   `withdraw` to move coin to / from the bank.",
-        },
-        run: cmd_balance,
-    },
+    // `balance` migrated to commands/balance.rs (inventory::submit!).
     Command {
         names: &["deposit"],
         min_role: UserRole::Player,
@@ -4124,7 +4138,7 @@ pub fn validate_registry() {
 
 static REGISTRY: LazyLock<HashMap<&'static str, &'static Command>> = LazyLock::new(|| {
     let mut m: HashMap<&'static str, &'static Command> = HashMap::new();
-    for cmd in COMMANDS {
+    for cmd in all_commands() {
         assert!(
             !cmd.help.summary.is_empty(),
             "command {:?} has empty help.summary",
@@ -5614,6 +5628,22 @@ mod tests {
     }
     fn ansi(s: &str) -> String {
         render_color_tags(s, ColorMode::Ansi)
+    }
+
+    /// Smoke test: the inventory-distributed `balance` command
+    /// shows up in `all_commands()`. Proves the registry actually
+    /// links the `inventory::submit!` block — a regression here
+    /// means a future migrated command would silently disappear.
+    #[test]
+    fn inventory_distributed_balance_is_registered() {
+        let names: Vec<&'static str> = super::all_commands()
+            .flat_map(|c| c.names.iter().copied())
+            .collect();
+        assert!(
+            names.contains(&"balance"),
+            "balance not in all_commands()"
+        );
+        assert!(names.contains(&"bal"), "bal alias not in all_commands()");
     }
 
     #[test]
@@ -7761,7 +7791,7 @@ fn cmd_help(world: &mut World, player: Entity, args: &str) {
     let topic = args.trim().to_ascii_lowercase();
     if topic.is_empty() {
         let mut by_cat: HashMap<Category, Vec<&Command>> = HashMap::new();
-        for cmd in COMMANDS {
+        for cmd in all_commands() {
             if !visible(cmd, role, &perms) {
                 continue;
             }
@@ -8970,18 +9000,7 @@ fn bank_transfer(world: &mut World, player: Entity, args: &str, direction: &str)
     }
 }
 
-/// `balance` / `bal`: show the bank-stored balance separate from
-/// on-hand wealth. Read-only today — `deposit` / `withdraw` will
-/// land with the banker NPC component and shop economy.
-fn cmd_balance(world: &mut World, player: Entity, _args: &str) {
-    let total = world.get::<BankWealth>(player).map_or(0, |b| b.0);
-    let msg = if let Some(parts) = format_wealth(total) {
-        format!("\r\nYour bank balance is {parts}.\r\n")
-    } else {
-        "\r\nYour bank balance is empty.\r\n".to_string()
-    };
-    send_to(world, player, msg);
-}
+// `balance` body lives in commands/balance.rs (inventory-distributed).
 
 /// Split an on-hand copper total into the four denominations and
 /// render as `"X platinum, Y gold, Z silver, W copper"`. Returns
@@ -11683,8 +11702,7 @@ fn cmd_commands(world: &mut World, player: Entity, _args: &str) {
     let (role, perms) = world
         .get::<Account>(player)
         .map_or((UserRole::Player, Vec::new()), |a| (a.role, a.perms.clone()));
-    let mut names: Vec<&'static str> = COMMANDS
-        .iter()
+    let mut names: Vec<&'static str> = all_commands()
         .filter(|c| visible(c, role, &perms))
         .map(|c| c.names[0])
         .collect();
