@@ -2884,6 +2884,14 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     }
+    // Footer: surface the player's on-hand coin so they can
+    // gauge what's in reach without round-tripping through
+    // `wealth`. Skipped when the player has nothing — the
+    // empty-pockets case is implied by the lack of a footer.
+    let on_hand = world.get::<Wealth>(player).map_or(0, |w| w.0);
+    if let Some(coin) = format_wealth(on_hand) {
+        out.push_str(&format!("\r\nYou have {coin}.\r\n"));
+    }
     send_rendered(world, player, &out);
 }
 
