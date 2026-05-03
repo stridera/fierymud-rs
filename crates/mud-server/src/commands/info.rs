@@ -4448,7 +4448,17 @@ pub(crate) fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
 }
 
 pub(crate) fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
-    send_to(world, player, "Goodbye!\r\n");
+    // Save happens automatically on disconnect via the
+    // ConnRouter::on_disconnect path; the autosave tick also
+    // runs every 5 minutes so anything since the last save is
+    // safe even on Ctrl-C. Spelling it out here so a player who
+    // just types `quit` without closing the client doesn't worry
+    // about losing progress.
+    send_to(
+        world,
+        player,
+        "Goodbye! Your character is auto-saved on disconnect — close your client to log out.\r\n",
+    );
 }
 
 pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
