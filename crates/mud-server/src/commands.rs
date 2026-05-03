@@ -220,6 +220,8 @@ inventory::collect!(Command);
 // without renaming it to `commands/mod.rs`. Adding a new file
 // here is the only edit needed when migrating an existing command
 // (or shipping a new one) — no central array touch.
+#[path = "commands/admin_inspect.rs"]
+mod admin_inspect;
 #[path = "commands/admin_management.rs"]
 mod admin_management;
 #[path = "commands/admin_world.rs"]
@@ -2840,98 +2842,7 @@ const COMMANDS: &[Command] = &[
     // restore / slay migrated to commands/admin_world.rs.
     // ban / cclan / pnote / hinfo / hgrant / hrevoke migrated to
     // commands/admin_management.rs.
-    Command {
-        names: &["zstat"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "zstat [<zone_id>]",
-            summary: "Dump ECS state of a zone.",
-            long: "Builder+. With no arg, inspects the zone you're in \
-                   (resolved from your room's WorldKey). Prints zone \
-                   name + entity, loaded room count, mob/object \
-                   prototype counts, and live spawned mob/item counts \
-                   originating from this zone's protos.",
-        },
-        run: cmd_zstat,
-    },
-    Command {
-        names: &["mstat"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "mstat <zone> <id>",
-            summary: "Dump a Mob prototype's catalog data + live count.",
-            long: "Builder+. Looks up `MobPrototypes[(zone, id)]` and \
-                   prints name, level, alignment, role, hit/damage \
-                   dice, AC, hit_roll, wealth, attached trigger \
-                   count, and how many live instances of this proto \
-                   currently exist in the world.",
-        },
-        run: cmd_mstat,
-    },
-    Command {
-        names: &["ostat"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "ostat <zone> <id>",
-            summary: "Dump an Object prototype's catalog data + live count.",
-            long: "Builder+. Looks up `ObjectPrototypes[(zone, id)]` and \
-                   prints name, type, wear flags, examine description, \
-                   liquid/board metadata if present, attached trigger \
-                   count, and how many live instances exist.",
-        },
-        run: cmd_ostat,
-    },
-    Command {
-        names: &["sstat"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "sstat <zone> <id>",
-            summary: "Dump a Shop's catalog row.",
-            long: "Builder+. Looks up `ShopCatalog[(zone, id)]` and \
-                   prints keeper, buy/sell profit, item offerings, \
-                   accept-filter rules, and pet offerings.",
-        },
-        run: cmd_sstat,
-    },
-    Command {
-        names: &["tstat"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "tstat <zone> <id>",
-            summary: "Dump a Lua trigger row.",
-            long: "Builder+. Looks up `TriggerCatalog[(zone, id)]` \
-                   and prints attach type, event flags, arg list, and \
-                   the body (commands) text. Read-only — does not \
-                   fire the trigger.",
-        },
-        run: cmd_tstat,
-    },
-    Command {
-        names: &["setweather"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "setweather <climate> [<zone_id>]",
-            summary: "Override the climate for a zone (current zone by default).",
-            long: "Builder+. Mutates the zone's `ZoneClimate` \
-                   component. Climate is one of: none / semiarid / \
-                   arid / oceanic / temperate / subtropical / \
-                   tropical / subarctic / arctic / alpine. Persists \
-                   only in-memory until the next world load.",
-        },
-        run: cmd_setweather,
-    },
+    // `zstat` migrated to commands/admin_inspect.rs.
     Command {
         names: &["identify", "id"],
         min_role: UserRole::Player,
@@ -2948,180 +2859,7 @@ const COMMANDS: &[Command] = &[
         },
         run: cmd_identify,
     },
-    Command {
-        names: &["set"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "set <target|me> <field> <value>",
-            summary: "Mutate a numeric stat on a character.",
-            long: "Builder+. `target` is `me` for self or a keyword \
-                   matching a player in the current room. `field` is \
-                   one of: level, xp, hp, maxhp, stamina, maxstamina, \
-                   gold (= copper), alignment. Session-only — \
-                   persists on disconnect via the normal save path \
-                   for the level/xp/hp/stamina/gold subset.",
-        },
-        run: cmd_set,
-    },
-    Command {
-        names: &["show"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "show <subsystem>",
-            summary: "Diagnostic dump for a runtime subsystem.",
-            long: "Builder+. Subsystems: \
-                   `players` (online list with role/level/room), \
-                   `triggers` (catalog totals + per-event tally), \
-                   `effects` (active EffectInstance count by tag), \
-                   `clock` (MudClock + TickCount), \
-                   `resets` (mob/object refresh counts), \
-                   `corpses` (active corpses + decay + item counts). \
-                   `show` with no arg lists the subsystems.",
-        },
-        run: cmd_show,
-    },
-    Command {
-        names: &["scripterrors", "scripterr"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "scripterrors [<count>]",
-            summary: "Recent Lua trigger fire failures.",
-            long: "Builder+. Walks the in-memory ScriptErrorLog \
-                   (most-recent first) and prints each failure with \
-                   timestamp, (zone, id), trigger name, event, and \
-                   the lua error message. Capped at 256 entries; \
-                   default `count` is 20.",
-        },
-        run: cmd_scripterrors,
-    },
-    Command {
-        names: &["syslog"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "syslog [<count>] [<filter>]",
-            summary: "Recent tracing log lines.",
-            long: "Builder+. Walks the in-memory syslog ring buffer \
-                   (most-recent first) and prints each entry with \
-                   wall-clock seconds-ago, level, target, and message. \
-                   `filter` (case-insensitive) matches level \
-                   (TRACE/DEBUG/INFO/WARN/ERROR) or any substring of \
-                   target/message. Capped at 512 entries; default \
-                   `count` is 30.",
-        },
-        run: cmd_syslog,
-    },
-    Command {
-        names: &["astat"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "astat [<target>]",
-            summary: "Detailed `affects` listing for any character in the room.",
-            long: "Builder+. Without an argument, dumps your own \
-                   `EffectInstance` rows in detail. With a keyword, \
-                   resolves to a player or mob in the same room. \
-                   Shows each effect's tag, remaining duration, \
-                   strength, source, and the ability that spawned \
-                   it (when known).",
-        },
-        run: cmd_astat,
-    },
-    Command {
-        names: &["rstat"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "rstat [<zone_id> <room_id>]",
-            summary: "Dump ECS state of a room.",
-            long: "Builder+. With no arg, inspects the room you're in. \
-                   With two integer ids, looks up the matching room via \
-                   WorldKeyIndex. Prints zone, id, sector, occupant \
-                   counts, and the populated exit table.",
-        },
-        run: cmd_rstat,
-    },
-    Command {
-        names: &["stat"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "stat [room [<zone> <id>] | <target>]",
-            summary: "Dump ECS state of an entity, or a room.",
-            long: "Builder+ diagnostic. With no arg or `me`/`self`, \
-                   inspects you. With a keyword, finds the matching mob/ \
-                   player/item in the room and prints its components: \
-                   WorldKey, Health, Stamina, Posture, CombatStats, \
-                   Profile (players), and any active EffectInstances \
-                   pointing at it. `stat room` (alias for `rstat`) dumps \
-                   the current room — name, sector, exits with state and \
-                   key, attached triggers, occupants by name, and any \
-                   environmental effect instances.",
-        },
-        run: cmd_stat,
-    },
     // load / loadobj / dumpworld / purge migrated to commands/admin_world.rs.
-    Command {
-        names: &["lua"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "lua <code>",
-            summary: "Run a snippet of Lua code.",
-            long: "Runs `code` with `actor` bound to your character. \
-                   Captured `print` output is sent back to you. Useful for \
-                   inspecting entity state and prototyping triggers. \
-                   Examples: \
-                     lua print(actor:name()) \
-                     lua print(actor:hp() .. '/' .. actor:max_hp())",
-        },
-        run: cmd_lua,
-    },
-    Command {
-        names: &["triggers", "trigs"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "triggers [here|<keyword>]",
-            summary: "List Lua triggers attached to entities.",
-            long: "With `here` (default), lists triggers on your room and \
-                   on every mob/item in it. With a keyword, finds the \
-                   single matching mob or item and lists just its \
-                   triggers. Each line is `(zone, id) name [FLAG ...]`. \
-                   Read-only diagnostic — does not fire anything.",
-        },
-        run: cmd_triggers,
-    },
-    Command {
-        names: &["firetrig"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "firetrig <zone> <id> [<keyword>]",
-            summary: "Hand-fire a Lua trigger body for testing.",
-            long: "Looks up the trigger in TriggerCatalog by `(zone, id)` \
-                   and executes its `commands` body via the LuaHost. \
-                   Without a keyword, `self` and `actor` bind to YOU. \
-                   With a keyword, they bind to the matching mob/item in \
-                   the current room. Captured `print` output and any \
-                   error are sent back. Useful for validating trigger \
-                   data without waiting for the natural event.",
-        },
-        run: cmd_firetrig,
-    },
 ];
 
 pub(crate) const MOVE_HELP: Help = Help {
@@ -4747,6 +4485,18 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "admin-world `{name}` missing"
+            );
+        }
+        // admin_inspect.rs
+        for name in [
+            "zstat", "mstat", "ostat", "sstat", "tstat", "astat",
+            "rstat", "stat", "setweather", "set", "show",
+            "scripterrors", "scripterr", "syslog", "lua",
+            "triggers", "trigs", "firetrig",
+        ] {
+            assert!(
+                names.contains(&name),
+                "admin-inspect `{name}` missing"
             );
         }
     }
@@ -21356,7 +21106,7 @@ pub(crate) fn cmd_apply(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-fn cmd_lua(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_lua(world: &mut World, player: Entity, args: &str) {
     let code = args.trim();
     if code.is_empty() {
         send_to(world, player, "Usage: lua <code>\r\n");
@@ -21386,7 +21136,7 @@ fn cmd_lua(world: &mut World, player: Entity, args: &str) {
 /// in the current room (default) or to a single keyword-resolved
 /// target. Read-only diagnostic — does not fire anything.
 #[allow(clippy::too_many_lines)]
-fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
     use mud_world::TriggerEvent;
 
     let arg = args.trim();
@@ -21505,7 +21255,7 @@ fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
 /// body against an actor. The actor defaults to the player; with a
 /// keyword, resolves a mob/item in the current room. Bound via
 /// `self` / `actor` in the executed snippet.
-fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() < 2 {
         send_to(world, player, "Usage: firetrig <zone> <id> [<keyword>]\r\n");
@@ -21560,7 +21310,7 @@ fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
 
 /// `zstat [<id>]`: dump zone-level state. Resolves the zone via the
 /// player's current room (no arg) or by direct id (one arg).
-fn cmd_zstat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_zstat(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     let zone_id = if parts.is_empty() {
         // Resolve via player's room WorldKey.
@@ -21635,7 +21385,7 @@ fn cmd_zstat(world: &mut World, player: Entity, args: &str) {
 }
 
 /// `mstat <zone> <id>`: dump mob prototype + live count.
-fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
         send_to(world, player, "Usage: mstat <zone> <id>\r\n");
@@ -21691,7 +21441,7 @@ fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
 }
 
 /// `ostat <zone> <id>`: dump object prototype + live count.
-fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
         send_to(world, player, "Usage: ostat <zone> <id>\r\n");
@@ -21746,7 +21496,7 @@ fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
 
 /// `setweather <climate> [<zone_id>]`: override the climate for a
 /// zone. Without a zone arg, mutates the player's current zone.
-fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
     use mud_db::enums::Climate;
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
@@ -21947,7 +21697,7 @@ fn cmd_identify(world: &mut World, player: Entity, args: &str) {
 /// disconnect save handles a subset; full persistence (across all
 /// fields) follows when each field's column round-trips.
 #[allow(clippy::too_many_lines)]
-fn cmd_set(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.splitn(3, char::is_whitespace).collect();
     if parts.len() != 3 || parts[1].trim().is_empty() || parts[2].trim().is_empty() {
         send_to(world, player, "Usage: set <target|me> <field> <value>\r\n");
@@ -22055,7 +21805,7 @@ fn cmd_set(world: &mut World, player: Entity, args: &str) {
 /// the long-form alternative to the per-kind `*stat` commands
 /// when the goal is "summarize everything in this category."
 #[allow(clippy::too_many_lines)]
-fn cmd_show(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim().to_ascii_lowercase();
     let mut out = String::from("\r\n");
     match arg.as_str() {
@@ -22264,7 +22014,7 @@ fn cmd_show(world: &mut World, player: Entity, args: &str) {
 
 /// `scripterrors [<n>]`: list the most recent Lua trigger fire
 /// failures from the in-memory `ScriptErrorLog`.
-fn cmd_scripterrors(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_scripterrors(world: &mut World, player: Entity, args: &str) {
     use mud_world::ScriptErrorLog;
     let n: usize = args
         .trim()
@@ -22303,7 +22053,7 @@ fn cmd_scripterrors(world: &mut World, player: Entity, args: &str) {
 
 /// `syslog [<count>] [<filter>]`: list the most recent tracing log
 /// lines captured into the in-memory ring buffer.
-fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
     let mut tokens = args.split_whitespace();
     let count: usize = tokens
         .next()
@@ -22357,7 +22107,7 @@ fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
 }
 
 /// `astat [<target>]`: detailed effect listing for any character.
-fn cmd_astat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_astat(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let target = if arg.is_empty() {
         player
@@ -22417,7 +22167,7 @@ fn cmd_astat(world: &mut World, player: Entity, args: &str) {
 }
 
 /// `sstat <zone> <id>`: dump a Shop catalog row.
-fn cmd_sstat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_sstat(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
         send_to(world, player, "Usage: sstat <zone> <id>\r\n");
@@ -22456,7 +22206,7 @@ fn cmd_sstat(world: &mut World, player: Entity, args: &str) {
 }
 
 /// `tstat <zone> <id>`: dump a Lua trigger row.
-fn cmd_tstat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_tstat(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 2 {
         send_to(world, player, "Usage: tstat <zone> <id>\r\n");
@@ -22499,7 +22249,7 @@ fn cmd_tstat(world: &mut World, player: Entity, args: &str) {
 /// the room up via `WorldKeyIndex`. Useful for verifying loader
 /// state and catching dangling references.
 #[allow(clippy::too_many_lines)]
-fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
     type ActorRow = (Entity, String, Option<(i32, i32)>);
     type ItemRow = (Entity, String, Option<(i32, i32)>, Option<i32>);
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -22642,7 +22392,7 @@ fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
 /// (or self when arg empty / "me" / "self"). Output is intentionally
 /// dense — a Debug-style readout, not for player consumption.
 #[allow(clippy::too_many_lines)]
-fn cmd_stat(world: &mut World, player: Entity, args: &str) {
+pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     // `stat room [<zone> <id>]` aliases through to `cmd_rstat`. Same
     // semantics: no args dumps the room you're standing in, two ids
