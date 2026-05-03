@@ -3303,22 +3303,37 @@ pub(crate) fn cmd_value(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    let cost = world
+    let proto = world
         .get::<WorldKey>(target)
         .and_then(|k| {
             world
                 .resource::<ObjectPrototypes>()
                 .by_key
                 .get(&(k.zone, k.id))
-                .map(|p| p.cost)
-        })
-        .unwrap_or(0);
+                .cloned()
+        });
     let item_name = name_of(world, target);
-    let msg = if let Some(parts) = format_wealth(i64::from(cost)) {
-        format!("{item_name} is worth {parts}.\r\n")
+    let mut msg = if let Some(p) = &proto {
+        if let Some(parts) = format_wealth(i64::from(p.cost)) {
+            format!("{item_name} is worth {parts}.\r\n")
+        } else {
+            format!("{item_name} is worthless.\r\n")
+        }
     } else {
-        format!("{item_name} is worthless.\r\n")
+        format!("{item_name} has no proto data; treat as worthless.\r\n")
     };
+    if let Some(p) = &proto {
+        // Weight + level give the player the rest of the
+        // is-this-worth-carrying picture without a separate
+        // examine. Skip the level line at level 0 (the proto
+        // default) since "minimum level: 0" reads as noise.
+        if p.weight > 0.0 {
+            msg.push_str(&format!("  Weight: {:.1} lbs.\r\n", p.weight));
+        }
+        if p.level > 0 {
+            msg.push_str(&format!("  Minimum level: {}\r\n", p.level));
+        }
+    }
     send_rendered(world, player, &msg);
 }
 
