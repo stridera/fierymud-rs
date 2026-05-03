@@ -8016,3 +8016,45 @@ pub(crate) fn cmd_abilities_kind(
     }
     send_to(world, player, out);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_who_level_filter;
+
+    #[test]
+    fn no_args_returns_none() {
+        assert_eq!(parse_who_level_filter(""), None);
+        assert_eq!(parse_who_level_filter("   "), None);
+    }
+
+    #[test]
+    fn single_numeric_arg_means_level_or_higher() {
+        assert_eq!(parse_who_level_filter("50"), Some((50, i32::MAX)));
+        assert_eq!(parse_who_level_filter("  100  "), Some((100, i32::MAX)));
+    }
+
+    #[test]
+    fn two_numeric_args_form_inclusive_range() {
+        assert_eq!(parse_who_level_filter("1 50"), Some((1, 50)));
+        assert_eq!(parse_who_level_filter("25  75"), Some((25, 75)));
+    }
+
+    #[test]
+    fn descending_range_is_normalised_to_ascending() {
+        // who 100 1 → 1..=100, not 100..=1.
+        assert_eq!(parse_who_level_filter("100 1"), Some((1, 100)));
+    }
+
+    #[test]
+    fn extra_tokens_after_two_numbers_are_ignored() {
+        // No need to refuse — drop the trailing junk.
+        assert_eq!(parse_who_level_filter("1 50 garbage"), Some((1, 50)));
+    }
+
+    #[test]
+    fn non_numeric_args_silently_fall_back_to_no_filter() {
+        // Lenient parser: skip non-numeric tokens entirely.
+        assert_eq!(parse_who_level_filter("abc"), None);
+        assert_eq!(parse_who_level_filter("xyz 50"), Some((50, i32::MAX)));
+    }
+}
