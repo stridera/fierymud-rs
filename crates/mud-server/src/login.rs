@@ -21,6 +21,13 @@ const BANNER: &str = "\r\n=========================================\r\n   fierym
 /// only thing legacy MUD usernames couldn't legally contain).
 const IDENT_PROMPT: &str = "Email or character name: ";
 const PASSWORD_PROMPT: &str = "Password: ";
+const NEW_PASSWORD_PROMPT: &str = "Choose a password: ";
+const CONFIRM_PASSWORD_PROMPT: &str = "Re-enter password to confirm: ";
+/// Minimum length for a freshly-created password. Mirrors the
+/// existing `bcrypt::hash` cost path — bcrypt itself doesn't
+/// enforce a length, but anything shorter than this is a
+/// hard pass for a new account regardless.
+const MIN_NEW_PASSWORD_LEN: usize = 6;
 
 /// Default starting room when a character has no current/recall location set.
 /// (0, 0) is "The Void" — fitting.
@@ -41,11 +48,27 @@ pub enum Stage {
     /// Identifier didn't match anything in the database. Ask the
     /// user whether they want to create a new account / character
     /// rather than silently bouncing them through a doomed
-    /// password check. The actual creation flow is the multi-wake
-    /// follow-up; this stage is the doorway.
+    /// password check.
     ConfirmCreate {
         identifier: String,
         is_email: bool,
+    },
+    /// Confirm-create answered "yes". Collect a password for the
+    /// new account. The character-name path collapses both
+    /// account + character creation behind one identifier — the
+    /// password covers the user-row.
+    AwaitingNewPassword {
+        identifier: String,
+        is_email: bool,
+    },
+    /// Re-prompt to verify the new password matches what the user
+    /// just typed. Mismatches bounce back to `AwaitingNewPassword`.
+    /// Ephemeral plaintext lives only on this stage value — gone
+    /// when the stage advances.
+    ConfirmNewPassword {
+        identifier: String,
+        is_email: bool,
+        first_attempt: String,
     },
     CharSelect { user: User, characters: Vec<CharacterRow> },
 }
@@ -257,24 +280,15 @@ impl ConnRouter {
                 let yes = matches!(answer.as_str(), "y" | "yes");
                 let no = matches!(answer.as_str(), "n" | "no" | "");
                 if yes {
-                    // Creation flow proper is the multi-wake follow-up.
-                    // For now, surface the explicit "not yet wired" line
-                    // so the player isn't left wondering what happened —
-                    // and so the contract for the future flow is
-                    // documented in this branch.
-                    let kind_label = if is_email { "account" } else { "character" };
                     let _ = ctx.outbound.send(
                         format!(
-                            "Creating a new {kind_label} for `{identifier}` is not yet \
-                             implemented. The login flow has the doorway wired but \
-                             the creation steps (password set, character details, \
-                             stats roll) land in a follow-up. For now, please \
-                             enter an existing email or character name.\r\n"
+                            "Great — let's set up `{identifier}`. Pick a password \
+                             at least {MIN_NEW_PASSWORD_LEN} characters long.\r\n"
                         )
                         .into_bytes(),
                     );
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
+                    let _ = ctx.outbound.send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
                 } else if no {
                     let _ = ctx.outbound.send(
                         "Okay — please enter an existing email or character name.\r\n"
@@ -289,6 +303,62 @@ impl ConnRouter {
                     );
                     ctx.stage = Stage::ConfirmCreate { identifier, is_email };
                 }
+            }
+
+            Stage::AwaitingNewPassword { identifier, is_email } => {
+                if trimmed.len() < MIN_NEW_PASSWORD_LEN {
+                    let _ = ctx.outbound.send(
+                        format!(
+                            "Password must be at least {MIN_NEW_PASSWORD_LEN} \
+                             characters. Try again.\r\n"
+                        )
+                        .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
+                    let _ = ctx.outbound.send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
+                    return;
+                }
+                ctx.stage = Stage::ConfirmNewPassword {
+                    identifier,
+                    is_email,
+                    first_attempt: trimmed.to_string(),
+                };
+                let _ = ctx.outbound.send(CONFIRM_PASSWORD_PROMPT.as_bytes().to_vec());
+            }
+
+            Stage::ConfirmNewPassword {
+                identifier,
+                is_email,
+                first_attempt,
+            } => {
+                if trimmed != first_attempt {
+                    let _ = ctx.outbound.send(
+                        "Passwords don't match. Let's start over.\r\n"
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                    ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
+                    let _ = ctx.outbound.send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
+                    return;
+                }
+                // Password confirmed. Account/character row INSERTs
+                // and the spawn-into-world steps land in follow-up
+                // slices; this slice ends the doorway with an
+                // explicit "next steps coming" line so the contract
+                // is visible without wiring the body.
+                let kind_label = if is_email { "account" } else { "character" };
+                let _ = ctx.outbound.send(
+                    format!(
+                        "Password confirmed. Creating a new {kind_label} for \
+                         `{identifier}` still needs character details (name, \
+                         race, class, gender, stat roll) which land in a \
+                         follow-up slice. For now please enter an existing \
+                         email or character name.\r\n"
+                    )
+                    .into_bytes(),
+                );
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
             }
 
             Stage::AwaitingPassword { user, preselected } => {
