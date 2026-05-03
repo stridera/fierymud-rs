@@ -11907,6 +11907,9 @@ fn cmd_where(world: &mut World, player: Entity, _args: &str) {
 }
 
 fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
+    // Snapshot in two passes so we can group identical names into a
+    // single "3x <name>" line. Order is preserved by tracking the
+    // first-seen position so duplicates fold without scrambling.
     let items: Vec<String> = {
         let mut q = world
             .query_filtered::<(&Located, &Named, Option<&EquippedSlot>), With<Item>>();
@@ -11915,6 +11918,15 @@ fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
             .map(|(_, n, _)| n.name.clone())
             .collect()
     };
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for name in &items {
+        if !counts.contains_key(name) {
+            order.push(name.clone());
+        }
+        *counts.entry(name.clone()).or_insert(0) += 1;
+    }
     let weight = carried_weight(world, player);
     let mode = color_mode_for(world, player);
     let mut out = if items.is_empty() {
@@ -11922,8 +11934,14 @@ fn cmd_inventory(world: &mut World, player: Entity, _args: &str) {
     } else {
         format!("\r\nYou are carrying {} item(s):\r\n", items.len())
     };
-    for name in &items {
-        out.push_str(&format!("  {}\r\n", render_color_tags(name, mode)));
+    for name in &order {
+        let n = counts.get(name).copied().unwrap_or(1);
+        let rendered = render_color_tags(name, mode);
+        if n > 1 {
+            out.push_str(&format!("  ({n}) {rendered}\r\n"));
+        } else {
+            out.push_str(&format!("      {rendered}\r\n"));
+        }
     }
     if weight > 0.0 {
         let cap = carry_capacity(world, player);
