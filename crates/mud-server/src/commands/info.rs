@@ -5635,10 +5635,14 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
     out.push_str("\r\n");
     for (dir, room, state) in &rows {
         let open = exit_state_color(*state);
-        let dir_label = render_color_tags(
-            &format!("{open}{}</>", direction_name(*dir)),
-            mode,
-        );
+        // Pad in XML-Lite space (visible_width sees `<tag>`),
+        // THEN render. Same shape as cmd_spells's grid (2bb9a1a
+        // / fix in this commit's sibling site): rendering first
+        // would leave ANSI escapes that visible_width counts as
+        // visible chars, undercounting the padding.
+        let dir_xml = format!("{open}{}</>", direction_name(*dir));
+        let dir_label =
+            render_color_tags(&pad_visible(&dir_xml, 10), mode);
         // Colorize plain target room names; authored ones keep
         // their builder-set color via colorize_default.
         let room_label = render_color_tags(
@@ -5650,11 +5654,7 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
             ExitState::Closed => render_color_tags("  <yellow>(closed)</>", mode),
             ExitState::Locked => render_color_tags("  <red>(locked)</>", mode),
         };
-        // Pad direction column visible-width-aware so color tags
-        // don't break the right-justified alignment. NAME_COL = 10
-        // matches the previous `:>10` formatter.
-        let padded = pad_visible(&dir_label, 10);
-        out.push_str(&format!("  {padded} - {room_label}{state_label}\r\n"));
+        out.push_str(&format!("  {dir_label} - {room_label}{state_label}\r\n"));
     }
     send_to(world, player, out);
 }
@@ -9451,9 +9451,14 @@ pub(crate) fn cmd_abilities_kind(
     for chunk in names.chunks(3) {
         out.push_str("  ");
         for n in chunk {
-            let rendered = render_color_tags(n, mode);
-            let padded = pad_visible(&rendered, column_width);
-            out.push_str(&padded);
+            // Same XML-Lite-pad-then-render order as cmd_spells's
+            // grid (2bb9a1a) — visible_width understands the
+            // `<tag>` markers but not the ANSI escapes
+            // render_color_tags emits, so padding must happen
+            // before rendering.
+            let padded = pad_visible(n, column_width);
+            let rendered = render_color_tags(&padded, mode);
+            out.push_str(&rendered);
         }
         out.push_str("\r\n");
     }
