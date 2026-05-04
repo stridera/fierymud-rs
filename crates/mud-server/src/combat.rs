@@ -1756,6 +1756,156 @@ mod tests {
     }
 
     #[test]
+    fn sleeping_target_jolts_awake_on_damage() {
+        // The "you jolt awake!" branch: a sleeping victim that
+        // takes a non-lethal hit must transition to Standing on
+        // the same swing. Auto-hit on sleepers means the combat
+        // formula can't miss, so the only paths are hit-and-die
+        // or hit-and-wake. This guards the second one.
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = world
+            .spawn((
+                Named { name: "Sleeper".to_string() },
+                Located(room),
+                Health { hp: 50, max: 50 },
+                CombatStats {
+                    hit_roll: 0,
+                    dmg_roll: 0,
+                    ac: 0,
+                    alignment: 0,
+                },
+                Posture(PostureKind::Sleeping),
+            ))
+            .id();
+        let attacker = make_attacker(&mut world, room, target, 7);
+        try_insert(&mut world, target, Fighting(attacker));
+
+        run_combat_tick(&mut world);
+
+        assert_eq!(
+            world.get::<Posture>(target).map(|p| p.0),
+            Some(PostureKind::Standing),
+            "sleeping target jolts to Standing on damage"
+        );
+        // Hit is auto (sleeping bypasses the roll), so HP
+        // definitely dropped. Don't assert exact value — crit
+        // randomness leaves a band — but anything below max
+        // proves the swing landed.
+        assert!(
+            world.get::<Health>(target).unwrap().hp < 50,
+            "sleeping target took damage from auto-hit"
+        );
+    }
+
+    #[test]
+    fn fleer_keeps_hate_list_for_re_aggro_on_return() {
+        // Flee semantics: cmd_flee removes the fleer's Fighting and
+        // moves them to a new room; combat_tick's room-mismatch
+        // pass clears attackers' Fighting on next tick. But the
+        // mob's HateList must keep the fleer entry — that's what
+        // the on-entry / re-aggro pass uses to re-engage when the
+        // player walks back in.
+        //
+        // This test simulates the post-flee state directly (player
+        // already moved, mob still has Fighting + HateList) and
+        // runs combat_tick to verify: attacker's Fighting clears
+        // via room mismatch, HateList retains the entry.
+        let mut world = World::new();
+        let room_a = make_room(&mut world);
+        let room_b = make_room(&mut world);
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Tester".to_string() },
+                Located(room_b), // already fled
+                Health { hp: 100, max: 100 },
+                Posture(PostureKind::Standing),
+                CombatStats {
+                    hit_roll: 0,
+                    dmg_roll: 0,
+                    ac: 0,
+                    alignment: 0,
+                },
+            ))
+            .id();
+        let mob = world
+            .spawn((
+                Mob,
+                Named { name: "Guard".to_string() },
+                Located(room_a),
+                Health { hp: 50, max: 50 },
+                CombatStats {
+                    hit_roll: 10,
+                    dmg_roll: 5,
+                    ac: 0,
+                    alignment: 0,
+                },
+                Posture(PostureKind::Standing),
+                Fighting(player),
+                HateList(vec![player]),
+            ))
+            .id();
+
+        run_combat_tick(&mut world);
+
+        assert!(
+            world.get::<Fighting>(mob).is_none(),
+            "mob disengages on room mismatch"
+        );
+        let hate = world
+            .get::<HateList>(mob)
+            .expect("HateList preserved across flee");
+        assert!(
+            hate.0.contains(&player),
+            "fleer remains on the HateList for re-aggro on return"
+        );
+    }
+
+    #[test]
+    fn mid_tick_residual_swing_no_ops_after_target_ghosts() {
+        // Two attackers swinging at the same player target in one
+        // tick. The first swing kills the target (handle_death
+        // fires, Ghost set, attackers' Fighting swept). The second
+        // swing was already in the snapshot list — it still
+        // executes apply_swing, but apply_damage must early-return
+        // on the new Ghost so the residual swing doesn't push HP
+        // below 0 or trigger a second death event.
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(COMBAT_PERIOD_TICKS));
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Tester".to_string() },
+                Located(room),
+                Health { hp: 5, max: 100 }, // one swing kills
+                Posture(PostureKind::Standing),
+                CombatStats {
+                    hit_roll: 0,
+                    dmg_roll: 0,
+                    ac: 0,
+                    alignment: 0,
+                },
+            ))
+            .id();
+        let _attacker_a = make_attacker(&mut world, room, player, 50);
+        let _attacker_b = make_attacker(&mut world, room, player, 50);
+
+        combat_tick(&mut world);
+
+        assert!(
+            world.get::<Ghost>(player).is_some(),
+            "target was ghosted by the lethal swing"
+        );
+        assert_eq!(
+            world.get::<Health>(player).unwrap().hp,
+            0,
+            "ghost HP at 0 — residual swing didn't drive it negative"
+        );
+    }
+
+    #[test]
     fn frozen_attacker_is_filtered_from_swing_snapshot() {
         // Defense-in-depth check: even if a Frozen entity somehow
         // has Fighting set on them, the swing snapshot must skip
