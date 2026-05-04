@@ -816,6 +816,15 @@ pub struct LoggedInAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LastPersistedAt(pub std::time::Instant);
 
+/// Lua `actor:save()` request marker. Inserted from inside a
+/// Lua callback (which runs in sync `&mut World` context and so
+/// can't await the async DB write directly). The main loop's
+/// post-tick drain queries entities with this marker, calls the
+/// async `save_player` on each, and removes the marker — the same
+/// async-bridge pattern as `IdleKickPending`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PendingSave;
+
 /// Captured value of `Characters.last_login` from the row that
 /// spawned this player, stored as a Unix timestamp in seconds.
 /// Score's "Last login:" line renders the relative time ("3 days

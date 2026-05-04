@@ -298,6 +298,26 @@ async fn main() {
                             info!(tick, "periodic autosave");
                         }
                     }
+                    // Lua-requested saves: triggers can call
+                    // `actor:save()` to checkpoint progress mid-tick.
+                    // The Lua callback inserts a `PendingSave` marker
+                    // since async DB writes can't run inline; we drain
+                    // the markers here, save each player, and clear the
+                    // marker. Plays well with the post-tick autosave
+                    // above because every save_player is idempotent.
+                    {
+                        let pending_save: Vec<Entity> = {
+                            let mut q = world
+                                .query_filtered::<Entity, With<mud_world::PendingSave>>();
+                            q.iter(&world).collect()
+                        };
+                        for e in pending_save {
+                            if let Ok(mut em) = world.get_entity_mut(e) {
+                                em.remove::<mud_world::PendingSave>();
+                            }
+                            login::save_player(&mut world, e, &pool).await;
+                        }
+                    }
                     // Drain idle-kick markers before flushing prompts
                     // so the kick notice lands ahead of the prompt
                     // refresh and the disconnect path runs cleanly

@@ -1501,6 +1501,26 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:save()` requests a snapshot of this player's state
+        // back to the DB. 77+ corpus refs, almost all from
+        // quest-completion checkpoints — the trigger awards xp /
+        // grants an ability / advances the quest stage and then
+        // forces a save so a crash before the next autosave can't
+        // roll the progress back.
+        //
+        // The Lua callback runs sync inside the world tick; the
+        // actual `save_player` is async. Insert a `PendingSave`
+        // marker that the main loop drains post-tick (same shape
+        // as `IdleKickPending`). No-op for non-player entities since
+        // `save_player` only persists `Account`-bearing characters.
+        methods.add_method("save", |lua, this, ()| -> mlua::Result<()> {
+            world_mut_from_lua(lua, |world| {
+                if let Ok(mut em) = world.get_entity_mut(this.entity) {
+                    em.insert(mud_world::PendingSave);
+                }
+            })
+        });
+
         // `actor:set_flag(name, on)` toggles a `MobBehavior` flag on
         // a mob. 26+ corpus refs use this to lock guard mobs into
         // place via `set_flag("sentinel", true)` while a quest scene
