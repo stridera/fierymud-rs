@@ -1898,6 +1898,36 @@ impl UserData for LuaActor {
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
+                    // Body size from `Races.default_size`. Looks up
+                    // the actor's race (uppercased to match the enum
+                    // key) in `RaceDefaults.size_by_race`. 17 corpus
+                    // refs (`if actor.size == "small" then ...`-style
+                    // gating). Returns lowercase to match the existing
+                    // `actor.race` casing convention; empty string
+                    // when the race lacks a row in `Races`.
+                    "size" => {
+                        let s = world_from_lua(lua, |w| {
+                            let race_key = if let Some(p) = w.get::<Profile>(this.entity) {
+                                p.race.to_ascii_uppercase()
+                            } else if let Some(wk) = w.get::<WorldKey>(this.entity) {
+                                w.resource::<MobPrototypes>()
+                                    .by_key
+                                    .get(&(wk.zone, wk.id))
+                                    .map(|p| p.race.to_ascii_uppercase())
+                                    .unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            if race_key.is_empty() {
+                                return String::new();
+                            }
+                            w.get_resource::<mud_world::RaceDefaults>()
+                                .and_then(|r| r.size_by_race.get(&race_key).cloned())
+                                .map(|s| s.to_ascii_lowercase())
+                                .unwrap_or_default()
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
                     // 211 corpus refs.
                     "is_player" => world_from_lua(lua, |w| {
                         Value::Boolean(w.get::<Player>(this.entity).is_some())
