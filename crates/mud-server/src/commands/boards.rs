@@ -61,7 +61,7 @@ inventory::submit! {
         names: &["boards"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Communication,
+        category: Category::Mail,
         help: Help {
             usage: "boards",
             summary: "List every public message board.",
@@ -78,7 +78,7 @@ inventory::submit! {
         names: &["board"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Communication,
+        category: Category::Mail,
         help: Help {
             usage: "board <alias> [#]",
             summary: "List or read messages on a board.",
@@ -95,7 +95,7 @@ inventory::submit! {
         names: &["post"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Communication,
+        category: Category::Mail,
         help: Help {
             usage: "post <board-alias>",
             summary: "Compose a new message on a board.",
@@ -114,7 +114,7 @@ inventory::submit! {
         names: &["delpost"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Communication,
+        category: Category::Mail,
         help: Help {
             usage: "delpost <board-alias> <#>",
             summary: "Delete a board message (yours, or any if Builder+).",
@@ -132,7 +132,7 @@ inventory::submit! {
         names: &["editpost"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Communication,
+        category: Category::Mail,
         help: Help {
             usage: "editpost <board-alias> <#>",
             summary: "Re-open a board post for editing.",

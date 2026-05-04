@@ -29,7 +29,7 @@ inventory::submit! {
         names: &["mail"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Communication,
+        category: Category::Mail,
         help: Help {
             usage: "mail <character>",
             summary: "Open a mail composition session to one player.",
@@ -48,7 +48,7 @@ inventory::submit! {
         names: &["mailbox"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Communication,
+        category: Category::Mail,
         help: Help {
             usage: "mailbox",
             summary: "List inbound mail in your account inbox.",
@@ -65,7 +65,7 @@ inventory::submit! {
         names: &["readmail"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Communication,
+        category: Category::Mail,
         help: Help {
             usage: "readmail <#>",
             summary: "Read a single mail message by slot.",
@@ -82,7 +82,7 @@ inventory::submit! {
         names: &["delmail"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Communication,
+        category: Category::Mail,
         help: Help {
             usage: "delmail <#>",
             summary: "Delete a mail message by slot.",

@@ -41,7 +41,7 @@ inventory::submit! {
         names: &["study"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Combat,
+        category: Category::Magic,
         help: Help {
             usage: "study <spell>",
             summary: "Permanently learn a spell from your class list.",
@@ -60,7 +60,7 @@ inventory::submit! {
         names: &["memorize", "mem", "pray"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Combat,
+        category: Category::Magic,
         help: Help {
             usage: "memorize <spell>",
             summary: "Prepare a spell into one of your circle slots.",
@@ -80,7 +80,7 @@ inventory::submit! {
         names: &["forget"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Combat,
+        category: Category::Magic,
         help: Help {
             usage: "forget <spell>",
             summary: "Drop a memorized spell from your prepared list.",
@@ -97,7 +97,7 @@ inventory::submit! {
         names: &["cast", "c"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Combat,
+        category: Category::Magic,
         help: Help {
             usage: "cast <spell> [target]",
             summary: "Cast a spell from the loaded catalog.",
@@ -119,7 +119,7 @@ inventory::submit! {
         names: &["chant"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Combat,
+        category: Category::Magic,
         help: Help {
             usage: "chant <chant> [target]",
             summary: "Invoke a chant from the catalog (cleric-side spells).",
@@ -136,7 +136,7 @@ inventory::submit! {
         names: &["perform"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Combat,
+        category: Category::Magic,
         help: Help {
             usage: "perform <song> [target]",
             summary: "Perform a song from the catalog (bard).",
