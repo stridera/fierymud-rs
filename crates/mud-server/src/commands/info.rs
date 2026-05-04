@@ -1270,13 +1270,13 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "spells [filter]",
-            summary: "List loaded abilities (spells/chants/songs/skills).",
-            long: "Shows every ability the world has loaded, grouped by \
-                   kind. Optional filter narrows by case-insensitive \
-                   substring match on the name. Once a per-character \
-                   ability list lands this command will show only what \
-                   you know — for now it's the full catalog.",
+            usage: "spells [all] [filter]",
+            summary: "List the abilities you know (or the full catalog).",
+            long: "By default shows only abilities you've actually \
+                   learned, grouped by kind (Spells / Chants / Songs / \
+                   Skills). Add `all` to dump the full catalog (handy \
+                   for builders / curiosity). Optional substring filter \
+                   narrows either scope: `spells fire` / `spells all fire`.",
         },
         run: cmd_spells,
     }
@@ -1326,11 +1326,12 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "skills [filter]",
-            summary: "List skills (kind=Skill abilities).",
-            long: "Like `spells` but filtered to skills only. Honors \
-                   KnownAbilities — shows only what you know when set. \
-                   Optional filter narrows by case-insensitive substring.",
+            usage: "skills [all] [filter]",
+            summary: "List skills you know (or the full catalog).",
+            long: "Like `spells` but filtered to kind=Skill. Default \
+                   shows only what you've learned; `skills all` dumps \
+                   the full catalog. Optional substring filter applies \
+                   to either scope.",
         },
         run: cmd_skills,
     }
@@ -1343,10 +1344,11 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "songs [filter]",
-            summary: "List bardic songs (kind=Song abilities).",
-            long: "Like `spells` but filtered to songs only. Use \
-                   `perform <song>` to invoke them.",
+            usage: "songs [all] [filter]",
+            summary: "List bardic songs you know (or the full catalog).",
+            long: "Like `spells` but filtered to kind=Song. Default \
+                   shows only songs you've learned; `songs all` dumps \
+                   the catalog. Use `perform <song>` to invoke.",
         },
         run: cmd_songs,
     }
@@ -1359,10 +1361,11 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "chants [filter]",
-            summary: "List chants (kind=Chant abilities).",
-            long: "Like `spells` but filtered to chants only. Use \
-                   `chant <name>` to invoke them.",
+            usage: "chants [all] [filter]",
+            summary: "List chants you know (or the full catalog).",
+            long: "Like `spells` but filtered to kind=Chant. Default \
+                   shows only chants you've learned; `chants all` \
+                   dumps the catalog. Use `chant <name>` to invoke.",
         },
         run: cmd_chants,
     }
@@ -8075,18 +8078,32 @@ pub(crate) fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
 pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
     use mud_db::abilities::AbilityKind;
 
-    let filter = args.trim().to_ascii_lowercase();
     let mode = color_mode_for(world, player);
+    // Argument shape:
+    //   `spells`               → known abilities only
+    //   `spells all`           → full catalog (builders / curiosity)
+    //   `spells <substring>`   → filter known by substring
+    //   `spells all <substr>`  → filter full catalog by substring
+    let raw = args.trim().to_ascii_lowercase();
+    let (show_all, filter) = if let Some(rest) = raw.strip_prefix("all") {
+        (true, rest.trim().to_string())
+    } else {
+        (false, raw)
+    };
 
-    // If the player has a KnownAbilities component with any entries, only
-    // show abilities they actually know. Empty KnownAbilities (or no
-    // component at all) falls back to the full catalog — useful for
-    // bare admin tests and for characters whose ability list hasn't
-    // been seeded yet.
-    let known: Option<std::collections::HashSet<i32>> = world
-        .get::<KnownAbilities>(player)
-        .filter(|k| !k.entries.is_empty())
-        .map(|k| k.entries.iter().map(|(id, _, _)| *id).collect());
+    // Known set is the default scope. `spells all` overrides to the
+    // full catalog regardless of what the player has trained.
+    let known: Option<std::collections::HashSet<i32>> = if show_all {
+        None
+    } else {
+        Some(
+            world
+                .get::<KnownAbilities>(player)
+                .map_or_else(std::collections::HashSet::new, |k| {
+                    k.entries.iter().map(|(id, _, _)| *id).collect()
+                }),
+        )
+    };
 
     let mut buckets: std::collections::BTreeMap<&'static str, Vec<String>> =
         std::collections::BTreeMap::new();
@@ -8108,37 +8125,80 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
         buckets.entry(bucket).or_default().push(def.name.clone());
     }
     if buckets.is_empty() {
-        let scope = if known.is_some() { "you know" } else { "loaded" };
-        if filter.is_empty() {
-            send_to(world, player, format!("\r\nNo abilities {scope}.\r\n"));
+        if show_all {
+            // Catalog dump explicitly requested but produced
+            // nothing — likely a substring filter that matched
+            // zero rows.
+            if filter.is_empty() {
+                send_to(world, player, "\r\nNo abilities loaded.\r\n");
+            } else {
+                send_rendered(
+                    world,
+                    player,
+                    &format!(
+                        "\r\nNo abilities matching '{filter}' loaded.\r\n"
+                    ),
+                );
+            }
+        } else if filter.is_empty() {
+            send_to(
+                world,
+                player,
+                "\r\n<dim>You haven't learned any abilities yet.</> \
+                 Type `spells all` to browse the catalog.\r\n",
+            );
         } else {
             send_rendered(
                 world,
                 player,
-                &format!("\r\nNo abilities matching '{filter}' {scope}.\r\n"),
+                &format!(
+                    "\r\nNo abilities matching '{filter}' in your known list. \
+                     Try `spells all {filter}`.\r\n"
+                ),
             );
         }
         return;
     }
 
-    let header = if known.is_some() {
-        "Abilities you know"
+    let header = if show_all {
+        "<b:cyan>All loaded abilities</>"
     } else {
-        "All loaded abilities"
+        "<b:cyan>Abilities you know</>"
     };
     let mut out = format!("\r\n{header}:\r\n");
     for (bucket, names) in &mut buckets {
         names.sort_unstable();
-        out.push_str(&format!("{} ({}):\r\n", bucket, names.len()));
+        out.push_str(&format!(
+            "<b:yellow>{}</> <dim>({})</>:\r\n",
+            bucket,
+            names.len()
+        ));
+        let column_width = name_column_width(names);
         for chunk in names.chunks(3) {
             out.push_str("  ");
             for n in chunk {
-                out.push_str(&format!("{:<26}", render_color_tags(n, mode)));
+                let rendered = render_color_tags(n, mode);
+                let padded = pad_visible(&rendered, column_width);
+                out.push_str(&padded);
             }
             out.push_str("\r\n");
         }
     }
     send_to(world, player, out);
+}
+
+/// Pick the column width for an ability-list grid. Sized to the
+/// widest *visible* name in the page plus a 2-space gutter, with a
+/// 22-char floor so short-name pages don't render too cramped.
+fn name_column_width(names: &[String]) -> usize {
+    const MIN_WIDTH: usize = 22;
+    const GUTTER: usize = 2;
+    let widest = names
+        .iter()
+        .map(|n| visible_width(n))
+        .max()
+        .unwrap_or(MIN_WIDTH);
+    widest.saturating_add(GUTTER).max(MIN_WIDTH)
 }
 
 pub(crate) fn cmd_skills(world: &mut World, player: Entity, args: &str) {
@@ -9208,12 +9268,27 @@ pub(crate) fn cmd_abilities_kind(
     args: &str,
     kind: mud_db::abilities::AbilityKind,
 ) {
-    let filter = args.trim().to_ascii_lowercase();
     let mode = color_mode_for(world, player);
-    let known: Option<std::collections::HashSet<i32>> = world
-        .get::<KnownAbilities>(player)
-        .filter(|k| !k.entries.is_empty())
-        .map(|k| k.entries.iter().map(|(id, _, _)| *id).collect());
+    let kind_label = kind.label();
+    // Argument shape mirrors cmd_spells: bare = known, `all` =
+    // catalog, optional substring filter on either scope.
+    let raw = args.trim().to_ascii_lowercase();
+    let (show_all, filter) = if let Some(rest) = raw.strip_prefix("all") {
+        (true, rest.trim().to_string())
+    } else {
+        (false, raw)
+    };
+    let known: Option<std::collections::HashSet<i32>> = if show_all {
+        None
+    } else {
+        Some(
+            world
+                .get::<KnownAbilities>(player)
+                .map_or_else(std::collections::HashSet::new, |k| {
+                    k.entries.iter().map(|(id, _, _)| *id).collect()
+                }),
+        )
+    };
     let mut names: Vec<String> = Vec::new();
     for def in world.resource::<AbilityCatalog>().by_name.values() {
         if def.kind != kind {
@@ -9230,30 +9305,51 @@ pub(crate) fn cmd_abilities_kind(
         names.push(def.name.clone());
     }
     if names.is_empty() {
-        let scope = if known.is_some() { "you know" } else { "loaded" };
-        let kind_label = kind.label();
-        if filter.is_empty() {
-            send_to(world, player, format!("\r\nNo {kind_label}s {scope}.\r\n"));
+        if show_all {
+            if filter.is_empty() {
+                send_to(world, player, format!("\r\nNo {kind_label}s loaded.\r\n"));
+            } else {
+                send_rendered(
+                    world,
+                    player,
+                    &format!("\r\nNo {kind_label}s matching '{filter}' loaded.\r\n"),
+                );
+            }
+        } else if filter.is_empty() {
+            send_to(
+                world,
+                player,
+                format!(
+                    "\r\n<dim>You haven't learned any {kind_label}s yet.</> \
+                     Type `{kind_label}s all` to browse the catalog.\r\n"
+                ),
+            );
         } else {
             send_rendered(
                 world,
                 player,
-                &format!("\r\nNo {kind_label}s matching '{filter}' {scope}.\r\n"),
+                &format!(
+                    "\r\nNo {kind_label}s matching '{filter}' in your known list. \
+                     Try `{kind_label}s all {filter}`.\r\n"
+                ),
             );
         }
         return;
     }
     names.sort_unstable();
-    let header = if known.is_some() {
-        format!("{}s you know", capitalize(kind.label()))
+    let header = if show_all {
+        format!("<b:cyan>All loaded {kind_label}s</>")
     } else {
-        format!("All loaded {}s", kind.label())
+        format!("<b:cyan>{}s you know</>", capitalize(kind_label))
     };
-    let mut out = format!("\r\n{header} ({}):\r\n", names.len());
+    let mut out = format!("\r\n{header} <dim>({})</>:\r\n", names.len());
+    let column_width = name_column_width(&names);
     for chunk in names.chunks(3) {
         out.push_str("  ");
         for n in chunk {
-            out.push_str(&format!("{:<26}", render_color_tags(n, mode)));
+            let rendered = render_color_tags(n, mode);
+            let padded = pad_visible(&rendered, column_width);
+            out.push_str(&padded);
         }
         out.push_str("\r\n");
     }
