@@ -1674,6 +1674,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_quoted_first_token_handles_quotes_and_whitespace() {
+        use super::parse_quoted_first_token;
+        // Bare word: legacy whitespace split.
+        let (head, tail) = parse_quoted_first_token("fireball goblin");
+        assert_eq!(head, "fireball");
+        assert_eq!(tail, Some("goblin"));
+        // Single-quoted multi-word phrase + trailing target.
+        let (head, tail) = parse_quoted_first_token("'magic missile' goblin");
+        assert_eq!(head, "magic missile");
+        assert_eq!(tail, Some("goblin"));
+        // Single-quoted phrase, no trailing target.
+        let (head, tail) = parse_quoted_first_token("'magic missile'");
+        assert_eq!(head, "magic missile");
+        assert_eq!(tail, None);
+        // Double quotes work the same.
+        let (head, tail) = parse_quoted_first_token("\"acid burst\" troll");
+        assert_eq!(head, "acid burst");
+        assert_eq!(tail, Some("troll"));
+        // Leading whitespace is forgiven.
+        let (head, tail) = parse_quoted_first_token("  fireball  goblin");
+        assert_eq!(head, "fireball");
+        assert_eq!(tail, Some("goblin"));
+        // Unclosed quote: fall back to whitespace split (and the
+        // first token retains the leading quote — caller's lookup
+        // will fail naturally and produce the standard "no match"
+        // message rather than silently misreading half the args).
+        let (head, _) = parse_quoted_first_token("'magic missile");
+        assert_eq!(head, "'magic");
+        // Empty input: empty head, no tail.
+        let (head, tail) = parse_quoted_first_token("");
+        assert_eq!(head, "");
+        assert_eq!(tail, None);
+    }
+
+    #[test]
     fn parse_direction_handles_full_words_and_aliases() {
         use mud_db::enums::Direction;
         assert_eq!(parse_direction("north"), Some(Direction::North));
@@ -7089,6 +7124,41 @@ pub(crate) fn invoke_ability(
     invoke_ability_with(world, player, args, kind, verb, false);
 }
 
+/// Pull the first "token" out of `args`, treating a leading single-
+/// or double-quoted phrase as one token regardless of whitespace
+/// inside. Returns `(head, tail)` where `head` is the trimmed
+/// phrase (quotes stripped) and `tail` is the remaining argument
+/// text (or `None` if empty).
+///
+/// Multi-word ability names like `cast 'magic missile' goblin`
+/// previously broke the cast-arg parser — the leading `'` ended up
+/// inside the ability needle (`'magic`) so the catalog lookup
+/// failed. This helper handles that case while preserving the
+/// legacy whitespace-split behavior when no quote appears.
+#[must_use]
+pub(crate) fn parse_quoted_first_token(args: &str) -> (String, Option<&str>) {
+    let trimmed = args.trim_start();
+    let opener = trimmed.chars().next();
+    if matches!(opener, Some('\'' | '"')) {
+        let q = opener.unwrap();
+        let rest = &trimmed[q.len_utf8()..];
+        if let Some(close_idx) = rest.find(q) {
+            let phrase = rest[..close_idx].trim().to_string();
+            let after = rest[close_idx + q.len_utf8()..].trim_start();
+            let tail = (!after.is_empty()).then_some(after);
+            return (phrase, tail);
+        }
+        // No closing quote — fall through to whitespace split.
+    }
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let head = parts.next().unwrap_or("").trim().to_string();
+    let tail = parts
+        .next()
+        .map(str::trim_start)
+        .filter(|s| !s.is_empty());
+    (head, tail)
+}
+
 /// fn-ptr shim used by the Lua `skills.execute` binding. Hardcodes
 /// kind=Skill / verb="use" so the host doesn't have to know about
 /// `AbilityKind`. The signature matches `mud_script::SkillExecutor`.
@@ -7181,13 +7251,19 @@ pub(crate) fn invoke_ability_with(
     verb: &str,
     aoe_repeat: bool,
 ) {
-    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
-    if parts.is_empty() || parts[0].trim().is_empty() {
+    // Quoted phrases (`cast 'magic missile' goblin`) collapse to a
+    // single token; otherwise behaves like the legacy whitespace
+    // split. After the parse, normalize spaces inside the needle to
+    // underscores so the user-friendly form matches the
+    // underscore-keyed catalog (Ability.plain_name = "MAGIC_MISSILE"
+    // → key "magic_missile"). Substring fallback uses the same
+    // normalization on both sides.
+    let (raw_needle, target_word) = parse_quoted_first_token(args);
+    if raw_needle.is_empty() {
         send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
         return;
     }
-    let needle = parts[0].trim().to_ascii_lowercase();
-    let target_word = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
+    let needle = raw_needle.to_ascii_lowercase().replace(' ', "_");
 
     // Find by exact key (and right kind) first, then fall back to the
     // first substring match restricted to the same kind.
@@ -7246,10 +7322,14 @@ pub(crate) fn invoke_ability_with(
             .get::<KnownAbilities>(player)
             .is_some_and(|k| k.has_any(def.id));
         if !knows_it {
+            // `def.name` is the display name (Title Case, may carry
+            // XML-Lite color tags) — `def.plain_name` is the raw
+            // SCREAMING_SNAKE_CASE schema identifier and shouldn't
+            // leak to players.
             send_to(
                 world,
                 player,
-                format!("You don't know how to {} {}.\r\n", verb, def.plain_name),
+                format!("You don't know how to {} {}.\r\n", verb, def.name),
             );
             return;
         }
