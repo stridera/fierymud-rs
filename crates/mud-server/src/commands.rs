@@ -25,7 +25,7 @@ use mud_net::Outbound;
 use mud_world::{
     AbilityCatalog, Account, AppliedTo, ClassCatalog, CombatStats, Cooldowns, CoreStats,
     Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, Exits, Fighting,
-    Follower, Frozen, Health, Item, Keywords, KnownAbilities, LastInputAt, Located, LoggedInAt,
+    Follower, Frozen, Health, Item, Keywords, KnownAbilities, LastInputAt, Located,
     Mob, MobPrototypes, Named, ObjectPrototypes, Player, PlayerFlags, Posture,
     PostureKind, Profile, Prompt, BankWealth, BoardDraft, MailDraft,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, Wealth,
@@ -2739,10 +2739,8 @@ mod tests {
 
     fn build_smoke_score_data<'a>(
         name: &'a str,
-        flags: &'a [&'static str],
         slots: &'a [(i32, i32, i32)],
         effects: &'a [String],
-        equipment: &'a [(&'static str, String)],
     ) -> super::ScoreData<'a> {
         super::ScoreData {
             name,
@@ -2766,9 +2764,7 @@ mod tests {
                 charisma: 10,
             }),
             posture: Some(super::Posture(super::PostureKind::Standing)),
-            logged_in: None,
             fight_target: None,
-            flags,
             profile: Some((25, "Warrior", "human", "male", 1234)),
             wealth: 1234,
             bank: 5000,
@@ -2783,7 +2779,6 @@ mod tests {
             group_status: super::GroupStatus::default(),
             level_progress: super::level_progress_for(25, 1234),
             location: Some(("Town Square", 30, 1)),
-            equipment,
             practice_points: 3,
             achievements: (5, 47),
             title: Some("the Daring Adventurer"),
@@ -2802,8 +2797,6 @@ mod tests {
             mail_draft: None,
             board_draft: None,
             size: Some("Medium"),
-            play_time_secs: Some(7290), // 2h 1m
-            last_login_secs_ago: Some(86_400 * 2), // 2 days
             is_ghost: false,
             is_stunned: false,
             is_frozen: false,
@@ -2812,11 +2805,9 @@ mod tests {
 
     #[test]
     fn score_minimal_includes_core_fields() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = vec!["bless".to_string()];
-        let equipment: Vec<(&'static str, String)> = Vec::new();
-        let data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let data = build_smoke_score_data("Strider", &slots, &effects);
         let out = super::render_score_minimal(&data);
         assert!(out.contains("Strider"), "name: {out}");
         assert!(out.contains("L25"), "level: {out}");
@@ -2831,19 +2822,20 @@ mod tests {
 
     #[test]
     fn score_standard_includes_section_headings() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = vec![(1, 2, 3)];
         let effects: Vec<String> = vec!["bless".to_string(), "haste".to_string()];
-        let equipment: Vec<(&'static str, String)> =
-            vec![("Wielded", "longsword".to_string()), ("Body", "leather".to_string())];
-        let data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let data = build_smoke_score_data("Strider", &slots, &effects);
         let out = super::render_score_standard(&data);
         assert!(out.contains("Strider"), "name: {out}");
         assert!(out.contains("HP: 95 / 100"), "hp line: {out}");
         assert!(out.contains("Slots:"), "slots line: {out}");
         assert!(out.contains("bless, haste"), "effects line: {out}");
-        assert!(out.contains("Equipment:"), "equipment heading: {out}");
-        assert!(out.contains("longsword"), "wielded item: {out}");
+        // Equipment block was moved out of score (it lives on the
+        // `equipment` command). Score must NOT include it now.
+        assert!(
+            !out.contains("Equipment:"),
+            "equipment block dropped from score: {out}",
+        );
         assert!(out.contains("Practice:"), "practice line: {out}");
         assert!(out.contains("Achievements: 5 / 47"), "achievements: {out}");
         assert!(out.contains("Location: Town Square"), "location: {out}");
@@ -2880,12 +2872,10 @@ mod tests {
 
     #[test]
     fn score_board_draft_line_only_when_in_flight() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let equipment: Vec<(&'static str, String)> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+            build_smoke_score_data("Strider", &slots, &effects);
         let off = super::render_score_standard(&data);
         assert!(!off.contains("Board draft:"), "no board row: {off}");
         data.board_draft = Some(("mortal", 5));
@@ -2898,12 +2888,10 @@ mod tests {
 
     #[test]
     fn score_mail_draft_line_only_when_in_flight() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let equipment: Vec<(&'static str, String)> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+            build_smoke_score_data("Strider", &slots, &effects);
         let off = super::render_score_standard(&data);
         assert!(!off.contains("Mail draft:"), "no draft row: {off}");
         data.mail_draft = Some(("Samui", 3));
@@ -2916,12 +2904,10 @@ mod tests {
 
     #[test]
     fn score_guarding_line_only_when_set() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let equipment: Vec<(&'static str, String)> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+            build_smoke_score_data("Strider", &slots, &effects);
         let off = super::render_score_standard(&data);
         assert!(!off.contains("Guarding:"), "no guarding row: {off}");
         data.guarding_name = Some("Samui");
@@ -2931,12 +2917,10 @@ mod tests {
 
     #[test]
     fn score_motion_state_lines_only_when_active() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let equipment: Vec<(&'static str, String)> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+            build_smoke_score_data("Strider", &slots, &effects);
         // Default fixture: on foot, walking → no rows.
         let grounded = super::render_score_standard(&data);
         assert!(!grounded.contains("Flying:"), "no fly row: {grounded}");
@@ -2954,12 +2938,10 @@ mod tests {
 
     #[test]
     fn score_stealth_line_only_when_hidden() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let equipment: Vec<(&'static str, String)> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+            build_smoke_score_data("Strider", &slots, &effects);
         // Default fixture: no stealth → no line.
         let visible = super::render_score_standard(&data);
         assert!(
@@ -2977,11 +2959,9 @@ mod tests {
 
     #[test]
     fn score_level_title_appended_for_staff() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let equipment: Vec<(&'static str, String)> = Vec::new();
-        let mut data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let mut data = build_smoke_score_data("Strider", &slots, &effects);
         data.level_title = Some("Implementer");
         let out = super::render_score_standard(&data);
         // Title sits between the level number and gender/race.
@@ -2993,11 +2973,9 @@ mod tests {
 
     #[test]
     fn score_level_title_omitted_when_none() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let equipment: Vec<(&'static str, String)> = Vec::new();
-        let data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let data = build_smoke_score_data("Strider", &slots, &effects);
         let out = super::render_score_standard(&data);
         // Mortal rendering keeps the original "Level N <gender>"
         // shape with no extra spaces — guard against a regression
@@ -3010,11 +2988,9 @@ mod tests {
 
     #[test]
     fn score_fancy_box_borders_render() {
-        let flags: Vec<&'static str> = Vec::new();
         let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let equipment: Vec<(&'static str, String)> = Vec::new();
-        let data = build_smoke_score_data("Strider", &flags, &slots, &effects, &equipment);
+        let data = build_smoke_score_data("Strider", &slots, &effects);
         let out = super::render_score_fancy(&data);
         // Fancy renderer wraps in a box; both top + bottom borders
         // start with '+' and end with '+'.
@@ -4794,9 +4770,7 @@ pub(crate) struct ScoreData<'a> {
     /// renders the six values + their bonuses on a single line.
     core_stats: Option<CoreStats>,
     posture: Option<Posture>,
-    logged_in: Option<LoggedInAt>,
     fight_target: Option<&'a str>,
-    flags: &'a [&'static str],
     /// `(level, class_label, race, gender, experience)` from the
     /// Profile component. `class_label` is the catalog `name` (with
     /// color tags) when the character has a class assigned,
@@ -4852,12 +4826,6 @@ pub(crate) struct ScoreData<'a> {
     /// "[void]"). Display name has color tags pre-stripped so the
     /// fancy renderer's fixed-width row padding stays correct.
     location: Option<(&'a str, i32, i32)>,
-    /// Worn / wielded items in canonical slot order, as
-    /// `(slot_label, item_name)`. Item names have color tags
-    /// pre-stripped so fancy-box padding stays aligned. Empty
-    /// when the player has nothing equipped — the renderer
-    /// suppresses the section in that case.
-    equipment: &'a [(&'static str, String)],
     /// Unspent practice points (`SkillPoints` component). Score
     /// sheet shows the number whenever it's nonzero so a player
     /// can see they have something to spend without running
@@ -4956,18 +4924,6 @@ pub(crate) struct ScoreData<'a> {
     /// rather than rendering "Size: ?". Capitalize-first matches
     /// the C++ score formatting.
     size: Option<&'a str>,
-    /// Lifetime time played, in total seconds (current session
-    /// included). Sourced from `TimePlayed` plus `LoggedInAt`'s
-    /// elapsed; rendered as "1d 4h" / "23m" via `format_play_time`.
-    /// `None` suppresses the line — used for the corner case where
-    /// `LoggedInAt` is missing and the persisted total is also 0.
-    play_time_secs: Option<u64>,
-    /// Seconds elapsed since the player's previous login, captured
-    /// at this session's spawn time so the value remains stable
-    /// across the session. None for brand-new characters who've
-    /// never logged in before — score then suppresses the line.
-    /// Rendered via `format_time_ago` as "3 days ago" / "just now".
-    last_login_secs_ago: Option<i64>,
     /// Life-state markers feeding the Posture line's color tag.
     /// Priority order in `status_color_tag`: ghost > frozen >
     /// stunned > fighting > posture-driven. Together with `posture`
@@ -5082,26 +5038,16 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             d.carry.1,
         ));
     }
-    if let Some(l) = d.logged_in {
-        out.push_str(&format!("  Online for: {}\r\n", format_idle(l.0.elapsed().as_secs())));
-    }
-    if let Some(secs) = d.play_time_secs {
-        out.push_str(&format!("  Played:    {}\r\n", format_play_time(secs)));
-    }
-    if let Some(secs) = d.last_login_secs_ago {
-        out.push_str(&format!("  Last login: {}\r\n", format_time_ago(secs)));
-    }
     if let Some(target) = d.fight_target {
-        out.push_str(&format!("  Fighting: {target}\r\n"));
+        out.push_str(&format!("  Fighting: <b:red>{target}</>\r\n"));
     }
     if let Some(target) = d.guarding_name {
         out.push_str(&format!("  Guarding: {target}\r\n"));
     }
-    if !d.flags.is_empty() {
-        out.push_str(&format!("  Flags: {}\r\n", d.flags.join(", ")));
-    }
     if let Some(c) = condition_summary(d.hunger, d.thirst, d.active_effects) {
-        out.push_str(&format!("  Condition: {c}\r\n"));
+        let open = condition_color_tag(d.hunger, d.thirst).unwrap_or("");
+        let close = if open.is_empty() { "" } else { "</>" };
+        out.push_str(&format!("  Condition: {open}{c}{close}\r\n"));
     }
     if d.drunkenness > 0 {
         out.push_str(&format!(
@@ -5185,12 +5131,6 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!(
             "  House:    {rooms} room{suffix} at [{zone}:{id}]\r\n",
         ));
-    }
-    if !d.equipment.is_empty() {
-        out.push_str("  Equipment:\r\n");
-        for (slot_label, item_name) in d.equipment {
-            out.push_str(&format!("    {slot_label:>14}: {item_name}\r\n"));
-        }
     }
     if d.practice_points > 0 {
         let pts = d.practice_points;
@@ -5397,6 +5337,25 @@ pub(crate) fn format_age(level: i32) -> Option<String> {
     ))
 }
 
+/// XML-Lite open tag for the score sheet's Condition line, graded
+/// by the worst hunger/thirst band that currently fires. Starving /
+/// parched read red (the survival-tick will start draining HP);
+/// hungry / thirsty read yellow (warning, no drain yet). Returns
+/// `None` when only positive states (nourished / refreshed) are
+/// present — the line shouldn't shout in green when the player is
+/// well. Bands match `condition_summary` exactly so the color
+/// tracks the text the player sees.
+#[must_use]
+pub(crate) fn condition_color_tag(hunger: i32, thirst: i32) -> Option<&'static str> {
+    if hunger >= 48 || thirst >= 24 {
+        Some("<red>")
+    } else if hunger >= 24 || thirst >= 12 {
+        Some("<yellow>")
+    } else {
+        None
+    }
+}
+
 /// Comma-joined condition descriptors mixing hunger/thirst negative
 /// bands with positive effect states (Nourished / Refreshed) when
 /// they're active. None when neither side has anything to say.
@@ -5546,26 +5505,16 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
             d.carry.1,
         ));
     }
-    if let Some(l) = d.logged_in {
-        row(format!("Online:    {}", format_idle(l.0.elapsed().as_secs())));
-    }
-    if let Some(secs) = d.play_time_secs {
-        row(format!("Played:    {}", format_play_time(secs)));
-    }
-    if let Some(secs) = d.last_login_secs_ago {
-        row(format!("Last login: {}", format_time_ago(secs)));
-    }
     if let Some(target) = d.fight_target {
-        row(format!("Fighting:  {target}"));
+        row(format!("Fighting:  <b:red>{target}</>"));
     }
     if let Some(target) = d.guarding_name {
         row(format!("Guarding:  {target}"));
     }
-    if !d.flags.is_empty() {
-        row(format!("Flags:     {}", d.flags.join(", ")));
-    }
     if let Some(c) = condition_summary(d.hunger, d.thirst, d.active_effects) {
-        row(format!("Condition: {c}"));
+        let open = condition_color_tag(d.hunger, d.thirst).unwrap_or("");
+        let close = if open.is_empty() { "" } else { "</>" };
+        row(format!("Condition: {open}{c}{close}"));
     }
     if d.drunkenness > 0 {
         row(format!(
@@ -5638,12 +5587,6 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         let suffix = if rooms == 1 { "" } else { "s" };
         row(format!("House:     {rooms} room{suffix} at [{zone}:{id}]"));
     }
-    if !d.equipment.is_empty() {
-        row(String::from("Equipment:"));
-        for (slot_label, item_name) in d.equipment {
-            row(format!("  {slot_label:>12}: {item_name}"));
-        }
-    }
     if d.practice_points > 0 {
         let pts = d.practice_points;
         let suffix = if pts == 1 { "" } else { "s" };
@@ -5695,7 +5638,10 @@ pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
         parts.push(format!("vs:{target}"));
     }
     if let Some(c) = condition_summary(d.hunger, d.thirst, d.active_effects) {
-        parts.push(c);
+        match condition_color_tag(d.hunger, d.thirst) {
+            Some(open) => parts.push(format!("{open}{c}</>")),
+            None => parts.push(c),
+        }
     }
     if d.drunkenness > 0 {
         parts.push(format!("drunk:{}", d.drunkenness));
@@ -9897,10 +9843,21 @@ impl FormulaParser<'_> {
 }
 
 pub(crate) fn capitalize(s: &str) -> String {
+    // Title-case: first character uppercase, rest lowercase. Race
+    // and gender values arrive from the DB ALL CAPS (`HUMAN` /
+    // `MALE`), and the score / examine readouts shouldn't show
+    // them that way. Verb-style usage ("eat what?") still works
+    // because the lowercase rest is a no-op when the input is
+    // already lowercase. Single-char inputs collapse to just
+    // uppercase as before.
     let mut chars = s.chars();
     match chars.next() {
         None => String::new(),
-        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+        Some(c) => {
+            let head = c.to_ascii_uppercase().to_string();
+            let tail: String = chars.as_str().to_ascii_lowercase();
+            head + &tail
+        }
     }
 }
 

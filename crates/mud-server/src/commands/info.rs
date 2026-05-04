@@ -4644,12 +4644,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let cs = world.get::<CombatStats>(player).copied();
     let fighting = world.get::<Fighting>(player).copied();
     let posture = world.get::<Posture>(player).copied();
-    let logged_in = world.get::<LoggedInAt>(player).copied();
     let fight_target_name = fighting.map(|f| name_or(world, f.0, "(gone)"));
-    let flags: Vec<&'static str> = world
-        .get::<PlayerFlags>(player)
-        .map(|f| f.0.iter().map(|fl| fl.label()).collect())
-        .unwrap_or_default();
     let style = world.get::<UiStyle>(player).copied().unwrap_or_default();
     // Profile + class catalog lookup: resolve the display name once here so
     // renderers stay pure (no &World access). Uses `plain_name` (no color
@@ -4759,35 +4754,6 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .map_or_else(String::new, |n| n.name.clone());
             render_color_tags(&raw, ColorMode::Strip)
         });
-    // Previous-session login captured at spawn. Subtract from
-    // current Unix time to produce "Last login: 3 days ago" on
-    // score. Negative deltas (clock skew) collapse to "just now"
-    // inside `format_time_ago`.
-    let last_login_secs_ago: Option<i64> = world
-        .get::<mud_world::PreviousLogin>(player)
-        .map(|p| p.0)
-        .and_then(|prev_ts| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_secs();
-            let now_i64 = i64::try_from(now).ok()?;
-            Some(now_i64.saturating_sub(prev_ts))
-        });
-
-    // Lifetime play-time = persisted seconds + current session
-    // elapsed. Suppressed when both contributions are zero (very
-    // brand-new character, no LoggedInAt — shouldn't happen for
-    // online players but keep the line tidy regardless).
-    let play_time_secs: Option<u64> = {
-        let persisted: u64 = world
-            .get::<mud_world::TimePlayed>(player)
-            .map_or(0, |t| u64::try_from(t.0.max(0)).unwrap_or(0));
-        let session = logged_in.map_or(0, |l| l.0.elapsed().as_secs());
-        let total = persisted.saturating_add(session);
-        if total == 0 { None } else { Some(total) }
-    };
-
     // Body size from `RaceDefaults.size_by_race`. The map key is the
     // raw `Race` enum text on `Profile.race` (HUMAN / ELF / ...) and
     // values are the `Size` enum text (`MEDIUM` / `LARGE` / ...).
@@ -4823,29 +4789,6 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let board_draft_owned: Option<(String, usize)> = world
         .get::<BoardDraft>(player)
         .map(|d| (d.board_alias.clone(), d.body.len()));
-    // Equipment summary in canonical slot order. Same shape as
-    // `cmd_equipment` but pre-flattened to (label, name) tuples
-    // with color tags stripped — render layer just pads.
-    let equipment_owned: Vec<(&'static str, String)> = {
-        let mut by_slot: Vec<(Slot, String)> = {
-            let mut q =
-                world.query_filtered::<(&Located, &Named, &EquippedSlot), With<Item>>();
-            q.iter(world)
-                .filter(|(l, _, _)| l.0 == player)
-                .map(|(_, n, eq)| {
-                    let plain = render_color_tags(&n.name, ColorMode::Strip);
-                    (eq.0, plain)
-                })
-                .collect()
-        };
-        by_slot.sort_by_key(|(s, _)| {
-            Slot::ORDER.iter().position(|x| x == s).unwrap_or(usize::MAX)
-        });
-        by_slot
-            .into_iter()
-            .map(|(slot, name)| (slot.label(), name))
-            .collect()
-    };
     // Per-circle slot summary for spellcasters. Reads
     // SpellSlotData (level + class → slot caps) and the player's
     // MemorizedSpells (used vs ready). Empty for classless / non-
@@ -4931,9 +4874,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         cs,
         core_stats,
         posture,
-        logged_in,
         fight_target: fight_target_name.as_deref(),
-        flags: &flags,
         profile: profile_owned.as_ref().map(|(lvl, cls, race, gender, xp)| {
             (
                 *lvl,
@@ -4990,7 +4931,6 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         location: location_owned
             .as_ref()
             .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
-        equipment: &equipment_owned,
         practice_points: world
             .get::<mud_world::SkillPoints>(player)
             .map_or(0, |s| s.0),
@@ -5045,8 +4985,6 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .as_ref()
             .map(|(alias, lines)| (alias.as_str(), *lines)),
         size: size_owned.as_deref(),
-        play_time_secs,
-        last_login_secs_ago,
         is_ghost: world.get::<mud_world::Ghost>(player).is_some(),
         is_stunned: world.get::<mud_world::Stunned>(player).is_some(),
         is_frozen: world.get::<mud_world::Frozen>(player).is_some(),
@@ -6192,6 +6130,30 @@ pub(crate) fn cmd_clientinfo(world: &mut World, player: Entity, _args: &str) {
     let idle_text = idle_open.map_or(idle_str.clone(), |open| {
         format!("{open}{idle_str}</>")
     });
+    // Lifetime time played: persisted seconds + this session's
+    // elapsed. Pulled here (not on score) since it's session-meta,
+    // not combat-relevant. Suppressed when both are zero.
+    let played_secs: u64 = {
+        let persisted: u64 = world
+            .get::<mud_world::TimePlayed>(player)
+            .map_or(0, |t| u64::try_from(t.0.max(0)).unwrap_or(0));
+        persisted.saturating_add(uptime_secs)
+    };
+    // "Last login" = seconds since the player's previous session
+    // started. Captured at this session's spawn so the value
+    // doesn't drift across the session.
+    let last_login_secs_ago: Option<i64> = world
+        .get::<mud_world::PreviousLogin>(player)
+        .map(|p| p.0)
+        .and_then(|prev_ts| {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            let now_i64 = i64::try_from(now_secs).ok()?;
+            Some(now_i64.saturating_sub(prev_ts))
+        });
+
     let mut out = String::from("\r\n<b:cyan>Session</>\r\n");
     out.push_str(&format!(
         "  <cyan>Character:</> <b:cyan>{char_name}</>\r\n"
@@ -6204,6 +6166,18 @@ pub(crate) fn cmd_clientinfo(world: &mut World, player: Entity, _args: &str) {
     out.push_str(&format!(
         "  <cyan>Idle:</>      {idle_text} <dim>(since last input)</>\r\n",
     ));
+    if played_secs > 0 {
+        out.push_str(&format!(
+            "  <cyan>Played:</>    <dim>{}</> <dim>(lifetime)</>\r\n",
+            format_play_time(played_secs)
+        ));
+    }
+    if let Some(secs) = last_login_secs_ago {
+        out.push_str(&format!(
+            "  <cyan>Last login:</> <dim>{}</>\r\n",
+            format_time_ago(secs)
+        ));
+    }
     send_to(world, player, out);
 }
 
