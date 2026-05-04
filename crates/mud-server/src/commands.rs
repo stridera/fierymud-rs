@@ -1611,23 +1611,23 @@ mod tests {
         let e = spawn_with_hp(&mut w, 80, 100);
         let (dead, msg) = apply_damage(&mut w, e, 40);
         assert!(!dead);
-        assert_eq!(msg, Some("You are hurt.\r\n"));
+        assert_eq!(msg, Some("<yellow>You are hurt.</>\r\n"));
         assert_eq!(w.get::<Health>(e).unwrap().hp, 40);
 
         // Crossing only the 25% line: 40 → 20 (already past 50% → no re-fire).
         let e = spawn_with_hp(&mut w, 40, 100);
         let (_, msg) = apply_damage(&mut w, e, 20);
-        assert_eq!(msg, Some("You are badly hurt!\r\n"));
+        assert_eq!(msg, Some("<red>You are badly hurt!</>\r\n"));
 
         // Crossing only the 10% line.
         let e = spawn_with_hp(&mut w, 20, 100);
         let (_, msg) = apply_damage(&mut w, e, 12);
-        assert_eq!(msg, Some("You are near death!\r\n"));
+        assert_eq!(msg, Some("<b:red>You are near death!</>\r\n"));
 
         // Skip-crossing: 80 → 5 should report the deepest band only.
         let e = spawn_with_hp(&mut w, 80, 100);
         let (_, msg) = apply_damage(&mut w, e, 75);
-        assert_eq!(msg, Some("You are near death!\r\n"));
+        assert_eq!(msg, Some("<b:red>You are near death!</>\r\n"));
 
         // Lethal blow: dead, no threshold message.
         let e = spawn_with_hp(&mut w, 5, 100);
@@ -3995,6 +3995,22 @@ pub(crate) fn who_level_color(level: i32) -> Option<&'static str> {
         50..=99 => Some("<b:cyan>"),
         100..=104 => Some("<b:magenta>"),
         _ => Some("<b:white>"),
+    }
+}
+
+/// XML-Lite open tag for a swing's damage value, banded by
+/// magnitude so the player's eye lands on heavy hits and crits.
+/// Bands tuned around a roughly level-appropriate weapon swing
+/// (4-30 normal, 30+ heavy). Values <=5 dim — they read as chip
+/// damage that's more flavor than threat. None means render plain.
+#[must_use]
+pub(crate) fn damage_color_tag(damage: i32) -> Option<&'static str> {
+    match damage {
+        i32::MIN..=5 => Some("<dim>"),
+        6..=15 => None,
+        16..=30 => Some("<yellow>"),
+        31..=60 => Some("<b:yellow>"),
+        _ => Some("<red>"),
     }
 }
 
@@ -10058,12 +10074,16 @@ pub(crate) fn apply_damage(
     let near = max / 10;
     let badly = max / 4;
     let hurt = max / 2;
+    // Threshold-crossing messages — fire once per crossing, color-
+    // graded by severity. The render pipeline strips tags for
+    // clients that don't support color, so plain telnet sees the
+    // bare text unchanged.
     let msg = if old > near && new_value <= near {
-        Some("You are near death!\r\n")
+        Some("<b:red>You are near death!</>\r\n")
     } else if old > badly && new_value <= badly {
-        Some("You are badly hurt!\r\n")
+        Some("<red>You are badly hurt!</>\r\n")
     } else if old > hurt && new_value <= hurt {
-        Some("You are hurt.\r\n")
+        Some("<yellow>You are hurt.</>\r\n")
     } else {
         None
     };

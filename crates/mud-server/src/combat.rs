@@ -10,8 +10,8 @@ use tracing::info;
 use crate::TickCount;
 use crate::commands::{
     apply_damage, broadcast_room_except_players_rendered, broadcast_room_except_rendered,
-    cmd_flee, direction_name, disengage_attackers_of, drain_stamina, name_of, opposite, send_to,
-    try_insert, try_remove,
+    cmd_flee, damage_color_tag, direction_name, disengage_attackers_of, drain_stamina, name_of,
+    opposite, send_to, try_insert, try_remove,
 };
 
 const COMBAT_PERIOD_TICKS: u64 = 10;
@@ -742,21 +742,26 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
     if outcome == SwingOutcome::Miss {
         let tail = if dice_on { show_dice_swing(detail, s.damage, 0) } else { String::new() };
+        // Misses dim slightly — visible but recedes vs the hit
+        // lines below, which carry the actual gameplay info.
         send_to(
             world,
             s.attacker,
-            format!("You swing at {target_name} but miss.\r\n{tail}"),
+            format!("<dim>You swing at {target_name} but miss.</>\r\n{tail}"),
         );
         send_to(
             world,
             s.target,
-            format!("{} swings at you but misses.\r\n", s.attacker_name),
+            format!("<dim>{} swings at you but misses.</>\r\n", s.attacker_name),
         );
         broadcast_room_except_rendered(
             world,
             room,
             &[s.attacker, s.target],
-            &format!("{} swings at {target_name} but misses.\r\n", s.attacker_name),
+            &format!(
+                "<dim>{} swings at {target_name} but misses.</>\r\n",
+                s.attacker_name
+            ),
         );
         // Stamina still drains — you swung, you spent the breath.
         drain_stamina(world, s.attacker, 1);
@@ -789,30 +794,42 @@ fn apply_swing(world: &mut World, s: &Swing) {
 
     // Names may carry XML-Lite tags; send_to renders per-recipient so each
     // player gets ANSI or stripped output according to their own COLOR_BLIND
-    // flag.
-    let crit_tag = if outcome == SwingOutcome::Crit { " (critical hit!)" } else { "" };
+    // flag. Damage value color-graded by magnitude (chip dim, mid plain,
+    // heavy yellow, big red) so the player's eye lands on the meaningful
+    // hits. Crit tag bold red.
+    let crit_tag = if outcome == SwingOutcome::Crit {
+        " <b:red>(critical hit!)</>"
+    } else {
+        ""
+    };
+    let damage_label = match damage_color_tag(damage) {
+        Some(open) => format!("{open}{damage}</>"),
+        None => damage.to_string(),
+    };
     let tail = if dice_on { show_dice_swing(detail, damage_pre_variance, damage) } else { String::new() };
     send_to(
         world,
         s.attacker,
-        format!("You hit {target_name} for {damage} damage{crit_tag}.\r\n{tail}"),
+        format!(
+            "You hit <b:cyan>{target_name}</> for {damage_label} damage{crit_tag}.\r\n{tail}"
+        ),
     );
     send_to(
         world,
         s.target,
         format!(
-            "{} hits you for {damage} damage{crit_tag}.\r\n",
+            "{} hits you for {damage_label} damage{crit_tag}.\r\n",
             s.attacker_name
         ),
     );
     if was_sleeping && !dead {
         try_insert(world, s.target, Posture(PostureKind::Standing));
-        send_to(world, s.target, "You jolt awake!\r\n");
+        send_to(world, s.target, "<yellow>You jolt awake!</>\r\n");
         broadcast_room_except_rendered(
             world,
             room,
             &[s.attacker, s.target],
-            &format!("{target_name} jolts awake!\r\n"),
+            &format!("<yellow>{target_name} jolts awake!</>\r\n"),
         );
     }
     if let Some(m) = threshold_msg {
