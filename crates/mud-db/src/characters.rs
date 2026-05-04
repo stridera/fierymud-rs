@@ -291,6 +291,26 @@ pub async fn load_drunkenness(pool: &PgPool, character_id: &str) -> sqlx::Result
     Ok(row.map_or(0, |r| r.drunkenness))
 }
 
+/// Persist the lifetime time-played counter. `save_player` calls
+/// this with the cumulative seconds (existing column value plus
+/// time elapsed since the previous save anchor) so the column
+/// monotonically grows. Skip the call when the increment would be
+/// zero — fresh saves immediately after another don't pay a write.
+pub async fn save_time_played(
+    pool: &PgPool,
+    character_id: &str,
+    time_played: i32,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET time_played = $1 WHERE id = $2"#,
+        time_played,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Save the drunkenness counter. Called from save-on-disconnect
 /// alongside hunger / thirst so the value round-trips.
 pub async fn save_drunkenness(

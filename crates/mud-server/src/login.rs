@@ -1386,10 +1386,14 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         // follow-up; for now the gauges just round-trip.
         e.insert(mud_world::Hunger(c.hunger));
         e.insert(mud_world::Thirst(c.thirst));
-        // Lifetime time-played in seconds. Surfaces on score's
-        // "Played:" line. Save-time accumulator (incrementing the
-        // column as the session continues) is a follow-up.
+        // Lifetime time-played in seconds, with a paired anchor
+        // for the save-time accumulator. Each call to save_player
+        // credits `now - LastPersistedAt` into TimePlayed (both
+        // component and DB column) and resets the anchor — so
+        // autosave + final-save together cover the full session
+        // without double-counting any window.
         e.insert(mud_world::TimePlayed(c.time_played));
+        e.insert(mud_world::LastPersistedAt(std::time::Instant::now()));
     }
     entity
 }
@@ -1526,6 +1530,36 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
             mud_db::characters::save_bank_wealth(pool, &account.character_id, bank).await
     {
         warn!(error = %e, character_id = %account.character_id, "bank_wealth save failed");
+    }
+
+    // Lifetime time-played accumulator. Credit every second since
+    // the previous save into both the component and the DB column,
+    // then reset the anchor. Skipped when no time has actually
+    // passed — back-to-back saves (rare) shouldn't pay a write.
+    let now = std::time::Instant::now();
+    let session_delta_secs: i32 = world
+        .get::<mud_world::LastPersistedAt>(entity)
+        .map(|a| now.duration_since(a.0).as_secs())
+        .and_then(|s| i32::try_from(s).ok())
+        .unwrap_or(0);
+    if session_delta_secs > 0 {
+        let new_total = world
+            .get::<mud_world::TimePlayed>(entity)
+            .map_or(0, |t| t.0)
+            .saturating_add(session_delta_secs);
+        if let Err(e) =
+            mud_db::characters::save_time_played(pool, &account.character_id, new_total).await
+        {
+            warn!(error = %e, character_id = %account.character_id, "time_played save failed");
+        } else {
+            // Bump the in-memory copies only after the DB write
+            // succeeds, so a transient failure doesn't lose the
+            // accumulator on the next attempt.
+            if let Ok(mut em) = world.get_entity_mut(entity) {
+                em.insert(mud_world::TimePlayed(new_total));
+                em.insert(mud_world::LastPersistedAt(now));
+            }
+        }
     }
 
     // Persist KnownAbilities → CharacterAbilities so `study`-acquired

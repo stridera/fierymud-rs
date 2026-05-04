@@ -807,6 +807,15 @@ pub struct LastInputAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LoggedInAt(pub std::time::Instant);
 
+/// Wall-clock anchor for the `TimePlayed` accumulator. `save_player`
+/// adds `now - LastPersistedAt` to `TimePlayed` (and the persisted
+/// column), then resets the anchor to `now`. Decoupled from
+/// `LoggedInAt` so periodic autosave doesn't double-count the
+/// session window — each save credits only the time elapsed since
+/// the previous one.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LastPersistedAt(pub std::time::Instant);
+
 /// Marker linking a spawned mob entity back to the `MobResets.id` row
 /// that produced it. The respawn tick system queries entities by this
 /// component to count live instances per reset and decide whether to

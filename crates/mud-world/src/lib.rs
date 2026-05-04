@@ -10,7 +10,7 @@ pub use components::{
     FromMobReset, FromObjectReset, Frozen, Ghost,
     GroupInvite, Guarding, Health, HouseExitEntry, HouseGuestEntry, HouseItem, HouseItemEntry,
     HouseRoom, HouseRoomEntry, HouseSummary, Hunger, IgnoreList, Item, Keywords, KillStats,
-    KnownAbilities, LastInputAt,
+    KnownAbilities, LastInputAt, LastPersistedAt,
     LastTeller, LightFuel, LiquidContainer, Lit, Located, LoggedInAt, LootClaim, MailDraft,
     MemEntry,
     MemorizedSpells,
