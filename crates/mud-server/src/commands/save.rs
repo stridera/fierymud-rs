@@ -17,7 +17,7 @@ inventory::submit! {
         names: &["save"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "save",
             summary: "Force a checkpoint of your character to the database.",

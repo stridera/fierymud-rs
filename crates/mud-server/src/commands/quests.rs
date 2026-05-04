@@ -33,7 +33,7 @@ inventory::submit! {
         names: &["quests", "qstat", "qlist"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Quest,
         help: Help {
             usage: "quests",
             summary: "List your accepted quests.",
@@ -52,7 +52,7 @@ inventory::submit! {
         names: &["abandon"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Quest,
         help: Help {
             usage: "abandon <#>",
             summary: "Drop an in-progress quest.",
@@ -70,7 +70,7 @@ inventory::submit! {
         names: &["innate"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Magic,
         help: Help {
             usage: "innate",
             summary: "List your race's innate abilities.",
@@ -88,7 +88,7 @@ inventory::submit! {
         names: &["questinfo"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Quest,
         help: Help {
             usage: "questinfo <zone> <id>",
             summary: "Show details for a single quest definition.",
@@ -106,7 +106,7 @@ inventory::submit! {
         names: &["qaccept"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Quest,
         help: Help {
             usage: "qaccept <zone> <quest-id>",
             summary: "Accept a quest by composite id.",

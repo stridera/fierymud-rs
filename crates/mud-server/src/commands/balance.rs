@@ -18,7 +18,7 @@ inventory::submit! {
         names: &["balance", "bal"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Banking,
         help: Help {
             usage: "balance",
             summary: "Show your bank-stored coin.",

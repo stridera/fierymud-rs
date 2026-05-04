@@ -74,7 +74,7 @@ inventory::submit! {
         names: &["practice", "prac"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "practice [<ability>]",
             summary: "List trained abilities, or improve proficiency.",
@@ -128,7 +128,7 @@ inventory::submit! {
         names: &["wealth", "gold", "money", "coins"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Banking,
         help: Help {
             usage: "wealth",
             summary: "Show your on-hand coin in platinum/gold/silver/copper.",
@@ -145,7 +145,7 @@ inventory::submit! {
         names: &["bribe"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "bribe <amount> <target>",
             summary: "Hand a sum of copper to a mob — fires BRIBE triggers.",
@@ -164,7 +164,7 @@ inventory::submit! {
         names: &["deposit"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Banking,
         help: Help {
             usage: "deposit <amount>",
             summary: "Move copper into the bank.",
@@ -181,7 +181,7 @@ inventory::submit! {
         names: &["withdraw"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Banking,
         help: Help {
             usage: "withdraw <amount>",
             summary: "Move copper from the bank to on-hand wealth.",
@@ -197,7 +197,7 @@ inventory::submit! {
         names: &["value", "appraise"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Banking,
         help: Help {
             usage: "value <item>",
             summary: "Show an item's catalog value in coin.",
@@ -215,7 +215,7 @@ inventory::submit! {
         names: &["list"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Banking,
         help: Help {
             usage: "list",
             summary: "Show what the shopkeeper here is selling.",
@@ -232,7 +232,7 @@ inventory::submit! {
         names: &["buy"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Banking,
         help: Help {
             usage: "buy <#|name>",
             summary: "Buy an item from the shopkeeper here.",
@@ -251,7 +251,7 @@ inventory::submit! {
         names: &["sell"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Banking,
         help: Help {
             usage: "sell <item>",
             summary: "Sell a carried item to the shopkeeper here.",
@@ -269,7 +269,7 @@ inventory::submit! {
         names: &["hire"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Mount,
         help: Help {
             usage: "hire <#|name>",
             summary: "Hire a pet from a pet-shop keeper.",
@@ -286,7 +286,7 @@ inventory::submit! {
         names: &["title"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "title [<new title> | clear]",
             summary: "Show or change the epithet shown after your name.",
@@ -303,7 +303,7 @@ inventory::submit! {
         names: &["description", "desc"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "description [<new prose> | clear]",
             summary: "Show or set the prose `examine` shows for you.",
@@ -322,7 +322,7 @@ inventory::submit! {
         names: &["examine", "exa"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "examine <target>",
             summary: "Look closely at a person or thing in the room.",
@@ -392,7 +392,7 @@ inventory::submit! {
         names: &["roles"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "roles",
             summary: "Show your account role and permissions.",
@@ -408,7 +408,7 @@ inventory::submit! {
         names: &["inventory", "i", "inv"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "inventory [<filter>]",
             summary: "List items you are carrying.",
@@ -427,7 +427,7 @@ inventory::submit! {
         names: &["get", "take", "g"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "get <item> | get <item> from <container>",
             summary: "Pick up an item from the room or a container.",
@@ -446,7 +446,7 @@ inventory::submit! {
         names: &["put"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "put <item> <container>",
             summary: "Move a carried item into a container.",
@@ -463,7 +463,7 @@ inventory::submit! {
         names: &["drop"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "drop <item>",
             summary: "Drop an item from your inventory onto the floor.",
@@ -480,7 +480,7 @@ inventory::submit! {
         names: &["donate"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "donate <item>",
             summary: "Charitably leave an item for someone else.",
@@ -497,7 +497,7 @@ inventory::submit! {
         names: &["junk", "trash"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "junk <item>",
             summary: "Permanently destroy a carried item.",
@@ -514,7 +514,7 @@ inventory::submit! {
         names: &["give"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "give <item> <target>",
             summary: "Hand an item to another character in the room.",
@@ -531,7 +531,7 @@ inventory::submit! {
         names: &["wear"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "wear <item>",
             summary: "Equip a wearable item from your inventory.",
@@ -547,7 +547,7 @@ inventory::submit! {
         names: &["wield"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "wield <item>",
             summary: "Wield a weapon (shortcut for wear into the Wield slot).",
@@ -563,7 +563,7 @@ inventory::submit! {
         names: &["light"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "light <item>",
             summary: "Light a torch or lantern.",
@@ -580,7 +580,7 @@ inventory::submit! {
         names: &["extinguish", "douse"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "extinguish <item>",
             summary: "Put out a lit torch or lantern.",
@@ -596,7 +596,7 @@ inventory::submit! {
         names: &["mount"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Mount,
         help: Help {
             usage: "mount <mob>",
             summary: "Climb onto a mountable mob.",
@@ -615,7 +615,7 @@ inventory::submit! {
         names: &["dismount"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Mount,
         help: Help {
             usage: "dismount",
             summary: "Get off your current mount.",
@@ -632,7 +632,7 @@ inventory::submit! {
         names: &["fly"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "fly",
             summary: "Take to the air (sets the Flying marker).",
@@ -650,7 +650,7 @@ inventory::submit! {
         names: &["walk", "land"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Movement,
         help: Help {
             usage: "walk",
             summary: "Stop flying and walk again.",
@@ -666,7 +666,7 @@ inventory::submit! {
         names: &["hide"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "hide",
             summary: "Slip into the shadows (sets the Stealth marker).",
@@ -685,7 +685,7 @@ inventory::submit! {
         names: &["visible", "vis"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "visible",
             summary: "Stop hiding (clears the Stealth marker).",
@@ -700,7 +700,7 @@ inventory::submit! {
         names: &["eat"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "eat <item>",
             summary: "Consume a food item from your inventory.",
@@ -716,7 +716,7 @@ inventory::submit! {
         names: &["quaff"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "quaff <potion>",
             summary: "Drink a potion from your inventory.",
@@ -732,7 +732,7 @@ inventory::submit! {
         names: &["drink"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "drink <container>",
             summary: "Take a swig from a drink container.",
@@ -750,7 +750,7 @@ inventory::submit! {
         names: &["sip"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "sip <container>",
             summary: "Sip 1 unit from a drink container.",
@@ -766,7 +766,7 @@ inventory::submit! {
         names: &["taste"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "taste <container>",
             summary: "Identify a liquid without drinking it.",
@@ -782,7 +782,7 @@ inventory::submit! {
         names: &["pour"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "pour <container> [target]",
             summary: "Transfer liquid between containers, or empty.",
@@ -802,7 +802,7 @@ inventory::submit! {
         names: &["fill"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "fill <container> <source>",
             summary: "Top up a container from another container.",
@@ -819,7 +819,7 @@ inventory::submit! {
         names: &["recite"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Magic,
         help: Help {
             usage: "recite <scroll> [<target>]",
             summary: "Read a magic scroll, casting its inscribed spells.",
@@ -836,7 +836,7 @@ inventory::submit! {
         names: &["wave"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "wave <wand> [<target>]",
             summary: "Wave a wand to cast its bound spell.",
@@ -853,7 +853,7 @@ inventory::submit! {
         names: &["tap"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "tap <staff> [<target>]",
             summary: "Tap a staff to invoke its bound abilities.",
@@ -869,7 +869,7 @@ inventory::submit! {
         names: &["hold", "grab"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "hold <item>",
             summary: "Hold a non-weapon item in your offhand.",
@@ -885,7 +885,7 @@ inventory::submit! {
         names: &["remove", "rem"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "remove <item>",
             summary: "Unequip an item, returning it to your inventory.",
@@ -900,7 +900,7 @@ inventory::submit! {
         names: &["equipment", "eq"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "equipment",
             summary: "List items you are wearing/wielding.",
@@ -951,7 +951,7 @@ inventory::submit! {
         names: &["open"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "open <direction>",
             summary: "Open a closed door in the given direction.",
@@ -967,7 +967,7 @@ inventory::submit! {
         names: &["unlock"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "unlock <direction>",
             summary: "Unlock a locked door using a key in your inventory.",
@@ -986,7 +986,7 @@ inventory::submit! {
         names: &["close"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "close <direction>",
             summary: "Close an open door in the given direction.",
@@ -1002,7 +1002,7 @@ inventory::submit! {
         names: &["lock"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "lock <direction>",
             summary: "Lock a closed door using a key in your inventory.",
@@ -1020,7 +1020,7 @@ inventory::submit! {
         names: &["read"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "read <item>",
             summary: "Read the text on an item (book, sign, scroll).",
@@ -1037,7 +1037,7 @@ inventory::submit! {
         names: &["compare"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "compare <item-a> [<item-b>]",
             summary: "Compare two carried/worn items by weight, level, and weapon damage.",
@@ -1105,7 +1105,7 @@ inventory::submit! {
         names: &["policies", "rules", "policy"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "policies",
             summary: "Server rules and code of conduct.",
@@ -1138,7 +1138,7 @@ inventory::submit! {
         names: &["richtest"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "richtest",
             summary: "Render a color-tag sampler.",
@@ -1247,7 +1247,7 @@ inventory::submit! {
         names: &["idle"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "idle [<min-minutes>]",
             summary: "Show online players sorted by idle time, longest first.",
@@ -1268,7 +1268,7 @@ inventory::submit! {
         names: &["spells", "abilities", "abil"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Magic,
         help: Help {
             usage: "spells [all] [filter]",
             summary: "List the abilities you know (or the full catalog).",
@@ -1306,7 +1306,7 @@ inventory::submit! {
         names: &["slots"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Magic,
         help: Help {
             usage: "slots",
             summary: "Show your spell-slot allotment per circle.",
@@ -1324,7 +1324,7 @@ inventory::submit! {
         names: &["skills"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Magic,
         help: Help {
             usage: "skills [all] [filter]",
             summary: "List skills you know (or the full catalog).",
@@ -1342,7 +1342,7 @@ inventory::submit! {
         names: &["songs"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Magic,
         help: Help {
             usage: "songs [all] [filter]",
             summary: "List bardic songs you know (or the full catalog).",
@@ -1359,7 +1359,7 @@ inventory::submit! {
         names: &["chants"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Magic,
         help: Help {
             usage: "chants [all] [filter]",
             summary: "List chants you know (or the full catalog).",
@@ -1376,7 +1376,7 @@ inventory::submit! {
         names: &["prompt", "display"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "prompt [template]",
             summary: "Show or change your status prompt template.",
@@ -1398,7 +1398,7 @@ inventory::submit! {
         names: &["style"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "style [fancy | standard | minimal]",
             summary: "Choose a UI style for info commands like score.",
@@ -1417,7 +1417,7 @@ inventory::submit! {
         names: &["toggle"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "toggle <flag>",
             summary: "Flip a player flag on or off.",
@@ -1437,7 +1437,7 @@ inventory::submit! {
         names: &["flags"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "flags",
             summary: "List your active player flags.",
@@ -1453,7 +1453,7 @@ inventory::submit! {
         names: &["afk"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "afk",
             summary: "Flip your away-from-keyboard flag.",
@@ -1469,7 +1469,7 @@ inventory::submit! {
         names: &["alias"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "alias [<name> [<command>]]",
             summary: "Define a command shortcut.",
@@ -1490,7 +1490,7 @@ inventory::submit! {
         names: &["unalias"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "unalias <name>",
             summary: "Remove a defined alias.",
@@ -1506,7 +1506,7 @@ inventory::submit! {
         names: &["notell"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "notell",
             summary: "Refuse incoming `tell` messages.",
@@ -1522,7 +1522,7 @@ inventory::submit! {
         names: &["deaf"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "deaf",
             summary: "Stop hearing room-wide channels (gossip, shout).",
@@ -1538,7 +1538,7 @@ inventory::submit! {
         names: &["color", "colour"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "color",
             summary: "Toggle ANSI color rendering for your output.",
@@ -1554,7 +1554,7 @@ inventory::submit! {
         names: &["wimpy", "wi"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "wimpy [pct|off]",
             summary: "Set the HP percentage at which combat auto-flees you.",
@@ -1573,7 +1573,7 @@ inventory::submit! {
         names: &["autoexit"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "autoexit",
             summary: "Toggle automatic exit listing on `look`.",
@@ -1590,7 +1590,7 @@ inventory::submit! {
         names: &["autoloot"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "autoloot",
             summary: "Toggle the auto-loot flag (no behavior wired yet).",
@@ -1607,7 +1607,7 @@ inventory::submit! {
         names: &["autogold"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "autogold",
             summary: "Toggle the auto-gold flag (no behavior wired yet).",
@@ -1623,7 +1623,7 @@ inventory::submit! {
         names: &["autoassist"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "autoassist",
             summary: "Toggle the auto-assist flag (no behavior wired yet).",
@@ -1640,7 +1640,7 @@ inventory::submit! {
         names: &["autosplit"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "autosplit",
             summary: "Toggle the auto-split flag (no behavior wired yet).",
@@ -1657,7 +1657,7 @@ inventory::submit! {
         names: &["brief"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "brief",
             summary: "Toggle terse room descriptions.",
@@ -1673,7 +1673,7 @@ inventory::submit! {
         names: &["compact"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "compact",
             summary: "Toggle compact output (suppresses leading blank lines).",
@@ -1689,7 +1689,7 @@ inventory::submit! {
         names: &["norepeat"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "norepeat",
             summary: "Suppress consecutive duplicate output lines.",
@@ -1705,7 +1705,7 @@ inventory::submit! {
         names: &["nosummon"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "nosummon",
             summary: "Refuse incoming summon spells.",
@@ -1721,7 +1721,7 @@ inventory::submit! {
         names: &["dice", "showdicerolls"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "dice",
             summary: "Toggle showing per-swing dice rolls in combat.",
@@ -1737,7 +1737,7 @@ inventory::submit! {
         names: &["pk"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "pk",
             summary: "Toggle player-kill participation.",
@@ -1753,7 +1753,7 @@ inventory::submit! {
         names: &["quest"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Quest,
         help: Help {
             usage: "quest",
             summary: "Toggle quest mode (placeholder; gates quest zones).",
@@ -1769,7 +1769,7 @@ inventory::submit! {
         names: &["consent"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "consent",
             summary: "Toggle consent for group/share interactions.",
@@ -1785,7 +1785,7 @@ inventory::submit! {
         names: &["holylight"],
         min_role: UserRole::Builder,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "holylight",
             summary: "Toggle holy-light vision (admin/builder).",
@@ -1802,7 +1802,7 @@ inventory::submit! {
         names: &["showids"],
         min_role: UserRole::Builder,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "showids",
             summary: "Toggle showing (zone, id) on entities you can see.",
@@ -1835,7 +1835,7 @@ inventory::submit! {
         names: &["cooldowns", "cd"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Magic,
         help: Help {
             usage: "cooldowns",
             summary: "List abilities currently on cooldown.",
@@ -1852,7 +1852,7 @@ inventory::submit! {
         names: &["quit", "qu"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "quit",
             summary: "Disconnect from the game.",
@@ -1907,7 +1907,7 @@ inventory::submit! {
         names: &["train"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "train [<stat>]",
             summary: "Spend a practice point to bump a CoreStat by 1.",
@@ -1927,7 +1927,7 @@ inventory::submit! {
         names: &["stand"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "stand",
             summary: "Get to your feet.",
@@ -1942,7 +1942,7 @@ inventory::submit! {
         names: &["sit"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "sit",
             summary: "Sit down.",
@@ -1957,7 +1957,7 @@ inventory::submit! {
         names: &["kneel"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "kneel",
             summary: "Kneel — lower-profile but still alert.",
@@ -1975,7 +1975,7 @@ inventory::submit! {
         names: &["rest", "recline"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "rest",
             summary: "Rest in place.",
@@ -1992,7 +1992,7 @@ inventory::submit! {
         names: &["sleep"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "sleep",
             summary: "Lie down and sleep.",
@@ -2008,7 +2008,7 @@ inventory::submit! {
         names: &["wake"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Settings,
         help: Help {
             usage: "wake [target]",
             summary: "Wake yourself, or rouse a sleeping companion.",
@@ -2025,7 +2025,7 @@ inventory::submit! {
         names: &["follow", "shadow"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "follow <name>",
             summary: "Trail another character automatically.",
@@ -2043,7 +2043,7 @@ inventory::submit! {
         names: &["unfollow"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "unfollow",
             summary: "Stop following whoever you were following.",
@@ -2058,7 +2058,7 @@ inventory::submit! {
         names: &["group"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "group",
             summary: "List your current group (follow chain).",
@@ -2076,7 +2076,7 @@ inventory::submit! {
         names: &["order"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "order <follower|all> <command>",
             summary: "Issue a command to one or all of your followers.",
@@ -2097,7 +2097,7 @@ inventory::submit! {
         names: &["dismiss"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "dismiss <player>",
             summary: "Drop a single direct follower from your group.",
@@ -2115,7 +2115,7 @@ inventory::submit! {
         names: &["split"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Banking,
         help: Help {
             usage: "split <amount>",
             summary: "Divide coin evenly among same-room group members.",
@@ -2135,7 +2135,7 @@ inventory::submit! {
         names: &["disband"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "disband",
             summary: "Dismiss everyone directly following you.",
@@ -2152,7 +2152,7 @@ inventory::submit! {
         names: &["invite"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "invite <player>",
             summary: "Send a group invite to another player.",
@@ -2170,7 +2170,7 @@ inventory::submit! {
         names: &["accept"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "accept",
             summary: "Accept a pending group invite.",
@@ -2186,7 +2186,7 @@ inventory::submit! {
         names: &["decline"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Group,
         help: Help {
             usage: "decline",
             summary: "Decline a pending group invite.",
@@ -2202,7 +2202,7 @@ inventory::submit! {
         names: &["identify", "id"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Info,
+        category: Category::Inventory,
         help: Help {
             usage: "identify <item>",
             summary: "Magical analysis of a carried item.",

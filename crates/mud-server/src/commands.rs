@@ -327,16 +327,36 @@ pub enum Category {
     Movement,
     Communication,
     Combat,
+    Magic,
+    Inventory,
+    Group,
+    Mount,
+    Banking,
+    Quest,
+    Mail,
+    Settings,
     Admin,
 }
 
 impl Category {
-    /// Display order for `help` with no args.
+    /// Display order for `help` with no args. Ordered roughly by
+    /// what a new player needs first: orienting (Info / Movement /
+    /// Comm), then moment-to-moment play (Combat / Magic /
+    /// Inventory), then social and meta (Group / Mount / Banking /
+    /// Quest / Mail / Settings), then admin at the bottom.
     pub const ORDER: &'static [Self] = &[
         Self::Info,
         Self::Movement,
         Self::Communication,
         Self::Combat,
+        Self::Magic,
+        Self::Inventory,
+        Self::Group,
+        Self::Mount,
+        Self::Banking,
+        Self::Quest,
+        Self::Mail,
+        Self::Settings,
         Self::Admin,
     ];
 
@@ -346,6 +366,14 @@ impl Category {
             Self::Movement => "Movement",
             Self::Communication => "Communication",
             Self::Combat => "Combat",
+            Self::Magic => "Magic",
+            Self::Inventory => "Inventory",
+            Self::Group => "Group",
+            Self::Mount => "Mount",
+            Self::Banking => "Banking",
+            Self::Quest => "Quest",
+            Self::Mail => "Mail",
+            Self::Settings => "Settings",
             Self::Admin => "Admin",
         }
     }
