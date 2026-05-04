@@ -7958,9 +7958,16 @@ pub(crate) fn invoke_ability_with(
         );
         return;
     }
+    // Self-name detection: the AOE dispatcher passes per-target
+    // *names* and re-resolves through this branch. RoomAllies /
+    // RoomAll include the caster, so a per-target call may carry
+    // the caster's own display name as the target word — match
+    // that to self alongside the literal "me" / "self" strings.
+    let caster_self_name = name_of(world, player);
     let target_entity = if let Some(word) = target_word
         && !word.eq_ignore_ascii_case("me")
         && !word.eq_ignore_ascii_case("self")
+        && !word.eq_ignore_ascii_case(&caster_self_name)
     {
         let Some(located) = world.get::<Located>(player).copied() else {
             send_to(world, player, "You are nowhere; can't target.\r\n");
