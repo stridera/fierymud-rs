@@ -1501,6 +1501,53 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:set_flag(name, on)` toggles a `MobBehavior` flag on
+        // a mob. 26+ corpus refs use this to lock guard mobs into
+        // place via `set_flag("sentinel", true)` while a quest scene
+        // is playing, then release them with `false` afterward. Only
+        // recognized names hit a real component edit; unknown names
+        // are a quiet no-op so a typo or unported flag doesn't bring
+        // the trigger down. The current allowlist mirrors what the
+        // corpus actually uses (sentinel only). Add new entries here
+        // when content authors start exercising them.
+        methods.add_method(
+            "set_flag",
+            |lua, this, (name, on): (String, bool)| -> mlua::Result<()> {
+                let key = name.trim().to_ascii_lowercase();
+                let behavior = match key.as_str() {
+                    "sentinel" => Some(mud_db::enums::MobBehavior::Sentinel),
+                    "stay_zone" | "stayzone" => {
+                        Some(mud_db::enums::MobBehavior::StayZone)
+                    }
+                    "scavenger" => Some(mud_db::enums::MobBehavior::Scavenger),
+                    "wimpy" => Some(mud_db::enums::MobBehavior::Wimpy),
+                    "helper" => Some(mud_db::enums::MobBehavior::Helper),
+                    "memory" => Some(mud_db::enums::MobBehavior::Memory),
+                    _ => None,
+                };
+                let Some(flag) = behavior else {
+                    return Ok(());
+                };
+                world_mut_from_lua(lua, |world| {
+                    let entity = this.entity;
+                    if let Some(mut current) = world.get_mut::<mud_world::MobBehaviors>(entity) {
+                        let present = current.0.iter().position(|b| *b == flag);
+                        match (on, present) {
+                            (true, None) => current.0.push(flag),
+                            (false, Some(idx)) => {
+                                current.0.swap_remove(idx);
+                            }
+                            _ => {}
+                        }
+                    } else if on
+                        && let Ok(mut em) = world.get_entity_mut(entity)
+                    {
+                        em.insert(mud_world::MobBehaviors(vec![flag]));
+                    }
+                })
+            },
+        );
+
         // `actor:has_skill(name)` — true if `KnownAbilities` has the
         // ability identified by lowercased plain name. 77 corpus
         // refs (gating combat moves on character class proficiency).
