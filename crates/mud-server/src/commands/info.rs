@@ -2228,35 +2228,53 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
             }
             by_cat.entry(cmd.category).or_default().push(cmd);
         }
-        let mut out = String::from("\r\nAvailable commands:\r\n");
+        // Help index reads as a colored TOC: bold-cyan title, each
+        // category as a bold-yellow header (matches `who`'s class
+        // band hue) and command names in plain cyan so the eye
+        // scans by category first, then alphabetically within.
+        let mut out = String::from("\r\n<b:cyan>Available commands:</>\r\n");
         for cat in Category::ORDER {
             if let Some(cmds) = by_cat.get(cat) {
-                out.push_str(&format!("\r\n  {}\r\n", cat.label()));
+                out.push_str(&format!("\r\n  <b:yellow>{}</>\r\n", cat.label()));
                 let mut names: Vec<&str> = cmds.iter().map(|c| c.names[0]).collect();
                 names.sort_unstable();
-                out.push_str(&format!("    {}\r\n", names.join(", ")));
+                let colored: Vec<String> =
+                    names.iter().map(|n| format!("<cyan>{n}</>")).collect();
+                out.push_str(&format!("    {}\r\n", colored.join(", ")));
             }
         }
-        out.push_str("\r\nType `help <command>` for details.\r\n");
+        out.push_str("\r\n<dim>Type `help <command>` for details.</>\r\n");
         send_to(world, player, out);
         return;
     }
 
     if let Some(cmd) = REGISTRY.get(topic.as_str()) {
         if !visible(cmd, role, &perms) {
-            send_to(world, player, format!("No help on '{topic}'.\r\n"));
+            send_to(world, player, format!("<dim>No help on '{topic}'.</>\r\n"));
             return;
         }
-        let mut out = format!("\r\n{}\r\n", cmd.names[0]);
+        // Per-command page: bold-cyan command name as the title,
+        // cyan section labels (Usage / Aliases / Category) so the
+        // body text reads as the focal content. Usage syntax stays
+        // default-color so it remains the most legible part of the
+        // page; aliases / category gloss are dimmed since they're
+        // reference metadata, not the example a player will copy.
+        let mut out = format!("\r\n<b:cyan>{}</>\r\n", cmd.names[0]);
         out.push_str(&format!("\r\n  {}\r\n", cmd.help.summary));
-        out.push_str(&format!("\r\n  Usage: {}\r\n", cmd.help.usage));
+        out.push_str(&format!("\r\n  <cyan>Usage:</> {}\r\n", cmd.help.usage));
         if !cmd.help.long.is_empty() {
             out.push_str(&format!("\r\n  {}\r\n", cmd.help.long));
         }
         if cmd.names.len() > 1 {
-            out.push_str(&format!("\r\n  Aliases: {}\r\n", cmd.names[1..].join(", ")));
+            out.push_str(&format!(
+                "\r\n  <cyan>Aliases:</> <dim>{}</>\r\n",
+                cmd.names[1..].join(", ")
+            ));
         }
-        out.push_str(&format!("  Category: {}\r\n", cmd.category.label()));
+        out.push_str(&format!(
+            "  <cyan>Category:</> <dim>{}</>\r\n",
+            cmd.category.label()
+        ));
         send_to(world, player, out);
     } else {
         // No exact match — surface visible commands whose primary
@@ -2275,16 +2293,19 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
         suggestions.sort_unstable();
         suggestions.dedup();
         if suggestions.is_empty() {
-            send_to(world, player, format!("No help on '{topic}'.\r\n"));
+            send_to(world, player, format!("<dim>No help on '{topic}'.</>\r\n"));
         } else {
             const MAX_SUGGESTIONS: usize = 8;
-            let shown: Vec<&str> = suggestions
+            let shown: Vec<String> = suggestions
                 .iter()
                 .take(MAX_SUGGESTIONS)
-                .copied()
+                .map(|n| format!("<cyan>{n}</>"))
                 .collect();
             let trailer = if suggestions.len() > MAX_SUGGESTIONS {
-                format!(" ({} more)", suggestions.len() - MAX_SUGGESTIONS)
+                format!(
+                    " <dim>({} more)</>",
+                    suggestions.len() - MAX_SUGGESTIONS
+                )
             } else {
                 String::new()
             };
@@ -2292,7 +2313,7 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
                 world,
                 player,
                 format!(
-                    "No exact help for '{topic}'. Did you mean: {}{}?\r\n",
+                    "<dim>No exact help for '{topic}'.</> Did you mean: {}{}?\r\n",
                     shown.join(", "),
                     trailer,
                 ),
@@ -6186,20 +6207,35 @@ pub(crate) fn cmd_commands(world: &mut World, player: Entity, args: &str) {
         .collect();
     names.sort_unstable();
 
+    // Header reads bold-cyan as the count + category title; the
+    // category label inside it picks up a bold-yellow accent to
+    // match the help-index category framing. Names render in cyan,
+    // padded inside the color tags so the column grid stays
+    // visually aligned in clients that strip color (mode = Strip
+    // collapses tags before width calc downstream is unaffected).
     let header = if let Some(cat) = want_category {
-        format!("\r\n{} {} commands available:\r\n", names.len(), cat.label())
+        format!(
+            "\r\n<b:cyan>{} <b:yellow>{}</> commands available:</>\r\n",
+            names.len(),
+            cat.label()
+        )
     } else {
-        format!("\r\n{} commands available:\r\n", names.len())
+        format!(
+            "\r\n<b:cyan>{} commands available:</>\r\n",
+            names.len()
+        )
     };
     let mut out = header;
     for chunk in names.chunks(COMMANDS_LIST_COLS) {
         out.push_str("  ");
         for name in chunk {
-            out.push_str(&format!("{name:<COMMANDS_LIST_COL_WIDTH$}"));
+            out.push_str(&format!(
+                "<cyan>{name:<COMMANDS_LIST_COL_WIDTH$}</>"
+            ));
         }
         out.push_str("\r\n");
     }
-    out.push_str("\r\nUse `help <command>` for details.\r\n");
+    out.push_str("\r\n<dim>Use `help <command>` for details.</>\r\n");
     send_to(world, player, out);
 }
 
