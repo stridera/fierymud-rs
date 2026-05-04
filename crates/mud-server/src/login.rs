@@ -1072,12 +1072,7 @@ impl ConnRouter {
         let item_count = spawn_inventory(world, entity, &item_rows);
         let known_abilities = KnownAbilities::from_rows(&ability_rows);
         let ability_count = known_abilities.entries.len();
-        let aliases = mud_world::Aliases {
-            entries: alias_rows
-                .iter()
-                .map(|r| (r.alias.clone(), r.command.clone()))
-                .collect(),
-        };
+        let aliases = mud_world::Aliases::from_rows(&alias_rows);
         let alias_count = aliases.entries.len();
         let summary = AccountSummary {
             email: user.email.clone(),
@@ -1599,15 +1594,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     // round-trip across reconnect.
     let alias_rows: Vec<mud_db::character_aliases::CharacterAliasRow> = world
         .get::<mud_world::Aliases>(entity)
-        .map(|al| {
-            al.entries
-                .iter()
-                .map(|(alias, command)| mud_db::character_aliases::CharacterAliasRow {
-                    alias: alias.clone(),
-                    command: command.clone(),
-                })
-                .collect()
-        })
+        .map(mud_world::Aliases::to_rows)
         .unwrap_or_default();
     let alias_count = alias_rows.len();
     if let Err(e) =

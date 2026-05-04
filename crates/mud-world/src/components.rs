@@ -1019,6 +1019,32 @@ impl Aliases {
             .map(|(_, c)| c.as_str())
     }
 
+    /// Hydrate from a `CharacterAliases` query result. Mirrors
+    /// `KnownAbilities::from_rows` so the persistence path has one
+    /// shape for all character-junction tables.
+    #[must_use]
+    pub fn from_rows(rows: &[mud_db::character_aliases::CharacterAliasRow]) -> Self {
+        Self {
+            entries: rows
+                .iter()
+                .map(|r| (r.alias.clone(), r.command.clone()))
+                .collect(),
+        }
+    }
+
+    /// Inverse of `from_rows` — produces the row vec the persistence
+    /// path hands to `character_aliases::save_for`. Round-trips exactly.
+    #[must_use]
+    pub fn to_rows(&self) -> Vec<mud_db::character_aliases::CharacterAliasRow> {
+        self.entries
+            .iter()
+            .map(|(alias, command)| mud_db::character_aliases::CharacterAliasRow {
+                alias: alias.clone(),
+                command: command.clone(),
+            })
+            .collect()
+    }
+
     /// Insert or replace an alias. Returns true if a previous entry
     /// with the same alias was overwritten.
     pub fn set(&mut self, alias: &str, command: String) -> bool {
@@ -1388,5 +1414,27 @@ mod tests {
         assert!(empty_rows.is_empty());
         let restored_empty = KnownAbilities::from_rows(&empty_rows);
         assert!(restored_empty.entries.is_empty());
+    }
+
+    #[test]
+    fn aliases_round_trip_through_db_rows() {
+        // Same shape as KnownAbilities — pin the alias / command
+        // ordering so a future struct-tweak can't silently swap
+        // them. (The runtime tuple is `(alias, command)`; the row
+        // is `{alias, command}` — symmetry today, but locking in
+        // beats hoping.)
+        let original = Aliases {
+            entries: vec![
+                ("k".to_string(), "kill".to_string()),
+                ("rest".to_string(), "rest sleep".to_string()),
+            ],
+        };
+        let rows = original.to_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].alias, "k");
+        assert_eq!(rows[0].command, "kill");
+        assert_eq!(rows[1].alias, "rest");
+        let restored = Aliases::from_rows(&rows);
+        assert_eq!(restored.entries, original.entries);
     }
 }

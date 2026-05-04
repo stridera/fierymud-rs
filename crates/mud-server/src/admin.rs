@@ -1301,12 +1301,7 @@ fn session_create(
     // to 0 because KnownAbilities is missing.
     let known_abilities = mud_world::KnownAbilities::from_rows(abilities);
     let ability_count = known_abilities.entries.len();
-    let alias_set = mud_world::Aliases {
-        entries: aliases
-            .iter()
-            .map(|r| (r.alias.clone(), r.command.clone()))
-            .collect(),
-    };
+    let alias_set = mud_world::Aliases::from_rows(aliases);
     let alias_count = alias_set.entries.len();
     if let Ok(mut e) = world.get_entity_mut(entity) {
         e.insert(known_abilities);
