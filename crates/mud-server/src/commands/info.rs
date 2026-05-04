@@ -8341,7 +8341,7 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
 /// (fire=red, water=cyan, healing=green, etc.); unmapped or
 /// missing spheres fall through to dim. Abilities without a
 /// sphere assignment render the name unchanged.
-fn format_ability_with_sphere(def: &mud_world::AbilityDef) -> String {
+pub(crate) fn format_ability_with_sphere(def: &mud_world::AbilityDef) -> String {
     let Some(s) = def.sphere.as_deref().filter(|s| !s.is_empty()) else {
         return def.name.clone();
     };

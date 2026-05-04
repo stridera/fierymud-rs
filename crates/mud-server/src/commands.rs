@@ -1914,6 +1914,81 @@ mod tests {
     }
 
     #[test]
+    fn bound_ability_line_renders_sphere_palette() {
+        // Equipping a wand/staff with bindings should surface the
+        // ability + sphere on the wield confirmation. Pin the
+        // formatter contract (sphere hue applied via
+        // format_ability_with_sphere) so a future palette tweak
+        // can't silently drop the parenthetical.
+        use mud_db::abilities::AbilityKind;
+        use mud_world::{
+            AbilityCatalog, AbilityDef, ObjectAbilityCatalog, WorldKey,
+            resources::ObjectAbilityBinding,
+        };
+        let mut world = World::new();
+        let mut catalog = AbilityCatalog::default();
+        catalog.by_name.insert(
+            "magic missile".to_string(),
+            AbilityDef {
+                id: 42,
+                name: "Magic Missile".to_string(),
+                plain_name: "MAGIC_MISSILE".to_string(),
+                description: None,
+                kind: AbilityKind::Spell,
+                violent: true,
+                combat_ok: true,
+                in_combat_only: false,
+                cast_time_rounds: 1,
+                cooldown_ms: 0,
+                is_area: false,
+                min_position_label: "STANDING".to_string(),
+                min_posture_rank: 9,
+                target_scope: "ROOM_ENEMY".to_string(),
+                is_magical: true,
+                sphere: Some("fire".to_string()),
+                damage_type: Some("fire".to_string()),
+            },
+        );
+        world.insert_resource(catalog);
+        let mut bindings = ObjectAbilityCatalog::default();
+        bindings.by_key.insert(
+            (10, 5),
+            vec![ObjectAbilityBinding {
+                ability_id: 42,
+                level: 1,
+                charges: Some(7),
+            }],
+        );
+        world.insert_resource(bindings);
+        let item = world.spawn(WorldKey { zone: 10, id: 5 }).id();
+        let line = super::render_bound_ability_line(&mut world, item)
+            .expect("bound item produces a line");
+        // Formatter wraps the sphere parenthetical in <red> (fire)
+        // — the literal tag we're pinning is what `format_ability_with_sphere`
+        // emits, not the post-render ANSI.
+        assert!(
+            line.contains("Magic Missile <red>(fire)</>"),
+            "sphere parenthetical present: {line}"
+        );
+        assert!(line.starts_with("<dim>It carries</>"), "lead-in dim: {line}");
+
+        // Item without a binding row → no follow-up line at all.
+        let bare = world.spawn(WorldKey { zone: 99, id: 1 }).id();
+        assert!(
+            super::render_bound_ability_line(&mut world, bare).is_none(),
+            "no binding → no line"
+        );
+
+        // Item with no WorldKey at all (corpses, synthesized entities)
+        // → no follow-up line.
+        let keyless = world.spawn_empty().id();
+        assert!(
+            super::render_bound_ability_line(&mut world, keyless).is_none(),
+            "no key → no line"
+        );
+    }
+
+    #[test]
     fn aoe_targets_room_allies_includes_caster_and_group_excludes_mobs() {
         // RoomAllies = caster + group members in the room. Mobs are
         // excluded (no allied-mob tag today). Out-of-room group
@@ -7275,8 +7350,48 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
         Slot::Hold => "hold",
         _ => "wear",
     };
-    send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
+    let mut msg = format!("You {verb} {item_name}.\r\n");
+    // Surface bound abilities (wands, staves, magical weapons) with
+    // sphere-colored parenthetical, so the player learns at equip time
+    // what powers the item carries instead of having to `identify`
+    // separately.
+    if let Some(line) = render_bound_ability_line(world, item) {
+        msg.push_str(&line);
+    }
+    send_rendered(world, player, &msg);
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
+}
+
+/// Look up `ObjectAbilityCatalog` bindings for `item` and render a
+/// concise follow-up line listing each ability with its sphere hue.
+/// Returns `None` when the item has no bindings — the caller skips
+/// the extra line so non-magical gear stays quiet.
+fn render_bound_ability_line(world: &mut World, item: Entity) -> Option<String> {
+    let key = world.get::<WorldKey>(item)?;
+    let key = (key.zone, key.id);
+    let bindings = world
+        .resource::<mud_world::ObjectAbilityCatalog>()
+        .by_key
+        .get(&key)?
+        .clone();
+    if bindings.is_empty() {
+        return None;
+    }
+    let abilities = world.resource::<AbilityCatalog>();
+    let entries: Vec<String> = bindings
+        .iter()
+        .map(|b| {
+            abilities
+                .by_name
+                .values()
+                .find(|d| d.id == b.ability_id)
+                .map_or_else(
+                    || format!("ability #{}", b.ability_id),
+                    crate::commands::info::format_ability_with_sphere,
+                )
+        })
+        .collect();
+    Some(format!("<dim>It carries</> {}<dim>.</>\r\n", entries.join(", ")))
 }
 
 /// Match by Keywords substring first, falling back to Name substring.
