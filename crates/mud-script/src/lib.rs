@@ -2398,6 +2398,42 @@ impl UserData for LuaRoom {
             },
         );
 
+        // `room:send_to_adjacent(msg)` echoes `msg` into every room
+        // reachable from this room via a non-`None` Exits target.
+        // 6+ corpus refs — minstrels' music drifting across the
+        // tavern, pirate drumming, cow moo'ing, etc. The message is
+        // sent verbatim to neighbours; the source room itself is
+        // skipped (the caller usually pairs this with a separate
+        // `room:send` for the in-room view).
+        methods.add_method(
+            "send_to_adjacent",
+            |lua, this, msg: String| -> mlua::Result<()> {
+                world_mut_from_lua(lua, |world| {
+                    let neighbours: Vec<Entity> = world
+                        .get::<mud_world::Exits>(this.entity)
+                        .map(|exits| {
+                            exits
+                                .0
+                                .values()
+                                .filter_map(|e| e.to)
+                                .filter(|t| *t != this.entity)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if neighbours.is_empty() {
+                        return;
+                    }
+                    if !world.contains_resource::<LuaOutbox>() {
+                        world.insert_resource(LuaOutbox::default());
+                    }
+                    let mut out = world.resource_mut::<LuaOutbox>();
+                    for n in neighbours {
+                        out.messages.push((n, msg.clone(), None));
+                    }
+                })
+            },
+        );
+
         // `room:purge()` despawns every mob located in this room.
         // 16+ corpus refs, almost all in DEATH triggers for "wave"
         // bosses — killing the boss should clean up the remaining
