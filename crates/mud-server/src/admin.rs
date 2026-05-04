@@ -1299,12 +1299,7 @@ fn session_create(
     // skill lookup, alias expansion, etc.) work for virtual sessions.
     // Without this, every ability formula referencing `skill` resolves
     // to 0 because KnownAbilities is missing.
-    let known_abilities = mud_world::KnownAbilities {
-        entries: abilities
-            .iter()
-            .map(|r| (r.ability_id, r.proficiency, r.known))
-            .collect(),
-    };
+    let known_abilities = mud_world::KnownAbilities::from_rows(abilities);
     let ability_count = known_abilities.entries.len();
     let alias_set = mud_world::Aliases {
         entries: aliases

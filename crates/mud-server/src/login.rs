@@ -1070,12 +1070,7 @@ impl ConnRouter {
         let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
         let entity = spawn_player(world, &user, &char_row, outbound);
         let item_count = spawn_inventory(world, entity, &item_rows);
-        let known_abilities = KnownAbilities {
-            entries: ability_rows
-                .iter()
-                .map(|r| (r.ability_id, r.proficiency, r.known))
-                .collect(),
-        };
+        let known_abilities = KnownAbilities::from_rows(&ability_rows);
         let ability_count = known_abilities.entries.len();
         let aliases = mud_world::Aliases {
             entries: alias_rows
@@ -1587,16 +1582,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     // spells round-trip across reconnect.
     let ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow> = world
         .get::<KnownAbilities>(entity)
-        .map(|ka| {
-            ka.entries
-                .iter()
-                .map(|(id, prof, known)| mud_db::character_abilities::CharacterAbilityRow {
-                    ability_id: *id,
-                    known: *known,
-                    proficiency: *prof,
-                })
-                .collect()
-        })
+        .map(KnownAbilities::to_rows)
         .unwrap_or_default();
     if let Err(e) = mud_db::character_abilities::save_for(
         pool,

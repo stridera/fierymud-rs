@@ -967,6 +967,37 @@ impl KnownAbilities {
     pub fn has_any(&self, ability_id: i32) -> bool {
         self.entries.iter().any(|(id, _, _)| *id == ability_id)
     }
+
+    /// Hydrate from a `CharacterAbilities` query result. Centralizes
+    /// the row → tuple field-order so login + admin virtual-session
+    /// spawn share one conversion (regression-prone otherwise: the
+    /// runtime tuple is `(id, prof, known)` while the row layout is
+    /// `{id, known, prof}` — a swapped destructure here would
+    /// silently corrupt every save round-trip).
+    #[must_use]
+    pub fn from_rows(rows: &[mud_db::character_abilities::CharacterAbilityRow]) -> Self {
+        Self {
+            entries: rows
+                .iter()
+                .map(|r| (r.ability_id, r.proficiency, r.known))
+                .collect(),
+        }
+    }
+
+    /// Inverse of `from_rows` — produce the row vec the persistence
+    /// path hands to `character_abilities::save_for`. Round-trips
+    /// exactly: `from_rows(&ka.to_rows())` reproduces `ka`.
+    #[must_use]
+    pub fn to_rows(&self) -> Vec<mud_db::character_abilities::CharacterAbilityRow> {
+        self.entries
+            .iter()
+            .map(|(id, prof, known)| mud_db::character_abilities::CharacterAbilityRow {
+                ability_id: *id,
+                known: *known,
+                proficiency: *prof,
+            })
+            .collect()
+    }
 }
 
 /// Per-character command aliases. Each entry is `(alias, command)`
@@ -1318,5 +1349,44 @@ mod tests {
         assert_eq!(Slot::from_label("HOVER"), Some(Slot::Hover));
         assert_eq!(Slot::from_label(""), None);
         assert_eq!(Slot::from_label("garbage"), None);
+    }
+
+    #[test]
+    fn known_abilities_round_trips_through_db_rows() {
+        // Persistence regression guard: the runtime tuple is
+        // `(ability_id, proficiency, known)` while CharacterAbilityRow
+        // is `{ability_id, known, proficiency}`. A swapped destructure
+        // here would silently corrupt every save/login round-trip
+        // (e.g. proficiency 850 stored as `known: true`, known=false
+        // stored as `proficiency: 0`). Pin to_rows ↔ from_rows so a
+        // future refactor can't drift the field order.
+        use mud_db::character_abilities::CharacterAbilityRow;
+        let original = KnownAbilities {
+            entries: vec![
+                (1, 850, true),
+                (42, 0, false),
+                (100, 1000, true),
+            ],
+        };
+        let rows = original.to_rows();
+        // Each row carries the proficiency in `proficiency`, the
+        // known flag in `known`, and the id in `ability_id` — *not*
+        // swapped.
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].ability_id, 1);
+        assert_eq!(rows[0].proficiency, 850);
+        assert!(rows[0].known);
+        assert_eq!(rows[1].ability_id, 42);
+        assert_eq!(rows[1].proficiency, 0);
+        assert!(!rows[1].known);
+        // Round-trip: from_rows(to_rows(x)) reproduces x exactly.
+        let restored = KnownAbilities::from_rows(&rows);
+        assert_eq!(restored.entries, original.entries);
+        // Empty round-trip is a valid edge (respec wipes everything).
+        let empty = KnownAbilities::default();
+        let empty_rows: Vec<CharacterAbilityRow> = empty.to_rows();
+        assert!(empty_rows.is_empty());
+        let restored_empty = KnownAbilities::from_rows(&empty_rows);
+        assert!(restored_empty.entries.is_empty());
     }
 }
