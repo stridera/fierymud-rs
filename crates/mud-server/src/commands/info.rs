@@ -4251,30 +4251,71 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // mobs (alignment past `AGGRO_ALIGNMENT`) get a `<red>(HOSTILE)</>`
     // suffix so a careful look reveals what `consider` would and the
     // auto-engage rule will land. Non-mob entities skip it.
+    // Mob lines, grouped so identical proto-instances stack into a
+    // `(N) <description>` entry. The body is the rendered text we
+    // would print for one instance; identical bodies are
+    // collapsed. `(HOSTILE)` is part of the body, so two mobs with
+    // the same proto but different alignments (rare) won't merge.
+    // First-seen ordering is preserved so the room reads in the
+    // same order it always did.
     let mob_lines: Vec<String> = {
         let aggro_threshold = aggro_alignment(world);
+        let mut order: Vec<String> = Vec::new();
+        let mut counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let mut q = world
             .query_filtered::<(&Located, &Named, Option<&Description>, Option<&CombatStats>), With<Mob>>();
-        q.iter(world)
-            .filter(|(l, _, _, _)| l.0 == room)
-            .map(|(_, n, desc, stats)| {
-                let body = desc
-                    .filter(|d| !d.0.trim().is_empty())
-                    .map_or_else(|| n.name.clone(), |d| d.0.trim_end().to_string());
-                if stats.is_some_and(|s| s.alignment <= aggro_threshold) {
-                    format!("{body} <red>(HOSTILE)</>")
+        for (_, n, desc, stats) in q.iter(world).filter(|(l, _, _, _)| l.0 == room) {
+            let body = desc
+                .filter(|d| !d.0.trim().is_empty())
+                .map_or_else(|| n.name.clone(), |d| d.0.trim_end().to_string());
+            let line = if stats.is_some_and(|s| s.alignment <= aggro_threshold) {
+                format!("{body} <red>(HOSTILE)</>")
+            } else {
+                body
+            };
+            if !counts.contains_key(&line) {
+                order.push(line.clone());
+            }
+            *counts.entry(line).or_insert(0) += 1;
+        }
+        order
+            .into_iter()
+            .map(|line| {
+                let n = counts.get(&line).copied().unwrap_or(1);
+                if n > 1 {
+                    format!("<dim>({n})</> {line}")
                 } else {
-                    body
+                    line
                 }
             })
             .collect()
     };
-    // Items on the ground in this room.
+    // Items on the ground, count-grouped the same way as mob lines
+    // so a pile of identical coins / arrows / corpses doesn't show
+    // up as ten copies of `a copper coin` separated by commas.
+    // Pattern matches `cmd_inventory`.
     let items: Vec<String> = {
+        let mut order: Vec<String> = Vec::new();
+        let mut counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
-        q.iter(world)
-            .filter(|(l, _)| l.0 == room)
-            .map(|(_, n)| n.name.clone())
+        for (_, n) in q.iter(world).filter(|(l, _)| l.0 == room) {
+            if !counts.contains_key(&n.name) {
+                order.push(n.name.clone());
+            }
+            *counts.entry(n.name.clone()).or_insert(0) += 1;
+        }
+        order
+            .into_iter()
+            .map(|name| {
+                let n = counts.get(&name).copied().unwrap_or(1);
+                if n > 1 {
+                    format!("<dim>({n})</> {name}")
+                } else {
+                    name
+                }
+            })
             .collect()
     };
 
