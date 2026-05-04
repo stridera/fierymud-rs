@@ -2398,6 +2398,38 @@ impl UserData for LuaRoom {
             },
         );
 
+        // `room:teleport_all(target_room)` warps every actor (player
+        // or mob) located in this room into `target_room`. 13+ corpus
+        // refs in environmental scripts: avalanches, time-travel,
+        // vanishing springs, monk-quest scene transitions. Items
+        // sitting on the floor stay behind — corpses / dropped gear
+        // don't follow the actors. The trigger body is responsible
+        // for any pre-warp `room:send` flavor.
+        methods.add_method(
+            "teleport_all",
+            |lua, this, target: AnyUserData| -> mlua::Result<()> {
+                let target_entity = target.borrow::<LuaRoom>()?.entity;
+                if target_entity == this.entity {
+                    return Ok(());
+                }
+                world_mut_from_lua(lua, |world| {
+                    let occupants: Vec<Entity> = {
+                        let mut q = world
+                            .query_filtered::<(Entity, &Located), Without<Item>>();
+                        q.iter(world)
+                            .filter(|(_, l)| l.0 == this.entity)
+                            .map(|(e, _)| e)
+                            .collect()
+                    };
+                    for e in occupants {
+                        if let Ok(mut em) = world.get_entity_mut(e) {
+                            em.insert(Located(target_entity));
+                        }
+                    }
+                })
+            },
+        );
+
         // `room:find_object(keyword)` is the item-side mirror of
         // `room:find_actor`. Searches items lying in this room (not
         // carried items in NPCs/players inventories) for one matching
