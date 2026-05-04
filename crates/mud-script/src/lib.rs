@@ -3251,7 +3251,7 @@ fn spawn_mob_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<
                 dmg_roll: dmg,
                 ac: proto.armor_class,
                 alignment: proto.alignment,
-                ward_pct: 0,
+                ward_pct: proto.ward_percent,
             },
             Posture(PostureKind::Standing),
         ));

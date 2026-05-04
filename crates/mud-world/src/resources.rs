@@ -1122,6 +1122,13 @@ pub struct MobProto {
     pub damage_dice_bonus: i32,
     pub hit_roll: i32,
     pub armor_class: i32,
+    /// Magical mitigation percentage from `Mobs.ward_percent`
+    /// (0..=100). Engaged at combat pipeline step 5 when the
+    /// damage source is magical (`Ability.is_magical`). Zero on
+    /// most ordinary mobs; bossier authors lift it for "this
+    /// dragon shrugs off spells" content. Surfaces verbatim onto
+    /// the spawned `CombatStats.ward_pct`.
+    pub ward_percent: i32,
     /// Coin awarded to the killer (or dropped) on death, in copper.
     /// Mirrors `Mobs.wealth`.
     pub wealth: i64,

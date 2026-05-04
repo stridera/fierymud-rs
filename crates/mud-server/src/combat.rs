@@ -1710,6 +1710,7 @@ mod tests {
                 damage_dice_bonus: 0,
                 hit_roll: 0,
                 armor_class: 0,
+                ward_percent: 0,
                 wealth: 75, // 7 silver, 5 copper
                 class_id: None,
                 behaviors: Vec::new(),

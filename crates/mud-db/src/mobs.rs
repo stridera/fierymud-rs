@@ -26,6 +26,10 @@ pub struct Mob {
     pub damage_dice_bonus: i32,
     pub hit_roll: i32,
     pub armor_class: i32,
+    /// Magical mitigation percentage from `Mobs.ward_percent`. Engaged
+    /// at combat pipeline step 5 when the damage source is magical.
+    /// Zero on most mobs; raised on boss content.
+    pub ward_percent: i32,
     /// On-hand wealth in copper units, paid to the killer on death.
     /// Schema column is BIGINT; default 0.
     pub wealth: i64,
@@ -76,6 +80,7 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             damage_dice_bonus,
             hit_roll,
             armor_class,
+            ward_percent,
             wealth,
             class_id,
             behaviors AS "behaviors!: Vec<MobBehavior>",

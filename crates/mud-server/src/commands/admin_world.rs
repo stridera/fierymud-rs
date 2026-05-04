@@ -855,6 +855,7 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     let proto_alignment = proto.alignment;
     let proto_hit_roll = proto.hit_roll;
     let proto_armor_class = proto.armor_class;
+    let proto_ward_percent = proto.ward_percent;
 
     let mob_entity = world
         .spawn((
@@ -869,7 +870,7 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
                 dmg_roll: dmg,
                 ac: proto_armor_class,
                 alignment: proto_alignment,
-                ward_pct: 0,
+                ward_pct: proto_ward_percent,
             },
             Posture(PostureKind::Standing),
         ))
