@@ -2398,6 +2398,30 @@ impl UserData for LuaRoom {
             },
         );
 
+        // `room:purge()` despawns every mob located in this room.
+        // 16+ corpus refs, almost all in DEATH triggers for "wave"
+        // bosses — killing the boss should clean up the remaining
+        // minions in one sweep instead of leaving them to wander
+        // off. Players and items are intentionally untouched: the
+        // intent is "cleanup minions", not "wipe the room".
+        methods.add_method("purge", |lua, this, ()| -> mlua::Result<()> {
+            world_mut_from_lua(lua, |world| {
+                let mobs: Vec<Entity> = {
+                    let mut q = world
+                        .query_filtered::<(Entity, &Located), With<Mob>>();
+                    q.iter(world)
+                        .filter(|(_, l)| l.0 == this.entity)
+                        .map(|(e, _)| e)
+                        .collect()
+                };
+                for e in mobs {
+                    if let Ok(em) = world.get_entity_mut(e) {
+                        em.despawn();
+                    }
+                }
+            })
+        });
+
         // `room:teleport_all(target_room)` warps every actor (player
         // or mob) located in this room into `target_room`. 13+ corpus
         // refs in environmental scripts: avalanches, time-travel,
