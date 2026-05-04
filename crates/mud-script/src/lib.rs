@@ -82,6 +82,20 @@ pub struct SpellExecutor(pub Option<fn(&mut World, Entity, &str)>);
 #[derive(Resource, Default, Clone, Copy)]
 pub struct AttackAllExecutor(pub Option<fn(&mut World, Entity)>);
 
+/// Sibling of `SpellExecutor` for the Chant kind. Drives the Lua
+/// `self:chant(name, target?, level?)` binding for monk / cleric
+/// chants. mud-server installs a shim that calls
+/// `invoke_ability(.., AbilityKind::Chant, "chant")`.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct ChantExecutor(pub Option<fn(&mut World, Entity, &str)>);
+
+/// Sibling of `SpellExecutor` for the Song kind. Drives the Lua
+/// `self:perform(name, target?, level?)` binding for bard songs.
+/// mud-server installs a shim that calls
+/// `invoke_ability(.., AbilityKind::Song, "perform")`.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct SongExecutor(pub Option<fn(&mut World, Entity, &str)>);
+
 impl Default for LuaHost {
     fn default() -> Self {
         Self::new()
@@ -1195,6 +1209,49 @@ fn skills_execute(
     })
 }
 
+/// Method-form dispatch for `actor:chant` / `actor:perform` style
+/// bindings: caster is resolved from the method receiver (`this`),
+/// and the remaining args are `(name, target?, level?)`. Level is
+/// accepted but ignored — the runtime derives caster level from
+/// `Profile` / `MobProto`. The `lookup` closure picks which
+/// per-kind executor resource to dispatch through.
+fn ability_method_dispatch<F>(
+    lua: &Lua,
+    caster: Entity,
+    args: MultiValue,
+    lookup: F,
+) -> mlua::Result<()>
+where
+    F: FnOnce(&World) -> Option<fn(&mut World, Entity, &str)> + Copy + 'static,
+{
+    let mut iter = args.into_iter();
+    let Some(name_val) = iter.next() else {
+        return Ok(());
+    };
+    let name = match name_val {
+        Value::String(s) => s
+            .to_str()
+            .map(|c| c.trim().to_string())
+            .unwrap_or_default(),
+        _ => return Ok(()),
+    };
+    if name.is_empty() {
+        return Ok(());
+    }
+    let target = iter.next().unwrap_or(Value::Nil);
+    let target_name = resolve_target_name(lua, &target)?;
+    world_mut_from_lua(lua, |world| {
+        let Some(f) = lookup(world) else {
+            return;
+        };
+        let args_str = match target_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(t) => format!("{name} {t}"),
+            None => name.clone(),
+        };
+        f(world, caster, &args_str);
+    })
+}
+
 /// Adapter from `spells.cast(caster, name, target?, level?)` Lua call
 /// to `SpellExecutor`. The level argument is currently ignored — the
 /// runtime derives caster level from `Profile`/`MobProto`. Accepted
@@ -1833,6 +1890,44 @@ impl UserData for LuaActor {
                 }
             })
         });
+
+        // `actor:chant(name, target?, level?)` dispatches a CHANT-
+        // kind ability via `ChantExecutor`. 4+ corpus refs from
+        // monk fight scripts cycling chants (war_cry, battle_hymn,
+        // peace, regeneration). Same target / level shape as
+        // `spells.cast` — level is accepted for legacy callers
+        // (`self.level`) but ignored by the runtime.
+        methods.add_method(
+            "chant",
+            |lua, this, args: MultiValue| -> mlua::Result<()> {
+                ability_method_dispatch(
+                    lua,
+                    this.entity,
+                    args,
+                    |world| {
+                        world.get_resource::<ChantExecutor>().and_then(|e| e.0)
+                    },
+                )
+            },
+        );
+
+        // `actor:perform(name, target?, level?)` dispatches a SONG-
+        // kind ability via `SongExecutor`. 4+ corpus refs from bard
+        // fight scripts (terror, ballad_of_tears). Mirrors
+        // `actor:chant` but routes to SongExecutor instead.
+        methods.add_method(
+            "perform",
+            |lua, this, args: MultiValue| -> mlua::Result<()> {
+                ability_method_dispatch(
+                    lua,
+                    this.entity,
+                    args,
+                    |world| {
+                        world.get_resource::<SongExecutor>().and_then(|e| e.0)
+                    },
+                )
+            },
+        );
 
         // `actor:breath_attack(element, target?)` is a convenience
         // wrapper for the dragon `breathe_<element>` SKILLs (12+

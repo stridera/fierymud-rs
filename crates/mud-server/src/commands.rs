@@ -6900,6 +6900,28 @@ pub fn lua_invoke_spell(world: &mut World, caster: Entity, args: &str) {
     );
 }
 
+/// Sibling of `lua_invoke_spell` for the Chant kind. Verb="chant".
+pub fn lua_invoke_chant(world: &mut World, caster: Entity, args: &str) {
+    invoke_ability(
+        world,
+        caster,
+        args,
+        mud_db::abilities::AbilityKind::Chant,
+        "chant",
+    );
+}
+
+/// Sibling of `lua_invoke_spell` for the Song kind. Verb="perform".
+pub fn lua_invoke_song(world: &mut World, caster: Entity, args: &str) {
+    invoke_ability(
+        world,
+        caster,
+        args,
+        mud_db::abilities::AbilityKind::Song,
+        "perform",
+    );
+}
+
 /// fn-ptr shim used by the Lua `actor:attack_all()` binding.
 /// Engages every co-located Player via `engage_combat`. Targets
 /// are snapshot before the engagement loop so each call uses the
