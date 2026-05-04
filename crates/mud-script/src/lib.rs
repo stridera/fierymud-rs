@@ -1501,6 +1501,92 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:whisper(target_name, msg)` is the private-to-target
+        // counterpart of `say` / `tell`. 52+ corpus refs from newbie
+        // safety guards / quest greeters that want to lecture a
+        // wandering player without broadcasting the warning to the
+        // whole room. Three-message shape matches the player-side
+        // `whisper` command:
+        //   speaker — "You whisper to NAME, \"MSG\""
+        //   target  — "NAME whispers to you, \"MSG\""
+        //   others  — "NAME whispers something to OTHER."
+        // The target arg is a name string (corpus pattern is
+        // `self:whisper(actor.name, "...")`); resolution searches the
+        // speaker's room for a matching `Named.name` or `Keywords`
+        // entry. No-op when the target isn't co-located so a stale
+        // reference doesn't leak content.
+        methods.add_method(
+            "whisper",
+            |lua, this, (target_name, msg): (String, String)| -> mlua::Result<()> {
+                let needle = target_name.trim().to_ascii_lowercase();
+                if needle.is_empty() || msg.is_empty() {
+                    return Ok(());
+                }
+                world_mut_from_lua(lua, |world| {
+                    let Some(located) = world.get::<Located>(this.entity).copied() else {
+                        return;
+                    };
+                    let speaker_name = world
+                        .get::<Named>(this.entity)
+                        .map_or_else(|| "Someone".to_string(), |n| n.name.clone());
+                    let target = {
+                        let mut q = world.query_filtered::<
+                            (Entity, &Located, &Named, Option<&Keywords>),
+                            Without<Item>,
+                        >();
+                        q.iter(world)
+                            .find(|(e, l, n, kw)| {
+                                *e != this.entity
+                                    && l.0 == located.0
+                                    && (n.name.to_ascii_lowercase().contains(&needle)
+                                        || kw.is_some_and(|k| {
+                                            k.0.iter().any(|w| {
+                                                w.to_ascii_lowercase().contains(&needle)
+                                            })
+                                        }))
+                            })
+                            .map(|(e, _, n, _)| (e, n.name.clone()))
+                    };
+                    let Some((target_entity, resolved_name)) = target else {
+                        return;
+                    };
+                    // Bystanders are every other player in the room
+                    // (skip speaker + target). Snapshot before we
+                    // borrow LuaOutbox mut so the query doesn't
+                    // deadlock with the resource borrow.
+                    let bystanders: Vec<Entity> = {
+                        let mut q = world
+                            .query_filtered::<(Entity, &Located), With<Player>>();
+                        q.iter(world)
+                            .filter(|(e, l)| {
+                                *e != this.entity
+                                    && *e != target_entity
+                                    && l.0 == located.0
+                            })
+                            .map(|(e, _)| e)
+                            .collect()
+                    };
+                    if !world.contains_resource::<LuaOutbox>() {
+                        world.insert_resource(LuaOutbox::default());
+                    }
+                    let mut out = world.resource_mut::<LuaOutbox>();
+                    out.direct.push((
+                        this.entity,
+                        format!("You whisper to {resolved_name}, \"{msg}\""),
+                    ));
+                    out.direct.push((
+                        target_entity,
+                        format!("{speaker_name} whispers to you, \"{msg}\""),
+                    ));
+                    let bystander_line =
+                        format!("{speaker_name} whispers something to {resolved_name}.");
+                    for b in bystanders {
+                        out.direct.push((b, bystander_line.clone()));
+                    }
+                })
+            },
+        );
+
         // `actor:save()` requests a snapshot of this player's state
         // back to the DB. 77+ corpus refs, almost all from
         // quest-completion checkpoints — the trigger awards xp /
