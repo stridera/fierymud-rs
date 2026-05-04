@@ -4851,11 +4851,13 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!("  Bank:   {coin}\r\n"));
     }
     if d.carry.0 > 0.0 {
+        let band = encumbrance_band(d.carry.0, d.carry.1);
+        let (open, close) = encumbrance_color_tag(d.carry.0, d.carry.1)
+            .map_or((String::new(), String::new()), |t| (t.to_string(), "</>".to_string()));
         out.push_str(&format!(
-            "  Load:   {:.1} / {:.0} lbs.  ({})\r\n",
+            "  Load:   {open}{:.1}{close} / {:.0} lbs.  ({open}{band}{close})\r\n",
             d.carry.0,
             d.carry.1,
-            encumbrance_band(d.carry.0, d.carry.1),
         ));
     }
     if let Some(l) = d.logged_in {
@@ -5090,6 +5092,25 @@ pub(crate) fn encumbrance_band(carried: f64, capacity: f64) -> &'static str {
     }
 }
 
+/// XML-Lite open tag for the score sheet's encumbrance line. Red
+/// at 90%+, yellow at 70%+, none below — same gradient the C++
+/// score uses, so a player crossing the heavy-load threshold sees
+/// the same "you're hauling too much" warning hue. None at zero
+/// capacity (defensive — avoids divide-by-zero).
+pub(crate) fn encumbrance_color_tag(carried: f64, capacity: f64) -> Option<&'static str> {
+    if capacity <= 0.0 {
+        return None;
+    }
+    let pct = (carried / capacity) * 100.0;
+    if pct >= 90.0 {
+        Some("<red>")
+    } else if pct >= 70.0 {
+        Some("<yellow>")
+    } else {
+        None
+    }
+}
+
 /// One-word descriptor for the score sheet's drunkenness line. The
 /// bands track our 0..=100 alcohol scale: at 80+ the runtime emits
 /// the room-spinning blackout warning on drink (`cmd_drink_amount`),
@@ -5255,11 +5276,13 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         row(format!("Bank:      {coin}"));
     }
     if d.carry.0 > 0.0 {
+        let band = encumbrance_band(d.carry.0, d.carry.1);
+        let (open, close) = encumbrance_color_tag(d.carry.0, d.carry.1)
+            .map_or((String::new(), String::new()), |t| (t.to_string(), "</>".to_string()));
         row(format!(
-            "Load:      {:.1} / {:.0} lbs.  ({})",
+            "Load:      {open}{:.1}{close} / {:.0} lbs.  ({open}{band}{close})",
             d.carry.0,
             d.carry.1,
-            encumbrance_band(d.carry.0, d.carry.1),
         ));
     }
     if let Some(l) = d.logged_in {
