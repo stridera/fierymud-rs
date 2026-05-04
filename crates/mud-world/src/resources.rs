@@ -1018,6 +1018,14 @@ pub struct AbilityDef {
     /// DEAD=1 .. STANDING=9; runtime postures occupy 6..9. Anything ≤ 6
     /// is satisfied by every runtime posture.
     pub min_posture_rank: i32,
+    /// `Ability.target_scope` enum value as a string. Drives AOE
+    /// dispatch in `invoke_ability_with` — `SINGLE` →
+    /// single-target, `ROOM_ENEMIES` / `ROOM_ALLIES` / `ROOM_ALL`
+    /// → fan-out via `invoke_ability_aoe`. `SELF` /
+    /// `ROOM_ENVIRONMENT` and legacy values (`CHAIN` / `CONE` /
+    /// `LINE` / `AREA` / `GROUP`) fall through to single-target
+    /// for now.
+    pub target_scope: String,
 }
 
 /// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The

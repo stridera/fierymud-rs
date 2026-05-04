@@ -68,6 +68,15 @@ pub struct AbilityRow {
     /// / STANDING) so anything below SLEEPING is satisfied by every
     /// runtime posture.
     pub min_position: String,
+    /// AOE / single-target dispatch hint. `Ability.target_scope`
+    /// enum column — the post-locked-design values are `SELF` /
+    /// `SINGLE` / `ROOM_ALLIES` / `ROOM_ENEMIES` / `ROOM_ALL` /
+    /// `ROOM_ENVIRONMENT` (legacy `CHAIN` / `CONE` / `LINE` /
+    /// `AREA` / `GROUP` also still exist in the enum but no row
+    /// uses them post-migration). Surfaced to the runtime as a
+    /// string so the dispatcher can match on any of the values
+    /// without the runtime needing to know about the legacy ones.
+    pub target_scope: String,
 }
 
 pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
@@ -86,7 +95,8 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
             cast_time_rounds,
             cooldown_ms,
             is_area,
-            "minPosition"::text AS "min_position!: String"
+            "minPosition"::text AS "min_position!: String",
+            target_scope::text AS "target_scope!: String"
         FROM "Ability"
         ORDER BY id
         "#

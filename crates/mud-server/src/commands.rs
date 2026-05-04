@@ -1730,6 +1730,7 @@ mod tests {
             is_area: true,
             min_position_label: "STANDING".to_string(),
             min_posture_rank: 9,
+            target_scope: "ROOM_ENEMIES".to_string(),
         };
         let _ = AbilityCatalog::default();
         // The property under test is a one-line conditional; the
@@ -7853,23 +7854,31 @@ pub(crate) fn invoke_ability_with(
         }
     }
 
-    // AOE fan-out. Once `Ability.target_scope` lands as a schema
-    // column the choice will be a direct read; until then we infer
-    // from the existing `is_area` flag plus `violent`:
-    //   is_area + violent     → ROOM_ENEMIES (firestorm, meteorswarm, ...)
-    //   is_area + non-violent → ROOM_ALLIES  (group_heal, peace, ...)
-    // ROOM_ALL is reserved for chaos / admin abilities and not yet
-    // emitted by any catalog row. `aoe_repeat` is the recursion
-    // guard — invoke_ability_aoe iterates back through this
-    // function once per target with aoe_repeat = true, which
-    // bypasses this branch.
-    if !aoe_repeat && def.is_area {
-        let scope = if def.violent {
+    // AOE fan-out. `Ability.target_scope` carries the locked
+    // design's enum (SELF / SINGLE / ROOM_* / ROOM_ENVIRONMENT,
+    // plus legacy CHAIN / CONE / LINE / AREA / GROUP). Read the
+    // column directly; ROOM_* values fan out via invoke_ability_aoe.
+    // For abilities still on legacy values (or whose row is
+    // genuinely SINGLE despite is_area=true), fall back to the
+    // inference rule: is_area + violent → ROOM_ENEMIES,
+    // is_area + non-violent → ROOM_ALLIES. `aoe_repeat` is the
+    // recursion guard — invoke_ability_aoe iterates back through
+    // this function once per target with aoe_repeat = true.
+    let inferred_scope: Option<AoeScope> = match def.target_scope.as_str() {
+        "ROOM_ENEMIES" => Some(AoeScope::RoomEnemies),
+        "ROOM_ALLIES" => Some(AoeScope::RoomAllies),
+        "ROOM_ALL" => Some(AoeScope::RoomAll),
+        _ if def.is_area => Some(if def.violent {
             AoeScope::RoomEnemies
         } else {
             AoeScope::RoomAllies
-        };
-        let refusal = if def.violent {
+        }),
+        _ => None,
+    };
+    if !aoe_repeat
+        && let Some(scope) = inferred_scope
+    {
+        let refusal = if matches!(scope, AoeScope::RoomEnemies | AoeScope::RoomAll) {
             format!("Nothing here to {verb} {}.\r\n", def.plain_name)
         } else {
             format!("Nobody here for {} to reach.\r\n", def.plain_name)
