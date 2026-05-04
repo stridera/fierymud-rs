@@ -3980,6 +3980,24 @@ pub(crate) fn exit_state_color(state: ExitState) -> &'static str {
     }
 }
 
+/// XML-Lite open tag for a `UserRole` label. Player → plain (None),
+/// staff tiers pick up progressively brighter accents so the role
+/// readout on `account` / `clientinfo` / score reads at a glance.
+/// Tuned to align with `who_level_color`'s staff band (bold magenta)
+/// — Implementor gets bold white as a "top of stack" cap.
+#[must_use]
+pub(crate) fn role_color_tag(role: mud_db::enums::UserRole) -> Option<&'static str> {
+    use mud_db::enums::UserRole;
+    match role {
+        UserRole::Player => None,
+        UserRole::Immortal => Some("<b:cyan>"),
+        UserRole::Builder => Some("<b:green>"),
+        UserRole::HeadBuilder => Some("<b:yellow>"),
+        UserRole::Coder => Some("<b:magenta>"),
+        UserRole::Implementor => Some("<b:white>"),
+    }
+}
+
 /// XML-Lite open tag for a player's `who` level tag, banded by
 /// progression milestone. None means "render plain". Bands tuned
 /// to the level table: 100+ = immortal staff, 50-99 = endgame,

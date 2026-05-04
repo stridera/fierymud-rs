@@ -6146,16 +6146,31 @@ pub(crate) fn cmd_clientinfo(world: &mut World, player: Entity, _args: &str) {
             format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
         }
     };
-    let mut out = String::from("\r\n");
-    out.push_str(&format!("  Character: {char_name}\r\n"));
-    out.push_str(&format!("  Role:      {}\r\n", role.label()));
+    // Session readout: cyan labels frame each line; character
+    // name + role colored, uptime bold-cyan as the headline,
+    // idle picks up `idle_color`'s warmth grade so a stale
+    // session reads at a glance (matches `who` / `idle`).
+    let role_open = role_color_tag(role);
+    let role_text = role_open.map_or_else(
+        || role.label().to_string(),
+        |open| format!("{open}{}</>", role.label()),
+    );
+    let idle_open = idle_color(idle_secs);
+    let idle_str = format_dur(idle_secs);
+    let idle_text = idle_open.map_or(idle_str.clone(), |open| {
+        format!("{open}{idle_str}</>")
+    });
+    let mut out = String::from("\r\n<b:cyan>Session</>\r\n");
     out.push_str(&format!(
-        "  Uptime:    {} (since login)\r\n",
+        "  <cyan>Character:</> <b:cyan>{char_name}</>\r\n"
+    ));
+    out.push_str(&format!("  <cyan>Role:</>      {role_text}\r\n"));
+    out.push_str(&format!(
+        "  <cyan>Uptime:</>    <b:cyan>{}</> <dim>(since login)</>\r\n",
         format_dur(uptime_secs)
     ));
     out.push_str(&format!(
-        "  Idle:      {} (since last input)\r\n",
-        format_dur(idle_secs)
+        "  <cyan>Idle:</>      {idle_text} <dim>(since last input)</>\r\n",
     ));
     send_to(world, player, out);
 }
@@ -6170,16 +6185,43 @@ pub(crate) fn cmd_account(world: &mut World, player: Entity, _args: &str) {
         .get::<Account>(player)
         .map_or(UserRole::Player, |a| a.role);
 
-    let mut out = String::from("\r\n");
-    out.push_str(&format!("  Email:        {}\r\n", summary.email));
-    out.push_str(&format!("  Display name: {}\r\n", summary.display_name));
-    out.push_str(&format!("  Role:         {}\r\n", role.label()));
-    out.push_str(&format!("  Characters    ({}):\r\n", summary.characters.len()));
+    // Account readout: email + display name read as reference
+    // metadata (dim values), role picks up `role_color_tag`'s
+    // staff hue so an Implementor stands out, character list
+    // marks the active character with bold-yellow `*` + cyan
+    // name, level dimmed since it's a callout for the active
+    // line not the headline.
+    let role_open = role_color_tag(role);
+    let role_text = role_open.map_or_else(
+        || role.label().to_string(),
+        |open| format!("{open}{}</>", role.label()),
+    );
+    let mut out = String::from("\r\n<b:cyan>Account</>\r\n");
+    out.push_str(&format!(
+        "  <cyan>Email:</>        <dim>{}</>\r\n",
+        summary.email
+    ));
+    out.push_str(&format!(
+        "  <cyan>Display name:</> <dim>{}</>\r\n",
+        summary.display_name
+    ));
+    out.push_str(&format!("  <cyan>Role:</>         {role_text}\r\n"));
+    out.push_str(&format!(
+        "  <cyan>Characters</>   <dim>({}):</>\r\n",
+        summary.characters.len()
+    ));
     for (name, level) in &summary.characters {
-        let marker = if name == &active_name { " *" } else { "  " };
-        out.push_str(&format!("   {marker} {name} (level {level})\r\n"));
+        if name == &active_name {
+            out.push_str(&format!(
+                "    <b:yellow>*</> <cyan>{name}</> <dim>(level {level})</>\r\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "      <cyan>{name}</> <dim>(level {level})</>\r\n"
+            ));
+        }
     }
-    out.push_str("\r\n  * = currently playing\r\n");
+    out.push_str("\r\n  <dim>* = currently playing</>\r\n");
     send_to(world, player, out);
 }
 
@@ -6255,15 +6297,21 @@ pub(crate) fn cmd_world(world: &mut World, player: Entity, _args: &str) {
     let m = (uptime_secs % 3600) / 60;
     let s = uptime_secs % 60;
 
-    let mut out = String::from("\r\n");
-    out.push_str(&format!("  Zones loaded:    {zones}\r\n"));
-    out.push_str(&format!("  Rooms loaded:    {rooms}\r\n"));
-    out.push_str(&format!("  Mobs spawned:    {mobs}\r\n"));
-    out.push_str(&format!("  Items spawned:   {items}\r\n"));
-    out.push_str(&format!("  Players online:  {players_online}\r\n"));
-    out.push_str(&format!("  Active effects:  {effects}\r\n"));
-    out.push_str(&format!("  Server tick:     {tick}\r\n"));
-    out.push_str(&format!("  Uptime:          {h}h {m}m {s}s\r\n"));
+    // Status readout: cyan labels frame each line; counts stay
+    // default-color so the eye lands on the value. Uptime gets
+    // bold-cyan because "how long has the server been up" is the
+    // single most-checked field and reads as a header for the rest.
+    let mut out = String::from("\r\n<b:cyan>World status</>\r\n");
+    out.push_str(&format!("  <cyan>Zones loaded:</>    {zones}\r\n"));
+    out.push_str(&format!("  <cyan>Rooms loaded:</>    {rooms}\r\n"));
+    out.push_str(&format!("  <cyan>Mobs spawned:</>    {mobs}\r\n"));
+    out.push_str(&format!("  <cyan>Items spawned:</>   {items}\r\n"));
+    out.push_str(&format!("  <cyan>Players online:</>  {players_online}\r\n"));
+    out.push_str(&format!("  <cyan>Active effects:</>  {effects}\r\n"));
+    out.push_str(&format!("  <cyan>Server tick:</>     <dim>{tick}</>\r\n"));
+    out.push_str(&format!(
+        "  <cyan>Uptime:</>          <b:cyan>{h}h {m}m {s}s</>\r\n"
+    ));
     send_to(world, player, out);
 }
 
@@ -6300,15 +6348,26 @@ pub(crate) fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     };
     let day_suffix = ordinal_suffix(mud_day);
 
+    // Time readout: cyan section labels match the rest of the
+    // static-info family. Real-world server time is reference info
+    // (dimmed); world tick is debug-flavor (dimmed). Game time is
+    // the focal line — bold-yellow on the calendar text plays into
+    // the fantasy-flavor framing and matches the season hue used
+    // in `weather`.
     let mut out = String::from("\r\n");
-    out.push_str(&format!("  Server time: {}\r\n", now.format("%Y-%m-%d %H:%M:%S UTC")));
-    out.push_str(&format!("  Uptime:      {h}h {m}m {s}s\r\n"));
-    out.push_str(&format!("  World tick:  {tick}\r\n"));
     out.push_str(&format!(
-        "  Game time:   The {mud_day}{day_suffix} day of {month_name}, Year {mud_year}.\r\n",
+        "  <cyan>Server time:</> <dim>{}</>\r\n",
+        now.format("%Y-%m-%d %H:%M:%S UTC")
     ));
     out.push_str(&format!(
-        "               It is {mud_hour:02}:00 ({period}); the season is {season}.\r\n",
+        "  <cyan>Uptime:</>      <b:cyan>{h}h {m}m {s}s</>\r\n"
+    ));
+    out.push_str(&format!("  <cyan>World tick:</>  <dim>{tick}</>\r\n"));
+    out.push_str(&format!(
+        "  <cyan>Game time:</>   <b:yellow>The {mud_day}{day_suffix} day of {month_name}, Year {mud_year}.</>\r\n",
+    ));
+    out.push_str(&format!(
+        "               It is <b:yellow>{mud_hour:02}:00</> <dim>({period})</>; the season is <yellow>{season}</>.\r\n",
     ));
     send_to(world, player, out);
 }
@@ -6383,26 +6442,45 @@ pub(crate) fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
         (_, mud_world::Season::Summer) => Some("The long days of summer hold sway."),
         (_, mud_world::Season::Autumn) => Some("Autumn paints the air with change."),
     };
+    // Weather is atmospheric flavor — keep the body default-color
+    // so authored climate lines read cleanly. The live drift line
+    // (current state from WeatherCatalog) gets a cyan accent so
+    // players can tell "this is what the sky is doing right now"
+    // apart from the "this is what this climate feels like"
+    // baseline. Season closer dims; it's a calendar gloss, not the
+    // headline.
     let mut out = String::from("\r\n");
     if let Some(live) = live_line {
-        out.push_str(&format!("{live}\r\n"));
+        out.push_str(&format!("<cyan>{live}</>\r\n"));
     }
     out.push_str(&format!("{line}\r\n"));
     if let Some(s) = season_line {
-        out.push_str(&format!("{s}\r\n"));
+        out.push_str(&format!("<dim>{s}</>\r\n"));
     }
     send_to(world, player, out);
 }
 
 pub(crate) fn cmd_version(world: &mut World, player: Entity, _args: &str) {
+    // Headline line: bold-cyan crate name + bold-yellow version so
+    // the "what am I running" answer pops at the top of the
+    // readout. Profile / tick fields are reference info — cyan
+    // labels, dimmed values.
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     let mut out = String::from("\r\n");
     out.push_str(&format!(
-        "  {} {}\r\n",
+        "  <b:cyan>{}</> <b:yellow>{}</>\r\n",
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
     ));
-    out.push_str(&format!("  Profile: {}\r\n", if cfg!(debug_assertions) { "debug" } else { "release" }));
-    out.push_str(&format!("  Tick rate: {} Hz\r\n", crate::TICK_HZ));
+    out.push_str(&format!("  <cyan>Profile:</>   <dim>{profile}</>\r\n"));
+    out.push_str(&format!(
+        "  <cyan>Tick rate:</> <dim>{} Hz</>\r\n",
+        crate::TICK_HZ
+    ));
     send_to(world, player, out);
 }
 
