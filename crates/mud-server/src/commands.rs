@@ -1822,6 +1822,144 @@ mod tests {
     }
 
     #[test]
+    fn aoe_targets_room_allies_includes_caster_and_group_excludes_mobs() {
+        // RoomAllies = caster + group members in the room. Mobs are
+        // excluded (no allied-mob tag today). Out-of-room group
+        // members also drop out — only co-located allies receive
+        // the buff / heal.
+        use super::{AoeScope, aoe_targets_in_room};
+        let mut world = World::new();
+        let room_a = world.spawn_empty().id();
+        let room_b = world.spawn_empty().id();
+        let caster = world
+            .spawn((
+                Player,
+                Named { name: "Caster".to_string() },
+                mud_world::Located(room_a),
+            ))
+            .id();
+        let _co_located_teammate = world
+            .spawn((
+                Player,
+                Named { name: "Teammate".to_string() },
+                mud_world::Located(room_a),
+                mud_world::Follower(caster),
+            ))
+            .id();
+        let _far_teammate = world
+            .spawn((
+                Player,
+                Named { name: "FarTeammate".to_string() },
+                mud_world::Located(room_b),
+                mud_world::Follower(caster),
+            ))
+            .id();
+        let _mob = world
+            .spawn((
+                mud_world::Mob,
+                Named { name: "a stray dog".to_string() },
+                mud_world::Located(room_a),
+            ))
+            .id();
+
+        let names = aoe_targets_in_room(&mut world, caster, room_a, AoeScope::RoomAllies);
+        assert!(
+            names.iter().any(|n| n == "Caster"),
+            "caster included in RoomAllies: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "Teammate"),
+            "co-located teammate included: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "FarTeammate"),
+            "out-of-room teammate excluded: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "a stray dog"),
+            "mobs excluded from RoomAllies: {names:?}"
+        );
+    }
+
+    #[test]
+    fn aoe_targets_room_all_includes_everyone_except_caster() {
+        // RoomAll is the chaos / admin scope: every Player + Mob
+        // in the room except the caster. Group membership doesn't
+        // grant immunity — that's the point of the variant.
+        use super::{AoeScope, aoe_targets_in_room};
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let caster = world
+            .spawn((
+                Player,
+                Named { name: "Caster".to_string() },
+                mud_world::Located(room),
+            ))
+            .id();
+        let _teammate = world
+            .spawn((
+                Player,
+                Named { name: "Teammate".to_string() },
+                mud_world::Located(room),
+                mud_world::Follower(caster),
+            ))
+            .id();
+        let _mob = world
+            .spawn((
+                mud_world::Mob,
+                Named { name: "a stray dog".to_string() },
+                mud_world::Located(room),
+            ))
+            .id();
+
+        let names = aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomAll);
+        assert!(
+            !names.iter().any(|n| n == "Caster"),
+            "caster excluded from RoomAll: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "Teammate"),
+            "RoomAll includes group teammates (no immunity): {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "a stray dog"),
+            "RoomAll includes mobs: {names:?}"
+        );
+    }
+
+    #[test]
+    fn aoe_targets_empty_room_returns_empty_list() {
+        // Caster alone in a room produces an empty target list for
+        // RoomEnemies and RoomAll (only-caster excluded). RoomAllies
+        // is the exception — caster is included since they're
+        // still themselves an ally.
+        use super::{AoeScope, aoe_targets_in_room};
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let caster = world
+            .spawn((
+                Player,
+                Named { name: "Solo".to_string() },
+                mud_world::Located(room),
+            ))
+            .id();
+
+        assert!(
+            aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomEnemies).is_empty(),
+            "RoomEnemies in an empty room is empty"
+        );
+        assert!(
+            aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomAll).is_empty(),
+            "RoomAll in an empty room is empty (only caster present, who is excluded)"
+        );
+        let allies = aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomAllies);
+        assert_eq!(
+            allies, vec!["Solo".to_string()],
+            "RoomAllies on a solo caster targets self only"
+        );
+    }
+
+    #[test]
     fn parse_quoted_first_token_handles_quotes_and_whitespace() {
         use super::parse_quoted_first_token;
         // Bare word: legacy whitespace split.
