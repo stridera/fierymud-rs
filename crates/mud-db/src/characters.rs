@@ -67,6 +67,12 @@ pub struct CharacterRow {
     /// Thirst gauge — game-hours since last drink. 0 = sated. Same
     /// tick contract as `hunger` but with a tighter threshold (~24).
     pub thirst: i32,
+    /// Lifetime seconds the character has been logged in across all
+    /// sessions. Schema column defaults to 0; the runtime surfaces
+    /// it via the `TimePlayed` component on score's "Played:" line.
+    /// Incrementing on save is a follow-up — the column round-trips
+    /// at zero for now until that lands.
+    pub time_played: i32,
 }
 
 /// Bundle of fields fed into `create` from the login-creation
@@ -384,7 +390,7 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             race::text AS "race!: String",
             experience, title, description,
             strength, dexterity, constitution, intelligence, wisdom, charisma,
-            wealth, bank_wealth, gender, skill_points, hunger, thirst
+            wealth, bank_wealth, gender, skill_points, hunger, thirst, time_played
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -435,7 +441,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             gender,
             skill_points,
             hunger,
-            thirst
+            thirst,
+            time_played
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

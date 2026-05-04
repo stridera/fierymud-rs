@@ -1386,6 +1386,10 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         // follow-up; for now the gauges just round-trip.
         e.insert(mud_world::Hunger(c.hunger));
         e.insert(mud_world::Thirst(c.thirst));
+        // Lifetime time-played in seconds. Surfaces on score's
+        // "Played:" line. Save-time accumulator (incrementing the
+        // column as the session continues) is a follow-up.
+        e.insert(mud_world::TimePlayed(c.time_played));
     }
     entity
 }
@@ -1960,6 +1964,7 @@ mod tests {
             skill_points: 0,
             hunger: 0,
             thirst: 0,
+            time_played: 0,
         }
     }
 

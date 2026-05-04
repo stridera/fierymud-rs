@@ -4689,6 +4689,19 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .map_or_else(String::new, |n| n.name.clone());
             render_color_tags(&raw, ColorMode::Strip)
         });
+    // Lifetime play-time = persisted seconds + current session
+    // elapsed. Suppressed when both contributions are zero (very
+    // brand-new character, no LoggedInAt — shouldn't happen for
+    // online players but keep the line tidy regardless).
+    let play_time_secs: Option<u64> = {
+        let persisted: u64 = world
+            .get::<mud_world::TimePlayed>(player)
+            .map_or(0, |t| u64::try_from(t.0.max(0)).unwrap_or(0));
+        let session = logged_in.map_or(0, |l| l.0.elapsed().as_secs());
+        let total = persisted.saturating_add(session);
+        if total == 0 { None } else { Some(total) }
+    };
+
     // Body size from `RaceDefaults.size_by_race`. The map key is the
     // raw `Race` enum text on `Profile.race` (HUMAN / ELF / ...) and
     // values are the `Size` enum text (`MEDIUM` / `LARGE` / ...).
@@ -4946,6 +4959,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .as_ref()
             .map(|(alias, lines)| (alias.as_str(), *lines)),
         size: size_owned.as_deref(),
+        play_time_secs,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

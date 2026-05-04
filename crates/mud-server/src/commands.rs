@@ -2748,6 +2748,7 @@ mod tests {
             mail_draft: None,
             board_draft: None,
             size: Some("Medium"),
+            play_time_secs: Some(7290), // 2h 1m
         }
     }
 
@@ -4511,6 +4512,37 @@ pub(crate) fn format_idle(secs: u64) -> String {
     }
 }
 
+/// Format a lifetime play-time count into a coarse "1d 4h" / "23m"
+/// string for the score sheet. Differs from `format_idle` in two
+/// ways: collapses sub-minute spans to "0m" rather than "Ns" (the
+/// score "Played:" line surfaces total engagement, not jitter);
+/// promotes to days at 24h+ since lifetime values can grow large.
+pub(crate) fn format_play_time(secs: u64) -> String {
+    if secs < 60 {
+        return String::from("0m");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let hours = mins / 60;
+    let leftover_mins = mins % 60;
+    if hours < 24 {
+        return if leftover_mins == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h {leftover_mins}m")
+        };
+    }
+    let days = hours / 24;
+    let leftover_hours = hours % 24;
+    if leftover_hours == 0 {
+        format!("{days}d")
+    } else {
+        format!("{days}d {leftover_hours}h")
+    }
+}
+
 /// Bundle of all the data the `score` renderers consume. Building it once
 /// in `cmd_score` avoids re-querying components per render variant and
 /// keeps the renderer signatures from blowing past clippy's
@@ -4686,6 +4718,12 @@ pub(crate) struct ScoreData<'a> {
     /// rather than rendering "Size: ?". Capitalize-first matches
     /// the C++ score formatting.
     size: Option<&'a str>,
+    /// Lifetime time played, in total seconds (current session
+    /// included). Sourced from `TimePlayed` plus `LoggedInAt`'s
+    /// elapsed; rendered as "1d 4h" / "23m" via `format_play_time`.
+    /// `None` suppresses the line — used for the corner case where
+    /// `LoggedInAt` is missing and the persisted total is also 0.
+    play_time_secs: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -4773,6 +4811,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(l) = d.logged_in {
         out.push_str(&format!("  Online for: {}\r\n", format_idle(l.0.elapsed().as_secs())));
+    }
+    if let Some(secs) = d.play_time_secs {
+        out.push_str(&format!("  Played:    {}\r\n", format_play_time(secs)));
     }
     if let Some(target) = d.fight_target {
         out.push_str(&format!("  Fighting: {target}\r\n"));
@@ -5158,6 +5199,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(l) = d.logged_in {
         row(format!("Online:    {}", format_idle(l.0.elapsed().as_secs())));
+    }
+    if let Some(secs) = d.play_time_secs {
+        row(format!("Played:    {}", format_play_time(secs)));
     }
     if let Some(target) = d.fight_target {
         row(format!("Fighting:  {target}"));

@@ -395,6 +395,15 @@ pub struct Hunger(pub i32);
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Thirst(pub i32);
 
+/// Lifetime seconds the character has been logged in across all
+/// sessions, sourced from `Characters.time_played` at spawn. Score
+/// renders this on its "Played:" line. Incrementing across
+/// sessions (a save-time accumulator) is a deliberate follow-up;
+/// the column round-trips at zero today, so all players currently
+/// see suppression of the line until persistence lands.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct TimePlayed(pub i32);
+
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct CombatStats {
     pub hit_roll: i32,
