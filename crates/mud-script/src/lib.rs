@@ -1827,6 +1827,49 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:move(direction)` warps the actor through the named
+        // exit of their current room. 30+ corpus refs (TCD entrance
+        // / Pyro exit / academy recruiter / Eleweiss opening) push a
+        // player directly through a quest doorway from a SPEECH or
+        // RECEIVE trigger so the script controls the next-room
+        // landing rather than relying on the player to type the
+        // direction. Silently no-ops on closed/no-exit/missing-room
+        // — the trigger body owns any "the door slams shut" flavor.
+        methods.add_method(
+            "move",
+            |lua, this, dir_label: String| -> mlua::Result<()> {
+                let dir = match dir_label.trim().to_ascii_lowercase().as_str() {
+                    "north" | "n" => mud_db::enums::Direction::North,
+                    "south" | "s" => mud_db::enums::Direction::South,
+                    "east" | "e" => mud_db::enums::Direction::East,
+                    "west" | "w" => mud_db::enums::Direction::West,
+                    "up" | "u" => mud_db::enums::Direction::Up,
+                    "down" | "d" => mud_db::enums::Direction::Down,
+                    "northeast" | "ne" => mud_db::enums::Direction::Northeast,
+                    "northwest" | "nw" => mud_db::enums::Direction::Northwest,
+                    "southeast" | "se" => mud_db::enums::Direction::Southeast,
+                    "southwest" | "sw" => mud_db::enums::Direction::Southwest,
+                    "in" => mud_db::enums::Direction::In,
+                    "out" => mud_db::enums::Direction::Out,
+                    _ => return Ok(()),
+                };
+                world_mut_from_lua(lua, |world| {
+                    let Some(located) = world.get::<Located>(this.entity).copied() else {
+                        return;
+                    };
+                    let Some(target) = world
+                        .get::<mud_world::Exits>(located.0)
+                        .and_then(|exits| exits.0.get(&dir).and_then(|e| e.to))
+                    else {
+                        return;
+                    };
+                    if let Some(mut loc) = world.get_mut::<Located>(this.entity) {
+                        loc.0 = target;
+                    }
+                })
+            },
+        );
+
         // `actor:heal(amount)` is the inverse of `damage` — bumps HP
         // by `amount`, capped at `max`. 7+ corpus refs from friendly
         // healers (animal pets that lick wounds), fountain `RANDOM`
