@@ -1739,6 +1739,28 @@ impl UserData for LuaActor {
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
+                    // `self.worn_by` — for an item entity, the actor
+                    // currently wearing or wielding it. Drives ~8
+                    // RANDOM-trigger object scripts that periodically
+                    // afflict the wearer (insanity curse, soul siphon,
+                    // etc.). The item's Located points at its
+                    // container; combined with an `EquippedSlot`
+                    // component that container is "the wearer".
+                    // Returns nil for items in a chest, on the floor,
+                    // or carried but unworn.
+                    "worn_by" => {
+                        let result = world_from_lua(lua, |w| {
+                            w.get::<Item>(this.entity)?;
+                            w.get::<EquippedSlot>(this.entity)?;
+                            w.get::<Located>(this.entity).map(|l| l.0)
+                        })?;
+                        match result {
+                            Some(e) => Ok(Value::UserData(
+                                lua.create_userdata(LuaActor { entity: e })?,
+                            )),
+                            None => Ok(Value::Nil),
+                        }
+                    }
                     // `actor.alias` — short noun reference, used by
                     // ~11 corpus refs as a stand-in for the actor's
                     // name in messages (`self:say("thanks " ..
