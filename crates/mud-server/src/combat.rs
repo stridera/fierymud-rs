@@ -1756,6 +1756,122 @@ mod tests {
     }
 
     #[test]
+    fn frozen_attacker_is_filtered_from_swing_snapshot() {
+        // Defense-in-depth check: even if a Frozen entity somehow
+        // has Fighting set on them, the swing snapshot must skip
+        // them. Otherwise admin-frozen players (or any future
+        // mid-combat freeze effect) would still keep swinging.
+        use mud_world::Frozen;
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 50);
+        let attacker = make_attacker(&mut world, room, target, 7);
+        try_insert(&mut world, attacker, Frozen);
+
+        run_combat_tick(&mut world);
+
+        let hp = world
+            .get::<Health>(target)
+            .expect("target still has Health");
+        assert_eq!(
+            hp.hp, 50,
+            "Frozen attacker doesn't generate a swing"
+        );
+    }
+
+    #[test]
+    fn re_aggro_skips_frozen_targets() {
+        // A Frozen player co-located with a mob holding their entry
+        // in HateList must not get re-engaged. Same rule shape as
+        // the Ghost test below — life-state markers are the
+        // authoritative liveness gate, not HP.
+        use mud_world::Frozen;
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Tester".to_string() },
+                Located(room),
+                Health { hp: 100, max: 100 },
+                Posture(PostureKind::Standing),
+                Frozen,
+            ))
+            .id();
+        let mob = world
+            .spawn((
+                Mob,
+                Named { name: "Guard".to_string() },
+                Located(room),
+                Health { hp: 50, max: 50 },
+                CombatStats {
+                    hit_roll: 10,
+                    dmg_roll: 20,
+                    ac: 0,
+                    alignment: 0,
+                },
+                Posture(PostureKind::Standing),
+                HateList(vec![player]),
+            ))
+            .id();
+
+        run_combat_tick(&mut world);
+
+        assert!(
+            world.get::<Fighting>(mob).is_none(),
+            "mob doesn't re-aggro onto a frozen target"
+        );
+        assert!(
+            world.get::<Fighting>(player).is_none(),
+            "frozen player doesn't pick up Fighting"
+        );
+    }
+
+    #[test]
+    fn re_aggro_skips_stunned_targets() {
+        // Same coverage shape for Stunned. Stun is short-lived
+        // (effects_tick drops it when the backing EffectInstance
+        // expires) but during the stun window the target should
+        // be off the re-aggro candidate list.
+        use mud_world::Stunned;
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Tester".to_string() },
+                Located(room),
+                Health { hp: 100, max: 100 },
+                Posture(PostureKind::Standing),
+                Stunned,
+            ))
+            .id();
+        let mob = world
+            .spawn((
+                Mob,
+                Named { name: "Guard".to_string() },
+                Located(room),
+                Health { hp: 50, max: 50 },
+                CombatStats {
+                    hit_roll: 10,
+                    dmg_roll: 20,
+                    ac: 0,
+                    alignment: 0,
+                },
+                Posture(PostureKind::Standing),
+                HateList(vec![player]),
+            ))
+            .id();
+
+        run_combat_tick(&mut world);
+
+        assert!(
+            world.get::<Fighting>(mob).is_none(),
+            "mob doesn't re-aggro onto a stunned target"
+        );
+    }
+
+    #[test]
     fn re_aggro_skips_ghost_targets() {
         // Regression: the combat-tick pre-pass that re-engages mobs
         // from their HateList must skip Ghost targets, otherwise a

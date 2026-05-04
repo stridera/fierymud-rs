@@ -402,6 +402,32 @@ mod tests {
     }
 
     #[test]
+    fn ghost_players_skip_regen() {
+        // Ghosts are dead — they don't slowly heal back to max.
+        // release is the only path back from Ghost and it sets
+        // hp = max in one shot. If regen ran for ghosts, the
+        // release transition becomes pointless and "I'm dead but
+        // recovering" reads as a contradiction.
+        let mut world = World::new();
+        let p = make_player(&mut world, 0, 100, 0, 50, PostureKind::Sleeping);
+        world
+            .get_entity_mut(p)
+            .unwrap()
+            .insert(Ghost);
+        run_regen_tick(&mut world);
+        assert_eq!(
+            world.get::<Health>(p).unwrap().hp,
+            0,
+            "ghost HP doesn't regen"
+        );
+        assert_eq!(
+            world.get::<Stamina>(p).unwrap().current,
+            0,
+            "ghost stamina doesn't regen"
+        );
+    }
+
+    #[test]
     fn fighting_blocks_regen() {
         let mut world = World::new();
         let dummy = world.spawn_empty().id();

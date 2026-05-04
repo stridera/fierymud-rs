@@ -2066,6 +2066,60 @@ mod tests {
     }
 
     #[test]
+    fn apply_damage_no_op_on_ghost() {
+        // Regression for the post-death damage loop: apply_damage
+        // must early-return on Ghost targets so a swing snapshotted
+        // before the entity ghosted (or a residual mob targeting
+        // the corpse) doesn't push HP into death-event territory
+        // again. Returns (false, None) — no death event, no
+        // threshold message.
+        use mud_world::Ghost;
+        let mut world = World::new();
+        let target = world
+            .spawn((Health { hp: 0, max: 100 }, Ghost))
+            .id();
+        let (dead, msg) = apply_damage(&mut world, target, 50);
+        assert!(!dead, "Ghost target doesn't trigger a death event");
+        assert_eq!(msg, None, "Ghost target doesn't get threshold messages");
+        assert_eq!(
+            world.get::<Health>(target).unwrap().hp,
+            0,
+            "Ghost HP unchanged by apply_damage"
+        );
+    }
+
+    #[test]
+    fn apply_heal_hp_no_op_on_ghost() {
+        // Healing a corpse is a no-op. release is the only path
+        // back from Ghost — it sets hp = max in one shot.
+        use mud_world::Ghost;
+        let mut world = World::new();
+        let target = world
+            .spawn((Health { hp: 0, max: 100 }, Ghost))
+            .id();
+        let healed = apply_heal_hp(&mut world, target, 50);
+        assert_eq!(healed, 0, "Ghost target reports no healing applied");
+        assert_eq!(
+            world.get::<Health>(target).unwrap().hp,
+            0,
+            "Ghost HP unchanged by apply_heal_hp"
+        );
+    }
+
+    #[test]
+    fn apply_heal_stamina_no_op_on_ghost() {
+        // Same parity as HP: corpses don't refill stamina either.
+        use mud_world::Ghost;
+        let mut world = World::new();
+        let target = world
+            .spawn((Stamina { current: 0, max: 50 }, Ghost))
+            .id();
+        let healed = apply_heal_stamina(&mut world, target, 25);
+        assert_eq!(healed, 0, "Ghost target reports no stamina healed");
+        assert_eq!(world.get::<Stamina>(target).unwrap().current, 0);
+    }
+
+    #[test]
     fn apply_heal_hp_caps_at_max() {
         let mut world = World::new();
         let target = world.spawn(Health { hp: 50, max: 100 }).id();
