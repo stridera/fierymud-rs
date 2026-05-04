@@ -4977,6 +4977,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         size: size_owned.as_deref(),
         play_time_secs,
         last_login_secs_ago,
+        is_ghost: world.get::<mud_world::Ghost>(player).is_some(),
+        is_stunned: world.get::<mud_world::Stunned>(player).is_some(),
+        is_frozen: world.get::<mud_world::Frozen>(player).is_some(),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

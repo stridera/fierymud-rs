@@ -2750,6 +2750,9 @@ mod tests {
             size: Some("Medium"),
             play_time_secs: Some(7290), // 2h 1m
             last_login_secs_ago: Some(86_400 * 2), // 2 days
+            is_ghost: false,
+            is_stunned: false,
+            is_frozen: false,
         }
     }
 
@@ -4582,6 +4585,7 @@ pub(crate) fn format_play_time(secs: u64) -> String {
 /// in `cmd_score` avoids re-querying components per render variant and
 /// keeps the renderer signatures from blowing past clippy's
 /// `too_many_arguments` threshold.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ScoreData<'a> {
     name: &'a str,
     hp: Option<Health>,
@@ -4765,6 +4769,14 @@ pub(crate) struct ScoreData<'a> {
     /// never logged in before — score then suppresses the line.
     /// Rendered via `format_time_ago` as "3 days ago" / "just now".
     last_login_secs_ago: Option<i64>,
+    /// Life-state markers feeding the Posture line's color tag.
+    /// Priority order in `status_color_tag`: ghost > frozen >
+    /// stunned > fighting > posture-driven. Together with `posture`
+    /// and `fight_target` they pick the line's hue without
+    /// restructuring the standard/fancy renderers.
+    is_ghost: bool,
+    is_stunned: bool,
+    is_frozen: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -4833,7 +4845,18 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         ));
     }
     if let Some(p) = d.posture {
-        out.push_str(&format!("  Posture: {}\r\n", p.0.label()));
+        let tag = status_color_tag(
+            Some(p.0),
+            d.fight_target.is_some(),
+            d.is_ghost,
+            d.is_frozen,
+            d.is_stunned,
+        );
+        let label = match tag {
+            Some(open) => format!("{open}{}</>", p.0.label()),
+            None => p.0.label().to_string(),
+        };
+        out.push_str(&format!("  Posture: {label}\r\n"));
     }
     if d.stealth {
         out.push_str("  Stealth: hidden\r\n");
@@ -5092,6 +5115,34 @@ pub(crate) fn encumbrance_band(carried: f64, capacity: f64) -> &'static str {
     }
 }
 
+/// XML-Lite open tag for the score sheet's Posture line. Priority
+/// order from worst to best: ghost > frozen > stunned > fighting >
+/// posture-driven (yellow for non-standing, none for standing). Mirrors
+/// the C++ score's status-color table without inventing new hues.
+/// `None` means "render plain"; the caller emits no tag.
+#[allow(clippy::fn_params_excessive_bools)]
+pub(crate) fn status_color_tag(
+    posture: Option<PostureKind>,
+    in_combat: bool,
+    is_ghost: bool,
+    is_frozen: bool,
+    is_stunned: bool,
+) -> Option<&'static str> {
+    if is_ghost {
+        return Some("<b:black>");
+    }
+    if is_frozen || is_stunned {
+        return Some("<b:cyan>");
+    }
+    if in_combat {
+        return Some("<b:red>");
+    }
+    match posture? {
+        PostureKind::Standing => None,
+        _ => Some("<yellow>"),
+    }
+}
+
 /// XML-Lite open tag for the score sheet's encumbrance line. Red
 /// at 90%+, yellow at 70%+, none below — same gradient the C++
 /// score uses, so a player crossing the heavy-load threshold sees
@@ -5258,7 +5309,18 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         ));
     }
     if let Some(p) = d.posture {
-        row(format!("Posture:   {}", p.0.label()));
+        let tag = status_color_tag(
+            Some(p.0),
+            d.fight_target.is_some(),
+            d.is_ghost,
+            d.is_frozen,
+            d.is_stunned,
+        );
+        let label = match tag {
+            Some(open) => format!("{open}{}</>", p.0.label()),
+            None => p.0.label().to_string(),
+        };
+        row(format!("Posture:   {label}"));
     }
     if d.stealth {
         row(String::from("Stealth:   hidden"));
