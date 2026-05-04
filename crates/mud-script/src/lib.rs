@@ -17,8 +17,8 @@ use mlua::{
 use mud_world::{
     AbilityCatalog, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats, CoreStats, Description,
     EffectCatalog, EffectInstance, EquippedSlot, Fighting, Follower, Health, Item, Keywords,
-    KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Player,
-    Posture, PostureKind, Profile, Stealth, Title, TriggerCatalog, WorldKey, WorldKeyIndex,
+    KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Online,
+    Player, Posture, PostureKind, Profile, Stealth, Title, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 
 /// One trigger body that ran into `wait(N)` and got parked. We hold the
@@ -1823,6 +1823,40 @@ impl UserData for LuaActor {
             world_mut_from_lua(lua, |world| {
                 if let Some(mut h) = world.get_mut::<Health>(this.entity) {
                     h.hp = (h.hp - amount).max(0);
+                }
+            })
+        });
+
+        // `actor:shout(msg)` global broadcast every online player
+        // hears regardless of room. 8+ corpus refs from
+        // plot-significant declarations: pirate captain warnings,
+        // angry-gardener "MURDERER!" cry, kingspriest fight taunts,
+        // bronze statue rage. Mob speaker has no player-side "you
+        // shout" feedback line — mobs aren't in the audience query —
+        // so this is purely a broadcast.
+        methods.add_method("shout", |lua, this, msg: String| -> mlua::Result<()> {
+            if msg.trim().is_empty() {
+                return Ok(());
+            }
+            world_mut_from_lua(lua, |world| {
+                let speaker_name = world
+                    .get::<Named>(this.entity)
+                    .map_or_else(|| "Someone".to_string(), |n| n.name.clone());
+                let audience: Vec<Entity> = {
+                    let mut q = world
+                        .query_filtered::<Entity, (With<Player>, With<Online>)>();
+                    q.iter(world).filter(|e| *e != this.entity).collect()
+                };
+                if audience.is_empty() {
+                    return;
+                }
+                if !world.contains_resource::<LuaOutbox>() {
+                    world.insert_resource(LuaOutbox::default());
+                }
+                let line = format!("{speaker_name} shouts, \"{msg}\"");
+                let mut out = world.resource_mut::<LuaOutbox>();
+                for t in audience {
+                    out.direct.push((t, line.clone()));
                 }
             })
         });
