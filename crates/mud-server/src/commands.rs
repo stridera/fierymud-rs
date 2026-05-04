@@ -3980,6 +3980,38 @@ pub(crate) fn exit_state_color(state: ExitState) -> &'static str {
     }
 }
 
+/// XML-Lite open tag for a player's `who` level tag, banded by
+/// progression milestone. None means "render plain". Bands tuned
+/// to the level table: 100+ = immortal staff, 50-99 = endgame,
+/// 25-49 = mid, 10-24 = leveling, 1-9 = newbie. Lets the player
+/// scan the who list and immediately spot peers / staff.
+#[must_use]
+pub(crate) fn who_level_color(level: i32) -> Option<&'static str> {
+    match level {
+        i32::MIN..=0 => None,
+        1..=9 => Some("<yellow>"),
+        10..=24 => Some("<b:yellow>"),
+        25..=49 => Some("<green>"),
+        50..=99 => Some("<b:cyan>"),
+        100..=104 => Some("<b:magenta>"),
+        _ => Some("<b:white>"),
+    }
+}
+
+/// XML-Lite open tag for an idle duration. Active sessions return
+/// None (plain); progressively longer idle gets warmer colors so
+/// `who` and `idle` make stale sessions easy to spot at a glance.
+/// Bands roughly: <5min plain, <30min cyan, <2h yellow, longer red.
+#[must_use]
+pub(crate) fn idle_color(idle_secs: u64) -> Option<&'static str> {
+    match idle_secs {
+        0..=299 => None,                // <5m: active enough
+        300..=1799 => Some("<cyan>"),   // 5-30m
+        1800..=7199 => Some("<yellow>"), // 30m-2h
+        _ => Some("<red>"),             // 2h+
+    }
+}
+
 pub(crate) fn vital_color_tag(current: i32, max: i32) -> Option<&'static str> {
     if max <= 0 {
         return None;

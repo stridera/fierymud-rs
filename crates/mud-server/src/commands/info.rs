@@ -4387,11 +4387,15 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
         // collide with the query's borrow on World. Class is
         // looked up by Profile.class_id and rendered as plain_name
         // (no color tags — color sneaks in via the title).
+        // `name` (with builder color tags) — `plain_name` was the
+        // pre-color shape. Class-tag color in the who list comes
+        // from this; the render path strips tags for clients that
+        // don't support color so plain telnet still reads cleanly.
         let class_lookup: std::collections::HashMap<i32, String> = world
             .resource::<ClassCatalog>()
             .by_id
             .iter()
-            .map(|(id, def)| (*id, def.plain_name.clone()))
+            .map(|(id, def)| (*id, def.name.clone()))
             .collect();
         let mut q = world.query_filtered::<(
             Entity,
@@ -4452,26 +4456,26 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     };
     let header = if let Some(needle) = &clan_filter {
         format!(
-            "\r\n{} of {} online (clan {needle}):\r\n",
+            "\r\n<b:cyan>{} of {} online</> (clan <b:yellow>{needle}</>):\r\n",
             raw_filtered.len(),
             total_online,
         )
     } else if let Some((lo, hi)) = level_filter {
         if lo == hi {
             format!(
-                "\r\n{} of {} online (level {lo}):\r\n",
+                "\r\n<b:cyan>{} of {} online</> (level {lo}):\r\n",
                 raw_filtered.len(),
                 total_online,
             )
         } else {
             format!(
-                "\r\n{} of {} online (levels {lo}-{hi}):\r\n",
+                "\r\n<b:cyan>{} of {} online</> (levels {lo}-{hi}):\r\n",
                 raw_filtered.len(),
                 total_online,
             )
         }
     } else {
-        format!("\r\n{total_online} online:\r\n")
+        format!("\r\n<b:cyan>{total_online} online</>:\r\n")
     };
     let mut out = header;
     // Sort by level desc so endgame players surface first; same-
@@ -4483,31 +4487,46 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
         let in_group = group_size.get(&root).copied().unwrap_or(0) > 1;
         out.push_str("  ");
         if r.level > 0 {
-            out.push_str(&format!("[L{:>3}] ", r.level));
+            // Level tag colored by progression band — newbie
+            // yellow / mid green / endgame cyan / staff magenta.
+            // Lets the player scan the list and spot peers + staff
+            // at a glance.
+            let lvl_color = who_level_color(r.level);
+            let lvl_label = match lvl_color {
+                Some(open) => format!("{open}[L{:>3}]</>", r.level),
+                None => format!("[L{:>3}]", r.level),
+            };
+            out.push_str(&format!("{lvl_label} "));
         } else {
             out.push_str("       ");
         }
         out.push_str(&pad_visible(&r.name, NAME_COL));
         if let Some(class) = &r.class_name {
+            // class is the catalog `name` field (carries authored
+            // color); render-time mapping turns the tags into ANSI.
             out.push_str(&format!(" [{class}]"));
         }
         if let Some(abbrev) = &r.clan_abbrev {
-            out.push_str(&format!(" [{abbrev}]"));
+            out.push_str(&format!(" [<b:yellow>{abbrev}</>]"));
         }
         if let Some(t) = &r.title {
             out.push(' ');
             out.push_str(t);
         }
         if in_group {
-            out.push_str(" [G]");
+            out.push_str(" [<b:green>G</>]");
         }
         if r.afk {
-            out.push_str(" [AFK]");
+            out.push_str(" [<yellow>AFK</>]");
         }
         if let Some(secs) = r.idle
             && secs >= 60
         {
-            out.push_str(&format!(" [idle {}]", format_idle(secs)));
+            let idle_label = match idle_color(secs) {
+                Some(open) => format!("[{open}idle {}</>]", format_idle(secs)),
+                None => format!("[idle {}]", format_idle(secs)),
+            };
+            out.push_str(&format!(" {idle_label}"));
         }
         out.push_str("\r\n");
     }
@@ -4553,30 +4572,37 @@ pub(crate) fn cmd_idle(world: &mut World, player: Entity, args: &str) {
     });
     let mut out = if let Some(threshold) = min_idle_secs {
         format!(
-            "\r\n{} of {} online idle ≥ {}:\r\n",
+            "\r\n<b:cyan>{} of {} online idle ≥ {}</>:\r\n",
             rows.len(),
             total_online,
             format_idle(threshold),
         )
     } else {
-        format!("\r\n{total_online} online by idle:\r\n")
+        format!("\r\n<b:cyan>{total_online} online by idle</>:\r\n")
     };
-    out.push_str("  Name                     Idle      Online\r\n");
+    out.push_str("  <cyan>Name                     Idle      Online</>\r\n");
     for (name, idle, online) in &rows {
+        // Idle column: plain "active" for <60s sessions, gray
+        // "fresh" for never-typed, otherwise color-graded by band
+        // (cyan / yellow / red as the session goes stale).
         let idle_label = match idle {
-            None => "fresh".to_string(),
+            None => "<dim>fresh</>".to_string(),
             Some(s) if *s < 60 => "active".to_string(),
-            Some(s) => format_idle(*s),
+            Some(s) => match idle_color(*s) {
+                Some(open) => format!("{open}{}</>", format_idle(*s)),
+                None => format_idle(*s),
+            },
         };
         let online_label = online.map_or_else(|| "?".to_string(), format_idle);
         // pad_visible counts visible chars (skipping XML-Lite tags)
         // so columns stay aligned even when names contain `<red>...</>`.
         let padded_name = pad_visible(name, 24);
+        let padded_idle = pad_visible(&idle_label, 9);
         out.push_str(&format!(
-            "  {padded_name} {idle_label:<9} {online_label}\r\n"
+            "  {padded_name} {padded_idle} {online_label}\r\n"
         ));
     }
-    send_to(world, player, out);
+    send_rendered(world, player, &out);
 }
 
 pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
