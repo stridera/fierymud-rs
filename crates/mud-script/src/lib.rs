@@ -2398,6 +2398,40 @@ impl UserData for LuaRoom {
             },
         );
 
+        // `room:find_object(keyword)` is the item-side mirror of
+        // `room:find_actor`. Searches items lying in this room (not
+        // carried items in NPCs/players inventories) for one matching
+        // `keyword`. 22+ corpus refs — typically used to gate "is the
+        // ritual artifact still here" checks in quest scripts.
+        methods.add_method(
+            "find_object",
+            |lua, this, needle: String| -> mlua::Result<Value> {
+                let needle = needle.trim().to_ascii_lowercase();
+                if needle.is_empty() {
+                    return Ok(Value::Nil);
+                }
+                let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
+                    let mut q = world
+                        .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+                    q.iter(world)
+                        .find(|(_, l, n, kw)| {
+                            l.0 == this.entity
+                                && (n.name.to_ascii_lowercase().contains(&needle)
+                                    || kw.is_some_and(|k| {
+                                        k.0.iter().any(|w| {
+                                            w.to_ascii_lowercase().contains(&needle)
+                                        })
+                                    }))
+                        })
+                        .map(|(e, _, _, _)| e)
+                })?;
+                match entity {
+                    Some(e) => Ok(Value::UserData(lua.create_userdata(LuaActor { entity: e })?)),
+                    None => Ok(Value::Nil),
+                }
+            },
+        );
+
         // `room:weather()` returns the current precip label
         // ("clear", "rain", "blizzard", …) for the room's zone.
         // Returns "clear" when the zone has no entry in the
