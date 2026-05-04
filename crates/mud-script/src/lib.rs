@@ -2173,6 +2173,41 @@ impl UserData for LuaRoom {
                 format!("Room({name})")
             })
         });
+
+        // Field-style accessors corpus bodies use directly:
+        // `room.id`, `room.local_id`, `room.zone_id`, `room.name`.
+        // Returns nil for unknown keys to match Lua table semantics
+        // (so `tostring(room.unknown_field)` is "nil" rather than
+        // a hard error). The method-style accessors above stay the
+        // canonical way to invoke functionality (sector, weather,
+        // temp, etc.); these handle the bare-property reads.
+        methods.add_meta_method(
+            MetaMethod::Index,
+            |lua, this, key: String| -> mlua::Result<Value> {
+                match key.as_str() {
+                    "id" | "local_id" => {
+                        let id = world_from_lua(lua, |w| {
+                            w.get::<WorldKey>(this.entity).map_or(0, |k| k.id)
+                        })?;
+                        Ok(Value::Integer(id.into()))
+                    }
+                    "zone_id" => {
+                        let zone = world_from_lua(lua, |w| {
+                            w.get::<WorldKey>(this.entity).map_or(0, |k| k.zone)
+                        })?;
+                        Ok(Value::Integer(zone.into()))
+                    }
+                    "name" => {
+                        let s = world_from_lua(lua, |w| {
+                            w.get::<Named>(this.entity)
+                                .map_or_else(String::new, |n| n.name.clone())
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    _ => Ok(Value::Nil),
+                }
+            },
+        );
     }
 }
 
