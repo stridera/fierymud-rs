@@ -2406,6 +2406,23 @@ impl UserData for LuaRoom {
                         }
                         Ok(Value::Table(tbl))
                     }
+                    // `room.actor_count` — count of actors located in
+                    // this room. 10+ corpus refs in environmental-
+                    // damage scripts that scale a hazard by number of
+                    // occupants (`local pop = self.actor_count / 2`).
+                    // Cheaper than building the actors table just for
+                    // its length when callers only need the count.
+                    "actor_count" => {
+                        let count = world_mut_from_lua(lua, |w| {
+                            let mut q = w
+                                .query_filtered::<(Entity, &Located), Without<Item>>();
+                            i64::try_from(
+                                q.iter(w).filter(|(_, l)| l.0 == this.entity).count(),
+                            )
+                            .unwrap_or(i64::MAX)
+                        })?;
+                        Ok(Value::Integer(count))
+                    }
                     _ => Ok(Value::Nil),
                 }
             },
