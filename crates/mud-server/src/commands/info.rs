@@ -125,7 +125,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["wealth", "gold", "money", "coins"],
+        names: &["wealth", "gold", "money", "coins", "wallet"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Banking,

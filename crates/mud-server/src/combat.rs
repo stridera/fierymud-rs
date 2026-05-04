@@ -678,6 +678,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
     let was_sleeping =
         world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
+    // posture-and-lifestate.md: a defender attacked while RESTING
+    // auto-stands on the hit. Sleeping has its own jolt-awake path
+    // (different visual), so the two stay separate flags.
+    let was_resting =
+        world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Resting);
 
     // Mob memory: any swing initiated by a player at a mob lands
     // them in that mob's grudge book, regardless of hit/miss/crit.
@@ -846,6 +851,19 @@ fn apply_swing(world: &mut World, s: &Swing) {
             room,
             &[s.attacker, s.target],
             &format!("<yellow>{target_name} jolts awake!</>\r\n"),
+        );
+    } else if was_resting && !dead {
+        // posture-and-lifestate.md: a hit on a resting defender
+        // forces them to stand. Mirrors the sleeping jolt-awake
+        // path with a less-startled visual — they were already
+        // conscious, just supine.
+        try_insert(world, s.target, Posture(PostureKind::Standing));
+        send_to(world, s.target, "<yellow>You scramble to your feet!</>\r\n");
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[s.attacker, s.target],
+            &format!("<yellow>{target_name} scrambles to their feet!</>\r\n"),
         );
     }
     if let Some(m) = threshold_msg {
@@ -1911,6 +1929,64 @@ mod tests {
         assert!(
             world.get::<Health>(target).unwrap().hp < 50,
             "sleeping target took damage from auto-hit"
+        );
+    }
+
+    #[test]
+    fn resting_target_scrambles_to_feet_on_damage() {
+        // posture-and-lifestate.md design: a hit on a RESTING
+        // defender auto-stands them. Mirror of the existing
+        // sleeping jolt-awake path. Stops resting players from
+        // staying on the ground while taking damage indefinitely.
+        //
+        // Resting adds +5 AC (posture_ac_modifier), so the
+        // attacker needs hit_roll high enough to clear that
+        // band even at the worst end of the swing roll. 50 is
+        // well past the 100% cap.
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = world
+            .spawn((
+                Named { name: "Resting".to_string() },
+                Located(room),
+                Health { hp: 50, max: 50 },
+                CombatStats {
+                    hit_roll: 0,
+                    dmg_roll: 0,
+                    ac: 0,
+                    alignment: 0,
+                },
+                Posture(PostureKind::Resting),
+            ))
+            .id();
+        let attacker = world
+            .spawn((
+                Named { name: "Attacker".to_string() },
+                Located(room),
+                Fighting(target),
+                CombatStats {
+                    hit_roll: 50,
+                    dmg_roll: 7,
+                    ac: 10,
+                    alignment: 0,
+                },
+                Posture(PostureKind::Standing),
+            ))
+            .id();
+        try_insert(&mut world, target, Fighting(attacker));
+
+        run_combat_tick(&mut world);
+
+        assert_eq!(
+            world.get::<Posture>(target).map(|p| p.0),
+            Some(PostureKind::Standing),
+            "resting target stands after taking a hit"
+        );
+        // Hit should still land — the auto-stand happens after
+        // damage application, not as a dodge.
+        assert!(
+            world.get::<Health>(target).unwrap().hp < 50,
+            "swing landed before the auto-stand"
         );
     }
 
