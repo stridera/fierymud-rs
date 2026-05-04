@@ -77,6 +77,15 @@ pub struct AbilityRow {
     /// string so the dispatcher can match on any of the values
     /// without the runtime needing to know about the legacy ones.
     pub target_scope: String,
+    /// Gates ward-vs-armor mitigation routing per `combat.md`.
+    /// `true` engages magical mitigation (Ward) at combat
+    /// pipeline step 5; `false` routes purely through Armor.
+    /// Default convention: `SPELL` / `CHANT` / `SONG` are magical;
+    /// `SKILL` is mundane unless flagged otherwise (sphere-of-X
+    /// magical-flavor skills). The Ward stat split lands later;
+    /// today the column loads through the catalog as
+    /// groundwork.
+    pub is_magical: bool,
 }
 
 pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
@@ -96,7 +105,8 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
             cooldown_ms,
             is_area,
             "minPosition"::text AS "min_position!: String",
-            target_scope::text AS "target_scope!: String"
+            target_scope::text AS "target_scope!: String",
+            is_magical
         FROM "Ability"
         ORDER BY id
         "#

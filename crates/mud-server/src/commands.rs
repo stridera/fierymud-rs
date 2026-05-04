@@ -1731,6 +1731,7 @@ mod tests {
             min_position_label: "STANDING".to_string(),
             min_posture_rank: 9,
             target_scope: "ROOM_ENEMIES".to_string(),
+            is_magical: true,
         };
         let _ = AbilityCatalog::default();
         // The property under test is a one-line conditional; the

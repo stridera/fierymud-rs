@@ -1026,6 +1026,15 @@ pub struct AbilityDef {
     /// `LINE` / `AREA` / `GROUP`) fall through to single-target
     /// for now.
     pub target_scope: String,
+    /// Gates magical mitigation (Ward) at combat pipeline step 5
+    /// per `docs/design/combat.md`. `true` engages Ward in
+    /// addition to Armor; `false` routes purely through Armor
+    /// (mundane fire from a torch swing, applied poison, etc.).
+    /// Loaded from `Ability.is_magical`; SPELL / CHANT / SONG
+    /// default true, SKILL defaults false. The Ward stat is not
+    /// yet split out from AC, so this field is groundwork — the
+    /// mitigation routing lands once Ward is its own component.
+    pub is_magical: bool,
 }
 
 /// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The
