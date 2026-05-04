@@ -1739,6 +1739,29 @@ impl UserData for LuaActor {
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
+                    // `actor.alias` — short noun reference, used by
+                    // ~11 corpus refs as a stand-in for the actor's
+                    // name in messages (`self:say("thanks " ..
+                    // actor.alias)`). For mobs, returns the first
+                    // entry in `Keywords` (typically the lowercase
+                    // noun like "witch" or "guard"). Falls back to
+                    // `Named.name` when Keywords is missing or
+                    // empty — which covers every player, since the
+                    // login spawn doesn't attach a Keywords
+                    // component.
+                    "alias" => {
+                        let s = world_from_lua(lua, |w| {
+                            let kw = w
+                                .get::<Keywords>(this.entity)
+                                .and_then(|k| k.0.first().cloned());
+                            kw.unwrap_or_else(|| {
+                                w.get::<Named>(this.entity)
+                                    .map(|n| n.name.clone())
+                                    .unwrap_or_default()
+                            })
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
                     "hp" => world_from_lua(lua, |w| {
                         Value::Integer(w.get::<Health>(this.entity).map_or(0, |h| h.hp).into())
                     }),
