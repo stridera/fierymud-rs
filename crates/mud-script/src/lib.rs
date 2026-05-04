@@ -1924,7 +1924,9 @@ impl UserData for LuaActor {
                     // 42 corpus refs. Returns the posture label
                     // matching the legacy "Position" enum token
                     // ("standing" / "sitting" / "sleeping" / etc.).
-                    "position" => {
+                    // `stance` is the DG-Script alias for the same
+                    // value (1 corpus ref in dormitory_sleep.lua).
+                    "position" | "stance" => {
                         let s = world_from_lua(lua, |w| {
                             w.get::<Posture>(this.entity).map_or_else(
                                 || "standing".to_string(),
