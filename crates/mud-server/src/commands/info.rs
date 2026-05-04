@@ -8233,9 +8233,16 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
         for chunk in names.chunks(3) {
             out.push_str("  ");
             for n in chunk {
-                let rendered = render_color_tags(n, mode);
-                let padded = pad_visible(&rendered, column_width);
-                out.push_str(&padded);
+                // Pad in XML-Lite space first (visible_width
+                // understands `<tag>` markers), THEN render. If
+                // we render first, the resulting ANSI escapes
+                // confuse visible_width and the padding under-
+                // counts — the entry that follows ends up
+                // touching the previous one for any name with
+                // a colored sphere parenthetical.
+                let padded = pad_visible(n, column_width);
+                let rendered = render_color_tags(&padded, mode);
+                out.push_str(&rendered);
             }
             out.push_str("\r\n");
         }
