@@ -7773,13 +7773,18 @@ pub(crate) fn invoke_ability_with(
                         .position(|e| e.ability_id == def.id && e.ready)
                 });
             let Some(idx) = memorized_idx else {
+                // Display name in the prose; lowercase + space form
+                // for the `memorize` hint (parser accepts both
+                // underscore and space, but 'magic missile' reads
+                // friendlier than magic_missile to a fresh player).
+                let memorize_hint =
+                    def.plain_name.to_ascii_lowercase().replace('_', " ");
                 send_to(
                     world,
                     player,
                     format!(
-                        "You haven't memorized {}. Use `memorize {}` first.\r\n",
-                        def.plain_name,
-                        def.plain_name.to_ascii_lowercase()
+                        "You haven't memorized {}. Use `memorize '{memorize_hint}'` first.\r\n",
+                        def.name,
                     ),
                 );
                 return;
