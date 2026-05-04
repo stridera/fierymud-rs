@@ -1275,8 +1275,11 @@ inventory::submit! {
             long: "By default shows only abilities you've actually \
                    learned, grouped by kind (Spells / Chants / Songs / \
                    Skills). Add `all` to dump the full catalog (handy \
-                   for builders / curiosity). Optional substring filter \
-                   narrows either scope: `spells fire` / `spells all fire`.",
+                   for builders / curiosity). The filter substring \
+                   matches both the ability name AND its sphere — \
+                   `spells fire` lands Fireball (name) plus every \
+                   fire-sphere spell. Try also: `spells all healing` \
+                   for the full healing-sphere catalog.",
         },
         run: cmd_spells,
     }
@@ -8154,7 +8157,15 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
         {
             continue;
         }
-        if !filter.is_empty() && !def.plain_name.to_ascii_lowercase().contains(&filter) {
+        // Filter matches if the substring lands on either the
+        // ability name OR its sphere — so `spells fire` shows
+        // both Fireball (name match) and Burning Hands (sphere
+        // match), letting players cluster by elemental theme
+        // without learning a separate keyword.
+        if !filter.is_empty()
+            && !def.plain_name.to_ascii_lowercase().contains(&filter)
+            && def.sphere.as_deref().is_none_or(|s| s != filter)
+        {
             continue;
         }
         let bucket = match def.kind {
@@ -9377,7 +9388,15 @@ pub(crate) fn cmd_abilities_kind(
         {
             continue;
         }
-        if !filter.is_empty() && !def.plain_name.to_ascii_lowercase().contains(&filter) {
+        // Filter matches if the substring lands on either the
+        // ability name OR its sphere — so `spells fire` shows
+        // both Fireball (name match) and Burning Hands (sphere
+        // match), letting players cluster by elemental theme
+        // without learning a separate keyword.
+        if !filter.is_empty()
+            && !def.plain_name.to_ascii_lowercase().contains(&filter)
+            && def.sphere.as_deref().is_none_or(|s| s != filter)
+        {
             continue;
         }
         names.push(format_ability_with_sphere(def));
