@@ -6864,6 +6864,19 @@ pub fn lua_invoke_skill(world: &mut World, caster: Entity, args: &str) {
     );
 }
 
+/// Sibling of `lua_invoke_skill` for the Spell kind. Hardcodes
+/// verb="cast" so trigger bodies route through the standard
+/// spell-casting message templates.
+pub fn lua_invoke_spell(world: &mut World, caster: Entity, args: &str) {
+    invoke_ability(
+        world,
+        caster,
+        args,
+        mud_db::abilities::AbilityKind::Spell,
+        "cast",
+    );
+}
+
 /// Same as [`invoke_ability`] but treats the call as a non-first
 /// dispatch in an AOE batch:
 ///   - skips the leading description-box header (so `cmd_roar` over

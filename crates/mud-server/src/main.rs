@@ -119,6 +119,7 @@ async fn main() {
     // host crate doesn't depend on mud-server, so we hand it a
     // fn-ptr that routes to `invoke_ability` with kind=Skill.
     world.insert_resource(mud_script::SkillExecutor(Some(commands::lua_invoke_skill)));
+    world.insert_resource(mud_script::SpellExecutor(Some(commands::lua_invoke_spell)));
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
         error!(error = %e, "world load failed");

@@ -68,6 +68,13 @@ const TICK_HZ: u64 = 10;
 #[derive(Resource, Default, Clone, Copy)]
 pub struct SkillExecutor(pub Option<fn(&mut World, Entity, &str)>);
 
+/// Sibling of `SkillExecutor` for the Spell kind. Drives the Lua
+/// `spells.cast(caster, "name", target?, level?)` binding. mud-server
+/// installs a shim that calls `invoke_ability(.., AbilityKind::Spell,
+/// "cast")`. Same `Option<fn>` pattern so unit tests stay decoupled.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct SpellExecutor(pub Option<fn(&mut World, Entity, &str)>);
+
 impl Default for LuaHost {
     fn default() -> Self {
         Self::new()
@@ -381,6 +388,26 @@ impl LuaHost {
                 )?,
             )?;
             globals.set("skills", skills_tbl)?;
+
+            // `spells.cast(actor, name, target?, level?)` dispatches a
+            // named spell via `SpellExecutor`. The corpus passes the
+            // caster as `self`, the spell name, an optional target
+            // (LuaActor or string), and an optional level — the level
+            // is currently ignored by the runtime since
+            // `invoke_ability` derives caster level itself, but the
+            // parameter is accepted so existing trigger bodies work
+            // unchanged. 100+ corpus refs across mob combat AI and
+            // greet flavor scripts.
+            let spells_tbl = self.lua.create_table()?;
+            spells_tbl.set(
+                "cast",
+                self.lua.create_function(
+                    |lua, args: MultiValue| -> mlua::Result<()> {
+                        spells_cast_dispatch(lua, args)
+                    },
+                )?,
+            )?;
+            globals.set("spells", spells_tbl)?;
 
             // `world` namespace: read-only queries against the live
             // world. `count_mobiles` / `count_objects` return how many
@@ -789,6 +816,15 @@ impl LuaHost {
         )?;
         globals.set("skills", skills_tbl)?;
 
+        let spells_tbl = self.lua.create_table()?;
+        spells_tbl.set(
+            "cast",
+            self.lua.create_function(
+                |lua, args: MultiValue| -> mlua::Result<()> { spells_cast_dispatch(lua, args) },
+            )?,
+        )?;
+        globals.set("spells", spells_tbl)?;
+
         let world_tbl = self.lua.create_table()?;
         world_tbl.set(
             "count_mobiles",
@@ -1149,6 +1185,49 @@ fn skills_execute(
             None => skill.to_string(),
         };
         f(world, caster, &args);
+    })
+}
+
+/// Adapter from `spells.cast(caster, name, target?, level?)` Lua call
+/// to `SpellExecutor`. The level argument is currently ignored — the
+/// runtime derives caster level from `Profile`/`MobProto`. Accepted
+/// purely so existing trigger bodies that pass `self.level` keep
+/// working unchanged.
+fn spells_cast_dispatch(lua: &Lua, args: MultiValue) -> mlua::Result<()> {
+    let mut iter = args.into_iter();
+    let Some(caster_val) = iter.next() else {
+        return Ok(());
+    };
+    let Value::UserData(caster_ud) = caster_val else {
+        return Ok(());
+    };
+    let caster = caster_ud.borrow::<LuaActor>()?.entity;
+    let Some(name_val) = iter.next() else {
+        return Ok(());
+    };
+    let name = match name_val {
+        Value::String(s) => s
+            .to_str()
+            .map(|c| c.trim().to_string())
+            .unwrap_or_default(),
+        _ => return Ok(()),
+    };
+    if name.is_empty() {
+        return Ok(());
+    }
+    // Third arg is an optional target: LuaActor / string / nil. The
+    // fourth-arg level (if any) is intentionally ignored.
+    let target = iter.next().unwrap_or(Value::Nil);
+    let target_name = resolve_target_name(lua, &target)?;
+    world_mut_from_lua(lua, |world| {
+        let Some(f) = world.get_resource::<SpellExecutor>().and_then(|e| e.0) else {
+            return;
+        };
+        let args_str = match target_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(t) => format!("{name} {t}"),
+            None => name.clone(),
+        };
+        f(world, caster, &args_str);
     })
 }
 
