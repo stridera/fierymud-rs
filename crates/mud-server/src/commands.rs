@@ -1914,6 +1914,29 @@ mod tests {
     }
 
     #[test]
+    fn who_level_color_bands_match_honor_roll_threshold() {
+        // The honor-roll [★] decoration on `who` rows fires at
+        // level >= 100 — same threshold the bold-magenta staff
+        // band fires at. Pin the boundary so a future band tweak
+        // can't desync the two.
+        use super::who_level_color;
+        assert_eq!(who_level_color(0), None);
+        assert_eq!(who_level_color(1), Some("<yellow>"));
+        assert_eq!(who_level_color(9), Some("<yellow>"));
+        assert_eq!(who_level_color(10), Some("<b:yellow>"));
+        assert_eq!(who_level_color(24), Some("<b:yellow>"));
+        assert_eq!(who_level_color(25), Some("<green>"));
+        assert_eq!(who_level_color(49), Some("<green>"));
+        assert_eq!(who_level_color(50), Some("<b:cyan>"));
+        assert_eq!(who_level_color(99), Some("<b:cyan>"));
+        // Honor-roll threshold: bold-magenta from 100, holding
+        // until the impl tier at 105.
+        assert_eq!(who_level_color(100), Some("<b:magenta>"));
+        assert_eq!(who_level_color(104), Some("<b:magenta>"));
+        assert_eq!(who_level_color(105), Some("<b:white>"));
+    }
+
+    #[test]
     fn bound_ability_line_renders_sphere_palette() {
         // Equipping a wand/staff with bindings should surface the
         // ability + sphere on the wield confirmation. Pin the

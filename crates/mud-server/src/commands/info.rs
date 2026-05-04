@@ -4648,6 +4648,14 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
         if in_group {
             out.push_str(" [<b:green>G</>]");
         }
+        // Honor-roll mark for endgame / staff tier. The `who_level_color`
+        // band paints the level tag bold-magenta at this threshold; the
+        // star adds a glyph cue so players can spot the honor roll
+        // without having to read level numbers. Bold-yellow leans into
+        // the "gold star" framing rather than re-using magenta.
+        if r.level >= 100 {
+            out.push_str(" [<b:yellow>★</>]");
+        }
         if r.afk {
             out.push_str(" [<yellow>AFK</>]");
         }
