@@ -2363,7 +2363,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // running multiple commands.
     if needle == "me" || needle == "self" {
         let name = name_of(world, player);
-        let mut out = format!("\r\nYou look at yourself: {name}.\r\n");
+        let mut out = format!("\r\nYou look at yourself: <b:cyan>{name}</>.\r\n");
         // Self-Description: lets the player confirm what other
         // players would see when examining them. Set with the
         // `description` command. Empty / unset → skipped silently
@@ -2379,14 +2379,14 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             ));
         }
         if world.get::<mud_world::Flying>(player).is_some() {
-            out.push_str("You're hovering in mid-air.\r\n");
+            out.push_str("<cyan>You're hovering in mid-air.</>\r\n");
         }
         if world.get::<Stealth>(player).is_some() {
-            out.push_str("You are hidden.\r\n");
+            out.push_str("<dim>You are hidden.</>\r\n");
         }
         if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(player).copied() {
             let mount_name = name_or(world, mount, "(unknown)");
-            out.push_str(&format!("You're riding {mount_name}.\r\n"));
+            out.push_str(&format!("You're riding <cyan>{mount_name}</>.\r\n"));
         }
         let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
         let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
@@ -2401,7 +2401,9 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 .collect()
         };
         if let Some(c) = condition_summary(hunger, thirst, &self_effects) {
-            out.push_str(&format!("You feel {c}.\r\n"));
+            let open = condition_color_tag(hunger, thirst).unwrap_or("");
+            let close = if open.is_empty() { "" } else { "</>" };
+            out.push_str(&format!("You feel {open}{c}{close}.\r\n"));
         }
         send_to(world, player, out);
         return;
@@ -2488,7 +2490,10 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // any trailing reset from render_color_tags terminates cleanly before
     // the literal " is sleeping here." / " is bleeding." text.
     let name_rendered = render_color_tags(&name, mode);
-    let mut out = format!("\r\nYou look at {name_rendered}.\r\n");
+    // Bold-cyan name as the headline, matching identify's title.
+    // Builder-authored color tags on the name still flow through
+    // — render_color_tags handles nested layers correctly.
+    let mut out = format!("\r\nYou look at <b:cyan>{name_rendered}</>.\r\n");
     if !description.trim().is_empty() {
         out.push_str(&format!(
             "{}\r\n",
@@ -2498,12 +2503,17 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     if let Some(p) = posture
         && p != PostureKind::Standing
     {
-        out.push_str(&format!("{name_rendered} is {} here.\r\n", p.label()));
+        out.push_str(&format!(
+            "<b:cyan>{name_rendered}</> is <yellow>{}</> here.\r\n",
+            p.label()
+        ));
     }
     // Identity line: level + race + class for actors. Helps a
     // player gauge mob difficulty before engaging and pick the
     // right ally for a group. Pulled from Profile (players + any
-    // mob with one) or the mob proto for level-only mobs.
+    // mob with one) or the mob proto for level-only mobs. Level
+    // picks up `who_level_color`'s band so endgame mobs read in
+    // bold magenta the way endgame players do on `who`.
     if let Some(prof) = world.get::<Profile>(target) {
         let class_name = prof.class_id.and_then(|cid| {
             world
@@ -2516,8 +2526,11 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         let class_label = class_name
             .as_deref()
             .map_or_else(String::new, |c| format!(" {c}"));
+        let lvl_open = who_level_color(prof.level).unwrap_or("");
+        let lvl_close = if lvl_open.is_empty() { "" } else { "</>" };
         out.push_str(&format!(
-            "{name_rendered} is a level {} {race_label}{class_label}.\r\n",
+            "<b:cyan>{name_rendered}</> is a level {lvl_open}{}{lvl_close} \
+             {race_label}{class_label}.\r\n",
             prof.level,
         ));
     } else if world.get::<Mob>(target).is_some()
@@ -2527,12 +2540,23 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .and_then(|p| p.by_key.get(&(key.zone, key.id)))
         && proto.level > 0
     {
-        out.push_str(&format!("{name_rendered} is level {}.\r\n", proto.level));
+        let lvl_open = who_level_color(proto.level).unwrap_or("");
+        let lvl_close = if lvl_open.is_empty() { "" } else { "</>" };
+        out.push_str(&format!(
+            "<b:cyan>{name_rendered}</> is level {lvl_open}{}{lvl_close}.\r\n",
+            proto.level
+        ));
     }
     if let Some(hp) = world.get::<Health>(target).copied() {
+        // Health condition phrase ("is bleeding" / "is mortally
+        // wounded" / etc.) graded by the same vital_color_tag the
+        // score sheet uses — wounded targets read red without the
+        // player having to parse the prose.
+        let cond = condition_label(hp);
+        let cond_open = vital_color_tag(hp.hp, hp.max).unwrap_or("");
+        let cond_close = if cond_open.is_empty() { "" } else { "</>" };
         out.push_str(&format!(
-            "{name_rendered} {condition}.\r\n",
-            condition = condition_label(hp)
+            "<b:cyan>{name_rendered}</> {cond_open}{cond}{cond_close}.\r\n",
         ));
     }
     if world.get::<Shopkeeper>(target).is_some() {
@@ -2611,13 +2635,14 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // Freshness cue for corpses — same thresholds the decay tick uses
     // for its in-room atmospheric broadcasts. Players walking in late
     // need a way to read the corpse's state without waiting for the
-    // next milestone tick.
+    // next milestone tick. Hue grades by remaining time: imminent
+    // dissolution reads red, mid-stage rot yellow, fresh dim.
     if let Some(decay) = world.get::<mud_world::CorpseDecay>(target).copied() {
         let line = match decay.remaining_secs {
-            i32::MIN..=30 => "It is on the verge of dissolution.",
-            31..=120 => "It reeks; flies and grubs are everywhere.",
-            121..=300 => "Flies have gathered; it is no longer fresh.",
-            _ => "It is still warm.",
+            i32::MIN..=30 => "<red>It is on the verge of dissolution.</>",
+            31..=120 => "<yellow>It reeks; flies and grubs are everywhere.</>",
+            121..=300 => "<yellow>Flies have gathered; it is no longer fresh.</>",
+            _ => "<dim>It is still warm.</>",
         };
         out.push_str(&format!("{line}\r\n"));
     }
@@ -2649,7 +2674,9 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         // for synthetic items that have no proto weight.
         let weight = item_weight(world, target);
         if weight > 0.0 {
-            out.push_str(&format!("It weighs about {weight:.1} lbs.\r\n"));
+            out.push_str(&format!(
+                "It weighs about <dim>{weight:.1} lbs.</>\r\n"
+            ));
         }
         // Wearable slot. Tells a player "this fits on the head" /
         // "this is wielded" without making them try `wear it` and
@@ -2661,20 +2688,44 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 Slot::Hold => "held",
                 _ => "worn",
             };
-            out.push_str(&format!("It is {verb} on the {}.\r\n", slot.label()));
+            out.push_str(&format!(
+                "It is <cyan>{verb}</> on the <cyan>{}</>.\r\n",
+                slot.label()
+            ));
         }
-        let contents: Vec<String> = {
+        let contents: Vec<(String, usize)> = {
             let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
-            q.iter(world)
-                .filter(|(l, _)| l.0 == target)
-                .map(|(_, n)| n.name.clone())
+            // Stack identical contents (matching look's room dedup
+            // and inventory's stacking) so a corpse holding three
+            // copper coins reads as one entry with `(3)`.
+            let mut order: Vec<String> = Vec::new();
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for (_, n) in q.iter(world).filter(|(l, _)| l.0 == target) {
+                if !counts.contains_key(&n.name) {
+                    order.push(n.name.clone());
+                }
+                *counts.entry(n.name.clone()).or_insert(0) += 1;
+            }
+            order
+                .into_iter()
+                .map(|name| {
+                    let n = counts.get(&name).copied().unwrap_or(1);
+                    (name, n)
+                })
                 .collect()
         };
         if !contents.is_empty() {
-            out.push_str(&format!("\r\n{name_rendered} contains:\r\n"));
-            for item_name in contents {
+            out.push_str(&format!(
+                "\r\n<cyan>{name_rendered} contains:</>\r\n"
+            ));
+            for (item_name, count) in contents {
                 let rendered = render_color_tags(&item_name, mode);
-                out.push_str(&format!("  {rendered}\r\n"));
+                if count > 1 {
+                    out.push_str(&format!("  <dim>({count})</> {rendered}\r\n"));
+                } else {
+                    out.push_str(&format!("  {rendered}\r\n"));
+                }
             }
         }
     }
