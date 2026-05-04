@@ -1097,17 +1097,18 @@ pub(crate) fn handle_death(
         );
         info!(?victim, name = %victim_name, ?corpse, "player corpsed");
     } else {
-        // Mob death: notify, drop loot into a corpse, despawn the
-        // mob, stop attackers. Without the corpse path the items
-        // the loader put on the mob (equipment) would be orphaned
-        // ECS entities pointing at a despawned parent.
+        // Mob death: notify, spawn a corpse, drop loot + leftover
+        // coin into it, despawn the mob, stop attackers. The corpse
+        // always spawns — even when the mob carried nothing — so
+        // `look corpse` works regardless and the leftover-coin path
+        // (`award_kill_coin` for non-AutoGold killers) has somewhere
+        // to attach a `CoinPile`.
         broadcast_room_except_rendered(
             world,
             room,
             &[],
             &format!("{victim_name} dies.\r\n"),
         );
-        award_kill_coin(world, victim, victim_name);
         award_kill_xp(world, victim, victim_name);
         // Achievement hooks: first_kill and (eventually)
         // milestone-kill counters. Fire on the player who's
@@ -1142,85 +1143,88 @@ pub(crate) fn handle_death(
                 .map(|(e, _)| e)
                 .collect()
         };
-        let killer: Option<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
-            q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
-        };
-        if !owned_items.is_empty() {
-            let corpse = world
-                .spawn((
-                    Item,
-                    Corpse,
-                    Named { name: format!("the corpse of {victim_name}") },
-                    Keywords(vec![
-                        "corpse".to_string(),
-                        victim_name.to_ascii_lowercase(),
-                    ]),
-                    Located(room),
-                    CorpseDecay { remaining_secs: 600 },
-                ))
-                .id();
-            // Loot-claim window: 5 minutes for the killer.
-            // Player-only — mob killers don't claim corpses (this
-            // path is reached only when a player landed the
-            // killing blow against another mob; the killer
-            // lookup above filters to Player entities).
-            if let Some(k) = killer {
-                world.get_entity_mut(corpse).unwrap().insert(mud_world::LootClaim {
-                    owner: k,
-                    expires_at: std::time::Instant::now()
-                        + std::time::Duration::from_secs(300),
-                });
+        let corpse = world
+            .spawn((
+                Item,
+                Corpse,
+                Named { name: format!("the corpse of {victim_name}") },
+                Keywords(vec![
+                    "corpse".to_string(),
+                    victim_name.to_ascii_lowercase(),
+                ]),
+                Located(room),
+                CorpseDecay { remaining_secs: 600 },
+            ))
+            .id();
+        // Loot-claim window: 5 minutes for the killer. Player-only
+        // — mob killers don't claim corpses (this path is reached
+        // only when a player landed the killing blow against
+        // another mob; the killer lookup above filters to Player
+        // entities).
+        if let Some(k) = killer {
+            world.get_entity_mut(corpse).unwrap().insert(mud_world::LootClaim {
+                owner: k,
+                expires_at: std::time::Instant::now()
+                    + std::time::Duration::from_secs(300),
+            });
+        }
+        for it in &owned_items {
+            if let Some(mut l) = world.get_mut::<Located>(*it) {
+                l.0 = corpse;
             }
+            try_remove::<mud_world::EquippedSlot>(world, *it);
+        }
+        // award_kill_coin handles AutoGold/AutoSplit and (when
+        // AutoGold is off) attaches a CoinPile to the corpse so
+        // the coin can still be claimed via `get all from corpse`.
+        // Runs after the corpse is spawned so the CoinPile has
+        // somewhere to attach.
+        award_kill_coin(world, victim, victim_name, corpse);
+        // Auto-loot: if the killer has the flag, immediately
+        // pull every item out of the corpse onto them. Quiet —
+        // players opted in.
+        let auto_loot = killer
+            .and_then(|k| world.get::<mud_world::PlayerFlags>(k).cloned())
+            .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::AutoLoot));
+        if let (Some(killer), true) = (killer, auto_loot)
+            && !owned_items.is_empty()
+        {
+            let mut moved = 0;
             for it in &owned_items {
                 if let Some(mut l) = world.get_mut::<Located>(*it) {
-                    l.0 = corpse;
+                    l.0 = killer;
+                    moved += 1;
                 }
-                try_remove::<mud_world::EquippedSlot>(world, *it);
             }
-            // Auto-loot: if the killer has the flag, immediately
-            // pull every item out of the corpse onto them and let
-                // the corpse decay empty. Quiet — players opted in.
-            let auto_loot = killer
-                .and_then(|k| world.get::<mud_world::PlayerFlags>(k).cloned())
-                .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::AutoLoot));
-            if let (Some(killer), true) = (killer, auto_loot) {
-                let mut moved = 0;
-                for it in &owned_items {
-                    if let Some(mut l) = world.get_mut::<Located>(*it) {
-                        l.0 = killer;
-                        moved += 1;
-                    }
-                }
-                if moved > 0 {
-                    send_to(
-                        world,
-                        killer,
-                        format!(
-                            "You loot {moved} item(s) from the corpse of {victim_name}.\r\n"
-                        ),
-                    );
-                }
+            if moved > 0 {
+                send_to(
+                    world,
+                    killer,
+                    format!(
+                        "You loot {moved} item(s) from the corpse of {victim_name}.\r\n"
+                    ),
+                );
             }
         }
         disengage_attackers_of(world, victim);
         if let Ok(e) = world.get_entity_mut(victim) {
             e.despawn();
         }
-        info!(?victim, name = %victim_name, "mob despawned");
+        info!(?victim, name = %victim_name, ?corpse, "mob despawned");
     }
 }
 
 /// On mob death: look up the proto's `wealth`, find the first player
-/// engaged with the victim, and (when `AUTO_GOLD` is set) add the coin
-/// to their `Wealth`. No-op when the mob has no wealth, no proto, or
-/// no player attacker.
-///
-/// When `AUTO_GOLD` is *not* set, the coin is forfeited and the player
-/// is told as much. A real corpse model that survives the despawn
-/// would let players `get coin from corpse` instead of forfeiting;
-/// until then, the toggle is the only knob.
-fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
+/// engaged with the victim, and route the coin onto either the killer
+/// (`AUTO_GOLD` on, default) or the freshly-spawned corpse via
+/// `CoinPile` (`AUTO_GOLD` off — claimed via `get all from corpse`).
+/// No-op when the mob has no wealth, no proto, or no player attacker.
+fn award_kill_coin(
+    world: &mut World,
+    victim: Entity,
+    victim_name: &str,
+    corpse: Entity,
+) {
     let coin = world
         .get::<WorldKey>(victim)
         .and_then(|k| {
@@ -1236,18 +1240,34 @@ fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str) {
         let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
         q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
     };
-    let Some(killer) = killer else { return };
+    let Some(killer) = killer else {
+        // No player engaged — coin still needs a home so it can be
+        // claimed if a player walks in later (or it just decays
+        // with the corpse). Attach to the corpse without an
+        // owner-side message.
+        if let Ok(mut e) = world.get_entity_mut(corpse) {
+            e.insert(mud_world::CoinPile(coin));
+        }
+        return;
+    };
     let auto_gold = world
         .get::<PlayerFlags>(killer)
         .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::AutoGold));
     if !auto_gold {
+        // Coin lies on the corpse as a `CoinPile` — claimable via
+        // `get all from corpse`. Decays with the corpse if left
+        // behind. Replaces the previous "you leave it scattered"
+        // forfeit-the-coin path that left the player with nothing.
+        if let Ok(mut e) = world.get_entity_mut(corpse) {
+            e.insert(mud_world::CoinPile(coin));
+        }
         let msg = crate::commands::format_wealth(coin).unwrap_or_else(|| "no coin".to_string());
         send_to(
             world,
             killer,
             format!(
-                "You leave {msg} scattered around the corpse of {victim_name}. \
-                 (Set `autogold` to collect automatically.)\r\n"
+                "{msg} lies among the remains of {victim_name}. \
+                 (`get all from corpse` to claim, or set `autogold` to auto-collect.)\r\n"
             ),
         );
         return;
@@ -1631,6 +1651,102 @@ mod tests {
         assert!(
             world.get::<Fighting>(attacker).is_none(),
             "attacker's Fighting cleared after target died"
+        );
+    }
+
+    #[test]
+    fn mob_kill_spawns_corpse_with_coin_pile() {
+        // Regression for the playtest "no corpse / no gold" bug:
+        // killing an itemless mob with a coin proto must (a) spawn
+        // a corpse in the room and (b) leave the coin reachable via
+        // a CoinPile component on that corpse, since the killer
+        // here has no AutoGold flag. Previously the corpse only
+        // spawned when owned_items was non-empty, and the coin was
+        // forfeited with a misleading "scattered around the corpse"
+        // message.
+        use mud_world::{CoinPile, MobPrototypes};
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        // Minimal MobProto carrying a coin reward.
+        let mut protos = MobPrototypes::default();
+        protos.by_key.insert(
+            (1, 1),
+            mud_world::MobProto {
+                zone_id: 1,
+                id: 1,
+                name: "a stray dog".to_string(),
+                keywords: vec!["dog".to_string()],
+                room_description: String::new(),
+                examine_description: String::new(),
+                gender: "neutral".to_string(),
+                race: "animal".to_string(),
+                level: 1,
+                alignment: 0,
+                role: mud_db::enums::MobRole::Normal,
+                hp_dice_num: 1,
+                hp_dice_size: 1,
+                hp_dice_bonus: 5,
+                damage_dice_num: 1,
+                damage_dice_size: 1,
+                damage_dice_bonus: 0,
+                hit_roll: 0,
+                armor_class: 0,
+                wealth: 75, // 7 silver, 5 copper
+                class_id: None,
+                behaviors: Vec::new(),
+                protected_kind: mud_db::enums::ProtectedKind::Normal,
+                professions: Vec::new(),
+            },
+        );
+        world.insert_resource(protos);
+
+        let target = world
+            .spawn((
+                Mob,
+                Named { name: "a stray dog".to_string() },
+                Located(room),
+                Health { hp: 5, max: 5 },
+                mud_world::WorldKey { zone: 1, id: 1 },
+            ))
+            .id();
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Tester".to_string() },
+                Located(room),
+                Health { hp: 100, max: 100 },
+                CombatStats {
+                    hit_roll: 10,
+                    dmg_roll: 100,
+                    ac: 10,
+                    alignment: 0,
+                },
+                Posture(PostureKind::Standing),
+                Fighting(target),
+            ))
+            .id();
+
+        run_combat_tick(&mut world);
+
+        // Mob is dead, corpse exists in the room.
+        assert!(
+            world.get_entity(target).is_err(),
+            "target despawned"
+        );
+        let corpse = world
+            .query_filtered::<(Entity, &Located, &CoinPile), With<Corpse>>()
+            .iter(&world)
+            .find(|(_, l, _)| l.0 == room)
+            .map(|(e, _, p)| (e, p.0));
+        let (_corpse_entity, coin) = corpse
+            .expect("corpse with CoinPile spawned in room (no AutoGold)");
+        assert_eq!(coin, 75, "coin amount lands on corpse for non-AutoGold killer");
+        // Player wealth is still zero — coin is on the corpse,
+        // claimed via `get all from corpse`.
+        assert!(
+            world.get::<Wealth>(player).is_none()
+                || world.get::<Wealth>(player).unwrap().0 == 0,
+            "no AutoGold means no wealth deposited yet"
         );
     }
 

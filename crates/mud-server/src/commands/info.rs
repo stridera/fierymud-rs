@@ -6572,6 +6572,26 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
 }
 
 #[allow(clippy::too_many_lines)]
+/// Pull a `CoinPile` off `container`, add the amount to `player`'s
+/// `Wealth`, and remove the component. Returns `Some(amount)` when
+/// a pile was drained; `None` when the container had no coin. Used
+/// by the `get all from <container>` path so corpse-loot picks up
+/// both items and coin in one command.
+fn drain_coin_pile(world: &mut World, container: Entity, player: Entity) -> Option<i64> {
+    let amount = world.get::<CoinPile>(container).map(|p| p.0)?;
+    if amount <= 0 {
+        try_remove::<CoinPile>(world, container);
+        return None;
+    }
+    if let Some(mut w) = world.get_mut::<Wealth>(player) {
+        w.0 = w.0.saturating_add(amount);
+    } else {
+        try_insert(world, player, Wealth(amount));
+    }
+    try_remove::<CoinPile>(world, container);
+    Some(amount)
+}
+
 pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     if trimmed.is_empty() {
@@ -6622,8 +6642,10 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
 
         // `get all from <container>`: snapshot every item inside,
         // re-Located to the player, broadcast a single line with the
-        // count. Empty containers report the obvious "nothing in
-        // there" rather than failing the keyword lookup.
+        // count. Also drains a `CoinPile` if the container carries
+        // one (e.g. a corpse from a non-AutoGold kill). Empty
+        // containers report the obvious "nothing in there" rather
+        // than failing the keyword lookup.
         if needle.eq_ignore_ascii_case("all") {
             let items: Vec<(Entity, String)> = {
                 let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Item>>();
@@ -6632,12 +6654,31 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
                     .map(|(e, _, n)| (e, n.name.clone()))
                     .collect()
             };
-            if items.is_empty() {
+            // Drain CoinPile first — independent of items so a
+            // corpse that holds *only* coin (low-tier mob with no
+            // gear) still completes meaningfully instead of
+            // reporting "nothing in there".
+            let coin_drained = drain_coin_pile(world, container, player);
+            if let Some(amount) = coin_drained {
+                let msg = render_color_tags(
+                    &crate::commands::format_wealth(amount)
+                        .unwrap_or_else(|| "no coin".to_string()),
+                    color_mode_for(world, player),
+                );
                 send_rendered(
                     world,
                     player,
-                    &format!("There's nothing in {container_name}.\r\n"),
+                    &format!("You collect {msg} from {container_name}.\r\n"),
                 );
+            }
+            if items.is_empty() {
+                if coin_drained.is_none() {
+                    send_rendered(
+                        world,
+                        player,
+                        &format!("There's nothing in {container_name}.\r\n"),
+                    );
+                }
                 return;
             }
             let cap = carry_capacity(world, player);

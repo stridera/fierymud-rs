@@ -473,6 +473,16 @@ pub struct CorpseDecay {
     pub remaining_secs: i32,
 }
 
+/// Coin amount (in copper) lying on a container. Today it's only
+/// attached to corpses by the mob-death path when the killer
+/// doesn't have `AutoGold`; `get all from <corpse>` drains it onto
+/// the player's `Wealth`. Kept as its own component (rather than
+/// stored on `Corpse`) so the same shape can later attach to a
+/// loose pile-of-coins item dropped on the floor without growing
+/// the corpse type. Decays with the corpse.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CoinPile(pub i64);
+
 /// Marker: this entity is hidden / sneaking. Resolves the `hidden`
 /// symbol in formula expressions to 1 (vs 0 when absent). Used by
 /// rogue-style abilities (BACKSTAB's `bonusIfHidden`, future
