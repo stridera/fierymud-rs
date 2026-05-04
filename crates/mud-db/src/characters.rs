@@ -211,27 +211,36 @@ pub async fn save_core_stats(
     Ok(())
 }
 
-// One UPDATE-per-column-set is the simplest call site for this many fields;
-// a SaveState struct would just shuffle the names. Revisit if it grows.
-#[allow(clippy::too_many_arguments)]
+/// Payload for `save_state`. Fifteen fields including four
+/// `Option<i32>` room-pair coordinates (current zone/id +
+/// recall zone/id) make the positional shape regression-prone:
+/// a swap between any two `Option<i32>` arguments compiles
+/// cleanly and silently persists the player into the wrong
+/// room on next reconnect. Named-fields collapse the call site
+/// to one struct literal that mirrors the SET-clause order.
+#[derive(Debug, Clone)]
+pub struct CharacterStatePayload<'a> {
+    pub hit_points: i32,
+    pub stamina: i32,
+    pub current_room_zone_id: Option<i32>,
+    pub current_room_id: Option<i32>,
+    pub recall_room_zone_id: Option<i32>,
+    pub recall_room_id: Option<i32>,
+    pub player_flags: &'a [PlayerFlag],
+    pub prompt: &'a str,
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub wealth: i64,
+    pub experience: i32,
+    pub skill_points: i32,
+    pub hunger: i32,
+    pub thirst: i32,
+}
+
 pub async fn save_state(
     pool: &PgPool,
     character_id: &str,
-    hit_points: i32,
-    stamina: i32,
-    current_room_zone_id: Option<i32>,
-    current_room_id: Option<i32>,
-    recall_room_zone_id: Option<i32>,
-    recall_room_id: Option<i32>,
-    player_flags: &[PlayerFlag],
-    prompt: &str,
-    title: Option<&str>,
-    description: Option<&str>,
-    wealth: i64,
-    experience: i32,
-    skill_points: i32,
-    hunger: i32,
-    thirst: i32,
+    state: &CharacterStatePayload<'_>,
 ) -> sqlx::Result<()> {
     sqlx::query!(
         r#"
@@ -254,21 +263,21 @@ pub async fn save_state(
             last_login = NOW()
         WHERE id = $16
         "#,
-        hit_points,
-        stamina,
-        current_room_zone_id,
-        current_room_id,
-        recall_room_zone_id,
-        recall_room_id,
-        player_flags as &[PlayerFlag],
-        prompt,
-        title,
-        description,
-        wealth,
-        experience,
-        skill_points,
-        hunger,
-        thirst,
+        state.hit_points,
+        state.stamina,
+        state.current_room_zone_id,
+        state.current_room_id,
+        state.recall_room_zone_id,
+        state.recall_room_id,
+        state.player_flags as &[PlayerFlag],
+        state.prompt,
+        state.title,
+        state.description,
+        state.wealth,
+        state.experience,
+        state.skill_points,
+        state.hunger,
+        state.thirst,
         character_id,
     )
     .execute(pool)
