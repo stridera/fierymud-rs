@@ -1728,6 +1728,35 @@ impl UserData for LuaActor {
             },
         );
 
+        // `actor:get_worn(slot_label)` returns the item the actor has
+        // equipped in `slot_label`, or nil. 37+ corpus refs from mob
+        // combat AI checking "do I have a weapon wielded?" before
+        // committing to a weapon-only attack rotation. Slot labels
+        // accept the same case-insensitive variants `Slot::from_label`
+        // recognizes (`wield`, `hold`, `head`, `body`, …); unrecognized
+        // labels collapse to nil so legacy aliases (`hold2` /
+        // `2hwield` — those slots aren't modeled as separate bins
+        // today) don't crash the gate, they just fail-closed.
+        methods.add_method(
+            "get_worn",
+            |lua, this, slot_label: String| -> mlua::Result<Value> {
+                let Some(slot) = mud_world::Slot::from_label(&slot_label) else {
+                    return Ok(Value::Nil);
+                };
+                let entity = world_mut_from_lua(lua, |w| -> Option<Entity> {
+                    let mut q = w
+                        .query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
+                    q.iter(w)
+                        .find(|(_, l, eq)| l.0 == this.entity && eq.0 == slot)
+                        .map(|(e, _, _)| e)
+                })?;
+                match entity {
+                    Some(e) => Ok(Value::UserData(lua.create_userdata(LuaActor { entity: e })?)),
+                    None => Ok(Value::Nil),
+                }
+            },
+        );
+
         // Quest API stubs. The corpus references these heavily
         // (get_quest_stage 2271, get_quest_var 2007, set_quest_var
         // 727, get_has_completed 344, advance_quest 283, start_quest
