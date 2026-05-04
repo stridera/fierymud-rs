@@ -4165,8 +4165,10 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
                 })
                 .unwrap_or_default();
             if !exits.is_empty() {
+                let mode = color_mode_for(world, player);
+                let header = render_color_tags("<cyan>Exits:</>", mode);
                 let names: Vec<&str> = exits.iter().map(|d| direction_name(*d)).collect();
-                out.push_str(&format!("Exits: {}\r\n", names.join(", ")));
+                out.push_str(&format!("{header} {}\r\n", names.join(", ")));
             }
         }
         send_to(world, player, out);
@@ -4253,9 +4255,13 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         } else {
             ""
         };
+    // Colorize plain room names in cyan as the default. Authored
+    // names that carry their own XML-Lite tags (~23 rooms in the
+    // imported world) keep their builder-set color.
+    let titled_room_name = colorize_default(&room_name, "<b:cyan>");
     out.push_str(&format!(
         "\r\n{}{}\r\n",
-        render_color_tags(&room_name, mode),
+        render_color_tags(&titled_room_name, mode),
         render_color_tags(peaceful_tag, mode),
     ));
     // BRIEF flag suppresses the description — name/occupants/exits only.
@@ -4290,37 +4296,42 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             .iter()
             .map(|p| render_color_tags(p, mode))
             .collect();
-        out.push_str(&format!("Also here: {}\r\n", rendered.join(", ")));
+        let header = render_color_tags("<cyan>Also here:</>", mode);
+        out.push_str(&format!("{header} {}\r\n", rendered.join(", ")));
     }
     if !items.is_empty() {
         let rendered: Vec<String> = items
             .iter()
             .map(|i| render_color_tags(i, mode))
             .collect();
-        out.push_str(&format!("On the ground: {}\r\n", rendered.join(", ")));
+        let header = render_color_tags("<cyan>On the ground:</>", mode);
+        out.push_str(&format!("{header} {}\r\n", rendered.join(", ")));
     }
     // Auto-exits: only render the exits line on look when the player has the
     // AUTO_EXIT flag set. Without it, the room shows clean and the player
     // types `exits` (or peeks with `look <dir>`) on demand. Classic CircleMUD
-    // semantics — kept opt-in to avoid clutter. Closed / locked exits get
-    // a one-letter trailer ([C] / [L]) so the player notices a barrier
-    // before they try to walk through.
+    // semantics — kept opt-in to avoid clutter. Each direction is colored by
+    // door state — open=green, closed=yellow, locked=red — so the player
+    // notices a barrier before they try to walk through.
     if has_flag(world, player, PlayerFlag::AutoExit) {
+        let header = render_color_tags("<cyan>Exits:</>", mode);
         if exits.is_empty() {
-            out.push_str("Exits: none\r\n");
+            out.push_str(&format!("{header} none\r\n"));
         } else {
             let names: Vec<String> = exits
                 .iter()
                 .map(|(d, state)| {
+                    let open = exit_state_color(*state);
                     let suffix = match state {
                         ExitState::Open => "",
                         ExitState::Closed => "[C]",
                         ExitState::Locked => "[L]",
                     };
-                    format!("{}{}", direction_name(*d), suffix)
+                    let raw = format!("{open}{}{suffix}</>", direction_name(*d));
+                    render_color_tags(&raw, mode)
                 })
                 .collect();
-            out.push_str(&format!("Exits: {}\r\n", names.join(", ")));
+            out.push_str(&format!("{header} {}\r\n", names.join(", ")));
         }
     }
     send_to(world, player, out);
@@ -5575,19 +5586,32 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     rows.sort_by_key(|(d, _, _)| direction_order(*d));
-    let mut out = String::from("\r\nExits:\r\n");
+    let mode = color_mode_for(world, player);
+    let mut out = String::from("\r\n");
+    out.push_str(&render_color_tags("<cyan>Exits:</>", mode));
+    out.push_str("\r\n");
     for (dir, room, state) in &rows {
+        let open = exit_state_color(*state);
+        let dir_label = render_color_tags(
+            &format!("{open}{}</>", direction_name(*dir)),
+            mode,
+        );
+        // Colorize plain target room names; authored ones keep
+        // their builder-set color via colorize_default.
+        let room_label = render_color_tags(
+            &colorize_default(room, "<b:white>"),
+            mode,
+        );
         let state_label = match state {
-            ExitState::Open => "",
-            ExitState::Closed => "  (closed)",
-            ExitState::Locked => "  (locked)",
+            ExitState::Open => String::new(),
+            ExitState::Closed => render_color_tags("  <yellow>(closed)</>", mode),
+            ExitState::Locked => render_color_tags("  <red>(locked)</>", mode),
         };
-        out.push_str(&format!(
-            "  {:>10} - {}{}\r\n",
-            direction_name(*dir),
-            room,
-            state_label,
-        ));
+        // Pad direction column visible-width-aware so color tags
+        // don't break the right-justified alignment. NAME_COL = 10
+        // matches the previous `:>10` formatter.
+        let padded = pad_visible(&dir_label, 10);
+        out.push_str(&format!("  {padded} - {room_label}{state_label}\r\n"));
     }
     send_to(world, player, out);
 }

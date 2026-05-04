@@ -3953,6 +3953,33 @@ pub(crate) fn render_vital_bar(current: i32, max: i32) -> String {
 /// below 25%, yellow below 50%, none otherwise. Returns the open
 /// tag string; the caller closes with `</>`. Zero / negative max
 /// yields no color (defensive — avoids divide-by-zero panic).
+/// Wrap a string in a default color tag when it carries no
+/// XML-Lite markup of its own. Authored color (rare for room
+/// names, occasional for items/players) wins — the wrapper only
+/// adds hue to plain content. Used by look-side renders so
+/// generic strings get a baseline color without overriding
+/// builder intent.
+pub(crate) fn colorize_default(s: &str, open: &str) -> String {
+    if s.contains('<') {
+        s.to_string()
+    } else {
+        format!("{open}{s}</>")
+    }
+}
+
+/// XML-Lite open tag matching an exit's state. Open exits read
+/// green (welcoming), closed exits yellow (passable but slow),
+/// locked exits red (need a key). Used for the auto-exit list
+/// and the standalone `exits` command.
+#[must_use]
+pub(crate) fn exit_state_color(state: ExitState) -> &'static str {
+    match state {
+        ExitState::Open => "<green>",
+        ExitState::Closed => "<yellow>",
+        ExitState::Locked => "<red>",
+    }
+}
+
 pub(crate) fn vital_color_tag(current: i32, max: i32) -> Option<&'static str> {
     if max <= 0 {
         return None;
@@ -5854,7 +5881,14 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
     if ed.state == mud_db::enums::ExitState::Closed
         || ed.state == mud_db::enums::ExitState::Locked
     {
-        send_to(world, player, "The way is closed.\r\n");
+        // Yellow when merely closed (push and walk in), red when
+        // locked (need a key first) — matches the auto-exit list
+        // colors so the player learns one palette.
+        let line = match ed.state {
+            mud_db::enums::ExitState::Locked => "<red>The way is locked.</>",
+            _ => "<yellow>The way is closed.</>",
+        };
+        send_to(world, player, format!("{}\r\n", render_color_tags(line, mode_pre)));
         return;
     }
     let Some(target_room) = ed.to else {
@@ -5874,7 +5908,8 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
     }
     let name = name_or(world, target_room, "(unknown)");
     let mode = color_mode_for(world, player);
-    let name = render_color_tags(&name, mode);
+    // Default-cyan for plain target room names; authored colors win.
+    let name = render_color_tags(&colorize_default(&name, "<b:cyan>"), mode);
     let desc = world
         .get::<Description>(target_room)
         .map(|d| render_color_tags(&d.0, mode))
