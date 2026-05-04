@@ -138,10 +138,14 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
             .collect()
     };
     for target in targets {
+        // Say/says verb framed in green (room-local speech reads
+        // friendly / open vs the louder yellow/red wide channels).
+        // Speaker name emphasized so the eye lands on who's
+        // talking; message body inherits authored color.
         let line = if target == player {
-            format!("You say, \"{message}\"\r\n")
+            format!("<green>You say,</> \"{message}\"\r\n")
         } else {
-            format!("{speaker} says, \"{message}\"\r\n")
+            format!("<b:green>{speaker}</> <green>says,</> \"{message}\"\r\n")
         };
         send_rendered(world, target, &line);
     }

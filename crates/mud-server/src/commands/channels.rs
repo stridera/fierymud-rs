@@ -86,7 +86,9 @@ inventory::submit! {
 }
 
 /// Shared body for gossip / music / shout. Picks a self-form +
-/// other-form verb pair for the user-visible line. Filters out
+/// other-form verb pair for the user-visible line plus a
+/// `channel_tag` open-color so each channel reads in its own hue
+/// — gossip yellow, music magenta, shout bold red. Filters out
 /// Deaf recipients and anyone who's `IgnoreList`-blocked the
 /// sender.
 fn broadcast_global(
@@ -96,6 +98,7 @@ fn broadcast_global(
     verb_self: &str,
     verb_other: &str,
     refusal: &str,
+    channel_tag: &str,
 ) {
     let message = args.trim();
     if message.is_empty() {
@@ -122,25 +125,36 @@ fn broadcast_global(
         {
             continue;
         }
+        // Channel tag colors the verb + body together so the line
+        // is unmistakable in a busy log. Speaker name keeps any
+        // authored color via render-on-send.
         let line = if t == player {
-            format!("You {verb_self}, \"{message}\"\r\n")
+            format!("{channel_tag}You {verb_self}, \"{message}\"</>\r\n")
         } else {
-            format!("{player_name} {verb_other}, \"{message}\"\r\n")
+            format!(
+                "{channel_tag}{player_name} {verb_other}, \"{message}\"</>\r\n"
+            )
         };
         send_to(world, t, line);
     }
 }
 
 fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
-    broadcast_global(world, player, args, "gossip", "gossips", "Gossip what?\r\n");
+    broadcast_global(
+        world, player, args, "gossip", "gossips", "Gossip what?\r\n", "<yellow>",
+    );
 }
 
 fn cmd_music(world: &mut World, player: Entity, args: &str) {
-    broadcast_global(world, player, args, "sing", "sings", "Sing what?\r\n");
+    broadcast_global(
+        world, player, args, "sing", "sings", "Sing what?\r\n", "<magenta>",
+    );
 }
 
 fn cmd_shout(world: &mut World, player: Entity, args: &str) {
-    broadcast_global(world, player, args, "shout", "shouts", "Shout what?\r\n");
+    broadcast_global(
+        world, player, args, "shout", "shouts", "Shout what?\r\n", "<b:red>",
+    );
 }
 
 fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
@@ -158,10 +172,15 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     for t in targets {
+        // Wiznet reads bold cyan to match its staff-only role —
+        // distinct from the public channels (gossip/shout/music)
+        // and unmistakable in a mixed log.
         let line = if t == player {
-            format!("[wiznet] You: {message}\r\n")
+            format!("<b:cyan>[wiznet]</> <b:white>You:</> {message}\r\n")
         } else {
-            format!("[wiznet] {player_name}: {message}\r\n")
+            format!(
+                "<b:cyan>[wiznet]</> <b:white>{player_name}:</> {message}\r\n"
+            )
         };
         send_to(world, t, line);
     }

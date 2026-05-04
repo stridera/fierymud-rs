@@ -155,22 +155,26 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
     let player_name = name_of(world, player);
     let target_name = name_of(world, target);
 
+    // Tells render with a cyan channel framing (`You tell` /
+    // `tells you`) so they pop against say/emote/shout traffic
+    // in a busy player's log. Speaker / target names keep any
+    // authored color via render-on-send.
     send_rendered(
         world,
         player,
-        &format!("You tell {target_name}, \"{message}\"\r\n"),
+        &format!("<cyan>You tell <b:cyan>{target_name}</>, \"{message}\"</>\r\n"),
     );
     if has_flag(world, target, PlayerFlag::Afk) {
         send_rendered(
             world,
             player,
-            &format!("({target_name} is AFK and may not respond right away.)\r\n"),
+            &format!("<dim>({target_name} is AFK and may not respond right away.)</>\r\n"),
         );
     }
     send_rendered(
         world,
         target,
-        &format!("{player_name} tells you, \"{message}\"\r\n"),
+        &format!("<cyan><b:cyan>{player_name}</> tells you, \"{message}\"</>\r\n"),
     );
 
     try_insert(world, target, LastTeller(player));

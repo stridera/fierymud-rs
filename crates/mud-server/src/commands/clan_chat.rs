@@ -77,10 +77,18 @@ fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     for t in targets {
+        // Clan-tell channel tag in bold yellow (matches the
+        // clan-abbreviation tag color already used on `who` and
+        // the score sheet's clan line). Speaker name highlighted
+        // bright yellow against the dimmer message body.
         let line = if t == player {
-            format!("[{abbrev}] You: {message}\r\n")
+            format!(
+                "<b:yellow>[{abbrev}]</> <b:white>You:</> {message}\r\n"
+            )
         } else {
-            format!("[{abbrev}] {player_name}: {message}\r\n")
+            format!(
+                "<b:yellow>[{abbrev}]</> <b:white>{player_name}:</> {message}\r\n"
+            )
         };
         send_to(world, t, line);
     }
