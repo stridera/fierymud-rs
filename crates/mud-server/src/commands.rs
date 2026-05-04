@@ -1382,6 +1382,70 @@ mod tests {
         assert_eq!(super::pad_visible("looooong", 4), "looooong");
     }
 
+    /// Strip ANSI CSI escapes from `s` and return the visible-character
+    /// width that remains. Tracks `\x1b[...m` sequences only — what
+    /// `render_color_tags(.., ColorMode::Ansi)` emits today.
+    fn ansi_visible_width(s: &str) -> usize {
+        let mut count = 0usize;
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Eat `[` and everything up to and including `m`.
+                let _ = chars.next();
+                for nx in chars.by_ref() {
+                    if nx == 'm' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            count += 1;
+        }
+        count
+    }
+
+    #[test]
+    fn pad_then_render_yields_expected_visible_width() {
+        // Regression for 2bb9a1a / adc473e: the listing grids must
+        // pad XML-Lite first, then render. After rendering the
+        // resulting ANSI string should still occupy exactly the
+        // pad target's visible columns. This test enforces the
+        // contract that all the call sites depend on.
+        let cases: &[(&str, usize)] = &[
+            ("foo", 6),
+            ("<red>foo</>", 6),
+            ("<b:cyan>Magic Missile</> <red>(fire)</>", 30),
+            ("Hellfire and Brimstone <red>(fire)</>", 33),
+            ("Protection from Fire <b:white>(protection)</>", 36),
+            ("plain", 12),
+            ("", 4),
+        ];
+        for &(xml, width) in cases {
+            let padded = super::pad_visible(xml, width);
+            let rendered = ansi(&padded);
+            assert_eq!(
+                ansi_visible_width(&rendered),
+                width,
+                "pad-then-render width mismatch for {xml:?} → {width}",
+            );
+        }
+        // Inverse: rendering first then padding undercounts.
+        // pad_visible scans for `<...>` markers and treats the
+        // ANSI escape bytes as visible chars, so it bails early
+        // and the result is *not* width-aligned. This test pins
+        // the broken order so a future "simplification" that
+        // collapses the pipeline back to render-then-pad gets
+        // caught immediately.
+        let xml = "<red>fire</>";
+        let render_first = super::pad_visible(&ansi(xml), 30);
+        assert_ne!(
+            ansi_visible_width(&render_first),
+            30,
+            "render-then-pad must not produce a width-30 line — \
+             ANSI bytes inflate visible_width's count"
+        );
+    }
+
     #[test]
     fn render_color_tags_strip_mode_matches_legacy() {
         // No tags: identity.
