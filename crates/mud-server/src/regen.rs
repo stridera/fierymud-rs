@@ -40,6 +40,20 @@ pub fn regen_tick(world: &mut World) {
         return;
     }
 
+    // Resolve the survival thresholds once before the query
+    // iterator borrows World — same numbers feed every player.
+    // `get_resource` (vs `resource`) so tests that build a fresh
+    // World without the GameConfig loader pass don't panic;
+    // production always has the resource installed by the loader.
+    let (starving_at, parched_at) = world
+        .get_resource::<mud_world::RuntimeConfig>()
+        .map_or((DEFAULT_STARVING_AT, DEFAULT_PARCHED_AT), |cfg| {
+            (
+                cfg.get_i32("survival", "starving_at", DEFAULT_STARVING_AT),
+                cfg.get_i32("survival", "parched_at", DEFAULT_PARCHED_AT),
+            )
+        });
+
     // Snapshot the (entity, new_stamina, new_hp) tuples while no mutable
     // borrows are live, then apply. Pattern matches combat_tick / effects_tick.
     // Starving / parched players regen at half rate (rounded down) — they
@@ -53,8 +67,8 @@ pub fn regen_tick(world: &mut World) {
         >();
         q.iter(world)
             .map(|(e, stamina, hp, posture, hunger, thirst)| {
-                let starved = hunger.is_some_and(|h| h.0 >= STARVING_AT)
-                    || thirst.is_some_and(|t| t.0 >= PARCHED_AT);
+                let starved = hunger.is_some_and(|h| h.0 >= starving_at)
+                    || thirst.is_some_and(|t| t.0 >= parched_at);
                 let scale = |amt: i32| if starved { amt / 2 } else { amt };
                 let new_stamina = stamina.and_then(|s| {
                     if s.current >= s.max {
@@ -103,14 +117,20 @@ pub fn regen_tick(world: &mut World) {
 /// One game-hour at 10Hz × 75s/hour. Hunger / Thirst tick at this
 /// cadence; matches `mud_clock_tick`'s hour rollover.
 const HUNGER_TICK_TICKS: u64 = 750;
-/// Threshold at which the player feels the gauge — soft warning.
-const HUNGRY_AT: i32 = 24;
-const THIRSTY_AT: i32 = 12;
-/// Threshold at which actual stamina/HP drain starts. Drain is 1
-/// stamina per game-hour; once stamina is at 0, 1 HP per hour
-/// (clamped at 1 — starvation never KILLS in v1, just incapacitates).
-const STARVING_AT: i32 = 48;
-const PARCHED_AT: i32 = 24;
+/// Default thresholds for the soft "you're hungry/thirsty" warning.
+/// Live values come from `survival.hungry_at` / `survival.thirsty_at`
+/// in `GameConfig`; these are the call-site fallbacks. Hours of
+/// game time, since `Hunger.0` and `Thirst.0` are game-hours since
+/// last meal/drink.
+const DEFAULT_HUNGRY_AT: i32 = 24;
+const DEFAULT_THIRSTY_AT: i32 = 12;
+/// Default thresholds at which actual stamina/HP drain starts.
+/// Live values: `survival.starving_at` / `survival.parched_at`.
+/// Drain is 1 stamina per game-hour; once stamina is at 0,
+/// 1 HP per hour clamped at 1 — starvation never KILLS in v1,
+/// just incapacitates.
+const DEFAULT_STARVING_AT: i32 = 48;
+const DEFAULT_PARCHED_AT: i32 = 24;
 
 /// Increment Hunger and Thirst once per game-hour, emit threshold
 /// crossing messages, and drain stamina/HP when starving / parched.
@@ -121,6 +141,29 @@ pub fn hunger_thirst_tick(world: &mut World) {
     if !tick.is_multiple_of(HUNGER_TICK_TICKS) {
         return;
     }
+
+    // Resolve the four thresholds once per tick — every player in
+    // the snapshot uses the same values. `get_resource` so test
+    // worlds without the GameConfig loader pass fall through to
+    // the legacy defaults instead of panicking.
+    let (hungry_at, thirsty_at, starving_at, parched_at) = world
+        .get_resource::<mud_world::RuntimeConfig>()
+        .map_or(
+            (
+                DEFAULT_HUNGRY_AT,
+                DEFAULT_THIRSTY_AT,
+                DEFAULT_STARVING_AT,
+                DEFAULT_PARCHED_AT,
+            ),
+            |cfg| {
+                (
+                    cfg.get_i32("survival", "hungry_at", DEFAULT_HUNGRY_AT),
+                    cfg.get_i32("survival", "thirsty_at", DEFAULT_THIRSTY_AT),
+                    cfg.get_i32("survival", "starving_at", DEFAULT_STARVING_AT),
+                    cfg.get_i32("survival", "parched_at", DEFAULT_PARCHED_AT),
+                )
+            },
+        );
 
     // Snapshot pre-tick state so all mutations and notifications can
     // happen in a single pass without juggling re-borrows.
@@ -146,23 +189,23 @@ pub fn hunger_thirst_tick(world: &mut World) {
 
         // Threshold-crossing messages — fire once per crossing, not
         // every tick the player is over.
-        if old_hunger < HUNGRY_AT && new_hunger >= HUNGRY_AT {
+        if old_hunger < hungry_at && new_hunger >= hungry_at {
             send_to(world, entity, "You are hungry.\r\n");
         }
-        if old_hunger < STARVING_AT && new_hunger >= STARVING_AT {
+        if old_hunger < starving_at && new_hunger >= starving_at {
             send_to(world, entity, "You feel weak from hunger.\r\n");
         }
-        if old_thirst < THIRSTY_AT && new_thirst >= THIRSTY_AT {
+        if old_thirst < thirsty_at && new_thirst >= thirsty_at {
             send_to(world, entity, "You are thirsty.\r\n");
         }
-        if old_thirst < PARCHED_AT && new_thirst >= PARCHED_AT {
+        if old_thirst < parched_at && new_thirst >= parched_at {
             send_to(world, entity, "Your throat is parched!\r\n");
         }
 
         // Drain when over either threshold. 1 stamina/hour; once
         // stamina is at 0, 1 HP/hour clamped at 1 — survival
         // mechanic, not death.
-        if new_hunger >= STARVING_AT || new_thirst >= PARCHED_AT {
+        if new_hunger >= starving_at || new_thirst >= parched_at {
             if stam > 0 {
                 if let Some(mut s) = world.get_mut::<Stamina>(entity) {
                     s.current = (s.current - 1).max(0);

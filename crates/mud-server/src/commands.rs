@@ -10609,27 +10609,26 @@ pub(crate) const DEFAULT_AGGRO_ALIGNMENT: i32 = -800;
 /// Read the alignment threshold from `RuntimeConfig`, falling
 /// back to the legacy hardcoded value. Used by every aggro
 /// gate (room arrival, respawn auto-engage, hostile-tag in
-/// `look`).
+/// `look`). `get_resource` so test worlds without the loader
+/// pass fall through to the default.
 #[must_use]
 pub(crate) fn aggro_alignment(world: &World) -> i32 {
-    world.resource::<mud_world::RuntimeConfig>().get_i32(
-        "combat",
-        "aggro_alignment",
+    world.get_resource::<mud_world::RuntimeConfig>().map_or(
         DEFAULT_AGGRO_ALIGNMENT,
+        |cfg| cfg.get_i32("combat", "aggro_alignment", DEFAULT_AGGRO_ALIGNMENT),
     )
 }
 
 /// Read a per-skill stamina cost from `RuntimeConfig`. Skill names
 /// match the lowercase command name (e.g. `"attack"`, `"bash"`,
 /// `"backstab"`). Falls back to the legacy compile-time default
-/// when the row is absent.
+/// when the row is absent or the resource isn't installed (test
+/// worlds without the loader pass).
 #[must_use]
 pub(crate) fn skill_stamina_cost(world: &World, skill: &str, default: i32) -> i32 {
-    world.resource::<mud_world::RuntimeConfig>().get_i32(
-        "combat.stamina_cost",
-        skill,
-        default,
-    )
+    world
+        .get_resource::<mud_world::RuntimeConfig>()
+        .map_or(default, |cfg| cfg.get_i32("combat.stamina_cost", skill, default))
 }
 
 /// Bidirectional `Fighting` + announcement on both sides + the

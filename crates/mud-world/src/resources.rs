@@ -61,67 +61,95 @@ pub struct RoomEnvironmentalEffects {
     pub by_room: HashMap<(i32, i32), Vec<i32>>,
 }
 
+/// One pre-parsed `GameConfig` value. Loader picks the variant
+/// based on the row's `value_type` column; accessors match on
+/// the variant rather than re-parsing the raw text on every
+/// call. Combat-tick paths read the same row hundreds of times
+/// per second — the parse-once shape eliminates that hot-path
+/// allocation + parse overhead.
+#[derive(Debug, Clone)]
+pub enum ConfigValue {
+    Int(i64),
+    Bool(bool),
+    Float(f64),
+    Str(String),
+    Json(String),
+}
+
 /// K/V tunables from the `GameConfig` table. Replaces the
 /// per-callsite `pub(crate) const FOO_COST` constants — call
 /// sites pass the legacy value as `default` to `get_*`, and a row
-/// in the table overrides it. Missing rows or parse failures fall
-/// through to the default (a `tracing::warn!` flags the parse
-/// failure once at boot).
+/// in the table overrides it. Rows that fail to parse against the
+/// declared `value_type` are dropped at load time with a warning;
+/// the call site sees the default at lookup, same as a missing row.
 ///
-/// Storage shape: `(category, key) -> raw string` plus a typed
-/// parse on each accessor. Values are loaded once at boot; admin
-/// reload is a follow-up (the `restart_req` flag on the schema
-/// row already telegraphs which keys want a restart vs hot reload).
+/// Storage shape: `(category, key) -> ConfigValue` (a tagged enum
+/// of the parsed variants). Loader runs once at boot; accessors
+/// just match on the variant. Admin reload would re-run the loader
+/// pass and replace the resource — that's the follow-up.
 #[derive(Resource, Debug, Default)]
 pub struct RuntimeConfig {
-    pub by_key: HashMap<(String, String), String>,
+    pub by_key: HashMap<(String, String), ConfigValue>,
 }
 
 impl RuntimeConfig {
     /// Read a `(category, key)` row as `i32`. Falls back to
-    /// `default` when the row is missing or doesn't parse. Used
-    /// for skill stamina costs, alignment thresholds, and most
-    /// other small integer tunables.
+    /// `default` when the row is missing or wasn't an INT-typed
+    /// row. Used for skill stamina costs, alignment thresholds,
+    /// and most other small integer tunables.
     #[must_use]
     pub fn get_i32(&self, category: &str, key: &str, default: i32) -> i32 {
-        self.by_key
-            .get(&(category.to_string(), key.to_string()))
-            .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(default)
+        match self.by_key.get(&(category.to_string(), key.to_string())) {
+            Some(ConfigValue::Int(v)) => i32::try_from(*v).unwrap_or(default),
+            _ => default,
+        }
     }
 
     /// Same as `get_i32` for `i64`. Used for housing prices and
     /// other cost values that exceed `i32` headroom.
     #[must_use]
     pub fn get_i64(&self, category: &str, key: &str, default: i64) -> i64 {
-        self.by_key
-            .get(&(category.to_string(), key.to_string()))
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(default)
+        match self.by_key.get(&(category.to_string(), key.to_string())) {
+            Some(ConfigValue::Int(v)) => *v,
+            _ => default,
+        }
     }
 
-    /// Boolean tunable. Accepts "true" / "false" / "1" / "0"
-    /// case-insensitively. Anything else falls through to default.
+    /// Boolean tunable. Returns the parsed `Bool` variant directly;
+    /// `Int(0)` and `Int(non-zero)` also coerce to false/true so a
+    /// row authored as INT still resolves cleanly.
     #[must_use]
     pub fn get_bool(&self, category: &str, key: &str, default: bool) -> bool {
-        self.by_key
-            .get(&(category.to_string(), key.to_string()))
-            .map(|v| v.to_ascii_lowercase())
-            .and_then(|v| match v.as_str() {
-                "true" | "1" | "yes" | "on" => Some(true),
-                "false" | "0" | "no" | "off" => Some(false),
-                _ => None,
-            })
-            .unwrap_or(default)
+        match self.by_key.get(&(category.to_string(), key.to_string())) {
+            Some(ConfigValue::Bool(v)) => *v,
+            Some(ConfigValue::Int(v)) => *v != 0,
+            _ => default,
+        }
     }
 
-    /// String tunable — pass the row's value through verbatim.
-    /// Used for things like "weather mode" labels.
+    /// `f64` tunable for weather-tick intervals, scaling factors,
+    /// etc. Falls back to `default` on missing or wrong-type rows.
+    /// Int-typed rows coerce via `as f64` — config values are small
+    /// integers in practice, well within mantissa precision.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn get_f64(&self, category: &str, key: &str, default: f64) -> f64 {
+        match self.by_key.get(&(category.to_string(), key.to_string())) {
+            Some(ConfigValue::Float(v)) => *v,
+            Some(ConfigValue::Int(v)) => *v as f64,
+            _ => default,
+        }
+    }
+
+    /// String tunable — returns the row's value verbatim. Used for
+    /// things like "weather mode" labels. JSON-typed rows return
+    /// their raw JSON text; callers parse on their own.
     #[must_use]
     pub fn get_string<'a>(&'a self, category: &str, key: &str, default: &'a str) -> &'a str {
-        self.by_key
-            .get(&(category.to_string(), key.to_string()))
-            .map_or(default, String::as_str)
+        match self.by_key.get(&(category.to_string(), key.to_string())) {
+            Some(ConfigValue::Str(v) | ConfigValue::Json(v)) => v.as_str(),
+            _ => default,
+        }
     }
 }
 

@@ -689,7 +689,8 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "doorbash") {
         return;
     }
-    if !check_stamina(world, player, DOORBASH_COST, "doorbash") {
+    let cost = skill_stamina_cost(world, "doorbash", DOORBASH_COST);
+    if !check_stamina(world, player, cost, "doorbash") {
         return;
     }
     let arg = args.trim();
@@ -712,7 +713,7 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("It's already open {}.\r\n", direction_name(dir)));
         return;
     }
-    drain_stamina(world, player, DOORBASH_COST);
+    drain_stamina(world, player, cost);
     flip_door_both_sides(world, room, dir, ExitState::Open);
 
     let player_name = name_of(world, player);
@@ -1030,7 +1031,8 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "stomp") {
         return;
     }
-    if !check_stamina(world, player, STOMP_COST, "stomp") {
+    let cost = skill_stamina_cost(world, "stomp", STOMP_COST);
+    if !check_stamina(world, player, cost, "stomp") {
         return;
     }
     let arg = args.trim();
@@ -1069,7 +1071,7 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     };
 
     let dmg = world.get::<CombatStats>(player).map_or(1, |c| (c.dmg_roll / 2).max(1));
-    drain_stamina(world, player, STOMP_COST);
+    drain_stamina(world, player, cost);
 
     let player_name = name_of(world, player);
     let target_name = name_or(world, target, "(unknown)");
@@ -1123,10 +1125,11 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
     } else {
         format!("trip_up {arg}")
     };
-    if !check_stamina(world, player, TRIPUP_COST, "tripup") {
+    let cost = skill_stamina_cost(world, "tripup", TRIPUP_COST);
+    if !check_stamina(world, player, cost, "tripup") {
         return;
     }
-    drain_stamina(world, player, TRIPUP_COST);
+    drain_stamina(world, player, cost);
     invoke_ability(
         world,
         player,
@@ -1139,7 +1142,8 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "sweep") {
         return;
     }
-    if !check_stamina(world, player, SWEEP_COST, "sweep") {
+    let cost = skill_stamina_cost(world, "sweep", SWEEP_COST);
+    if !check_stamina(world, player, cost, "sweep") {
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {
@@ -1162,7 +1166,7 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "Nothing here to sweep.\r\n");
         return;
     }
-    drain_stamina(world, player, SWEEP_COST);
+    drain_stamina(world, player, cost);
     let player_name = name_of(world, player);
     let count = targets.len();
     for t in targets {
@@ -1195,10 +1199,11 @@ pub(crate) fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "Your target is gone.\r\n");
         return;
     }
-    if !check_stamina(world, player, ROUNDHOUSE_COST, "roundhouse") {
+    let cost = skill_stamina_cost(world, "roundhouse", ROUNDHOUSE_COST);
+    if !check_stamina(world, player, cost, "roundhouse") {
         return;
     }
-    drain_stamina(world, player, ROUNDHOUSE_COST);
+    drain_stamina(world, player, cost);
     let target_name = name_of(world, target);
     invoke_ability(
         world,
@@ -1212,7 +1217,8 @@ pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "roar") {
         return;
     }
-    if !check_stamina(world, player, ROAR_COST, "roar") {
+    let cost = skill_stamina_cost(world, "roar", ROAR_COST);
+    if !check_stamina(world, player, cost, "roar") {
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {
@@ -1240,7 +1246,7 @@ pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "There's nothing here to roar at.\r\n");
         return;
     }
-    drain_stamina(world, player, ROAR_COST);
+    drain_stamina(world, player, cost);
     // First target gets the full description box; subsequent targets
     // dispatch through the quiet variant so the box doesn't repeat
     // N times in an N-mob room. Per-target success / effect summary
@@ -1270,10 +1276,11 @@ pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
     } else {
         arg.to_string()
     };
-    if !check_stamina(world, player, REND_COST, "rend") {
+    let cost = skill_stamina_cost(world, "rend", REND_COST);
+    if !check_stamina(world, player, cost, "rend") {
         return;
     }
-    drain_stamina(world, player, REND_COST);
+    drain_stamina(world, player, cost);
     invoke_ability(
         world,
         player,
@@ -1296,10 +1303,11 @@ pub(crate) fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
     } else {
         arg.to_string()
     };
-    if !check_stamina(world, player, GOUGE_COST, "gouge") {
+    let cost = skill_stamina_cost(world, "gouge", GOUGE_COST);
+    if !check_stamina(world, player, cost, "gouge") {
         return;
     }
-    drain_stamina(world, player, GOUGE_COST);
+    drain_stamina(world, player, cost);
     invoke_ability(
         world,
         player,
@@ -1339,10 +1347,11 @@ pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're already fighting; no surprise.\r\n");
         return;
     }
-    if !check_stamina(world, player, SPRINGLEAP_COST, "springleap") {
+    let cost = skill_stamina_cost(world, "springleap", SPRINGLEAP_COST);
+    if !check_stamina(world, player, cost, "springleap") {
         return;
     }
-    drain_stamina(world, player, SPRINGLEAP_COST);
+    drain_stamina(world, player, cost);
     let target_name = name_of(world, target);
     invoke_ability(
         world,
@@ -1391,10 +1400,11 @@ pub(crate) fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're too alert.\r\n");
         return;
     }
-    if !check_stamina(world, player, THROATCUT_COST, "throatcut") {
+    let cost = skill_stamina_cost(world, "throatcut", THROATCUT_COST);
+    if !check_stamina(world, player, cost, "throatcut") {
         return;
     }
-    drain_stamina(world, player, THROATCUT_COST);
+    drain_stamina(world, player, cost);
     let target_name = name_of(world, target);
     invoke_ability(
         world,
@@ -1467,7 +1477,8 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "hitall") {
         return;
     }
-    if !check_stamina(world, player, HITALL_COST, "hitall") {
+    let cost = skill_stamina_cost(world, "hitall", HITALL_COST);
+    if !check_stamina(world, player, cost, "hitall") {
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {
@@ -1490,7 +1501,7 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "Nothing here to swing at.\r\n");
         return;
     }
-    drain_stamina(world, player, HITALL_COST);
+    drain_stamina(world, player, cost);
 
     let player_name = name_of(world, player);
     let already_fighting = world.get::<Fighting>(player).is_some();
@@ -1541,7 +1552,8 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "disarm") {
         return;
     }
-    if !check_stamina(world, player, DISARM_COST, "disarm") {
+    let cost = skill_stamina_cost(world, "disarm", DISARM_COST);
+    if !check_stamina(world, player, cost, "disarm") {
         return;
     }
     let arg = args.trim();
@@ -1588,7 +1600,7 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Target is in limbo; can't disarm.\r\n");
         return;
     };
-    drain_stamina(world, player, DISARM_COST);
+    drain_stamina(world, player, cost);
 
     // Drop weapon: remove EquippedSlot, re-Located to the room.
     if let Ok(mut e) = world.get_entity_mut(weapon) {
@@ -1679,10 +1691,11 @@ pub(crate) fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can't rescue yourself.\r\n");
         return;
     }
-    if !check_stamina(world, player, RESCUE_COST, "rescue") {
+    let cost = skill_stamina_cost(world, "rescue", RESCUE_COST);
+    if !check_stamina(world, player, cost, "rescue") {
         return;
     }
-    drain_stamina(world, player, RESCUE_COST);
+    drain_stamina(world, player, cost);
     invoke_ability(
         world,
         player,
@@ -1774,10 +1787,11 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
     cmd_look(world, player, "");
 }
 pub(crate) fn cmd_layhands(world: &mut World, player: Entity, args: &str) {
-    if !check_stamina(world, player, LAYHANDS_COST, "lay hands") {
+    let cost = skill_stamina_cost(world, "layhands", LAYHANDS_COST);
+    if !check_stamina(world, player, cost, "lay hands") {
         return;
     }
-    drain_stamina(world, player, LAYHANDS_COST);
+    drain_stamina(world, player, cost);
     let arg = args.trim();
     let dispatched = if arg.is_empty() {
         String::from("lay_hands")
@@ -1814,10 +1828,11 @@ pub(crate) fn cmd_tame(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can only tame animals.\r\n");
         return;
     }
-    if !check_stamina(world, player, TAME_COST, "tame") {
+    let cost = skill_stamina_cost(world, "tame", TAME_COST);
+    if !check_stamina(world, player, cost, "tame") {
         return;
     }
-    drain_stamina(world, player, TAME_COST);
+    drain_stamina(world, player, cost);
     let target_name = name_of(world, target);
     invoke_ability(
         world,
@@ -1832,10 +1847,11 @@ pub(crate) fn cmd_drag(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "drag") {
         return;
     }
-    if !check_stamina(world, player, DRAG_COST, "drag") {
+    let cost = skill_stamina_cost(world, "drag", DRAG_COST);
+    if !check_stamina(world, player, cost, "drag") {
         return;
     }
-    drain_stamina(world, player, DRAG_COST);
+    drain_stamina(world, player, cost);
     invoke_ability(
         world,
         player,
@@ -1867,10 +1883,11 @@ pub(crate) fn cmd_breathe(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "breathe") {
         return;
     }
-    if !check_stamina(world, player, BREATHE_COST, "breathe") {
+    let cost = skill_stamina_cost(world, "breathe", BREATHE_COST);
+    if !check_stamina(world, player, cost, "breathe") {
         return;
     }
-    drain_stamina(world, player, BREATHE_COST);
+    drain_stamina(world, player, cost);
     let arg = args.trim();
     let dispatched = if arg.is_empty() {
         ability_name.to_string()
@@ -1893,10 +1910,11 @@ pub(crate) fn cmd_corner(world: &mut World, player: Entity, args: &str) {
 }
 pub(crate) fn cmd_sneak(world: &mut World, player: Entity, _args: &str) {
     const SNEAK_COST: i32 = 3;
-    if !check_stamina(world, player, SNEAK_COST, "sneak") {
+    let cost = skill_stamina_cost(world, "sneak", SNEAK_COST);
+    if !check_stamina(world, player, cost, "sneak") {
         return;
     }
-    drain_stamina(world, player, SNEAK_COST);
+    drain_stamina(world, player, cost);
     invoke_ability(
         world,
         player,
@@ -1907,10 +1925,11 @@ pub(crate) fn cmd_sneak(world: &mut World, player: Entity, _args: &str) {
 }
 pub(crate) fn cmd_conceal(world: &mut World, player: Entity, _args: &str) {
     const CONCEAL_COST: i32 = 4;
-    if !check_stamina(world, player, CONCEAL_COST, "conceal") {
+    let cost = skill_stamina_cost(world, "conceal", CONCEAL_COST);
+    if !check_stamina(world, player, cost, "conceal") {
         return;
     }
-    drain_stamina(world, player, CONCEAL_COST);
+    drain_stamina(world, player, cost);
     invoke_ability(
         world,
         player,
@@ -1925,10 +1944,11 @@ pub(crate) fn cmd_firstaid(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can't apply first aid in combat.\r\n");
         return;
     }
-    if !check_stamina(world, player, FIRSTAID_COST, "firstaid") {
+    let cost = skill_stamina_cost(world, "firstaid", FIRSTAID_COST);
+    if !check_stamina(world, player, cost, "firstaid") {
         return;
     }
-    drain_stamina(world, player, FIRSTAID_COST);
+    drain_stamina(world, player, cost);
     let arg = args.trim();
     let dispatched = if arg.is_empty() {
         String::from("first_aid")
@@ -1948,10 +1968,11 @@ pub(crate) fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can't bandage in combat.\r\n");
         return;
     }
-    if !check_stamina(world, player, BANDAGE_COST, "bandage") {
+    let cost = skill_stamina_cost(world, "bandage", BANDAGE_COST);
+    if !check_stamina(world, player, cost, "bandage") {
         return;
     }
-    drain_stamina(world, player, BANDAGE_COST);
+    drain_stamina(world, player, cost);
     // Resolve target (for the bleed staunch — invoke_ability also
     // resolves it but we need access to call remove_effect_named).
     let arg = args.trim();

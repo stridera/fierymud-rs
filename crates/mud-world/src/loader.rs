@@ -625,17 +625,53 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // per-callsite `pub(crate) const FOO_COST` constants. Call
     // sites pass the legacy value as the `default` argument to
     // `RuntimeConfig::get_*`, so a missing or unparseable row
-    // degrades to today's behavior.
+    // degrades to today's behavior. Values are parsed once here
+    // based on the row's `value_type` so accessor calls are a
+    // hashmap lookup + variant match — no per-call re-parse.
     let config_rows = game_config::list_all(pool).await?;
     let mut config = crate::resources::RuntimeConfig::default();
+    let mut skipped = 0u32;
     for row in config_rows {
-        config
-            .by_key
-            .insert((row.category, row.key), row.value);
+        let parsed = match row.value_type.as_str() {
+            "INT" => row
+                .value
+                .parse::<i64>()
+                .ok()
+                .map(crate::resources::ConfigValue::Int),
+            "BOOL" => match row.value.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => {
+                    Some(crate::resources::ConfigValue::Bool(true))
+                }
+                "false" | "0" | "no" | "off" => {
+                    Some(crate::resources::ConfigValue::Bool(false))
+                }
+                _ => None,
+            },
+            "FLOAT" => row
+                .value
+                .parse::<f64>()
+                .ok()
+                .map(crate::resources::ConfigValue::Float),
+            "JSON" => Some(crate::resources::ConfigValue::Json(row.value.clone())),
+            // Default + STRING + anything unrecognized: store as Str.
+            _ => Some(crate::resources::ConfigValue::Str(row.value.clone())),
+        };
+        if let Some(v) = parsed {
+            config.by_key.insert((row.category, row.key), v);
+        } else {
+            warn!(
+                category = %row.category,
+                key = %row.key,
+                value_type = %row.value_type,
+                raw = %row.value,
+                "GameConfig row failed to parse; falling back to call-site default"
+            );
+            skipped += 1;
+        }
     }
     let cfg_count = config.by_key.len();
     world.insert_resource(config);
-    info!(rows = cfg_count, "GameConfig loaded");
+    info!(rows = cfg_count, skipped, "GameConfig loaded");
 
     // Pass 4d: object-ability catalog (scrolls / wands / staves
     // bound abilities). Lookups are by `(zone, id)` matching an item
