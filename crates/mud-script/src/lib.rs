@@ -2023,7 +2023,12 @@ impl UserData for LuaActor {
                         Ok(Value::String(lua.create_string(&s)?))
                     }
                     // 2 corpus refs — objective gender pronoun.
-                    "objective" | "himher" => {
+                    // `actor.object` is the legacy DG-Script alias
+                    // for the same value (10+ corpus refs in mob
+                    // fight bodies: "throws X in the wall, smacking
+                    // <object> in the jaw"). Distinct from the
+                    // _global_ `object` (the event item context).
+                    "objective" | "himher" | "object" => {
                         let s = pronoun_for(this.entity, lua, |g| match g {
                             "male" => "him",
                             "female" => "her",
