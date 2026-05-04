@@ -8835,8 +8835,16 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
             std::cmp::Ordering::Greater => format!("+{}", p.weapon_dice_bonus),
             std::cmp::Ordering::Less => format!("{}", p.weapon_dice_bonus),
         };
+        // Damage type from the proto's values blob — slash/pierce/
+        // crush/bludgeon/etc. Suffix as a colored parenthetical so
+        // the player can tell the attack family without `examine`.
+        let dtype_suffix = p
+            .weapon_damage_type
+            .as_deref()
+            .map(|t| format!("  <yellow>({t})</>"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "  <cyan>Damage:</>    <yellow>{}d{}{bonus}</>  <dim>(avg {})</>\r\n",
+            "  <cyan>Damage:</>    <yellow>{}d{}{bonus}</>  <dim>(avg {})</>{dtype_suffix}\r\n",
             p.weapon_dice_num,
             p.weapon_dice_size,
             p.avg_damage(),

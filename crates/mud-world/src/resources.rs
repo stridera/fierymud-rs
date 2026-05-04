@@ -298,6 +298,13 @@ pub struct ObjectProto {
     pub weapon_dice_num: i32,
     pub weapon_dice_size: i32,
     pub weapon_dice_bonus: i32,
+    /// Weapon `Damage Type` from `Objects.values` — `SLASH` /
+    /// `PIERCE` / `CRUSH` / `BLUDGEON` / etc. Lowercased for
+    /// display. `None` for non-weapons or weapons whose row
+    /// doesn't carry the field. Surfaces on `identify` so a
+    /// player can tell the attack family at a glance without
+    /// knowing the proto's keyword.
+    pub weapon_damage_type: Option<String>,
     /// Base value in copper (the schema's `Objects.cost`). Shops will
     /// pay some fraction of this on sell; appraisal commands surface
     /// the raw number split into denominations.

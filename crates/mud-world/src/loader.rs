@@ -252,6 +252,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     for row in object_rows {
         let (weapon_dice_num, weapon_dice_size, weapon_dice_bonus) =
             parse_weapon_dice(&row.values);
+        let weapon_damage_type = if matches!(row.r#type, mud_db::enums::ObjectType::Weapon) {
+            parse_weapon_damage_type(&row.values)
+        } else {
+            None
+        };
         let portal_destination_vnum = if matches!(row.r#type, mud_db::enums::ObjectType::Portal) {
             parse_portal_destination(&row.values)
         } else {
@@ -291,6 +296,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 weapon_dice_num,
                 weapon_dice_size,
                 weapon_dice_bonus,
+                weapon_damage_type,
                 cost: row.cost,
                 portal_destination_vnum,
                 board_id,
@@ -1569,6 +1575,16 @@ pub fn wear_flags_primary_slot(flags: &[mud_db::enums::WearFlag]) -> Option<crat
 }
 
 /// Pull weapon dice out of an Object's `values` JSONB blob. Schema
+/// Pull `Damage Type` from a weapon's `values` JSONB
+/// (`SLASH` / `PIERCE` / `CRUSH` / `BLUDGEON` / etc.).
+/// Lowercased for display; `None` when the field is absent.
+fn parse_weapon_damage_type(values: &serde_json::Value) -> Option<String> {
+    values
+        .get("Damage Type")?
+        .as_str()
+        .map(str::to_ascii_lowercase)
+}
+
 /// shape: `{"Hit Dice": {"num": "N", "size": "M", "bonus": B}, ...}`
 /// where num/size are typed as strings (not numbers) in the legacy
 /// data — we accept either form. Returns `(num, size, bonus)` zeros
