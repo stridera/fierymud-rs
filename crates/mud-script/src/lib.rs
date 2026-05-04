@@ -1733,6 +1733,35 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:get_has_spell(name)` — true if any `EffectInstance`
+        // applied to this entity carries an `ability_id` matching
+        // the named ability. Different from `has_effect`, which
+        // matches by Effect catalog row (those are generic types
+        // like "status" / "heal" / "modify" — not the per-spell
+        // name corpus callers want). 9+ corpus refs from bard
+        // combat AI gating song re-application
+        // ("if not actor:get_has_spell('terror') then perform...").
+        methods.add_method(
+            "get_has_spell",
+            |lua, this, name: String| -> mlua::Result<bool> {
+                world_mut_from_lua(lua, |w| {
+                    let key = name.trim().to_ascii_lowercase();
+                    let Some(target_id) = w
+                        .resource::<AbilityCatalog>()
+                        .by_name
+                        .get(&key)
+                        .map(|d| d.id)
+                    else {
+                        return false;
+                    };
+                    let mut q = w.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(w).any(|(inst, applied)| {
+                        applied.0 == this.entity && inst.ability_id == Some(target_id)
+                    })
+                })
+            },
+        );
+
         // `actor:has_effect(name)` — true if any `EffectInstance`
         // applied to this entity resolves through `EffectCatalog`
         // to a definition whose name matches case-insensitively.
