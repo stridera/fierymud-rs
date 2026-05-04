@@ -1677,16 +1677,67 @@ impl UserData for LuaActor {
                         let level = if let Some(p) = w.get::<Profile>(this.entity) {
                             p.level
                         } else if let Some(wk) = w.get::<WorldKey>(this.entity) {
-                            // Mobs: source level from the proto catalog
-                            // since they don't carry Profile.
-                            w.resource::<MobPrototypes>()
+                            // Mobs first, then items — both carry
+                            // WorldKey but live in different proto
+                            // catalogs. Returns 0 for entities in
+                            // neither (rooms, zones, ...).
+                            if let Some(p) = w
+                                .resource::<MobPrototypes>()
                                 .by_key
                                 .get(&(wk.zone, wk.id))
-                                .map_or(0, |p| p.level)
+                            {
+                                p.level
+                            } else {
+                                w.resource::<ObjectPrototypes>()
+                                    .by_key
+                                    .get(&(wk.zone, wk.id))
+                                    .map_or(0, |p| p.level)
+                            }
                         } else {
                             0
                         };
                         Value::Integer(level.into())
+                    }),
+                    // Item proto fields. `object.cost` (base value
+                    // in copper), `object.type` (ObjectType enum
+                    // tag — "WEAPON", "ARMOR", etc.), `object.weight`.
+                    // Returns 0 / "" for non-item entities.
+                    "cost" => world_from_lua(lua, |w| {
+                        let cost = w
+                            .get::<WorldKey>(this.entity)
+                            .and_then(|wk| {
+                                w.resource::<ObjectPrototypes>()
+                                    .by_key
+                                    .get(&(wk.zone, wk.id))
+                                    .map(|p| p.cost)
+                            })
+                            .unwrap_or(0);
+                        Value::Integer(cost.into())
+                    }),
+                    "type" => {
+                        let s = world_from_lua(lua, |w| {
+                            w.get::<WorldKey>(this.entity)
+                                .and_then(|wk| {
+                                    w.resource::<ObjectPrototypes>()
+                                        .by_key
+                                        .get(&(wk.zone, wk.id))
+                                        .map(|p| format!("{:?}", p.r#type).to_uppercase())
+                                })
+                                .unwrap_or_default()
+                        })?;
+                        Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    "weight" => world_from_lua(lua, |w| {
+                        let weight = w
+                            .get::<WorldKey>(this.entity)
+                            .and_then(|wk| {
+                                w.resource::<ObjectPrototypes>()
+                                    .by_key
+                                    .get(&(wk.zone, wk.id))
+                                    .map(|p| p.weight)
+                            })
+                            .unwrap_or(0.0);
+                        Value::Number(weight)
                     }),
                     // `actor.class` returns the plain_name of the
                     // actor's class (e.g. "warrior"). Players source
