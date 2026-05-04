@@ -1827,6 +1827,23 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:heal(amount)` is the inverse of `damage` — bumps HP
+        // by `amount`, capped at `max`. 7+ corpus refs from friendly
+        // healers (animal pets that lick wounds), fountain `RANDOM`
+        // bodies, and soul-siphon-style scripts where the wielder
+        // gets healed by the drained HP. Negative input is treated
+        // as zero (callers should use `damage` for the inverse) and
+        // missing `Health` is a quiet no-op.
+        methods.add_method("heal", |lua, this, amount: i32| -> mlua::Result<()> {
+            world_mut_from_lua(lua, |world| {
+                if let Some(mut h) = world.get_mut::<Health>(this.entity)
+                    && amount > 0
+                {
+                    h.hp = (h.hp + amount).min(h.max);
+                }
+            })
+        });
+
         // `actor:destroy_item(needle)` removes items from the actor's
         // inventory whose keywords match. `all.X` form despawns
         // every matching item; bare `X` despawns just the first.
