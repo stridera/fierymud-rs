@@ -6725,6 +6725,19 @@ pub(crate) fn invoke_ability(
     invoke_ability_with(world, player, args, kind, verb, false);
 }
 
+/// fn-ptr shim used by the Lua `skills.execute` binding. Hardcodes
+/// kind=Skill / verb="use" so the host doesn't have to know about
+/// `AbilityKind`. The signature matches `mud_script::SkillExecutor`.
+pub fn lua_invoke_skill(world: &mut World, caster: Entity, args: &str) {
+    invoke_ability(
+        world,
+        caster,
+        args,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+    );
+}
+
 /// Same as [`invoke_ability`] but treats the call as a non-first
 /// dispatch in an AOE batch:
 ///   - skips the leading description-box header (so `cmd_roar` over

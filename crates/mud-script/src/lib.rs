@@ -55,6 +55,19 @@ pub struct LuaHost {
 /// doesn't need to depend on mud-server.
 const TICK_HZ: u64 = 10;
 
+/// Function-pointer resource installed by mud-server at boot. The Lua
+/// `skills.execute(caster, "name", target)` binding looks this up and
+/// calls it with `(world, caster, "name target_name")`. Kept as an
+/// `Option` so unit tests inside this crate (which don't link
+/// mud-server) can run without it; in that mode the binding is a
+/// quiet no-op.
+///
+/// The reason it's a fn-ptr resource rather than a direct call into
+/// mud-server: `mud-script` does not depend on `mud-server`. mud-server
+/// installs `invoke_ability(_, _, _, AbilityKind::Skill, "use")` here.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct SkillExecutor(pub Option<fn(&mut World, Entity, &str)>);
+
 impl Default for LuaHost {
     fn default() -> Self {
         Self::new()
@@ -338,6 +351,15 @@ impl LuaHost {
             // into the actor's `KnownAbilities`. Used by the
             // breathe-* family of LOAD triggers to grant abilities at
             // mob spawn time.
+            //
+            // `skills.execute(actor, name, target)` dispatches a named
+            // skill via `SkillExecutor`, the fn-ptr resource that
+            // mud-server installs at boot. Used by combat AI scripts
+            // to fire `bash` / `kick` / `backstab` mid-fight. Target
+            // can be a `LuaActor` userdata (its `Named.name` is used)
+            // or a string name; nil falls through to the no-target
+            // form (which `invoke_ability` handles as a self-cast or
+            // current-target lookup).
             let skills_tbl = self.lua.create_table()?;
             skills_tbl.set(
                 "set_level",
@@ -345,6 +367,16 @@ impl LuaHost {
                     |lua, (a, name, level): (AnyUserData, String, i32)| -> mlua::Result<()> {
                         let entity = a.borrow::<LuaActor>()?.entity;
                         skills_set_level(lua, entity, &name, level)
+                    },
+                )?,
+            )?;
+            skills_tbl.set(
+                "execute",
+                self.lua.create_function(
+                    |lua, (a, name, target): (AnyUserData, String, Value)| -> mlua::Result<()> {
+                        let caster = a.borrow::<LuaActor>()?.entity;
+                        let target_name = resolve_target_name(lua, &target)?;
+                        skills_execute(lua, caster, &name, target_name.as_deref())
                     },
                 )?,
             )?;
@@ -745,6 +777,16 @@ impl LuaHost {
                 },
             )?,
         )?;
+        skills_tbl.set(
+            "execute",
+            self.lua.create_function(
+                |lua, (a, name, target): (AnyUserData, String, Value)| -> mlua::Result<()> {
+                    let caster = a.borrow::<LuaActor>()?.entity;
+                    let target_name = resolve_target_name(lua, &target)?;
+                    skills_execute(lua, caster, &name, target_name.as_deref())
+                },
+            )?,
+        )?;
         globals.set("skills", skills_tbl)?;
 
         let world_tbl = self.lua.create_table()?;
@@ -1056,6 +1098,58 @@ fn world_mut_from_lua<R>(lua: &Lua, f: impl FnOnce(&mut World) -> R) -> mlua::Re
     // host yet).
     let world = unsafe { p.as_mut() };
     Ok(f(world))
+}
+
+/// Resolve a Lua argument into a target-name string suitable for
+/// `invoke_ability`. Accepts `LuaActor` (uses its `Named.name`),
+/// raw strings, or nil (returns `None`). Other types collapse to
+/// `None` so callers can keep the binding signature loose.
+fn resolve_target_name(lua: &Lua, target: &Value) -> mlua::Result<Option<String>> {
+    match target {
+        Value::String(s) => Ok(s
+            .to_str()
+            .ok()
+            .map(|c| c.trim().to_string())
+            .filter(|s| !s.is_empty())),
+        Value::UserData(ud) => {
+            let Ok(actor) = ud.borrow::<LuaActor>() else {
+                return Ok(None);
+            };
+            let entity = actor.entity;
+            let name = world_from_lua(lua, |w| {
+                w.get::<Named>(entity).map(|n| n.name.clone())
+            })?;
+            Ok(name.filter(|s| !s.is_empty()))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Dispatch a named skill via the `SkillExecutor` fn-ptr resource.
+/// No-op if the resource isn't installed (unit tests don't link
+/// mud-server) or if `skill` is empty. Target gets appended to the
+/// args string so `invoke_ability`'s usual `"skill target_word"`
+/// parsing works without changes.
+fn skills_execute(
+    lua: &Lua,
+    caster: Entity,
+    skill: &str,
+    target: Option<&str>,
+) -> mlua::Result<()> {
+    let skill = skill.trim();
+    if skill.is_empty() {
+        return Ok(());
+    }
+    world_mut_from_lua(lua, |world| {
+        let Some(f) = world.get_resource::<SkillExecutor>().and_then(|e| e.0) else {
+            return;
+        };
+        let args = match target.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(t) => format!("{skill} {t}"),
+            None => skill.to_string(),
+        };
+        f(world, caster, &args);
+    })
 }
 
 /// Upsert a `KnownAbilities` row on `entity`. If the entity has no

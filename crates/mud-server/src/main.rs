@@ -114,6 +114,11 @@ async fn main() {
     world.insert_resource(mud_world::MudClock::default());
     world.insert_resource(mud_world::HousingIndex::default());
     world.insert_resource(mud_script::LuaHost::default());
+    // Install the skill-dispatch shim. The Lua corpus calls
+    // `skills.execute(actor, "kick", target)` from combat AI; the
+    // host crate doesn't depend on mud-server, so we hand it a
+    // fn-ptr that routes to `invoke_ability` with kind=Skill.
+    world.insert_resource(mud_script::SkillExecutor(Some(commands::lua_invoke_skill)));
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
         error!(error = %e, "world load failed");
