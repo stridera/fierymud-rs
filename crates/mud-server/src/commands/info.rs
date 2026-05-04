@@ -6062,13 +6062,26 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     let a_avg = ap.avg_damage();
     let b_avg = bp.avg_damage();
     if a_avg > 0 && b_avg > 0 {
+        // Dice + damage-type as a single weapon-attack signature.
+        // Mismatched damage types (slash vs crush) are a real
+        // tactical decision when one resists physical-vs-elemental
+        // hits, so surfacing both numbers and family in one line
+        // lets the player pick on more than just average damage.
         let dice_line = |p: &mud_world::ObjectProto| -> String {
             let bonus = match p.weapon_dice_bonus.cmp(&0) {
                 std::cmp::Ordering::Equal => String::new(),
                 std::cmp::Ordering::Greater => format!("+{}", p.weapon_dice_bonus),
                 std::cmp::Ordering::Less => format!("{}", p.weapon_dice_bonus),
             };
-            format!("{}d{}{bonus}", p.weapon_dice_num, p.weapon_dice_size)
+            let dice = format!("{}d{}{bonus}", p.weapon_dice_num, p.weapon_dice_size);
+            // Append the damage-type family (slash/crush/pierce/...)
+            // when present. The outer format string wraps this whole
+            // result in <yellow>...</> so we don't add color here —
+            // the parenthetical inherits the yellow.
+            match p.weapon_damage_type.as_deref() {
+                Some(t) if !t.is_empty() => format!("{dice} ({t})"),
+                _ => dice,
+            }
         };
         let damage_delta = a_avg - b_avg;
         // Damage delta picks up `damage_color_tag` so a meaningful
@@ -6092,6 +6105,23 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
             dice_line(&ap),
             dice_line(&bp),
         ));
+        // Type-mismatch hint. When A and B carry different damage
+        // families (slash vs crush, pierce vs bludgeon, ...) and
+        // both are populated, surface the delta as its own line so
+        // a player picking between two roughly-equal weapons can
+        // spot the tactical fork without parsing the dice line.
+        match (
+            ap.weapon_damage_type.as_deref(),
+            bp.weapon_damage_type.as_deref(),
+        ) {
+            (Some(a), Some(b)) if a != b && !a.is_empty() && !b.is_empty() => {
+                out.push_str(&format!(
+                    "  <dim>Different damage types — A: <yellow>{a}</>, \
+                     B: <yellow>{b}</></>\r\n"
+                ));
+            }
+            _ => {}
+        }
     }
     send_to(world, player, out);
 }
