@@ -3998,6 +3998,21 @@ pub(crate) fn who_level_color(level: i32) -> Option<&'static str> {
     }
 }
 
+/// XML-Lite open tag for an effect's remaining duration. Effects
+/// running close to expiry render warm so the player notices in
+/// time to refresh; longer-lived buffs / debuffs read plain.
+/// Bands: <30s red, <2m yellow, longer plain. Permanent effects
+/// (negative `remaining_secs` signal) get their own treatment in
+/// the caller — this helper only fires for finite durations.
+#[must_use]
+pub(crate) fn effect_duration_color(remaining_secs: u64) -> Option<&'static str> {
+    match remaining_secs {
+        0..=29 => Some("<red>"),
+        30..=119 => Some("<yellow>"),
+        _ => None,
+    }
+}
+
 /// XML-Lite open tag for an idle duration. Active sessions return
 /// None (plain); progressively longer idle gets warmer colors so
 /// `who` and `idle` make stale sessions easy to spot at a glance.

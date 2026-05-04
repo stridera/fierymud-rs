@@ -6404,28 +6404,30 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
         *counts.entry(name.clone()).or_insert(0) += 1;
     }
     let weight = carried_weight(world, player);
-    let mode = color_mode_for(world, player);
-    let mut out = if items.is_empty() {
+    let mut raw = if items.is_empty() {
         if filter.is_empty() {
             "\r\nYou are carrying nothing.\r\n".to_string()
         } else {
             format!("\r\nYou aren't carrying anything matching '{filter}'.\r\n")
         }
     } else if filter.is_empty() {
-        format!("\r\nYou are carrying {} item(s):\r\n", items.len())
+        format!(
+            "\r\n<b:cyan>You are carrying {} item(s):</>\r\n",
+            items.len()
+        )
     } else {
         format!(
-            "\r\n{} item(s) match '{filter}':\r\n",
+            "\r\n<b:cyan>{} item(s) match '{filter}':</>\r\n",
             items.len(),
         )
     };
     for name in &order {
         let n = counts.get(name).copied().unwrap_or(1);
-        let rendered = render_color_tags(name, mode);
         if n > 1 {
-            out.push_str(&format!("  ({n}) {rendered}\r\n"));
+            // Stack count dimmed so the eye lands on the item name.
+            raw.push_str(&format!("  <dim>({n})</> {name}\r\n"));
         } else {
-            out.push_str(&format!("      {rendered}\r\n"));
+            raw.push_str(&format!("      {name}\r\n"));
         }
     }
     // Always show total carried weight when the player has any —
@@ -6433,15 +6435,20 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
     // accurate regardless of which subset they're inspecting.
     if weight > 0.0 {
         let cap = carry_capacity(world, player);
-        // Same encumbrance band the score sheet uses, so a player
-        // checking inventory immediately sees whether they're
-        // bumping their move-stamina penalty bracket.
-        out.push_str(&format!(
-            "\r\nTotal weight carried: {weight:.1} / {cap:.0} lbs.  ({})\r\n",
-            encumbrance_band(weight, cap),
+        let band = encumbrance_band(weight, cap);
+        // Same encumbrance gradient the score sheet uses (red ≥90%,
+        // yellow ≥70%, plain otherwise) so a player checking
+        // inventory immediately sees whether they're bumping their
+        // move-stamina penalty bracket.
+        let (open, close) = encumbrance_color_tag(weight, cap)
+            .map_or((String::new(), String::new()), |t| {
+                (t.to_string(), "</>".to_string())
+            });
+        raw.push_str(&format!(
+            "\r\nTotal weight carried: {open}{weight:.1}{close} / {cap:.0} lbs.  ({open}{band}{close})\r\n",
         ));
     }
-    send_to(world, player, out);
+    send_rendered(world, player, &raw);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -7485,25 +7492,26 @@ pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     by_slot.sort_by_key(|(s, _, _)| Slot::ORDER.iter().position(|x| x == s).unwrap_or(usize::MAX));
-    let mode = color_mode_for(world, player);
     let total_weight: f64 = by_slot.iter().map(|(_, _, w)| w).sum();
-    let mut out = String::from("\r\nEquipment:\r\n");
+    let mut out = String::from("\r\n<b:cyan>Equipment:</>\r\n");
     for (slot, name, weight) in &by_slot {
+        // Slot label dimmed so the eye lands on the item name.
+        // Weight in parentheses also dimmed — supplemental data.
         let weight_label = if *weight > 0.0 {
-            format!(" ({weight:.1} lbs)")
+            format!(" <dim>({weight:.1} lbs)</>")
         } else {
             String::new()
         };
         out.push_str(&format!(
-            "  {:>14}: {}{}\r\n",
+            "  <cyan>{:>14}</>: {}{}\r\n",
             slot.label(),
-            render_color_tags(name, mode),
+            name,
             weight_label,
         ));
     }
     if total_weight > 0.0 {
         out.push_str(&format!(
-            "\r\nTotal worn weight: {total_weight:.1} lbs.\r\n",
+            "\r\n<dim>Total worn weight: {total_weight:.1} lbs.</>\r\n",
         ));
     }
     send_to(world, player, out);
@@ -7586,7 +7594,7 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     let mut out = if active.is_empty() {
         "\r\nYou have no active effects.\r\n".to_string()
     } else {
-        format!("\r\n{} active effect(s):\r\n", active.len())
+        format!("\r\n<b:cyan>{} active effect(s):</>\r\n", active.len())
     };
     let catalog = world.resource::<AbilityCatalog>();
     for (name, remaining, ability_id, delta_amount) in active {
@@ -7600,25 +7608,42 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
                 .find(|d| d.id == id)
                 .map(|d| d.plain_name.clone())
         });
+        // Source attribution dimmed — supplemental, not the focus.
         let suffix = from
             .as_deref()
-            .map_or(String::new(), |n| format!(" — from {n}"));
+            .map_or(String::new(), |n| format!(" <dim>— from {n}</>"));
+        // Modifier delta colored by sign — green for buffs, red for
+        // debuffs. A bless (+2 STR) reads green; a curse (-3 DEX)
+        // reads red. Player can scan the list and immediately see
+        // which way each effect is pulling them.
         let delta_label = delta_amount.map_or(String::new(), |a| {
-            let sign = if a >= 0 { "+" } else { "" };
-            format!(" ({sign}{a})")
+            let (sign, color) = if a >= 0 {
+                ("+", "<green>")
+            } else {
+                ("", "<red>")
+            };
+            format!(" {color}({sign}{a})</>")
         });
         if remaining < 0 {
-            out.push_str(&format!("  {name}{delta_label} (permanent){suffix}\r\n"));
+            // Permanent effects (innate racials, divine boons, etc.)
+            // get a bold-cyan tag — they're not on the clock.
+            out.push_str(&format!(
+                "  <b:cyan>{name}</>{delta_label} <b:cyan>(permanent)</>{suffix}\r\n"
+            ));
         } else {
             // Render long durations as "37m" / "2h15m" instead of
-            // raw "2245s remaining" so the player gets a useful
-            // sense of timeline at a glance. format_idle handles
-            // the hour/minute/second decomposition.
+            // raw "2245s remaining". Color-graded by `effect_duration_color`
+            // so a buff about to expire reads warm and the player
+            // notices in time to refresh.
             #[allow(clippy::cast_sign_loss)]
             let secs = remaining.max(0) as u64;
+            let dur_open = effect_duration_color(secs);
+            let dur_label = match dur_open {
+                Some(open) => format!("{open}{}</>", format_idle(secs)),
+                None => format_idle(secs),
+            };
             out.push_str(&format!(
-                "  {name}{delta_label} ({} remaining){suffix}\r\n",
-                format_idle(secs),
+                "  <cyan>{name}</>{delta_label} ({dur_label} remaining){suffix}\r\n"
             ));
         }
     }
