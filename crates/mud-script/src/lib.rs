@@ -1834,6 +1834,26 @@ impl UserData for LuaActor {
             })
         });
 
+        // `actor:breath_attack(element, target?)` is a convenience
+        // wrapper for the dragon `breathe_<element>` SKILLs (12+
+        // corpus refs from fire/frost/lightning/acid/gas dragons,
+        // efreeti, etc.). The element string maps directly onto the
+        // ability name; the target arg is the same shape as
+        // `skills.execute` (LuaActor / string / nil — most corpus
+        // calls pass `nil` to fire the AOE form).
+        methods.add_method(
+            "breath_attack",
+            |lua, this, (element, target): (String, Value)| -> mlua::Result<()> {
+                let element_key = element.trim().to_ascii_lowercase();
+                if element_key.is_empty() {
+                    return Ok(());
+                }
+                let skill = format!("breathe_{element_key}");
+                let target_name = resolve_target_name(lua, &target)?;
+                skills_execute(lua, this.entity, &skill, target_name.as_deref())
+            },
+        );
+
         // `actor:attack_all()` makes the speaker engage every player
         // in their room. 8+ corpus refs from FIGHT triggers on
         // mid-tier enrage states (jann warrior, severan, dark elves,
