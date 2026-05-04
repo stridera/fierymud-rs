@@ -1906,6 +1906,80 @@ mod tests {
     }
 
     #[test]
+    fn combat_resumes_after_stun_clears() {
+        // Integration: a Stunned attacker doesn't swing, but once
+        // the marker is gone (effects_tick clears it when the last
+        // backing stun EffectInstance expires), the next combat
+        // tick should land damage. effects::tests already cover
+        // marker-add/remove in isolation; this test bridges the
+        // two systems.
+        use mud_world::Stunned;
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 50);
+        let attacker = make_attacker(&mut world, room, target, 7);
+        try_insert(&mut world, attacker, Stunned);
+
+        // Stunned: no damage applied.
+        run_combat_tick(&mut world);
+        assert_eq!(
+            world.get::<Health>(target).unwrap().hp,
+            50,
+            "stunned attacker doesn't swing"
+        );
+
+        // Marker cleared (mimic effects_tick's behavior). Next combat
+        // tick should land damage.
+        try_remove::<Stunned>(&mut world, attacker);
+        run_combat_tick(&mut world);
+        assert!(
+            world.get::<Health>(target).unwrap().hp < 50,
+            "swing lands once Stunned clears"
+        );
+    }
+
+    #[test]
+    fn mid_tick_residual_swing_skips_despawned_mob() {
+        // Multi-attacker mob death race: two attackers swing at the
+        // same mob in one tick; the first kill despawns the mob.
+        // The second swing was already snapshotted, so apply_swing
+        // is still called with a target Entity that no longer
+        // exists. Verifies the early-return at apply_swing's top
+        // (`world.get_entity(target).is_err()`) clears Fighting
+        // from the residual attacker without panicking.
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let mob = world
+            .spawn((
+                Mob,
+                Named { name: "Target".to_string() },
+                Located(room),
+                Health { hp: 5, max: 5 }, // one swing kills
+            ))
+            .id();
+        let attacker_a = make_attacker(&mut world, room, mob, 50);
+        let attacker_b = make_attacker(&mut world, room, mob, 50);
+
+        run_combat_tick(&mut world);
+
+        assert!(
+            world.get_entity(mob).is_err(),
+            "lethal first swing despawned the mob"
+        );
+        // Both attackers must end up with Fighting cleared — one
+        // via handle_death's sweep, the other via the
+        // entity-gone early-return in apply_swing.
+        assert!(
+            world.get::<Fighting>(attacker_a).is_none(),
+            "first attacker disengaged via handle_death"
+        );
+        assert!(
+            world.get::<Fighting>(attacker_b).is_none(),
+            "second (residual-swing) attacker disengaged via entity-gone guard"
+        );
+    }
+
+    #[test]
     fn frozen_attacker_is_filtered_from_swing_snapshot() {
         // Defense-in-depth check: even if a Frozen entity somehow
         // has Fighting set on them, the swing snapshot must skip

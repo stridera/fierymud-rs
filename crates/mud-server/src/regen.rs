@@ -402,6 +402,47 @@ mod tests {
     }
 
     #[test]
+    fn starving_player_regens_at_half_rate() {
+        // Once Hunger crosses the starving threshold, regen halves
+        // (rounded down). Sleeping baseline is +8 stamina / +4 hp;
+        // halved → +4 / +2. Hunger value uses the default 48-game-
+        // hour threshold inlined as DEFAULT_STARVING_AT.
+        let mut world = World::new();
+        let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Sleeping);
+        world
+            .get_entity_mut(p)
+            .unwrap()
+            .insert(Hunger(DEFAULT_STARVING_AT));
+        run_regen_tick(&mut world);
+        assert_eq!(
+            world.get::<Stamina>(p).unwrap().current,
+            34,
+            "starving halves stamina regen (8 → 4)"
+        );
+        assert_eq!(
+            world.get::<Health>(p).unwrap().hp,
+            52,
+            "starving halves hp regen (4 → 2)"
+        );
+    }
+
+    #[test]
+    fn parched_player_regens_at_half_rate() {
+        // Same shape as starving, but driven by Thirst. Either
+        // axis triggers the half-rate scale — they don't stack
+        // for double-halving.
+        let mut world = World::new();
+        let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Sleeping);
+        world
+            .get_entity_mut(p)
+            .unwrap()
+            .insert(Thirst(DEFAULT_PARCHED_AT));
+        run_regen_tick(&mut world);
+        assert_eq!(world.get::<Stamina>(p).unwrap().current, 34);
+        assert_eq!(world.get::<Health>(p).unwrap().hp, 52);
+    }
+
+    #[test]
     fn ghost_players_skip_regen() {
         // Ghosts are dead — they don't slowly heal back to max.
         // release is the only path back from Ghost and it sets
