@@ -73,7 +73,7 @@ Dropped types and their migration target:
 
 | Drop | Why | Migration |
 |---|---|---|
-| `FIREWEAPON` | `damage_type = FIRE` on regular WEAPON + on-hit `burning` STATUS via ObjectEffects covers it | Each FIREWEAPON → WEAPON with `damage_type = FIRE`; ObjectEffects row → `burning` Effect catalog row. |
+| `FIREWEAPON` | Every legacy fire-weapon is a physical implement that's been lit / enchanted / forged hot. Composes cleanly as `WEAPON` + on-hit fire ability. See [damage-types.md](damage-types.md) "Mixed-damage weapons". | All legacy FIREWEAPONs → `WEAPON` with the appropriate physical `damage_type` (SLASHING for swords, PIERCING for daggers, BLUDGEONING for torches/maces, etc.) + `ObjectAbilities(trigger = ON_HIT)` row pointing at a fire-strike ability. The fierylib importer picks the physical type from the legacy `weapon_class` / `name`. The fire portion's behavior — direct damage, ignite chance, both — comes from which fire-strike ability the row points at. **Pure-elemental weapons** (spell-summoned `create flameblade`, fire-elemental natural attacks) are a separate path: those are `WEAPON(FIRE)` directly with no physical substrate, and they skip armor automatically by the damage-type categorization rule (see damage-types.md). |
 | `WORN` | Distinction from ARMOR was "wearable but no mitigation." Same shape, just `armor_pct = 0` | Each WORN → ARMOR with `armor_pct = 0`. |
 | `TRAP` | Triggers on items / rooms handle trap mechanics; no special type needed | Trap items either rebuild as triggered items, or convert to OTHER if decorative. |
 | `WINGS` | Wings are a slot, not a type. New `Slot::Wings` + `WearFlag::Wings`; flight is an effect. | Each WINGS → ARMOR with `wear_flags = [WINGS]`; ObjectEffects row → `fly` STATUS. |
@@ -86,7 +86,7 @@ Kept (with notes):
 
 | Type | Notes |
 |---|---|
-| `WEAPON` | Now carries `base_damage`, `damage_type`, `weapon_class`, `pen_pct`, `pen_flat`, `requires_ammo` |
+| `WEAPON` | Now carries `base_damage`, `damage_type`, `weapon_class`, `pen_pct`, `pen_flat`, `requires_ammo`. Optional on-hit ability via `ObjectAbilities(trigger = ON_HIT)` — see [damage-types.md](damage-types.md) for the flaming-sword pattern. |
 | `ARMOR` | Now carries `armor_pct`, `armor_flat` |
 | `MISSILE` | Now carries `damage_type`, `missile_class`, optional `base_damage` bonus |
 | `INSTRUMENT` | Now carries `weapon_class` (extended enum covers instruments) |
@@ -97,7 +97,7 @@ Kept (with notes):
 | `CONTAINER` | `container_capacity` + lock-key columns |
 | `KEY` | No data beyond name; pairs with CONTAINER's lock columns |
 | `FOOD` | `food_hours` |
-| `POTION`, `SCROLL`, `WAND`, `STAFF` | Use `ObjectAbilities` table for spell bindings (already exists) |
+| `POTION`, `SCROLL`, `WAND`, `STAFF` | Use `ObjectAbilities(trigger = USE)` for spell bindings — same junction the on-hit pattern reuses, just with a different trigger discriminator. |
 | `SPELLBOOK` | `Ability.pages` already drives scribe cost; `ObjectSpellbookEntries` (or similar junction) carries which spells the book teaches — schema-level decision tracked in [schema-reconciliation.md](schema-reconciliation.md) |
 | `TOUCHSTONE` | No extra columns; runtime `cmd_touch` reads the type label |
 | `VEHICLE` | Absorbs former BOAT; optional `vehicle_class` enum (LAND / WATER / AIR) |
@@ -361,7 +361,8 @@ portal_dest_room = 45
 | Missile / ranged | **Option (A)** — same-room only, consume one MISSILE per swing, no spatial mechanics. Adjacent-room targeting deferred to a future ranged.md if ever. |
 | Wings | **Drop type, keep slot.** Add `Slot::Wings` + `WearFlag::Wings`. Items use `wear_flags: [WINGS]` + ObjectEffects → `fly` STATUS. |
 | Disguise | **Drop type AND slot.** Items use natural Face/Head/About slot + ObjectEffects → `disguised_as_*` STATUS. Magical disguise spells skip the item. |
-| Type rationalization | **38 → 28 ObjectTypes.** Drops: FIREWEAPON, WORN, TRAP, WINGS, PERFUME, DISGUISE, POISON, BOAT. Each migrates to a kept type + appropriate ObjectEffects rows. |
+| Type rationalization | **38 → 28 ObjectTypes.** Drops: FIREWEAPON, WORN, TRAP, WINGS, PERFUME, DISGUISE, POISON, BOAT. Each migrates to a kept type + ObjectEffects / ObjectAbilities rows as appropriate. |
+| FIREWEAPON migration shape | **All physical-substrate.** Every legacy FIREWEAPON → `WEAPON(SLASHING / PIERCING / BLUDGEONING)` per legacy weapon_class + `ObjectAbilities(ON_HIT)` fire-strike. Pure-elemental weapons (spell-summoned, elemental natural attacks) are not legacy FIREWEAPONs and are a separate authoring path. See [damage-types.md](damage-types.md). |
 | `Slot::Hover` vs `Slot::Wings` | **Both kept.** Hover is "orbiting accessory"; Wings is "back attachment." Distinct semantics, distinct slots. |
 
 ## Remaining open questions

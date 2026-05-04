@@ -1,6 +1,6 @@
 # Damage Types & Resistances
 
-**Status:** proposal — awaiting review.
+**Status:** locked except where noted (review pass 1, 2026-05-03).
 
 ## Design intent
 
@@ -43,8 +43,11 @@ DamageType:
 
 Defender's `resistances` JSON is `{"FIRE": 25, "MENTAL": -25}`.
 Positive numbers reduce damage; negative numbers amplify
-(vulnerability). Range cap: `[-100, +100]`. -100 = double damage;
-+100 = full immunity. Out-of-range values clamp.
+(vulnerability). Immunity caps at `+100`; **vulnerability is
+unbounded** — a boss row of `{"LIGHTNING": -500}` deals 6× lightning
+damage on purpose, so content authors can encode "raid puzzle: bring
+lightning damage." Aligned with [combat.md](combat.md)'s locked
+decision.
 
 Applied **after** armor and ward (see [combat.md](combat.md) pipeline
 step 6) so type resistance is the last reduction before hardness.
@@ -56,12 +59,138 @@ hardness. Used sparingly — boss-only telegraphed hits, narrative
 "dragon swallows you" effects. The runtime treats it as a full bypass
 of pipeline steps 4–7 in combat.md.
 
-## Conversion: weapons → damage types
+## Mitigation engagement — two independent axes
 
-Every weapon has exactly one `damage_type`. A flaming sword that does
-"slashing + fire" is two abilities under the hood — the swing is
-`slashing` and an `on_hit` effect adds `fire`. Cleaner than tagging
-the weapon with multiple types.
+The combat pipeline has two pre-resist mitigation steps and they
+key on different things:
+
+| Step | Layer | Engaged when |
+|---|---|---|
+| 4 (`armor_pct`/`armor_flat`) | physical | Damage type's **category** is PHYSICAL |
+| 5 (`ward_pct`) | magical | Damage source's **`Ability.is_magical`** is true |
+
+Type resist (step 6) and hardness (step 7) apply to all non-`TRUE`
+damage regardless.
+
+The two axes intentionally don't co-vary. A mundane torch's fire
+is ELEMENTAL **and** non-magical → skips both layers, only fire-resist
+mitigates. A dragon's breath is ELEMENTAL **and** magical → skips
+armor, engages ward. A wizard's enchanted-steel blade does SLASHING
+(physical, engages armor) on the base swing and FIRE (elemental,
+skips armor) + magical (engages ward) on the on-hit.
+
+### Damage categorization
+
+Damage types group into four categories. The **armor** axis above
+reads from category alone; nothing else does.
+
+```
+DamageCategory:
+  PHYSICAL  -> SLASHING, PIERCING, BLUDGEONING
+  ELEMENTAL -> FIRE, COLD, LIGHTNING, ACID, SONIC
+  MYSTIC    -> HOLY, NECROTIC, MENTAL, POISON
+  UNIVERSAL -> TRUE
+```
+
+Chainmail soaks a sword swing but not a fireball because of this
+table — no per-callsite branch.
+
+## Mixed-damage weapons
+
+Every weapon has exactly one base `damage_type`. A "flaming sword"
+that does *slashing + fire* is composed: the base swing is
+**slashing** (PHYSICAL — armor applies), and the fire portion is an
+**on-hit ability** the weapon also carries (ELEMENTAL — armor skipped
+automatically). This keeps weapon authoring clean (one type column)
+and makes the fire portion reusable — the same `flame_strike`
+ability can sit on a flame brand, on a torch, on a fire elemental's
+natural attack, and on a `cast firestrike` spell.
+
+A torch is the canonical case: a stick (BLUDGEONING base) lit on one
+end (on-hit FIRE). Hitting someone with a torch lands the bludgeoning
+through their armor and the fire around it.
+
+### How a flaming sword resolves
+
+Weapon: 12 base slashing + on-hit `flame_strike` (8 base fire).
+Defender (plain goblin): no armor, no ward, no resists, no hardness.
+Variance is rolled mid-band for clarity.
+
+**Pass 1 — slashing swing** runs the full combat.md pipeline. SLASHING
+is PHYSICAL, so steps 4-7 all apply: hit roll, crit, base × variance,
+armor (none here), ward, slashing resist, hardness. The slashing
+portion lands like any normal swing → 12 damage.
+
+**Pass 2 — on-hit fire ability** fires only if the swing landed.
+The `flame_strike` ability is `is_magical = true`, so ward (step 5)
+applies. FIRE is ELEMENTAL, so armor (step 4) is skipped. Type
+resist (fire-resist, step 6) and hardness (step 7) apply.
+
+→ 8 damage on the plain goblin (no ward, no fire-resist, no hardness
+to bite).
+
+A *mundane* on-hit (e.g. lit-torch `flame_burn` with `is_magical =
+false`) skips ward in addition to armor — only fire-resist and
+hardness mitigate it. Different ability row, same FIRE damage type.
+
+The two damage numbers are emitted as separate lines so the player
+can see both contributions:
+
+```
+You slash a goblin for 12 damage.
+The flame brand burns the goblin for 8 damage.
+```
+
+### Vulnerability and immunity behave per-portion
+
+Same flaming sword (12 slashing + 8 fire base). Different defenders,
+otherwise unmitigated:
+
+| Defender | Slashing portion | Fire portion | Total |
+|---|---|---|---|
+| Plain goblin (no resist) | 12 | 8 | **20** |
+| Fire-immune (`{FIRE: 100}`) | 12 | **0** | **12** |
+| Fire-vulnerable (`{FIRE: -50}`) | 12 | **12** | **24** |
+| Fire-vulnerable (`{FIRE: -200}`) | 12 | **24** | **36** |
+
+The slashing portion is unaffected by fire resist. The fire portion
+sees only fire resist. This is the load-bearing property of the
+on-hit composition — one weapon, two independent type-resist
+checks.
+
+### "Lit on fire" is a separate effect
+
+The DoT ("burning") that ignites the target *after* the hit is **not**
+the fire damage above. It's a separate `EffectInstance` with `kind =
+burning` (or whatever the Effect catalog row is) spawned by the
+`flame_strike` ability via its `AbilityEffect` row. Its tick damage
+flows through the same fire-resist (so a fire-immune target won't
+ignite at all — chance × 0 ≈ 0).
+
+Whether a weapon ignites is **opt-in per ability row**: a
+plain-fire-damage `flame_strike` spawns no DoT; an "ignite" variant
+adds an AbilityEffect row that spawns the `burning` instance with
+some duration. Authors compose what they want.
+
+### Schema wiring
+
+The on-hit binding lives on the existing `ObjectAbilities` junction
+table. Today it carries `(object, ability_id, level, charges)` for
+scrolls / wands; add a `trigger ObjectAbilityTrigger` enum column
+that distinguishes:
+
+```
+ObjectAbilityTrigger:
+  USE        # `recite scroll` / `quaff potion` — manual invocation
+  ON_HIT     # fires when the wielding actor lands a melee swing
+  ON_WEAR    # fires when equipped (ring of fire resistance)
+  ON_REMOVE  # fires when unequipped (cleanup of wear-state)
+```
+
+Equip-time caching: when an item with an `ON_HIT` row gets wielded,
+the runtime stamps an `OnHitAbility(ability_id)` component on the
+wielder so the per-swing path is a component lookup, not a DB
+query.
 
 ## Conversion: abilities → damage types
 
@@ -146,33 +275,62 @@ Ability damage:
 
 ### Holy paladin vs undead
 
-- weapon: longsword base 12 slashing, on-hit ability "smite"
+- weapon: longsword base 12 slashing, on-hit ability `smite`
   base 8 holy
-- defender resistances: `{ "NECROTIC": 75, "HOLY": -50 }`
+- defender resistances: `{ "NECROTIC": 75, "HOLY": -50 }`,
+  `armor_pct = 30`, `ward_pct = 0`, `hardness = 0`
+- attacker `pen_pct = 0`
 
-Slashing swing lands normally; smite does 8 → 12 (holy
-vulnerability).
+Pass 1 — slashing swing through full pipeline:
+```
+12 * 1.0 * (1 ± 0.25)                # 9 - 15
+* (1 - 30/100)                       # 6.3 - 10.5  (armor reduces)
+* (1 - 0)                            # ward
+* (1 - 0/100)                        # slashing resist 0
+                                     # 6.3 - 10.5
+```
 
-## Open questions
+Pass 2 — on-hit `smite` (skips physical armor):
+```
+8 * (1 + spell_power)                # 8 base
+* (1 ± 0.25)                         # 6 - 10
+                                     # (skip armor — fire/holy isn't soaked by chainmail)
+* (1 - 0)                            # ward
+* (1 - (-50)/100) = * 1.5            # holy vulnerability
+                                     # 9 - 15
+```
 
-1. **Granularity.** Is 12 types right? Easy to add but hard to remove.
-   Temptation list to merge: SONIC into BLUDGEONING (sonic damage
-   isn't really a thing in classic MUD content)? PIERCING and
-   SLASHING separate or one "sharp"? Recommendation: ship the 12,
-   delete unused after a content pass.
-2. **Vulnerability cap.** `-100` (2× damage) — hard cap. Or unbounded
-   so a `-200` content row deals 3× damage? I prefer the cap; lets
-   builders push numbers without breaking the math.
-3. **Cross-type immunity.** Currently `+100` on a single type =
-   immune. Some mobs want full physical immunity = `+100` on
-   slashing/piercing/bludgeoning all three. JSON authoring handles
-   that. Should we have a `physical_immune Bool` shorthand? Probably
-   not — three keys is fine, and explicit.
-4. **`TRUE` damage exposure to content.** Should `TRUE` be authorable
-   in Muditor or reserved for code-emit-only? I'd lock it down at the
-   schema level (no `damageType: TRUE` for player-castable abilities)
-   to prevent content authors from accidentally writing unblockable
-   spells.
-5. **Damage type aliases.** Some legacy content uses synonyms (KINETIC
-   for BLUDGEONING, FROST for COLD). The fierylib re-importer should
-   map them. List of accepted aliases worth documenting?
+Total per swing: ~15 - 25 damage to the undead.
+
+## Decisions locked (review pass 1, 2026-05-03)
+
+| Question | Locked |
+|---|---|
+| Type count | **Ship 12** named types + `TRUE`. Delete unused after a content pass — easier than retroactively splitting. |
+| Vulnerability cap | **Unbounded vulnerability**; `+100` immunity cap stays. Aligned with combat.md. |
+| Physical-immune shorthand | **No.** Three keys (slash/pierce/bludgeon = 100) is fine, and explicit. |
+| `TRUE` damage exposure | **Schema-locked.** No content path can author `damageType: TRUE` — runtime-emit-only via a separate `InternalDamageType` path. Prevents accidental unblockable spells. |
+| Aliases (`KINETIC` / `FROST` / etc.) | **Importer-only.** fierylib maps legacy synonyms to the canonical enum on import. Runtime never sees aliases. |
+| On-hit composition | **Model A** (one `damage_type` on the weapon + optional on-hit ability). Reuses `ObjectAbilities` junction with a `trigger ON_HIT` discriminator. |
+| Fire-on-hit pipeline scope | **Skip physical armor**, apply ward + type resist + hardness. Magical damage from on-hit isn't soaked by chainmail. |
+
+## Remaining open questions
+
+1. **`uses_stat`-style branch on the weapon's on-hit ability.** Combat.md
+   has a `uses_stat == MAGICAL` branch that swaps `attack_power` for
+   `spell_power`. The on-hit fire portion should travel that same
+   branch automatically (since it's an ability with its own
+   `uses_stat`). Verify the combat pipeline routes the on-hit
+   correctly without special-casing it as "the weapon's on-hit".
+2. **Damage line emission order.** The example renders slashing then
+   fire on separate lines. Crit on the swing — does the on-hit also
+   crit? Two reads: (a) the swing crit applies to both portions
+   (one roll, both portions multiply); (b) on-hit rolls its own
+   crit independently. Recommendation: **(b)**, since the on-hit is
+   a separate ability with its own crit-relevant stats. But this
+   needs a one-liner in combat.md.
+3. **Alias documentation home.** The aliases-locked decision puts
+   the mapping inside fierylib (`KINETIC → BLUDGEONING`, `FROST →
+   COLD`, etc). Where does the canonical list live so reviewers
+   can audit it — a comment block on the importer fn, or a
+   short reference doc next to fierylib's CLAUDE.md?

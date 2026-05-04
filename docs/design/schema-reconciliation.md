@@ -1,6 +1,6 @@
 # Schema Reconciliation
 
-**Status:** proposal — awaiting review.
+**Status:** locked except where noted (review pass 1, 2026-05-03).
 
 ## Design intent
 
@@ -142,9 +142,16 @@ specifically for this; planar sectors are the use case.
 `PLANT`, `EARTH`, `MAGIC`, `ETHER`, `STONE`, `MINERAL`, `CRYSTAL`,
 `METAL`, `LIQUID`, `BONE`). Nothing in code reads it today.
 
-Recommendation: **drop** until a feature actually needs it.
-Re-introduce when (e.g.) a "shatter stone golem" ability needs a
-`composition_required` filter.
+**Drop until a feature actually needs it.** When the enum goes,
+the columns referencing it go too:
+
+- `Mobs.composition` → drop
+- `Races.defaultComposition` → drop
+- `Characters.composition` (if it exists) → drop
+
+Re-introduce the enum when (e.g.) a "shatter stone golem" ability
+needs a `composition_required` filter — at that point the columns
+come back simultaneously, not staggered.
 
 ### `MagicAffinity`
 
@@ -152,12 +159,15 @@ Declared, never read.
 
 Recommendation: **drop**.
 
-### `Composition` and `Size` overlap
+### `Size` representation
 
-`Mobs.size` and `Characters` both have a size dimension; meanwhile
-`baseSize` / `currentSize` are integers. Pick one representation
-(enum `Size` with `TINY`/`SMALL`/`MEDIUM`/`LARGE`/`HUGE`/`GARGANTUAN`
-is conventional) and drop the integer columns.
+Single source of truth: the existing `Size` enum on `Mobs` and
+`Races` (`TINY`/`SMALL`/`MEDIUM`/`LARGE`/`HUGE`/`GIANT`/`GARGANTUAN`/
+`COLOSSAL`/`MOUNTAINOUS`/`TITANIC`). `Characters` doesn't carry a
+size column directly — body size derives from `Race.defaultSize`,
+which already covers character creation needs. The `baseSize` /
+`currentSize` integer columns drop per the body-metric section
+below.
 
 ## Body-metric column dust
 
@@ -166,14 +176,24 @@ is conventional) and drop the integer columns.
 some of them (`maleHeight*`, `femaleHeight*`, `maleWeight*`,
 `femaleWeight*`).
 
-Decision needed: are these used for character creation flavor (in
-which case wire them to a one-time roll on creation and surface in
-`description`)? Or pure flavor / cut?
+**Resolution:**
 
-Recommendation: **wire on creation, expose via `description`, drop
-`current_*` runtime mutation**. Body changes via
-shape-change effects modify a `SizeOverride` component, not the
-persisted column.
+- **Keep `Characters.height` and `Characters.weight`** as immutable-after-creation
+  flavor columns. Character-creation flow rolls them once from the
+  Race's gender-keyed range and writes the result. Score sheet renders
+  them on a "Height: 5'10″ Weight: 180 lbs" line — same idea as the
+  Played: / Last login: pattern already shipping.
+- **Drop `baseHeight`, `baseWeight`, `baseSize`, `currentSize`.** The
+  `base*` columns shadowed `height`/`weight`; the `current*` integer
+  columns wanted to track shape-change overrides which now belong on
+  a runtime `SizeOverride` ECS component instead.
+- **Keep the `Race` range columns** (`male/femaleHeight*`,
+  `male/femaleWeight*`) — character creation reads them. Drop only
+  the per-character mirror columns.
+
+Note: `description` is authored prose for `examine` output, not a
+field for system-generated stat dumps. Surface body metrics on
+score, leave `description` alone.
 
 ## `Mobs` column audit
 
@@ -197,28 +217,53 @@ Resolve column-by-column with the combat redesign:
 
 To avoid runtime breakage:
 
+0. **Pre-flight audit** (no schema change). Run a diagnostic SQL pass
+   to surface the cases the cleanup migrations need to handle:
+   - `SELECT DISTINCT toggle_name FROM PlayerToggle` — list any rows
+     whose names aren't covered by `PlayerFlag` enum variants. Each
+     uncovered toggle either lands on the enum first or gets
+     promoted to a dedicated column before `PlayerToggle` drops.
+   - `SELECT DISTINCT element FROM ObjectAffects WHERE NOT migratable`
+     — any modifier that doesn't translate cleanly into
+     `ObjectEffects(modify, target=…)` needs a hand-written
+     `ObjectEffects` row in the re-import.
+   - `SELECT name, current_size FROM Characters WHERE current_size != base_size`
+     — characters mid-shapechange when the migration runs need
+     their `current_size` captured into a transient
+     `SizeOverride` runtime row before the column drops.
 1. **First batch — additions** (no breakage):
-   - Add `Ability.staminaCost`, `Ability.manaCost`, `Ability.targetScope`.
+   - Add `Ability.staminaCost`, `Ability.manaCost`, `Ability.targetScope`,
+     `Ability.is_magical Bool @default(true)`.
    - Add new `Mobs` / `Characters` / `Objects` columns from combat redesign.
-   - Add `WearLocation` and `SaveResult` enums.
+   - Add `Mobs.default_posture Posture` and `Characters.is_frozen Bool`
+     from posture-and-lifestate.md.
+   - Add `WearLocation`, `SaveResult`, `ObjectAbilityTrigger`, and
+     `DamageType` enums.
 2. **Re-import** populates the new columns from existing legacy
-   data.
-3. **Runtime switches** to reading new columns.
+   data. **Runtime offline during this phase** — the world process
+   reads stale legacy columns while fierylib writes new ones, so a
+   stop-the-world window is the simplest invariant. Coordinate with
+   ops; expect single-digit-minute downtime for the import.
+3. **Runtime switches** to reading new columns. Deploy + restart;
+   legacy columns become dead reads.
 4. **Second batch — removals**: drop legacy columns, dead enums,
    duplicate tables. Each in a separate migration so a rollback is
    surgical.
 
-## Open questions
+## Decisions locked (review pass 1, 2026-05-03)
 
-1. **fierylib re-import strategy.** Most of these migrations need
-   data back-filled from the existing rows. Add a per-migration
-   transformer in fierylib or one big "post-redesign re-import"
-   script? I'd default to per-migration so each schema change is
-   self-contained.
-2. **`MobCarrying` deletion vs marking deprecated.** Drop it
-   outright vs leave the table empty for one release cycle in case a
-   downstream consumer (Muditor preview?) still reads it. Probably
-   drop — there's only one consumer chain.
-3. **`PlayerToggle` cleanup.** Are there any toggles in the current
-   `PlayerToggle` rows that aren't covered by `PlayerFlag` enum
-   variants? If yes, those need to land on the enum first.
+| Question | Locked |
+|---|---|
+| fierylib re-import strategy | **Per-migration transformer.** Each schema change ships its own back-fill so individual migrations stay self-contained and reversible. The "one big script" alternative bets the whole cleanup on a single run; per-migration matches the additions / re-import / switch / removals phasing. |
+| `MobCarrying` deletion | **Drop outright.** No deprecation cycle — Muditor doesn't read it (per loader.rs audit), there's no second consumer to wait on, and the table sits empty in the schema noise budget otherwise. |
+| `PlayerToggle` audit | **Promoted to migration step 0.** Pre-flight `SELECT DISTINCT toggle_name FROM PlayerToggle` runs before phase 1; uncovered names become PlayerFlag variants or dedicated columns before the table drops. Not a runtime-time question. |
+| Body-metric columns | **Keep `height` / `weight` on Characters; drop `base*` / `current*` mirrors.** Roll once at character creation from Race ranges; surface on score. Shape-change overrides live in a runtime `SizeOverride` ECS component. |
+| `description` field reuse | **Keep authored prose only.** Don't append system-generated body metrics; surface those on score. |
+| `Composition` orphans | **Drop the enum and every column that references it together** (`Mobs.composition`, `Races.defaultComposition`, `Characters.composition` if present). No staggered drops. |
+
+## Remaining open questions
+
+None blocking the migration. Add tracker rows here if the audit
+phase surfaces uncovered cases (PlayerToggle names, ObjectAffects
+modifiers, mid-shapechange characters) that need a one-off
+mitigation step.

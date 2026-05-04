@@ -46,6 +46,7 @@ allied. `ROOM_ALL` is admin / chaos territory.
 | `noncombat_only` | Bool | false | refused while engaged |
 | `cooldown_ms` | Int | 0 | already exists. Primary resource gate for SONG/CHANT. |
 | `cast_time_rounds` | Int | 0 | already exists; 0 = instant |
+| `is_magical` | Bool | true | Gates ward engagement at combat pipeline step 5. False for mundane on-hit abilities (lit-torch fire, applied poison). See [combat.md](combat.md) "Armor vs ward — independent axes". |
 
 ### `TargetType` enum (the per-ability validity filter)
 
@@ -334,25 +335,21 @@ The level gate is on the spawn side; the prevent is on the wear side.
 | Multi-resource abilities | **One resource per ability**, picked by `kind`. No spell costs both a slot and stamina. |
 | AbilityEffect kinds | **9** — DAMAGE, HEAL, MODIFY, STATUS, CLEANSE, DISPEL, REVEAL, KNOCKDOWN, CHAIN_DAMAGE. World-mutating actions (teleport, summon, create, etc.) become STATUS catalog rows with `on_apply_lua`. See [effects.md](effects.md). |
 
+## Decisions locked (review pass 2, 2026-05-03)
+
+| Question | Locked |
+|---|---|
+| Magicality flag | **`Ability.is_magical Bool default true`.** Gates ward engagement (combat pipeline step 5). Default-true because most authored abilities are spells / supernatural skills; mundane on-hit abilities (lit-torch fire, applied poison before a poison-immune target) opt out. See [combat.md](combat.md) "Armor vs ward — independent axes". |
+| ROOM_ALLIES caster inclusion | **Always includes the caster.** "Mass cure light" landing on you and the party is the natural pattern; self-buff via room AOE is more common than the exception. |
+| PK-eligible filtering | **Both caster and target must carry `PlayerFlag::PkEnabled`.** `ROOM_ENEMIES` cast by a player skips other players unless this two-sided check passes. Mirrors the legacy "consensual PK" model the runtime already enforces on direct attack. |
+| `weapon_required` source of truth | **Column on `Ability`** (hard requirement). Drop the parallel `weapon_type` rule in `AbilityRestrictions` — those rules are for *conditional* gates, not eligibility. The `gate_weapon` step in `invoke_ability` reads the column directly; restriction evaluator no longer needs the rule type. |
+| Songs / chants stamina cost in v2 | **No schema change needed.** The `stamina_cost` column lands for SKILLs. When class differentiation calls for stamina-gated songs, individual rows set `stamina_cost > 0` against the same column. Reuse, not extension. |
+
 ## Remaining open questions
 
-1. **Should ROOM_ALLIES include the caster?** ("Mass cure light"
-   landing on you and your party.) Recommendation: yes, always —
-   self-buff via room AOE is a common pattern and easier to reason
-   about than the exception.
-2. **PK-eligible filtering.** When does `ROOM_ENEMIES` cast by a
-   player include other players? Today PK is opt-in via flag. Probably:
-   only when both caster and target have `PlayerFlag::PkEnabled`.
-3. **`weapon_required` granularity.** WeaponClass at the row level
-   (PIERCING, SLASHING, …) vs the existing `weapon_type` rule in
-   `AbilityRestrictions`. Two ways to spell the same thing. I'd prefer
-   the column on `Ability` since it's a hard requirement, not a
-   conditional bonus.
-4. **Concurrent invocations.** Should a player be able to queue a
-   second cast while the first is mid-cast-time? Today it's
-   instantaneous; if `cast_time_rounds > 0` ever ships, queueing
-   policy needs a decision.
-5. **Songs/chants stamina cost in v2.** Today they're cooldown-only.
-   When class differentiation calls for it, add `stamina_cost > 0`
-   on individual rows. No schema change needed — the column's already
-   there for SKILLs.
+1. **Concurrent invocations / cast queueing.** Today casts are
+   instantaneous (`cast_time_rounds = 0` everywhere). If
+   `cast_time_rounds > 0` ever ships, queueing policy needs a
+   decision: refuse a second cast input mid-channel, or queue it
+   for the next available window? Defer until at least one
+   long-cast ability lands.

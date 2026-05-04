@@ -2699,6 +2699,24 @@ impl UserData for LuaActor {
                     "is_fighting" => world_from_lua(lua, |w| {
                         Value::Boolean(w.get::<mud_world::Fighting>(this.entity).is_some())
                     }),
+                    // Life-state markers — pre-stage for the
+                    // posture-and-lifestate.md migration. Triggers
+                    // that today compare `actor.position == "STUNNED"`
+                    // / `"DEAD"` / etc. should migrate to these
+                    // boolean accessors. Adding them now lets the
+                    // trigger-rewrite pass start incrementally;
+                    // when the schema migration drops the legacy
+                    // Position values, the corpus is already on the
+                    // new shape.
+                    "is_ghost" => world_from_lua(lua, |w| {
+                        Value::Boolean(w.get::<mud_world::Ghost>(this.entity).is_some())
+                    }),
+                    "is_stunned" => world_from_lua(lua, |w| {
+                        Value::Boolean(w.get::<mud_world::Stunned>(this.entity).is_some())
+                    }),
+                    "is_frozen" => world_from_lua(lua, |w| {
+                        Value::Boolean(w.get::<mud_world::Frozen>(this.entity).is_some())
+                    }),
                     // 62 corpus refs — gender-keyed pronoun ("his" /
                     // "her" / "its"). Players source from
                     // `Profile.gender`; mobs source from MobProto

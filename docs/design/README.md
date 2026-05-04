@@ -35,13 +35,13 @@ ships.
 
 | Doc | What it covers | Status |
 |---|---|---|
-| [combat.md](combat.md) | Accuracy/evasion swing resolution, damage pipeline, crit/variance | **proposal** |
-| [effects.md](effects.md) | Per-flag Effect rows, `prevents: Action[]`, application/wearoff Lua | **proposal** |
-| [abilities.md](abilities.md) | Stamina costs as columns, target scopes (room-only AOE), restrictions | **proposal** |
-| [damage-types.md](damage-types.md) | The `DamageType` enum, resistance application order | **proposal** |
-| [objects.md](objects.md) | Typed columns replacing `Object.values` JSON, weapon shape | **proposal** |
-| [posture-and-lifestate.md](posture-and-lifestate.md) | Splitting voluntary posture from incapacitation | **proposal** |
-| [schema-reconciliation.md](schema-reconciliation.md) | Dead duplicates and legacy columns to delete | **proposal** |
+| [combat.md](combat.md) | Accuracy/evasion swing resolution, damage pipeline, crit/variance | **locked** (review pass 2 — ward gating) |
+| [effects.md](effects.md) | Per-flag Effect rows, `prevents: Action[]`, application/wearoff Lua | **locked** (review pass 2) |
+| [abilities.md](abilities.md) | Stamina costs as columns, target scopes (room-only AOE), restrictions, magicality flag | **locked** (review pass 2 — magicality + OQ closure) |
+| [damage-types.md](damage-types.md) | The `DamageType` enum, resistance application order, on-hit composition, mitigation engagement | **locked** (review pass 1) |
+| [objects.md](objects.md) | Typed columns replacing `Object.values` JSON, weapon shape, on-hit ability wiring | **locked** (review pass 1) |
+| [posture-and-lifestate.md](posture-and-lifestate.md) | Splitting voluntary posture from incapacitation | **locked** (review pass 1) |
+| [schema-reconciliation.md](schema-reconciliation.md) | Dead duplicates and legacy columns to delete | **locked** (review pass 1) |
 
 ## How to review
 

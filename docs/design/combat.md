@@ -45,7 +45,10 @@ formulas per weapon:
    base -= max(0, defender.armor_flat - attacker.pen_flat)
 
 5. Wards (magical layer)
-   base *= 1 - defender.ward_pct / 100
+   # Engaged only when the damage source is magical (Ability.is_magical = true).
+   # Raw weapon swings and mundane on-hit abilities skip this step entirely.
+   if source_is_magical:
+       base *= 1 - defender.ward_pct / 100
 
 6. Type resistance
    resist = defender.resistances[weapon.damage_type] or 0
@@ -109,6 +112,24 @@ damage. This is the design intent: content authors can express
 "raid puzzle: bring lightning damage." Immunity caps at +100; there's
 no symmetric vulnerability cap.
 
+**Armor vs ward — independent axes**
+
+Two mitigation layers that key on different things:
+
+- **Armor (step 4)** keys on the damage *type's* category. PHYSICAL
+  types (SLASHING/PIERCING/BLUDGEONING) engage armor; ELEMENTAL,
+  MYSTIC, and TRUE skip it. See [damage-types.md](damage-types.md)
+  "Damage categorization."
+- **Ward (step 5)** keys on the damage *source's* magicality.
+  Abilities with `is_magical = true` engage ward; raw weapon swings
+  and mundane on-hit abilities skip it.
+
+The two are independent. A torch's on-hit fire portion is FIRE
+(skips armor by category) and `is_magical = false` (skips ward by
+source) — only fire-resist mitigates it. A dragon's breath weapon
+is FIRE *and* `is_magical = true` — skips armor, engages ward,
+applies fire-resist.
+
 ## Schema
 
 Columns required on `Mobs` and `Characters` (drop the legacy ones):
@@ -130,6 +151,12 @@ Columns required on `Mobs` and `Characters` (drop the legacy ones):
 
 `Objects` (weapons): see [objects.md](objects.md). Adds `base_damage`
 and `damage_type`. Drops `Hit Dice` JSON.
+
+`Ability` adds `is_magical Bool @default(true)`. Default-magical
+because the overwhelming majority of authored abilities are spells
+or supernatural skills; mundane on-hit attacks (lit-torch fire,
+poison-coated weapons before a poison-immune target, etc.) opt out
+explicitly. The flag gates ward engagement at pipeline step 5.
 
 **Drop from `Mobs` and `Characters`:**
 - `armor_class` (replaced by `armor_pct` + `armor_flat`)
@@ -239,6 +266,8 @@ fire, defender fire_resist −50 (vulnerable).
 | Negative resistance cap | **Unbounded vulnerability**; +100 immunity cap stays |
 | Mob natural weapon | **(B)** two columns on `Mobs` — `natural_base_damage`, `natural_damage_type` |
 | `ward_pct` source | **Stat column** on entity, modified by ward-tagged `modify` effects |
+| Ward engagement (review pass 2, 2026-05-03) | **Source-magicality gated.** Ward applies only when `Ability.is_magical = true`. Raw weapon swings and mundane on-hit abilities skip ward entirely. Independent of damage-type category, which gates armor instead. |
+| Armor engagement | **Damage-category gated.** PHYSICAL types engage armor; ELEMENTAL/MYSTIC/TRUE skip. See [damage-types.md](damage-types.md) "Damage categorization". |
 | PvP scaling | **No scaling** — equal players hit at 50%, which is fine |
 | Tie-break on hit roll | Ties go to **attacker** (so equal stats = exactly 50% hit) |
 | Accuracy/Evasion baseline | **50/50 = 50% hit rate**; no hard cap; negatives allowed |

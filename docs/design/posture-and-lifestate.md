@@ -1,6 +1,6 @@
 # Posture and Life State
 
-**Status:** proposal — awaiting review.
+**Status:** locked except where noted (review pass 1, 2026-05-03).
 
 ## Design intent
 
@@ -34,20 +34,21 @@ regen, etc. read this directly.
 
 ### `LifeState` — incapacitation
 
-Not an enum on the schema. Lives entirely as **runtime ECS markers**:
+Not an enum on the schema. Lives entirely as **runtime ECS markers**;
+the few that need cross-session persistence get a single boolean
+column on `Characters`.
 
-| Marker | Meaning | Source |
-|---|---|---|
-| `Ghost` | dead, untouchable | `release` after death |
-| `Stunned` | input refused for N seconds | stun-effect spawn |
-| `Frozen` | admin-frozen | `freeze` command |
-| (Health.hp == 0) | dying / corpse | combat death handler |
+| Marker | Persisted | Source | Notes |
+|---|---|---|---|
+| `Ghost` | `Characters.is_ghost Bool` | combat death → `release` | Survives logout; needs admin or `release` to clear. |
+| `Frozen` | `Characters.is_frozen Bool` (new) | admin `freeze` command | Survives logout — the use case is freezing a logged-out griefer. Cleared by admin `thaw`. |
+| `Stunned` | runtime-only | stun-effect spawn | Recreated from active effects on login if the originating effect persists; otherwise dropped. |
+| (`Health.hp == 0`) | implied by `hit_points` column | combat death handler | "Dying" is just hp == 0 + alive entity until the death tick fires. |
 
-These are *not* in the schema because they're transient — Ghost
-persists across logouts (admin restore needed), Stunned/Frozen don't.
-A separate `Characters.is_ghost Bool` already exists; that's the only
-persisted bit needed. Stunned/Frozen are recreated from active effects
-on login if applicable.
+The two `Bool` columns mirror each other intentionally — both are
+"admin-clearable persistent block states." Effect-driven markers
+(`Stunned`) stay volatile because their backing `EffectInstance`
+already round-trips through `CharacterEffects` on login.
 
 ## What to drop
 
@@ -75,9 +76,33 @@ on login if applicable.
    enum value. Anything else (Dead/MortallyWounded/Incapacitated/
    Stunned) maps to STANDING — those weren't really starting states
    anyway.
-3. Drop the `Position` enum and any column that referenced it.
-4. Runtime: `PostureKind::Fighting` variant gets removed; combat
-   detection switches entirely to "has `Fighting` component".
+3. Add `Characters.is_frozen Bool @default(false)` symmetrical to
+   `is_ghost`. Login spawn restores the `Frozen` marker if set.
+4. Drop the `Position` enum and any column that referenced it.
+5. Runtime: `PostureKind::Fighting` variant gets removed. Combat
+   detection switches entirely to "has `Fighting` component";
+   `set_posture` / `cmd_stand` / `cmd_sit` paths verify they
+   don't gate on the dropped variant.
+
+### Lua trigger compatibility
+
+Some imported triggers compare `actor.position == "STUNNED"` /
+`"DEAD"` / etc. After the migration `actor.position` returns only
+the new `Posture` labels (STANDING / KNEELING / SITTING / RESTING
+/ SLEEPING). Triggers that gated on incapacitation states need a
+translation path:
+
+- Add `actor.is_ghost`, `actor.is_stunned`, `actor.is_frozen`
+  boolean accessors. The fierylib trigger-rewrite pass migrates
+  `actor.position == "STUNNED"` → `actor.is_stunned`, etc.
+- Keep `actor.position` returning the new Posture string. Triggers
+  that *correctly* compared against STANDING/SITTING/etc continue
+  to work unchanged.
+- An optional `actor.life_state` accessor returning `"normal"` /
+  `"ghost"` / `"stunned"` / `"frozen"` is a nicety for legacy
+  triggers that switch on the entire incapacitation set; defer
+  unless the migration audit shows enough call sites to justify
+  it.
 
 ## Combat / posture interactions
 
@@ -105,20 +130,20 @@ behavior but reads the new enum directly. Sleeping refuses entirely
 Combat against a sleeping target wakes them at the same swing
 (unchanged from current runtime behavior).
 
-## Open questions
+## Decisions locked (review pass 1, 2026-05-03)
 
-1. **`Posture::Fighting` removal.** Pure cleanup but it's referenced
-   in a few places. Worth verifying every read site at migration time.
-2. **Restraint via posture.** Some content might want "lying prone"
-   as a separate posture from "resting" (knockdown vs voluntary
-   rest). Two states or one? Recommendation: one — `RESTING` covers
-   both, with the difference encoded as an active effect (e.g.
-   `KnockedDown` debuff with a duration). Avoids enum bloat.
-3. **`Ghost` persistence.** Today it persists via
-   `Characters.is_ghost`. Is this the right storage? Or does ghost-on-
-   reconnect read from "did you die without releasing" by checking
-   for active effects? I'd keep the column — explicit.
-4. **`Frozen` persistence.** Today the marker is volatile. Should
-   admin-freeze persist across reconnect? If so, that's a column on
-   Characters. Probably yes — being able to freeze a logged-out
-   griefer is the use case.
+| Question | Locked |
+|---|---|
+| `Posture::Fighting` removal | **Drop the variant.** Combat detection reads the `Fighting` component, not the posture enum. Migration walks the `set_posture` / `cmd_stand` / `cmd_sit` / `cmd_rest` / `cmd_sleep` paths to verify nothing gates on the dropped variant. |
+| Knockdown / restraint | **Single posture, effect-driven distinction.** `RESTING` covers both voluntary rest and forced prone. A `KnockedDown` `EffectInstance` with a duration carries the involuntary part — combat / movement gates check the effect, not a separate posture. Avoids enum bloat. |
+| `Ghost` persistence | **Keep `Characters.is_ghost Bool`** as the explicit persisted bit. Cleared by `release` (player) or admin restore. |
+| `Frozen` persistence | **Add `Characters.is_frozen Bool`** symmetrical to `is_ghost`. Survives logout so an admin can freeze a logged-out griefer. Cleared by admin `thaw`. |
+| `actor.position` Lua semantics | **Returns only the new `Posture` labels.** Incapacitation states surface via `actor.is_ghost` / `actor.is_stunned` / `actor.is_frozen` boolean accessors. fierylib trigger-rewrite pass migrates legacy `actor.position == "STUNNED"` comparisons. |
+
+## Remaining open questions
+
+1. **`actor.life_state` aggregator.** Cheap to add (string returning
+   `"normal"` / `"ghost"` / `"stunned"` / `"frozen"`) but only
+   useful if enough imported triggers want a single switch over the
+   incapacitation set. Defer until the migration audit reports
+   call-site counts.
