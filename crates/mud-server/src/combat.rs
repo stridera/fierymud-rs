@@ -446,6 +446,13 @@ pub fn combat_tick(world: &mut World) {
     // multi-target aggro work: a mob fighting Alice + Bob keeps
     // swinging at Bob when Alice flees, instead of standing
     // around peacefully.
+    //
+    // Targets are filtered out when their LifeState marks them
+    // unswingable: `Ghost` (dead, HP pinned to 1), `Frozen` (admin
+    // freeze), `Stunned` (transient incapacitation). Without these
+    // filters a dead player gets re-aggroed every tick because the
+    // pinned-to-1 HP still passes the `hp > 0` check, producing a
+    // damage loop on the corpse.
     let to_reengage: Vec<(Entity, Entity)> = {
         let mut q = world.query_filtered::<
             (Entity, &Located, &HateList),
@@ -459,6 +466,9 @@ pub fn combat_tick(world: &mut World) {
                     .find(|target| {
                         world.get::<Located>(**target).map(|l| l.0) == Some(loc.0)
                             && world.get::<Health>(**target).is_some_and(|h| h.hp > 0)
+                            && world.get::<Ghost>(**target).is_none()
+                            && world.get::<mud_world::Frozen>(**target).is_none()
+                            && world.get::<mud_world::Stunned>(**target).is_none()
                     })
                     .map(|target| (mob, *target))
             })
@@ -553,16 +563,22 @@ pub fn combat_tick(world: &mut World) {
         } else {
             std::collections::HashMap::new()
         };
+    // Ghost / Frozen attackers are filtered out of the swing
+    // snapshot — even if Fighting somehow lingers on a dead or
+    // frozen entity, they can't swing. Stunned is checked
+    // explicitly below for parity with the existing semantics.
     let swings: Vec<Swing> = {
-        let mut q = world
-            .query::<(
+        let mut q = world.query_filtered::<
+            (
                 Entity,
                 &Fighting,
                 &CombatStats,
                 &Named,
                 Option<&Posture>,
                 Option<&Stunned>,
-            )>();
+            ),
+            (Without<Ghost>, Without<mud_world::Frozen>),
+        >();
         q.iter(world)
             .filter(|(_, _, _, _, posture, stunned)| {
                 stunned.is_none()
@@ -929,11 +945,13 @@ pub(crate) fn handle_death(
 
     if is_player {
         // If they're already a Ghost, don't double-corpse them — just
-        // pin HP to 1 and stop combat. Ghosts in combat is rare (no
-        // gate today) but defensible as a no-op safety branch.
+        // clamp HP at zero (they're dead) and stop combat. Ghosts
+        // shouldn't normally take damage at all (apply_damage early-
+        // returns on Ghost), but a swing snapshotted before the
+        // Ghost was applied can still call into here.
         if world.get::<Ghost>(victim).is_some() {
             if let Some(mut hp) = world.get_mut::<Health>(victim) {
-                hp.hp = hp.hp.max(1);
+                hp.hp = 0;
             }
             try_remove::<Fighting>(world, victim);
             disengage_attackers_of(world, victim);
@@ -1035,11 +1053,35 @@ pub(crate) fn handle_death(
             }
         }
 
-        // Ghost the player. HP pinned to 1 so any further damage is
-        // a no-op (data path and apply_damage both clamp at 0/1).
+        // Death clears every mob's grudge data against the dead
+        // player — `MobMemory` (auto-engage on re-entry) and
+        // `HateList` (re-aggro pre-pass target list). Without this,
+        // mobs keep targeting the corpse / ghost and re-aggro fires
+        // every tick on the pinned-HP-1 ghost. It also matches
+        // player expectation that death is a soft reset for "who's
+        // angry at me right now".
+        let mobs: Vec<Entity> = {
+            let mut q = world.query_filtered::<Entity, With<Mob>>();
+            q.iter(world).collect()
+        };
+        for mob in mobs {
+            if let Some(mut mem) = world.get_mut::<MobMemory>(mob) {
+                mem.0.remove(&victim);
+            }
+            if let Some(mut hate) = world.get_mut::<HateList>(mob) {
+                hate.0.retain(|e| *e != victim);
+            }
+        }
+
+        // Ghost the player. HP set to 0 — they're dead, the body
+        // has no health left. The Ghost component is the
+        // authoritative gate (apply_damage / regen_tick / heal /
+        // re-aggro all check it) so the HP value just has to read
+        // truthfully on the score sheet. `release` restores
+        // hp = max as part of the spirit-returns-to-body transition.
         try_insert(world, victim, Ghost);
         if let Some(mut hp) = world.get_mut::<Health>(victim) {
-            hp.hp = 1;
+            hp.hp = 0;
         }
 
         send_to(
@@ -1629,13 +1671,13 @@ mod tests {
 
         super::handle_death(&mut world, player, "Tester", room);
 
-        // Player should now be a Ghost with HP pinned to 1.
+        // Player should now be a Ghost with HP at 0 — they're dead.
         assert!(
             world.get::<Ghost>(player).is_some(),
             "player gains Ghost marker on death"
         );
         let hp = world.get::<Health>(player).expect("player keeps Health");
-        assert_eq!(hp.hp, 1, "ghost HP pinned to 1");
+        assert_eq!(hp.hp, 0, "ghost HP at 0 (dead body)");
         // A Corpse Item should exist in the death room.
         let corpse = world
             .query_filtered::<(Entity, &Located, &Named, &CorpseDecay), With<Corpse>>()
@@ -1659,6 +1701,109 @@ mod tests {
             .iter(&world)
             .count();
         assert_eq!(still_equipped, 0, "EquippedSlot stripped on death");
+    }
+
+    #[test]
+    fn handle_death_clears_mob_grudge_data_against_dead_player() {
+        // Regression for the post-death re-aggro loop: if a mob's
+        // MobMemory / HateList still references the dead player, the
+        // combat-tick pre-pass would re-aggro onto the ghost every
+        // tick (HP pinned to 1 used to pass the `hp > 0` filter).
+        // After death, both data structures must drop the player.
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Tester".to_string() },
+                Located(room),
+                Health { hp: 0, max: 100 },
+                Posture(PostureKind::Standing),
+            ))
+            .id();
+        let mob = world
+            .spawn((
+                Mob,
+                Named { name: "Guard".to_string() },
+                Located(room),
+                Health { hp: 50, max: 50 },
+                MobMemory({
+                    let mut s = std::collections::HashSet::new();
+                    s.insert(player);
+                    s
+                }),
+                HateList(vec![player]),
+            ))
+            .id();
+
+        super::handle_death(&mut world, player, "Tester", room);
+
+        let mem = world
+            .get::<MobMemory>(mob)
+            .expect("MobMemory component preserved");
+        assert!(
+            !mem.0.contains(&player),
+            "MobMemory drops dead player on death"
+        );
+        let hate = world
+            .get::<HateList>(mob)
+            .expect("HateList component preserved");
+        assert!(
+            !hate.0.contains(&player),
+            "HateList drops dead player on death"
+        );
+    }
+
+    #[test]
+    fn re_aggro_skips_ghost_targets() {
+        // Regression: the combat-tick pre-pass that re-engages mobs
+        // from their HateList must skip Ghost targets, otherwise a
+        // dead-but-still-co-located player gets put back into combat
+        // every tick.
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Tester".to_string() },
+                Located(room),
+                Health { hp: 0, max: 100 },
+                Posture(PostureKind::Standing),
+                Ghost,
+            ))
+            .id();
+        let mob = world
+            .spawn((
+                Mob,
+                Named { name: "Guard".to_string() },
+                Located(room),
+                Health { hp: 50, max: 50 },
+                CombatStats {
+                    hit_roll: 10,
+                    dmg_roll: 20,
+                    ac: 0,
+                    alignment: 0,
+                },
+                Posture(PostureKind::Standing),
+                HateList(vec![player]),
+            ))
+            .id();
+
+        run_combat_tick(&mut world);
+
+        assert!(
+            world.get::<Fighting>(mob).is_none(),
+            "mob doesn't re-aggro onto a ghost target"
+        );
+        assert!(
+            world.get::<Fighting>(player).is_none(),
+            "ghost player doesn't get Fighting set on them"
+        );
+        // Ghost HP shouldn't have changed either — apply_damage is
+        // a no-op on Ghost targets.
+        let hp = world.get::<Health>(player).expect("ghost keeps Health");
+        assert_eq!(hp.hp, 0, "ghost HP unchanged after combat tick");
     }
 
     #[test]

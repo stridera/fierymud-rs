@@ -60,10 +60,14 @@ pub fn regen_tick(world: &mut World) {
     // can still slowly recover, but the hunger drain on top makes net
     // progress glacial. Mirrors the stat-survival contract in
     // hunger_thirst_tick.
+    // Ghost players don't regen — they're dead. `release` restores
+    // hp to max in one shot when the spirit returns to the body;
+    // gradually healing a corpse over time would be wrong both
+    // mechanically (`release` becomes pointless) and thematically.
     let updates: Vec<(Entity, Option<i32>, Option<i32>)> = {
         let mut q = world.query_filtered::<
             (Entity, Option<&Stamina>, Option<&Health>, &Posture, Option<&Hunger>, Option<&Thirst>),
-            (With<Online>, Without<Fighting>),
+            (With<Online>, Without<Fighting>, Without<Ghost>),
         >();
         q.iter(world)
             .map(|(e, stamina, hp, posture, hunger, thirst)| {

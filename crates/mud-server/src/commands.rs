@@ -9196,6 +9196,12 @@ pub(crate) fn apply_heal_hp(world: &mut World, target: Entity, amount: i32) -> i
     if amount <= 0 {
         return 0;
     }
+    // Ghost targets aren't healable — a corpse can't recover. Heals
+    // resolve as 0 actual hp restored. `release` is the only path
+    // back from Ghost, and it restores hp = max directly.
+    if world.get::<mud_world::Ghost>(target).is_some() {
+        return 0;
+    }
     let Some(h) = world.get::<Health>(target).copied() else {
         return 0;
     };
@@ -9214,6 +9220,11 @@ pub(crate) fn apply_heal_hp(world: &mut World, target: Entity, amount: i32) -> i
 /// stamina pool).
 pub(crate) fn apply_heal_stamina(world: &mut World, target: Entity, amount: i32) -> i32 {
     if amount <= 0 {
+        return 0;
+    }
+    // Ghosts don't refill stamina either — same reasoning as
+    // apply_heal_hp.
+    if world.get::<mud_world::Ghost>(target).is_some() {
         return 0;
     }
     let Some(s) = world.get::<Stamina>(target).copied() else {
@@ -10116,6 +10127,14 @@ pub(crate) fn apply_damage(
     target: Entity,
     amount: i32,
 ) -> (bool, Option<&'static str>) {
+    // Ghost targets are dead-but-incorporeal — no damage applied,
+    // no death event. The combat-tick re-aggro filter already
+    // prevents mobs from picking up a Ghost as a fresh target, but
+    // a swing that was already snapshotted before the Ghost was
+    // ghosted (mid-tick death) can still land here.
+    if world.get::<mud_world::Ghost>(target).is_some() {
+        return (false, None);
+    }
     let Some((old, max)) = world.get::<Health>(target).map(|h| (h.hp, h.max)) else {
         return (false, None);
     };
