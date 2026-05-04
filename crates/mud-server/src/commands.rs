@@ -1732,6 +1732,8 @@ mod tests {
             min_posture_rank: 9,
             target_scope: "ROOM_ENEMIES".to_string(),
             is_magical: true,
+            sphere: Some("fire".to_string()),
+            damage_type: Some("fire".to_string()),
         };
         let _ = AbilityCatalog::default();
         // The property under test is a one-line conditional; the

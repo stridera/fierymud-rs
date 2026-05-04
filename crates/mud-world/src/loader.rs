@@ -402,6 +402,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 min_posture_rank,
                 target_scope: row.target_scope,
                 is_magical: row.is_magical,
+                sphere: row.sphere,
+                damage_type: row.damage_type,
             },
         );
     }

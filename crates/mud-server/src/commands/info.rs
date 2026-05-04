@@ -8163,7 +8163,11 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
             AbilityKind::Song => "Songs",
             AbilityKind::Skill => "Skills",
         };
-        buckets.entry(bucket).or_default().push(def.name.clone());
+        // Append the sphere as a dim parenthetical so the listing
+        // doubles as an elemental-affinity scan. Skipped when the
+        // ability has no sphere assigned (most SKILLs).
+        let entry = format_ability_with_sphere(def);
+        buckets.entry(bucket).or_default().push(entry);
     }
     if buckets.is_empty() {
         if show_all {
@@ -8226,6 +8230,18 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
         }
     }
     send_to(world, player, out);
+}
+
+/// Render an ability's display name plus a dim parenthetical for
+/// its sphere when one is assigned. Lets the spells / chants /
+/// songs / skills listings double as an elemental-affinity scan
+/// without forcing players to run `identify` per spell. Abilities
+/// without a sphere render the name unchanged.
+fn format_ability_with_sphere(def: &mud_world::AbilityDef) -> String {
+    match def.sphere.as_deref() {
+        Some(s) if !s.is_empty() => format!("{} <dim>({s})</>", def.name),
+        _ => def.name.clone(),
+    }
 }
 
 /// Pick the column width for an ability-list grid. Sized to the
@@ -9343,7 +9359,7 @@ pub(crate) fn cmd_abilities_kind(
         if !filter.is_empty() && !def.plain_name.to_ascii_lowercase().contains(&filter) {
             continue;
         }
-        names.push(def.name.clone());
+        names.push(format_ability_with_sphere(def));
     }
     if names.is_empty() {
         if show_all {

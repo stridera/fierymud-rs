@@ -1035,6 +1035,17 @@ pub struct AbilityDef {
     /// yet split out from AC, so this field is groundwork — the
     /// mitigation routing lands once Ward is its own component.
     pub is_magical: bool,
+    /// `SpellSphere` schema value — fire / water / healing /
+    /// enchantment / etc. Lowercased for display. Surfaces on
+    /// `spells` / `chants` / `songs` / `skills` listings as a
+    /// dim parenthetical suffix so players can scan by elemental
+    /// affinity. `None` for abilities without a sphere assignment.
+    pub sphere: Option<String>,
+    /// `ElementType` schema value — fire / cold / holy / etc.
+    /// Lowercased for display. Loaded for future damage-affinity
+    /// routing (vulnerability / resistance application);
+    /// not yet surfaced on player-facing readouts.
+    pub damage_type: Option<String>,
 }
 
 /// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The

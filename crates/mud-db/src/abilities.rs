@@ -86,6 +86,18 @@ pub struct AbilityRow {
     /// today the column loads through the catalog as
     /// groundwork.
     pub is_magical: bool,
+    /// Spell sphere — `FIRE` / `WATER` / `HEALING` / `ENCHANTMENT`
+    /// etc. (`SpellSphere` schema enum). Players see this on the
+    /// spells listing as a dim parenthetical so they can scan by
+    /// elemental affinity without running `identify` per spell.
+    /// Lowercased here so display surfaces don't have to
+    /// title-case at every call site.
+    pub sphere: Option<String>,
+    /// Primary damage type — `FIRE` / `COLD` / `HOLY` etc.
+    /// (`ElementType` schema enum). Loaded for future damage-
+    /// affinity / vulnerability routing; not yet surfaced on
+    /// player-facing readouts.
+    pub damage_type: Option<String>,
 }
 
 pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
@@ -106,7 +118,9 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
             is_area,
             "minPosition"::text AS "min_position!: String",
             target_scope::text AS "target_scope!: String",
-            is_magical
+            is_magical,
+            LOWER(sphere::text) AS "sphere?: String",
+            LOWER(damage_type::text) AS "damage_type?: String"
         FROM "Ability"
         ORDER BY id
         "#
