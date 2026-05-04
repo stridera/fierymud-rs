@@ -410,6 +410,17 @@ pub struct CombatStats {
     pub dmg_roll: i32,
     pub ac: i32,
     pub alignment: i32,
+    /// Magical mitigation percentage (0..=100). Applied at combat
+    /// pipeline step 5 ("Wards") per `docs/design/combat.md` —
+    /// engaged only when the damage source is magical
+    /// (`Ability.is_magical = true`). Independent axis from `ac`,
+    /// which keys on damage-type *category* (PHYSICAL engages
+    /// armor; ELEMENTAL/MYSTIC/TRUE skip). Mundane weapon swings
+    /// and on-hit abilities skip ward entirely. Default 0; loaded
+    /// from `Mobs.ward_percent` for mobs (follow-up — currently
+    /// every mob spawns with 0) and from per-effect Ward modifier
+    /// stacks for players.
+    pub ward_pct: i32,
 }
 
 /// `D&D`-style ability scores (3..=25 in classic `CircleMUD`; schema

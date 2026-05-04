@@ -1546,6 +1546,7 @@ mod tests {
                     dmg_roll,
                     ac: 10,
                     alignment: 0,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Standing),
             ))
@@ -1738,6 +1739,7 @@ mod tests {
                     dmg_roll: 100,
                     ac: 10,
                     alignment: 0,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Standing),
                 Fighting(target),
@@ -1908,6 +1910,7 @@ mod tests {
                     dmg_roll: 0,
                     ac: 0,
                     alignment: 0,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Sleeping),
             ))
@@ -1955,6 +1958,7 @@ mod tests {
                     dmg_roll: 0,
                     ac: 0,
                     alignment: 0,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Resting),
             ))
@@ -1969,6 +1973,7 @@ mod tests {
                     dmg_roll: 7,
                     ac: 10,
                     alignment: 0,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Standing),
             ))
@@ -2018,6 +2023,7 @@ mod tests {
                     dmg_roll: 0,
                     ac: 0,
                     alignment: 0,
+                    ward_pct: 0,
                 },
             ))
             .id();
@@ -2032,6 +2038,7 @@ mod tests {
                     dmg_roll: 5,
                     ac: 0,
                     alignment: 0,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Standing),
                 Fighting(player),
@@ -2078,6 +2085,7 @@ mod tests {
                     dmg_roll: 0,
                     ac: 0,
                     alignment: 0,
+                    ward_pct: 0,
                 },
             ))
             .id();
@@ -2225,6 +2233,7 @@ mod tests {
                     dmg_roll: 20,
                     ac: 0,
                     alignment: 0,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Standing),
                 HateList(vec![player]),
@@ -2273,6 +2282,7 @@ mod tests {
                     dmg_roll: 20,
                     ac: 0,
                     alignment: 0,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Standing),
                 HateList(vec![player]),
@@ -2316,6 +2326,7 @@ mod tests {
                     dmg_roll: 20,
                     ac: 0,
                     alignment: 0,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Standing),
                 HateList(vec![player]),

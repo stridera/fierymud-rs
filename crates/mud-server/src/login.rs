@@ -1329,6 +1329,7 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         dmg_roll: c.damage_roll,
         ac: c.armor_class,
         alignment: c.alignment,
+        ward_pct: 0,
     };
     let core_stats = CoreStats {
         strength: c.strength,

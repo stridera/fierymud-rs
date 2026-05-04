@@ -1522,6 +1522,7 @@ fn spawn_into(
                     dmg_roll: dmg,
                     ac: proto.armor_class,
                     alignment: proto.alignment,
+                    ward_pct: 0,
                 },
                 Posture(PostureKind::Standing),
             ));

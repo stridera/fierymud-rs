@@ -2600,6 +2600,28 @@ mod tests {
     }
 
     #[test]
+    fn apply_modify_delta_ward_routes_to_ward_pct() {
+        // Regression: prior code aliased the "ward" modify stat
+        // onto `cs.ac` (subtracting the buff). Per combat.md the
+        // Ward stat is independent of AC; positive amounts
+        // increment `ward_pct`, and the inverse delta on effect
+        // expiry decrements it back. AC must NOT move.
+        use mud_world::CombatStats;
+        let mut world = World::new();
+        let entity = world.spawn(CombatStats::default()).id();
+        let baseline_ac = world.get::<CombatStats>(entity).unwrap().ac;
+        super::apply_modify_delta(&mut world, entity, "ward", 25);
+        let cs = world.get::<CombatStats>(entity).copied().unwrap();
+        assert_eq!(cs.ward_pct, 25, "ward modify routes to ward_pct");
+        assert_eq!(cs.ac, baseline_ac, "ward modify does NOT touch ac");
+        // Reverse delta (effect expiry) walks it back.
+        super::reverse_modify_delta(&mut world, entity, "ward", 25);
+        let cs2 = world.get::<CombatStats>(entity).copied().unwrap();
+        assert_eq!(cs2.ward_pct, 0, "reverse_modify_delta returns ward_pct to 0");
+        assert_eq!(cs2.ac, baseline_ac, "reverse stays clear of ac");
+    }
+
+    #[test]
     fn apply_heal_hp_no_op_on_ghost() {
         // Healing a corpse is a no-op. release is the only path
         // back from Ghost — it sets hp = max in one shot.
@@ -3265,6 +3287,7 @@ mod tests {
                 dmg_roll: 8,
                 ac: 12,
                 alignment: 250,
+                ward_pct: 0,
             }),
             core_stats: Some(super::CoreStats {
                 strength: 16,
@@ -5534,6 +5557,17 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             "  Hit roll: {}    Damage roll: {}    AC: {}    Alignment: {} ({})\r\n",
             cs.hit_roll, cs.dmg_roll, cs.ac, align_label, cs.alignment,
         ));
+        // Ward is independent of AC — surface only when nonzero so
+        // a fresh character with no ward effects doesn't see a
+        // noisy 0% line. Renders as a single dim percent so the
+        // value reads as "magical mitigation" without competing
+        // visually with the primary stat row above.
+        if cs.ward_pct != 0 {
+            out.push_str(&format!(
+                "  Ward: <b:cyan>{}%</> <dim>(magical mitigation)</>\r\n",
+                cs.ward_pct,
+            ));
+        }
     }
     if let Some(p) = d.posture {
         let tag = status_color_tag(
@@ -6001,6 +6035,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
             "Hit: {}   Dmg: {}   AC: {}   Align: {} ({})",
             cs.hit_roll, cs.dmg_roll, cs.ac, align_label, cs.alignment,
         ));
+        if cs.ward_pct != 0 {
+            row(format!("Ward: <b:cyan>{}%</> <dim>(magical)</>", cs.ward_pct));
+        }
     }
     if let Some(p) = d.posture {
         let tag = status_color_tag(
@@ -6157,6 +6194,9 @@ pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
     }
     if let Some(cs) = d.cs {
         parts.push(format!("dmg:{} ac:{}", cs.dmg_roll, cs.ac));
+        if cs.ward_pct != 0 {
+            parts.push(format!("ward:{}%", cs.ward_pct));
+        }
     }
     if let Some(p) = d.posture {
         parts.push(format!("p:{}", p.0.label()));
@@ -8714,6 +8754,22 @@ pub(crate) fn invoke_ability_with(
                     if reagent_boost_pct > 0 {
                         amount = amount.saturating_add(amount * reagent_boost_pct / 100);
                     }
+                    // Ward (combat pipeline step 5): magical sources
+                    // route through the target's `ward_pct`. Mundane
+                    // on-hit abilities (`is_magical = false`) skip
+                    // ward entirely and route purely through armor /
+                    // resists. Cap at 100 so a runaway ward stack
+                    // can't generate negative damage; floor at 0 so
+                    // negative ward (vulnerability) stays
+                    // armor-side, not ward-side.
+                    if def.is_magical {
+                        let ward = world
+                            .get::<CombatStats>(target_entity)
+                            .map_or(0, |c| c.ward_pct.clamp(0, 100));
+                        if ward > 0 {
+                            amount = amount.saturating_mul(100 - ward) / 100;
+                        }
+                    }
                     let (dead, threshold_msg) =
                         crate::commands::apply_damage(world, target_entity, amount);
                     // Surface the apply_damage threshold message
@@ -10010,11 +10066,14 @@ pub(crate) fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, 
             }
             true
         }
-        // Lower AC = better in CircleMUD lineage; the schema's
-        // `ward` is positive-buff so subtract from ac.
+        // Ward is its own stat (combat pipeline step 5, gated by
+        // `Ability.is_magical`). Positive amounts add magical
+        // mitigation; effects_tick reverses the same delta on
+        // expiry. Independent of `ac`, which keys on the physical
+        // damage-type category instead.
         "ward" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.ac = cs.ac.saturating_sub(amount);
+                cs.ward_pct = cs.ward_pct.saturating_add(amount);
             }
             true
         }

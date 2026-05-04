@@ -118,6 +118,7 @@ pub fn respawn_tick(world: &mut World) {
                 dmg_roll: dmg,
                 ac: proto.armor_class,
                 alignment: proto.alignment,
+                ward_pct: 0,
             },
             Posture(PostureKind::Standing),
             FromMobReset(entry.reset_id),

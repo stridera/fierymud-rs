@@ -3339,6 +3339,7 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
                 dmg_roll: dmg,
                 ac: proto.armor_class,
                 alignment: proto.alignment,
+                ward_pct: 0,
             },
             Posture(PostureKind::Standing),
             Follower(player),

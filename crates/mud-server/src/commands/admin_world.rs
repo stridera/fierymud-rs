@@ -869,6 +869,7 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
                 dmg_roll: dmg,
                 ac: proto_armor_class,
                 alignment: proto_alignment,
+                ward_pct: 0,
             },
             Posture(PostureKind::Standing),
         ))
