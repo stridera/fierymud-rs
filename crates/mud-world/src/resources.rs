@@ -61,6 +61,20 @@ pub struct RoomEnvironmentalEffects {
     pub by_room: HashMap<(i32, i32), Vec<i32>>,
 }
 
+/// Per-race defaults loaded from the schema's `Race` table at boot.
+/// Today only `default_size` is wired (used by the score sheet); the
+/// fuller surface (`focusBonus` / lifeforce / weight-height ranges)
+/// lands here as features need it. Race name keys are the raw enum
+/// labels (`HUMAN` / `ELF` / `HUMANOID` / ...) — same shape as
+/// `Profile.race`.
+#[derive(Resource, Debug, Default)]
+pub struct RaceDefaults {
+    /// `(race_label) -> Size` enum text (`MEDIUM` / `LARGE` / ...).
+    /// Empty when the `Race` table has no rows yet (fresh DB) or
+    /// hasn't been loaded.
+    pub size_by_race: HashMap<String, String>,
+}
+
 /// Catalog of effect *types* loaded from the Effect table at startup.
 /// Active applications live as ECS entities (`EffectInstance` + `AppliedTo`);
 /// the catalog supplies metadata that doesn't change per-application.

@@ -34,6 +34,7 @@ pub mod objects;
 pub mod quest_objectives;
 pub mod quests;
 pub mod race_abilities;
+pub mod races;
 pub mod reports;
 pub mod room_exits;
 pub mod room_extra_descriptions;

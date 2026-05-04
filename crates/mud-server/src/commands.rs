@@ -2747,6 +2747,7 @@ mod tests {
             guarding_name: None,
             mail_draft: None,
             board_draft: None,
+            size: Some("Medium"),
         }
     }
 
@@ -4678,6 +4679,13 @@ pub(crate) struct ScoreData<'a> {
     /// when the player is mid-post. Surfaced so a half-written
     /// post that's been parked for a while doesn't go unnoticed.
     board_draft: Option<(&'a str, usize)>,
+    /// Body size from `RaceDefaults.size_by_race` (the `Race`
+    /// table's `default_size` column) — typically `Medium` /
+    /// `Large` etc. None when the race has no row in the table
+    /// (e.g. a freshly seeded DB) so the line is suppressed
+    /// rather than rendering "Size: ?". Capitalize-first matches
+    /// the C++ score formatting.
+    size: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -4706,6 +4714,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(t) = d.title {
         out.push_str(&format!("  Title: {t}\r\n"));
+    }
+    if let Some(size) = d.size {
+        out.push_str(&format!("  Size: {size}\r\n"));
     }
     if let Some(age) = d.profile.and_then(|(lvl, ..)| format_age(lvl)) {
         out.push_str(&format!("  Age: {age}\r\n"));
@@ -5086,6 +5097,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(t) = d.title {
         row(format!("Title:     {t}"));
+    }
+    if let Some(size) = d.size {
+        row(format!("Size:      {size}"));
     }
     if let Some(age) = d.profile.and_then(|(lvl, ..)| format_age(lvl)) {
         row(format!("Age:       {age}"));

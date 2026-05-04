@@ -6,7 +6,8 @@ use mud_db::{
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
     effects, levels,
     mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
-    objects, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool, triggers, zones,
+    objects, races, room_exits, rooms, shops, socials, spell_slots,
+    sqlx::PgPool, triggers, zones,
 };
 use tracing::{info, warn};
 
@@ -610,6 +611,15 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .insert((r.class_id, r.ability_id), r.proficiency_cap);
     }
     world.insert_resource(class_skills_data);
+
+    // Pass 4c.6: race defaults. Today only `default_size` is wired —
+    // surfaced on the score sheet so the player sees "Size: Medium"
+    // line. The full Race row carries more (focusBonus / lifeforce
+    // / stat caps); land them here as features need them.
+    let race_size_map = races::list_default_sizes(pool).await?;
+    world.insert_resource(crate::resources::RaceDefaults {
+        size_by_race: race_size_map,
+    });
 
     // Pass 4d: object-ability catalog (scrolls / wands / staves
     // bound abilities). Lookups are by `(zone, id)` matching an item

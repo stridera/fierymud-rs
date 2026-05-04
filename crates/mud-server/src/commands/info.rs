@@ -4689,6 +4689,30 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .map_or_else(String::new, |n| n.name.clone());
             render_color_tags(&raw, ColorMode::Strip)
         });
+    // Body size from `RaceDefaults.size_by_race`. The map key is the
+    // raw `Race` enum text on `Profile.race` (HUMAN / ELF / ...) and
+    // values are the `Size` enum text (`MEDIUM` / `LARGE` / ...).
+    // Look up here so the renderer doesn't carry a &World reference.
+    let size_owned: Option<String> = profile_owned
+        .as_ref()
+        .and_then(|(_, _, race, ..)| {
+            world
+                .get_resource::<mud_world::RaceDefaults>()
+                .and_then(|r| r.size_by_race.get(race).cloned())
+        })
+        .map(|s| {
+            let mut chars = s.chars();
+            match chars.next() {
+                Some(c) => {
+                    let head = c.to_ascii_uppercase().to_string();
+                    let tail: String = chars.collect::<String>().to_ascii_lowercase();
+                    head + &tail
+                }
+                None => String::new(),
+            }
+        })
+        .filter(|s| !s.is_empty());
+
     // Mail-draft summary. Players walk away from half-composed
     // messages all the time — surfacing the recipient + line
     // count keeps the in-flight draft visible from any score
@@ -4921,6 +4945,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         board_draft: board_draft_owned
             .as_ref()
             .map(|(alias, lines)| (alias.as_str(), *lines)),
+        size: size_owned.as_deref(),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
