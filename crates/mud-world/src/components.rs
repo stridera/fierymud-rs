@@ -447,6 +447,21 @@ impl CoreStats {
     }
 }
 
+/// Lossless conversion to the persistence payload. Pins the field
+/// mapping in one place so callers can't drift the order on save.
+impl From<CoreStats> for mud_db::characters::CoreStatsPayload {
+    fn from(s: CoreStats) -> Self {
+        Self {
+            strength: s.strength,
+            dexterity: s.dexterity,
+            constitution: s.constitution,
+            intelligence: s.intelligence,
+            wisdom: s.wisdom,
+            charisma: s.charisma,
+        }
+    }
+}
+
 /// Combat state: this entity is currently fighting the target. Removed when
 /// combat ends (death, flee, room mismatch).
 #[derive(Component, Debug, Clone, Copy)]
@@ -1414,6 +1429,31 @@ mod tests {
         assert!(empty_rows.is_empty());
         let restored_empty = KnownAbilities::from_rows(&empty_rows);
         assert!(restored_empty.entries.is_empty());
+    }
+
+    #[test]
+    fn core_stats_payload_preserves_axis_order() {
+        // Persistence regression guard: the six CoreStats fields
+        // are the same Rust type (i32) so a typo in
+        // `impl From<CoreStats>` would compile cleanly and
+        // silently swap (e.g.) STR ↔ DEX on every save. Use a
+        // unique value per axis so a swap shows up as a wrong
+        // field at the destination.
+        let cs = CoreStats {
+            strength: 11,
+            dexterity: 12,
+            constitution: 13,
+            intelligence: 14,
+            wisdom: 15,
+            charisma: 16,
+        };
+        let payload: mud_db::characters::CoreStatsPayload = cs.into();
+        assert_eq!(payload.strength, 11, "STR axis preserved");
+        assert_eq!(payload.dexterity, 12, "DEX axis preserved");
+        assert_eq!(payload.constitution, 13, "CON axis preserved");
+        assert_eq!(payload.intelligence, 14, "INT axis preserved");
+        assert_eq!(payload.wisdom, 15, "WIS axis preserved");
+        assert_eq!(payload.charisma, 16, "CHA axis preserved");
     }
 
     #[test]

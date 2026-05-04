@@ -167,16 +167,25 @@ pub async fn create<'e, E: PgExecutor<'e>>(
 /// doesn't grow another 6 parameters; `train <stat>` is the first
 /// runtime caller. Save-side only — the load path picks them up via
 /// `list_for_user`.
-#[allow(clippy::too_many_arguments)]
+/// Payload for `save_core_stats`. Carrying the six attribute scores
+/// in a struct (rather than positional `i32` args) collapses the
+/// call site to a single value and eliminates the swap risk —
+/// passing `stats.dexterity, stats.strength, …` in the wrong order
+/// would silently corrupt the persisted character.
+#[derive(Debug, Clone, Copy)]
+pub struct CoreStatsPayload {
+    pub strength: i32,
+    pub dexterity: i32,
+    pub constitution: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub charisma: i32,
+}
+
 pub async fn save_core_stats(
     pool: &PgPool,
     character_id: &str,
-    strength: i32,
-    dexterity: i32,
-    constitution: i32,
-    intelligence: i32,
-    wisdom: i32,
-    charisma: i32,
+    stats: &CoreStatsPayload,
 ) -> sqlx::Result<()> {
     sqlx::query!(
         r#"
@@ -189,12 +198,12 @@ pub async fn save_core_stats(
             charisma = $6
         WHERE id = $7
         "#,
-        strength,
-        dexterity,
-        constitution,
-        intelligence,
-        wisdom,
-        charisma,
+        stats.strength,
+        stats.dexterity,
+        stats.constitution,
+        stats.intelligence,
+        stats.wisdom,
+        stats.charisma,
         character_id,
     )
     .execute(pool)

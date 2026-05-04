@@ -1611,12 +1611,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         && let Err(e) = characters::save_core_stats(
             pool,
             &account.character_id,
-            stats.strength,
-            stats.dexterity,
-            stats.constitution,
-            stats.intelligence,
-            stats.wisdom,
-            stats.charisma,
+            &stats.into(),
         )
         .await
     {
