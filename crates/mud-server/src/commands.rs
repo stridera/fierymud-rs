@@ -6168,52 +6168,79 @@ pub(crate) fn flip_door_both_sides(world: &mut World, room: Entity, dir: Directi
 /// to a dynamic lookup. Today the goal is: muscle-memory commands
 /// shouldn't error out, and players get useful prose.
 const MOTD_TEXT: &str = "\
-\r\n=== Welcome to fierymud-rs ===\r\n\
+\r\n<b:red>~~~ </><b:yellow>Welcome to FieryMUD</> <b:red> ~~~</>\r\n\
 \r\n\
-A Rust ECS rewrite of FieryMUD, in active development. Many\r\n\
-commands work; many don't yet. Type `commands` for the full list\r\n\
-or `help <name>` for details. File a bug with `bug <message>` if\r\n\
-something looks broken.\r\n\
+You stand at the threshold of a world older than memory — its \
+forests deep, its temples ancient, its fires never wholly out.\r\n\
 \r\n\
-Combat is fully functional but unbalanced — be cautious in\r\n\
-high-level guild rooms (the Cleric's Guild guards hit for ~250).\r\n\
+The road begins at the <cyan>Forest Temple of Mielikki</>. From \
+there: a town center, training grounds for new adventurers, \
+guildhalls for clerics and druids and warriors. Beyond the town \
+lie the wild places, where the patient hunter finds purpose and \
+the careless one finds a quiet grave.\r\n\
+\r\n\
+<dim>Type `commands` to see what your hands can do, `help <name>` \
+for details on any command, and `news` for the most recent \
+changes. If something looks broken, `bug <message>` reaches the \
+keepers.</>\r\n\
+\r\n\
+<yellow>The fires are fed. The doors are open. Walk in.</>\r\n\
 ";
 const NEWS_TEXT: &str = "\
-\r\n=== Recent Changes ===\r\n\
+\r\n<b:cyan>=== Recent Changes ===</>\r\n\
 \r\n\
-This list is curated by hand from the commit log. The most recent\r\n\
-runtime changes:\r\n\
+<dim>This list is curated by hand from the commit log. Most \
+recent runtime changes:</>\r\n\
 \r\n\
-- Combat skills landed: bandage, layhands, rescue, assist, disarm,\r\n\
-  hitall, backstab, springleap, gouge, roar, berserk, rend, retreat.\r\n\
-- Bleed and other DoT effects tick HP damage every second.\r\n\
-- Bandage staunches bleed.\r\n\
-- Berserk attackers deal +50% damage in combat.\r\n\
+- <yellow>Combat readout</> picked up color hierarchy: HP / damage \
+graded by severity, target names highlighted, miss lines dimmed.\r\n\
+- <yellow>Score</> trimmed to current-stats only — equipment \
+moved to `equipment`, session-meta moved to `clientinfo`.\r\n\
+- <yellow>Help index</> reshaped into Info / Movement / Comm / \
+Combat / Magic / Inventory / Group / Mount / Banking / Quest / \
+Mail / Settings categories instead of one giant Info bucket.\r\n\
+- <yellow>Spells / chants / skills / songs</> default to abilities \
+you actually know; `spells all` dumps the full catalog.\r\n\
+- <yellow>Combat-loot</> fixed: a corpse always spawns on mob \
+death; non-AutoGold killers find their coin attached as a \
+CoinPile and reclaim it via `get all from corpse`.\r\n\
+- <yellow>Cast parsing</> now supports quoted multi-word names \
+(`cast 'magic missile' goblin`).\r\n\
 \r\n\
-Run `commands` for everything you can use today.\r\n\
+<dim>Run `commands` for everything you can use today.</>\r\n\
 ";
 const CREDITS_TEXT: &str = "\
-\r\n=== Credits ===\r\n\
+\r\n<b:cyan>=== Credits ===</>\r\n\
 \r\n\
-fierymud-rs is a clean-slate rewrite inspired by:\r\n\
-  - FieryMUD (the C++ codebase from Mielikki et al.)\r\n\
-  - DikuMUD / CircleMUD lineage\r\n\
+<yellow>FieryMUD</> stands on the shoulders of a long lineage:\r\n\
 \r\n\
-Stack: Rust, bevy_ecs, sqlx, tokio, mlua. Thanks to those\r\n\
-projects' authors and to everyone who keeps a public MUD running.\r\n\
+  <cyan>·</> <yellow>FieryMUD</> — the C++ codebase from Mielikki \
+and a quarter-century of contributors\r\n\
+  <cyan>·</> <yellow>HubisMUD</> — Avans, Horner, Smith, Holcomb, \
+Larsen, who built the bones we kept\r\n\
+  <cyan>·</> <yellow>CircleMUD</> — Jeremy Elson, who carved \
+CircleMUD out of Diku at Johns Hopkins\r\n\
+  <cyan>·</> <yellow>DikuMUD</> — Nyboe, Madsen, Staerfeldt, \
+Seifert, and Hammer at the University of Copenhagen, who started \
+all of it in 1990\r\n\
+\r\n\
+<dim>fierymud-rs is a clean-slate Rust rewrite — bevy_ecs, sqlx, \
+tokio, mlua. Thanks to the lineage above, and to everyone who \
+keeps a public MUD running.</>\r\n\
 ";
 const POLICIES_TEXT: &str = "\
-\r\n=== Server Policies ===\r\n\
+\r\n<b:cyan>=== Server Policies ===</>\r\n\
 \r\n\
-1. No harassment, slurs, or threats — to anyone, in any channel.\r\n\
-2. No cheating: bug exploits should be reported via `bug`, not\r\n\
-   used.\r\n\
-3. No multi-charing for an unfair advantage. Multi-charing is\r\n\
-   fine for socializing.\r\n\
-4. Admins enforce rules; appeals through `tell <admin> <message>`\r\n\
-   or by emailing the address in `motd`.\r\n\
+<yellow>1.</> <b:white>No harassment</>, slurs, or threats — to \
+anyone, in any channel. Staff intervene quickly.\r\n\
+<yellow>2.</> <b:white>No cheating</>: report bug exploits with \
+`bug <message>`. Don't use them.\r\n\
+<yellow>3.</> <b:white>No multi-charing for unfair advantage</>. \
+Multi-charing is fine for socializing.\r\n\
+<yellow>4.</> Admins enforce rules; appeals via `tell <admin> \
+<message>` or the address in `motd`.\r\n\
 \r\n\
-This is a hobby server; please be kind.\r\n\
+<dim>This is a hobby server. Be kind.</>\r\n\
 ";
 
 /// `commands`: flat alphabetical list of every command the player has

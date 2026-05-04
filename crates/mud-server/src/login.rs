@@ -15,7 +15,21 @@ use tracing::{info, warn};
 
 use crate::commands::{self, Connection};
 
-const BANNER: &str = "\r\n=========================================\r\n   fierymud-rs (Rust ECS rewrite)\r\n=========================================\r\n";
+/// Pre-login banner. Sent as raw bytes (no XML-Lite renderer in
+/// the login path) so ANSI escapes are inlined directly. Bold red
+/// flame border + bold yellow title + dim subtitle reads warm
+/// without leaning on terminal-capability negotiation. The
+/// 41-char interior keeps the box flush in 80-col clients.
+const BANNER: &str = concat!(
+    "\r\n",
+    "\x1b[1;31m  /\\  /\\  /\\  /\\  /\\  /\\  /\\  /\\  /\\  /\\\x1b[0m\r\n",
+    "\x1b[1;33m              fierymud-rs\x1b[0m\r\n",
+    "\x1b[2m       a Rust rewrite of FieryMUD\x1b[0m\r\n",
+    "\x1b[1;31m  \\/  \\/  \\/  \\/  \\/  \\/  \\/  \\/  \\/  \\/\x1b[0m\r\n",
+    "\r\n",
+    "\x1b[2m  Type your email or character name to begin.\x1b[0m\r\n",
+    "\r\n",
+);
 /// Combined identifier prompt — accepts either an email or a
 /// character name. Email is detected by the presence of '@' (the
 /// only thing legacy MUD usernames couldn't legally contain).
