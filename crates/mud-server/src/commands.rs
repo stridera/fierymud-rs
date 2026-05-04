@@ -1702,6 +1702,66 @@ mod tests {
     }
 
     #[test]
+    fn aoe_targets_room_enemies_excludes_group_members() {
+        // RoomEnemies expands to every Mob in the room plus PK-flagged
+        // Players, minus the caster's group. Use the runtime helper
+        // through a minimal world.
+        use super::{AoeScope, aoe_targets_in_room};
+        let mut world = World::new();
+        let room_a = world.spawn_empty().id();
+        let _room_b = world.spawn_empty().id();
+        // Caster + one group teammate in room_a (group via Follower).
+        let caster = world
+            .spawn((
+                Player,
+                Named { name: "Caster".to_string() },
+                mud_world::Located(room_a),
+            ))
+            .id();
+        let _teammate = world
+            .spawn((
+                Player,
+                Named { name: "Teammate".to_string() },
+                mud_world::Located(room_a),
+                mud_world::Follower(caster),
+            ))
+            .id();
+        // Two mobs in room_a — both should appear as enemies.
+        let _mob_a = world
+            .spawn((
+                mud_world::Mob,
+                Named { name: "a stray dog".to_string() },
+                mud_world::Located(room_a),
+            ))
+            .id();
+        let _mob_b = world
+            .spawn((
+                mud_world::Mob,
+                Named { name: "a half-elven guard".to_string() },
+                mud_world::Located(room_a),
+            ))
+            .id();
+
+        let names = aoe_targets_in_room(&mut world, caster, room_a, AoeScope::RoomEnemies);
+        assert!(
+            names.iter().any(|n| n == "a stray dog"),
+            "stray dog in enemy list: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "a half-elven guard"),
+            "half-elven guard in enemy list: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "Teammate"),
+            "group teammate excluded from enemy list: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "Caster"),
+            "caster excluded from own enemy list: {names:?}"
+        );
+    }
+
+    #[test]
     fn parse_quoted_first_token_handles_quotes_and_whitespace() {
         use super::parse_quoted_first_token;
         // Bare word: legacy whitespace split.
@@ -7177,6 +7237,157 @@ pub(crate) fn invoke_ability(
     verb: &str,
 ) {
     invoke_ability_with(world, player, args, kind, verb, false);
+}
+
+/// Target-set selectors for AOE ability dispatch. Names match the
+/// locked design in `docs/design/abilities.md`'s `TargetScope` enum
+/// — once `Ability.target_scope` lands as a schema column the
+/// per-ability registration will name one of these directly. Until
+/// then, AOE shims call `invoke_ability_aoe` with the matching
+/// variant explicitly. Friendly-fire policy:
+///
+/// - `RoomEnemies`: every Mob in the same room as the caster, plus
+///   any Player who has the `PkEnabled` flag set (consenting `PvP`
+///   target), minus group members.
+/// - `RoomAllies`: caster + every group member co-located with the
+///   caster. Mobs are skipped unless explicitly tagged allied (no
+///   such tag today; placeholder for future charm/pet integration).
+/// - `RoomAll`: every actor in the room except the caster.
+#[allow(clippy::enum_variant_names, dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AoeScope {
+    /// Currently the only call site (`cmd_roar`).
+    RoomEnemies,
+    /// Reserved for `bless` / group-heal style AOE.
+    RoomAllies,
+    /// Reserved for chaos / admin abilities.
+    RoomAll,
+}
+
+/// Expand `scope` into a list of target entities in the caster's
+/// current room, then dispatch `<ability> <target>` per-target via
+/// `invoke_ability_with`. The first call is a regular dispatch
+/// (`aoe_repeat = false`) so the description-box header / cooldown
+/// gate fire once; subsequent calls pass `aoe_repeat = true` to
+/// suppress the repeats. Empty target lists short-circuit with a
+/// caller-friendly refusal.
+///
+/// Replaces hand-rolled per-ability AOE loops (currently `cmd_roar`)
+/// with a single generic dispatcher. Once `Ability.target_scope`
+/// lands the call site collapses further: `invoke_ability_with`
+/// itself will read the column and pick the scope, dropping the
+/// per-ability shim entirely.
+pub(crate) fn invoke_ability_aoe(
+    world: &mut World,
+    caster: Entity,
+    kind: mud_db::abilities::AbilityKind,
+    verb: &str,
+    ability_name: &str,
+    scope: AoeScope,
+    refusal_when_empty: &str,
+) {
+    let Some(located) = world.get::<Located>(caster).copied() else {
+        send_to(world, caster, "You are nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+    let targets: Vec<String> = aoe_targets_in_room(world, caster, room, scope);
+    if targets.is_empty() {
+        send_to(world, caster, refusal_when_empty);
+        return;
+    }
+    for (idx, target_name) in targets.iter().enumerate() {
+        invoke_ability_with(
+            world,
+            caster,
+            &format!("{ability_name} {target_name}"),
+            kind,
+            verb,
+            idx > 0,
+        );
+    }
+}
+
+/// Resolve `scope` against `room` from `caster`'s perspective and
+/// return the list of target *names* in the room. Names rather
+/// than entities so the per-target dispatch can re-resolve through
+/// the standard `find_actor_in_room` path (handles room-mismatch /
+/// despawn races identically to single-target dispatch).
+fn aoe_targets_in_room(
+    world: &mut World,
+    caster: Entity,
+    room: Entity,
+    scope: AoeScope,
+) -> Vec<String> {
+    let group_root_e = group_root(world, caster);
+    let group: std::collections::HashSet<Entity> = group_members(world, group_root_e)
+        .into_iter()
+        .collect();
+    match scope {
+        AoeScope::RoomEnemies => {
+            // Mobs in the room, plus PK-flagged players (excluding
+            // self / group members).
+            let mut names: Vec<String> = Vec::new();
+            {
+                let mut q = world
+                    .query_filtered::<(Entity, &Located, &Named), With<Mob>>();
+                for (e, l, n) in q.iter(world) {
+                    if l.0 == room && !group.contains(&e) && e != caster {
+                        names.push(n.name.clone());
+                    }
+                }
+            }
+            {
+                let mut q = world.query_filtered::<
+                    (Entity, &Located, &Named, Option<&PlayerFlags>),
+                    With<Player>,
+                >();
+                for (e, l, n, pf) in q.iter(world) {
+                    if l.0 != room || group.contains(&e) || e == caster {
+                        continue;
+                    }
+                    if pf.is_some_and(|f| f.has(mud_db::enums::PlayerFlag::PkEnabled)) {
+                        names.push(n.name.clone());
+                    }
+                }
+            }
+            names
+        }
+        AoeScope::RoomAllies => {
+            // Group members in the room. Mobs aren't included
+            // (no allied-mob tag today). Caster is included.
+            let mut q = world
+                .query_filtered::<(Entity, &Located, &Named), With<Player>>();
+            q.iter(world)
+                .filter(|(e, l, _)| l.0 == room && group.contains(e))
+                .map(|(_, _, n)| n.name.clone())
+                .collect()
+        }
+        AoeScope::RoomAll => {
+            // Everyone in the room except the caster — Players
+            // and Mobs alike. Used by chaos / admin abilities.
+            let mut names: Vec<String> = Vec::new();
+            {
+                let mut q = world
+                    .query_filtered::<(Entity, &Located, &Named), With<Mob>>();
+                for (e, l, n) in q.iter(world) {
+                    if l.0 == room && e != caster {
+                        names.push(n.name.clone());
+                    }
+                }
+            }
+            {
+                let mut q = world
+                    .query_filtered::<(Entity, &Located, &Named), With<Player>>();
+                for (e, l, n) in q.iter(world) {
+                    if l.0 == room && e != caster {
+                        names.push(n.name.clone());
+                    }
+                }
+            }
+            names
+        }
+    }
 }
 
 /// Pull the first "token" out of `args`, treating a leading single-

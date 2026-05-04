@@ -4,20 +4,20 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ExitState, UserRole};
 use mud_world::{
-    AppliedTo, CombatStats, EffectInstance, EquippedSlot, Exits, Fighting, Health, Item, Located,
-    Mob, Named, Posture, PostureKind, Profile, Slot,
+    CombatStats, EquippedSlot, Exits, Fighting, Health, Item, Located, Mob, Named, Posture,
+    PostureKind, Profile, Slot,
 };
 
 use crate::commands::{
-    ATTACK_COST, BACKSTAB_COST, BANDAGE_COST, BASH_COST, BERSERK_COST, Category, Command,
+    ATTACK_COST, AoeScope, BACKSTAB_COST, BANDAGE_COST, BASH_COST, BERSERK_COST, Category, Command,
     DISARM_COST, DOORBASH_COST, GOUGE_COST, HITALL_COST, Help, KICK_COST, LAYHANDS_COST, REND_COST,
     RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST, THROATCUT_COST,
     TRIPUP_COST, aggro_alignment, apply_damage, auto_assist_followers_of, skill_stamina_cost,
     broadcast_room_except_players_rendered, broadcast_room_except_rendered, check_stamina,
     cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
-    find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_with,
-    mob_helpers_engage, name_of, name_or, opposite, parse_direction, remove_effect_named,
-    require_alert_posture, send_rendered, send_to, try_insert, try_remove,
+    find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_aoe,
+    mob_helpers_engage, name_of, name_or, opposite, parse_direction,
+    remove_effect_named, require_alert_posture, send_rendered, send_to, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -1252,46 +1252,22 @@ pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
     if !check_stamina(world, player, cost, "roar") {
         return;
     }
-    let Some(located) = world.get::<Located>(player).copied() else {
-        send_to(world, player, "You are nowhere.\r\n");
-        return;
-    };
-    let room = located.0;
-    // Skip already-feared targets — re-applying just resets duration
-    // but the visual repetition is annoying.
-    let feared: std::collections::HashSet<Entity> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(e, _)| e.name.eq_ignore_ascii_case("fear"))
-            .map(|(_, applied)| applied.0)
-            .collect()
-    };
-    let targets: Vec<String> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Mob>>();
-        q.iter(world)
-            .filter(|(e, l, _)| l.0 == room && !feared.contains(e))
-            .map(|(_, _, n)| n.name.clone())
-            .collect()
-    };
-    if targets.is_empty() {
-        send_to(world, player, "There's nothing here to roar at.\r\n");
-        return;
-    }
     drain_stamina(world, player, cost);
-    // First target gets the full description box; subsequent targets
-    // dispatch through the quiet variant so the box doesn't repeat
-    // N times in an N-mob room. Per-target success / effect summary
-    // lines still emit normally.
-    for (idx, target_name) in targets.iter().enumerate() {
-        invoke_ability_with(
-            world,
-            player,
-            &format!("roar {target_name}"),
-            mud_db::abilities::AbilityKind::Skill,
-            "use",
-            idx > 0,
-        );
-    }
+    // RoomEnemies scope handles per-ability target expansion (every
+    // mob in the room minus group members) plus per-target
+    // dispatch with the first call carrying the description box and
+    // the rest using `aoe_repeat = true`. Already-feared targets
+    // get re-applied — `fear` effect-type stacks duration which is
+    // the right behavior for a player roaring repeatedly.
+    invoke_ability_aoe(
+        world,
+        player,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+        "roar",
+        AoeScope::RoomEnemies,
+        "There's nothing here to roar at.\r\n",
+    );
 }
 pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "rend") {
