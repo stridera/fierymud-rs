@@ -6900,6 +6900,31 @@ pub fn lua_invoke_spell(world: &mut World, caster: Entity, args: &str) {
     );
 }
 
+/// fn-ptr shim used by the Lua `actor:attack_all()` binding.
+/// Engages every co-located Player via `engage_combat`. Targets
+/// are snapshot before the engagement loop so each call uses the
+/// same room view; players who flee mid-loop simply don't get
+/// re-attacked. Per-player `PeacefulRoom` gating is honored
+/// inside `engage_combat`.
+pub fn lua_attack_all(world: &mut World, attacker: Entity) {
+    let Some(located) = world.get::<Located>(attacker).copied() else {
+        return;
+    };
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located),
+            (With<mud_world::Player>, With<mud_world::Online>),
+        >();
+        q.iter(world)
+            .filter(|(e, l)| *e != attacker && l.0 == located.0)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        engage_combat(world, attacker, t, located.0);
+    }
+}
+
 /// Same as [`invoke_ability`] but treats the call as a non-first
 /// dispatch in an AOE batch:
 ///   - skips the leading description-box header (so `cmd_roar` over

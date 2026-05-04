@@ -75,6 +75,13 @@ pub struct SkillExecutor(pub Option<fn(&mut World, Entity, &str)>);
 #[derive(Resource, Default, Clone, Copy)]
 pub struct SpellExecutor(pub Option<fn(&mut World, Entity, &str)>);
 
+/// fn-ptr bridge for the Lua `actor:attack_all()` binding. mud-server
+/// installs a shim that engages every Player in the attacker's room
+/// via the canonical `engage_combat` helper, which handles
+/// `PeacefulRoom` gating and attacker/defender Fighting bookkeeping.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct AttackAllExecutor(pub Option<fn(&mut World, Entity)>);
+
 impl Default for LuaHost {
     fn default() -> Self {
         Self::new()
@@ -1824,6 +1831,31 @@ impl UserData for LuaActor {
                 if let Some(mut h) = world.get_mut::<Health>(this.entity) {
                     h.hp = (h.hp - amount).max(0);
                 }
+            })
+        });
+
+        // `actor:attack_all()` makes the speaker engage every player
+        // in their room. 8+ corpus refs from FIGHT triggers on
+        // mid-tier enrage states (jann warrior, severan, dark elves,
+        // ursa's-roar, smart-combat) — used when one player at low
+        // HP shouldn't get to soak the boss alone while a group of
+        // co-attackers stand idle.
+        //
+        // Routed through `AttackAllExecutor`: mud-server's shim
+        // walks Player+Online entities co-located with the attacker
+        // and runs the canonical `engage_combat` for each, which
+        // handles the `PeacefulRoom` gate and the attacker/defender
+        // Fighting bookkeeping. No-op when the resource isn't
+        // installed (unit tests).
+        methods.add_method("attack_all", |lua, this, ()| -> mlua::Result<()> {
+            world_mut_from_lua(lua, |world| {
+                let Some(f) = world
+                    .get_resource::<AttackAllExecutor>()
+                    .and_then(|e| e.0)
+                else {
+                    return;
+                };
+                f(world, this.entity);
             })
         });
 

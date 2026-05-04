@@ -120,6 +120,7 @@ async fn main() {
     // fn-ptr that routes to `invoke_ability` with kind=Skill.
     world.insert_resource(mud_script::SkillExecutor(Some(commands::lua_invoke_skill)));
     world.insert_resource(mud_script::SpellExecutor(Some(commands::lua_invoke_spell)));
+    world.insert_resource(mud_script::AttackAllExecutor(Some(commands::lua_attack_all)));
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
         error!(error = %e, "world load failed");
