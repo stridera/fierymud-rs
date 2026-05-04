@@ -2681,17 +2681,19 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         // Wearable slot. Tells a player "this fits on the head" /
         // "this is wielded" without making them try `wear it` and
         // see where it lands. Skipped silently for non-wearable
-        // items (most consumables, decorations).
+        // items (most consumables, decorations). Wield/hold slots
+        // collapse to a one-word phrase since the slot label and
+        // the verb are the same word — "It is wielded." instead of
+        // the awkward "It is wielded on the wielded."
         if let Some(slot) = world.get::<WearableIn>(target).map(|w| w.0) {
-            let verb = match slot {
-                Slot::Wield => "wielded",
-                Slot::Hold => "held",
-                _ => "worn",
-            };
-            out.push_str(&format!(
-                "It is <cyan>{verb}</> on the <cyan>{}</>.\r\n",
-                slot.label()
-            ));
+            match slot {
+                Slot::Wield => out.push_str("It is <cyan>wielded</>.\r\n"),
+                Slot::Hold => out.push_str("It is <cyan>held</>.\r\n"),
+                _ => out.push_str(&format!(
+                    "It is <cyan>worn</> on the <cyan>{}</>.\r\n",
+                    slot.label()
+                )),
+            }
         }
         let contents: Vec<(String, usize)> = {
             let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
