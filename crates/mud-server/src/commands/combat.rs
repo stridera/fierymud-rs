@@ -14,10 +14,10 @@ use crate::commands::{
     RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST, THROATCUT_COST,
     TRIPUP_COST, aggro_alignment, apply_damage, auto_assist_followers_of, skill_stamina_cost,
     broadcast_room_except_players_rendered, broadcast_room_except_rendered, check_stamina,
-    cmd_look, direction_name, drain_stamina, engage_skill_shim, find_actor_in_room,
-    flip_door_both_sides, invoke_ability, invoke_ability_with, mob_helpers_engage, name_of,
-    name_or, opposite, parse_direction, remove_effect_named, require_alert_posture, send_rendered,
-    send_to, try_insert, try_remove,
+    cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
+    find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_with,
+    mob_helpers_engage, name_of, name_or, opposite, parse_direction, remove_effect_named,
+    require_alert_posture, send_rendered, send_to, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -886,37 +886,68 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
         "would slaughter you. Don't try it."
     };
 
-    let mut out = format!("{target_name} {verdict}\r\n");
+    // Verdict line: target name bold-cyan as the focal subject;
+    // verdict colored by the same ratio cutoff used to pick the
+    // text, so a "would slaughter you" reads bold-red without the
+    // player having to parse the prose.
+    let verdict_open = consider_verdict_color(ratio);
+    let mut out = format!(
+        "<b:cyan>{target_name}</> {verdict_open}{verdict}</>\r\n"
+    );
     // Hit-chance hints both ways. Use the same formula combat does
     // so what `consider` predicts matches what swings actually land.
+    // Each percentage is graded green→red so a player can compare
+    // their swing chance vs the target's at a glance.
     let your_chance = crate::combat::hit_chance_pct(self_hit_roll, target_ac);
     let their_chance = crate::combat::hit_chance_pct(target_hit_roll, self_ac);
+    let your_pct_text =
+        hit_chance_color(your_chance).map_or(format!("{your_chance}%"), |open| {
+            format!("{open}{your_chance}%</>")
+        });
+    // Their chance flips the gradient — a high percentage means
+    // *they* land swings reliably (bad for the player), so wrap in
+    // red bands. Reuse the helper but invert: pct >= 65 → red, low
+    // pct → green from the player's perspective.
+    let their_pct_text = match their_chance {
+        i32::MIN..=14 => format!("<b:green>{their_chance}%</>"),
+        15..=34 => format!("<green>{their_chance}%</>"),
+        35..=64 => format!("{their_chance}%"),
+        65..=84 => format!("<red>{their_chance}%</>"),
+        _ => format!("<b:red>{their_chance}%</>"),
+    };
     out.push_str(&format!(
-        "Your strikes would land about {your_chance}%; theirs about {their_chance}%.\r\n",
+        "Your strikes would land about {your_pct_text}; theirs about {their_pct_text}.\r\n",
     ));
     // Aggro hint: same threshold the room-entry check uses, so
     // `consider` matches the auto-engage rule. Players passing
     // through a known-hostile zone can size up the danger before
     // walking back in. Memory check first — a remembered grudge
     // is the more specific reason a particular target would
-    // attack you.
+    // attack you. Both reads as a bold-red threat tag — distinct
+    // from the verdict hue so the alarm doesn't blend into the
+    // gradient.
     if world.get::<Mob>(target).is_some() {
         let remembers_you = world
             .get::<crate::combat::MobMemory>(target)
             .is_some_and(|m| m.0.contains(&player));
         let target_alignment = target_stats.map_or(0, |c| c.alignment);
         if remembers_you {
-            out.push_str("It remembers you, and its hand goes to its weapon.\r\n");
+            out.push_str(
+                "<b:red>It remembers you, and its hand goes to its weapon.</>\r\n",
+            );
         } else if target_alignment <= aggro_alignment(world) {
-            out.push_str("Its eyes follow you with malice — it would attack on sight.\r\n");
+            out.push_str(
+                "<b:red>Its eyes follow you with malice — it would attack on sight.</>\r\n",
+            );
         }
     }
     // PeacefulRoom hint — if this room won't let combat happen,
     // the verdict is moot. Surfaced last so the rest of the
     // analysis still renders (useful when debugging encounters).
+    // Cyan because it's calming reassurance, not a threat.
     if world.get::<mud_world::PeacefulRoom>(located.0).is_some() {
         out.push_str(
-            "But a peaceful aura fills this place — violence won't happen here.\r\n",
+            "<cyan>But a peaceful aura fills this place — violence won't happen here.</>\r\n",
         );
     }
     send_rendered(world, player, &out);

@@ -4117,19 +4117,30 @@ pub(crate) fn cmd_glance(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let name = name_of(world, target);
-    let cond = world
-        .get::<Health>(target)
-        .copied()
-        .map_or("looks fine", condition_label);
+    let hp = world.get::<Health>(target).copied();
+    let cond = hp.map_or("looks fine", condition_label);
+    // Wrap the condition phrase in vital-graded color so a glance
+    // at a wounded target reads red without forcing the player to
+    // parse the words. None → render plain (target is fine enough).
+    let cond_open = hp.and_then(|h| vital_color_tag(h.hp, h.max));
+    let cond_text = cond_open.map_or_else(
+        || cond.to_string(),
+        |open| format!("{open}{cond}</>"),
+    );
     let posture = world
         .get::<Posture>(target)
         .map_or("standing", |p| p.0.label());
     let fighting = world
         .get::<Fighting>(target)
         .map(|f| name_or(world, f.0, "(gone)"));
-    let mut line = format!("\r\n{name} ({posture}) {cond}");
+    // Posture parenthetical dims (it's framing, not the headline);
+    // the fighting clause is the alarm — bold-red so an in-progress
+    // brawl is obvious at a glance.
+    let mut line = format!(
+        "\r\n<b:cyan>{name}</> <dim>({posture})</> {cond_text}"
+    );
     if let Some(target_name) = fighting {
-        line.push_str(&format!(" — fighting {target_name}"));
+        line.push_str(&format!(" <b:red>— fighting {target_name}</>"));
     }
     line.push_str(".\r\n");
     send_rendered(world, player, &line);
@@ -6013,16 +6024,22 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     };
 
     let mode = color_mode_for(world, player);
-    let mut out = String::from("\r\n");
+    // Compare table: bold-cyan A/B side tags so the eye locks onto
+    // which row is which; weight/level/type are reference fields,
+    // dimmed. Item names render through the normal color pipeline
+    // so authored tags survive. Render through send_rendered keeps
+    // the color tags inside the dim wrapper from re-entering the
+    // pipeline.
+    let mut out = String::from("\r\n<b:cyan>Compare</>\r\n");
     out.push_str(&format!(
-        "  A: {}    weight: {:.1}   level: {}   ({:?})\r\n",
+        "  <b:cyan>A:</> {}    <dim>weight: {:.1}   level: {}   ({:?})</>\r\n",
         render_color_tags(&a_name, mode),
         ap.weight,
         ap.level,
         ap.r#type,
     ));
     out.push_str(&format!(
-        "  B: {}    weight: {:.1}   level: {}   ({:?})\r\n",
+        "  <b:cyan>B:</> {}    <dim>weight: {:.1}   level: {}   ({:?})</>\r\n",
         render_color_tags(&b_name, mode),
         bp.weight,
         bp.level,
@@ -6030,17 +6047,25 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     ));
     let weight_delta = ap.weight - bp.weight;
     let level_delta = ap.level - bp.level;
+    // Delta lines: equality reads dim (no signal); non-equal lines
+    // colored neutral cyan since "A heavier" isn't inherently good
+    // or bad — the player decides whether weight is a feature or
+    // a tax for their build.
     let weight_line = if weight_delta.abs() < f64::EPSILON {
-        "Same weight.".to_string()
+        "<dim>Same weight.</>".to_string()
     } else if weight_delta > 0.0 {
-        format!("A heavier by {weight_delta:.1}.")
+        format!("<cyan>A heavier by {weight_delta:.1}.</>")
     } else {
-        format!("B heavier by {:.1}.", -weight_delta)
+        format!("<cyan>B heavier by {:.1}.</>", -weight_delta)
     };
     let level_line = match level_delta.cmp(&0) {
-        std::cmp::Ordering::Equal => "Same level.".to_string(),
-        std::cmp::Ordering::Greater => format!("A higher level by {level_delta}."),
-        std::cmp::Ordering::Less => format!("B higher level by {}.", -level_delta),
+        std::cmp::Ordering::Equal => "<dim>Same level.</>".to_string(),
+        std::cmp::Ordering::Greater => {
+            format!("<cyan>A higher level by {level_delta}.</>")
+        }
+        std::cmp::Ordering::Less => {
+            format!("<cyan>B higher level by {}.</>", -level_delta)
+        }
     };
     out.push_str(&format!("  {weight_line}  {level_line}\r\n"));
     // Weapon-vs-weapon damage comparison. Skipped silently when
@@ -6061,17 +6086,24 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
             format!("{}d{}{bonus}", p.weapon_dice_num, p.weapon_dice_size)
         };
         let damage_delta = a_avg - b_avg;
+        // Damage delta picks up `damage_color_tag` so a meaningful
+        // difference reads with the same warmth used on combat
+        // swings. Equal damage dims as "no signal".
         let damage_line = match damage_delta.cmp(&0) {
-            std::cmp::Ordering::Equal => "Same average damage.".to_string(),
+            std::cmp::Ordering::Equal => {
+                "<dim>Same average damage.</>".to_string()
+            }
             std::cmp::Ordering::Greater => {
-                format!("A higher avg damage by {damage_delta}.")
+                let open = damage_color_tag(damage_delta).unwrap_or("<cyan>");
+                format!("{open}A higher avg damage by {damage_delta}.</>")
             }
             std::cmp::Ordering::Less => {
-                format!("B higher avg damage by {}.", -damage_delta)
+                let open = damage_color_tag(-damage_delta).unwrap_or("<cyan>");
+                format!("{open}B higher avg damage by {}.</>", -damage_delta)
             }
         };
         out.push_str(&format!(
-            "  A: {} (avg {a_avg})    B: {} (avg {b_avg})    {damage_line}\r\n",
+            "  <b:cyan>A:</> <yellow>{}</> <dim>(avg {a_avg})</>    <b:cyan>B:</> <yellow>{}</> <dim>(avg {b_avg})</>    {damage_line}\r\n",
             dice_line(&ap),
             dice_line(&bp),
         ));
@@ -8264,23 +8296,44 @@ pub(crate) fn cmd_group(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You're not in a group.\r\n");
         return;
     }
-    let mut out = format!("\r\nGroup ({} members):\r\n", members.len());
+    // Group roster: bold-cyan title with member count dimmed. Per
+    // line: leader tag bold-yellow (the only one that's special),
+    // member tag dimmed; cyan name; HP wrapped in vital-color so
+    // a wounded party member reads red at a glance; here/elsewhere
+    // colored green/dim so "who's actually with me right now"
+    // jumps out without parsing every line. Column padding is done
+    // on the *plain* strings before color-wrapping so the visible
+    // alignment is correct after the renderer strips/emits tags.
+    let mut out = format!(
+        "\r\n<b:cyan>Group</> <dim>({} members)</>\r\n",
+        members.len()
+    );
+    let my_room = world.get::<Located>(player).map(|l| l.0);
     for (i, m) in members.iter().enumerate() {
         let name = name_of(world, *m);
-        let role = if i == 0 { "leader" } else { "member" };
-        let hp = world
+        let role_word = if i == 0 { "leader" } else { "member" };
+        let role_open = if i == 0 { "<b:yellow>" } else { "<dim>" };
+        let role_inner = format!("[{role_word:<6}]");
+        let role_text = format!("{role_open}{role_inner}</>");
+        let name_padded = format!("{name:<20}");
+        let name_text = format!("<cyan>{name_padded}</>");
+        let hp_inner = world
             .get::<Health>(*m)
-            .map(|h| format!("HP {}/{}", h.hp, h.max))
-            .unwrap_or_default();
-        let here = if let (Some(my_room), Some(their_room)) = (
-            world.get::<Located>(player).map(|l| l.0),
-            world.get::<Located>(*m).map(|l| l.0),
-        ) {
-            if my_room == their_room { "here" } else { "elsewhere" }
-        } else {
-            "elsewhere"
+            .map_or(String::new(), |h| format!("HP {}/{}", h.hp, h.max));
+        let hp_padded = format!("{hp_inner:<14}");
+        let hp_open = world
+            .get::<Health>(*m)
+            .and_then(|h| vital_color_tag(h.hp, h.max));
+        let hp_text = hp_open.map_or(hp_padded.clone(), |open| {
+            format!("{open}{hp_padded}</>")
+        });
+        let here_text = match (my_room, world.get::<Located>(*m).map(|l| l.0)) {
+            (Some(mine), Some(theirs)) if mine == theirs => "<green>here</>",
+            _ => "<dim>elsewhere</>",
         };
-        out.push_str(&format!("  [{role:<6}] {name:<20} {hp:<14} ({here})\r\n"));
+        out.push_str(&format!(
+            "  {role_text} {name_text} {hp_text} ({here_text})\r\n"
+        ));
     }
     send_to(world, player, out);
 }

@@ -4061,6 +4061,43 @@ pub(crate) fn idle_color(idle_secs: u64) -> Option<&'static str> {
     }
 }
 
+/// XML-Lite open tag for a `consider` verdict, banded by the
+/// score-ratio formula in `cmd_consider`. Maps the verdict text
+/// onto a green→red gradient so a player skimming the consider
+/// output lands on "is this safe" before reading the prose.
+/// Crossover values match the verdict cutoffs exactly.
+#[must_use]
+pub(crate) fn consider_verdict_color(ratio: f64) -> &'static str {
+    if ratio < 0.30 {
+        "<dim>"
+    } else if ratio < 0.70 {
+        "<green>"
+    } else if ratio < 1.50 {
+        "<yellow>"
+    } else if ratio < 3.00 {
+        "<red>"
+    } else {
+        "<b:red>"
+    }
+}
+
+/// XML-Lite open tag for a hit-chance percentage. None means render
+/// plain (mid range, ~25–75% — the boring "fair fight" zone).
+/// Used by `consider` so a player can scan the swing-likelihood
+/// numbers without reading them. Bands tuned to the same gut-feel
+/// as the verdict gradient: under 25% reads dim (you'll mostly
+/// miss), 75%+ reads bold green (you'll mostly land).
+#[must_use]
+pub(crate) fn hit_chance_color(pct: i32) -> Option<&'static str> {
+    match pct {
+        i32::MIN..=14 => Some("<dim>"),
+        15..=34 => Some("<red>"),
+        35..=64 => None,
+        65..=84 => Some("<green>"),
+        _ => Some("<b:green>"),
+    }
+}
+
 pub(crate) fn vital_color_tag(current: i32, max: i32) -> Option<&'static str> {
     if max <= 0 {
         return None;
