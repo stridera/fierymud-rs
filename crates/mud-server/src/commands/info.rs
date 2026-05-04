@@ -8781,26 +8781,32 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let mode = color_mode_for(world, player);
-    let mut out = String::from("\r\n");
+    let mut out = String::from("\r\n<b:cyan>Identify</>\r\n");
     out.push_str(&format!(
-        "  Item:      {}\r\n",
+        "  <cyan>Item:</>      <b:cyan>{}</>\r\n",
         render_color_tags(&p.name, mode)
     ));
-    out.push_str(&format!("  Type:      {:?}\r\n", p.r#type));
-    out.push_str(&format!("  Weight:    {:.1}\r\n", p.weight));
+    out.push_str(&format!("  <cyan>Type:</>      {:?}\r\n", p.r#type));
+    out.push_str(&format!(
+        "  <cyan>Weight:</>    <dim>{:.1}</>\r\n",
+        p.weight
+    ));
     // Level 0 is the schema default — don't pad the readout with
     // "Level: 0" when the proto carries no requirement.
     if p.level > 0 {
-        out.push_str(&format!("  Level:     {}\r\n", p.level));
+        out.push_str(&format!("  <cyan>Level:</>     {}\r\n", p.level));
     }
     if p.cost > 0
         && let Some(coin) = format_wealth(i64::from(p.cost))
     {
-        out.push_str(&format!("  Value:     {coin}\r\n"));
+        out.push_str(&format!("  <cyan>Value:</>     {coin}\r\n"));
     }
     if !p.wear_flags.is_empty() {
         let labels: Vec<String> = p.wear_flags.iter().map(|f| format!("{f:?}")).collect();
-        out.push_str(&format!("  Wear:      {}\r\n", labels.join(", ")));
+        out.push_str(&format!(
+            "  <cyan>Wear:</>      <dim>{}</>\r\n",
+            labels.join(", ")
+        ));
     }
     if p.weapon_dice_num > 0 {
         // Match compare's bonus formatting: positive bonus gets a
@@ -8812,7 +8818,7 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
             std::cmp::Ordering::Less => format!("{}", p.weapon_dice_bonus),
         };
         out.push_str(&format!(
-            "  Damage:    {}d{}{bonus}  (avg {})\r\n",
+            "  <cyan>Damage:</>    <yellow>{}d{}{bonus}</>  <dim>(avg {})</>\r\n",
             p.weapon_dice_num,
             p.weapon_dice_size,
             p.avg_damage(),
@@ -8823,12 +8829,12 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
         let (remaining, capacity) =
             state.as_ref().map_or((liq.remaining, liq.capacity), |s| (s.remaining, s.capacity));
         out.push_str(&format!(
-            "  Liquid:    {} ({}/{}){}\r\n",
+            "  <cyan>Liquid:</>    {} <dim>({}/{})</>{}\r\n",
             liq.liquid,
             remaining,
             capacity,
             if state.as_ref().is_some_and(|s| s.poisoned) {
-                " — POISONED"
+                " <b:red>— POISONED</>"
             } else {
                 ""
             }
@@ -8843,25 +8849,33 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
         .cloned()
         .unwrap_or_default();
     if !bindings.is_empty() {
-        out.push_str("  Bound abilities:\r\n");
+        out.push_str("  <cyan>Bound abilities:</>\r\n");
         let abilities = world.resource::<AbilityCatalog>();
         for b in bindings {
-            let name = abilities
+            // Render through the same sphere-coloring formatter as
+            // the spells listing so identify reads consistently —
+            // `Magic Missile (force)` with the parenthetical in
+            // the sphere's hue. Falls back to "ability #N" when
+            // the catalog has no row for the binding (orphan).
+            let entry = abilities
                 .by_name
                 .values()
                 .find(|d| d.id == b.ability_id)
-                .map_or_else(|| format!("ability {}", b.ability_id), |d| d.plain_name.clone());
+                .map_or_else(
+                    || format!("ability #{}", b.ability_id),
+                    format_ability_with_sphere,
+                );
             let charges = b
                 .charges
                 .map_or_else(|| "unlimited".to_string(), |c| format!("{c} charges"));
             out.push_str(&format!(
-                "    - {name} (level {}, {charges})\r\n",
+                "    <dim>·</> {entry} <dim>(level {}, {charges})</>\r\n",
                 b.level
             ));
         }
     }
     if let Some(c) = world.get::<mud_world::Charges>(item) {
-        out.push_str(&format!("  Charges remaining: {}\r\n", c.0));
+        out.push_str(&format!("  <cyan>Charges remaining:</> {}\r\n", c.0));
     }
 
     // Active effects on the item (rare today; surfaces if any are
@@ -8874,7 +8888,10 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     if !item_effects.is_empty() {
-        out.push_str(&format!("  Effects:   {}\r\n", item_effects.join(", ")));
+        out.push_str(&format!(
+            "  <cyan>Effects:</>   {}\r\n",
+            item_effects.join(", ")
+        ));
     }
 
     send_rendered(world, player, &out);
