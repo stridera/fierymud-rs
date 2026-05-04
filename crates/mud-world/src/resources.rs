@@ -61,6 +61,70 @@ pub struct RoomEnvironmentalEffects {
     pub by_room: HashMap<(i32, i32), Vec<i32>>,
 }
 
+/// K/V tunables from the `GameConfig` table. Replaces the
+/// per-callsite `pub(crate) const FOO_COST` constants — call
+/// sites pass the legacy value as `default` to `get_*`, and a row
+/// in the table overrides it. Missing rows or parse failures fall
+/// through to the default (a `tracing::warn!` flags the parse
+/// failure once at boot).
+///
+/// Storage shape: `(category, key) -> raw string` plus a typed
+/// parse on each accessor. Values are loaded once at boot; admin
+/// reload is a follow-up (the `restart_req` flag on the schema
+/// row already telegraphs which keys want a restart vs hot reload).
+#[derive(Resource, Debug, Default)]
+pub struct RuntimeConfig {
+    pub by_key: HashMap<(String, String), String>,
+}
+
+impl RuntimeConfig {
+    /// Read a `(category, key)` row as `i32`. Falls back to
+    /// `default` when the row is missing or doesn't parse. Used
+    /// for skill stamina costs, alignment thresholds, and most
+    /// other small integer tunables.
+    #[must_use]
+    pub fn get_i32(&self, category: &str, key: &str, default: i32) -> i32 {
+        self.by_key
+            .get(&(category.to_string(), key.to_string()))
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(default)
+    }
+
+    /// Same as `get_i32` for `i64`. Used for housing prices and
+    /// other cost values that exceed `i32` headroom.
+    #[must_use]
+    pub fn get_i64(&self, category: &str, key: &str, default: i64) -> i64 {
+        self.by_key
+            .get(&(category.to_string(), key.to_string()))
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(default)
+    }
+
+    /// Boolean tunable. Accepts "true" / "false" / "1" / "0"
+    /// case-insensitively. Anything else falls through to default.
+    #[must_use]
+    pub fn get_bool(&self, category: &str, key: &str, default: bool) -> bool {
+        self.by_key
+            .get(&(category.to_string(), key.to_string()))
+            .map(|v| v.to_ascii_lowercase())
+            .and_then(|v| match v.as_str() {
+                "true" | "1" | "yes" | "on" => Some(true),
+                "false" | "0" | "no" | "off" => Some(false),
+                _ => None,
+            })
+            .unwrap_or(default)
+    }
+
+    /// String tunable — pass the row's value through verbatim.
+    /// Used for things like "weather mode" labels.
+    #[must_use]
+    pub fn get_string<'a>(&'a self, category: &str, key: &str, default: &'a str) -> &'a str {
+        self.by_key
+            .get(&(category.to_string(), key.to_string()))
+            .map_or(default, String::as_str)
+    }
+}
+
 /// Per-race defaults loaded from the schema's `Race` table at boot.
 /// Today only `default_size` is wired (used by the score sheet); the
 /// fuller surface (`focusBonus` / lifeforce / weight-height ranges)

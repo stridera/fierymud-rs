@@ -76,6 +76,7 @@ pub fn respawn_tick(world: &mut World) {
     // hostilities. Reuses the same threshold the on-entry check
     // does so look / consider / spawn-engage all flip together.
     let mut aggro_queue: Vec<(Entity, Entity)> = Vec::new();
+    let aggro_threshold = crate::commands::aggro_alignment(world);
     for entry in &entries {
         if reset_id_alive.contains(&entry.reset_id) {
             continue;
@@ -148,7 +149,7 @@ pub fn respawn_tick(world: &mut World) {
         reset_id_alive.insert(entry.reset_id);
         *world_counts.entry(proto_key).or_insert(0) += 1;
         announce_queue.push((entry.room_entity, proto.name.clone()));
-        if proto.alignment <= crate::commands::AGGRO_ALIGNMENT {
+        if proto.alignment <= aggro_threshold {
             aggro_queue.push((em.id(), entry.room_entity));
         }
         refilled += 1;

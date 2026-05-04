@@ -4215,6 +4215,7 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // suffix so a careful look reveals what `consider` would and the
     // auto-engage rule will land. Non-mob entities skip it.
     let mob_lines: Vec<String> = {
+        let aggro_threshold = aggro_alignment(world);
         let mut q = world
             .query_filtered::<(&Located, &Named, Option<&Description>, Option<&CombatStats>), With<Mob>>();
         q.iter(world)
@@ -4223,7 +4224,7 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
                 let body = desc
                     .filter(|d| !d.0.trim().is_empty())
                     .map_or_else(|| n.name.clone(), |d| d.0.trim_end().to_string());
-                if stats.is_some_and(|s| s.alignment <= AGGRO_ALIGNMENT) {
+                if stats.is_some_and(|s| s.alignment <= aggro_threshold) {
                     format!("{body} <red>(HOSTILE)</>")
                 } else {
                     body

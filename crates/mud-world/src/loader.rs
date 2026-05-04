@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
-    effects, levels,
+    effects, game_config, levels,
     mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
     objects, races, room_exits, rooms, shops, socials, spell_slots,
     sqlx::PgPool, triggers, zones,
@@ -620,6 +620,22 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(crate::resources::RaceDefaults {
         size_by_race: race_size_map,
     });
+
+    // Pass 4c.7: runtime config k/v from `GameConfig`. Replaces the
+    // per-callsite `pub(crate) const FOO_COST` constants. Call
+    // sites pass the legacy value as the `default` argument to
+    // `RuntimeConfig::get_*`, so a missing or unparseable row
+    // degrades to today's behavior.
+    let config_rows = game_config::list_all(pool).await?;
+    let mut config = crate::resources::RuntimeConfig::default();
+    for row in config_rows {
+        config
+            .by_key
+            .insert((row.category, row.key), row.value);
+    }
+    let cfg_count = config.by_key.len();
+    world.insert_resource(config);
+    info!(rows = cfg_count, "GameConfig loaded");
 
     // Pass 4d: object-ability catalog (scrolls / wands / staves
     // bound abilities). Lookups are by `(zone, id)` matching an item

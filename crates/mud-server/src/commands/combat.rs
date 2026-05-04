@@ -9,10 +9,10 @@ use mud_world::{
 };
 
 use crate::commands::{
-    AGGRO_ALIGNMENT, ATTACK_COST, BACKSTAB_COST, BANDAGE_COST, BASH_COST, BERSERK_COST, Category,
-    Command, DISARM_COST, DOORBASH_COST, GOUGE_COST, HITALL_COST, Help, KICK_COST, LAYHANDS_COST,
-    REND_COST, RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST,
-    THROATCUT_COST, TRIPUP_COST, apply_damage, auto_assist_followers_of,
+    ATTACK_COST, BACKSTAB_COST, BANDAGE_COST, BASH_COST, BERSERK_COST, Category, Command,
+    DISARM_COST, DOORBASH_COST, GOUGE_COST, HITALL_COST, Help, KICK_COST, LAYHANDS_COST, REND_COST,
+    RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST, THROATCUT_COST,
+    TRIPUP_COST, aggro_alignment, apply_damage, auto_assist_followers_of, skill_stamina_cost,
     broadcast_room_except_players_rendered, broadcast_room_except_rendered, check_stamina,
     cmd_look, direction_name, drain_stamina, engage_skill_shim, find_actor_in_room,
     flip_door_both_sides, invoke_ability, invoke_ability_with, mob_helpers_engage, name_of,
@@ -731,7 +731,8 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     if !require_alert_posture(world, player, "attack") {
         return;
     }
-    if !check_stamina(world, player, ATTACK_COST, "attack") {
+    let cost = skill_stamina_cost(world, "attack", ATTACK_COST);
+    if !check_stamina(world, player, cost, "attack") {
         return;
     }
     let target_name = target_name.trim();
@@ -801,7 +802,7 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     {
         e.insert(Fighting(player));
     }
-    drain_stamina(world, player, ATTACK_COST);
+    drain_stamina(world, player, cost);
 
     send_to(world, player, format!("You attack {actual_name}!\r\n"));
     send_rendered(world, target, &format!("{player_name} attacks you!\r\n"));
@@ -905,7 +906,7 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
         let target_alignment = target_stats.map_or(0, |c| c.alignment);
         if remembers_you {
             out.push_str("It remembers you, and its hand goes to its weapon.\r\n");
-        } else if target_alignment <= AGGRO_ALIGNMENT {
+        } else if target_alignment <= aggro_alignment(world) {
             out.push_str("Its eyes follow you with malice — it would attack on sight.\r\n");
         }
     }
@@ -994,10 +995,11 @@ pub(crate) fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "Your target is gone.\r\n");
         return;
     }
-    if !check_stamina(world, player, KICK_COST, "kick") {
+    let cost = skill_stamina_cost(world, "kick", KICK_COST);
+    if !check_stamina(world, player, cost, "kick") {
         return;
     }
-    drain_stamina(world, player, KICK_COST);
+    drain_stamina(world, player, cost);
     let target_name = name_of(world, target);
     invoke_ability(
         world,
@@ -1011,10 +1013,11 @@ pub(crate) fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "berserk") {
         return;
     }
-    if !check_stamina(world, player, BERSERK_COST, "berserk") {
+    let cost = skill_stamina_cost(world, "berserk", BERSERK_COST);
+    if !check_stamina(world, player, cost, "berserk") {
         return;
     }
-    drain_stamina(world, player, BERSERK_COST);
+    drain_stamina(world, player, cost);
     invoke_ability(
         world,
         player,
@@ -1438,10 +1441,11 @@ pub(crate) fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're too alert to backstab.\r\n");
         return;
     }
-    if !check_stamina(world, player, BACKSTAB_COST, "backstab") {
+    let cost = skill_stamina_cost(world, "backstab", BACKSTAB_COST);
+    if !check_stamina(world, player, cost, "backstab") {
         return;
     }
-    drain_stamina(world, player, BACKSTAB_COST);
+    drain_stamina(world, player, cost);
     let target_name = name_of(world, target);
     invoke_ability(
         world,
@@ -1987,7 +1991,8 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     if !require_alert_posture(world, player, "bash") {
         return;
     }
-    if !check_stamina(world, player, BASH_COST, "bash") {
+    let cost = skill_stamina_cost(world, "bash", BASH_COST);
+    if !check_stamina(world, player, cost, "bash") {
         return;
     }
     let target_word = target_word.trim();
@@ -2021,7 +2026,7 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         .get::<CombatStats>(player)
         .map_or(1, |cs| cs.dmg_roll);
     let damage = (dmg_roll + 3).max(1);
-    drain_stamina(world, player, BASH_COST);
+    drain_stamina(world, player, cost);
 
     let target_name = name_of(world, target);
     let player_name = name_of(world, player);

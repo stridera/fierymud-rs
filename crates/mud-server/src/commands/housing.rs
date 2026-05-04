@@ -45,10 +45,12 @@ inventory::submit! {
     }
 }
 
-/// Per-room cost increment in copper. Seven rooms is "fully built
-/// out"; if we ever cap the count, lift to a config knob.
-const HOUSE_EXPAND_BASE_COST: i64 = 50_000;
-const HOUSE_EXPAND_PER_ROOM: i64 = 25_000;
+/// Default per-room expansion costs in copper. Live values come
+/// from `GameConfig` rows `housing.expand_base_cost` /
+/// `housing.expand_per_room`; these constants are the call-site
+/// fallback when the rows are missing or unparseable.
+const DEFAULT_HOUSE_EXPAND_BASE_COST: i64 = 50_000;
+const DEFAULT_HOUSE_EXPAND_PER_ROOM: i64 = 25_000;
 
 #[allow(clippy::too_many_lines)]
 async fn cmd_visit(
@@ -248,12 +250,23 @@ async fn cmd_house_expand(
         );
         return;
     }
+    let cfg = world.resource::<mud_world::RuntimeConfig>();
+    let per_room = cfg.get_i64(
+        "housing",
+        "expand_per_room",
+        DEFAULT_HOUSE_EXPAND_PER_ROOM,
+    );
+    let base = cfg.get_i64(
+        "housing",
+        "expand_base_cost",
+        DEFAULT_HOUSE_EXPAND_BASE_COST,
+    );
     let cost = i64::try_from(summary.rooms.len())
         .unwrap_or(0)
         .saturating_sub(1)
         .max(0)
-        .saturating_mul(HOUSE_EXPAND_PER_ROOM)
-        .saturating_add(HOUSE_EXPAND_BASE_COST);
+        .saturating_mul(per_room)
+        .saturating_add(base);
     let on_hand = world.get::<mud_world::Wealth>(player).map_or(0, |w| w.0);
     if on_hand < cost {
         send_to(

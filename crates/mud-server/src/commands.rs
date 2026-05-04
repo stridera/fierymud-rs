@@ -10599,13 +10599,38 @@ pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room:
     true
 }
 
-/// Alignment threshold below which a mob will swing on a player
-/// who walks into the room (or, on respawn, lands in a room with
-/// a player already there). Tuned by the import distribution: the
-/// nastiest two-hundred-odd mobs sit at -1000, so -800 lights up
-/// roughly the lower fifth — enough to make low-zone exploration
-/// have teeth without making every wandering goblin hostile.
-pub(crate) const AGGRO_ALIGNMENT: i32 = -800;
+/// Default alignment threshold below which a mob auto-swings on
+/// arriving players. Live value is `combat.aggro_alignment`
+/// in `GameConfig`; this is the call-site fallback. Tuned by the
+/// import distribution: nastiest 200-odd mobs sit at -1000, so
+/// -800 lights up roughly the lower fifth.
+pub(crate) const DEFAULT_AGGRO_ALIGNMENT: i32 = -800;
+
+/// Read the alignment threshold from `RuntimeConfig`, falling
+/// back to the legacy hardcoded value. Used by every aggro
+/// gate (room arrival, respawn auto-engage, hostile-tag in
+/// `look`).
+#[must_use]
+pub(crate) fn aggro_alignment(world: &World) -> i32 {
+    world.resource::<mud_world::RuntimeConfig>().get_i32(
+        "combat",
+        "aggro_alignment",
+        DEFAULT_AGGRO_ALIGNMENT,
+    )
+}
+
+/// Read a per-skill stamina cost from `RuntimeConfig`. Skill names
+/// match the lowercase command name (e.g. `"attack"`, `"bash"`,
+/// `"backstab"`). Falls back to the legacy compile-time default
+/// when the row is absent.
+#[must_use]
+pub(crate) fn skill_stamina_cost(world: &World, skill: &str, default: i32) -> i32 {
+    world.resource::<mud_world::RuntimeConfig>().get_i32(
+        "combat.stamina_cost",
+        skill,
+        default,
+    )
+}
 
 /// Bidirectional `Fighting` + announcement on both sides + the
 /// rest of the room. Shared between the on-entry aggro check and
@@ -10643,13 +10668,14 @@ pub(crate) fn engage_combat(
 }
 
 pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room: Entity) {
+    let threshold = aggro_alignment(world);
     let aggro: Option<Entity> = {
         let mut q = world.query_filtered::<
             (Entity, &Located, &CombatStats),
             (With<Mob>, Without<Fighting>),
         >();
         q.iter(world)
-            .find(|(_, l, cs)| l.0 == room && cs.alignment <= AGGRO_ALIGNMENT)
+            .find(|(_, l, cs)| l.0 == room && cs.alignment <= threshold)
             .map(|(e, _, _)| e)
     };
     let Some(mob) = aggro else { return };
