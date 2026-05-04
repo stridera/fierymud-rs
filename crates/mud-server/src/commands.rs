@@ -2600,6 +2600,48 @@ mod tests {
     }
 
     #[test]
+    fn apply_ward_skips_mundane_damage() {
+        // Mundane on-hit abilities (`is_magical = false`) and raw
+        // weapon swings bypass ward entirely, regardless of how much
+        // ward the target stacks. Per combat.md "Source-magicality
+        // gated" decision.
+        assert_eq!(super::apply_ward(100, 50, false), 100);
+        assert_eq!(super::apply_ward(100, 99, false), 100);
+        // Even at full immunity (ward=100), mundane damage lands.
+        assert_eq!(super::apply_ward(100, 100, false), 100);
+    }
+
+    #[test]
+    fn apply_ward_50pct_halves_magical_damage() {
+        // Typical case: a level-mid mage with 50% ward absorbs
+        // exactly half a 100-point fireball.
+        assert_eq!(super::apply_ward(100, 50, true), 50);
+        // Edge: zero ward is a no-op even on magical damage.
+        assert_eq!(super::apply_ward(100, 0, true), 100);
+    }
+
+    #[test]
+    fn apply_ward_clamps_negative_into_armor_side() {
+        // Vulnerability (negative ward) is intentionally NOT
+        // amplified by the ward stage — that semantic lives on the
+        // armor / type-resist side per combat.md. A negative
+        // ward_pct gets clamped to 0 so the magical hit lands at
+        // full damage and any vulnerability has to come from
+        // resistances instead.
+        assert_eq!(super::apply_ward(100, -50, true), 100);
+        assert_eq!(super::apply_ward(100, i32::MIN, true), 100);
+    }
+
+    #[test]
+    fn apply_ward_caps_at_100_immunity() {
+        // 100% ward zeros magical damage. Anything above clamps
+        // to the same — no negative-damage healing exploit.
+        assert_eq!(super::apply_ward(100, 100, true), 0);
+        assert_eq!(super::apply_ward(100, 200, true), 0);
+        assert_eq!(super::apply_ward(100, i32::MAX, true), 0);
+    }
+
+    #[test]
     fn apply_modify_delta_ward_routes_to_ward_pct() {
         // Regression: prior code aliased the "ward" modify stat
         // onto `cs.ac` (subtracting the buff). Per combat.md the
@@ -8762,14 +8804,10 @@ pub(crate) fn invoke_ability_with(
                     // can't generate negative damage; floor at 0 so
                     // negative ward (vulnerability) stays
                     // armor-side, not ward-side.
-                    if def.is_magical {
-                        let ward = world
-                            .get::<CombatStats>(target_entity)
-                            .map_or(0, |c| c.ward_pct.clamp(0, 100));
-                        if ward > 0 {
-                            amount = amount.saturating_mul(100 - ward) / 100;
-                        }
-                    }
+                    let ward_pct = world
+                        .get::<CombatStats>(target_entity)
+                        .map_or(0, |c| c.ward_pct);
+                    amount = apply_ward(amount, ward_pct, def.is_magical);
                     let (dead, threshold_msg) =
                         crate::commands::apply_damage(world, target_entity, amount);
                     // Surface the apply_damage threshold message
@@ -11042,6 +11080,26 @@ pub(crate) fn check_stamina(world: &World, player: Entity, cost: i32, verb: &str
         return false;
     }
     true
+}
+
+/// Combat pipeline step 5 ("Wards") per `docs/design/combat.md`.
+/// Magical sources route the rolled damage through the target's
+/// `ward_pct`; mundane on-hit abilities and raw weapon swings skip
+/// the layer entirely.
+///
+/// Ward is clamped to `[0, 100]` so a runaway buff stack can't
+/// flip the sign (negative ward = vulnerability stays armor-side,
+/// not ward-side; >100 immunity collapses to "all damage zeroed").
+#[must_use]
+pub(crate) fn apply_ward(amount: i32, ward_pct: i32, is_magical: bool) -> i32 {
+    if !is_magical {
+        return amount;
+    }
+    let ward = ward_pct.clamp(0, 100);
+    if ward == 0 {
+        return amount;
+    }
+    amount.saturating_mul(100 - ward) / 100
 }
 
 /// Apply `amount` damage to `target`'s Health. Returns `(dead, threshold_msg)`
