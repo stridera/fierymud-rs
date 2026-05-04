@@ -4761,7 +4761,7 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
         send_to(
             world,
             player,
-            format!("{} isn't on your class's list.\r\n", def.plain_name),
+            format!("{} isn't on your class's list.\r\n", def.name),
         );
         return;
     };
@@ -4773,7 +4773,7 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
         send_to(
             world,
             player,
-            format!("You haven't learned {} yet — `study` it first.\r\n", def.plain_name),
+            format!("You haven't learned {} yet — `study` it first.\r\n", def.name),
         );
         return;
     };
@@ -4783,7 +4783,7 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
             player,
             format!(
                 "Your {} is already at its class cap of {cap}.\r\n",
-                def.plain_name
+                def.name
             ),
         );
         return;
@@ -4817,7 +4817,7 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
         format!(
             "You practice {} — proficiency now {new_prof} / {cap}. \
              ({remaining} practice point(s) remaining.)\r\n",
-            def.plain_name
+            def.name
         ),
     );
 }
@@ -7256,7 +7256,7 @@ pub(crate) fn resolve_spell_for_class(
         return Err(format!("'{name}' isn't a known ability."));
     };
     if !matches!(def.kind, mud_db::abilities::AbilityKind::Spell) {
-        return Err(format!("{} isn't a memorizable spell.", def.plain_name));
+        return Err(format!("{} isn't a memorizable spell.", def.name));
     }
     let Some(&circle) = world
         .resource::<mud_world::SpellSlotData>()
@@ -7265,7 +7265,7 @@ pub(crate) fn resolve_spell_for_class(
     else {
         return Err(format!(
             "{} isn't on your class's spell list.",
-            def.plain_name
+            def.name
         ));
     };
     Ok((def.id, circle))
@@ -7702,7 +7702,7 @@ pub(crate) fn invoke_ability_with(
                                 player,
                                 format!(
                                     "You haven't practiced {} yet.\r\n",
-                                    def.plain_name
+                                    def.name
                                 ),
                             );
                             return;
@@ -7714,7 +7714,7 @@ pub(crate) fn invoke_ability_with(
                             player,
                             format!(
                                 "You must reach level {min_level} before you can use {}.\r\n",
-                                def.plain_name
+                                def.name
                             ),
                         );
                         return;
@@ -7725,7 +7725,7 @@ pub(crate) fn invoke_ability_with(
                             player,
                             format!(
                                 "Your class can't use {}.\r\n",
-                                def.plain_name
+                                def.name
                             ),
                         );
                         return;
@@ -7741,7 +7741,7 @@ pub(crate) fn invoke_ability_with(
             send_to(
                 world,
                 player,
-                format!("You don't know how to {} {}.\r\n", verb, def.plain_name),
+                format!("You don't know how to {} {}.\r\n", verb, def.name),
             );
             return;
         }
@@ -7802,11 +7802,11 @@ pub(crate) fn invoke_ability_with(
     // live gates.
     let caster_in_combat = world.get::<Fighting>(player).is_some();
     if def.in_combat_only && !caster_in_combat {
-        send_to(world, player, format!("You can only {verb} {} in combat.\r\n", def.plain_name));
+        send_to(world, player, format!("You can only {verb} {} in combat.\r\n", def.name));
         return;
     }
     if !def.combat_ok && caster_in_combat {
-        send_to(world, player, format!("You can't {verb} {} while fighting.\r\n", def.plain_name));
+        send_to(world, player, format!("You can't {verb} {} while fighting.\r\n", def.name));
         return;
     }
 
@@ -7820,7 +7820,7 @@ pub(crate) fn invoke_ability_with(
             player,
             format!(
                 "You can't {verb} {} while {}.\r\n",
-                def.plain_name,
+                def.name,
                 world
                     .get::<Posture>(player)
                     .map_or("incapacitated", |p| p.0.label()),
@@ -7853,7 +7853,7 @@ pub(crate) fn invoke_ability_with(
                 player,
                 format!(
                     "You can't {verb} {} yet — {secs:.1}s remaining.\r\n",
-                    def.plain_name,
+                    def.name,
                 ),
             );
             return;
@@ -7885,9 +7885,9 @@ pub(crate) fn invoke_ability_with(
         && let Some(scope) = inferred_scope
     {
         let refusal = if matches!(scope, AoeScope::RoomEnemies | AoeScope::RoomAll) {
-            format!("Nothing here to {verb} {}.\r\n", def.plain_name)
+            format!("Nothing here to {verb} {}.\r\n", def.name)
         } else {
-            format!("Nobody here for {} to reach.\r\n", def.plain_name)
+            format!("Nobody here for {} to reach.\r\n", def.name)
         };
         invoke_ability_aoe(
             world,
@@ -8249,7 +8249,7 @@ pub(crate) fn invoke_ability_with(
         send_to(
             world,
             player,
-            format!("{target_name} resists your {}.\r\n", def.plain_name),
+            format!("{target_name} resists your {}.\r\n", def.name),
         );
         if target_entity != player {
             send_rendered(
@@ -8257,7 +8257,7 @@ pub(crate) fn invoke_ability_with(
                 target_entity,
                 &format!(
                     "You resist {}'s {}.\r\n",
-                    actor_name_pre, def.plain_name,
+                    actor_name_pre, def.name,
                 ),
             );
         }
@@ -8905,11 +8905,11 @@ pub(crate) fn invoke_ability_with(
             );
             out.push_str(&format!("    {}\r\n", render_color_tags(&rendered, mode)));
         } else if target_entity == player {
-            out.push_str(&format!("    you {verb} {}\r\n", def.plain_name));
+            out.push_str(&format!("    you {verb} {}\r\n", def.name));
         } else {
             out.push_str(&format!(
                 "    you {verb} {} on {}\r\n",
-                def.plain_name,
+                def.name,
                 render_color_tags(&target_name_raw, mode),
             ));
         }
@@ -8929,7 +8929,7 @@ pub(crate) fn invoke_ability_with(
         } else {
             format!(
                 "{actor_name} {verb}s {} on you. ({} effect(s))",
-                def.plain_name,
+                def.name,
                 applied_msgs.len()
             )
         };

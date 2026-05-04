@@ -415,7 +415,7 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("{} isn't on your class's list.\r\n", def.plain_name),
+            format!("{} isn't on your class's list.\r\n", def.name),
         );
         return;
     }
@@ -425,7 +425,7 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("You already know {}.\r\n", def.plain_name),
+            format!("You already know {}.\r\n", def.name),
         );
         return;
     }
@@ -442,7 +442,7 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         player,
         format!(
             "You commit {} to memory. (proficiency 1)\r\n",
-            def.plain_name
+            def.name
         ),
     );
 }
@@ -488,12 +488,12 @@ pub(crate) fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    let plain_name = world
+    let display_name = world
         .resource::<AbilityCatalog>()
         .by_name
         .values()
         .find(|d| d.id == ability_id)
-        .map_or_else(String::new, |d| d.plain_name.clone());
+        .map_or_else(String::new, |d| d.name.clone());
     let prep_secs = (circle * 5).max(5); // default 5s/circle until Ability.memorization_time is seeded
     let entry = mud_world::MemEntry {
         ability_id,
@@ -512,7 +512,7 @@ pub(crate) fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
         world,
         player,
         format!(
-            "You begin memorizing {plain_name} (circle {circle}, ~{prep_secs}s while resting).\r\n"
+            "You begin memorizing {display_name} (circle {circle}, ~{prep_secs}s while resting).\r\n"
         ),
     );
 }
@@ -532,12 +532,12 @@ pub(crate) fn cmd_forget(world: &mut World, player: Entity, args: &str) {
             return;
         }
     };
-    let plain_name = world
+    let display_name = world
         .resource::<AbilityCatalog>()
         .by_name
         .values()
         .find(|d| d.id == ability_id)
-        .map_or_else(String::new, |d| d.plain_name.clone());
+        .map_or_else(String::new, |d| d.name.clone());
     let removed = if let Some(mut mem) = world.get_mut::<MemorizedSpells>(player) {
         // Prefer dropping a not-yet-ready entry (cheaper to lose).
         let idx = mem
@@ -555,12 +555,12 @@ pub(crate) fn cmd_forget(world: &mut World, player: Entity, args: &str) {
         false
     };
     if removed {
-        send_to(world, player, format!("You forget {plain_name}.\r\n"));
+        send_to(world, player, format!("You forget {display_name}.\r\n"));
     } else {
         send_to(
             world,
             player,
-            format!("{plain_name} isn't currently memorized.\r\n"),
+            format!("{display_name} isn't currently memorized.\r\n"),
         );
     }
 }
