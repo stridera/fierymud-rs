@@ -2204,6 +2204,28 @@ impl UserData for LuaRoom {
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
+                    // `room.actors` / `room.people` — 1-indexed table
+                    // of LuaActor wrappers for every actor (mob or
+                    // player) located in this room. Heavily used by
+                    // randomized "pick a random target here"
+                    // patterns: `room.actors[random(1, #room.actors)]`.
+                    "actors" | "people" => {
+                        let occupants: Vec<Entity> = world_mut_from_lua(lua, |w| {
+                            let mut q = w
+                                .query_filtered::<(Entity, &Located), Without<Item>>();
+                            q.iter(w)
+                                .filter(|(_, l)| l.0 == this.entity)
+                                .map(|(e, _)| e)
+                                .collect()
+                        })?;
+                        let tbl = lua.create_table()?;
+                        for (i, e) in occupants.iter().enumerate() {
+                            let actor = LuaActor { entity: *e };
+                            let idx = i64::try_from(i + 1).unwrap_or(i64::MAX);
+                            tbl.set(idx, lua.create_userdata(actor)?)?;
+                        }
+                        Ok(Value::Table(tbl))
+                    }
                     _ => Ok(Value::Nil),
                 }
             },
