@@ -4760,10 +4760,18 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!("  Age: {age}\r\n"));
     }
     if let Some(hp) = d.hp {
-        out.push_str(&format!("  HP: {} / {}\r\n", hp.hp, hp.max));
+        let cur = vital_color_tag(hp.hp, hp.max).map_or_else(
+            || hp.hp.to_string(),
+            |tag| format!("{tag}{}</>", hp.hp),
+        );
+        out.push_str(&format!("  HP: {cur} / {}\r\n", hp.max));
     }
     if let Some(s) = d.stamina {
-        out.push_str(&format!("  Stamina: {} / {}\r\n", s.current, s.max));
+        let cur = vital_color_tag(s.current, s.max).map_or_else(
+            || s.current.to_string(),
+            |tag| format!("{tag}{}</>", s.current),
+        );
+        out.push_str(&format!("  Stamina: {cur} / {}\r\n", s.max));
     }
     if let Some(stats) = d.core_stats {
         out.push_str(&format!(
@@ -5125,7 +5133,11 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     out.push_str(&format!("|{title}|\r\n"));
     out.push_str(&format!("+{}+\r\n", "-".repeat(W)));
     let mut row = |s: String| {
-        out.push_str(&format!("| {s:<width$} |\r\n", width = W - 2));
+        // pad_visible respects XML-Lite color tags so a wrapped HP
+        // value like `<red>40</> / 100` doesn't shift the right
+        // border. ASCII-only rows pad identically since visible
+        // width matches byte width.
+        out.push_str(&format!("| {} |\r\n", pad_visible(&s, W - 2)));
     };
     if let Some((level, class, race, gender, xp)) = d.profile {
         let rank = d.level_title.map_or(String::new(), |t| format!(" {t}"));
@@ -5146,10 +5158,18 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         row(format!("Age:       {age}"));
     }
     if let Some(hp) = d.hp {
-        row(format!("HP:        {} / {}", hp.hp, hp.max));
+        let cur = vital_color_tag(hp.hp, hp.max).map_or_else(
+            || hp.hp.to_string(),
+            |tag| format!("{tag}{}</>", hp.hp),
+        );
+        row(format!("HP:        {cur} / {}", hp.max));
     }
     if let Some(s) = d.stamina {
-        row(format!("Stamina:   {} / {}", s.current, s.max));
+        let cur = vital_color_tag(s.current, s.max).map_or_else(
+            || s.current.to_string(),
+            |tag| format!("{tag}{}</>", s.current),
+        );
+        row(format!("Stamina:   {cur} / {}", s.max));
     }
     if let Some(stats) = d.core_stats {
         row(format!(
