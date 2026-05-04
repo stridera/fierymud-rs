@@ -2749,6 +2749,7 @@ mod tests {
             board_draft: None,
             size: Some("Medium"),
             play_time_secs: Some(7290), // 2h 1m
+            last_login_secs_ago: Some(86_400 * 2), // 2 days
         }
     }
 
@@ -4512,6 +4513,40 @@ pub(crate) fn format_idle(secs: u64) -> String {
     }
 }
 
+/// Render seconds-since-event as a human-friendly relative
+/// timestamp ("3 days ago", "just now"). Used by score's
+/// "Last login:" line. Negative input collapses to "just now"
+/// — wall-clock skew between server and DB shouldn't surface
+/// "in the future" to the player.
+pub(crate) fn format_time_ago(secs: i64) -> String {
+    if secs < 60 {
+        return String::from("just now");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        let label = if mins == 1 { "minute" } else { "minutes" };
+        return format!("{mins} {label} ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        let label = if hours == 1 { "hour" } else { "hours" };
+        return format!("{hours} {label} ago");
+    }
+    let days = hours / 24;
+    if days < 30 {
+        let label = if days == 1 { "day" } else { "days" };
+        return format!("{days} {label} ago");
+    }
+    let months = days / 30;
+    if months < 12 {
+        let label = if months == 1 { "month" } else { "months" };
+        return format!("{months} {label} ago");
+    }
+    let years = months / 12;
+    let label = if years == 1 { "year" } else { "years" };
+    format!("{years} {label} ago")
+}
+
 /// Format a lifetime play-time count into a coarse "1d 4h" / "23m"
 /// string for the score sheet. Differs from `format_idle` in two
 /// ways: collapses sub-minute spans to "0m" rather than "Ns" (the
@@ -4724,6 +4759,12 @@ pub(crate) struct ScoreData<'a> {
     /// `None` suppresses the line — used for the corner case where
     /// `LoggedInAt` is missing and the persisted total is also 0.
     play_time_secs: Option<u64>,
+    /// Seconds elapsed since the player's previous login, captured
+    /// at this session's spawn time so the value remains stable
+    /// across the session. None for brand-new characters who've
+    /// never logged in before — score then suppresses the line.
+    /// Rendered via `format_time_ago` as "3 days ago" / "just now".
+    last_login_secs_ago: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -4822,6 +4863,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(secs) = d.play_time_secs {
         out.push_str(&format!("  Played:    {}\r\n", format_play_time(secs)));
+    }
+    if let Some(secs) = d.last_login_secs_ago {
+        out.push_str(&format!("  Last login: {}\r\n", format_time_ago(secs)));
     }
     if let Some(target) = d.fight_target {
         out.push_str(&format!("  Fighting: {target}\r\n"));
@@ -5186,9 +5230,10 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         ));
     }
     if let Some(cs) = d.cs {
+        let align_label = mud_db::enums::Alignment::from_score(cs.alignment).label();
         row(format!(
-            "Hit: {}   Dmg: {}   AC: {}   Align: {}",
-            cs.hit_roll, cs.dmg_roll, cs.ac, cs.alignment
+            "Hit: {}   Dmg: {}   AC: {}   Align: {} ({})",
+            cs.hit_roll, cs.dmg_roll, cs.ac, align_label, cs.alignment,
         ));
     }
     if let Some(p) = d.posture {
@@ -5222,6 +5267,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(secs) = d.play_time_secs {
         row(format!("Played:    {}", format_play_time(secs)));
+    }
+    if let Some(secs) = d.last_login_secs_ago {
+        row(format!("Last login: {}", format_time_ago(secs)));
     }
     if let Some(target) = d.fight_target {
         row(format!("Fighting:  {target}"));

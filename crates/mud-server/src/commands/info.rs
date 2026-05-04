@@ -4689,6 +4689,22 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .map_or_else(String::new, |n| n.name.clone());
             render_color_tags(&raw, ColorMode::Strip)
         });
+    // Previous-session login captured at spawn. Subtract from
+    // current Unix time to produce "Last login: 3 days ago" on
+    // score. Negative deltas (clock skew) collapse to "just now"
+    // inside `format_time_ago`.
+    let last_login_secs_ago: Option<i64> = world
+        .get::<mud_world::PreviousLogin>(player)
+        .map(|p| p.0)
+        .and_then(|prev_ts| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            let now_i64 = i64::try_from(now).ok()?;
+            Some(now_i64.saturating_sub(prev_ts))
+        });
+
     // Lifetime play-time = persisted seconds + current session
     // elapsed. Suppressed when both contributions are zero (very
     // brand-new character, no LoggedInAt — shouldn't happen for
@@ -4960,6 +4976,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .map(|(alias, lines)| (alias.as_str(), *lines)),
         size: size_owned.as_deref(),
         play_time_secs,
+        last_login_secs_ago,
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),

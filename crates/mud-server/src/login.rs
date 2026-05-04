@@ -1394,6 +1394,12 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         // without double-counting any window.
         e.insert(mud_world::TimePlayed(c.time_played));
         e.insert(mud_world::LastPersistedAt(std::time::Instant::now()));
+        // Capture the previous-session login timestamp BEFORE
+        // save_state's UPDATE NOW() runs and overwrites it with
+        // the current login. Absent for first-time logins.
+        if let Some(ts) = c.last_login {
+            e.insert(mud_world::PreviousLogin(ts.and_utc().timestamp()));
+        }
     }
     entity
 }
@@ -1999,6 +2005,7 @@ mod tests {
             hunger: 0,
             thirst: 0,
             time_played: 0,
+            last_login: None,
         }
     }
 

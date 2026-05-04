@@ -73,6 +73,13 @@ pub struct CharacterRow {
     /// Incrementing on save is a follow-up — the column round-trips
     /// at zero for now until that lands.
     pub time_played: i32,
+    /// Wall-clock timestamp of the previous session's login. Read
+    /// once at spawn and stashed on a `PreviousLogin` component;
+    /// the login flow's own `save_state` call later updates the
+    /// column to `NOW()`, so this is the only spot to capture the
+    /// "before-now" value for the score sheet's "Last login:"
+    /// line. Null for brand-new characters who've never logged in.
+    pub last_login: Option<chrono::NaiveDateTime>,
 }
 
 /// Bundle of fields fed into `create` from the login-creation
@@ -410,7 +417,8 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             race::text AS "race!: String",
             experience, title, description,
             strength, dexterity, constitution, intelligence, wisdom, charisma,
-            wealth, bank_wealth, gender, skill_points, hunger, thirst, time_played
+            wealth, bank_wealth, gender, skill_points, hunger, thirst, time_played,
+            last_login AS "last_login: chrono::NaiveDateTime"
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -462,7 +470,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             skill_points,
             hunger,
             thirst,
-            time_played
+            time_played,
+            last_login AS "last_login: chrono::NaiveDateTime"
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

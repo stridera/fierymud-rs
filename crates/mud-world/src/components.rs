@@ -816,6 +816,16 @@ pub struct LoggedInAt(pub std::time::Instant);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LastPersistedAt(pub std::time::Instant);
 
+/// Captured value of `Characters.last_login` from the row that
+/// spawned this player, stored as a Unix timestamp in seconds.
+/// Score's "Last login:" line renders the relative time ("3 days
+/// ago", "just now"). Captured at spawn because the same login
+/// flow's `save_state` later overwrites the column to `NOW()`; this
+/// component is the only place that holds the previous value.
+/// Absent for brand-new characters whose first session is happening.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PreviousLogin(pub i64);
+
 /// Marker linking a spawned mob entity back to the `MobResets.id` row
 /// that produced it. The respawn tick system queries entities by this
 /// component to count live instances per reset and decide whether to
