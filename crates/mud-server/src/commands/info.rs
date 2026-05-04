@@ -8232,16 +8232,20 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 
-/// Render an ability's display name plus a dim parenthetical for
-/// its sphere when one is assigned. Lets the spells / chants /
-/// songs / skills listings double as an elemental-affinity scan
-/// without forcing players to run `identify` per spell. Abilities
-/// without a sphere render the name unchanged.
+/// Render an ability's display name plus a colored parenthetical
+/// for its sphere when one is assigned. Lets the spells / chants
+/// / songs / skills listings double as an elemental-affinity scan
+/// without forcing players to run `identify` per spell. Sphere
+/// hue picks from the palette in `sphere_color_tag`
+/// (fire=red, water=cyan, healing=green, etc.); unmapped or
+/// missing spheres fall through to dim. Abilities without a
+/// sphere assignment render the name unchanged.
 fn format_ability_with_sphere(def: &mud_world::AbilityDef) -> String {
-    match def.sphere.as_deref() {
-        Some(s) if !s.is_empty() => format!("{} <dim>({s})</>", def.name),
-        _ => def.name.clone(),
-    }
+    let Some(s) = def.sphere.as_deref().filter(|s| !s.is_empty()) else {
+        return def.name.clone();
+    };
+    let open = sphere_color_tag(s).unwrap_or("<dim>");
+    format!("{} {open}({s})</>", def.name)
 }
 
 /// Pick the column width for an ability-list grid. Sized to the

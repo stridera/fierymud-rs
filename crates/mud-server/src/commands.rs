@@ -1824,6 +1824,32 @@ mod tests {
     }
 
     #[test]
+    fn sphere_color_tag_covers_palette() {
+        use super::sphere_color_tag;
+        // Elemental + healing / death — the schema's most common
+        // spheres. Fire/water are the load-bearing ones for player
+        // intuition (red/cyan); the rest follow.
+        assert_eq!(sphere_color_tag("fire"), Some("<red>"));
+        assert_eq!(sphere_color_tag("water"), Some("<cyan>"));
+        assert_eq!(sphere_color_tag("air"), Some("<b:cyan>"));
+        assert_eq!(sphere_color_tag("earth"), Some("<yellow>"));
+        assert_eq!(sphere_color_tag("healing"), Some("<green>"));
+        assert_eq!(sphere_color_tag("death"), Some("<b:black>"));
+        assert_eq!(sphere_color_tag("protection"), Some("<b:white>"));
+        assert_eq!(sphere_color_tag("enchantment"), Some("<magenta>"));
+        assert_eq!(sphere_color_tag("summoning"), Some("<b:magenta>"));
+        assert_eq!(sphere_color_tag("divination"), Some("<b:yellow>"));
+        // GENERIC + unmapped fall through to None — caller renders
+        // dim. Input is lowercase; uppercase variants don't match
+        // (matches how the catalog stores them after our
+        // LOWER(sphere::text) cast in mud_db).
+        assert_eq!(sphere_color_tag("generic"), None);
+        assert_eq!(sphere_color_tag(""), None);
+        assert_eq!(sphere_color_tag("FIRE"), None);
+        assert_eq!(sphere_color_tag("unrecognized"), None);
+    }
+
+    #[test]
     fn aoe_targets_room_allies_includes_caster_and_group_excludes_mobs() {
         // RoomAllies = caster + group members in the room. Mobs are
         // excluded (no allied-mob tag today). Out-of-room group
@@ -4459,6 +4485,31 @@ pub(crate) fn vital_color_tag(current: i32, max: i32) -> Option<&'static str> {
     match pct {
         ..=24 => Some("<red>"),
         25..=49 => Some("<yellow>"),
+        _ => None,
+    }
+}
+
+/// XML-Lite open tag for an ability's sphere — fire=red,
+/// water=cyan, healing=green, etc. Lets the spells / chants /
+/// songs / skills listings render sphere parentheticals in their
+/// elemental hue so a player can spot fire spells at a glance.
+/// Returns `None` for sphere strings that aren't on the palette
+/// (caller renders dim or plain). Input is the lowercase form
+/// loaded from `Ability.sphere`.
+#[must_use]
+pub(crate) fn sphere_color_tag(sphere: &str) -> Option<&'static str> {
+    match sphere {
+        "fire" => Some("<red>"),
+        "water" => Some("<cyan>"),
+        "air" => Some("<b:cyan>"),
+        "earth" => Some("<yellow>"),
+        "healing" => Some("<green>"),
+        "death" => Some("<b:black>"),
+        "protection" => Some("<b:white>"),
+        "enchantment" => Some("<magenta>"),
+        "summoning" => Some("<b:magenta>"),
+        "divination" => Some("<b:yellow>"),
+        // GENERIC / unmapped: caller's dim fallback wins.
         _ => None,
     }
 }
