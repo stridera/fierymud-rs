@@ -7668,11 +7668,23 @@ pub(crate) fn cmd_quaff(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_drink(world: &mut World, player: Entity, args: &str) {
-    drink_amount(world, player, args, 4, "drink");
+    drink_amount(world, player, &strip_from_preposition(args), 4, "drink");
 }
 
 pub(crate) fn cmd_sip(world: &mut World, player: Entity, args: &str) {
-    drink_amount(world, player, args, 1, "sip");
+    drink_amount(world, player, &strip_from_preposition(args), 1, "sip");
+}
+
+/// Strip a leading or interleaved "from" preposition from a command's
+/// args so `drink from fountain` and `fill skin from fountain` parse
+/// the same way as the bare-token forms. Case-insensitive on the
+/// match; preserves case on the rest. Multiple internal "from"
+/// instances all get filtered (rare but cheap).
+fn strip_from_preposition(args: &str) -> String {
+    args.split_whitespace()
+        .filter(|w| !w.eq_ignore_ascii_case("from"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `pour <container> [target]`: transfer liquid from a held
@@ -7776,20 +7788,153 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-/// `fill <container> <source>`: top up the destination from the
-/// source. Inverse of `pour`. Same liquid-match rules apply.
+/// `fill <container> [from] [<source>]`: top up the destination
+/// from a liquid source — a carried container or a roomside source
+/// like a fountain. With no source word, auto-detects a fountain in
+/// the current room (so `fill skin` works when standing at one).
+/// "from" between args is optional sugar — `fill skin from fountain`
+/// reads the same as `fill skin fountain`. Same liquid-match rules
+/// as `pour` (mismatched non-empty containers refuse).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
-    let mut parts = args.split_whitespace();
-    let Some(dest_word) = parts.next() else {
-        send_to(world, player, "Usage: fill <container> <source>\r\n");
+    let parts: Vec<&str> = args
+        .split_whitespace()
+        .filter(|w| !w.eq_ignore_ascii_case("from"))
+        .collect();
+    let Some(&dest_word) = parts.first() else {
+        send_to(
+            world,
+            player,
+            "Usage: fill <container> [from] [<source>]   \
+             (omit source to fill from a nearby fountain)\r\n",
+        );
         return;
     };
-    let Some(src_word) = parts.next() else {
-        send_to(world, player, "Fill from what?\r\n");
+
+    let Some(dest) = find_carried_by(world, dest_word, player, EquipFilter::Anywhere) else {
+        send_to(world, player, format!("You aren't carrying '{dest_word}'.\r\n"));
         return;
     };
-    // Reuse pour's exact logic (source first arg) by swapping order.
-    cmd_pour(world, player, &format!("{src_word} {dest_word}"));
+    let dest_name = name_of(world, dest);
+    let Some(dest_state) = world.get::<mud_world::LiquidContainer>(dest).cloned() else {
+        send_rendered(
+            world,
+            player,
+            &format!("{dest_name} isn't a drink container.\r\n"),
+        );
+        return;
+    };
+    let dest_room = dest_state.capacity - dest_state.remaining;
+    if dest_room <= 0 {
+        send_rendered(world, player, &format!("{dest_name} is already full.\r\n"));
+        return;
+    }
+
+    // Resolve source. If a name is given, search inventory then
+    // room. If not, auto-detect a fountain in the current room.
+    let player_room = world.get::<Located>(player).map(|l| l.0);
+    let src: Option<Entity> = if let Some(&src_word) = parts.get(1) {
+        find_carried_by(world, src_word, player, EquipFilter::Anywhere)
+            .or_else(|| player_room.and_then(|r| find_in_room(world, src_word, r)))
+    } else {
+        player_room.and_then(|r| find_fountain_in_room(world, r))
+    };
+    let Some(src) = src else {
+        send_to(
+            world,
+            player,
+            "There's no obvious water source here. Fill from what?\r\n",
+        );
+        return;
+    };
+    if src == dest {
+        send_to(world, player, "You can't fill something from itself.\r\n");
+        return;
+    }
+    let src_name = name_of(world, src);
+    let Some(src_state) = world.get::<mud_world::LiquidContainer>(src).cloned() else {
+        send_rendered(
+            world,
+            player,
+            &format!("{src_name} isn't a drink container.\r\n"),
+        );
+        return;
+    };
+    // Fountains read as bottomless — same rule the drink path
+    // uses. Decrement-on-fill is skipped for them.
+    let src_is_fountain = world.get::<WorldKey>(src).is_some_and(|k| {
+        world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(k.zone, k.id))
+            .is_some_and(|p| p.r#type == mud_db::enums::ObjectType::Fountain)
+    });
+    if !src_is_fountain && src_state.remaining <= 0 {
+        send_rendered(world, player, &format!("{src_name} is empty.\r\n"));
+        return;
+    }
+    // Liquid-type match required when dest already holds something.
+    if dest_state.remaining > 0
+        && !dest_state.liquid.eq_ignore_ascii_case(&src_state.liquid)
+    {
+        send_rendered(
+            world,
+            player,
+            &format!("{dest_name} already holds something else.\r\n"),
+        );
+        return;
+    }
+    let amount = if src_is_fountain {
+        dest_room
+    } else {
+        dest_room.min(src_state.remaining)
+    };
+    if !src_is_fountain
+        && let Some(mut s) = world.get_mut::<mud_world::LiquidContainer>(src)
+    {
+        s.remaining -= amount;
+    }
+    if let Some(mut d) = world.get_mut::<mud_world::LiquidContainer>(dest) {
+        if d.remaining == 0 {
+            d.liquid.clone_from(&src_state.liquid);
+            d.poisoned = src_state.poisoned;
+        } else if src_state.poisoned {
+            // Poisoning spreads when topping up a non-poisoned with
+            // poisoned: any bad liquid contaminates the lot.
+            d.poisoned = true;
+        }
+        d.remaining += amount;
+    }
+    let liquid_lc = src_state.liquid.to_ascii_lowercase();
+    send_rendered(
+        world,
+        player,
+        &format!("You fill {dest_name} with {liquid_lc} from {src_name}.\r\n"),
+    );
+}
+
+/// Find the first Fountain-type item in `room`. Used by `fill` to
+/// auto-detect a water source when the player doesn't name one.
+fn find_fountain_in_room(world: &mut World, room: Entity) -> Option<Entity> {
+    // Snapshot candidates first so the proto lookup doesn't conflict
+    // with the query borrow.
+    let candidates: Vec<(Entity, WorldKey)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &WorldKey), With<Item>>();
+        q.iter(world)
+            .filter(|(_, l, _)| l.0 == room)
+            .map(|(e, _, k)| (e, *k))
+            .collect()
+    };
+    let protos = world.resource::<ObjectPrototypes>();
+    candidates
+        .into_iter()
+        .find(|(_, k)| {
+            protos
+                .by_key
+                .get(&(k.zone, k.id))
+                .is_some_and(|p| p.r#type == mud_db::enums::ObjectType::Fountain)
+        })
+        .map(|(e, _)| e)
 }
 
 /// `taste <container>`: identify the liquid without drinking. No
