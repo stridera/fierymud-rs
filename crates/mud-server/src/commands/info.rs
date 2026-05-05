@@ -2348,6 +2348,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         && needle != "self"
         && room_is_dark(world, room)
         && !room_has_light(world, room)
+        && !crate::commands::player_can_see_in_dark(world, player)
     {
         send_to(
             world,
@@ -4246,10 +4247,12 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
 
     // Dark-room gate: caves, underdark, underwater, and outdoor
     // rooms at night print only "It is pitch black..." plus exits
-    // (AUTO_EXIT) — unless someone in the room carries a Lit item.
-    // Players with the AUTO_LIGHT class trait could bypass later;
-    // for now, a held torch / staff / luminous gem suffices.
-    if room_is_dark(world, room) && !room_has_light(world, room) {
+    // (AUTO_EXIT) — unless someone in the room carries a Lit item,
+    // or the player has HOLY_LIGHT (admin/staff toggle).
+    if room_is_dark(world, room)
+        && !room_has_light(world, room)
+        && !crate::commands::player_can_see_in_dark(world, player)
+    {
         let mut out = String::from("\r\nIt is pitch black; you can see nothing.\r\n");
         if has_flag(world, player, PlayerFlag::AutoExit) {
             // Hidden exits stay out of the auto-listing even in

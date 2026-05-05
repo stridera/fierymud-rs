@@ -1435,6 +1435,16 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
     let share = (xp / n).max(1);
 
     for entity in &recipients {
+        // Max-tier players (level 100+ — staff and endgame) don't
+        // gain XP from kills: there's nothing to level into and the
+        // line just adds noise. Skip silently — the score sheet's
+        // "next level" suppression already signals the cap.
+        let level = world
+            .get::<mud_world::Profile>(*entity)
+            .map_or(0, |p| p.level);
+        if level >= 100 {
+            continue;
+        }
         if let Some(mut p) = world.get_mut::<mud_world::Profile>(*entity) {
             p.experience = p.experience.saturating_add(share);
         } else {

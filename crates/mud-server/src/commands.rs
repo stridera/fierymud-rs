@@ -6437,6 +6437,17 @@ pub(crate) fn room_is_dark(world: &World, room: Entity) -> bool {
     matches!(hour, 0..=4 | 22..=23)
 }
 
+/// True when `entity` perceives through normal darkness, magical
+/// darkness, and blind effects. Today the only source is the
+/// `HOLY_LIGHT` player flag (admin/staff toggle). When magical
+/// darkness / blindness effects land in the perception pipeline,
+/// they should also gate through this helper so `HOLY_LIGHT` keeps
+/// being the single bypass.
+#[must_use]
+pub(crate) fn player_can_see_in_dark(world: &World, entity: Entity) -> bool {
+    has_flag(world, entity, PlayerFlag::HolyLight)
+}
+
 /// True if anyone in `room` (any actor, plus loose items on the
 /// floor and items worn or carried by actors in the room) carries
 /// a `Lit` marker. Used to override `room_is_dark` for rooms with
@@ -6706,8 +6717,12 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
     };
     // Mirror the dark-room gate from cmd_look's home-room render —
     // peeking into a black cave from a lit corridor reveals nothing
-    // either. Source-room lighting doesn't bleed through the doorway.
-    if room_is_dark(world, target_room) && !room_has_light(world, target_room) {
+    // either. Source-room lighting doesn't bleed through the doorway,
+    // but HOLY_LIGHT pierces both rooms equally.
+    if room_is_dark(world, target_room)
+        && !room_has_light(world, target_room)
+        && !player_can_see_in_dark(world, player)
+    {
         send_to(
             world,
             player,
