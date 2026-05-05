@@ -6509,6 +6509,79 @@ fn zone_climate(world: &mut World, zone_id: i32) -> Option<mud_db::enums::Climat
         .map(|(_, c)| c.0)
 }
 
+/// `look in <container>` — list what's inside a container the
+/// player can see. Resolves the container against carried items,
+/// equipped slots, and items on the floor (in that order). Empty
+/// containers report a contained "is empty"; non-container targets
+/// get a "you can't look inside that" since the inventory listing
+/// would be misleading.
+pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: &str) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let container = find_carried_by(world, target_word, player, EquipFilter::Anywhere)
+        .or_else(|| find_in_room(world, target_word, room));
+    let Some(container) = container else {
+        send_to(
+            world,
+            player,
+            format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+    // Refuse on non-containers: only ObjectType::Container surfaces
+    // an "inside" semantically. Liquid containers fall through to
+    // their own examine path; corpses are containers (handled by
+    // the proto's type marker too).
+    let kind = world
+        .get::<WorldKey>(container)
+        .and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| p.r#type)
+        });
+    let is_corpse = world.get::<mud_world::Corpse>(container).is_some();
+    let container_name = name_of(world, container);
+    if !is_corpse && !matches!(kind, Some(mud_db::enums::ObjectType::Container)) {
+        send_rendered(
+            world,
+            player,
+            &format!("{container_name} isn't a container.\r\n"),
+        );
+        return;
+    }
+    let items: Vec<String> = {
+        let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
+        q.iter(world)
+            .filter(|(l, _)| l.0 == container)
+            .map(|(_, n)| n.name.clone())
+            .collect()
+    };
+    let coin = world.get::<mud_world::CoinPile>(container).map(|c| c.0);
+    if items.is_empty() && coin.unwrap_or(0) <= 0 {
+        send_rendered(
+            world,
+            player,
+            &format!("{container_name} is empty.\r\n"),
+        );
+        return;
+    }
+    let mut out = format!("{container_name} contains:\r\n");
+    if let Some(amount) = coin
+        && amount > 0
+        && let Some(formatted) = crate::commands::format_wealth(amount)
+    {
+        out.push_str(&format!("  {formatted}\r\n"));
+    }
+    for item_name in &items {
+        out.push_str(&format!("  {item_name}\r\n"));
+    }
+    send_rendered(world, player, &out);
+}
+
 /// for `look (at) sky`. Indoor / cave / plane sectors get a
 /// contained answer instead — there's no sky to check.
 pub(crate) fn look_at_sky(world: &mut World, player: Entity) {

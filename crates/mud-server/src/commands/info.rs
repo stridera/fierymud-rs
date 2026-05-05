@@ -319,7 +319,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["examine", "exa"],
+        names: &["examine", "exam", "exa"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Inventory,
@@ -4214,11 +4214,21 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             look_direction(world, player, dir);
             return;
         }
+        // `look in <container>` — list the container's contents.
+        // Carried, equipped, and in-room containers all resolve.
+        // Done before the examine fallthrough so the player gets
+        // the inventory listing instead of the bare description.
+        let lower = arg.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("in ").map(str::trim_start)
+            && !rest.is_empty()
+        {
+            look_in_container(world, player, rest);
+            return;
+        }
         // `look at sky` / `look stars` / `look horizon`: roll up the
         // scattered weather/time/season readouts into one line. Done
         // before the examine fallthrough so it works even though
         // there's no `sky` entity to find.
-        let lower = arg.to_ascii_lowercase();
         let stripped = lower.strip_prefix("at ").unwrap_or(&lower);
         if matches!(stripped, "sky" | "stars" | "horizon" | "heavens") {
             look_at_sky(world, player);
