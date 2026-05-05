@@ -2150,6 +2150,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_indexed_needle_recognizes_dotted_prefix() {
+        use super::parse_indexed_needle;
+        // Bare needle defaults to index 1 (first match).
+        assert_eq!(parse_indexed_needle("ancient"), (1, "ancient"));
+        // `2.ancient` → index 2, base needle "ancient".
+        assert_eq!(parse_indexed_needle("2.ancient"), (2, "ancient"));
+        assert_eq!(parse_indexed_needle("17.dog"), (17, "dog"));
+        // `0.foo` and missing-tail collapse to (1, full input) so
+        // pathological inputs degrade gracefully into a normal
+        // first-match search rather than a silent no-op.
+        assert_eq!(parse_indexed_needle("0.foo"), (1, "0.foo"));
+        assert_eq!(parse_indexed_needle("3."), (1, "3."));
+        // Non-numeric prefix: not an indexed needle, the whole
+        // string is the literal target.
+        assert_eq!(parse_indexed_needle("bag.of.holding"), (1, "bag.of.holding"));
+        assert_eq!(parse_indexed_needle("foo"), (1, "foo"));
+    }
+
+    #[test]
     fn parse_quoted_first_token_handles_quotes_and_whitespace() {
         use super::parse_quoted_first_token;
         // Bare word: legacy whitespace split.
@@ -7621,12 +7640,31 @@ pub(crate) enum EquipFilter {
     Anywhere,
 }
 
+/// Parse the legacy `CircleMUD` `N.needle` syntax for picking the
+/// Nth match from a stack of identically-named items / mobs.
+/// `2.ancient` returns `(2, "ancient")` so the caller skips to the
+/// second match. A bare needle returns `(1, needle)` — the first
+/// match, which is the unsurprising default. Indices < 1 collapse
+/// to 1 so `0.foo` and negative inputs degrade gracefully.
+#[must_use]
+pub(crate) fn parse_indexed_needle(input: &str) -> (usize, &str) {
+    if let Some((head, tail)) = input.split_once('.')
+        && let Ok(n) = head.parse::<usize>()
+        && n >= 1
+        && !tail.is_empty()
+    {
+        return (n, tail);
+    }
+    (1, input)
+}
+
 pub(crate) fn find_carried_by(
     world: &mut World,
     needle: &str,
     carrier: Entity,
     filter: EquipFilter,
 ) -> Option<Entity> {
+    let (index, needle) = parse_indexed_needle(needle);
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query_filtered::<(
         Entity,
@@ -7636,7 +7674,7 @@ pub(crate) fn find_carried_by(
         Option<&EquippedSlot>,
     ), With<Item>>();
     q.iter(world)
-        .find(|(_, l, n, kw, eq)| {
+        .filter(|(_, l, n, kw, eq)| {
             if l.0 != carrier {
                 return false;
             }
@@ -7648,14 +7686,17 @@ pub(crate) fn find_carried_by(
             };
             pass_filter && matches(&needle, n, *kw)
         })
+        .nth(index - 1)
         .map(|(e, _, _, _, _)| e)
 }
 
 pub(crate) fn find_in_room(world: &mut World, needle: &str, room: Entity) -> Option<Entity> {
+    let (index, needle) = parse_indexed_needle(needle);
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
     q.iter(world)
-        .find(|(_, l, n, kw)| l.0 == room && matches(&needle, n, *kw))
+        .filter(|(_, l, n, kw)| l.0 == room && matches(&needle, n, *kw))
+        .nth(index - 1)
         .map(|(e, _, _, _)| e)
 }
 
@@ -7667,12 +7708,14 @@ pub(crate) fn find_actor_in_room(
     room: Entity,
     exclude: Entity,
 ) -> Option<Entity> {
+    let (index, needle) = parse_indexed_needle(needle);
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>, Option<&Item>)>();
     q.iter(world)
-        .find(|(e, l, n, kw, item)| {
+        .filter(|(e, l, n, kw, item)| {
             *e != exclude && l.0 == room && item.is_none() && matches(&needle, n, *kw)
         })
+        .nth(index - 1)
         .map(|(e, _, _, _, _)| e)
 }
 

@@ -2339,7 +2339,14 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
-    let needle = target_word.to_ascii_lowercase();
+    // `N.target` disambiguator — `look 2.ancient` skips the first
+    // "ancient" match and surfaces the second. Used here to thread
+    // through both the entity search AND the extra-description
+    // fallthroughs as one unified counter, so a player can step
+    // past a real item to reach an extra-description that shares
+    // the same keyword.
+    let (mut remaining, base_needle) = crate::commands::parse_indexed_needle(target_word);
+    let needle = base_needle.to_ascii_lowercase();
 
     // Dark-room gate (matches cmd_look). Self-target is allowed —
     // you can always introspect yourself even in pitch black.
@@ -2411,60 +2418,80 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     }
 
     // Search the room — mobs and players are equally examinable; items too,
-    // both on the ground and on the player's person.
-    let target = {
+    // both on the ground and on the player's person. Indexed-needle
+    // (`2.ancient`) advances past `remaining-1` matches before
+    // accepting; if entities don't fill the count, the extra-
+    // description fallthroughs continue advancing the counter so a
+    // player can step past a real grimoire to land on its
+    // "ancient" extra-description body.
+    let entity_matches: Vec<Entity> = {
         let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>)>();
         q.iter(world)
-            .find(|(e, l, n, kw)| {
+            .filter(|(e, l, n, kw)| {
                 *e != player && (l.0 == room || l.0 == player) && matches(&needle, n, *kw)
             })
             .map(|(e, _, _, _)| e)
+            .collect()
+    };
+    let target = if remaining <= entity_matches.len() {
+        Some(entity_matches[remaining - 1])
+    } else {
+        remaining -= entity_matches.len();
+        None
     };
     let Some(target) = target else {
-        // Fall through to the room's RoomExtraDescriptions
-        // before reporting "you don't see that here". Keyword
-        // match is case-insensitive substring against any
-        // entry's keyword list. The first match wins; builders
-        // ordering things in the schema controls precedence.
+        // Fall through to the room's RoomExtraDescriptions. Keyword
+        // match is case-insensitive substring against any entry's
+        // keyword list, and the indexed counter still applies — N=2
+        // here means "the 2nd extra description matching".
         let needle_lc = needle.to_ascii_lowercase();
         if let Some(extras) = world.get::<mud_world::RoomExtras>(room) {
-            let hit = extras.entries.iter().find(|(keywords, _)| {
-                keywords
-                    .iter()
-                    .any(|kw| kw.to_ascii_lowercase().contains(&needle_lc))
-            });
-            if let Some((_, description)) = hit {
+            let hits: Vec<&str> = extras
+                .entries
+                .iter()
+                .filter(|(keywords, _)| {
+                    keywords
+                        .iter()
+                        .any(|kw| kw.to_ascii_lowercase().contains(&needle_lc))
+                })
+                .map(|(_, body)| body.as_str())
+                .collect();
+            if remaining <= hits.len() {
                 let mode = color_mode_for(world, player);
-                let body = render_color_tags(description.trim_end(), mode);
+                let body = render_color_tags(hits[remaining - 1].trim_end(), mode);
                 send_to(world, player, format!("\r\n{body}\r\n"));
                 return;
             }
+            remaining -= hits.len();
         }
         // Then ObjectExtras on items in the room or in inventory.
         // Item must be visible to the player to count — same
         // located-in-room-or-on-player gate the entity search uses.
-        let extras_hit: Option<String> = {
+        let extras_hits: Vec<String> = {
             let mut q = world
                 .query_filtered::<(&Located, &WorldKey), With<Item>>();
             let protos = world.resource::<mud_world::ObjectPrototypes>();
             q.iter(world)
                 .filter(|(l, _)| l.0 == room || l.0 == player)
-                .find_map(|(_, key)| {
-                    let proto = protos.by_key.get(&(key.zone, key.id))?;
+                .flat_map(|(_, key)| {
+                    let proto = protos.by_key.get(&(key.zone, key.id));
                     proto
-                        .extras
-                        .iter()
-                        .find(|(keywords, _)| {
+                        .map(|p| p.extras.clone())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|(keywords, _)| {
                             keywords
                                 .iter()
                                 .any(|kw| kw.to_ascii_lowercase().contains(&needle_lc))
                         })
-                        .map(|(_, body)| body.clone())
+                        .map(|(_, body)| body)
+                        .collect::<Vec<_>>()
                 })
+                .collect()
         };
-        if let Some(body) = extras_hit {
+        if remaining <= extras_hits.len() {
             let mode = color_mode_for(world, player);
-            let rendered = render_color_tags(body.trim_end(), mode);
+            let rendered = render_color_tags(extras_hits[remaining - 1].trim_end(), mode);
             send_to(world, player, format!("\r\n{rendered}\r\n"));
             return;
         }
@@ -2687,14 +2714,25 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         // the verb are the same word — "It is wielded." instead of
         // the awkward "It is wielded on the wielded."
         if let Some(slot) = world.get::<WearableIn>(target).map(|w| w.0) {
-            match slot {
-                Slot::Wield => out.push_str("It is <cyan>wielded</>.\r\n"),
-                Slot::Hold => out.push_str("It is <cyan>held</>.\r\n"),
-                _ => out.push_str(&format!(
-                    "It is <cyan>worn</> on the <cyan>{}</>.\r\n",
+            // Slot-by-slot phrasing — most slots are simple "worn on
+            // your <slot>" but a handful (wield/hold/hover/light/about/
+            // rings/badge) read as broken or weirdly impersonal under
+            // the generic template.
+            let line = match slot {
+                Slot::Wield => "It is <cyan>wielded</>.\r\n".to_string(),
+                Slot::Hold => "It is <cyan>held</>.\r\n".to_string(),
+                Slot::Hover => "It <cyan>hovers</> beside you.\r\n".to_string(),
+                Slot::Light => "It is <cyan>held aloft</> as a light source.\r\n".to_string(),
+                Slot::About => "It is <cyan>worn about your body</>.\r\n".to_string(),
+                Slot::LeftFinger => "It is <cyan>worn</> on your <cyan>left finger</>.\r\n".to_string(),
+                Slot::RightFinger => "It is <cyan>worn</> on your <cyan>right finger</>.\r\n".to_string(),
+                Slot::Badge => "It is <cyan>pinned</> as a badge.\r\n".to_string(),
+                _ => format!(
+                    "It is <cyan>worn</> on your <cyan>{}</>.\r\n",
                     slot.label()
-                )),
-            }
+                ),
+            };
+            out.push_str(&line);
         }
         let contents: Vec<(String, usize)> = {
             let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
