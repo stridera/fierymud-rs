@@ -58,12 +58,13 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
     }
 
     let mover_name = name_of(world, player);
+    let mover_capped = crate::commands::cap_sentence_start(&mover_name);
 
     broadcast_room_except_players_rendered(
         world,
         from_room,
         &[player],
-        &format!("{mover_name} fades away in a flash of light.\r\n"),
+        &format!("{mover_capped} fades away in a flash of light.\r\n"),
     );
 
     let mount = world.get::<Mounted>(player).map(|m| m.0);
@@ -80,7 +81,7 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
         world,
         target,
         &[player],
-        &format!("{mover_name} appears in a flash of light.\r\n"),
+        &format!("{mover_capped} appears in a flash of light.\r\n"),
     );
 
     send_to(world, player, "The world swirls around you...\r\n");

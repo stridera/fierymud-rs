@@ -304,11 +304,12 @@ fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
     let pick = rand::random_range(0..candidates.len());
     let (dir, target_room) = candidates[pick];
     let mob_name = name_of(world, mob);
+    let mob_capped = crate::commands::cap_sentence_start(&mob_name);
     broadcast_room_except_players_rendered(
         world,
         from_room,
         &[mob],
-        &format!("{mob_name} panics and flees {}!\r\n", direction_name(dir)),
+        &format!("{mob_capped} panics and flees {}!\r\n", direction_name(dir)),
     );
     try_remove::<Fighting>(world, mob);
     if let Some(mut l) = world.get_mut::<Located>(mob) {
@@ -320,7 +321,7 @@ fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
         world,
         target_room,
         &[mob],
-        &format!("{mob_name} arrives, panting, from {arrival_dir}.\r\n"),
+        &format!("{mob_capped} arrives, panting, from {arrival_dir}.\r\n"),
     );
 }
 

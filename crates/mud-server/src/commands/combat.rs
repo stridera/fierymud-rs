@@ -984,13 +984,14 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
     let dir_name = direction_name(dir);
 
     let mover_name = name_of(world, player);
+    let mover_capped = crate::commands::cap_sentence_start(&mover_name);
 
     // Notify the source room you're fleeing.
     broadcast_room_except_players_rendered(
         world,
         from_room,
         &[player],
-        &format!("{mover_name} panics and flees {dir_name}!\r\n"),
+        &format!("{mover_capped} panics and flees {dir_name}!\r\n"),
     );
 
     // Drop our own Fighting; combat_tick auto-disengages attackers on
@@ -1008,7 +1009,7 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
         world,
         target,
         &[player],
-        &format!("{mover_name} arrives, panting, from {arrival_dir}.\r\n"),
+        &format!("{mover_capped} arrives, panting, from {arrival_dir}.\r\n"),
     );
     send_to(world, player, format!("You flee {dir_name}!\r\n"));
     cmd_look(world, player, "");

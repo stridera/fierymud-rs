@@ -169,7 +169,7 @@ pub fn respawn_tick(world: &mut World) {
             world,
             room,
             &[],
-            &format!("{name} arrives.\r\n"),
+            &format!("{} arrives.\r\n", crate::commands::cap_sentence_start(&name)),
         );
     }
 

@@ -10885,6 +10885,45 @@ impl FormulaParser<'_> {
     }
 }
 
+/// Uppercase the first alphabetic character, leaving the rest of the
+/// string unchanged. Skips past leading XML-Lite color tags
+/// (e.g. `<b:cyan>Dragon</>`) so the first *visible* letter gets
+/// capitalized, not `<`. Use at sentence-start sites where a
+/// mob/player name leads — "the Elite Mage leaves." → "The Elite
+/// Mage leaves."  This differs from `capitalize` (full title-case),
+/// which would lowercase "Elite" / "Mage" downstream of the article.
+pub(crate) fn cap_sentence_start(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    let mut done = false;
+    while let Some(c) = chars.next() {
+        if !done {
+            // Pass XML-Lite tags through verbatim — `<b:cyan>` etc.
+            // The first letter we want to capitalize is the one after
+            // the (possibly multiple) leading tags.
+            if c == '<' {
+                out.push(c);
+                for tag_c in chars.by_ref() {
+                    out.push(tag_c);
+                    if tag_c == '>' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if c.is_alphabetic() {
+                for upper in c.to_uppercase() {
+                    out.push(upper);
+                }
+                done = true;
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub(crate) fn capitalize(s: &str) -> String {
     // Title-case: first character uppercase, rest lowercase. Race
     // and gender values arrive from the DB ALL CAPS (`HUMAN` /
@@ -11715,7 +11754,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             world,
             from_room,
             &movers,
-            &format!("{mover_name} leaves {dir_name}.\r\n"),
+            &format!("{} leaves {dir_name}.\r\n", cap_sentence_start(&mover_name)),
         );
     }
 
@@ -11773,7 +11812,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             world,
             target,
             &movers,
-            &format!("{mover_name} arrives from {arrival_dir}.\r\n"),
+            &format!("{} arrives from {arrival_dir}.\r\n", cap_sentence_start(&mover_name)),
         );
     }
 

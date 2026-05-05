@@ -1129,8 +1129,9 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _)| e)
             .collect()
     };
+    let target_capped = crate::commands::cap_sentence_start(&target_name);
     for b in dest_bystanders {
-        send_rendered(world, b, &format!("{target_name} arrives in a swirl of light.\r\n"));
+        send_rendered(world, b, &format!("{target_capped} arrives in a swirl of light.\r\n"));
     }
 
     send_rendered(

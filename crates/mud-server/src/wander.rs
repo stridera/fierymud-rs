@@ -113,7 +113,11 @@ pub fn wander_tick(world: &mut World) {
             world,
             from_room,
             &[mob],
-            &format!("{mob_name} leaves {}.\r\n", direction_name(dir)),
+            &format!(
+                "{} leaves {}.\r\n",
+                crate::commands::cap_sentence_start(&mob_name),
+                direction_name(dir),
+            ),
         );
         if let Some(mut l) = world.get_mut::<Located>(mob) {
             l.0 = target_room;
@@ -124,7 +128,10 @@ pub fn wander_tick(world: &mut World) {
             world,
             target_room,
             &[mob],
-            &format!("{mob_name} arrives from {arrival_dir}.\r\n"),
+            &format!(
+                "{} arrives from {arrival_dir}.\r\n",
+                crate::commands::cap_sentence_start(&mob_name),
+            ),
         );
     }
 }

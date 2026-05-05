@@ -159,38 +159,42 @@ pub fn ambient_tick(world: &mut World) {
 /// generically).
 fn ambient_terrain_line(sector: mud_db::enums::Sector) -> Option<&'static str> {
     use mud_db::enums::Sector;
+    // Color palette: <green> for forest/grass/swamp life,
+    // <cyan> for water/sea, <dim> for stone/wind, <b:yellow>
+    // for warm-band flashes. Lines stay one-color so render
+    // cost is trivial and the eye can scan them quickly.
     let pool: &[&str] = match sector {
         Sector::Forest => &[
-            "Leaves rustle in the canopy overhead.",
-            "Somewhere unseen, a bird calls.",
-            "A branch snaps in the distance.",
+            "<green>Leaves rustle in the canopy</> overhead.",
+            "Somewhere unseen, <green>a bird calls</>.",
+            "<dim>A branch snaps in the distance.</>",
         ],
         Sector::Hills => &[
-            "Wind whispers across the slopes.",
-            "Grass bends in the breeze.",
+            "<dim>Wind whispers across the slopes.</>",
+            "<green>Grass bends</> in the breeze.",
         ],
         Sector::Mountain => &[
-            "A distant rock clatters down the slope.",
-            "Wind howls between the peaks.",
-            "A raptor's cry echoes off the stone.",
+            "<dim>A distant rock clatters down the slope.</>",
+            "<dim>Wind howls between the peaks.</>",
+            "<b:yellow>A raptor's cry</> echoes off the stone.",
         ],
         Sector::Field | Sector::Grasslands => &[
-            "Tall grass whispers in the wind.",
-            "Insects hum in the undergrowth.",
+            "<green>Tall grass whispers</> in the wind.",
+            "<green>Insects hum</> in the undergrowth.",
         ],
         Sector::Beach | Sector::Shallows | Sector::Water => &[
-            "Waves wash against the shore.",
-            "A distant gull cries.",
-            "Salt spray rides the wind.",
+            "<cyan>Waves wash against the shore.</>",
+            "<b:cyan>A distant gull cries.</>",
+            "<cyan>Salt spray rides the wind.</>",
         ],
         Sector::Swamp => &[
-            "Frogs croak from the murky pools.",
-            "Something splashes nearby.",
-            "Mosquitoes whine past your ear.",
+            "<green>Frogs croak</> from the murky pools.",
+            "<cyan>Something splashes nearby.</>",
+            "<dim>Mosquitoes whine past your ear.</>",
         ],
         Sector::Ruins => &[
-            "Old stone settles with a creak.",
-            "Wind whistles through cracked walls.",
+            "<dim>Old stone settles with a creak.</>",
+            "<dim>Wind whistles through cracked walls.</>",
         ],
         _ => return None,
     };
@@ -202,14 +206,16 @@ fn ambient_terrain_line(sector: mud_db::enums::Sector) -> Option<&'static str> {
 /// `ambient_line` returns None. Mild bands stay silent — only
 /// the ends of the scale (Frigid / Sweltering) get chatter.
 fn ambient_temp_line(temp: TempBand) -> Option<&'static str> {
+    // Cold ends paint <b:cyan> / <b:white>; hot ends paint
+    // <red> / <b:yellow> for an immediate "hot vs cold" read.
     let pool: &[&str] = match temp {
         TempBand::Frigid => &[
-            "Your breath fogs in the bitter cold.",
-            "The cold gnaws at every exposed inch of skin.",
+            "<b:cyan>Your breath fogs</> in the bitter cold.",
+            "<b:cyan>The cold gnaws</> at every exposed inch of skin.",
         ],
         TempBand::Sweltering => &[
-            "Heat shimmers off every surface.",
-            "Sweat beads on your brow; the air feels heavy.",
+            "<red>Heat shimmers</> off every surface.",
+            "<red>Sweat beads on your brow</>; the air feels heavy.",
         ],
         _ => return None,
     };
@@ -222,29 +228,32 @@ fn ambient_temp_line(temp: TempBand) -> Option<&'static str> {
 /// Multiple variants per band; picked uniformly at random so the
 /// same band doesn't fire the same line every time.
 fn ambient_line(precip: PrecipKind) -> Option<&'static str> {
+    // <cyan> for rain/water, <b:white> for snow,
+    // <b:yellow> for lightning bursts, <dim> for thunder /
+    // wind that should sit *behind* the louder hits visually.
     let pool: &[&str] = match precip {
         PrecipKind::Clear | PrecipKind::Cloudy => return None,
         PrecipKind::Drizzle => &[
-            "A fine mist drifts past your face.",
-            "Drops patter softly on stone.",
+            "<cyan>A fine mist</> drifts past your face.",
+            "<cyan>Drops patter softly</> on stone.",
         ],
         PrecipKind::Rain => &[
-            "Rain hisses against the ground.",
-            "Wet wind tugs at your cloak.",
-            "A puddle ripples nearby.",
+            "<cyan>Rain hisses</> against the ground.",
+            "<dim>Wet wind tugs at your cloak.</>",
+            "<cyan>A puddle ripples</> nearby.",
         ],
         PrecipKind::Storm => &[
-            "Thunder rumbles in the distance.",
-            "Lightning splits the sky for an instant.",
-            "The wind shrieks through the trees.",
+            "<dim>Thunder rumbles</> in the distance.",
+            "<b:yellow>Lightning splits the sky</> for an instant.",
+            "<dim>The wind shrieks through the trees.</>",
         ],
         PrecipKind::Snow => &[
-            "Snowflakes settle on your shoulders.",
-            "The snow muffles every sound.",
+            "<b:white>Snowflakes settle</> on your shoulders.",
+            "<b:white>The snow muffles every sound.</>",
         ],
         PrecipKind::Blizzard => &[
-            "The blizzard howls; visibility shrinks.",
-            "Stinging snow whips past your face.",
+            "<b:white>The blizzard howls</>; visibility shrinks.",
+            "<b:white>Stinging snow</> whips past your face.",
         ],
     };
     let pick = rand::random_range(0..pool.len());
@@ -255,14 +264,17 @@ fn ambient_line(precip: PrecipKind) -> Option<&'static str> {
 /// (no per-from/per-to combinatorics) — players see the new
 /// state, not the delta. Good enough for v1.
 fn transition_line(new_precip: PrecipKind) -> &'static str {
+    // Same palette as `ambient_line`; transitions are the louder
+    // moments the player should look up at, so accent words
+    // ("rain", "thunder", "lightning") get the saturation.
     match new_precip {
-        PrecipKind::Clear => "The clouds part; the sky brightens.",
-        PrecipKind::Cloudy => "Clouds gather overhead.",
-        PrecipKind::Drizzle => "A light drizzle begins to fall.",
-        PrecipKind::Rain => "The rain picks up — a steady downpour.",
-        PrecipKind::Storm => "The wind howls; thunder rumbles in the distance.",
-        PrecipKind::Snow => "Snowflakes begin to fall.",
-        PrecipKind::Blizzard => "The snow thickens into a blinding blizzard.",
+        PrecipKind::Clear => "<b:yellow>The clouds part</>; the sky brightens.",
+        PrecipKind::Cloudy => "<dim>Clouds gather overhead.</>",
+        PrecipKind::Drizzle => "<cyan>A light drizzle</> begins to fall.",
+        PrecipKind::Rain => "The <cyan>rain</> picks up — a steady <cyan>downpour</>.",
+        PrecipKind::Storm => "<dim>The wind howls</>; <dim>thunder</> rumbles in the distance.",
+        PrecipKind::Snow => "<b:white>Snowflakes</> begin to fall.",
+        PrecipKind::Blizzard => "The snow thickens into a blinding <b:white>blizzard</>.",
     }
 }
 

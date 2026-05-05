@@ -113,12 +113,13 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let mover_name = name_of(world, player);
+    let mover_capped = crate::commands::cap_sentence_start(&mover_name);
     let portal_name = proto.name.clone();
     broadcast_room_except_players_rendered(
         world,
         from_room,
         &[player],
-        &format!("{mover_name} steps into {portal_name} and vanishes.\r\n"),
+        &format!("{mover_capped} steps into {portal_name} and vanishes.\r\n"),
     );
     if let Some(mut l) = world.get_mut::<Located>(player) {
         l.0 = dest;
@@ -127,7 +128,7 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
         world,
         dest,
         &[player],
-        &format!("{mover_name} steps out of a swirling portal.\r\n"),
+        &format!("{mover_capped} steps out of a swirling portal.\r\n"),
     );
     send_rendered(
         world,
