@@ -7321,26 +7321,35 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
         return;
     }
 
-    // Alignment + class restrictions: refuse if the proto's
+    // Alignment + class + race restrictions: refuse if the proto's
     // restriction list contains the player's bucket. Lookup is
     // by WorldKey → ObjectPrototypes; items without a proto
-    // (corpses, dynamically synthesized) skip both checks.
-    let (alignment_restriction, class_restriction, race_restriction) = world
-        .get::<WorldKey>(item)
-        .and_then(|k| {
-            world
-                .resource::<ObjectPrototypes>()
-                .by_key
-                .get(&(k.zone, k.id))
-                .map(|p| {
-                    (
-                        p.restricted_alignments.clone(),
-                        p.restricted_class_ids.clone(),
-                        p.restricted_races.clone(),
-                    )
-                })
-        })
-        .unwrap_or_default();
+    // (corpses, dynamically synthesized) skip all three checks.
+    // Staff (god / immortal / builder accounts) bypass every gear
+    // restriction — typing or test-spawning items shouldn't get
+    // blocked by alignment / class / race the world authors set
+    // for normal players.
+    let staff_bypass = is_staff(world, player);
+    let (alignment_restriction, class_restriction, race_restriction) = if staff_bypass {
+        Default::default()
+    } else {
+        world
+            .get::<WorldKey>(item)
+            .and_then(|k| {
+                world
+                    .resource::<ObjectPrototypes>()
+                    .by_key
+                    .get(&(k.zone, k.id))
+                    .map(|p| {
+                        (
+                            p.restricted_alignments.clone(),
+                            p.restricted_class_ids.clone(),
+                            p.restricted_races.clone(),
+                        )
+                    })
+            })
+            .unwrap_or_default()
+    };
     if !alignment_restriction.is_empty() {
         let player_align = world
             .get::<CombatStats>(player)
@@ -7433,15 +7442,19 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
         } else {
             format!(" (by {})", blockers.join(", "))
         };
+        // Use occupancy_label (noun form) so Wield / Hold / Hover
+        // don't render as "Your wielded is already occupied" — the
+        // verb-form `label()` works for "It is wielded." but breaks
+        // here. Most slots are already nouns and pass through.
         let msg = if candidates.len() > 1 {
             format!(
                 "Both {}s are already occupied{blocker_clause}.\r\n",
-                slot.label(),
+                slot.occupancy_label(),
             )
         } else {
             format!(
                 "Your {} is already occupied{blocker_clause}.\r\n",
-                slot.label(),
+                slot.occupancy_label(),
             )
         };
         send_rendered(world, player, &msg);
@@ -10949,6 +10962,21 @@ pub(crate) fn name_or(world: &World, e: Entity, fallback: &str) -> String {
     world
         .get::<Named>(e)
         .map_or_else(|| fallback.to_string(), |n| n.name.clone())
+}
+
+/// `true` when the entity belongs to a staff (god / immortal /
+/// builder) account. Used as the standard bypass gate for
+/// player-facing restrictions that gods shouldn't be subject to —
+/// alignment / class / race wear gates, encumbrance gates on
+/// `get`, and similar. Mirrors the threshold used elsewhere
+/// (combat re-aggro skip, casting bypasses); collected in one
+/// helper so adding a new bypass is a single call rather than
+/// re-deriving the role check.
+#[must_use]
+pub(crate) fn is_staff(world: &World, entity: Entity) -> bool {
+    world
+        .get::<Account>(entity)
+        .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder))
 }
 
 /// `true` when the exit should appear hidden to this player —

@@ -6824,9 +6824,13 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
             let mut running = carried_weight(world, player);
             let mut moved = 0usize;
             let mut skipped = 0usize;
+            // Staff bypass — gods don't get encumbered. The cap +
+            // running tally still update so the score sheet stays
+            // honest, but the gate doesn't reject.
+            let bypass_encumbrance = crate::commands::is_staff(world, player);
             for (item, item_name) in &items {
                 let w = item_weight(world, *item);
-                if running + w > cap {
+                if !bypass_encumbrance && running + w > cap {
                     skipped += 1;
                     continue;
                 }
@@ -6874,8 +6878,9 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
             return;
         };
         let item_name = name_of(world, item);
-        if carried_weight(world, player) + item_weight(world, item)
-            > carry_capacity(world, player)
+        if !crate::commands::is_staff(world, player)
+            && carried_weight(world, player) + item_weight(world, item)
+                > carry_capacity(world, player)
         {
             send_rendered(
                 world,
@@ -6915,8 +6920,9 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
     let item_name = name_of(world, item);
     let player_name = name_of(world, player);
 
-    if carried_weight(world, player) + item_weight(world, item)
-        > carry_capacity(world, player)
+    if !crate::commands::is_staff(world, player)
+        && carried_weight(world, player) + item_weight(world, item)
+            > carry_capacity(world, player)
     {
         send_rendered(
             world,

@@ -297,6 +297,22 @@ impl Slot {
         }
     }
 
+    /// Noun form for "Your X is already occupied" / "Your X is empty"
+    /// messages. The default `label()` returns the past-tense verb
+    /// for Wield / Hold / Hover (so "It is held." reads naturally),
+    /// but those forms break when used as a noun ("Your held is
+    /// occupied"). Most slots are already nouns and fall through.
+    #[must_use]
+    pub fn occupancy_label(self) -> &'static str {
+        match self {
+            Self::Wield => "weapon hand",
+            Self::Hold => "off-hand",
+            Self::Hover => "hover slot",
+            Self::Light => "light slot",
+            _ => self.label(),
+        }
+    }
+
     /// Canonical `SCREAMING_SNAKE_CASE` name for DB persistence — matches
     /// the `equipped_location` text we write to `CharacterItems`.
     #[must_use]
