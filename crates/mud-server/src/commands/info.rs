@@ -40,11 +40,12 @@ inventory::submit! {
         help: Help {
             usage: "scan",
             summary: "Peek at the adjacent rooms one step away.",
-            long: "For each unblocked exit, prints the target room's \
-                   name and how many mobs / players are there. Doors \
-                   that are closed or locked show their state instead. \
-                   Useful for spotting threats / hosts before walking \
-                   in.",
+            long: "Walks each unblocked exit and lists every mob / player \
+                   you'd see in those rooms, with a distance label and \
+                   posture (std/sit/fly/slp). Default range is one \
+                   room; staff scan up to three. Closed or hidden \
+                   doors stop the walk in that direction. Useful for \
+                   spotting threats / hosts before walking in.",
         },
         run: cmd_scan,
     }
@@ -3930,63 +3931,149 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
 /// with the target room's name plus mob/player counts. Closed and
 /// locked exits print state instead of contents — you can see the
 /// door but not what's behind it.
+/// Distance phrase for the legacy-style mob scan. Index 0 is the
+/// caster's own room ("right here"); 1+ are stepped outward, with
+/// the direction word filled in by the caller.
+fn scan_distance(dis: usize) -> &'static str {
+    match dis {
+        0 => "right",
+        1 => "immediately",
+        2 => "close by",
+        3 => "a ways off",
+        _ => "far far",
+    }
+}
+
+/// Posture / flight tag for each scanned actor — three letters with
+/// a sphere-style color cue so a fleeing mob's "fly" pops, while
+/// "sit"/"slp" stay restful. Mirrors the legacy contract closely
+/// (legacy used "fly"/"std"/"sit" only; we extend with "rst"/"slp"
+/// since the new posture enum carries the extra resolution).
+fn scan_posture_tag(world: &World, entity: Entity) -> &'static str {
+    if world.get::<Flying>(entity).is_some() {
+        return "<cyan>fly</>";
+    }
+    match world.get::<Posture>(entity).map(|p| p.0) {
+        Some(PostureKind::Sleeping) => "<dim>slp</>",
+        Some(PostureKind::Resting) => "<green>rst</>",
+        Some(PostureKind::Sitting | PostureKind::Kneeling) => "<green>sit</>",
+        _ => "std",
+    }
+}
+
+/// Append "  <distance phrase> : <name> (<posture>)" lines for
+/// every visible actor in `room` other than the scanner. Returns
+/// the count appended so the caller can decide whether to print
+/// the "you don't see anyone" fallback. The distance label is
+/// `<scan_distance(dis)> [dir]` — at dis=0 the direction is
+/// suppressed ("right here"), otherwise it follows ("immediately
+/// north").
+fn scan_room_actors(
+    world: &mut World,
+    out: &mut String,
+    room: Entity,
+    dis: usize,
+    dir: Direction,
+    scanner: Entity,
+) -> usize {
+    let actors: Vec<(Entity, String)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &Named),
+            Or<(With<Mob>, (With<Player>, With<Online>))>,
+        >();
+        q.iter(world)
+            .filter(|(e, l, _)| *e != scanner && l.0 == room)
+            .map(|(e, _, n)| (e, n.name.clone()))
+            .collect()
+    };
+    let label = if dis == 0 {
+        format!("{} here", scan_distance(dis))
+    } else {
+        format!("{} {}", scan_distance(dis), direction_name(dir))
+    };
+    for (entity, name) in &actors {
+        let posture = scan_posture_tag(world, *entity);
+        out.push_str(&format!(
+            "  <cyan>{label:>22}</> : {name} ({posture})\r\n",
+        ));
+    }
+    actors.len()
+}
+
 pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
     };
-    let Some(exits) = world.get::<Exits>(located.0).cloned() else {
-        send_to(world, player, "No exits to scan.\r\n");
-        return;
+    let here = located.0;
+    // Legacy maxdis: rogues/assassins/staff get 3, everyone else 1.
+    // We don't carry a class-name string on the runtime side yet
+    // (class is an i32 catalog id), so for now staff get the long
+    // scan and everyone else gets one room. Future: extend by
+    // checking Profile.class_id against a "stealth-leaning"
+    // catalog flag.
+    let maxdis = if crate::commands::is_staff(world, player) {
+        3
+    } else {
+        1
     };
-    if exits.0.is_empty() {
-        send_to(world, player, "No exits to scan.\r\n");
-        return;
-    }
-    // Hidden exits stay invisible to scan as well — same reveal
-    // contract as look / `exits` / movement, honoring the
-    // per-player RevealedExits override.
-    let mut entries: Vec<(Direction, ExitData)> = exits
-        .0
-        .into_iter()
-        .filter(|(d, ed)| !exit_is_hidden_to(world, player, located.0, *d, ed))
-        .collect();
-    if entries.is_empty() {
-        send_to(world, player, "No exits to scan.\r\n");
-        return;
-    }
-    entries.sort_by_key(|(d, _)| direction_rank(*d));
 
-    let mut out = String::from("\r\n");
-    for (dir, ed) in &entries {
-        let dir_label = direction_name(*dir);
-        if ed.state != ExitState::Open {
-            out.push_str(&format!(
-                "  {dir_label:>9}: <{:?}>\r\n",
-                ed.state,
-            ));
-            continue;
+    let mut out = String::from("\r\nYou scan the area, and see:\r\n");
+    // Current room first (dis=0 gets "right here").
+    let mut found = scan_room_actors(world, &mut out, here, 0, Direction::North, player);
+
+    // Walk each direction up to maxdis. The legacy scan stops at
+    // any closed door, hidden exit (unless staff), or dangling
+    // destination — same checks the existing `exit_is_hidden_to`
+    // uses for the look path.
+    for dir in [
+        Direction::North,
+        Direction::East,
+        Direction::South,
+        Direction::West,
+        Direction::Up,
+        Direction::Down,
+    ] {
+        let mut from_room = here;
+        for dis in 1..=maxdis {
+            let Some(exits) = world.get::<Exits>(from_room).cloned() else {
+                break;
+            };
+            let Some(ed) = exits.0.iter().find(|(d, _)| **d == dir).map(|(_, e)| e.clone()) else {
+                break;
+            };
+            if ed.state != ExitState::Open {
+                break;
+            }
+            if exit_is_hidden_to(world, player, from_room, dir, &ed) {
+                break;
+            }
+            let Some(to_room) = ed.to else {
+                break;
+            };
+            found += scan_room_actors(world, &mut out, to_room, dis, dir, player);
+            from_room = to_room;
         }
-        let Some(target_room) = ed.to else {
-            out.push_str(&format!("  {dir_label:>9}: (dangling)\r\n"));
-            continue;
-        };
-        let target_name = name_or(world, target_room, "(unknown)");
-        let mob_count = world
-            .query_filtered::<&Located, With<Mob>>()
-            .iter(world)
-            .filter(|l| l.0 == target_room)
-            .count();
-        let player_count = world
-            .query_filtered::<&Located, (With<Player>, With<Online>)>()
-            .iter(world)
-            .filter(|l| l.0 == target_room)
-            .count();
-        out.push_str(&format!(
-            "  {dir_label:>9}: {target_name}  ({mob_count}m {player_count}p)\r\n"
-        ));
     }
-    send_to(world, player, out);
+
+    if found == 0 {
+        send_to(world, player, "\r\nYou don't see anyone.\r\n");
+        return;
+    }
+    send_rendered(world, player, &out);
+
+    // Broadcast a subtle "$n scans the area." tell so other actors
+    // in the room know the player is peeking.
+    let scanner_name = name_of(world, player);
+    broadcast_room_except_players_rendered(
+        world,
+        here,
+        &[player],
+        &format!(
+            "{} scans the area.\r\n",
+            crate::commands::cap_sentence_start(&scanner_name),
+        ),
+    );
 }
 
 inventory::submit! {
