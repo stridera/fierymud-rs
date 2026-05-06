@@ -167,6 +167,56 @@ pub enum ObjectType {
     Poison,
 }
 
+impl ObjectType {
+    /// Human-readable label for `identify` / `vitem` / proto readouts.
+    /// Debug-derived names like "Drinkcontainer" / "Fireweapon" are
+    /// jarring on the screen; this expands them to the form players
+    /// and builders actually use.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Nothing => "Nothing",
+            Self::Light => "Light",
+            Self::Scroll => "Scroll",
+            Self::Wand => "Wand",
+            Self::Staff => "Staff",
+            Self::Weapon => "Weapon",
+            Self::Fireweapon => "Fire Weapon",
+            Self::Missile => "Missile",
+            Self::Treasure => "Treasure",
+            Self::Armor => "Armor",
+            Self::Potion => "Potion",
+            Self::Worn => "Worn",
+            Self::Other => "Other",
+            Self::Trash => "Trash",
+            Self::Trap => "Trap",
+            Self::Container => "Container",
+            Self::Note => "Note",
+            Self::Drinkcontainer => "Drink Container",
+            Self::Key => "Key",
+            Self::Food => "Food",
+            Self::Money => "Money",
+            Self::Pen => "Pen",
+            Self::Boat => "Boat",
+            Self::Fountain => "Fountain",
+            Self::Portal => "Portal",
+            Self::Rope => "Rope",
+            Self::Spellbook => "Spellbook",
+            Self::Wall => "Wall",
+            Self::Touchstone => "Touchstone",
+            Self::Board => "Board",
+            Self::Instrument => "Instrument",
+            Self::Vehicle => "Vehicle",
+            Self::Corpse => "Corpse",
+            Self::Kit => "Kit",
+            Self::Wings => "Wings",
+            Self::Perfume => "Perfume",
+            Self::Disguise => "Disguise",
+            Self::Poison => "Poison",
+        }
+    }
+}
+
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[sqlx(type_name = "AchievementCategory", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AchievementCategory {
@@ -199,6 +249,23 @@ pub enum MobRole {
     Miniboss,
     Boss,
     RaidBoss,
+}
+
+impl MobRole {
+    /// Human-readable label for stat / mlist output. The
+    /// `RaidBoss` variant collides on Debug output (no space) so we
+    /// expand it; the rest stay one-word.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Trash => "Trash",
+            Self::Normal => "Normal",
+            Self::Elite => "Elite",
+            Self::Miniboss => "Miniboss",
+            Self::Boss => "Boss",
+            Self::RaidBoss => "Raid Boss",
+        }
+    }
 }
 
 /// Special NPC service roles. A mob can carry multiple
@@ -389,6 +456,40 @@ pub enum WearFlag {
     Disguise,
 }
 
+impl WearFlag {
+    /// Human-readable label for `identify` / `vwear` / proto readouts.
+    /// Most are one-word and need no expansion; the multi-handed slots
+    /// pick up an explicit "Two-handed" / "Main hand" form so they're
+    /// not lower-cased and run-together.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Finger => "Finger",
+            Self::Neck => "Neck",
+            Self::Ear => "Ear",
+            Self::Wrist => "Wrist",
+            Self::Head => "Head",
+            Self::Eyes => "Eyes",
+            Self::Face => "Face",
+            Self::Body => "Body",
+            Self::About => "About body",
+            Self::Arms => "Arms",
+            Self::Hands => "Hands",
+            Self::Waist => "Waist",
+            Self::Belt => "Belt",
+            Self::Legs => "Legs",
+            Self::Feet => "Feet",
+            Self::Tail => "Tail",
+            Self::Mainhand => "Main hand",
+            Self::Offhand => "Off hand",
+            Self::Twohand => "Two-handed",
+            Self::Badge => "Badge",
+            Self::Hover => "Hover",
+            Self::Disguise => "Disguise",
+        }
+    }
+}
+
 // `type_name` carries embedded quotes so sqlx preserves the mixed-case
 // identifier through Postgres's name lookup; without quotes the
 // element name `PlayerFlag` is folded to lowercase by the server and
@@ -534,4 +635,43 @@ pub enum Permission {
     /// through Muditor. Kept here only so sqlx can decode rows that still
     /// have this Postgres enum value granted.
     Olc,
+}
+
+impl Permission {
+    /// Human-readable label for `account` / `roles` output. The grant
+    /// table stores `SCREAMING_SNAKE_CASE`; the Rust enum is CamelCase;
+    /// the user-facing form mostly follows the enum but expands a few
+    /// multi-word entries that read awkwardly otherwise.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Build => "Build",
+            Self::Code => "Code",
+            Self::Admin => "Admin",
+            Self::God => "God",
+            Self::Shutdown => "Shutdown",
+            Self::Wizlock => "Wizlock",
+            Self::Syslog => "Syslog",
+            Self::Log => "Log",
+            Self::Force => "Force",
+            Self::Snoop => "Snoop",
+            Self::Freeze => "Freeze",
+            Self::Thaw => "Thaw",
+            Self::Ban => "Ban",
+            Self::Unban => "Unban",
+            Self::Dc => "Disconnect",
+            Self::Advance => "Advance",
+            Self::Restore => "Restore",
+            Self::Notitle => "No-title",
+            Self::Squelch => "Squelch",
+            Self::Teleport => "Teleport",
+            Self::Transfer => "Transfer",
+            Self::Summon => "Summon",
+            Self::Invisible => "Invisible",
+            Self::Nohassle => "No-hassle",
+            Self::ZoneReset => "Zone Reset",
+            Self::Wiznet => "Wiznet",
+            Self::Olc => "OLC (legacy)",
+        }
+    }
 }

@@ -1247,7 +1247,7 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
         "alignment:     {} ({align_label})\r\n",
         p.alignment
     ));
-    out.push_str(&format!("role:          {:?}\r\n", p.role));
+    out.push_str(&format!("role:          {}\r\n", p.role.label()));
     out.push_str(&format!("race:          {}\r\n", p.race));
     out.push_str(&format!("gender:        {}\r\n", p.gender));
     out.push_str(&format!(
@@ -1308,16 +1308,14 @@ pub(crate) fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
     if let Some(desc) = &p.examine_description {
         out.push_str(&format!("examine:       {desc}\r\n"));
     }
-    out.push_str(&format!("type:          {:?}\r\n", p.r#type));
-    let wear_labels: Vec<String> = p.wear_flags.iter().map(|f| format!("{f:?}")).collect();
-    out.push_str(&format!(
-        "wear_flags:    {}\r\n",
-        if wear_labels.is_empty() {
-            "<none>".to_string()
-        } else {
-            wear_labels.join(", ")
-        }
-    ));
+    out.push_str(&format!("type:          {}\r\n", p.r#type.label()));
+    let wear_labels: Vec<&'static str> = p.wear_flags.iter().map(|f| f.label()).collect();
+    let wear_str = if wear_labels.is_empty() {
+        "<none>".to_string()
+    } else {
+        wear_labels.join(", ")
+    };
+    out.push_str(&format!("wear_flags:    {wear_str}\r\n"));
     if let Some(b) = p.board_id {
         out.push_str(&format!("board_id:      {b}\r\n"));
     }
@@ -2330,8 +2328,8 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
                 .cloned()
             {
                 out.push_str(&format!(
-                    "proto:         weight {:.1}, level {}, type {:?}\r\n",
-                    proto.weight, proto.level, proto.r#type,
+                    "proto:         weight {:.1}, level {}, type {}\r\n",
+                    proto.weight, proto.level, proto.r#type.label(),
                 ));
             }
             // Bound abilities (scrolls / wands / staves).

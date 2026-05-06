@@ -5931,13 +5931,13 @@ pub(crate) fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "No account info.\r\n");
         return;
     };
-    let mut out = format!("\r\nRole: {:?}\r\n", account.role);
+    let mut out = format!("\r\nRole: {}\r\n", account.role.label());
     if account.perms.is_empty() {
         out.push_str("Permissions: none\r\n");
     } else {
         out.push_str("Permissions:\r\n");
         for p in &account.perms {
-            out.push_str(&format!("  {p:?}\r\n"));
+            out.push_str(&format!("  {}\r\n", p.label()));
         }
     }
     send_to(world, player, out);
@@ -6874,18 +6874,18 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     // pipeline.
     let mut out = String::from("\r\n<b:cyan>Compare</>\r\n");
     out.push_str(&format!(
-        "  <b:cyan>A:</> {}    <dim>weight: {:.1}   level: {}   ({:?})</>\r\n",
+        "  <b:cyan>A:</> {}    <dim>weight: {:.1}   level: {}   ({})</>\r\n",
         render_color_tags(&a_name, mode),
         ap.weight,
         ap.level,
-        ap.r#type,
+        ap.r#type.label(),
     ));
     out.push_str(&format!(
-        "  <b:cyan>B:</> {}    <dim>weight: {:.1}   level: {}   ({:?})</>\r\n",
+        "  <b:cyan>B:</> {}    <dim>weight: {:.1}   level: {}   ({})</>\r\n",
         render_color_tags(&b_name, mode),
         bp.weight,
         bp.level,
-        bp.r#type,
+        bp.r#type.label(),
     ));
     let weight_delta = ap.weight - bp.weight;
     let level_delta = ap.level - bp.level;
@@ -9941,7 +9941,7 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
         "  <cyan>Item:</>      <b:cyan>{}</>\r\n",
         render_color_tags(&p.name, mode)
     ));
-    out.push_str(&format!("  <cyan>Type:</>      {:?}\r\n", p.r#type));
+    out.push_str(&format!("  <cyan>Type:</>      {}\r\n", p.r#type.label()));
     out.push_str(&format!(
         "  <cyan>Weight:</>    <dim>{:.1}</>\r\n",
         p.weight
@@ -9957,7 +9957,7 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!("  <cyan>Value:</>     {coin}\r\n"));
     }
     if !p.wear_flags.is_empty() {
-        let labels: Vec<String> = p.wear_flags.iter().map(|f| format!("{f:?}")).collect();
+        let labels: Vec<&'static str> = p.wear_flags.iter().map(|f| f.label()).collect();
         out.push_str(&format!(
             "  <cyan>Wear:</>      <dim>{}</>\r\n",
             labels.join(", ")
