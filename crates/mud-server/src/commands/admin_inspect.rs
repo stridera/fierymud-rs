@@ -253,11 +253,18 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "triggers [<zone> <id>]",
-            summary: "List loaded triggers / inspect one.",
-            long: "Builder+. With no args, lists every (zone, id) in \
-                   the trigger catalog. With an id, prints body + \
-                   flags + fire stats.",
+            usage: "triggers [here | <name> | <zone> <id> | full]",
+            summary: "Inspect attached triggers on entities or by id.",
+            long: "Builder+. Forms:\r\n\
+                   \x20 triggers                — list attachments on \
+                       every entity in the current room.\r\n\
+                   \x20 triggers here           — same as bare form.\r\n\
+                   \x20 triggers <name>         — list attachments on \
+                       a specific mob/item by name.\r\n\
+                   \x20 triggers <zone> <id>    — look up a trigger \
+                       by catalog id (alias of `tstat`).\r\n\
+                   \x20 triggers full [<name>]  — include the trigger \
+                       body inline alongside each attachment.",
         },
         run: cmd_triggers,
     }
@@ -317,10 +324,34 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
+    // Catalog form: `triggers <zone> <id>`. Pure two-int args
+    // delegate to tstat so builders can poke a trigger by id
+    // without remembering a separate command.
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    if parts.len() == 2
+        && parts[0].parse::<i32>().is_ok()
+        && parts[1].parse::<i32>().is_ok()
+    {
+        cmd_tstat(world, player, arg);
+        return;
+    }
+
+    // `triggers full [<name>|here]` — same listing as the default,
+    // but also dumps the trigger body inline so the builder doesn't
+    // have to chase down (zone, id) → tstat for each one.
+    let (verbose, body_arg) = if let Some(rest) = arg
+        .strip_prefix("full ")
+        .or_else(|| if arg.eq_ignore_ascii_case("full") { Some("") } else { None })
+    {
+        (true, rest.trim())
+    } else {
+        (false, arg)
+    };
+
     // Targets: room itself + every mob/item/player whose Located == room,
     // unless the user named a specific keyword.
     let mut targets: Vec<Entity> = Vec::new();
-    if arg.is_empty() || arg.eq_ignore_ascii_case("here") {
+    if body_arg.is_empty() || body_arg.eq_ignore_ascii_case("here") {
         targets.push(room);
         let mut q = world.query::<(Entity, &Located)>();
         for (e, l) in q.iter(world) {
@@ -328,12 +359,12 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
                 targets.push(e);
             }
         }
-    } else if let Some(e) = find_in_room(world, arg, room)
-        .or_else(|| find_actor_in_room(world, arg, room, player))
+    } else if let Some(e) = find_in_room(world, body_arg, room)
+        .or_else(|| find_actor_in_room(world, body_arg, room, player))
     {
         targets.push(e);
     } else {
-        send_to(world, player, format!("No '{arg}' here.\r\n"));
+        send_to(world, player, format!("No '{body_arg}' here.\r\n"));
         return;
     }
 
@@ -409,6 +440,16 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
                     format!(" [{}]", flags.join(" "))
                 };
                 out.push_str(&format!("  ({zone}, {id}) {}{flag_str}\r\n", def.name));
+                if verbose {
+                    // Indent the body two extra spaces for readability
+                    // and prefix each line so a long body stays
+                    // visually associated with its attachment.
+                    for line in def.commands.lines() {
+                        out.push_str("      | ");
+                        out.push_str(line);
+                        out.push_str("\r\n");
+                    }
+                }
             } else {
                 out.push_str(&format!("  ({zone}, {id}) <missing>\r\n"));
             }
