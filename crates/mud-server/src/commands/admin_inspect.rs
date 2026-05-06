@@ -2467,6 +2467,90 @@ const SEARCH_RESULT_LIMIT: usize = 50;
 
 inventory::submit! {
     Command {
+        names: &["zlist"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "zlist",
+            summary: "List every loaded zone (id + name).",
+            long: "Builder+. Sorted by zone id. Use `znum <name>` \
+                   to look up the id of a zone you only know by \
+                   name, or `zsearch <substring>` for a fuzzy \
+                   match.",
+        },
+        run: cmd_zlist,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["znum"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "znum <name>",
+            summary: "Print the zone id whose name exactly matches.",
+            long: "Builder+. Case-insensitive whole-name match. For \
+                   substring search use `zsearch`.",
+        },
+        run: cmd_znum,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["zsearch"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "zsearch <substring>",
+            summary: "Find zones by name substring.",
+            long: "Builder+. Case-insensitive substring against the \
+                   zone's `Named`. Capped at 50 hits.",
+        },
+        run: cmd_zsearch,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["clist"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "clist",
+            summary: "List every class with its catalog id.",
+            long: "Builder+. Pairs the class plain name with its \
+                   numeric id (the value `Profile.class_id` carries) \
+                   so you can plug it into `set` / `skillset` / \
+                   `advance` paths.",
+        },
+        run: cmd_clist,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["csearch"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "csearch <substring>",
+            summary: "Find classes by name substring.",
+            long: "Builder+. Case-insensitive substring against the \
+                   class's `plain_name`. Subclass rows are flagged.",
+        },
+        run: cmd_csearch,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["osearch"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -2516,6 +2600,160 @@ inventory::submit! {
         },
         run: cmd_rsearch,
     }
+}
+
+pub(crate) fn cmd_zlist(world: &mut World, player: Entity, _args: &str) {
+    let mut rows: Vec<(i32, String)> = {
+        let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Zone>>();
+        q.iter(world).map(|(k, n)| (k.zone, n.name.clone())).collect()
+    };
+    rows.sort_by_key(|(id, _)| *id);
+    if rows.is_empty() {
+        send_to(world, player, "No zones loaded.\r\n");
+        return;
+    }
+    let mut out = format!("\r\n<b:cyan>{} zone(s) loaded:</>\r\n", rows.len());
+    for (id, name) in rows {
+        out.push_str(&format!("  <dim>[{id:>3}]</> {name}\r\n"));
+    }
+    crate::commands::send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_znum(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(world, player, "Usage: znum <name>\r\n");
+        return;
+    }
+    let hit: Option<(i32, String)> = {
+        let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Zone>>();
+        q.iter(world)
+            .find(|(_, n)| {
+                let plain = crate::commands::render_color_tags(
+                    &n.name,
+                    crate::commands::ColorMode::Strip,
+                );
+                plain.eq_ignore_ascii_case(needle)
+            })
+            .map(|(k, n)| (k.zone, n.name.clone()))
+    };
+    match hit {
+        Some((id, name)) => {
+            crate::commands::send_rendered(
+                world,
+                player,
+                &format!("Zone <cyan>[{id}]</> {name}\r\n"),
+            );
+        }
+        None => send_to(
+            world,
+            player,
+            format!("No zone named '{needle}'. Try `zsearch`.\r\n"),
+        ),
+    }
+}
+
+pub(crate) fn cmd_zsearch(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(world, player, "Usage: zsearch <substring>\r\n");
+        return;
+    }
+    let needle_lc = needle.to_ascii_lowercase();
+    let mut hits: Vec<(i32, String)> = {
+        let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Zone>>();
+        q.iter(world)
+            .filter(|(_, n)| {
+                let plain = crate::commands::render_color_tags(
+                    &n.name,
+                    crate::commands::ColorMode::Strip,
+                );
+                plain.to_ascii_lowercase().contains(&needle_lc)
+            })
+            .map(|(k, n)| (k.zone, n.name.clone()))
+            .collect()
+    };
+    hits.sort_by_key(|(id, _)| *id);
+    if hits.is_empty() {
+        send_to(
+            world,
+            player,
+            format!("No zones match '{needle}'.\r\n"),
+        );
+        return;
+    }
+    let total = hits.len();
+    let shown = total.min(SEARCH_RESULT_LIMIT);
+    let mut out = format!(
+        "\r\n<b:cyan>{shown} of {total} zone(s) for '{needle}':</>\r\n",
+    );
+    for (id, name) in hits.iter().take(SEARCH_RESULT_LIMIT) {
+        out.push_str(&format!("  <dim>[{id:>3}]</> {name}\r\n"));
+    }
+    if total > SEARCH_RESULT_LIMIT {
+        out.push_str(&format!(
+            "  <dim>... {} more — narrow your search.</>\r\n",
+            total - SEARCH_RESULT_LIMIT,
+        ));
+    }
+    crate::commands::send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_clist(world: &mut World, player: Entity, _args: &str) {
+    let mut rows: Vec<(i32, String, bool, Option<i32>)> = world
+        .resource::<ClassCatalog>()
+        .by_id
+        .values()
+        .map(|d| (d.id, d.plain_name.clone(), d.is_subclass, d.parent_class_id))
+        .collect();
+    rows.sort_by_key(|(id, _, _, _)| *id);
+    if rows.is_empty() {
+        send_to(world, player, "No classes loaded.\r\n");
+        return;
+    }
+    let mut out = format!("\r\n<b:cyan>{} class(es) loaded:</>\r\n", rows.len());
+    for (id, name, sub, parent) in rows {
+        let suffix = if sub {
+            parent.map_or_else(
+                || String::from("  <dim>(subclass)</>"),
+                |p| format!("  <dim>(subclass of id {p})</>"),
+            )
+        } else {
+            String::new()
+        };
+        out.push_str(&format!("  <dim>[{id:>2}]</> {name}{suffix}\r\n"));
+    }
+    crate::commands::send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_csearch(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(world, player, "Usage: csearch <substring>\r\n");
+        return;
+    }
+    let needle_lc = needle.to_ascii_lowercase();
+    let mut hits: Vec<(i32, String, bool)> = world
+        .resource::<ClassCatalog>()
+        .by_id
+        .values()
+        .filter(|d| d.plain_name.to_ascii_lowercase().contains(&needle_lc))
+        .map(|d| (d.id, d.plain_name.clone(), d.is_subclass))
+        .collect();
+    hits.sort_by_key(|(id, _, _)| *id);
+    if hits.is_empty() {
+        send_to(world, player, format!("No classes match '{needle}'.\r\n"));
+        return;
+    }
+    let mut out = format!(
+        "\r\n<b:cyan>{} class(es) for '{needle}':</>\r\n",
+        hits.len(),
+    );
+    for (id, name, sub) in hits {
+        let suffix = if sub { "  <dim>(subclass)</>" } else { "" };
+        out.push_str(&format!("  <dim>[{id:>2}]</> {name}{suffix}\r\n"));
+    }
+    crate::commands::send_rendered(world, player, &out);
 }
 
 pub(crate) fn cmd_osearch(world: &mut World, player: Entity, args: &str) {
