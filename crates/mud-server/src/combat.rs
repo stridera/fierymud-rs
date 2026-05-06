@@ -1523,7 +1523,7 @@ pub fn trophy_xp_modifier(prior_kills: f32) -> f32 {
 /// levels in one call) — incrementing `Profile.level`, expanding
 /// `Health.max` and `Stamina.max` by the row's gain values, and
 /// emitting a "you advanced to level N" line per step.
-fn check_level_up(world: &mut World, entity: Entity) {
+pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
     use mud_world::{LevelTable, Profile};
     let table = world.resource::<LevelTable>().clone_rows();
     loop {

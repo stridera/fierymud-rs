@@ -111,6 +111,62 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["advance"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "advance <player> <level>",
+            summary: "Set a player's level (admin level-up).",
+            long: "Implementor-only. Bumps the target's XP to the \
+                   threshold for <level> and runs the standard \
+                   level-up loop, so HP/stamina max + practice \
+                   points scale through the normal path. Refuses \
+                   level decreases (those need a separate `delevel` \
+                   path).",
+        },
+        run: cmd_advance,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["skillset"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "skillset <player> <ability> <proficiency>",
+            summary: "Set a player's proficiency in a single ability.",
+            long: "Builder+. Writes the row in the target's \
+                   KnownAbilities. Inserts a new entry when the \
+                   ability isn't already learned. Proficiency is \
+                   0..=1000 (legacy convention).",
+        },
+        run: cmd_skillset,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["reroll"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "reroll <player>",
+            summary: "Reroll a player's six core stats (3d6 each).",
+            long: "Implementor-only. Wipes CoreStats and rolls 3d6 \
+                   per axis (STR / DEX / CON / INT / WIS / CHA). \
+                   Sends the new roll to the target so they can \
+                   verify it.",
+        },
+        run: cmd_reroll,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["mute", "squelch"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -1044,6 +1100,190 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} summons {proto_name} from thin air.\r\n"),
     );
 }
+pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "advance", args);
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 2 {
+        send_to(world, player, "Usage: advance <player> <level>\r\n");
+        return;
+    }
+    let target_word = parts[0];
+    let Ok(target_level) = parts[1].parse::<i32>() else {
+        send_to(world, player, "Level must be an integer.\r\n");
+        return;
+    };
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(target_word))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{target_word}' isn't online.\r\n"));
+        return;
+    };
+    let current_level = world.get::<Profile>(target).map_or(0, |p| p.level);
+    if target_level <= current_level {
+        send_to(
+            world,
+            player,
+            "advance only raises levels — use a delevel path for the inverse.\r\n",
+        );
+        return;
+    }
+    // Look up the XP threshold for the target level. If the level
+    // table doesn't have it we refuse rather than silently no-op.
+    let threshold = world
+        .resource::<mud_world::LevelTable>()
+        .clone_rows()
+        .into_iter()
+        .find(|r| r.level == target_level)
+        .map(|r| r.exp_required);
+    let Some(threshold) = threshold else {
+        send_to(
+            world,
+            player,
+            format!("Level {target_level} isn't defined in the level table.\r\n"),
+        );
+        return;
+    };
+    if let Some(mut p) = world.get_mut::<Profile>(target) {
+        p.experience = p.experience.max(threshold);
+    }
+    crate::combat::check_level_up(world, target);
+    let target_name = name_of(world, target);
+    send_rendered(
+        world,
+        player,
+        &format!("{target_name} advanced to level {target_level}.\r\n"),
+    );
+}
+
+pub(crate) fn cmd_skillset(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "skillset", args);
+    let parts: Vec<&str> = args.splitn(3, char::is_whitespace).collect();
+    if parts.len() != 3 {
+        send_to(
+            world,
+            player,
+            "Usage: skillset <player> <ability> <proficiency>\r\n",
+        );
+        return;
+    }
+    let target_word = parts[0];
+    let ability_word = parts[1].trim();
+    let Ok(prof) = parts[2].trim().parse::<i32>() else {
+        send_to(world, player, "Proficiency must be an integer.\r\n");
+        return;
+    };
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(target_word))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{target_word}' isn't online.\r\n"));
+        return;
+    };
+    // Look up the ability id by name (case-insensitive). The
+    // catalog keys on the lower-cased canonical name.
+    let ability_id = world
+        .resource::<mud_world::AbilityCatalog>()
+        .by_name
+        .get(&ability_word.to_ascii_lowercase())
+        .map(|d| d.id);
+    let Some(ability_id) = ability_id else {
+        send_to(
+            world,
+            player,
+            format!("No ability named '{ability_word}'.\r\n"),
+        );
+        return;
+    };
+    if world.get::<mud_world::KnownAbilities>(target).is_none()
+        && let Ok(mut em) = world.get_entity_mut(target)
+    {
+        em.insert(mud_world::KnownAbilities::default());
+    }
+    if let Some(mut known) = world.get_mut::<mud_world::KnownAbilities>(target) {
+        if let Some(entry) = known.entries.iter_mut().find(|(id, _, _)| *id == ability_id) {
+            entry.1 = prof;
+            entry.2 = prof > 0;
+        } else {
+            known.entries.push((ability_id, prof, prof > 0));
+        }
+    }
+    let target_name = name_of(world, target);
+    send_rendered(
+        world,
+        player,
+        &format!(
+            "Set {target_name}'s {ability_word} proficiency to {prof}.\r\n"
+        ),
+    );
+}
+
+pub(crate) fn cmd_reroll(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "reroll", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: reroll <player>\r\n");
+        return;
+    }
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(arg))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+        return;
+    };
+    let roll_3d6 = || {
+        rand::random_range(1..=6) + rand::random_range(1..=6) + rand::random_range(1..=6)
+    };
+    let new_stats = mud_world::CoreStats {
+        strength: roll_3d6(),
+        dexterity: roll_3d6(),
+        constitution: roll_3d6(),
+        intelligence: roll_3d6(),
+        wisdom: roll_3d6(),
+        charisma: roll_3d6(),
+    };
+    if let Some(mut cs) = world.get_mut::<mud_world::CoreStats>(target) {
+        *cs = new_stats;
+    } else if let Ok(mut em) = world.get_entity_mut(target) {
+        em.insert(new_stats);
+    }
+    let target_name = name_of(world, target);
+    let line = format!(
+        "Rerolled {target_name}: STR {} DEX {} CON {} INT {} WIS {} CHA {}.\r\n",
+        new_stats.strength,
+        new_stats.dexterity,
+        new_stats.constitution,
+        new_stats.intelligence,
+        new_stats.wisdom,
+        new_stats.charisma,
+    );
+    send_rendered(world, player, &line);
+    if target != player {
+        send_rendered(
+            world,
+            target,
+            &format!("Your stats were rerolled by an admin: STR {} DEX {} CON {} INT {} WIS {} CHA {}.\r\n",
+                new_stats.strength,
+                new_stats.dexterity,
+                new_stats.constitution,
+                new_stats.intelligence,
+                new_stats.wisdom,
+                new_stats.charisma,
+            ),
+        );
+    }
+}
+
 pub(crate) fn cmd_mute(world: &mut World, player: Entity, args: &str) {
     use mud_world::Muted;
     record_admin_action(world, player, "mute", args);
