@@ -80,6 +80,12 @@ pub struct CharacterRow {
     /// "before-now" value for the score sheet's "Last login:"
     /// line. Null for brand-new characters who've never logged in.
     pub last_login: Option<chrono::NaiveDateTime>,
+    /// Immortal-invisibility level. Mirrors `Characters.invis_level`.
+    /// Zero means fully visible. Loaded into the `WizInvis(level)`
+    /// component on login when nonzero; saved back from the same
+    /// component on disconnect so the staff stays invis across
+    /// sessions instead of popping into rooms on reconnect.
+    pub invis_level: i32,
 }
 
 /// Bundle of fields fed into `create` from the login-creation
@@ -255,6 +261,10 @@ pub struct CharacterStatePayload<'a> {
     pub skill_points: i32,
     pub hunger: i32,
     pub thirst: i32,
+    /// Wizinvis level — 0 means visible, otherwise the minimum
+    /// observer level required to see this player. Round-trips
+    /// the `WizInvis` component so staff stay invis on reconnect.
+    pub invis_level: i32,
 }
 
 pub async fn save_state(
@@ -280,8 +290,9 @@ pub async fn save_state(
             skill_points = $13,
             hunger = $14,
             thirst = $15,
+            invis_level = $16,
             last_login = NOW()
-        WHERE id = $16
+        WHERE id = $17
         "#,
         state.hit_points,
         state.stamina,
@@ -298,6 +309,7 @@ pub async fn save_state(
         state.skill_points,
         state.hunger,
         state.thirst,
+        state.invis_level,
         character_id,
     )
     .execute(pool)
@@ -456,7 +468,8 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             experience, title, description,
             strength, dexterity, constitution, intelligence, wisdom, charisma,
             wealth, bank_wealth, gender, skill_points, hunger, thirst, time_played,
-            last_login AS "last_login: chrono::NaiveDateTime"
+            last_login AS "last_login: chrono::NaiveDateTime",
+            invis_level
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -509,7 +522,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             hunger,
             thirst,
             time_played,
-            last_login AS "last_login: chrono::NaiveDateTime"
+            last_login AS "last_login: chrono::NaiveDateTime",
+            invis_level
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

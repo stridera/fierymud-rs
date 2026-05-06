@@ -1140,6 +1140,13 @@ impl ConnRouter {
             if drunk > 0 {
                 e.insert(mud_world::Drunkenness(drunk));
             }
+            // Restore wizinvis on reconnect — staff who logged out
+            // while invis stay invis until they `vis` it off. Skip
+            // the insert when the column is 0 so the visible-by-
+            // default path doesn't carry an empty component.
+            if char_row.invis_level > 0 {
+                e.insert(mud_world::WizInvis(char_row.invis_level));
+            }
             if let Some(c) = clan {
                 e.insert(mud_world::ClanMembership {
                     clan_id: c.clan_id,
@@ -1464,6 +1471,11 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         .get::<RecallPoint>(entity)
         .and_then(|r| world.get::<WorldKey>(r.0).copied())
         .map_or((None, None), |wk| (Some(wk.zone), Some(wk.id)));
+    // Wizinvis level — `WizInvis(level)` round-trips through
+    // `Characters.invis_level`. Absent component → 0 (visible).
+    let invis_level = world
+        .get::<mud_world::WizInvis>(entity)
+        .map_or(0, |w| w.0);
 
     // Snapshot every Item rooted at the player — both directly carried
     // and nested inside any container the player carries. BFS keeps
@@ -1527,6 +1539,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
             skill_points,
             hunger,
             thirst,
+            invis_level,
         },
     )
     .await
@@ -2014,6 +2027,7 @@ mod tests {
             thirst: 0,
             time_played: 0,
             last_login: None,
+            invis_level: 0,
         }
     }
 
