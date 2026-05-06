@@ -86,6 +86,13 @@ pub struct CharacterRow {
     /// component on disconnect so the staff stays invis across
     /// sessions instead of popping into rooms on reconnect.
     pub invis_level: i32,
+    /// Sanction level — when set, the player can't dispatch commands
+    /// until an admin unfreezes them. Mirrors
+    /// `Characters.freeze_level` (nullable in the schema; runtime
+    /// reads None as "not frozen", any Some as frozen). Loaded into
+    /// the `Frozen` marker; saved back as Some(1) when the marker
+    /// is present.
+    pub freeze_level: Option<i32>,
 }
 
 /// Bundle of fields fed into `create` from the login-creation
@@ -265,6 +272,10 @@ pub struct CharacterStatePayload<'a> {
     /// observer level required to see this player. Round-trips
     /// the `WizInvis` component so staff stay invis on reconnect.
     pub invis_level: i32,
+    /// Sanction lock — `Some(_)` keeps the player frozen across
+    /// reconnects, `None` clears the lock. Pairs with the runtime's
+    /// `Frozen` marker.
+    pub freeze_level: Option<i32>,
 }
 
 pub async fn save_state(
@@ -291,8 +302,9 @@ pub async fn save_state(
             hunger = $14,
             thirst = $15,
             invis_level = $16,
+            freeze_level = $17,
             last_login = NOW()
-        WHERE id = $17
+        WHERE id = $18
         "#,
         state.hit_points,
         state.stamina,
@@ -310,6 +322,7 @@ pub async fn save_state(
         state.hunger,
         state.thirst,
         state.invis_level,
+        state.freeze_level,
         character_id,
     )
     .execute(pool)
@@ -469,7 +482,7 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             strength, dexterity, constitution, intelligence, wisdom, charisma,
             wealth, bank_wealth, gender, skill_points, hunger, thirst, time_played,
             last_login AS "last_login: chrono::NaiveDateTime",
-            invis_level
+            invis_level, freeze_level
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -523,7 +536,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             thirst,
             time_played,
             last_login AS "last_login: chrono::NaiveDateTime",
-            invis_level
+            invis_level,
+            freeze_level
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

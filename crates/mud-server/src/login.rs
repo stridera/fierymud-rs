@@ -1147,6 +1147,14 @@ impl ConnRouter {
             if char_row.invis_level > 0 {
                 e.insert(mud_world::WizInvis(char_row.invis_level));
             }
+            // Frozen lock — re-attach if the column is set. A frozen
+            // player who reconnects can't dispatch commands until an
+            // admin runs `thaw`. Without this, freeze was a session-
+            // only sanction that the player could trivially escape
+            // by `quit` + reconnect.
+            if char_row.freeze_level.is_some() {
+                e.insert(mud_world::Frozen);
+            }
             if let Some(c) = clan {
                 e.insert(mud_world::ClanMembership {
                     clan_id: c.clan_id,
@@ -1476,6 +1484,13 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     let invis_level = world
         .get::<mud_world::WizInvis>(entity)
         .map_or(0, |w| w.0);
+    // Frozen marker → freeze_level. The schema column is
+    // nullable; we send None when the marker is absent, so an
+    // unfreeze on this session genuinely clears the lock instead
+    // of leaving a stale level on the row.
+    let freeze_level: Option<i32> = world
+        .get::<mud_world::Frozen>(entity)
+        .map(|_| 1);
 
     // Snapshot every Item rooted at the player — both directly carried
     // and nested inside any container the player carries. BFS keeps
@@ -1540,6 +1555,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
             hunger,
             thirst,
             invis_level,
+            freeze_level,
         },
     )
     .await
@@ -2028,6 +2044,7 @@ mod tests {
             time_played: 0,
             last_login: None,
             invis_level: 0,
+            freeze_level: None,
         }
     }
 
