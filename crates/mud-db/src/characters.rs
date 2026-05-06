@@ -211,6 +211,26 @@ pub async fn save_core_stats(
     Ok(())
 }
 
+/// Rename a character row by id. Returns the row count touched
+/// (0 = id not found; 1 = success). Uniqueness on the `name`
+/// column surfaces as a `sqlx::Error::Database` from the
+/// underlying Postgres index — caller renders that as a "name
+/// already taken" message.
+pub async fn rename(
+    pool: &PgPool,
+    character_id: &str,
+    new_name: &str,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query!(
+        r#"UPDATE "Characters" SET name = $1 WHERE id = $2"#,
+        new_name,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// Payload for `save_state`. Fifteen fields including four
 /// `Option<i32>` room-pair coordinates (current zone/id +
 /// recall zone/id) make the positional shape regression-prone:

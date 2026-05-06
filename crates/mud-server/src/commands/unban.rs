@@ -15,7 +15,7 @@ use crate::commands::{
 
 inventory::submit! {
     Command {
-        names: &["unban"],
+        names: &["unban", "pardon"],
         min_role: UserRole::Implementor,
         required_perm: None,
         category: Category::Admin,

@@ -930,6 +930,28 @@ pub(crate) async fn cmd_treload(
 
 inventory::submit! {
     Command {
+        names: &["rename"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "rename <old> <new>",
+            summary: "Rename a character (offline-only).",
+            long: "Implementor-only. Refuses while the target is \
+                   online — the in-memory Named cache and the \
+                   ConnRouter mappings would drift otherwise. The \
+                   character_id is the FK across CharacterItems / \
+                   CharacterAbilities / etc., so foreign-key \
+                   relationships survive untouched. Conflicts on \
+                   the new name surface as the unique-index error \
+                   from Postgres.",
+        },
+        run: cmd_rename,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["pscan"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -964,6 +986,77 @@ inventory::submit! {
         },
         run: cmd_viewchar,
     }
+}
+
+pub(crate) fn cmd_rename(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "rename", args);
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 2 {
+        send_to(world, player, "Usage: rename <old> <new>\r\n");
+        return;
+    }
+    let old_name = parts[0].to_string();
+    let new_name = parts[1].to_string();
+
+    // Refuse if the target is currently online — in-memory Named
+    // and ConnRouter mappings need a clean rebuild via login if
+    // we want them to track the new name.
+    let online = {
+        let mut q = world.query_filtered::<&mud_world::Named, (With<mud_world::Player>, With<mud_world::Online>)>();
+        q.iter(world).any(|n| n.name.eq_ignore_ascii_case(&old_name))
+    };
+    if online {
+        send_to(
+            world,
+            player,
+            format!("'{old_name}' is online — have them log out first.\r\n"),
+        );
+        return;
+    }
+
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    tokio::spawn(async move {
+        let Some(out) = outbound else { return };
+        let row = match mud_db::characters::find_by_name(&pool, &old_name).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                let _ = out
+                    .send(format!("No character named '{old_name}'.\r\n").into_bytes());
+                return;
+            }
+            Err(e) => {
+                let _ = out.send(format!("DB error: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+        match mud_db::characters::rename(&pool, &row.id, &new_name).await {
+            Ok(0) => {
+                let _ = out.send(
+                    format!("Character row '{old_name}' vanished mid-rename.\r\n")
+                        .into_bytes(),
+                );
+            }
+            Ok(_) => {
+                let _ = out.send(
+                    format!("Renamed '{old_name}' → '{new_name}'.\r\n").into_bytes(),
+                );
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("unique") || msg.contains("duplicate key") {
+                    let _ = out.send(
+                        format!("Name '{new_name}' is already taken.\r\n").into_bytes(),
+                    );
+                } else {
+                    let _ = out.send(format!("Rename failed: {e}\r\n").into_bytes());
+                }
+            }
+        }
+    });
 }
 
 pub(crate) fn cmd_pscan(world: &mut World, player: Entity, args: &str) {
