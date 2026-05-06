@@ -642,7 +642,7 @@ pub struct AttachedTriggers(pub Vec<(i32, i32)>);
 /// group kill contributes 0.25 per member). `display_name` is
 /// cached so the renderer doesn't have to chase the catalog
 /// every time the player opens `trophy`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TrophyEntry {
     pub kind: TrophyKind,
     pub amount: f32,
@@ -651,7 +651,7 @@ pub struct TrophyEntry {
 
 /// What the trophy entry is keyed against — a mob proto (zone +
 /// id) or a player kill (by character name).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TrophyKind {
     Mob { zone: i32, id: i32 },
     Player { name: String },

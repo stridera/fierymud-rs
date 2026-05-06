@@ -424,6 +424,73 @@ pub async fn save_drunkenness(
     Ok(())
 }
 
+/// Read the JSON `script_vars` blob. Returns `Ok(None)` when the
+/// column is NULL. Caller deserializes into the runtime
+/// `ScriptVars(BTreeMap<String, String>)` shape.
+pub async fn load_script_vars(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<serde_json::Value>> {
+    let row = sqlx::query!(
+        r#"SELECT script_vars FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.script_vars))
+}
+
+/// Persist the `script_vars` blob. Pass `None` to clear the column
+/// (player has no surviving vars); pass `Some(...)` to overwrite
+/// with a fresh JSON object.
+pub async fn save_script_vars(
+    pool: &PgPool,
+    character_id: &str,
+    blob: Option<&serde_json::Value>,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET script_vars = $1 WHERE id = $2"#,
+        blob,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Read the JSON `trophy_data` blob. Returns `Ok(None)` when the
+/// column is NULL. Caller deserializes into the runtime
+/// `Trophy { entries: VecDeque<TrophyEntry> }` shape.
+pub async fn load_trophy(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<serde_json::Value>> {
+    let row = sqlx::query!(
+        r#"SELECT trophy_data FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.trophy_data))
+}
+
+/// Persist the `trophy_data` blob. Same shape as `save_script_vars` —
+/// `None` clears the column, `Some(...)` overwrites.
+pub async fn save_trophy(
+    pool: &PgPool,
+    character_id: &str,
+    blob: Option<&serde_json::Value>,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET trophy_data = $1 WHERE id = $2"#,
+        blob,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Read the staff-notes blob for a character (Builder+ visibility).
 /// Returns Ok(None) when null. Single shared blob — appended to by
 /// the runtime's `pnote add` path.

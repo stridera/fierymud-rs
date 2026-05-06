@@ -1039,6 +1039,23 @@ impl ConnRouter {
             .await
             .unwrap_or(None);
 
+        // Script-vars + trophy JSON blobs. Either may be NULL on
+        // first login or for never-touched characters; the
+        // unwrap_or_else paths log + drop so a one-shot load
+        // failure can't reject login.
+        let script_vars_json = mud_db::characters::load_script_vars(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "script_vars load failed");
+                None
+            });
+        let trophy_json = mud_db::characters::load_trophy(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "trophy load failed");
+                None
+            });
+
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
         // the housing fetches; an error logs and skips.
@@ -1171,6 +1188,28 @@ impl ConnRouter {
                     poof_in: char_row.poof_in.clone(),
                     poof_out: char_row.poof_out.clone(),
                 });
+            }
+            // ScriptVars — JSON object → BTreeMap. Tolerate a
+            // garbage/legacy shape silently (drop the data) rather
+            // than rejecting login.
+            if let Some(json) = script_vars_json
+                && let Ok(map) = serde_json::from_value::<
+                    std::collections::BTreeMap<String, String>,
+                >(json)
+                && !map.is_empty()
+            {
+                e.insert(mud_world::ScriptVars(map));
+            }
+            // Trophy — JSON list → Trophy. Same tolerant pattern;
+            // the kill counter just resets to empty on bad data
+            // instead of bouncing the player off the server.
+            if let Some(json) = trophy_json
+                && let Ok(entries) = serde_json::from_value::<
+                    std::collections::VecDeque<mud_world::TrophyEntry>,
+                >(json)
+                && !entries.is_empty()
+            {
+                e.insert(mud_world::Trophy { entries });
             }
             if let Some(c) = clan {
                 e.insert(mud_world::ClanMembership {
@@ -1614,6 +1653,41 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
             mud_db::characters::save_drunkenness(pool, &account.character_id, drunk).await
     {
         warn!(error = %e, character_id = %account.character_id, "drunkenness save failed");
+    }
+
+    // ScriptVars — serialise the BTreeMap directly. NULL when the
+    // map is empty so first-login characters don't carry a stale
+    // `{}` blob the editor would have to special-case.
+    let script_vars_json = world
+        .get::<mud_world::ScriptVars>(entity)
+        .filter(|sv| !sv.0.is_empty())
+        .and_then(|sv| serde_json::to_value(&sv.0).ok());
+    if let Err(e) = mud_db::characters::save_script_vars(
+        pool,
+        &account.character_id,
+        script_vars_json.as_ref(),
+    )
+    .await
+    {
+        warn!(error = %e, character_id = %account.character_id, "script_vars save failed");
+    }
+
+    // Trophy — same shape as ScriptVars. Empty ring buffer →
+    // NULL. The XP-modifier path reads `kills_against` which
+    // returns 0.0 for an absent entry, so a fresh character
+    // without trophy data loads identically to one with `{}`.
+    let trophy_json = world
+        .get::<mud_world::Trophy>(entity)
+        .filter(|t| !t.entries.is_empty())
+        .and_then(|t| serde_json::to_value(&t.entries).ok());
+    if let Err(e) = mud_db::characters::save_trophy(
+        pool,
+        &account.character_id,
+        trophy_json.as_ref(),
+    )
+    .await
+    {
+        warn!(error = %e, character_id = %account.character_id, "trophy save failed");
     }
 
     // Persist BankWealth separately from save_state (which doesn't
