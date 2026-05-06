@@ -40,45 +40,30 @@ pub fn regen_tick(world: &mut World) {
         return;
     }
 
-    // Resolve the survival thresholds once before the query
-    // iterator borrows World — same numbers feed every player.
-    // `get_resource` (vs `resource`) so tests that build a fresh
-    // World without the GameConfig loader pass don't panic;
-    // production always has the resource installed by the loader.
-    let (starving_at, parched_at) = world
-        .get_resource::<mud_world::RuntimeConfig>()
-        .map_or((DEFAULT_STARVING_AT, DEFAULT_PARCHED_AT), |cfg| {
-            (
-                cfg.get_i32("survival", "starving_at", DEFAULT_STARVING_AT),
-                cfg.get_i32("survival", "parched_at", DEFAULT_PARCHED_AT),
-            )
-        });
-
     // Snapshot the (entity, new_stamina, new_hp) tuples while no mutable
     // borrows are live, then apply. Pattern matches combat_tick / effects_tick.
-    // Starving / parched players regen at half rate (rounded down) — they
-    // can still slowly recover, but the hunger drain on top makes net
-    // progress glacial. Mirrors the stat-survival contract in
-    // hunger_thirst_tick.
+    // Hunger / thirst do NOT scale regen — legacy fierymud kept those
+    // counters as pure flavor (the C++ `hit_gain` / `move_gain` paths
+    // never read them). Punishing regen for starving stranded
+    // players in the wilderness with no easy recovery; the threshold
+    // messages in `hunger_thirst_tick` plus the food/drink commands
+    // are enough signal without a punitive drain.
     // Ghost players don't regen — they're dead. `release` restores
     // hp to max in one shot when the spirit returns to the body;
     // gradually healing a corpse over time would be wrong both
     // mechanically (`release` becomes pointless) and thematically.
     let updates: Vec<(Entity, Option<i32>, Option<i32>)> = {
         let mut q = world.query_filtered::<
-            (Entity, Option<&Stamina>, Option<&Health>, &Posture, Option<&Hunger>, Option<&Thirst>),
+            (Entity, Option<&Stamina>, Option<&Health>, &Posture),
             (With<Online>, Without<Fighting>, Without<Ghost>),
         >();
         q.iter(world)
-            .map(|(e, stamina, hp, posture, hunger, thirst)| {
-                let starved = hunger.is_some_and(|h| h.0 >= starving_at)
-                    || thirst.is_some_and(|t| t.0 >= parched_at);
-                let scale = |amt: i32| if starved { amt / 2 } else { amt };
+            .map(|(e, stamina, hp, posture)| {
                 let new_stamina = stamina.and_then(|s| {
                     if s.current >= s.max {
                         None
                     } else {
-                        let regen = scale(stamina_per_tick(posture.0));
+                        let regen = stamina_per_tick(posture.0);
                         if regen == 0 {
                             None
                         } else {
@@ -90,7 +75,7 @@ pub fn regen_tick(world: &mut World) {
                     if h.hp >= h.max {
                         None
                     } else {
-                        let regen = scale(health_per_tick(posture.0));
+                        let regen = health_per_tick(posture.0);
                         if regen == 0 {
                             None
                         } else {
@@ -128,18 +113,22 @@ const HUNGER_TICK_TICKS: u64 = 750;
 /// last meal/drink.
 const DEFAULT_HUNGRY_AT: i32 = 24;
 const DEFAULT_THIRSTY_AT: i32 = 12;
-/// Default thresholds at which actual stamina/HP drain starts.
-/// Live values: `survival.starving_at` / `survival.parched_at`.
-/// Drain is 1 stamina per game-hour; once stamina is at 0,
-/// 1 HP per hour clamped at 1 — starvation never KILLS in v1,
-/// just incapacitates.
+/// Default thresholds at which the hard "starving" / "parched"
+/// flavor message fires. Live values: `survival.starving_at` /
+/// `survival.parched_at`. Per legacy fierymud's contract, these
+/// are warning thresholds only — no stamina or HP drain. Players
+/// who ignore food/water still see "you feel weak from hunger" /
+/// "your throat is parched" but the body keeps regenerating
+/// normally; punishing recovery left wilderness travelers
+/// stranded with no easy way back.
 const DEFAULT_STARVING_AT: i32 = 48;
 const DEFAULT_PARCHED_AT: i32 = 24;
 
-/// Increment Hunger and Thirst once per game-hour, emit threshold
-/// crossing messages, and drain stamina/HP when starving / parched.
-/// Skips ghosts, frozen players, and offline players (only Online +
-/// Player + non-Ghost + non-Frozen tick).
+/// Increment Hunger and Thirst once per game-hour and emit the
+/// threshold-crossing flavor lines (hungry, starving, thirsty,
+/// parched). Skips ghosts, frozen players, and offline players
+/// (only Online + Player + non-Ghost + non-Frozen tick). No
+/// stat drain — see comment on `DEFAULT_STARVING_AT`.
 pub fn hunger_thirst_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(HUNGER_TICK_TICKS) {
@@ -171,17 +160,17 @@ pub fn hunger_thirst_tick(world: &mut World) {
 
     // Snapshot pre-tick state so all mutations and notifications can
     // happen in a single pass without juggling re-borrows.
-    let snapshot: Vec<(Entity, i32, i32, i32, i32, i32, i32)> = {
+    let snapshot: Vec<(Entity, i32, i32)> = {
         let mut q = world.query_filtered::<
-            (Entity, &Hunger, &Thirst, &Stamina, &Health),
+            (Entity, &Hunger, &Thirst),
             (With<Player>, With<Online>, Without<Ghost>, Without<Frozen>),
         >();
         q.iter(world)
-            .map(|(e, h, t, s, hp)| (e, h.0, t.0, s.current, s.max, hp.hp, hp.max))
+            .map(|(e, h, t)| (e, h.0, t.0))
             .collect()
     };
 
-    for (entity, old_hunger, old_thirst, stam, _stam_max, hp, _hp_max) in snapshot {
+    for (entity, old_hunger, old_thirst) in snapshot {
         let new_hunger = old_hunger + 1;
         let new_thirst = old_thirst + 1;
         if let Some(mut h) = world.get_mut::<Hunger>(entity) {
@@ -205,21 +194,9 @@ pub fn hunger_thirst_tick(world: &mut World) {
         if old_thirst < parched_at && new_thirst >= parched_at {
             send_to(world, entity, "Your throat is parched!\r\n");
         }
-
-        // Drain when over either threshold. 1 stamina/hour; once
-        // stamina is at 0, 1 HP/hour clamped at 1 — survival
-        // mechanic, not death.
-        if new_hunger >= starving_at || new_thirst >= parched_at {
-            if stam > 0 {
-                if let Some(mut s) = world.get_mut::<Stamina>(entity) {
-                    s.current = (s.current - 1).max(0);
-                }
-            } else if hp > 1
-                && let Some(mut h) = world.get_mut::<Health>(entity)
-            {
-                h.hp = (h.hp - 1).max(1);
-            }
-        }
+        // No stat drain — hunger/thirst are pure flavor per legacy
+        // fierymud's contract (see DEFAULT_STARVING_AT comment).
+        // Threshold messages above are the entire feedback loop.
     }
 }
 
@@ -402,11 +379,13 @@ mod tests {
     }
 
     #[test]
-    fn starving_player_regens_at_half_rate() {
-        // Once Hunger crosses the starving threshold, regen halves
-        // (rounded down). Sleeping baseline is +8 stamina / +4 hp;
-        // halved → +4 / +2. Hunger value uses the default 48-game-
-        // hour threshold inlined as DEFAULT_STARVING_AT.
+    fn starving_player_still_regens_at_full_rate() {
+        // Per legacy fierymud, hunger/thirst are pure flavor — the
+        // C++ `hit_gain` / `move_gain` paths never read them, and
+        // halving regen here just stranded wilderness travelers
+        // with no easy recovery. Sleeping baseline is +8 stamina /
+        // +4 hp regardless of Hunger value. Pin the contract so a
+        // future "let's punish starvation" patch surfaces here.
         let mut world = World::new();
         let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Sleeping);
         world
@@ -416,21 +395,20 @@ mod tests {
         run_regen_tick(&mut world);
         assert_eq!(
             world.get::<Stamina>(p).unwrap().current,
-            34,
-            "starving halves stamina regen (8 → 4)"
+            38,
+            "starving doesn't halve stamina regen (full +8)"
         );
         assert_eq!(
             world.get::<Health>(p).unwrap().hp,
-            52,
-            "starving halves hp regen (4 → 2)"
+            54,
+            "starving doesn't halve hp regen (full +4)"
         );
     }
 
     #[test]
-    fn parched_player_regens_at_half_rate() {
-        // Same shape as starving, but driven by Thirst. Either
-        // axis triggers the half-rate scale — they don't stack
-        // for double-halving.
+    fn parched_player_still_regens_at_full_rate() {
+        // Same shape as the starving test — Thirst is pure flavor
+        // too. No drain, no halving, full regen.
         let mut world = World::new();
         let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Sleeping);
         world
@@ -438,8 +416,8 @@ mod tests {
             .unwrap()
             .insert(Thirst(DEFAULT_PARCHED_AT));
         run_regen_tick(&mut world);
-        assert_eq!(world.get::<Stamina>(p).unwrap().current, 34);
-        assert_eq!(world.get::<Health>(p).unwrap().hp, 52);
+        assert_eq!(world.get::<Stamina>(p).unwrap().current, 38);
+        assert_eq!(world.get::<Health>(p).unwrap().hp, 54);
     }
 
     #[test]
