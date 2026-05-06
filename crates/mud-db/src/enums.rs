@@ -379,6 +379,67 @@ pub enum MobBehavior {
     NoKill,
 }
 
+impl MobBehavior {
+    /// Short human label for builder-facing output. Matches the
+    /// schema spelling but spaces multi-word forms.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sentinel => "Sentinel",
+            Self::StayZone => "Stay-Zone",
+            Self::Scavenger => "Scavenger",
+            Self::Track => "Track",
+            Self::SlowTrack => "Slow-Track",
+            Self::FastTrack => "Fast-Track",
+            Self::Wimpy => "Wimpy",
+            Self::Aware => "Aware",
+            Self::Helper => "Helper",
+            Self::Protector => "Protector",
+            Self::Peacekeeper => "Peacekeeper",
+            Self::NoBash => "No-Bash",
+            Self::NoSummon => "No-Summon",
+            Self::NoVicious => "No-Vicious",
+            Self::Memory => "Memory",
+            Self::Teacher => "Teacher",
+            Self::Meditate => "Meditate",
+            Self::NoScript => "No-Script",
+            Self::NoClassAi => "No-ClassAI",
+            Self::Peaceful => "Peaceful",
+            Self::NoKill => "No-Kill",
+        }
+    }
+
+    /// One-sentence description used by `mob-ai` to explain what
+    /// each flag actually changes at runtime. Intentionally
+    /// builder-facing wording — not for player-facing screens.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Sentinel => "Stays in its starting room — never wanders.",
+            Self::StayZone => "Wanders, but never crosses zone boundaries.",
+            Self::Scavenger => "Picks up loose items in the room.",
+            Self::Track => "Will track a fleeing target through the zone.",
+            Self::SlowTrack => "Tracks fleeing targets, but slowly.",
+            Self::FastTrack => "Tracks fleeing targets relentlessly.",
+            Self::Wimpy => "Flees when its HP gets low.",
+            Self::Aware => "Notices sneaking / invisible characters.",
+            Self::Helper => "Joins fights on the side of any other mob in the room.",
+            Self::Protector => "Defends weaker mobs from being attacked.",
+            Self::Peacekeeper => "Tries to break up player-vs-player fights.",
+            Self::NoBash => "Can't be bashed (knocked over).",
+            Self::NoSummon => "Can't be summoned out of its current room.",
+            Self::NoVicious => "Won't deliver killing blows on fleeing targets.",
+            Self::Memory => "Remembers attackers and re-aggroes on sight.",
+            Self::Teacher => "Acts as a guildmaster / trainer for some abilities.",
+            Self::Meditate => "Naturally regenerates faster when idle.",
+            Self::NoScript => "Skipped by trigger dispatch (intentionally).",
+            Self::NoClassAi => "Won't run the class-driven combat AI.",
+            Self::Peaceful => "Refuses to engage in combat at all.",
+            Self::NoKill => "Cannot be killed — damage is clamped above zero.",
+        }
+    }
+}
+
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[sqlx(type_name = "UserRole", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum UserRole {

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::{Direction, UserRole};
+use mud_db::enums::{Direction, MobBehavior, UserRole};
 use mud_world::{
     AbilityCatalog, Account, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats,
     EffectInstance, EquippedSlot, ExitData, Exits, Fighting, FromObjectReset, Health, Item,
@@ -56,6 +56,26 @@ inventory::submit! {
                    reads the static catalog row that produced it.",
         },
         run: cmd_mstat,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["mob-ai", "mai"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "mob-ai <zone> <id> | <id> | <name>",
+            summary: "Plain-English brief of a mob's behavior.",
+            long: "Builder+. Reads the mob proto and `TriggerCatalog` \
+                   attachments, then summarises in plain English: \
+                   alignment-driven aggression, behaviors (sentinel, \
+                   wimpy, etc.), and whether the mob is scripted. For \
+                   the raw fields use `mstat`; this is the form you \
+                   want when explaining a mob to a designer.",
+        },
+        run: cmd_mob_ai,
     }
 }
 
@@ -1277,6 +1297,123 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     out.push_str(&format!("live count:    {live}\r\n"));
     send_to(world, player, out);
 }
+
+pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
+    let Some((zone, id)) = resolve_mob_target(world, player, args) else {
+        return;
+    };
+    let proto = world
+        .resource::<MobPrototypes>()
+        .by_key
+        .get(&(zone, id))
+        .cloned();
+    let Some(p) = proto else {
+        send_to(world, player, format!("No mob proto ({zone}, {id}).\r\n"));
+        return;
+    };
+    let trig_count = world
+        .resource::<mud_world::TriggerCatalog>()
+        .mob_attachments
+        .get(&(zone, id))
+        .map_or(0, Vec::len);
+
+    let mut out = format!("\r\n=== AI brief: {} ({zone}, {id}) ===\r\n", p.name);
+
+    // Alignment bucket — drives evil/good aggression heuristics
+    // even when no explicit "AggroEvil" behavior flag exists.
+    let align_bucket = mud_db::enums::Alignment::from_score(p.alignment);
+    out.push_str(&format!(
+        "Alignment:     {} ({})\r\n",
+        p.alignment,
+        align_bucket.label(),
+    ));
+
+    // Combat readout in plain English. dice → "rolls 2d6+3"; HR/AC
+    // expanded so a designer doesn't need to remember which is the
+    // attack stat and which is the defense.
+    out.push_str(&format!(
+        "Combat:        L{} — rolls {}d{}{} damage, hit roll {:+}, AC {}\r\n",
+        p.level,
+        p.damage_dice_num,
+        p.damage_dice_size,
+        if p.damage_dice_bonus == 0 {
+            String::new()
+        } else {
+            format!("{:+}", p.damage_dice_bonus)
+        },
+        p.hit_roll,
+        p.armor_class,
+    ));
+
+    // Class-driven AI: a mob with a class id and without NoClassAi
+    // runs the class kit (warrior swings, mage casts) at runtime.
+    let no_class_ai = p.behaviors.iter().any(|b| matches!(b, MobBehavior::NoClassAi));
+    let class_label = p.class_id.and_then(|cid| {
+        world
+            .get_resource::<mud_world::ClassCatalog>()
+            .and_then(|c| c.by_id.get(&cid).map(|d| d.plain_name.clone()))
+    });
+    match (class_label, no_class_ai) {
+        (Some(cls), false) => out.push_str(&format!(
+            "Class AI:      Runs the {cls} combat kit (basic attacks + class abilities).\r\n",
+        )),
+        (Some(cls), true) => out.push_str(&format!(
+            "Class AI:      {cls} class set, but No-ClassAI flag is on — manual / scripted only.\r\n",
+        )),
+        (None, _) => out.push_str("Class AI:      No class — basic melee swings only.\r\n"),
+    }
+
+    // Behavior list. Empty case is worth calling out — a designer
+    // checking a mob deserves a clear "this is intentional" beat.
+    if p.behaviors.is_empty() {
+        out.push_str("Behaviors:     <none> — vanilla wandering NPC.\r\n");
+    } else {
+        out.push_str("Behaviors:\r\n");
+        for b in &p.behaviors {
+            out.push_str(&format!("  {:<14} {}\r\n", b.label(), b.describe()));
+        }
+    }
+
+    // Service professions (banker / shopkeeper / etc) drive
+    // dedicated interactions; surface them so the brief is
+    // complete for "what does this mob do?" questions.
+    if !p.professions.is_empty() {
+        let labels: Vec<String> = p
+            .professions
+            .iter()
+            .map(|pr| format!("{pr:?}"))
+            .collect();
+        out.push_str(&format!("Service role:  {}\r\n", labels.join(", ")));
+    }
+
+    // Protected-kind drives alignment penalty on kill — useful
+    // to know when reviewing a mob's "what happens if a player
+    // kills me" surface.
+    if !matches!(p.protected_kind, mud_db::enums::ProtectedKind::Normal) {
+        out.push_str(&format!(
+            "Protected:     {:?} — killing this mob shifts the killer's alignment by {}.\r\n",
+            p.protected_kind,
+            p.protected_kind.alignment_penalty(),
+        ));
+    }
+
+    // Triggers override or layer on top of the inferred behavior.
+    // Note: NoScript flag suppresses dispatch, so flag that
+    // explicitly when both are set.
+    let no_script = p.behaviors.iter().any(|b| matches!(b, MobBehavior::NoScript));
+    match (trig_count, no_script) {
+        (0, _) => out.push_str("Triggers:      <none> — behavior is purely from the flags above.\r\n"),
+        (n, false) => out.push_str(&format!(
+            "Triggers:      {n} attached — scripts run alongside the flag-driven AI. Use `tinfo` for bodies.\r\n",
+        )),
+        (n, true) => out.push_str(&format!(
+            "Triggers:      {n} attached, but No-Script is set — dispatch is suppressed!\r\n",
+        )),
+    }
+
+    send_to(world, player, out);
+}
+
 pub(crate) fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
     let Some((zone, id)) = resolve_object_target(world, player, args) else {
         return;
