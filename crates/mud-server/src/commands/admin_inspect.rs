@@ -42,11 +42,18 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "mstat <zone> <id>",
-            summary: "Dump a mob prototype's metadata.",
-            long: "Builder+. Reads `MobPrototypes[(zone, id)]` and \
-                   prints the proto fields + linked behaviors / \
-                   professions / abilities / triggers.",
+            usage: "mstat <zone> <id> | <id> | <name>",
+            summary: "Dump a mob PROTOTYPE (template, not a live mob).",
+            long: "Builder+. Reads `MobPrototypes` and prints the \
+                   proto fields + linked behaviors / professions / \
+                   abilities / triggers. Three target forms:\r\n\
+                   \x20 mstat <zone> <id>   composite key\r\n\
+                   \x20 mstat <id>          id in your current zone\r\n\
+                   \x20 mstat <name>        substring against proto name\r\n\
+                   \r\n\
+                   For a LIVE mob's per-instance state, use `stat <name>` — \
+                   stat reads every component on a live entity, mstat \
+                   reads the static catalog row that produced it.",
         },
         run: cmd_mstat,
     }
@@ -59,10 +66,12 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "ostat <zone> <id>",
-            summary: "Dump an object prototype's metadata.",
+            usage: "ostat <zone> <id> | <id> | <name>",
+            summary: "Dump an object PROTOTYPE.",
             long: "Builder+. Mirrors `mstat` for objects: type, weight, \
-                   wear flags, restrictions, special-values per type.",
+                   wear flags, restrictions, special-values per type. \
+                   Same target forms — composite key, id in current \
+                   zone, or substring against proto name.",
         },
         run: cmd_ostat,
     }
@@ -75,10 +84,11 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "sstat <zone> <id>",
+            usage: "sstat <zone> <id> | <id>",
             summary: "Dump a shop's metadata.",
-            long: "Builder+. Reads `ShopCatalog[(zone, id)]` for \
-                   keeper, accept rules, items offered, pet roster.",
+            long: "Builder+. Reads `ShopCatalog` for keeper, accept \
+                   rules, items offered, pet roster. <id> alone \
+                   defaults to your current zone.",
         },
         run: cmd_sstat,
     }
@@ -91,10 +101,11 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "tstat <zone> <id>",
+            usage: "tstat <zone> <id> | <id>",
             summary: "Dump a trigger's metadata.",
-            long: "Builder+. Reads `TriggerCatalog[(zone, id)]` and \
-                   prints flags, body length, last-fire stats.",
+            long: "Builder+. Reads `TriggerCatalog` and prints flags, \
+                   body, fire stats. <id> alone defaults to current \
+                   zone.",
         },
         run: cmd_tstat,
     }
@@ -124,10 +135,11 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "rstat [<zone> <id>]",
-            summary: "Dump a room's ECS state.",
+            usage: "rstat [<zone> <id> | <id>]",
+            summary: "Dump a room's ECS state (live entity, not catalog).",
             long: "Builder+. With no arg, inspects your current room. \
-                   Otherwise looks up `WorldKeyIndex.rooms[(zone, id)]`.",
+                   <id> alone looks up the room in your current zone. \
+                   Composite <zone> <id> works too.",
         },
         run: cmd_rstat,
     }
@@ -140,10 +152,16 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "stat <player>",
-            summary: "Dump a player entity's component state.",
-            long: "Builder+. Reads every component on the named \
-                   player and prints a structured dump.",
+            usage: "stat <name>",
+            summary: "Dump a LIVE entity's per-instance component state.",
+            long: "Builder+. Reads every component on the named live \
+                   entity (player, mob, or item by name in your room) \
+                   and prints a structured dump. \
+                   \r\nNote the difference from mstat / ostat: stat \
+                   shows what the entity actually has right now \
+                   (e.g. current HP, active effects, stored vars); \
+                   mstat / ostat show the catalog template the \
+                   entity was spawned from.",
         },
         run: cmd_stat,
     }
@@ -1060,14 +1078,134 @@ pub(crate) fn cmd_zstat(world: &mut World, player: Entity, args: &str) {
     out.push_str(&format!("live_items:    {live_items}\r\n"));
     send_to(world, player, out);
 }
-pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
+/// Resolve `<zone> <id>` / `<id>` / `<name>` into a `(zone, id)`
+/// tuple. `<id>` alone defaults zone to the caller's current
+/// zone. Names match against `name` first, then keywords —
+/// case-insensitive substring. Sends an error and returns `None`
+/// when the lookup fails.
+fn resolve_mob_target(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+) -> Option<(i32, i32)> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() != 2 {
-        send_to(world, player, "Usage: mstat <zone> <id>\r\n");
-        return;
+    if parts.is_empty() {
+        send_to(world, player, "Usage: <zone> <id> | <id> | <name>\r\n");
+        return None;
     }
-    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
-        send_to(world, player, "Zone and id must be integers.\r\n");
+    if parts.len() == 2
+        && let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+    {
+        return Some((zone, id));
+    }
+    if parts.len() == 1
+        && let Ok(id) = parts[0].parse::<i32>()
+    {
+        let here_zone = world
+            .get::<Located>(player)
+            .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone));
+        let Some(zone) = here_zone else {
+            send_to(world, player, "Can't resolve current zone.\r\n");
+            return None;
+        };
+        return Some((zone, id));
+    }
+    // Name lookup — case-insensitive substring against name + keywords.
+    let needle = parts.join(" ").to_ascii_lowercase();
+    let hit = world
+        .resource::<MobPrototypes>()
+        .by_key
+        .iter()
+        .find(|(_, p)| {
+            p.name.to_ascii_lowercase().contains(&needle)
+                || p.keywords.iter().any(|k| k.to_ascii_lowercase().contains(&needle))
+        })
+        .map(|(k, _)| *k);
+    if hit.is_none() {
+        send_to(
+            world,
+            player,
+            format!("No mob proto matches '{}'.\r\n", parts.join(" ")),
+        );
+    }
+    hit
+}
+
+fn resolve_object_target(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+) -> Option<(i32, i32)> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        send_to(world, player, "Usage: <zone> <id> | <id> | <name>\r\n");
+        return None;
+    }
+    if parts.len() == 2
+        && let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+    {
+        return Some((zone, id));
+    }
+    if parts.len() == 1
+        && let Ok(id) = parts[0].parse::<i32>()
+    {
+        let here_zone = world
+            .get::<Located>(player)
+            .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone));
+        let Some(zone) = here_zone else {
+            send_to(world, player, "Can't resolve current zone.\r\n");
+            return None;
+        };
+        return Some((zone, id));
+    }
+    let needle = parts.join(" ").to_ascii_lowercase();
+    let hit = world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .iter()
+        .find(|(_, p)| {
+            p.name.to_ascii_lowercase().contains(&needle)
+                || p.keywords.iter().any(|k| k.to_ascii_lowercase().contains(&needle))
+        })
+        .map(|(k, _)| *k);
+    if hit.is_none() {
+        send_to(
+            world,
+            player,
+            format!("No object proto matches '{}'.\r\n", parts.join(" ")),
+        );
+    }
+    hit
+}
+
+/// Try `<zone> <id>` / `<id>` parsing only. Used by sstat / tstat
+/// where there's no name-search fallback (shop names aren't in
+/// the proto, trigger names live in the catalog body).
+fn resolve_zone_id(world: &mut World, player: Entity, args: &str) -> Option<(i32, i32)> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() == 2
+        && let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+    {
+        return Some((zone, id));
+    }
+    if parts.len() == 1
+        && let Ok(id) = parts[0].parse::<i32>()
+    {
+        let here_zone = world
+            .get::<Located>(player)
+            .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone));
+        let Some(zone) = here_zone else {
+            send_to(world, player, "Can't resolve current zone.\r\n");
+            return None;
+        };
+        return Some((zone, id));
+    }
+    send_to(world, player, "Usage: <zone> <id> | <id>\r\n");
+    None
+}
+
+pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
+    let Some((zone, id)) = resolve_mob_target(world, player, args) else {
         return;
     };
     let proto = world
@@ -1104,8 +1242,14 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
         }
     }
     out.push_str(&format!("level:         {}\r\n", p.level));
-    out.push_str(&format!("alignment:     {}\r\n", p.alignment));
+    let align_label = mud_db::enums::Alignment::from_score(p.alignment).label();
+    out.push_str(&format!(
+        "alignment:     {} ({align_label})\r\n",
+        p.alignment
+    ));
     out.push_str(&format!("role:          {:?}\r\n", p.role));
+    out.push_str(&format!("race:          {}\r\n", p.race));
+    out.push_str(&format!("gender:        {}\r\n", p.gender));
     out.push_str(&format!(
         "hp dice:       {}d{}+{}\r\n",
         p.hp_dice_num, p.hp_dice_size, p.hp_dice_bonus
@@ -1117,19 +1261,24 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     out.push_str(&format!("hit_roll:      {}\r\n", p.hit_roll));
     out.push_str(&format!("armor_class:   {}\r\n", p.armor_class));
     out.push_str(&format!("wealth:        {} cp\r\n", p.wealth));
-    out.push_str(&format!("class_id:      {:?}\r\n", p.class_id));
+    // class_id → resolved class name when the catalog has a row;
+    // raw `Some(N)` is unhelpful to a human reader.
+    let class_label = p.class_id.map_or_else(
+        || String::from("none"),
+        |id| {
+            world
+                .get_resource::<mud_world::ClassCatalog>()
+                .and_then(|c| c.by_id.get(&id).map(|d| d.plain_name.clone()))
+                .map_or_else(|| format!("id {id} (unknown)"), |name| format!("{name} (id {id})"))
+        },
+    );
+    out.push_str(&format!("class:         {class_label}\r\n"));
     out.push_str(&format!("triggers:      {trig_count}\r\n"));
     out.push_str(&format!("live count:    {live}\r\n"));
     send_to(world, player, out);
 }
 pub(crate) fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() != 2 {
-        send_to(world, player, "Usage: ostat <zone> <id>\r\n");
-        return;
-    }
-    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
-        send_to(world, player, "Zone and id must be integers.\r\n");
+    let Some((zone, id)) = resolve_object_target(world, player, args) else {
         return;
     };
     let proto = world
@@ -1160,7 +1309,15 @@ pub(crate) fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!("examine:       {desc}\r\n"));
     }
     out.push_str(&format!("type:          {:?}\r\n", p.r#type));
-    out.push_str(&format!("wear_flags:    {:?}\r\n", p.wear_flags));
+    let wear_labels: Vec<String> = p.wear_flags.iter().map(|f| format!("{f:?}")).collect();
+    out.push_str(&format!(
+        "wear_flags:    {}\r\n",
+        if wear_labels.is_empty() {
+            "<none>".to_string()
+        } else {
+            wear_labels.join(", ")
+        }
+    ));
     if let Some(b) = p.board_id {
         out.push_str(&format!("board_id:      {b}\r\n"));
     }
@@ -1867,13 +2024,7 @@ pub(crate) fn cmd_astat(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 pub(crate) fn cmd_sstat(world: &mut World, player: Entity, args: &str) {
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() != 2 {
-        send_to(world, player, "Usage: sstat <zone> <id>\r\n");
-        return;
-    }
-    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
-        send_to(world, player, "Zone and id must be integers.\r\n");
+    let Some((zone, id)) = resolve_zone_id(world, player, args) else {
         return;
     };
     let shop = world.resource::<ShopCatalog>().by_key.get(&(zone, id)).cloned();
@@ -1904,13 +2055,7 @@ pub(crate) fn cmd_sstat(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 pub(crate) fn cmd_tstat(world: &mut World, player: Entity, args: &str) {
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() != 2 {
-        send_to(world, player, "Usage: tstat <zone> <id>\r\n");
-        return;
-    }
-    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
-        send_to(world, player, "Zone and id must be integers.\r\n");
+    let Some((zone, id)) = resolve_zone_id(world, player, args) else {
         return;
     };
     let def = world
@@ -1944,16 +2089,17 @@ pub(crate) fn cmd_tstat(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
     type ActorRow = (Entity, String, Option<(i32, i32)>);
     type ItemRow = (Entity, String, Option<(i32, i32)>, Option<i32>);
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let room = if parts.is_empty() {
+    let trimmed = args.trim();
+    let room = if trimmed.is_empty() {
         let Some(located) = world.get::<Located>(player).copied() else {
             send_to(world, player, "You are nowhere.\r\n");
             return;
         };
         located.0
-    } else if parts.len() == 2 {
-        let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
-            send_to(world, player, "Usage: rstat [<zone_id> <room_id>]\r\n");
+    } else {
+        // Resolve via the same `<zone> <id>` / `<id>` shape as
+        // mstat / sstat / etc.
+        let Some((zone, id)) = resolve_zone_id(world, player, args) else {
             return;
         };
         let Some(found) = world
@@ -1966,9 +2112,6 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
             return;
         };
         found
-    } else {
-        send_to(world, player, "Usage: rstat [<zone_id> <room_id>]\r\n");
-        return;
     };
 
     let mut out = String::from("\r\n");
