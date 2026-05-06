@@ -272,6 +272,44 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["trigattach"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "trigattach <target> <zone> <id>",
+            summary: "Bolt a trigger onto a live entity without reloading.",
+            long: "Builder+. Mutates `AttachedTriggers` on the target \
+                   so a trigger fires for it on the next relevant \
+                   event. Doesn't touch the DB — survives only this \
+                   session. Use for builder iteration; persist via \
+                   muditor when the trigger is ready. <target> is \
+                   `here` (room), `me` / `self`, or a name in the \
+                   current room.",
+        },
+        run: cmd_trigattach,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["trigdetach"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "trigdetach <target> <zone> <id>",
+            summary: "Remove a runtime trigger attachment.",
+            long: "Builder+. Inverse of `trigattach`. Removes the \
+                   matching (zone, id) entry from the target's \
+                   `AttachedTriggers`. Silent no-op if no match.",
+        },
+        run: cmd_trigdetach,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["trace"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -736,6 +774,115 @@ pub(crate) fn cmd_varclear(world: &mut World, player: Entity, args: &str) {
                 format!("Cleared {count} script var{suffix} on {target_name}.\r\n"),
             );
         }
+    }
+}
+
+/// Parse `<target> <zone> <id>` for the trigattach / trigdetach
+/// commands. Returns `Some((target_entity, zone, id))` on a clean
+/// parse, or `None` after sending a usage message. Validates the
+/// trigger exists in the catalog so an attach to a missing id
+/// gets caught up front.
+fn parse_trigattach_args(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    verb: &str,
+) -> Option<(Entity, i32, i32)> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 3 {
+        send_to(
+            world,
+            player,
+            format!("Usage: {verb} <target> <zone> <id>\r\n"),
+        );
+        return None;
+    }
+    let (Ok(zone), Ok(id)) = (parts[1].parse::<i32>(), parts[2].parse::<i32>()) else {
+        send_to(world, player, "Zone and id must be integers.\r\n");
+        return None;
+    };
+    if !world
+        .resource::<mud_world::TriggerCatalog>()
+        .by_key
+        .contains_key(&(zone, id))
+    {
+        send_to(
+            world,
+            player,
+            format!("No trigger ({zone}, {id}) in the catalog.\r\n"),
+        );
+        return None;
+    }
+    let target = resolve_var_target(world, player, parts[0])?;
+    Some((target, zone, id))
+}
+
+pub(crate) fn cmd_trigattach(world: &mut World, player: Entity, args: &str) {
+    let Some((target, zone, id)) = parse_trigattach_args(world, player, args, "trigattach") else {
+        return;
+    };
+    // Insert the AttachedTriggers component if the target has none
+    // yet, then push the (zone, id) pair. Duplicates are harmless
+    // (the dispatcher iterates the list) but read awkwardly in
+    // `triggers <name>` output, so we de-dup.
+    if world.get::<AttachedTriggers>(target).is_none()
+        && let Ok(mut em) = world.get_entity_mut(target)
+    {
+        em.insert(AttachedTriggers::default());
+    }
+    let mut already_present = false;
+    if let Some(mut at) = world.get_mut::<AttachedTriggers>(target) {
+        if at.0.iter().any(|(z, i)| *z == zone && *i == id) {
+            already_present = true;
+        } else {
+            at.0.push((zone, id));
+        }
+    }
+    let target_name = name_of(world, target);
+    let trig_name = world
+        .resource::<mud_world::TriggerCatalog>()
+        .by_key
+        .get(&(zone, id))
+        .map_or_else(|| String::from("?"), |d| d.name.clone());
+    if already_present {
+        send_to(
+            world,
+            player,
+            format!("({zone}, {id}) {trig_name} was already attached to {target_name}.\r\n"),
+        );
+    } else {
+        send_to(
+            world,
+            player,
+            format!("Attached ({zone}, {id}) {trig_name} to {target_name}.\r\n"),
+        );
+    }
+}
+
+pub(crate) fn cmd_trigdetach(world: &mut World, player: Entity, args: &str) {
+    let Some((target, zone, id)) = parse_trigattach_args(world, player, args, "trigdetach") else {
+        return;
+    };
+    let target_name = name_of(world, target);
+    let removed = world
+        .get_mut::<AttachedTriggers>(target)
+        .is_some_and(|mut at| {
+            let before = at.0.len();
+            at.0.retain(|(z, i)| !(*z == zone && *i == id));
+            before != at.0.len()
+        });
+    if removed {
+        send_to(
+            world,
+            player,
+            format!("Detached ({zone}, {id}) from {target_name}.\r\n"),
+        );
+    } else {
+        send_to(
+            world,
+            player,
+            format!("({zone}, {id}) wasn't attached to {target_name}.\r\n"),
+        );
     }
 }
 
