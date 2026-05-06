@@ -1245,6 +1245,25 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["point"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "point <target>",
+            summary: "Point at someone, something, or a direction.",
+            long: "Resolves <target> against (in order): a direction \
+                   (n/s/e/w/u/d), an actor in your room (player or \
+                   mob), or an item in your room or inventory. \
+                   Pointing at a hidden actor reveals them — \
+                   stealth doesn't survive being singled out.",
+        },
+        run: cmd_point,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["aggr", "aggro"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4844,6 +4863,114 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     // Player titles can contain XML-Lite color tags; render before
     // sending so they show as ANSI rather than literal markup.
     send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_point(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Point at what? Or whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let player_name = name_of(world, player);
+
+    // Direction first — so "point n" beats a mob whose keyword is "n".
+    if let Some(dir) = parse_direction(arg) {
+        let dir_name = direction_name(dir);
+        send_rendered(
+            world,
+            player,
+            &format!("You point {dir_name}.\r\n"),
+        );
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} points {dir_name}.\r\n"),
+        );
+        return;
+    }
+
+    // Self-target.
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        send_rendered(world, player, "You point at yourself.\r\n");
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} points at themself.\r\n"),
+        );
+        return;
+    }
+
+    // Actor in the room: player or mob.
+    if let Some(target) = find_actor_in_room(world, arg, room, player) {
+        let target_name = name_of(world, target);
+        let was_hidden = world.get::<Stealth>(target).is_some();
+        if was_hidden {
+            // Reveal — pointing at someone hidden gives them away.
+            try_remove::<Stealth>(world, target);
+            send_rendered(
+                world,
+                player,
+                &format!("You point out {target_name}'s hiding place!\r\n"),
+            );
+            broadcast_room_except_players_rendered(
+                world,
+                room,
+                &[player, target],
+                &format!("{player_name} points out {target_name}, who was hiding here!\r\n"),
+            );
+            // The revealed actor sees the call-out personally.
+            crate::commands::send_rendered(
+                world,
+                target,
+                &format!("{player_name} points out your hiding place!\r\n"),
+            );
+        } else {
+            send_rendered(
+                world,
+                player,
+                &format!("You point at {target_name}.\r\n"),
+            );
+            broadcast_room_except_players_rendered(
+                world,
+                room,
+                &[player, target],
+                &format!("{player_name} points at {target_name}.\r\n"),
+            );
+            crate::commands::send_rendered(
+                world,
+                target,
+                &format!("{player_name} points at you.\r\n"),
+            );
+        }
+        return;
+    }
+
+    // Object in the room or in inventory.
+    let item = find_in_room(world, arg, room)
+        .or_else(|| find_carried_by(world, arg, player, EquipFilter::Anywhere));
+    if let Some(item) = item {
+        let item_name = name_of(world, item);
+        send_rendered(
+            world,
+            player,
+            &format!("You point at {item_name}.\r\n"),
+        );
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} points at {item_name}.\r\n"),
+        );
+        return;
+    }
+
+    send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
 }
 
 pub(crate) fn cmd_aggr(world: &mut World, player: Entity, _args: &str) {
