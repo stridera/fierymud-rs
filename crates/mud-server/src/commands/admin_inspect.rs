@@ -2467,6 +2467,42 @@ const SEARCH_RESULT_LIMIT: usize = 50;
 
 inventory::submit! {
     Command {
+        names: &["vitem"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "vitem <type>",
+            summary: "List object prototypes by type.",
+            long: "Builder+. Filters `ObjectPrototypes` by `ObjectType` \
+                   (Weapon, Armor, Container, Light, Scroll, Wand, …). \
+                   Case-insensitive. Capped at 50 hits with overflow \
+                   footer; pair with `ostat` to inspect any one.",
+        },
+        run: cmd_vitem,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["vwear"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "vwear <slot>",
+            summary: "List object prototypes by wear-slot.",
+            long: "Builder+. Filters `ObjectPrototypes` whose \
+                   `wear_flags` contain the named slot (Head, Body, \
+                   Mainhand, etc.). Case-insensitive; matches the \
+                   `WearFlag` enum names from the schema.",
+        },
+        run: cmd_vwear,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["zlist"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -2600,6 +2636,142 @@ inventory::submit! {
         },
         run: cmd_rsearch,
     }
+}
+
+/// Parse a case-insensitive `ObjectType` name. Returns `None` for
+/// unrecognised input — the caller renders a helpful error.
+fn parse_object_type(s: &str) -> Option<mud_db::enums::ObjectType> {
+    use mud_db::enums::ObjectType as T;
+    match s.to_ascii_lowercase().as_str() {
+        "nothing" => Some(T::Nothing),
+        "light" => Some(T::Light),
+        "scroll" => Some(T::Scroll),
+        "wand" => Some(T::Wand),
+        "staff" => Some(T::Staff),
+        "weapon" => Some(T::Weapon),
+        "fireweapon" => Some(T::Fireweapon),
+        "missile" => Some(T::Missile),
+        "treasure" => Some(T::Treasure),
+        "armor" => Some(T::Armor),
+        "potion" => Some(T::Potion),
+        "worn" => Some(T::Worn),
+        "other" => Some(T::Other),
+        "trash" => Some(T::Trash),
+        "trap" => Some(T::Trap),
+        "container" => Some(T::Container),
+        "note" => Some(T::Note),
+        "drinkcontainer" | "drink" => Some(T::Drinkcontainer),
+        "key" => Some(T::Key),
+        "food" => Some(T::Food),
+        "money" => Some(T::Money),
+        "pen" => Some(T::Pen),
+        "boat" => Some(T::Boat),
+        "fountain" => Some(T::Fountain),
+        "portal" => Some(T::Portal),
+        "rope" => Some(T::Rope),
+        "spellbook" => Some(T::Spellbook),
+        "wall" => Some(T::Wall),
+        "touchstone" => Some(T::Touchstone),
+        "board" => Some(T::Board),
+        "instrument" => Some(T::Instrument),
+        "vehicle" => Some(T::Vehicle),
+        "corpse" => Some(T::Corpse),
+        "kit" => Some(T::Kit),
+        "wings" => Some(T::Wings),
+        "perfume" => Some(T::Perfume),
+        "disguise" => Some(T::Disguise),
+        "poison" => Some(T::Poison),
+        _ => None,
+    }
+}
+
+fn parse_wear_flag(s: &str) -> Option<mud_db::enums::WearFlag> {
+    use mud_db::enums::WearFlag as W;
+    match s.to_ascii_lowercase().as_str() {
+        "finger" => Some(W::Finger),
+        "neck" => Some(W::Neck),
+        "ear" | "ears" => Some(W::Ear),
+        "wrist" => Some(W::Wrist),
+        "head" => Some(W::Head),
+        "eyes" => Some(W::Eyes),
+        "face" => Some(W::Face),
+        "body" => Some(W::Body),
+        "about" => Some(W::About),
+        "arms" => Some(W::Arms),
+        "hands" => Some(W::Hands),
+        "waist" => Some(W::Waist),
+        "belt" => Some(W::Belt),
+        "legs" => Some(W::Legs),
+        "feet" => Some(W::Feet),
+        "tail" => Some(W::Tail),
+        "mainhand" | "wield" => Some(W::Mainhand),
+        "offhand" | "hold" => Some(W::Offhand),
+        "twohand" => Some(W::Twohand),
+        "badge" => Some(W::Badge),
+        "hover" => Some(W::Hover),
+        "disguise" => Some(W::Disguise),
+        _ => None,
+    }
+}
+
+pub(crate) fn cmd_vitem(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(
+            world,
+            player,
+            "Usage: vitem <type>  (try: weapon, armor, container, light, scroll, wand, staff, food, drinkcontainer, key, portal, ...)\r\n",
+        );
+        return;
+    }
+    let Some(kind) = parse_object_type(needle) else {
+        send_to(
+            world,
+            player,
+            format!("Unknown object type '{needle}'. Run with no args for the list of valid kinds.\r\n"),
+        );
+        return;
+    };
+    let mut hits: Vec<((i32, i32), String)> = world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .iter()
+        .filter(|(_, p)| p.r#type == kind)
+        .map(|((z, id), p)| ((*z, *id), p.name.clone()))
+        .collect();
+    hits.sort_by_key(|((z, id), _)| (*z, *id));
+    let label = format!("{kind:?}");
+    render_search_results(world, player, "object", &label, &hits);
+}
+
+pub(crate) fn cmd_vwear(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(
+            world,
+            player,
+            "Usage: vwear <slot>  (try: head, body, mainhand, offhand, finger, neck, wrist, hands, feet, ...)\r\n",
+        );
+        return;
+    }
+    let Some(flag) = parse_wear_flag(needle) else {
+        send_to(
+            world,
+            player,
+            format!("Unknown wear slot '{needle}'. Run with no args for the list.\r\n"),
+        );
+        return;
+    };
+    let mut hits: Vec<((i32, i32), String)> = world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .iter()
+        .filter(|(_, p)| p.wear_flags.contains(&flag))
+        .map(|((z, id), p)| ((*z, *id), p.name.clone()))
+        .collect();
+    hits.sort_by_key(|((z, id), _)| (*z, *id));
+    let label = format!("wear-{flag:?}");
+    render_search_results(world, player, "object", &label, &hits);
 }
 
 pub(crate) fn cmd_zlist(world: &mut World, player: Entity, _args: &str) {
