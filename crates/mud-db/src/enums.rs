@@ -581,6 +581,10 @@ pub enum PlayerFlag {
     MxpEnabled,
     HolyLight,
     ShowIds,
+    /// Admin sanction — silenced on global channels (gossip /
+    /// shout / quest channel). Set by `mute`, cleared by re-running
+    /// `mute <name>`. Doesn't block `say` / `tell`.
+    Muted,
 }
 
 // sqlx's auto-derived PgHasArrayType lowercases the array type name
@@ -622,6 +626,7 @@ impl PlayerFlag {
             "MXP_ENABLED" | "MXP" => Some(Self::MxpEnabled),
             "HOLY_LIGHT" | "HOLYLIGHT" => Some(Self::HolyLight),
             "SHOW_IDS" | "SHOWIDS" => Some(Self::ShowIds),
+            "MUTED" => Some(Self::Muted),
             _ => None,
         }
     }
@@ -631,7 +636,7 @@ impl PlayerFlag {
     /// be used to bypass the dedicated god-toggle commands.
     #[must_use]
     pub fn is_god_only(self) -> bool {
-        matches!(self, Self::HolyLight | Self::ShowIds)
+        matches!(self, Self::HolyLight | Self::ShowIds | Self::Muted)
     }
 
     #[must_use]
@@ -659,6 +664,7 @@ impl PlayerFlag {
             Self::MxpEnabled => "MXP_ENABLED",
             Self::HolyLight => "HOLY_LIGHT",
             Self::ShowIds => "SHOW_IDS",
+            Self::Muted => "MUTED",
         }
     }
 }

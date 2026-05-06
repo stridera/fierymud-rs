@@ -179,7 +179,10 @@ fn broadcast_global(
         send_to(world, player, "Your voice is silenced.\r\n");
         return;
     }
-    if world.get::<mud_world::Muted>(player).is_some() {
+    if world
+        .get::<mud_world::PlayerFlags>(player)
+        .is_some_and(|pf| pf.has(PlayerFlag::Muted))
+    {
         send_to(
             world,
             player,

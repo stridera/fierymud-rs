@@ -16,7 +16,7 @@ pub use components::{
     MemEntry,
     MemorizedSpells,
     Mob, MobBehaviors, ModifyDelta, Mountable, Mounted, Named, Online, Player, PlayerFlags, Posture,
-    PostureKind, Profile, Prompt, Muted, Poofs, RecallPoint, RiddenBy, Room, RoomSector, ScriptVars, Shopkeeper, SkillPoints, Snooping, SnoopedBy, SwitchedFrom, SwitchedInto, Trophy, TrophyEntry, TrophyKind, WizInvis,
+    PostureKind, Profile, Prompt, Poofs, RecallPoint, RiddenBy, Room, RoomSector, ScriptVars, Shopkeeper, SkillPoints, Snooping, SnoopedBy, SwitchedFrom, SwitchedInto, Trophy, TrophyEntry, TrophyKind, WizInvis,
     BaseLightLevel, PeacefulRoom, RevealedExits, RoomExtras, Slot, Stamina, Stealth, Stunned, TellLog, Thirst, TimePlayed, Title, UiStyle, Wealth, WearableIn,
     WimpyThreshold,
     WorldKey, Zone, ZoneClimate, ZoneVisits,

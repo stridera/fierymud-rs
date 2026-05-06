@@ -2590,7 +2590,10 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             w.0,
         ));
     }
-    if world.get::<mud_world::Muted>(target).is_some() {
+    if world
+        .get::<PlayerFlags>(target)
+        .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::Muted))
+    {
         out.push_str("muted:         yes — silenced on global channels\r\n");
     }
     if let Some(w) = world.get::<mud_world::WimpyThreshold>(target)

@@ -10,7 +10,7 @@ use tracing::info;
 use mud_world::{
     Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance,
     EffectSource, Fighting, Frozen, Health, Item, Keywords, Located, Mob, MobPrototypes,
-    Named, ObjectPrototypes, Online, Player, Posture, PostureKind, Profile, Stamina, Wealth,
+    Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Stamina, Wealth,
     WearableIn, WorldKey, WorldKeyIndex,
 };
 
@@ -429,7 +429,7 @@ inventory::submit! {
         help: Help {
             usage: "mute <player>",
             summary: "Toggle a player's silence on global channels.",
-            long: "Builder+. Adds or removes a `Muted` marker on the \
+            long: "Builder+. Toggles `PlayerFlag::Muted` on the \
                    target. Muted players can't use gossip / shout / \
                    music / clan / quest channels — `say` and `tell` \
                    are unaffected so they can still play. Re-running \
@@ -1958,7 +1958,6 @@ pub(crate) fn cmd_reroll(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_mute(world: &mut World, player: Entity, args: &str) {
-    use mud_world::Muted;
     record_admin_action(world, player, "mute", args);
     let arg = args.trim();
     if arg.is_empty() {
@@ -1981,22 +1980,18 @@ pub(crate) fn cmd_mute(world: &mut World, player: Entity, args: &str) {
     }
     let target_name = name_of(world, target);
     let admin_name = name_of(world, player);
-    let was_muted = world.get::<Muted>(target).is_some();
-    if was_muted {
-        try_remove::<Muted>(world, target);
-        send_rendered(
-            world,
-            player,
-            &format!("You restore {target_name}'s voice.\r\n"),
-        );
-        send_rendered(
-            world,
-            target,
-            "<b:white>Your voice has been restored — channels are open again.</>\r\n",
-        );
-        info!(admin = %admin_name, target = %target_name, "mute cleared");
-    } else {
-        try_insert(world, target, Muted);
+    // Mute is `PlayerFlag::Muted` in the flags set — same array
+    // that round-trips through `Characters.player_flags`, so the
+    // sanction survives a reconnect for free. Insert the
+    // component if missing so the toggle path always has a Vec
+    // to flip.
+    if world.get::<PlayerFlags>(target).is_none() {
+        try_insert(world, target, PlayerFlags::default());
+    }
+    let now_muted = world
+        .get_mut::<PlayerFlags>(target)
+        .is_some_and(|mut pf| pf.toggle(mud_db::enums::PlayerFlag::Muted));
+    if now_muted {
         send_rendered(
             world,
             player,
@@ -2008,6 +2003,18 @@ pub(crate) fn cmd_mute(world: &mut World, player: Entity, args: &str) {
             "<red>Your voice has been muted by staff. Channels won't carry your words.</>\r\n",
         );
         info!(admin = %admin_name, target = %target_name, "mute set");
+    } else {
+        send_rendered(
+            world,
+            player,
+            &format!("You restore {target_name}'s voice.\r\n"),
+        );
+        send_rendered(
+            world,
+            target,
+            "<b:white>Your voice has been restored — channels are open again.</>\r\n",
+        );
+        info!(admin = %admin_name, target = %target_name, "mute cleared");
     }
 }
 
