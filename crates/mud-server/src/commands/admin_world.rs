@@ -111,6 +111,27 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["zreset"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "zreset [<zone_id>]",
+            summary: "Despawn reset-spawned mobs/objects so respawn refills the zone.",
+            long: "Builder+. With no arg, resets your current zone. \
+                   Despawns every mob and object that came from a \
+                   `MobResets` / `ObjectResets` row in the named \
+                   zone. The next respawn tick (~6s) refills the \
+                   gaps. Admin-summoned / loadobj'd entities are \
+                   preserved (no `FromMobReset` / `FromObjectReset` \
+                   marker).",
+        },
+        run: cmd_zreset,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["advance"],
         min_role: UserRole::Implementor,
         required_perm: None,
@@ -1100,6 +1121,73 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} summons {proto_name} from thin air.\r\n"),
     );
 }
+pub(crate) fn cmd_zreset(world: &mut World, player: Entity, args: &str) {
+    use mud_world::{FromMobReset, FromObjectReset};
+    record_admin_action(world, player, "zreset", args);
+    let arg = args.trim();
+    let zone: i32 = if arg.is_empty() {
+        let here = world
+            .get::<Located>(player)
+            .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone));
+        let Some(zone) = here else {
+            send_to(world, player, "Can't resolve current zone.\r\n");
+            return;
+        };
+        zone
+    } else if let Ok(z) = arg.parse::<i32>() {
+        z
+    } else {
+        send_to(world, player, "Usage: zreset [<zone_id>]\r\n");
+        return;
+    };
+
+    // Snapshot every reset-spawned mob and object whose WorldKey
+    // zone matches. Admin-summoned entities lack the From* marker
+    // and get preserved. Players (not Mob / Item) are also
+    // skipped by the With<Mob>/With<Item> filters.
+    let mob_targets: Vec<Entity> = {
+        let mut q = world
+            .query_filtered::<(Entity, &WorldKey, &FromMobReset), With<Mob>>();
+        q.iter(world)
+            .filter(|(_, k, _)| k.zone == zone)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    let item_targets: Vec<Entity> = {
+        let mut q = world
+            .query_filtered::<(Entity, &WorldKey, &FromObjectReset), With<Item>>();
+        q.iter(world)
+            .filter(|(_, k, _)| k.zone == zone)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    let mob_count = mob_targets.len();
+    let item_count = item_targets.len();
+    for e in mob_targets {
+        // Disengage anyone still locked onto this mob so combat
+        // doesn't dangle a Fighting reference into the void.
+        crate::commands::disengage_attackers_of(world, e);
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    for e in item_targets {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    let admin_name = name_of(world, player);
+    send_rendered(
+        world,
+        player,
+        &format!(
+            "Reset zone {zone}: cleared {mob_count} mob(s), {item_count} item(s). \
+             Respawn fills on the next tick.\r\n"
+        ),
+    );
+    info!(admin = %admin_name, zone, mob_count, item_count, "zreset");
+}
+
 pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "advance", args);
     let parts: Vec<&str> = args.split_whitespace().collect();
