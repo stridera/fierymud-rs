@@ -56,6 +56,25 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+    names: &["steal"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Combat,
+    help: Help {
+        usage: "steal <item|coins> <target>",
+        summary: "Pickpocket from a target.",
+        long: "Class-gated to Thief or Assassin. Refused while \
+               fighting, against yourself, against a Shopkeeper, \
+               and against staff. On failure the target notices \
+               and re-aggros on you. Pass `coins` / `gold` to \
+               grab a chunk of their coin instead of an item.",
+    },
+    run: cmd_steal,
+    }
+}
+
+inventory::submit! {
+    Command {
     names: &["gretreat"],
     min_role: UserRole::Player,
     required_perm: None,
@@ -970,6 +989,164 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     }
     send_rendered(world, player, &out);
 }
+/// Class IDs that can `steal`. Thief = 3, Assassin = 10 in the
+/// seeded Class catalog (verified against fierydev). A
+/// "rogue-skill" tag on the class would be the cleaner long-term
+/// shape so subclassing doesn't have to chase the list.
+const STEAL_CLASS_IDS: &[i32] = &[3, 10];
+
+#[allow(clippy::too_many_lines)]
+pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
+    if world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "You can't steal while fighting.\r\n");
+        return;
+    }
+    let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    if !class_id.is_some_and(|id| STEAL_CLASS_IDS.contains(&id)) {
+        send_to(world, player, "You don't know how to steal.\r\n");
+        return;
+    }
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() < 2 {
+        send_to(world, player, "Usage: steal <item|coins> <target>\r\n");
+        return;
+    }
+    let what = parts[0].trim();
+    let who = parts[1..].join(" ");
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let Some(target) = find_actor_in_room(world, &who, room, player) else {
+        send_to(world, player, format!("No '{who}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "Stealing from yourself is rather stupid.\r\n");
+        return;
+    }
+    // Refuse against staff, shopkeepers, and the room's
+    // PeacefulRoom marker.
+    let target_role = world.get::<mud_world::Account>(target).map(|a| a.role);
+    if target_role.is_some_and(|r| r.at_least(mud_db::enums::UserRole::Builder)) {
+        send_to(world, player, "You can't steal from staff.\r\n");
+        return;
+    }
+    if world.get::<mud_world::Shopkeeper>(target).is_some() {
+        send_to(
+            world,
+            player,
+            "Shopkeepers keep their coin a little too well guarded.\r\n",
+        );
+        return;
+    }
+    if world.get::<mud_world::PeacefulRoom>(room).is_some() {
+        send_to(
+            world,
+            player,
+            "A peaceful aura wards off such attempts here.\r\n",
+        );
+        return;
+    }
+
+    // Simplified skill check: 50% base, +5% per level above 1, -25%
+    // if the target's awake. Future polish: dex bonus, target
+    // alertness, weight modifier on items. Floor 5%, cap 95%.
+    let player_level = world.get::<Profile>(player).map_or(1, |p| p.level);
+    let awake = world
+        .get::<Posture>(target)
+        .is_none_or(|p| !matches!(p.0, PostureKind::Sleeping));
+    let chance: i32 = {
+        let base = 50 + (player_level - 1) * 5;
+        let after_awake = if awake { base - 25 } else { base };
+        after_awake.clamp(5, 95)
+    };
+    let roll = rand::random_range(1..=100);
+    let success = roll <= chance;
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
+
+    if !success {
+        send_to(world, player, "Oops...\r\n");
+        send_rendered(
+            world,
+            target,
+            &format!("<b:yellow>{player_name} tried to steal something from you!</>\r\n"),
+        );
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[player, target],
+            &format!("<b:yellow>{player_name} tries to steal from {target_name}.</>\r\n"),
+        );
+        // Caught — make the target aggro the thief. For mobs, push
+        // onto the HateList + MobMemory so they re-engage later.
+        // For PvP, just install Fighting.
+        if world.get::<Mob>(target).is_some() {
+            crate::combat::remember_attacker(world, target, player);
+        }
+        try_insert(world, target, Fighting(player));
+        return;
+    }
+
+    // Success path: coin or item.
+    if what.eq_ignore_ascii_case("coins") || what.eq_ignore_ascii_case("gold") {
+        // Grab roughly 1/4 of the target's wealth, capped at level*100 cp.
+        let pool = world.get::<mud_world::Wealth>(target).map_or(0, |w| w.0);
+        let take = (pool / 4).min(i64::from(player_level) * 100).max(0);
+        if take == 0 {
+            send_to(world, player, format!("{target_name} has no coin worth lifting.\r\n"));
+            return;
+        }
+        if let Some(mut w) = world.get_mut::<mud_world::Wealth>(target) {
+            w.0 = w.0.saturating_sub(take);
+        }
+        if let Some(mut w) = world.get_mut::<mud_world::Wealth>(player) {
+            w.0 = w.0.saturating_add(take);
+        } else if let Ok(mut em) = world.get_entity_mut(player) {
+            em.insert(mud_world::Wealth(take));
+        }
+        let coin = crate::commands::format_wealth(take).unwrap_or_else(|| "no coin".to_string());
+        send_rendered(
+            world,
+            player,
+            &format!("You lift {coin} from {target_name}.\r\n"),
+        );
+        return;
+    }
+
+    // Item path: find a carried (non-equipped) item by keyword.
+    let needle = what.to_ascii_lowercase();
+    let item_opt: Option<(Entity, String)> = {
+        let mut q = world
+            .query_filtered::<(Entity, &mud_world::Located, &Named, Option<&mud_world::Keywords>, Option<&mud_world::EquippedSlot>), With<Item>>();
+        q.iter(world)
+            .find(|(_, l, n, kw, eq)| {
+                l.0 == target
+                    && eq.is_none()
+                    && crate::commands::matches(&needle, n, *kw)
+            })
+            .map(|(e, _, n, _, _)| (e, n.name.clone()))
+    };
+    let Some((item, item_name)) = item_opt else {
+        send_rendered(
+            world,
+            player,
+            &format!("{target_name} hasn't got '{what}' on them.\r\n"),
+        );
+        return;
+    };
+    if let Some(mut l) = world.get_mut::<mud_world::Located>(item) {
+        l.0 = player;
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("You quietly pluck {item_name} from {target_name}.\r\n"),
+    );
+}
+
 pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
     use crate::commands::{cap_sentence_start, group_members, group_root};
     let Some(located) = world.get::<Located>(player).copied() else {
