@@ -101,17 +101,44 @@ inventory::submit! {
 fn cmd_tell(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.len() != 2 || parts[1].trim().is_empty() {
-        send_to(world, player, "Usage: tell <player> <message>\r\n");
+        send_to(
+            world,
+            player,
+            "Usage: tell <player>[,<player2>,...] <message>\r\n",
+        );
         return;
     }
     if effect_prevents(world, player, Prevent::Speaking) {
         send_to(world, player, "Your voice is silenced.\r\n");
         return;
     }
-    let target_name = parts[0].trim();
+    let names_raw = parts[0].trim();
     let message = parts[1].trim();
-    let target_lower = target_name.to_ascii_lowercase();
+    // Comma-separated recipient list — `tell foo,bar,baz hi`.
+    // Single-name form is the common case and reads as a list of
+    // one. Per-recipient feedback is sent inline (refusals,
+    // AFK hints, "isn't online") so the sender knows what
+    // landed.
+    let names: Vec<&str> = names_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        send_to(world, player, "Tell whom?\r\n");
+        return;
+    }
+    for name in &names {
+        deliver_tell(world, player, name, message);
+    }
+}
 
+/// Resolve and deliver one tell. Factored out of `cmd_tell` so the
+/// comma-separated list path can iterate. All per-recipient
+/// feedback (off-line, `NoTell`, `IgnoreList`, AFK hint) renders
+/// inline to the sender.
+fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &str) {
+    let target_lower = target_name.to_ascii_lowercase();
     let target = {
         let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
         q.iter(world)
@@ -155,10 +182,6 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
     let player_name = name_of(world, player);
     let target_name = name_of(world, target);
 
-    // Tells render with a cyan channel framing (`You tell` /
-    // `tells you`) so they pop against say/emote/shout traffic
-    // in a busy player's log. Speaker / target names keep any
-    // authored color via render-on-send.
     send_rendered(
         world,
         player,
