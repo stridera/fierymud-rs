@@ -826,6 +826,40 @@ impl ScriptErrorLog {
     }
 }
 
+/// One entry in the trigger fire history — every dispatched
+/// trigger gets a row. Drives the `trighistory <target>` admin
+/// command so builders can confirm whether a trigger actually
+/// fired (and on the right entity at the right tick) when a
+/// script doesn't behave as expected.
+#[derive(Debug, Clone)]
+pub struct TriggerHistoryEntry {
+    pub at: std::time::SystemTime,
+    pub tick: u64,
+    pub listener: bevy_ecs::entity::Entity,
+    pub trigger_zone: i32,
+    pub trigger_id: i32,
+    pub event: String,
+    pub ok: bool,
+}
+
+/// Bounded ring buffer of recent trigger fires. Capped at 512 so a
+/// chatty TIMER trigger can't bleed memory; in-memory only — clears
+/// on restart.
+#[derive(Resource, Debug, Default)]
+pub struct TriggerHistoryLog {
+    pub entries: std::collections::VecDeque<TriggerHistoryEntry>,
+}
+
+impl TriggerHistoryLog {
+    pub const CAP: usize = 512;
+    pub fn push(&mut self, e: TriggerHistoryEntry) {
+        if self.entries.len() >= Self::CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(e);
+    }
+}
+
 /// Queued output produced by Lua trigger bodies. `messages` carries
 /// room broadcasts (`room.send` / `room.send_except`); `direct`
 /// carries one-to-one lines (`actor.send`). mud-server drains both

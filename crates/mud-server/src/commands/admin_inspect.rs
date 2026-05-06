@@ -272,6 +272,25 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["trighistory"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "trighistory [<target>] [<n>]",
+            summary: "Show recent trigger fires for an entity.",
+            long: "Builder+. Filters the in-memory trigger fire log \
+                   to fires whose listener was <target> (`here` / \
+                   `me` / `self` / a name in the current room). With \
+                   no <target>, shows the last <n> fires across all \
+                   entities. <n> defaults to 20, capped at 200.",
+        },
+        run: cmd_trighistory,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["trigattach"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -857,6 +876,86 @@ pub(crate) fn cmd_trigattach(world: &mut World, player: Entity, args: &str) {
             format!("Attached ({zone}, {id}) {trig_name} to {target_name}.\r\n"),
         );
     }
+}
+
+pub(crate) fn cmd_trighistory(world: &mut World, player: Entity, args: &str) {
+    use mud_world::TriggerHistoryLog;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    // Parse args: any trailing integer is the limit; everything
+    // before it is the target word(s). Bare `trighistory` → most
+    // recent 20 fires across all entities.
+    let (target_words, limit): (Vec<&str>, usize) = if let Some(last) = parts.last()
+        && let Ok(n) = last.parse::<usize>()
+    {
+        let head: Vec<&str> = parts[..parts.len() - 1].to_vec();
+        (head, n.clamp(1, 200))
+    } else {
+        (parts.clone(), 20)
+    };
+    let target: Option<Entity> = if target_words.is_empty() {
+        None
+    } else {
+        let combined = target_words.join(" ");
+        let Some(t) = resolve_var_target(world, player, &combined) else {
+            return;
+        };
+        Some(t)
+    };
+
+    if !world.contains_resource::<TriggerHistoryLog>() {
+        send_to(world, player, "No trigger fires recorded yet.\r\n");
+        return;
+    }
+    let entries: Vec<mud_world::TriggerHistoryEntry> = {
+        let log = world.resource::<TriggerHistoryLog>();
+        log.entries
+            .iter()
+            .rev()
+            .filter(|e| target.is_none_or(|t| e.listener == t))
+            .take(limit)
+            .cloned()
+            .collect()
+    };
+    if entries.is_empty() {
+        if let Some(t) = target {
+            let n = name_of(world, t);
+            send_to(
+                world,
+                player,
+                format!("No recorded fires for {n}.\r\n"),
+            );
+        } else {
+            send_to(world, player, "No trigger fires recorded yet.\r\n");
+        }
+        return;
+    }
+    let header_target = target.map_or_else(
+        || String::from("(all entities)"),
+        |t| name_of(world, t),
+    );
+    let mut out = format!(
+        "\r\n<b:cyan>Last {} trigger fire(s) for {header_target}:</>\r\n",
+        entries.len(),
+    );
+    let now = std::time::SystemTime::now();
+    for e in &entries {
+        let secs_ago = now.duration_since(e.at).map(|d| d.as_secs()).unwrap_or(0);
+        let listener_name = if target.is_some() {
+            String::new() // already in header
+        } else {
+            format!("  on {}", name_of(world, e.listener))
+        };
+        let status = if e.ok { "<green>ok</>" } else { "<red>err</>" };
+        out.push_str(&format!(
+            "  <dim>tick {tick:>6} | {ago:>5}s ago</>  ({zone}, {id}) [{event}] {status}{listener_name}\r\n",
+            tick = e.tick,
+            ago = secs_ago,
+            zone = e.trigger_zone,
+            id = e.trigger_id,
+            event = e.event,
+        ));
+    }
+    crate::commands::send_rendered(world, player, &out);
 }
 
 pub(crate) fn cmd_trigdetach(world: &mut World, player: Entity, args: &str) {

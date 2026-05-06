@@ -39,27 +39,56 @@ pub struct EventCounters {
     pub failed: u64,
 }
 
-/// Increment the per-event counters for one trigger fire.
-/// Inserted everywhere a script body executes against `LuaHost`.
-fn record_fire(world: &mut World, event: TriggerEvent, ok: bool) {
+/// Increment the per-event counters for one trigger fire and
+/// append a per-entity history row. Inserted everywhere a script
+/// body executes against `LuaHost`. The history feeds the
+/// `trighistory <target>` builder command — bounded ring buffer
+/// per `TriggerHistoryLog::CAP` so a chatty trigger can't bleed
+/// memory.
+fn record_fire(
+    world: &mut World,
+    listener: Entity,
+    zone: i32,
+    id: i32,
+    event: TriggerEvent,
+    ok: bool,
+) {
     if !world.contains_resource::<TriggerStats>() {
         world.insert_resource(TriggerStats::default());
     }
-    let mut stats = world.resource_mut::<TriggerStats>();
-    stats.total_fired += 1;
-    if ok {
-        stats.total_succeeded += 1;
-    } else {
-        stats.total_failed += 1;
+    {
+        let mut stats = world.resource_mut::<TriggerStats>();
+        stats.total_fired += 1;
+        if ok {
+            stats.total_succeeded += 1;
+        } else {
+            stats.total_failed += 1;
+        }
+        let key = format!("{event:?}");
+        let counter = stats.by_event.entry(key).or_default();
+        counter.fired += 1;
+        if ok {
+            counter.succeeded += 1;
+        } else {
+            counter.failed += 1;
+        }
     }
-    let key = format!("{event:?}");
-    let counter = stats.by_event.entry(key).or_default();
-    counter.fired += 1;
-    if ok {
-        counter.succeeded += 1;
-    } else {
-        counter.failed += 1;
+
+    if !world.contains_resource::<mud_world::TriggerHistoryLog>() {
+        world.insert_resource(mud_world::TriggerHistoryLog::default());
     }
+    let tick = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
+    world
+        .resource_mut::<mud_world::TriggerHistoryLog>()
+        .push(mud_world::TriggerHistoryEntry {
+            at: std::time::SystemTime::now(),
+            tick,
+            listener,
+            trigger_zone: zone,
+            trigger_id: id,
+            event: format!("{event:?}"),
+            ok,
+        });
 }
 
 /// Push a fire failure into the in-memory `ScriptErrorLog` and emit
@@ -149,7 +178,7 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
             host.exec_for_actor(world, entity, &body)
         });
         drain_lua_outbox(world);
-        record_fire(world, event, result.is_ok());
+        record_fire(world, entity, zone, id, event, result.is_ok());
         if let Err(e) = result {
             record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
         }
@@ -202,7 +231,7 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
             )
         });
         drain_lua_outbox(world);
-        record_fire(world, TriggerEvent::Speech, result.is_ok());
+        record_fire(world, listener, zone, id, TriggerEvent::Speech, result.is_ok());
         if let Err(e) = result {
             record_failure(world, zone, id, &name, "SPEECH", &e);
         }
@@ -249,7 +278,7 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
                 )
             });
             drain_lua_outbox(world);
-            record_fire(world, TriggerEvent::Speech, result.is_ok());
+            record_fire(world, listener, zone, id, TriggerEvent::Speech, result.is_ok());
             if let Err(e) = result {
                 record_failure(world, zone, id, &name, "SPEECH", &e);
             }
@@ -287,7 +316,7 @@ pub fn fire_room_entry(world: &mut World, room: Entity, entering: Entity, event:
             host.exec_for_listener_with_extras(world, room, entering, &body, &[])
         });
         drain_lua_outbox(world);
-        record_fire(world, event, result.is_ok());
+        record_fire(world, room, zone, id, event, result.is_ok());
         if let Err(e) = result {
             record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
         }
@@ -335,7 +364,7 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
                 host.exec_for_listener_with_extras(world, listener, entering, &body, &[])
             });
             drain_lua_outbox(world);
-            record_fire(world, TriggerEvent::Greet, result.is_ok());
+            record_fire(world, listener, zone, id, TriggerEvent::Greet, result.is_ok());
             if let Err(e) = result {
                 record_failure(world, zone, id, &name, "GREET", &e);
             }
@@ -379,7 +408,7 @@ pub fn fire_item_event(
             host.exec_for_listener_with_extras(world, item, actor, &body, &[])
         });
         drain_lua_outbox(world);
-        record_fire(world, event, result.is_ok());
+        record_fire(world, item, zone, id, event, result.is_ok());
         if let Err(e) = result {
             record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
         }
@@ -420,7 +449,7 @@ pub fn fire_event_with_actor(
             host.exec_for_listener_with_extras(world, listener, acting, &body, &[])
         });
         drain_lua_outbox(world);
-        record_fire(world, event, result.is_ok());
+        record_fire(world, listener, zone, id, event, result.is_ok());
         if let Err(e) = result {
             record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
         }
@@ -457,7 +486,7 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
             host.exec_for_event(world, recipient, giver, Some(item), &body, &[])
         });
         drain_lua_outbox(world);
-        record_fire(world, TriggerEvent::Receive, result.is_ok());
+        record_fire(world, recipient, zone, id, TriggerEvent::Receive, result.is_ok());
         if let Err(e) = result {
             record_failure(world, zone, id, &name, "RECEIVE", &e);
         }
@@ -518,7 +547,7 @@ pub fn fire_command_in_room(
                 )
             });
             drain_lua_outbox(world);
-            record_fire(world, TriggerEvent::Command, result.is_ok());
+            record_fire(world, listener, zone, id, TriggerEvent::Command, result.is_ok());
             match result {
                 Ok((_out, Some(false))) => {
                     consumed = true;
