@@ -111,6 +111,44 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["switch"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "switch <mob>",
+            summary: "Take control of a mob in your current room.",
+            long: "Builder+. Future commands you type dispatch \
+                   against the mob instead of yourself; output the \
+                   mob would receive forwards to your connection. \
+                   Useful for testing triggers from inside a mob \
+                   and for running RP-as-NPC. `return` ends the \
+                   switch.",
+        },
+        run: cmd_switch,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["return"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "return",
+            summary: "End a `switch` session and return to your own body.",
+            long: "Builder+. Inverse of `switch`. Always types as \
+                   the puppeteer (not the mob) — the dispatcher \
+                   keeps `return` and `switch` as escape hatches \
+                   so a stuck switch can always be undone.",
+        },
+        run: cmd_return,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["zreset"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -1121,6 +1159,68 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} summons {proto_name} from thin air.\r\n"),
     );
 }
+pub(crate) fn cmd_switch(world: &mut World, player: Entity, args: &str) {
+    use mud_world::{SwitchedFrom, SwitchedInto};
+    record_admin_action(world, player, "switch", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: switch <mob>\r\n");
+        return;
+    }
+    if world.get::<SwitchedInto>(player).is_some() {
+        send_to(
+            world,
+            player,
+            "You're already controlling someone. Use `return` first.\r\n",
+        );
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let mob = find_actor_in_room(world, arg, located.0, player);
+    let Some(mob) = mob else {
+        send_to(world, player, format!("No '{arg}' here.\r\n"));
+        return;
+    };
+    if world.get::<Player>(mob).is_some() {
+        send_to(world, player, "You can't switch into another player.\r\n");
+        return;
+    }
+    if world.get::<SwitchedFrom>(mob).is_some() {
+        send_to(world, player, "Someone else is already in there.\r\n");
+        return;
+    }
+    try_insert(world, player, SwitchedInto(mob));
+    try_insert(world, mob, SwitchedFrom(player));
+    let mob_name = name_of(world, mob);
+    send_rendered(
+        world,
+        player,
+        &format!(
+            "<dim>You slip into {mob_name}. Type `return` to come back.</>\r\n"
+        ),
+    );
+}
+
+pub(crate) fn cmd_return(world: &mut World, player: Entity, args: &str) {
+    use mud_world::{SwitchedFrom, SwitchedInto};
+    record_admin_action(world, player, "return", args);
+    let mob = world.get::<SwitchedInto>(player).map(|s| s.0);
+    let Some(mob) = mob else {
+        send_to(world, player, "You aren't switched into anyone.\r\n");
+        return;
+    };
+    try_remove::<SwitchedInto>(world, player);
+    try_remove::<SwitchedFrom>(world, mob);
+    let mob_name = name_of(world, mob);
+    send_rendered(
+        world,
+        player,
+        &format!("<dim>You slip out of {mob_name} and back into your own body.</>\r\n"),
+    );
+}
+
 pub(crate) fn cmd_zreset(world: &mut World, player: Entity, args: &str) {
     use mud_world::{FromMobReset, FromObjectReset};
     record_admin_action(world, player, "zreset", args);

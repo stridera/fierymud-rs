@@ -501,6 +501,21 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         return;
     }
 
+    // `switch` redirects: when the player is puppeteering a mob,
+    // commands they type dispatch against the mob instead. The
+    // `return` command (and `switch` with no arg) are gates that
+    // we DON'T retarget — otherwise there's no escape hatch.
+    let lower_first = trimmed.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    let is_escape_hatch = matches!(lower_first.as_str(), "return" | "switch");
+    let player = if !is_escape_hatch
+        && let Some(mud_world::SwitchedInto(mob)) =
+            world.get::<mud_world::SwitchedInto>(player).copied()
+    {
+        mob
+    } else {
+        player
+    };
+
     // Per-character alias expansion: rewrite `<alias> <args>` to
     // `<command> <args>` once before lookup. v1 is plain prefix
     // replacement (no $1/$* substitution). One pass only — no recursion
@@ -720,6 +735,15 @@ pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
     let text = text.into();
     if let Some(conn) = world.get::<Connection>(target) {
         let _ = conn.0.send(text.clone().into_bytes());
+    }
+    // Switch puppet: when admin has used `switch <mob>`, the mob
+    // doesn't have its own Connection — forward the bytes to the
+    // puppeteer's connection so they see what their puppet sees.
+    if let Some(mud_world::SwitchedFrom(puppeteer)) =
+        world.get::<mud_world::SwitchedFrom>(target).copied()
+        && let Some(puppeteer_conn) = world.get::<Connection>(puppeteer)
+    {
+        let _ = puppeteer_conn.0.send(text.clone().into_bytes());
     }
     // Snoop mirror: forward a dim-prefixed copy to the snooper.
     // Skip when the text already starts with the prefix (defensive

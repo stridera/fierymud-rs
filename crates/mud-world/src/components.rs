@@ -731,6 +731,19 @@ pub struct Muted;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct WizInvis(pub i32);
 
+/// On a player: the mob they're currently controlling via the
+/// `switch` admin command. Inputs typed on this player's
+/// connection are dispatched against the mob instead. Cleared
+/// by `return` (or `switch` with no arg).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SwitchedInto(pub Entity);
+
+/// On a mob: the original player who switched into them. Forwards
+/// outbound text to that player's connection so the puppeteer
+/// sees what the mob would see. Pair to `SwitchedInto`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SwitchedFrom(pub Entity);
+
 /// On a snooper: the target whose output we're mirroring. Set by
 /// the `snoop` admin command, cleared by `snoop` with no arg.
 /// Paired with `SnoopedBy` on the target so `send_raw` can
