@@ -759,12 +759,17 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     let examine = proto.examine_description.clone();
 
     let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
+    // Spawn directly into the loader's inventory rather than the
+    // floor — admin tooling shouldn't race with scavengers / mobs /
+    // other players who could grab a freshly-loaded item before
+    // the admin reacts. `get` and `drop` are still available if
+    // the admin actually wants it on the floor.
     let mut bundle = world.spawn((
         Item,
         Named { name: proto_name.clone() },
         Keywords(proto_keywords),
         WorldKey { zone: proto.zone_id, id: proto.id },
-        Located(room),
+        Located(player),
     ));
     if let Some(desc) = examine {
         bundle.insert(Description(desc));
@@ -807,7 +812,7 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
         world,
         player,
         &format!(
-            "Loaded {proto_name} (entity {item:?}) at your feet.\r\n"
+            "Loaded {proto_name} (entity {item:?}) into your inventory.\r\n"
         ),
     );
     let player_name = name_of(world, player);
