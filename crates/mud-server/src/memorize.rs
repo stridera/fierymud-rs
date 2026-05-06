@@ -10,7 +10,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AbilityCatalog, Fighting, MemorizedSpells, Online, Posture, PostureKind,
+    AbilityCatalog, Fighting, Meditating, MemorizedSpells, Online, Posture, PostureKind,
 };
 
 use crate::commands::send_to;
@@ -37,18 +37,23 @@ pub fn memorize_tick(world: &mut World) {
 
     // Collect entries to advance + which slot indexes flip ready.
     // Per-entity vec of newly-ready ability_ids so we can emit the
-    // "finished memorizing" line after the World mutation.
+    // "finished memorizing" line after the World mutation. The
+    // `Meditating` marker doubles the prep delta — same speed-up
+    // intent as the legacy `mob_mem_time` skill multiplier.
     let mut newly_ready: Vec<(Entity, Vec<i32>)> = Vec::new();
     {
         let mut q = world
             .query_filtered::<
-                (Entity, &Posture, &mut MemorizedSpells),
+                (Entity, &Posture, &mut MemorizedSpells, Option<&Meditating>),
                 (With<Online>, Without<Fighting>),
             >();
-        for (entity, posture, mut mem) in q.iter_mut(world) {
-            let delta = prep_seconds_per_tick(posture.0);
+        for (entity, posture, mut mem, meditating) in q.iter_mut(world) {
+            let mut delta = prep_seconds_per_tick(posture.0);
             if delta == 0 {
                 continue;
+            }
+            if meditating.is_some() {
+                delta *= 2;
             }
             let mut just_ready: Vec<i32> = Vec::new();
             for e in &mut mem.entries {

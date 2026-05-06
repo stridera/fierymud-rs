@@ -2092,6 +2092,25 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["meditate"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Magic,
+        help: Help {
+            usage: "meditate",
+            summary: "Focus to speed up spell memorization.",
+            long: "Doubles the rate at which `memorize` slots refill. \
+                   Requires resting / sitting / kneeling — standing \
+                   or sleeping breaks focus, as does taking a step \
+                   or being attacked. Re-running `meditate` ends the \
+                   trance.",
+        },
+        run: cmd_meditate,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["sleep"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -5810,6 +5829,57 @@ pub(crate) fn cmd_sit(world: &mut World, player: Entity, _args: &str) {
 
 pub(crate) fn cmd_kneel(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Kneeling);
+}
+
+pub(crate) fn cmd_meditate(world: &mut World, player: Entity, _args: &str) {
+    use mud_world::Meditating;
+    if world.get::<Fighting>(player).is_some() {
+        send_to(
+            world,
+            player,
+            "You can't focus enough to meditate while fighting.\r\n",
+        );
+        return;
+    }
+    let posture = world.get::<Posture>(player).map(|p| p.0);
+    let allows = matches!(
+        posture,
+        Some(PostureKind::Resting | PostureKind::Sitting | PostureKind::Kneeling)
+    );
+    if !allows {
+        send_to(world, player, "Try resting or sitting first.\r\n");
+        return;
+    }
+    let player_name = name_of(world, player);
+    if world.get::<Meditating>(player).is_some() {
+        try_remove::<Meditating>(world, player);
+        send_to(world, player, "You stop meditating.\r\n");
+        if let Some(located) = world.get::<Located>(player).copied() {
+            broadcast_room_except_players_rendered(
+                world,
+                located.0,
+                &[player],
+                &format!("{player_name} ceases their meditative trance.\r\n"),
+            );
+        }
+        return;
+    }
+    try_insert(world, player, Meditating);
+    send_rendered(
+        world,
+        player,
+        "<b:cyan>You begin to meditate, slowing your breath.</>\r\n",
+    );
+    if let Some(located) = world.get::<Located>(player).copied() {
+        broadcast_room_except_players_rendered(
+            world,
+            located.0,
+            &[player],
+            &format!(
+                "{player_name} closes their eyes and slips into meditation.\r\n"
+            ),
+        );
+    }
 }
 
 pub(crate) fn cmd_rest(world: &mut World, player: Entity, _args: &str) {

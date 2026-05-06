@@ -6443,6 +6443,18 @@ pub(crate) fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
         );
         return;
     }
+    // Posture leaves the meditating band: clear `Meditating` and
+    // tell the player they've broken focus. Allowed band is
+    // resting / sitting / kneeling — same as cmd_meditate's gate.
+    let meditating = world.get::<mud_world::Meditating>(player).is_some();
+    let allows_meditate = matches!(
+        new,
+        PostureKind::Resting | PostureKind::Sitting | PostureKind::Kneeling
+    );
+    if meditating && !allows_meditate {
+        try_remove::<mud_world::Meditating>(world, player);
+        send_to(world, player, "You stop meditating.\r\n");
+    }
     try_insert(world, player, Posture(new));
     let verb = match new {
         PostureKind::Standing => "stand up",

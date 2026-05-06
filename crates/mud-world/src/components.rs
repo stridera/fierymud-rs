@@ -700,6 +700,13 @@ impl Trophy {
     }
 }
 
+/// Marker: this player is meditating. Set by the `meditate`
+/// command; cleared when their posture leaves the
+/// resting/sitting/kneeling band, when they enter combat, or on
+/// `meditate` again. Doubles memorize-tick speed while active.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Meditating;
+
 /// On a player who's set up camp (`camp` command). Records the
 /// tick the timer started and the room they pitched in so the
 /// camp-tick can detect "they moved" and cancel. Removed when the
