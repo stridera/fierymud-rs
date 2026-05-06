@@ -272,6 +272,28 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["trace"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "trace <N>",
+            summary: "Drill into a captured scripterror entry.",
+            long: "Builder+. Looks up entry #N from `scripterrors` \
+                   (1 = most recent) and prints the full trigger \
+                   body alongside the captured error message — so \
+                   the builder doesn't have to chase \
+                   (zone, id) → tstat after every failure. The \
+                   body shown is the *current* catalog row; if \
+                   the trigger was edited after the failure that \
+                   text may not match what actually ran.",
+        },
+        run: cmd_trace,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["varset"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -1363,14 +1385,19 @@ pub(crate) fn cmd_scripterrors(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let total = log.entries.len();
+    // Number entries from the most recent (#1) so `trace N` can
+    // refer back to a row by position. The numbering is stable
+    // within one render call but shifts as new errors land —
+    // good enough for an interactive debugging loop.
     let mut out = format!("\r\nLast {} of {total} trigger error(s):\r\n", n.min(total));
-    for entry in log.entries.iter().rev().take(n) {
+    for (idx, entry) in log.entries.iter().rev().take(n).enumerate() {
         let secs_ago = std::time::SystemTime::now()
             .duration_since(entry.at)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         out.push_str(&format!(
-            "  {ago:>4}s ago  ({zone}, {id}) [{event}] {name}\r\n         {msg}\r\n",
+            "  <dim>#{n:>3}</>  {ago:>4}s ago  ({zone}, {id}) [{event}] {name}\r\n         {msg}\r\n",
+            n = idx + 1,
             ago = secs_ago,
             zone = entry.trigger_zone,
             id = entry.trigger_id,
@@ -1379,7 +1406,66 @@ pub(crate) fn cmd_scripterrors(world: &mut World, player: Entity, args: &str) {
             msg = entry.message,
         ));
     }
-    send_to(world, player, out);
+    out.push_str("  <dim>(use `trace <N>` to dump the full trigger body for entry #N.)</>\r\n");
+    crate::commands::send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_trace(world: &mut World, player: Entity, args: &str) {
+    use mud_world::ScriptErrorLog;
+    let Ok(n) = args.trim().parse::<usize>() else {
+        send_to(world, player, "Usage: trace <N>  (N is the entry number from `scripterrors`)\r\n");
+        return;
+    };
+    if n == 0 {
+        send_to(world, player, "Entry numbers start at 1.\r\n");
+        return;
+    }
+    if !world.contains_resource::<ScriptErrorLog>() {
+        send_to(world, player, "No trigger errors recorded yet.\r\n");
+        return;
+    }
+    let entry = world
+        .resource::<ScriptErrorLog>()
+        .entries
+        .iter()
+        .rev()
+        .nth(n - 1)
+        .cloned();
+    let Some(entry) = entry else {
+        send_to(world, player, format!("No entry #{n} in the error log.\r\n"));
+        return;
+    };
+    let secs_ago = std::time::SystemTime::now()
+        .duration_since(entry.at)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut out = format!(
+        "\r\n<b:cyan>Trigger error #{n}</>  ({zone}, {id}) [{event}] {name}\r\n",
+        zone = entry.trigger_zone,
+        id = entry.trigger_id,
+        event = entry.event,
+        name = entry.trigger_name,
+    );
+    out.push_str(&format!("  <dim>fired</>     {secs_ago}s ago\r\n"));
+    out.push_str(&format!("  <red>error</>     {}\r\n", entry.message));
+    // Pull the full body from the catalog so the builder doesn't
+    // have to chase tstat. Shows the source as it was loaded —
+    // if the trigger has been edited since the failure, the body
+    // here is the *current* one (annotated below).
+    let body = world
+        .resource::<mud_world::TriggerCatalog>()
+        .by_key
+        .get(&(entry.trigger_zone, entry.trigger_id))
+        .map(|d| d.commands.clone());
+    if let Some(body) = body {
+        out.push_str("  <dim>body (current — may differ from the version that failed):</>\r\n");
+        for (i, line) in body.lines().enumerate() {
+            out.push_str(&format!("    {n:>3} | {line}\r\n", n = i + 1));
+        }
+    } else {
+        out.push_str("  <dim>(catalog has no current row for this id — trigger may have been deleted.)</>\r\n");
+    }
+    crate::commands::send_rendered(world, player, &out);
 }
 pub(crate) fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
     let mut tokens = args.split_whitespace();
