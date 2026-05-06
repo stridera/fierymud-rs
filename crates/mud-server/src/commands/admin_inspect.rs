@@ -2467,6 +2467,59 @@ const SEARCH_RESULT_LIMIT: usize = 50;
 
 inventory::submit! {
     Command {
+        names: &["slist"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "slist [spell|chant|song|skill]",
+            summary: "List every ability of a given kind, or all kinds.",
+            long: "Builder+. Pages through `AbilityCatalog`, sorted \
+                   alphabetically. With no arg, prints every ability \
+                   grouped by kind. With a kind label, narrows the \
+                   list. Pair with `astat <name>` for per-ability \
+                   detail.",
+        },
+        run: cmd_slist,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["snum"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "snum <name>",
+            summary: "Print the catalog id for an ability by name.",
+            long: "Builder+. Case-insensitive whole-name match. For \
+                   substring search use `ssearch`. The id surfaces \
+                   on `varset` / `skillset` / formula bindings.",
+        },
+        run: cmd_snum,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["ssearch"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "ssearch <substring>",
+            summary: "Find abilities by name substring.",
+            long: "Builder+. Case-insensitive substring against the \
+                   ability's plain name. Renders `(id) name (kind)` \
+                   per match, capped at 50.",
+        },
+        run: cmd_ssearch,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["vitem"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -2635,6 +2688,146 @@ inventory::submit! {
                    per match, capped at 50.",
         },
         run: cmd_rsearch,
+    }
+}
+
+fn parse_ability_kind(s: &str) -> Option<mud_db::abilities::AbilityKind> {
+    use mud_db::abilities::AbilityKind as K;
+    match s.to_ascii_lowercase().as_str() {
+        "spell" | "spells" => Some(K::Spell),
+        "chant" | "chants" => Some(K::Chant),
+        "song" | "songs" => Some(K::Song),
+        "skill" | "skills" => Some(K::Skill),
+        _ => None,
+    }
+}
+
+pub(crate) fn cmd_slist(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let filter_kind = if arg.is_empty() {
+        None
+    } else if let Some(k) = parse_ability_kind(arg) {
+        Some(k)
+    } else {
+        send_to(
+            world,
+            player,
+            format!("Unknown kind '{arg}'. Try: spell / chant / song / skill.\r\n"),
+        );
+        return;
+    };
+    let mut rows: Vec<(mud_db::abilities::AbilityKind, i32, String)> = world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .values()
+        .filter(|d| filter_kind.is_none_or(|k| d.kind == k))
+        .map(|d| (d.kind, d.id, d.plain_name.clone()))
+        .collect();
+    rows.sort_by(|a, b| a.0.label().cmp(b.0.label()).then_with(|| a.2.cmp(&b.2)));
+    if rows.is_empty() {
+        send_to(world, player, "No abilities match.\r\n");
+        return;
+    }
+    let mut out = format!(
+        "\r\n<b:cyan>{} abilit{} listed:</>\r\n",
+        rows.len(),
+        if rows.len() == 1 { "y" } else { "ies" },
+    );
+    let mut current_kind: Option<&'static str> = None;
+    for (kind, id, name) in &rows {
+        let label = kind.label();
+        if current_kind != Some(label) {
+            out.push_str(&format!("\r\n<cyan>{}s:</>\r\n", capitalize_first(label)));
+            current_kind = Some(label);
+        }
+        out.push_str(&format!("  <dim>[{id:>4}]</> {name}\r\n"));
+    }
+    crate::commands::send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_snum(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(world, player, "Usage: snum <name>\r\n");
+        return;
+    }
+    let lc = needle.to_ascii_lowercase();
+    match world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .get(&lc)
+    {
+        Some(d) => {
+            crate::commands::send_rendered(
+                world,
+                player,
+                &format!(
+                    "<cyan>[{}]</> {} <dim>({})</>\r\n",
+                    d.id,
+                    d.plain_name,
+                    d.kind.label(),
+                ),
+            );
+        }
+        None => send_to(
+            world,
+            player,
+            format!("No ability named '{needle}'. Try `ssearch`.\r\n"),
+        ),
+    }
+}
+
+pub(crate) fn cmd_ssearch(world: &mut World, player: Entity, args: &str) {
+    let needle = args.trim();
+    if needle.is_empty() {
+        send_to(world, player, "Usage: ssearch <substring>\r\n");
+        return;
+    }
+    let needle_lc = needle.to_ascii_lowercase();
+    let mut hits: Vec<(i32, String, &'static str)> = world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .values()
+        .filter(|d| d.plain_name.to_ascii_lowercase().contains(&needle_lc))
+        .map(|d| (d.id, d.plain_name.clone(), d.kind.label()))
+        .collect();
+    hits.sort_by(|a, b| a.1.cmp(&b.1));
+    if hits.is_empty() {
+        send_to(
+            world,
+            player,
+            format!("No abilities match '{needle}'.\r\n"),
+        );
+        return;
+    }
+    let total = hits.len();
+    let shown = total.min(SEARCH_RESULT_LIMIT);
+    let mut out = format!(
+        "\r\n<b:cyan>{shown} of {total} abilit{} for '{needle}':</>\r\n",
+        if total == 1 { "y" } else { "ies" },
+    );
+    for (id, name, kind) in hits.iter().take(SEARCH_RESULT_LIMIT) {
+        out.push_str(&format!(
+            "  <dim>[{id:>4}]</> {name}  <dim>({kind})</>\r\n",
+        ));
+    }
+    if total > SEARCH_RESULT_LIMIT {
+        out.push_str(&format!(
+            "  <dim>... {} more — narrow your search.</>\r\n",
+            total - SEARCH_RESULT_LIMIT,
+        ));
+    }
+    crate::commands::send_rendered(world, player, &out);
+}
+
+/// Title-case the first character. Local helper since the global
+/// `capitalize` is title-case the whole word; we only want the
+/// section header.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().chain(chars).collect(),
     }
 }
 
