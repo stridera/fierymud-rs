@@ -1433,6 +1433,17 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
     };
     let n = i32::try_from(recipients.len()).unwrap_or(1).max(1);
     let share = (xp / n).max(1);
+    // Trophy kill share: legacy splits 1.0 across the group. The
+    // i32→f32 cast is fine since n ≤ recipient count (small).
+    #[allow(clippy::cast_precision_loss)]
+    let trophy_share = 1.0_f32 / n as f32;
+    // Trophy key for this victim — we only have a mob proto in
+    // hand here (PvP has its own kill plumbing), so build the
+    // Mob variant from the WorldKey.
+    let trophy_kind = mud_world::TrophyKind::Mob {
+        zone: proto.zone_id,
+        id: proto.id,
+    };
 
     for entity in &recipients {
         // Max-tier players (level 100+ — staff and endgame) don't
@@ -1445,20 +1456,65 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
         if level >= 100 {
             continue;
         }
+        // Anti-grind: scale down XP based on how often this player
+        // has already killed this target. Mirrors legacy
+        // `exp_trophy_modifier` with the same band thresholds.
+        let prior_kills = world
+            .get::<mud_world::Trophy>(*entity)
+            .map_or(0.0, |t| t.kills_against(&trophy_kind));
+        let modifier = trophy_xp_modifier(prior_kills);
+        // f32 round-trip on the XP value — share fits comfortably
+        // in f32 mantissa for any sane player level, and we floor
+        // at 1 so heavy penalty bands still award a token amount.
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let scaled = ((share as f32) * modifier).max(1.0) as i32;
         if let Some(mut p) = world.get_mut::<mud_world::Profile>(*entity) {
-            p.experience = p.experience.saturating_add(share);
+            p.experience = p.experience.saturating_add(scaled);
         } else {
             continue;
         }
+        // Record the kill into trophy *after* XP scales — so the
+        // current swing benefits from the lower-band rate, and the
+        // next one feels the new cap.
+        let display_name = victim_name.to_string();
+        if world.get::<mud_world::Trophy>(*entity).is_none()
+            && let Ok(mut em) = world.get_entity_mut(*entity)
+        {
+            em.insert(mud_world::Trophy::default());
+        }
+        if let Some(mut trophy) = world.get_mut::<mud_world::Trophy>(*entity) {
+            trophy.record(trophy_kind.clone(), trophy_share, display_name);
+        }
         let line = if *entity == killer && recipients.len() == 1 {
-            format!("You gain {share} experience for the kill of {victim_name}.\r\n")
+            format!("You gain {scaled} experience for the kill of {victim_name}.\r\n")
         } else {
             format!(
-                "You gain {share} experience (group share) for the kill of {victim_name}.\r\n"
+                "You gain {scaled} experience (group share) for the kill of {victim_name}.\r\n"
             )
         };
         send_to(world, *entity, line);
         check_level_up(world, *entity);
+    }
+}
+
+/// Trophy XP scaling. Mirrors the legacy `exp_trophy_modifier`
+/// bands so a player who repeat-kills the same mob gets a
+/// progressively diminishing reward — anti-grind without
+/// blocking it outright.
+#[must_use]
+pub fn trophy_xp_modifier(prior_kills: f32) -> f32 {
+    if prior_kills < 2.01 {
+        1.0
+    } else if prior_kills < 3.01 {
+        0.95
+    } else if prior_kills < 5.01 {
+        0.85
+    } else if prior_kills < 7.01 {
+        0.65
+    } else if prior_kills < 10.01 {
+        0.45
+    } else {
+        0.3
     }
 }
 

@@ -637,6 +637,69 @@ pub struct BoardLink(pub i32);
 #[derive(Component, Debug, Clone, Default)]
 pub struct AttachedTriggers(pub Vec<(i32, i32)>);
 
+/// One row in a player's `Trophy` ring buffer. `amount` is the
+/// accumulated kill count (fractional for group splits — a 4-way
+/// group kill contributes 0.25 per member). `display_name` is
+/// cached so the renderer doesn't have to chase the catalog
+/// every time the player opens `trophy`.
+#[derive(Debug, Clone)]
+pub struct TrophyEntry {
+    pub kind: TrophyKind,
+    pub amount: f32,
+    pub display_name: String,
+}
+
+/// What the trophy entry is keyed against — a mob proto (zone +
+/// id) or a player kill (by character name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrophyKind {
+    Mob { zone: i32, id: i32 },
+    Player { name: String },
+}
+
+/// Per-player ring buffer of recent kills. Cap matches the
+/// legacy `TROPHY_LENGTH = 21` so behavior matches what builders
+/// remember. The repeat-kill XP modifier reads `amount` to scale
+/// XP awards down on grind targets — see
+/// `combat::trophy_xp_modifier`.
+#[derive(Component, Debug, Default, Clone)]
+pub struct Trophy {
+    pub entries: std::collections::VecDeque<TrophyEntry>,
+}
+
+impl Trophy {
+    pub const CAP: usize = 21;
+
+    /// Increment the per-target accumulator by `amount` (or insert
+    /// a new entry). When the buffer is full, the oldest entry
+    /// gets dropped — same FIFO shape as legacy.
+    pub fn record(&mut self, kind: TrophyKind, amount: f32, display_name: String) {
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.kind == kind) {
+            existing.amount += amount;
+            return;
+        }
+        if self.entries.len() >= Self::CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(TrophyEntry {
+            kind,
+            amount,
+            display_name,
+        });
+    }
+
+    /// Total accumulator for `kind`, or 0.0 if absent. Used by
+    /// the XP modifier path to figure out which band the next
+    /// kill falls into.
+    #[must_use]
+    pub fn kills_against(&self, kind: &TrophyKind) -> f32 {
+        self.entries
+            .iter()
+            .find(|e| &e.kind == kind)
+            .map_or(0.0, |e| e.amount)
+    }
+}
+
 /// On a player who's set up camp (`camp` command). Records the
 /// tick the timer started and the room they pitched in so the
 /// camp-tick can detect "they moved" and cancel. Removed when the

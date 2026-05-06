@@ -1245,6 +1245,26 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["trophy"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "trophy [<player>]",
+            summary: "Show your recent kills (and the XP penalty band).",
+            long: "Lists your most recent ~21 kill targets and the \
+                   accumulated kill count per target. Re-killing \
+                   targets you've farmed scales XP down — the \
+                   color band on each row hints at how steep the \
+                   penalty is. With a player name (Builder+), \
+                   shows their trophy instead of yours.",
+        },
+        run: cmd_trophy,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["camp"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4883,6 +4903,62 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     // Player titles can contain XML-Lite color tags; render before
     // sending so they show as ANSI rather than literal markup.
     send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_trophy(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    // Builder+ can inspect another player's trophy.
+    let target = if arg.is_empty() {
+        player
+    } else if !crate::commands::is_staff(world, player) {
+        send_to(world, player, "You can only view your own trophy.\r\n");
+        return;
+    } else {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        let Some((e, _)) = q.iter(world).find(|(_, n)| n.name.eq_ignore_ascii_case(arg)) else {
+            send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+            return;
+        };
+        e
+    };
+    let entries = world
+        .get::<mud_world::Trophy>(target)
+        .map(|t| t.entries.clone())
+        .unwrap_or_default();
+    let target_name = name_of(world, target);
+    if entries.is_empty() {
+        let line = if target == player {
+            "<green>Your trophy list is empty.</>\r\n".to_string()
+        } else {
+            format!("<green>{target_name}'s trophy list is empty.</>\r\n")
+        };
+        send_rendered(world, player, &line);
+        return;
+    }
+    let mut out = if target == player {
+        String::from("\r\n<green>Your trophy list:</>\r\n\r\n")
+    } else {
+        format!("\r\n<green>{target_name}'s trophy list:</>\r\n\r\n")
+    };
+    out.push_str("  <b:red>Kills</>     <u>Target</>\r\n");
+    // Most recent first. VecDeque is in-order push_back, so reverse.
+    let rows: Vec<_> = entries.iter().rev().collect();
+    for entry in rows {
+        // Color band by count: low = yellow (mild penalty), mid =
+        // bold-yellow, high = red (heavy penalty).
+        let color = if entry.amount < 4.99 {
+            "<yellow>"
+        } else if entry.amount < 7.99 {
+            "<b:yellow>"
+        } else {
+            "<red>"
+        };
+        out.push_str(&format!(
+            "  {color}{:>6.2}</>     {}\r\n",
+            entry.amount, entry.display_name,
+        ));
+    }
+    crate::commands::send_rendered(world, player, &out);
 }
 
 pub(crate) fn cmd_camp(world: &mut World, player: Entity, _args: &str) {
