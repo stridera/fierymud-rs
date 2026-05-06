@@ -149,6 +149,63 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["pain"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "pain <player>",
+            summary: "Cosmetic divine wrath flourish on a single player.",
+            long: "Builder+. Emits a roleplay-flavor pain line — no \
+                   actual HP / stamina change. The target sees a \
+                   personalized line; the room sees a third-person \
+                   broadcast. Use to express divine displeasure \
+                   during live events.",
+        },
+        run: cmd_pain,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["rpain"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "rpain [<message>]",
+            summary: "Cosmetic divine pain across the realm.",
+            long: "Implementor-only. Same as `pain` but reaches \
+                   every online player. Pure flavor — no stat \
+                   change. Optional <message> overrides the default \
+                   line. Players see your line; the caster sees a \
+                   confirmation count.",
+        },
+        run: cmd_rpain,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["rrestore"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "rrestore [<message>]",
+            summary: "Heal every online player + strip every effect.",
+            long: "Implementor-only. Restores HP / stamina to max \
+                   and clears every active EffectInstance for every \
+                   online player. Optional <message> overrides the \
+                   default flavor line. The realm-wide counterpart \
+                   to `restore`.",
+        },
+        run: cmd_rrestore,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["echo"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -1357,6 +1414,110 @@ pub(crate) fn cmd_return(world: &mut World, player: Entity, args: &str) {
         world,
         player,
         &format!("<dim>You slip out of {mob_name} and back into your own body.</>\r\n"),
+    );
+}
+
+pub(crate) fn cmd_pain(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "pain", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: pain <player>\r\n");
+        return;
+    }
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(arg))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+        return;
+    };
+    let target_name = name_of(world, target);
+    let admin_name = name_of(world, player);
+    send_rendered(
+        world,
+        player,
+        &format!("You wreathe {target_name} in divine pain.\r\n"),
+    );
+    send_rendered(
+        world,
+        target,
+        &format!(
+            "<red>{admin_name} wreathes you in divine pain — your nerves scream with otherworldly fire!</>\r\n"
+        ),
+    );
+    if let Some(located) = world.get::<Located>(target).copied() {
+        broadcast_room_except_players_rendered(
+            world,
+            located.0,
+            &[player, target],
+            &format!(
+                "<red>{target_name} writhes as divine pain courses through them.</>\r\n"
+            ),
+        );
+    }
+}
+
+pub(crate) fn cmd_rpain(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "rpain", args);
+    let custom = args.trim();
+    let admin_name = name_of(world, player);
+    let line = if custom.is_empty() {
+        format!(
+            "<red>{admin_name} spreads pain and pestilence across the realm — its harm reaches all in their path!</>\r\n"
+        )
+    } else {
+        format!("<red>{custom}</>\r\n")
+    };
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
+        q.iter(world).filter(|e| *e != player).collect()
+    };
+    let count = targets.len();
+    for t in targets {
+        send_rendered(world, t, &line);
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("Pain spread across the realm. {count} player(s) felt your wrath.\r\n"),
+    );
+}
+
+pub(crate) fn cmd_rrestore(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "rrestore", args);
+    let custom = args.trim();
+    let admin_name = name_of(world, player);
+    let line = if custom.is_empty() {
+        format!(
+            "<b:cyan>{admin_name} spreads healing energy across the realm, restoring all in its path.</>\r\n"
+        )
+    } else {
+        format!("<b:cyan>{custom}</>\r\n")
+    };
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
+        q.iter(world).collect()
+    };
+    let count = targets.len();
+    for t in targets {
+        if let Some(mut h) = world.get_mut::<Health>(t) {
+            h.hp = h.max;
+        }
+        if let Some(mut s) = world.get_mut::<Stamina>(t) {
+            s.current = s.max;
+        }
+        crate::commands::remove_all_effects_on(world, t);
+        if t != player {
+            send_rendered(world, t, &line);
+        }
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("Restored {count} player(s) and cleansed every active effect.\r\n"),
     );
 }
 
