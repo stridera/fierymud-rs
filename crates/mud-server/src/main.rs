@@ -349,7 +349,7 @@ async fn main() {
                 // After all systems for this tick have run, refresh
                 // prompts for anyone who received output (combat hits,
                 // effect fades, broadcasts, etc.).
-                commands::flush_prompts(&world);
+                commands::flush_prompts(&mut world);
             }
             msg = inbound_rx.recv() => {
                 let Some(msg) = msg else {

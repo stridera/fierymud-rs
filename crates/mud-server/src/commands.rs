@@ -817,7 +817,7 @@ pub(crate) fn mark_for_prompt(target: Entity) {
 /// the last flush. Idempotent — calling on an empty set is free. Despawned
 /// entities are skipped via `get_entity`; entities without a Connection are
 /// no-ops via `send_prompt`.
-pub(crate) fn flush_prompts(world: &World) {
+pub(crate) fn flush_prompts(world: &mut World) {
     let recipients =
         PROMPT_RECIPIENTS.with(|r| std::mem::take(&mut *r.borrow_mut()));
     for entity in recipients {
@@ -3786,8 +3786,14 @@ mod tests {
 /// Send the player's prompt template with variables substituted. Falls back
 /// to a sensible default if no Prompt component is attached or the template
 /// is empty.
-pub(crate) fn send_prompt(world: &World, target: Entity) {
-    let Some(conn) = world.get::<Connection>(target) else {
+#[allow(clippy::too_many_lines)]
+pub(crate) fn send_prompt(world: &mut World, target: Entity) {
+    // Clone the outbound channel up front so the rest of the
+    // function can borrow `world` freely (queries below need
+    // `&mut World`). Outbound is an `mpsc::UnboundedSender`,
+    // cheap to clone.
+    let conn = world.get::<Connection>(target).map(|c| c.0.clone());
+    let Some(conn) = conn else {
         return;
     };
     let template = world
@@ -3826,7 +3832,7 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
     // both — and is_tag_shaped lets the default `<%h/%H>` survive
     // since `<42/100>` isn't tag-shaped after %-substitution.
     let mode = color_mode_for(world, target);
-    let _ = conn.0.send(render_color_tags(&rendered, mode).into_bytes());
+    let _ = conn.send(render_color_tags(&rendered, mode).into_bytes());
 
     // Piggyback Char.Vitals on the prompt cadence — same once-per-
     // command frequency, which is reasonable for HUD-style clients.
@@ -3841,7 +3847,7 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
             "{{\"hp\":{},\"max_hp\":{},\"sp\":{},\"max_sp\":{},\"level\":{}}}",
             h.hp, h.max, s.current, s.max, level
         );
-        let _ = conn.0.send(mud_net::gmcp_packet("Char.Vitals", &payload));
+        let _ = conn.send(mud_net::gmcp_packet("Char.Vitals", &payload));
     }
     // Char.Status: longer-lived character metadata (level / xp /
     // class / race / wealth). Same prompt cadence — many of these
@@ -3868,8 +3874,48 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
             prof.race.replace('"', "\\\""),
             wealth,
         );
-        let _ = conn.0.send(mud_net::gmcp_packet("Char.Status", &payload));
+        let _ = conn.send(mud_net::gmcp_packet("Char.Status", &payload));
     }
+    // Char.Aggro: every mob (anywhere) that has the player on its
+    // HateList or in MobMemory. Lets HUD clients render a "things
+    // hunting you" panel without polling. Two arrays so the client
+    // can split active threats from "remembers you" stragglers.
+    {
+        let mut hating: Vec<String> = Vec::new();
+        let mut remembering: Vec<String> = Vec::new();
+        let mut q = world.query_filtered::<
+            (&Named, Option<&crate::combat::HateList>, Option<&crate::combat::MobMemory>),
+            With<Mob>,
+        >();
+        for (n, hate, mem) in q.iter(world) {
+            let in_hate = hate.is_some_and(|h| h.0.contains(&target));
+            let in_mem = mem.is_some_and(|m| m.0.contains(&target));
+            if in_hate {
+                hating.push(format!(
+                    "\"{}\"",
+                    render_color_tags(&n.name, ColorMode::Strip)
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                ));
+            } else if in_mem {
+                remembering.push(format!(
+                    "\"{}\"",
+                    render_color_tags(&n.name, ColorMode::Strip)
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                ));
+            }
+        }
+        if !hating.is_empty() || !remembering.is_empty() {
+            let payload = format!(
+                "{{\"hating\":[{}],\"remembering\":[{}]}}",
+                hating.join(","),
+                remembering.join(",")
+            );
+            let _ = conn.send(mud_net::gmcp_packet("Char.Aggro", &payload));
+        }
+    }
+
     // Room.Info: lightweight room metadata for Mudlet-style
     // mappers. Same prompt cadence as Char.Vitals; per-prompt
     // re-emit is cheap (one telnet frame, ~80 bytes) and lets
@@ -3903,7 +3949,7 @@ pub(crate) fn send_prompt(world: &World, target: Entity) {
         let payload = format!(
             "{{\"name\":\"{plain}\",\"zone\":{zone},\"id\":{id},\"exits\":[{exits_json}]}}"
         );
-        let _ = conn.0.send(mud_net::gmcp_packet("Room.Info", &payload));
+        let _ = conn.send(mud_net::gmcp_packet("Room.Info", &payload));
     }
 }
 

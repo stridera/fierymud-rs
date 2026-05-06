@@ -1245,6 +1245,27 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["aggr", "aggro"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "aggr",
+            summary: "Show what's hostile to you right now.",
+            long: "Lists every mob anywhere in the world that has \
+                   you in its hate list (most recent swing first) \
+                   or its memory (mobs you've fled from that will \
+                   re-engage on sight). Mobs in your current room \
+                   are flagged so you know what's about to swing. \
+                   Mirrored as a `Char.Aggro` GMCP frame on each \
+                   prompt for HUD-style clients.",
+        },
+        run: cmd_aggr,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["idle"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4823,6 +4844,68 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     // Player titles can contain XML-Lite color tags; render before
     // sending so they show as ANSI rather than literal markup.
     send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_aggr(world: &mut World, player: Entity, _args: &str) {
+    use crate::combat::{HateList, MobMemory};
+    let here = world.get::<Located>(player).map(|l| l.0);
+    // Snapshot every mob whose HateList or MobMemory contains the
+    // player. Carry along the room so we can flag who's adjacent.
+    let mut rows: Vec<(Entity, String, Option<Entity>, bool, bool)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Named, Option<&Located>, Option<&HateList>, Option<&MobMemory>),
+            With<Mob>,
+        >();
+        q.iter(world)
+            .filter_map(|(e, n, l, hate, mem)| {
+                let in_hate = hate.is_some_and(|h| h.0.contains(&player));
+                let in_mem = mem.is_some_and(|m| m.0.contains(&player));
+                if !in_hate && !in_mem {
+                    return None;
+                }
+                Some((
+                    e,
+                    n.name.clone(),
+                    l.map(|l| l.0),
+                    in_hate,
+                    in_mem,
+                ))
+            })
+            .collect()
+    };
+    if rows.is_empty() {
+        send_to(world, player, "Nothing has you on its bad side right now.\r\n");
+        return;
+    }
+    // Sort: same room first, hate-list before memory.
+    rows.sort_by_key(|(_, _, room, hate, _)| {
+        let same_room_first = i32::from(here.is_none_or(|h| Some(h) != *room));
+        let hate_first = i32::from(!*hate);
+        (same_room_first, hate_first)
+    });
+    let mut out = String::from("\r\n<b:cyan>Things hostile to you:</>\r\n");
+    for (_, name, room, in_hate, in_mem) in &rows {
+        let here_flag = if here.is_some_and(|h| Some(h) == *room) {
+            " <b:red>[here]</>"
+        } else {
+            ""
+        };
+        let mode = if *in_hate {
+            "<red>actively hunting</>"
+        } else if *in_mem {
+            "<yellow>remembers you</>"
+        } else {
+            ""
+        };
+        let room_label = match room {
+            Some(r) => crate::commands::name_or(world, *r, "(unknown)"),
+            None => String::new(),
+        };
+        out.push_str(&format!(
+            "  {name} — {mode}{here_flag} <dim>(in {room_label})</>\r\n",
+        ));
+    }
+    crate::commands::send_rendered(world, player, &out);
 }
 
 pub(crate) fn cmd_idle(world: &mut World, player: Entity, args: &str) {
