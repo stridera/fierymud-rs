@@ -48,6 +48,56 @@ pub struct NewCharacterItem {
     pub parent_idx: Option<usize>,
 }
 
+/// One row from the `pscan` admin lookup — a player + an item
+/// proto they own. Ordered by player name then item name in
+/// the query, but admin renderers are free to re-sort.
+#[derive(Debug, Clone)]
+pub struct OwnerHit {
+    pub character_id: String,
+    pub character_name: String,
+    pub level: i32,
+    pub object_zone_id: i32,
+    pub object_id: i32,
+    pub object_name: String,
+    pub equipped_location: Option<String>,
+}
+
+/// Search every persisted character's inventory for items whose
+/// proto name matches `needle` (case-insensitive substring).
+/// Returns one row per match — same character can show up
+/// multiple times if they're carrying duplicates. Capped at
+/// 200 rows server-side to avoid surprising big-result floods.
+pub async fn pscan_owners_by_item(
+    pool: &PgPool,
+    needle: &str,
+) -> sqlx::Result<Vec<OwnerHit>> {
+    let pattern = format!("%{}%", needle.to_lowercase());
+    sqlx::query_as!(
+        OwnerHit,
+        r#"
+        SELECT
+            c.id              AS character_id,
+            c.name            AS character_name,
+            c.level           AS level,
+            o.zone_id         AS object_zone_id,
+            o.id              AS object_id,
+            o.name            AS object_name,
+            ci.equipped_location AS equipped_location
+        FROM "CharacterItems" ci
+        JOIN "Characters" c ON c.id = ci.character_id
+        JOIN "Objects" o
+          ON o.zone_id = ci.object_zone_id
+         AND o.id = ci.object_id
+        WHERE LOWER(o.name) LIKE $1
+        ORDER BY c.name, o.name
+        LIMIT 200
+        "#,
+        pattern,
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Read every item row for a character. Ordered by `id` (insertion order)
 /// so the runtime sees items in a deterministic shape.
 pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<CharacterItemRow>> {

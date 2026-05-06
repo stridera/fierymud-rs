@@ -927,3 +927,201 @@ pub(crate) async fn cmd_treload(
         ),
     );
 }
+
+inventory::submit! {
+    Command {
+        names: &["pscan"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "pscan <substring>",
+            summary: "Scan every persisted character's inventory for an item.",
+            long: "Builder+. Joins `CharacterItems` × `Characters` × \
+                   `Objects` against an item-name substring and \
+                   prints one row per (player, item) hit. Async DB \
+                   query — covers offline characters, not just \
+                   online ones. Capped at 200 hits server-side.",
+        },
+        run: cmd_pscan,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["viewchar"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "viewchar <name>",
+            summary: "View an offline character's gear and stats.",
+            long: "Builder+. Async DB load — pulls the Characters \
+                   row + every CharacterItems row (resolved through \
+                   the in-memory ObjectPrototypes for names) and \
+                   prints what they're wearing / carrying. Replaces \
+                   the legacy `linkload` use case.",
+        },
+        run: cmd_viewchar,
+    }
+}
+
+pub(crate) fn cmd_pscan(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "pscan", args);
+    let needle = args.trim().to_string();
+    if needle.is_empty() {
+        send_to(world, player, "Usage: pscan <substring>\r\n");
+        return;
+    }
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    tokio::spawn(async move {
+        let Some(out) = outbound else { return };
+        let hits = match mud_db::character_items::pscan_owners_by_item(&pool, &needle).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                let _ = out.send(format!("pscan failed: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+        if hits.is_empty() {
+            let _ = out.send(
+                format!("No persisted character carries an item matching '{needle}'.\r\n")
+                    .into_bytes(),
+            );
+            return;
+        }
+        // Group by character so the renderer doesn't emit "Strider" five times in a row.
+        let mut by_char: std::collections::BTreeMap<String, Vec<mud_db::character_items::OwnerHit>> =
+            std::collections::BTreeMap::new();
+        for h in hits {
+            by_char.entry(h.character_name.clone()).or_default().push(h);
+        }
+        let mut body = format!(
+            "\r\n{} character(s) own items matching '{needle}':\r\n",
+            by_char.len(),
+        );
+        for (name, items) in &by_char {
+            let level = items.first().map_or(0, |h| h.level);
+            body.push_str(&format!("  {name} (L{level}):\r\n"));
+            for h in items {
+                let where_str = h
+                    .equipped_location
+                    .as_deref()
+                    .map_or_else(|| String::from("inventory"), |s| format!("worn: {s}"));
+                body.push_str(&format!(
+                    "    ({:>3}, {:>4}) {} — {where_str}\r\n",
+                    h.object_zone_id, h.object_id, h.object_name,
+                ));
+            }
+        }
+        let _ = out.send(body.into_bytes());
+    });
+}
+
+pub(crate) fn cmd_viewchar(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "viewchar", args);
+    let target_name = args.trim().to_string();
+    if target_name.is_empty() {
+        send_to(world, player, "Usage: viewchar <name>\r\n");
+        return;
+    }
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    // Resolve object protos to names via the in-memory catalog up
+    // front so the async closure has a flat lookup map. Loaded
+    // once at startup; ~thousands of rows but cheap to clone.
+    let proto_names: std::collections::HashMap<(i32, i32), String> = world
+        .resource::<mud_world::ObjectPrototypes>()
+        .by_key
+        .iter()
+        .map(|(k, p)| (*k, p.name.clone()))
+        .collect();
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    tokio::spawn(async move {
+        let Some(out) = outbound else { return };
+        let row = match mud_db::characters::find_by_name(&pool, &target_name).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                let _ = out
+                    .send(format!("No character named '{target_name}'.\r\n").into_bytes());
+                return;
+            }
+            Err(e) => {
+                let _ = out
+                    .send(format!("DB error: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+        let items = match mud_db::character_items::list_for(&pool, &row.id).await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = out
+                    .send(format!("DB error loading items: {e}\r\n").into_bytes());
+                return;
+            }
+        };
+
+        let mut body = format!(
+            "\r\nCharacter:    {}\r\nLevel:        {}\r\nRace:         {}\r\nHP / Stamina: {}/{} hp, {}/{} stam\r\nWealth:       {} cp on hand, {} bank\r\n",
+            row.name,
+            row.level,
+            row.race,
+            row.hit_points,
+            row.hit_points_max,
+            row.stamina,
+            row.stamina_max,
+            row.wealth,
+            row.bank_wealth,
+        );
+        if let Some(t) = row.title.as_deref()
+            && !t.trim().is_empty()
+        {
+            body.push_str(&format!("Title:        {t}\r\n"));
+        }
+        if items.is_empty() {
+            body.push_str("\r\nInventory:    <empty>\r\n");
+        } else {
+            let (worn, carried): (Vec<_>, Vec<_>) = items
+                .into_iter()
+                .partition(|r| r.equipped_location.is_some());
+            if !worn.is_empty() {
+                body.push_str(&format!("\r\nWorn ({}):\r\n", worn.len()));
+                for r in &worn {
+                    let name = proto_names
+                        .get(&(r.object_zone_id, r.object_id))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            format!("(missing proto {}/{})", r.object_zone_id, r.object_id)
+                        });
+                    let slot = r.equipped_location.as_deref().unwrap_or("?");
+                    body.push_str(&format!(
+                        "  ({:>3}, {:>4}) {name}  <{slot}>\r\n",
+                        r.object_zone_id, r.object_id,
+                    ));
+                }
+            }
+            if !carried.is_empty() {
+                body.push_str(&format!("\r\nCarrying ({}):\r\n", carried.len()));
+                for r in &carried {
+                    let name = proto_names
+                        .get(&(r.object_zone_id, r.object_id))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            format!("(missing proto {}/{})", r.object_zone_id, r.object_id)
+                        });
+                    body.push_str(&format!(
+                        "  ({:>3}, {:>4}) {name}\r\n",
+                        r.object_zone_id, r.object_id,
+                    ));
+                }
+            }
+        }
+        let _ = out.send(body.into_bytes());
+    });
+}
