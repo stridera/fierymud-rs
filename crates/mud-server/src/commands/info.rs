@@ -5354,8 +5354,59 @@ pub(crate) fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
+/// Built-in prompt templates a player can pick by short name.
+/// Order is the order shown by `prompt list`; first entry is the
+/// default suggested for new players. Templates intentionally
+/// avoid leading `<` so the renderer's "literal angle bracket"
+/// fallback isn't relied on by the defaults — the plumbing
+/// works either way, but plain forms read better in clients
+/// without color support.
+const PROMPT_TEMPLATES: &[(&str, &str)] = &[
+    ("classic", "<%h/%H hp %v/%V mv> "),
+    ("compact", "[%h/%H %v/%V] "),
+    ("bars", "%B %M "),
+    ("vitals", "<red>%h</>/%H hp <green>%v</>/%V mv "),
+    ("verbose", "<%n %h/%H hp %v/%V mv %g cp @ %r> "),
+    ("location", "[%r] <%h/%H hp> "),
+    ("worldclock", "<%h/%H %v/%V — %s %t %d> "),
+    ("minimal", "> "),
+];
+
 pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
     let template = args.trim();
+
+    // `prompt list` — show the named-template menu so a player
+    // doesn't have to read the format spec to find a starting
+    // point. `prompt <name>` adopts a template by name.
+    if template.eq_ignore_ascii_case("list") || template.eq_ignore_ascii_case("templates") {
+        let mut out = String::from("\r\n<b:cyan>Built-in prompt templates:</>\r\n");
+        let widest = PROMPT_TEMPLATES
+            .iter()
+            .map(|(n, _)| n.len())
+            .max()
+            .unwrap_or(0);
+        for (name, body) in PROMPT_TEMPLATES {
+            out.push_str(&format!("  <cyan>{name:<widest$}</>  {body}\r\n"));
+        }
+        out.push_str(
+            "  <dim>Pick one with `prompt <name>` or roll your own with the format below.</>\r\n",
+        );
+        send_rendered(world, player, &out);
+        return;
+    }
+    if let Some((_, body)) = PROMPT_TEMPLATES
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(template))
+    {
+        try_insert(world, player, Prompt((*body).to_string()));
+        send_rendered(
+            world,
+            player,
+            &format!("Prompt set to <cyan>{template}</>: {body}\r\n"),
+        );
+        return;
+    }
+
     if template.is_empty() {
         let current = world
             .get::<Prompt>(player)
@@ -5367,6 +5418,9 @@ pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
             format!(
                 "Your prompt is: {current}\r\n\
                  \r\n\
+                 Built-in templates: try `prompt list` for a menu.\r\n\
+                 \r\n\
+                 Format codes:\r\n\
                  Vitals:    %h current HP   %H max HP   \
                  %B 10-cell HP bar (color-graded)\r\n\
                  \x20          %v current stamina  %V max stamina  \

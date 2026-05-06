@@ -872,41 +872,64 @@ pub(crate) struct StyleLayer {
 pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
     let mut out = String::with_capacity(s.len() + 16);
     let mut stack: Vec<StyleLayer> = Vec::new();
-    let mut chars = s.chars();
-
-    while let Some(c) = chars.next() {
+    // Index-based walk so we can rewind on a nested `<`. The previous
+    // iterator-based scanner ate `<<yellow>` as a single non-tag run
+    // ("<yellow") and emitted it literally, which broke prompts that
+    // had a literal leading `<` (e.g. `prompt <%h/%H ...>` — the
+    // colored %h substitution puts a `<yellow>` right after the
+    // literal `<`).
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
         if c != '<' {
             out.push(c);
+            i += 1;
             continue;
         }
-        // Read up to the matching `>`. If we hit end-of-input before
-        // `>`, drain — matches the historical strip-only behavior.
-        let mut tag = String::new();
-        let mut closed = false;
-        for next in chars.by_ref() {
-            if next == '>' {
-                closed = true;
-                break;
+        // Scan for matching `>`. Bail to "literal `<`" if we hit
+        // another `<` first — that's a sign the outer `<` is just
+        // a typed angle bracket, not the start of a tag. Bail to
+        // "drop trailing fragment" if we hit end-of-input.
+        let mut j = i + 1;
+        let mut found_close: Option<usize> = None;
+        while j < chars.len() {
+            match chars[j] {
+                '>' => {
+                    found_close = Some(j);
+                    break;
+                }
+                '<' => break,
+                _ => j += 1,
             }
-            tag.push(next);
         }
-        if !closed {
-            break;
-        }
+        let Some(close) = found_close else {
+            // Either ran into a nested `<` or hit end-of-input.
+            // Either way the outer `<` is literal — emit it and
+            // resume parsing from the next char so a nested
+            // `<yellow>` after a literal `<` still opens the tag.
+            out.push('<');
+            i += 1;
+            continue;
+        };
+        let tag: String = chars[i + 1..close].iter().collect();
         // Only consume `<...>` as a tag if the content actually looks
         // tag-shaped. This is what lets the default prompt template
-        // `<%h/%H>` survive: after %-substitution it's `<42/100>`, which
-        // contains a `/` mid-content (not the leading-slash close form)
-        // and so doesn't match any color-tag shape — we emit it literally.
+        // `<%h/%H>` survive: after %-substitution it's `<42/100>`,
+        // which contains a `/` mid-content (not the leading-slash
+        // close form) and so doesn't match any color-tag shape —
+        // we emit it literally.
         if !is_tag_shaped(&tag) {
             out.push('<');
             out.push_str(&tag);
             out.push('>');
+            i = close + 1;
             continue;
         }
         if apply_tag(&tag, &mut stack) && mode == ColorMode::Ansi {
             emit_ansi_state(&mut out, &stack);
         }
+        i = close + 1;
     }
     if mode == ColorMode::Ansi && !stack.is_empty() {
         out.push_str("\x1b[0m");
@@ -932,36 +955,45 @@ pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
 /// the all-ASCII content the imported world contains.
 pub(crate) fn visible_width(s: &str) -> usize {
     let mut count = 0usize;
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
+    // Index-based to mirror render_color_tags' nested-`<` fallback.
+    // A literal `<` followed by a tag (`<<yellow>...`) counts the
+    // outer `<` as 1 visible char and re-enters parsing on the
+    // inner `<` — same shape as the renderer.
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
         if c != '<' {
             count += 1;
+            i += 1;
             continue;
         }
-        // Buffer up to the matching `>` (or end). If the buffered
-        // content isn't tag-shaped, we should have counted the `<`
-        // and the buffered chars and the `>` as visible. Mirrors
-        // render_color_tags' "literal text" fallback so the two
-        // functions agree on what counts as printable.
-        let mut tag = String::new();
-        let mut closed = false;
-        for next in chars.by_ref() {
-            if next == '>' {
-                closed = true;
-                break;
+        let mut j = i + 1;
+        let mut found_close: Option<usize> = None;
+        while j < chars.len() {
+            match chars[j] {
+                '>' => {
+                    found_close = Some(j);
+                    break;
+                }
+                '<' => break,
+                _ => j += 1,
             }
-            tag.push(next);
         }
-        if !closed {
-            // Unterminated `<`: render_color_tags drops the rest;
-            // we mirror that and stop counting here.
-            break;
-        }
+        let Some(close) = found_close else {
+            // Outer `<` is a literal angle bracket — counts as 1
+            // visible char; resume scanning from the next char.
+            count += 1;
+            i += 1;
+            continue;
+        };
+        let tag: String = chars[i + 1..close].iter().collect();
         if !is_tag_shaped(&tag) {
             // Literal `<...>` — counts as visible (`<`, body, `>`).
             count += 2 + tag.chars().count();
         }
         // Tag-shaped: contributes 0 visible chars.
+        i = close + 1;
     }
     count
 }
@@ -1363,8 +1395,14 @@ mod tests {
         assert_eq!(super::visible_width("<red>r</><green>g</><b>b</>"), 3);
         // Non-tag-shaped angle text: counts as literal.
         assert_eq!(super::visible_width("<%h/%H>"), "<%h/%H>".chars().count());
-        // Unterminated `<` truncates (matches render_color_tags).
-        assert_eq!(super::visible_width("hi <b:yellow"), 3);
+        // Unterminated `<` is treated as a literal angle bracket
+        // (no trailing `>` to close it), so the whole "hi <b:yellow"
+        // counts as 12 visible chars. Mirrors render_color_tags'
+        // matching fallback.
+        assert_eq!(super::visible_width("hi <b:yellow"), 12);
+        // Nested `<<yellow>foo</>`: outer `<` is literal (1 col), the
+        // inner `<yellow>...</>` wraps `foo` (3 cols). Total 4.
+        assert_eq!(super::visible_width("<<yellow>foo</>"), 4);
     }
 
     #[test]
@@ -1454,8 +1492,15 @@ mod tests {
         assert_eq!(strip("<red>red</>"), "red");
         // Multi-modifier open + full reset close.
         assert_eq!(strip("<b:yellow>warning:</> watch out"), "warning: watch out");
-        // Unterminated tag: drains rest of string.
-        assert_eq!(strip("hello <b:yellow"), "hello ");
+        // Unterminated `<` is treated as a literal angle bracket and
+        // the rest of the string passes through verbatim. (Earlier
+        // behavior dropped everything after the `<`; the new shape
+        // is needed so prompts like `<%h/%H ...>` survive when the
+        // %-substitution introduces nested tags.)
+        assert_eq!(strip("hello <b:yellow"), "hello <b:yellow");
+        // Nested literal-then-tag: the outer `<` is literal, the
+        // inner `<yellow>...</>` strips out cleanly.
+        assert_eq!(strip("<<yellow>foo</>"), "<foo");
         // Empty tags drop cleanly.
         assert_eq!(strip("<>x<>y"), "xy");
     }
