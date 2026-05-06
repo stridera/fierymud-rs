@@ -12,6 +12,24 @@ use crate::commands::{
 
 inventory::submit! {
     Command {
+        names: &["leave"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Movement,
+        help: Help {
+            usage: "leave",
+            summary: "Exit your current vehicle / mount.",
+            long: "Inverse of `enter` for vehicles. Today the only \
+                   in-vehicle state we model is mounted, so `leave` \
+                   is a synonym for `dismount`. When boats / \
+                   carriages land it'll cover those too.",
+        },
+        run: cmd_leave,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["enter"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -26,6 +44,21 @@ inventory::submit! {
         },
         run: cmd_enter,
     }
+}
+
+fn cmd_leave(world: &mut World, player: Entity, _args: &str) {
+    use mud_world::Mounted;
+    if world.get::<Mounted>(player).is_some() {
+        // Defer to the existing dismount path so the broadcast +
+        // RiddenBy cleanup stay in one place.
+        crate::commands::info::cmd_dismount(world, player, "");
+        return;
+    }
+    send_to(
+        world,
+        player,
+        "You aren't inside any vehicle or mount to leave.\r\n",
+    );
 }
 
 #[allow(clippy::too_many_lines)]
