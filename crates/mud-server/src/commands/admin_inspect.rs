@@ -173,10 +173,12 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "set <player> <field> <value>",
+            usage: "set <player> <field> <value>  |  set fields",
             summary: "Mutate a player field directly.",
-            long: "Implementor-only. Field names match the writable \
-                   columns on `Characters` (level, alignment, etc).",
+            long: "Implementor-only. Run `set fields` to list every \
+                   writable field with its aliases. `stat <player>` \
+                   dumps the full read-only component state — pair \
+                   the two when poking at a character.",
         },
         run: cmd_set,
     }
@@ -1249,10 +1251,49 @@ pub(crate) fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
         format!("Set climate of zone {zone_id} ({zone_name}) to {climate:?}.\r\n"),
     );
 }
+/// Inventory of writable fields the `set` command supports.
+/// `(canonical, aliases, "what it touches")`. Sourced once and
+/// rendered by `set fields` so the help is always in sync with
+/// the match arms below.
+const SET_FIELDS: &[(&str, &[&str], &str)] = &[
+    ("level", &[], "Profile.level (clamped >= 1)"),
+    ("xp", &["exp", "experience"], "Profile.experience (clamped >= 0)"),
+    ("hp", &[], "Health.hp (clamped 0..=max)"),
+    ("maxhp", &[], "Health.max (current hp pinned to new max)"),
+    ("stamina", &["stam"], "Stamina.current (clamped 0..=max)"),
+    ("maxstamina", &["maxstam"], "Stamina.max (current stamina pinned)"),
+    ("gold", &["copper", "wealth"], "Wealth in copper (clamped >= 0)"),
+    ("alignment", &["align"], "CombatStats.alignment (signed)"),
+];
+
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
+    // `set fields` / `set list` — show the writable-field list.
+    let trimmed = args.trim();
+    if trimmed.eq_ignore_ascii_case("fields") || trimmed.eq_ignore_ascii_case("list") {
+        let mut out = String::from("\r\n<b:cyan>Writable fields for `set`:</>\r\n");
+        let widest_canonical = SET_FIELDS.iter().map(|(c, _, _)| c.len()).max().unwrap_or(0);
+        for (canonical, aliases, desc) in SET_FIELDS {
+            let alias_str = if aliases.is_empty() {
+                String::new()
+            } else {
+                format!("  <dim>(also {})</>", aliases.join(", "))
+            };
+            out.push_str(&format!(
+                "  <cyan>{canonical:<widest_canonical$}</>{alias_str}  <dim>—</> {desc}\r\n",
+            ));
+        }
+        out.push_str("\r\n  <dim>Pair with `stat <player>` for the read-only component dump.</>\r\n");
+        crate::commands::send_rendered(world, player, &out);
+        return;
+    }
     let parts: Vec<&str> = args.splitn(3, char::is_whitespace).collect();
     if parts.len() != 3 || parts[1].trim().is_empty() || parts[2].trim().is_empty() {
-        send_to(world, player, "Usage: set <target|me> <field> <value>\r\n");
+        send_to(
+            world,
+            player,
+            "Usage: set <target|me> <field> <value>   (run `set fields` to list writable fields)\r\n",
+        );
         return;
     }
     let target_word = parts[0].trim();
@@ -1333,7 +1374,9 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
             send_to(
                 world,
                 player,
-                format!("Unknown field '{other}'. Try: level, xp, hp, maxhp, stamina, maxstamina, gold, alignment.\r\n"),
+                format!(
+                    "Unknown field '{other}'. Run `set fields` to list every writable field.\r\n"
+                ),
             );
             return;
         }
