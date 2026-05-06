@@ -3982,7 +3982,11 @@ fn scan_room_actors(
             Or<(With<Mob>, (With<Player>, With<Online>))>,
         >();
         q.iter(world)
-            .filter(|(e, l, _)| *e != scanner && l.0 == room)
+            .filter(|(e, l, _)| {
+                *e != scanner
+                    && l.0 == room
+                    && crate::commands::can_see_player(world, scanner, *e)
+            })
             .map(|(e, _, n)| (e, n.name.clone()))
             .collect()
     };
@@ -4430,7 +4434,11 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         let mut q = world
             .query_filtered::<(Entity, &Located, &Named, Option<&Posture>), With<Player>>();
         q.iter(world)
-            .filter(|(e, l, _, _)| *e != player && l.0 == room)
+            .filter(|(e, l, _, _)| {
+                *e != player
+                    && l.0 == room
+                    && crate::commands::can_see_player(world, player, *e)
+            })
             .map(|(_, _, n, posture)| {
                 let p = posture.map_or(PostureKind::Standing, |p| p.0);
                 if p == PostureKind::Standing {
@@ -4678,6 +4686,9 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
             Option<&mud_world::ClanMembership>,
         ), (With<Player>, With<Online>)>();
         q.iter(world)
+            .filter(|(e, _, _, _, _, _, _)| {
+                crate::commands::can_see_player(world, player, *e)
+            })
             .map(|(e, n, t, f, last, prof, clan)| WhoRow {
                 entity: e,
                 name: n.name.clone(),

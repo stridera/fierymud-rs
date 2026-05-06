@@ -6532,6 +6532,21 @@ pub(crate) fn player_can_see_in_dark(world: &World, entity: Entity) -> bool {
     has_flag(world, entity, PlayerFlag::HolyLight)
 }
 
+/// True when `viewer` is allowed to see `target` for the purpose
+/// of player-facing listings (who / look / scan). Returns false
+/// when `target` carries `WizInvis(N)` and viewer's `Profile.level`
+/// is below `N`. Targets without a `WizInvis` component are always
+/// visible. Used by every place we render another actor's name
+/// to a player so a wiz-invised admin actually disappears.
+#[must_use]
+pub(crate) fn can_see_player(world: &World, viewer: Entity, target: Entity) -> bool {
+    let Some(invis) = world.get::<mud_world::WizInvis>(target).map(|w| w.0) else {
+        return true;
+    };
+    let viewer_level = world.get::<Profile>(viewer).map_or(0, |p| p.level);
+    viewer_level >= invis
+}
+
 /// True if anyone in `room` (any actor, plus loose items on the
 /// floor and items worn or carried by actors in the room) carries
 /// a `Lit` marker. Used to override `room_is_dark` for rooms with

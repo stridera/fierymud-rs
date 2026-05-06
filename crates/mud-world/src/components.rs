@@ -637,6 +637,14 @@ pub struct BoardLink(pub i32);
 #[derive(Component, Debug, Clone, Default)]
 pub struct AttachedTriggers(pub Vec<(i32, i32)>);
 
+/// Immortal invisibility level — only viewers whose `Profile.level`
+/// is at least this value can see this entity in player listings
+/// (who / look / scan). Default is "no component" → fully visible.
+/// Set / cleared by the `wizinvis` admin command. Capped at the
+/// player's own level; legacy `do_invis` enforces the same.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WizInvis(pub i32);
+
 /// On a snooper: the target whose output we're mirroring. Set by
 /// the `snoop` admin command, cleared by `snoop` with no arg.
 /// Paired with `SnoopedBy` on the target so `send_raw` can

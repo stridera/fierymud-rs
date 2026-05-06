@@ -111,6 +111,26 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["wizinvis", "invis"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "wizinvis [<level> | off]",
+            summary: "Become invisible to lower-level players.",
+            long: "Builder+. With no arg, toggles invis at your own \
+                   level. `wizinvis <level>` sets to that exact \
+                   level (capped at your own). `wizinvis off` clears \
+                   it. Players whose level is below yours (or \
+                   below the explicit level) won't see you in \
+                   `who` / `look` / `scan` listings.",
+        },
+        run: cmd_wizinvis,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["snoop"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -986,6 +1006,58 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} summons {proto_name} from thin air.\r\n"),
     );
 }
+pub(crate) fn cmd_wizinvis(world: &mut World, player: Entity, args: &str) {
+    use mud_world::WizInvis;
+    record_admin_action(world, player, "wizinvis", args);
+    let arg = args.trim();
+    let own_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    let current = world.get::<WizInvis>(player).map(|w| w.0);
+
+    // Resolve the target invis level from the arg.
+    let new_level: Option<i32> = if arg.is_empty() {
+        // Toggle: if currently invis, clear; else go invis at own level.
+        if current.is_some() { Some(0) } else { Some(own_level) }
+    } else if arg.eq_ignore_ascii_case("off") || arg == "0" {
+        Some(0)
+    } else if let Ok(n) = arg.parse::<i32>() {
+        if n < 0 {
+            send_to(world, player, "Invis level can't be negative.\r\n");
+            return;
+        }
+        if n > own_level {
+            send_to(
+                world,
+                player,
+                "You can't go invisible above your own level.\r\n",
+            );
+            return;
+        }
+        Some(n)
+    } else {
+        send_to(world, player, "Usage: wizinvis [<level> | off]\r\n");
+        return;
+    };
+
+    let Some(level) = new_level else {
+        return;
+    };
+    if level == 0 {
+        try_remove::<WizInvis>(world, player);
+        send_rendered(
+            world,
+            player,
+            "<dim>You fade back into view.</>\r\n",
+        );
+    } else {
+        try_insert(world, player, WizInvis(level));
+        send_rendered(
+            world,
+            player,
+            &format!("<dim>You vanish from sight (invis level {level}).</>\r\n"),
+        );
+    }
+}
+
 pub(crate) fn cmd_snoop(world: &mut World, player: Entity, args: &str) {
     use mud_world::{SnoopedBy, Snooping};
     record_admin_action(world, player, "snoop", args);
