@@ -99,6 +99,12 @@ pub struct CharacterRow {
     /// disconnects (this is the kind of setting players set once and
     /// expect to stay set).
     pub wimpy_threshold: i32,
+    /// Custom arrival / departure messages for staff teleports.
+    /// `None` for either column → renderer falls back to the
+    /// generic "$n appears" / "$n vanishes" lines. Round-trips
+    /// the runtime's `Poofs` component.
+    pub poof_in: Option<String>,
+    pub poof_out: Option<String>,
 }
 
 /// Bundle of fields fed into `create` from the login-creation
@@ -285,6 +291,11 @@ pub struct CharacterStatePayload<'a> {
     /// Wimpy threshold (HP%-of-max trigger for auto-flee). Pairs
     /// with the runtime's `WimpyThreshold` component.
     pub wimpy_threshold: i32,
+    /// Custom arrival / departure messages for staff teleports.
+    /// `None` writes NULL; the runtime falls back to the generic
+    /// "$n appears" / "$n vanishes" lines at render time.
+    pub poof_in: Option<&'a str>,
+    pub poof_out: Option<&'a str>,
 }
 
 pub async fn save_state(
@@ -313,8 +324,10 @@ pub async fn save_state(
             invis_level = $16,
             freeze_level = $17,
             wimpy_threshold = $18,
+            poof_in = $19,
+            poof_out = $20,
             last_login = NOW()
-        WHERE id = $19
+        WHERE id = $21
         "#,
         state.hit_points,
         state.stamina,
@@ -334,6 +347,8 @@ pub async fn save_state(
         state.invis_level,
         state.freeze_level,
         state.wimpy_threshold,
+        state.poof_in,
+        state.poof_out,
         character_id,
     )
     .execute(pool)
@@ -493,7 +508,8 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             strength, dexterity, constitution, intelligence, wisdom, charisma,
             wealth, bank_wealth, gender, skill_points, hunger, thirst, time_played,
             last_login AS "last_login: chrono::NaiveDateTime",
-            invis_level, freeze_level, wimpy_threshold
+            invis_level, freeze_level, wimpy_threshold,
+            poof_in, poof_out
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -549,7 +565,9 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             last_login AS "last_login: chrono::NaiveDateTime",
             invis_level,
             freeze_level,
-            wimpy_threshold
+            wimpy_threshold,
+            poof_in,
+            poof_out
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

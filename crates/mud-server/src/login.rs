@@ -1163,6 +1163,15 @@ impl ConnRouter {
             if char_row.wimpy_threshold > 0 {
                 e.insert(mud_world::WimpyThreshold(char_row.wimpy_threshold));
             }
+            // Poofs — only attach when at least one side is set.
+            // Both NULL → no component → renderer falls back to
+            // the generic vanish/appear lines.
+            if char_row.poof_in.is_some() || char_row.poof_out.is_some() {
+                e.insert(mud_world::Poofs {
+                    poof_in: char_row.poof_in.clone(),
+                    poof_out: char_row.poof_out.clone(),
+                });
+            }
             if let Some(c) = clan {
                 e.insert(mud_world::ClanMembership {
                     clan_id: c.clan_id,
@@ -1504,6 +1513,11 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     let wimpy_threshold = world
         .get::<mud_world::WimpyThreshold>(entity)
         .map_or(0, |w| w.0);
+    // Poofs — clone the message strings out so the borrow checker
+    // doesn't drag a `&Poofs` into the awaited `save_state` call.
+    let (poof_in, poof_out) = world
+        .get::<mud_world::Poofs>(entity)
+        .map_or((None, None), |p| (p.poof_in.clone(), p.poof_out.clone()));
 
     // Snapshot every Item rooted at the player — both directly carried
     // and nested inside any container the player carries. BFS keeps
@@ -1570,6 +1584,8 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
             invis_level,
             freeze_level,
             wimpy_threshold,
+            poof_in: poof_in.as_deref(),
+            poof_out: poof_out.as_deref(),
         },
     )
     .await
@@ -2060,6 +2076,8 @@ mod tests {
             invis_level: 0,
             freeze_level: None,
             wimpy_threshold: 0,
+            poof_in: None,
+            poof_out: None,
         }
     }
 
