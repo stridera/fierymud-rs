@@ -11390,6 +11390,35 @@ pub(crate) fn broadcast_room_except_players_rendered(
     }
 }
 
+/// `broadcast_room_except_players_rendered`, but with a `sender`
+/// entity supplied so wiz-invised speakers stay invisible to
+/// lower-level observers. Use this at every site whose broadcast
+/// names a specific actor (movement, recall, portal enter,
+/// social emotes). Sites without a clear sender (mob-triggered
+/// effects, weather, etc.) keep the unfiltered variant.
+pub(crate) fn broadcast_room_visible(
+    world: &mut World,
+    room: Entity,
+    sender: Entity,
+    except: &[Entity],
+    raw_msg: &str,
+) {
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| {
+                l.0 == room
+                    && !except.contains(e)
+                    && can_see_player(world, *e, sender)
+            })
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        send_to(world, t, raw_msg);
+    }
+}
+
 /// Combat-action stamina costs (one stop in scope so a balance pass can
 /// retune them in one place).
 pub(crate) const ATTACK_COST: i32 = 2;
@@ -11956,11 +11985,14 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     });
 
     // Notify the source room of each mover departing (in chain order).
+    // Use the sender-aware broadcast so wiz-invised admins stay
+    // hidden to lower-level observers.
     for &mover in &movers {
         let mover_name = name_of(world, mover);
-        broadcast_room_except_players_rendered(
+        broadcast_room_visible(
             world,
             from_room,
+            mover,
             &movers,
             &format!("{} leaves {dir_name}.\r\n", cap_sentence_start(&mover_name)),
         );
@@ -12013,12 +12045,15 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         s.current = (s.current - stamina_cost).max(0);
     }
 
-    // Notify the destination room of arrivals.
+    // Notify the destination room of arrivals. Wizinvis filter
+    // mirrors the source-room broadcast so an invised admin's
+    // arrival also stays hidden.
     for &mover in &movers {
         let mover_name = name_of(world, mover);
-        broadcast_room_except_players_rendered(
+        broadcast_room_visible(
             world,
             target,
+            mover,
             &movers,
             &format!("{} arrives from {arrival_dir}.\r\n", cap_sentence_start(&mover_name)),
         );

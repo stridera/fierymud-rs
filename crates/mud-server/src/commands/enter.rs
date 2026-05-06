@@ -6,7 +6,7 @@ use mud_db::enums::{ObjectType, UserRole};
 use mud_world::{Fighting, Item, Keywords, Located, Named, ObjectPrototypes, WorldKey, WorldKeyIndex};
 
 use crate::commands::{
-    Category, Command, Help, broadcast_room_except_players_rendered, cmd_look, matches,
+    Category, Command, Help, cmd_look, matches,
     name_of, send_rendered, send_to,
 };
 
@@ -148,18 +148,20 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
     let mover_name = name_of(world, player);
     let mover_capped = crate::commands::cap_sentence_start(&mover_name);
     let portal_name = proto.name.clone();
-    broadcast_room_except_players_rendered(
+    crate::commands::broadcast_room_visible(
         world,
         from_room,
+        player,
         &[player],
         &format!("{mover_capped} steps into {portal_name} and vanishes.\r\n"),
     );
     if let Some(mut l) = world.get_mut::<Located>(player) {
         l.0 = dest;
     }
-    broadcast_room_except_players_rendered(
+    crate::commands::broadcast_room_visible(
         world,
         dest,
+        player,
         &[player],
         &format!("{mover_capped} steps out of a swirling portal.\r\n"),
     );

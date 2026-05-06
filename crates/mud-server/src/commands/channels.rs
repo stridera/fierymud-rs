@@ -203,6 +203,11 @@ fn broadcast_global(
         {
             continue;
         }
+        // Wizinvis: hide the speaker entirely from observers below
+        // their invis level. Sender always sees their own line.
+        if t != player && !crate::commands::can_see_player(world, t, player) {
+            continue;
+        }
         // Channel tag colors the verb + body together so the line
         // is unmistakable in a busy log. Speaker name keeps any
         // authored color via render-on-send.

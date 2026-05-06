@@ -5,7 +5,7 @@ use mud_db::enums::UserRole;
 use mud_world::{Fighting, Located, Mounted, RecallPoint};
 
 use crate::commands::{
-    Category, Command, Help, broadcast_room_except_players_rendered, cmd_look, name_of,
+    Category, Command, Help, cmd_look, name_of,
     send_to, try_remove,
 };
 
@@ -60,9 +60,10 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
     let mover_name = name_of(world, player);
     let mover_capped = crate::commands::cap_sentence_start(&mover_name);
 
-    broadcast_room_except_players_rendered(
+    crate::commands::broadcast_room_visible(
         world,
         from_room,
+        player,
         &[player],
         &format!("{mover_capped} fades away in a flash of light.\r\n"),
     );
@@ -77,9 +78,10 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
         l.0 = target;
     }
 
-    broadcast_room_except_players_rendered(
+    crate::commands::broadcast_room_visible(
         world,
         target,
+        player,
         &[player],
         &format!("{mover_capped} appears in a flash of light.\r\n"),
     );
