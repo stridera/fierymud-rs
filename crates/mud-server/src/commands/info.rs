@@ -1265,6 +1265,25 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["summonmount", "summon-mount"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Mount,
+        help: Help {
+            usage: "summonmount",
+            summary: "Conjure a mount (Paladin / Anti-Paladin only).",
+            long: "Class-gated to Paladin and Anti-Paladin; refused below \
+                   level 15, indoors, while fighting, or when you \
+                   already have a mount following you. Spawns the \
+                   first matching mountable proto as a Follower in \
+                   your current room.",
+        },
+        run: cmd_summonmount,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["camp"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4959,6 +4978,142 @@ pub(crate) fn cmd_trophy(world: &mut World, player: Entity, args: &str) {
         ));
     }
     crate::commands::send_rendered(world, player, &out);
+}
+
+/// Class IDs from the seeded `Class` catalog. Paladin = 5,
+/// Anti-Paladin = 6 (verified against fierydev). Hardcoded for now;
+/// a tag-based "summons-mount" class flag is the cleaner long-term
+/// shape.
+const SUMMON_MOUNT_CLASS_IDS: &[i32] = &[5, 6];
+const SUMMON_MOUNT_MIN_LEVEL: i32 = 15;
+
+pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<Fighting>(player).is_some() {
+        send_to(
+            world,
+            player,
+            "You can't focus enough while you're fighting.\r\n",
+        );
+        return;
+    }
+    let profile = world.get::<Profile>(player).cloned();
+    let Some(profile) = profile else { return };
+    let class_ok = profile
+        .class_id
+        .is_some_and(|id| SUMMON_MOUNT_CLASS_IDS.contains(&id));
+    if !class_ok {
+        send_to(
+            world,
+            player,
+            "You have no idea what you're trying to accomplish.\r\n",
+        );
+        return;
+    }
+    if profile.level < SUMMON_MOUNT_MIN_LEVEL {
+        send_to(
+            world,
+            player,
+            "You aren't yet deemed worthy of a mount — gain a few more levels.\r\n",
+        );
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let sector = world.get::<RoomSector>(room).map(|s| s.0);
+    if !sector.is_some_and(crate::camp::sector_allows_camp) {
+        send_to(
+            world,
+            player,
+            "Try again — outdoors this time.\r\n",
+        );
+        return;
+    }
+    // Refuse if a Mountable follower of this player is already in
+    // the room.
+    let already_mounted: bool = {
+        let mut q = world.query_filtered::<&Follower, (With<Mob>, With<mud_world::Mountable>)>();
+        q.iter(world).any(|f| f.0 == player)
+    };
+    if already_mounted {
+        send_to(world, player, "You already have a mount.\r\n");
+        return;
+    }
+
+    // Pick a proto: the first MobProto whose keywords match the
+    // basic horse/steed heuristic. Future polish: scale by level
+    // / alignment per the legacy mount_types table.
+    let candidate: Option<(i32, i32)> = {
+        let protos = world.resource::<MobPrototypes>();
+        protos
+            .by_key
+            .iter()
+            .find(|(_, p)| {
+                p.keywords.iter().any(|k| {
+                    let lc = k.to_ascii_lowercase();
+                    lc.contains("horse") || lc.contains("steed") || lc.contains("mount")
+                })
+            })
+            .map(|((z, id), _)| (*z, *id))
+    };
+    let Some((zone, id)) = candidate else {
+        send_to(
+            world,
+            player,
+            "No mount could be found in the world. Tell a god.\r\n",
+        );
+        return;
+    };
+    // Reuse the MCP/admin spawn flow indirectly: build a minimal
+    // mob entity from the proto. We deliberately skip MobResets
+    // bookkeeping (no FromMobReset) so the respawn tick won't
+    // re-fill us, and skip Shopkeeper / triggers — a summoned
+    // mount is generic.
+    let proto = world
+        .resource::<MobPrototypes>()
+        .by_key
+        .get(&(zone, id))
+        .cloned();
+    let Some(proto) = proto else { return };
+    let hp = proto.rolled_hp();
+    let dmg = proto.avg_damage();
+    let player_name = name_of(world, player);
+    let mount_entity = world
+        .spawn((
+            Mob,
+            Named { name: proto.name.clone() },
+            Keywords(proto.keywords.clone()),
+            Description(proto.room_description.clone()),
+            WorldKey { zone, id },
+            Located(room),
+            Health { hp, max: hp },
+            CombatStats {
+                hit_roll: proto.hit_roll,
+                dmg_roll: dmg,
+                ac: proto.armor_class,
+                alignment: proto.alignment,
+                ward_pct: proto.ward_percent,
+            },
+            Posture(PostureKind::Standing),
+            mud_world::Mountable,
+            Follower(player),
+        ))
+        .id();
+    let mount_name = name_of(world, mount_entity);
+    send_rendered(
+        world,
+        player,
+        &format!("{mount_name} answers your summons!\r\n"),
+    );
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!(
+            "{mount_name} walks in, seemingly from nowhere, and nuzzles {player_name}'s face.\r\n"
+        ),
+    );
 }
 
 pub(crate) fn cmd_camp(world: &mut World, player: Entity, _args: &str) {
