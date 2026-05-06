@@ -637,6 +637,20 @@ pub struct BoardLink(pub i32);
 #[derive(Component, Debug, Clone, Default)]
 pub struct AttachedTriggers(pub Vec<(i32, i32)>);
 
+/// On a player who's set up camp (`camp` command). Records the
+/// tick the timer started and the room they pitched in so the
+/// camp-tick can detect "they moved" and cancel. Removed when the
+/// camp completes (player saved + woken) or aborts (movement /
+/// combat). v1 doesn't disconnect on completion — camp is a
+/// "long rest with checkpoint" rather than the legacy
+/// safe-logout flow, since the runtime auto-saves on disconnect
+/// anyway.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Camping {
+    pub since_tick: u64,
+    pub started_in: Entity,
+}
+
 /// Immortal invisibility level — only viewers whose `Profile.level`
 /// is at least this value can see this entity in player listings
 /// (who / look / scan). Default is "no component" → fully visible.

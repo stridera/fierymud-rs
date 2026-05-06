@@ -1,4 +1,5 @@
 mod admin;
+mod camp;
 mod combat;
 mod commands;
 mod corpses;
@@ -244,6 +245,7 @@ async fn main() {
                 wander::wander_tick,
                 wander::scavenger_tick,
                 idle::idle_kick_tick,
+                camp::camp_tick,
                 memorize::memorize_tick,
                 respawn::respawn_tick,
                 triggers::lua_coroutine_tick,

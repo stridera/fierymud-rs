@@ -3,7 +3,7 @@ pub mod loader;
 pub mod resources;
 
 pub use components::{
-    Account, AccountSummary, Aliases, AppliedTo, AttachedTriggers, BankWealth, BoardDraft,
+    Account, AccountSummary, Aliases, AppliedTo, AttachedTriggers, BankWealth, BoardDraft, Camping,
     CharacterAchievements, ClanMembership,
     BoardLink, Charges, CoinPile, CombatStats, Cooldowns, CoreStats, Corpse, CorpseDecay, Description,
     Drunkenness, EffectInstance, EffectSource, EquippedSlot, ExamineText, ExitData, Exits, Fighting, Flying, Follower,

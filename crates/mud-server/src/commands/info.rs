@@ -1245,6 +1245,26 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["camp"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Settings,
+        help: Help {
+            usage: "camp",
+            summary: "Pitch camp for a long rest with a checkpoint save.",
+            long: "Refuses indoors, in cities, on water, in the air, \
+                   while mounted, or while in combat. Once setup \
+                   completes (~35 seconds), you're checkpointed \
+                   to disk so a sudden disconnect won't lose recent \
+                   progress. Walking away or being attacked aborts \
+                   the camp.",
+        },
+        run: cmd_camp,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["point"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4863,6 +4883,67 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     // Player titles can contain XML-Lite color tags; render before
     // sending so they show as ANSI rather than literal markup.
     send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_camp(world: &mut World, player: Entity, _args: &str) {
+    use mud_world::Camping;
+    if world.get::<Camping>(player).is_some() {
+        send_to(world, player, "You're already setting up camp.\r\n");
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(
+            world,
+            player,
+            "You're too busy fighting to pitch a tent.\r\n",
+        );
+        return;
+    }
+    if world.get::<mud_world::Mounted>(player).is_some() {
+        send_to(world, player, "You'd better dismount first.\r\n");
+        return;
+    }
+    if world.get::<mud_world::Flying>(player).is_some() {
+        send_to(world, player, "You can't pitch a tent in mid-air.\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let room = located.0;
+    let sector = world.get::<RoomSector>(room).map(|s| s.0);
+    let allows = sector.is_some_and(crate::camp::sector_allows_camp);
+    if !allows {
+        send_to(
+            world,
+            player,
+            "This isn't a place to camp. Find a stretch of \
+             wilderness — woods, hills, fields, beach, ruins, \
+             swamp, or open road.\r\n",
+        );
+        return;
+    }
+    let now_tick = world.resource::<TickCount>().0;
+    try_insert(
+        world,
+        player,
+        Camping {
+            since_tick: now_tick,
+            started_in: room,
+        },
+    );
+    let player_name = name_of(world, player);
+    send_rendered(
+        world,
+        player,
+        "<b:cyan>You start setting up camp.</>\r\n",
+    );
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} starts setting up camp.\r\n"),
+    );
 }
 
 pub(crate) fn cmd_point(world: &mut World, player: Entity, args: &str) {
