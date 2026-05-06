@@ -637,6 +637,21 @@ pub struct BoardLink(pub i32);
 #[derive(Component, Debug, Clone, Default)]
 pub struct AttachedTriggers(pub Vec<(i32, i32)>);
 
+/// On a snooper: the target whose output we're mirroring. Set by
+/// the `snoop` admin command, cleared by `snoop` with no arg.
+/// Paired with `SnoopedBy` on the target so `send_raw` can
+/// short-circuit the lookup. One snooper per target at a time
+/// (legacy convention) — re-snooping a different target rewires
+/// both ends.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Snooping(pub Entity);
+
+/// On a target: the snooper currently watching this entity's
+/// output. Pair to `Snooping`. Cleared when the snooper stops
+/// or switches; cleared on disconnect (via `Online` despawn paths).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SnoopedBy(pub Entity);
+
 /// Per-entity key-value state — the Lua / DG-script equivalent
 /// of legacy DG `var.<name>`. Triggers store and read named
 /// values across fires (e.g. a quest counter on a mob, a phase

@@ -714,10 +714,30 @@ pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
 
 /// Raw-bytes send, no color-tag rendering. `PROMPT_RECIPIENTS` is
 /// still tracked. Used by `send_to` after rendering, and by callers
-/// that ship pre-rendered ANSI.
+/// that ship pre-rendered ANSI. Also mirrors to a snooper when the
+/// target carries `SnoopedBy` — admin debugging visibility.
 pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
+    let text = text.into();
     if let Some(conn) = world.get::<Connection>(target) {
-        let _ = conn.0.send(text.into().into_bytes());
+        let _ = conn.0.send(text.clone().into_bytes());
+    }
+    // Snoop mirror: forward a dim-prefixed copy to the snooper.
+    // Skip when the text already starts with the prefix (defensive
+    // against accidental recursion) and when the snooper is the
+    // target itself.
+    if let Some(mud_world::SnoopedBy(snooper)) = world.get::<mud_world::SnoopedBy>(target).copied()
+        && snooper != target
+        && let Some(snooper_conn) = world.get::<Connection>(snooper)
+    {
+        let mut framed = String::with_capacity(text.len() + 16);
+        // Render line-by-line so multi-line output stays
+        // visually associated with the snooped entity. The dim
+        // `%` prefix mirrors the legacy convention.
+        for line in text.split_inclusive('\n') {
+            framed.push_str("\x1b[2m%\x1b[0m ");
+            framed.push_str(line);
+        }
+        let _ = snooper_conn.0.send(framed.into_bytes());
     }
     PROMPT_RECIPIENTS.with(|r| {
         r.borrow_mut().insert(target);

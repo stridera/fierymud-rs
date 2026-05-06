@@ -111,6 +111,27 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["snoop"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "snoop [<player>]",
+            summary: "Mirror another player's output to your screen.",
+            long: "Builder+. With a player name, starts mirroring \
+                   their output (every line they receive prints to \
+                   you with a dim `%` prefix). With no arg, stops \
+                   the current snoop. Refuses snooping yourself, an \
+                   equal-or-higher level account, or a player who's \
+                   already being snooped — one snooper per target. \
+                   Re-snooping a different target rewires cleanly.",
+        },
+        run: cmd_snoop,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["peace"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -965,6 +986,91 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} summons {proto_name} from thin air.\r\n"),
     );
 }
+pub(crate) fn cmd_snoop(world: &mut World, player: Entity, args: &str) {
+    use mud_world::{SnoopedBy, Snooping};
+    record_admin_action(world, player, "snoop", args);
+    let arg = args.trim();
+    // No arg → stop snooping.
+    if arg.is_empty() {
+        let target = world.get::<Snooping>(player).map(|s| s.0);
+        if let Some(target) = target {
+            try_remove::<Snooping>(world, player);
+            try_remove::<SnoopedBy>(world, target);
+            let target_name = name_or(world, target, "(gone)");
+            send_to(
+                world,
+                player,
+                format!("You stop snooping {target_name}.\r\n"),
+            );
+        } else {
+            send_to(world, player, "You aren't snooping anyone.\r\n");
+        }
+        return;
+    }
+
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(arg))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "Snooping yourself? Don't be silly.\r\n");
+        return;
+    }
+
+    // Same-or-higher role refuses — staff can't be snooped by
+    // their peers. Mirrors legacy GET_LEVEL gate.
+    let target_role = world
+        .get::<Account>(target)
+        .map_or(UserRole::Player, |a| a.role);
+    let admin_role = world
+        .get::<Account>(player)
+        .map_or(UserRole::Player, |a| a.role);
+    if target_role.rank() >= admin_role.rank() {
+        send_to(
+            world,
+            player,
+            "You can't snoop someone of equal or higher rank.\r\n",
+        );
+        return;
+    }
+
+    // One snooper per target. Refuse if someone else is already
+    // watching this target.
+    if let Some(SnoopedBy(other)) = world.get::<SnoopedBy>(target).copied() {
+        if other == player {
+            // Re-snooping the same target → no-op confirm.
+            send_to(world, player, "You're already snooping that player.\r\n");
+            return;
+        }
+        send_to(
+            world,
+            player,
+            "Someone is already snooping that player.\r\n",
+        );
+        return;
+    }
+
+    // Clear any prior snoop on this admin first.
+    if let Some(prev) = world.get::<Snooping>(player).map(|s| s.0) {
+        try_remove::<SnoopedBy>(world, prev);
+    }
+
+    try_insert(world, player, Snooping(target));
+    try_insert(world, target, SnoopedBy(player));
+    let target_name = name_of(world, target);
+    send_to(
+        world,
+        player,
+        format!("You begin snooping {target_name}.\r\n"),
+    );
+}
+
 pub(crate) fn cmd_peace(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "peace", args);
     let Some(located) = world.get::<Located>(player).copied() else {
