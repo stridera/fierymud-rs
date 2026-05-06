@@ -93,6 +93,12 @@ pub struct CharacterRow {
     /// the `Frozen` marker; saved back as Some(1) when the marker
     /// is present.
     pub freeze_level: Option<i32>,
+    /// Combat-flee threshold — flee attempt fires when HP drops below
+    /// this percentage of max. 0 disables wimpy. Round-trips
+    /// `WimpyThreshold` so a player's tuned threshold persists across
+    /// disconnects (this is the kind of setting players set once and
+    /// expect to stay set).
+    pub wimpy_threshold: i32,
 }
 
 /// Bundle of fields fed into `create` from the login-creation
@@ -276,6 +282,9 @@ pub struct CharacterStatePayload<'a> {
     /// reconnects, `None` clears the lock. Pairs with the runtime's
     /// `Frozen` marker.
     pub freeze_level: Option<i32>,
+    /// Wimpy threshold (HP%-of-max trigger for auto-flee). Pairs
+    /// with the runtime's `WimpyThreshold` component.
+    pub wimpy_threshold: i32,
 }
 
 pub async fn save_state(
@@ -303,8 +312,9 @@ pub async fn save_state(
             thirst = $15,
             invis_level = $16,
             freeze_level = $17,
+            wimpy_threshold = $18,
             last_login = NOW()
-        WHERE id = $18
+        WHERE id = $19
         "#,
         state.hit_points,
         state.stamina,
@@ -323,6 +333,7 @@ pub async fn save_state(
         state.thirst,
         state.invis_level,
         state.freeze_level,
+        state.wimpy_threshold,
         character_id,
     )
     .execute(pool)
@@ -482,7 +493,7 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             strength, dexterity, constitution, intelligence, wisdom, charisma,
             wealth, bank_wealth, gender, skill_points, hunger, thirst, time_played,
             last_login AS "last_login: chrono::NaiveDateTime",
-            invis_level, freeze_level
+            invis_level, freeze_level, wimpy_threshold
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -537,7 +548,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             time_played,
             last_login AS "last_login: chrono::NaiveDateTime",
             invis_level,
-            freeze_level
+            freeze_level,
+            wimpy_threshold
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

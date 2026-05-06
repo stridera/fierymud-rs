@@ -1155,6 +1155,14 @@ impl ConnRouter {
             if char_row.freeze_level.is_some() {
                 e.insert(mud_world::Frozen);
             }
+            // Wimpy threshold — re-attach when nonzero. The combat
+            // flee path falls back to a 25% default with no
+            // component, so the zero case is "use default" not
+            // "auto-flee disabled" today; this is documented on
+            // the component.
+            if char_row.wimpy_threshold > 0 {
+                e.insert(mud_world::WimpyThreshold(char_row.wimpy_threshold));
+            }
             if let Some(c) = clan {
                 e.insert(mud_world::ClanMembership {
                     clan_id: c.clan_id,
@@ -1491,6 +1499,11 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     let freeze_level: Option<i32> = world
         .get::<mud_world::Frozen>(entity)
         .map(|_| 1);
+    // Wimpy threshold — `WimpyThreshold(pct)` round-trips through
+    // the schema column. Absent component → 0 (no auto-flee).
+    let wimpy_threshold = world
+        .get::<mud_world::WimpyThreshold>(entity)
+        .map_or(0, |w| w.0);
 
     // Snapshot every Item rooted at the player — both directly carried
     // and nested inside any container the player carries. BFS keeps
@@ -1556,6 +1569,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
             thirst,
             invis_level,
             freeze_level,
+            wimpy_threshold,
         },
     )
     .await
@@ -2045,6 +2059,7 @@ mod tests {
             last_login: None,
             invis_level: 0,
             freeze_level: None,
+            wimpy_threshold: 0,
         }
     }
 
