@@ -101,6 +101,24 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["greport"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Group,
+        help: Help {
+            usage: "greport",
+            summary: "Broadcast your hp/stamina to your group.",
+            long: "Sends a one-line vitals snapshot to every member \
+                   of your current group regardless of room. Used \
+                   to coordinate healing / retreat without reading \
+                   raw `who` numbers.",
+        },
+        run: cmd_greport,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["gsay", "gtell", "gecho", "gt"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -303,6 +321,35 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
     let line_room = format!("{actor_name} insults {target_name}.\r\n");
     for e in bystanders {
         send_to(world, e, line_room.clone());
+    }
+}
+
+fn cmd_greport(world: &mut World, player: Entity, _args: &str) {
+    let root = group_root(world, player);
+    let members = group_members(world, root);
+    if members.len() <= 1 {
+        send_to(
+            world,
+            player,
+            "You're not in a group — nobody to report to.\r\n",
+        );
+        return;
+    }
+    let speaker = name_of(world, player);
+    let hp = world.get::<mud_world::Health>(player).copied();
+    let stamina = world.get::<mud_world::Stamina>(player).copied();
+    let hp_str = hp.map_or_else(|| String::from("?/?"), |h| format!("{}/{}", h.hp, h.max));
+    let st_str = stamina.map_or_else(
+        || String::from("?/?"),
+        |s| format!("{}/{}", s.current, s.max),
+    );
+    for m in members {
+        let line = if m == player {
+            format!("You report: {hp_str} hp, {st_str} stamina.\r\n")
+        } else {
+            format!("({speaker} reports: {hp_str} hp, {st_str} stamina.)\r\n")
+        };
+        send_rendered(world, m, &line);
     }
 }
 

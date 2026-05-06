@@ -56,6 +56,24 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+    names: &["gretreat"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Group,
+    help: Help {
+        usage: "gretreat",
+        summary: "Coordinated group retreat — every group member in your room flees together.",
+        long: "Picks one open exit at random; every group member in \
+               your current room moves through it and drops their \
+               Fighting state. Refused if you're not grouped or if \
+               the room has no open exits.",
+    },
+    run: cmd_gretreat,
+    }
+}
+
+inventory::submit! {
+    Command {
     names: &["flee"],
     min_role: UserRole::Player,
     required_perm: None,
@@ -952,6 +970,86 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     }
     send_rendered(world, player, &out);
 }
+pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
+    use crate::commands::{cap_sentence_start, group_members, group_root};
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let from_room = located.0;
+
+    // Group members in the same room. Solo callers get refused —
+    // they can use plain `flee` instead.
+    let root = group_root(world, player);
+    let same_room: Vec<Entity> = group_members(world, root)
+        .into_iter()
+        .filter(|m| world.get::<Located>(*m).is_some_and(|l| l.0 == from_room))
+        .collect();
+    if same_room.len() <= 1 {
+        send_to(
+            world,
+            player,
+            "You're not grouped with anyone here — try `flee` solo.\r\n",
+        );
+        return;
+    }
+
+    let candidates: Vec<(mud_db::enums::Direction, Entity)> = world
+        .get::<Exits>(from_room)
+        .map(|e| {
+            e.0.iter()
+                .filter_map(|(dir, ed)| {
+                    if ed.state == ExitState::Open {
+                        ed.to.map(|t| (*dir, t))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if candidates.is_empty() {
+        send_to(world, player, "There's nowhere to run!\r\n");
+        return;
+    }
+    let pick = rand::random_range(0..candidates.len());
+    let (dir, target) = candidates[pick];
+    let dir_name = direction_name(dir);
+
+    // Source-room broadcast: announce all retreating members at
+    // once before the moves so onlookers see one line per fleer.
+    for m in &same_room {
+        let name = name_of(world, *m);
+        let capped = cap_sentence_start(&name);
+        broadcast_room_except_players_rendered(
+            world,
+            from_room,
+            &same_room,
+            &format!("{capped} retreats with the group {dir_name}!\r\n"),
+        );
+        // Each retreating member drops their own Fighting; the
+        // combat tick auto-disengages attackers on next pass.
+        try_remove::<Fighting>(world, *m);
+        if let Some(mut l) = world.get_mut::<Located>(*m) {
+            l.0 = target;
+        }
+    }
+    let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
+        format!("the {}", direction_name(d))
+    });
+    for m in &same_room {
+        let name = name_of(world, *m);
+        let capped = cap_sentence_start(&name);
+        broadcast_room_except_players_rendered(
+            world,
+            target,
+            &same_room,
+            &format!("{capped} arrives, panting, from {arrival_dir}.\r\n"),
+        );
+        send_to(world, *m, format!("You retreat with the group {dir_name}!\r\n"));
+        cmd_look(world, *m, "");
+    }
+}
+
 pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
