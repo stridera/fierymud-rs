@@ -7048,6 +7048,26 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
+    // `get all` — sweep every item off the floor.
+    // `get all.<name>` — pick up every floor item whose name or
+    // keywords contain <name>. Both forms run the same code path
+    // with an optional substring filter; the filter is empty for
+    // bare `all`.
+    let lower = trimmed.to_ascii_lowercase();
+    let all_filter: Option<&str> = if lower == "all" {
+        Some("")
+    } else if let Some(rest) = lower.strip_prefix("all.")
+        && !rest.is_empty()
+    {
+        Some(rest)
+    } else {
+        None
+    };
+    if let Some(filter) = all_filter {
+        get_all_from_floor(world, player, room, filter);
+        return;
+    }
+
     // Plain `get <item>` from the floor.
     let item = find_in_room(world, trimmed, room);
     let Some(item) = item else {
@@ -7084,6 +7104,85 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Get);
     if let Some(key) = world.get::<WorldKey>(item).copied() {
         bump_collect_quest_progress(world, player, key.zone, key.id);
+    }
+}
+
+/// Sweep every floor item in `room` into the player's inventory,
+/// optionally filtered by a substring against the item's name or
+/// keywords. `filter == ""` means "every item." Mirrors the
+/// `get all from <container>` path: encumbrance is honored unless
+/// the picker is staff (`is_staff` bypass), per-item Get triggers
+/// fire, and a single broadcast summarizes the count to onlookers.
+fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &str) {
+    let needle = filter.to_ascii_lowercase();
+    let items: Vec<(Entity, String)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &Named, Option<&Keywords>),
+            With<Item>,
+        >();
+        q.iter(world)
+            .filter(|(_, l, n, kw)| {
+                if l.0 != room {
+                    return false;
+                }
+                if needle.is_empty() {
+                    return true;
+                }
+                matches(&needle, n, *kw)
+            })
+            .map(|(e, _, n, _)| (e, n.name.clone()))
+            .collect()
+    };
+    if items.is_empty() {
+        if needle.is_empty() {
+            send_to(world, player, "There's nothing here to pick up.\r\n");
+        } else {
+            send_to(
+                world,
+                player,
+                format!("There's nothing matching '{filter}' here.\r\n"),
+            );
+        }
+        return;
+    }
+    let player_name = name_of(world, player);
+    let cap = carry_capacity(world, player);
+    let mut running = carried_weight(world, player);
+    let mut moved = 0usize;
+    let mut skipped = 0usize;
+    let bypass_encumbrance = crate::commands::is_staff(world, player);
+    for (item, item_name) in &items {
+        let w = item_weight(world, *item);
+        if !bypass_encumbrance && running + w > cap {
+            skipped += 1;
+            continue;
+        }
+        running += w;
+        if let Some(mut l) = world.get_mut::<Located>(*item) {
+            l.0 = player;
+        }
+        send_rendered(world, player, &format!("You pick up {item_name}.\r\n"));
+        crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Get);
+        if let Some(key) = world.get::<WorldKey>(*item).copied() {
+            bump_collect_quest_progress(world, player, key.zone, key.id);
+        }
+        moved += 1;
+    }
+    if moved > 0 {
+        let suffix = if moved == 1 { "" } else { "s" };
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} picks up {moved} item{suffix} from the ground.\r\n"),
+        );
+    }
+    if skipped > 0 {
+        send_to(
+            world,
+            player,
+            format!("You're too encumbered to carry {skipped} more item(s).\r\n"),
+        );
     }
 }
 
