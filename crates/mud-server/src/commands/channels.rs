@@ -109,6 +109,14 @@ fn broadcast_global(
         send_to(world, player, "Your voice is silenced.\r\n");
         return;
     }
+    if world.get::<mud_world::Muted>(player).is_some() {
+        send_to(
+            world,
+            player,
+            "Your voice has been muted by staff. Speak privately if you must.\r\n",
+        );
+        return;
+    }
     let player_name = name_of(world, player);
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();

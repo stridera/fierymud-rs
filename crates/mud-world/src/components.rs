@@ -714,6 +714,15 @@ pub struct Camping {
     pub started_in: Entity,
 }
 
+/// Marker: this player is silenced on global channels (gossip /
+/// shout / wiznet / quest channel). Set by the admin `mute`
+/// command, cleared by re-running `mute <name>`. Does NOT block
+/// `say` or `tell` — same scope as legacy `do_wizutil
+/// SCMD_SQUELCH`. In-memory only; persistence via the
+/// `PendingSave` path will land in a follow-up.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Muted;
+
 /// Immortal invisibility level — only viewers whose `Profile.level`
 /// is at least this value can see this entity in player listings
 /// (who / look / scan). Default is "no component" → fully visible.

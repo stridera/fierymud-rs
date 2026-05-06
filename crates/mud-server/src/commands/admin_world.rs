@@ -111,6 +111,44 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["mute", "squelch"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "mute <player>",
+            summary: "Toggle a player's silence on global channels.",
+            long: "Builder+. Adds or removes a `Muted` marker on the \
+                   target. Muted players can't use gossip / shout / \
+                   music / clan / quest channels — `say` and `tell` \
+                   are unaffected so they can still play. Re-running \
+                   `mute <name>` clears it.",
+        },
+        run: cmd_mute,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["last"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "last <player>",
+            summary: "Show last-login info for a character.",
+            long: "Builder+. Looks up the character row by name and \
+                   prints the last `last_login` timestamp, level, \
+                   race / class, and online-now status. Async DB \
+                   call — output is delivered after the lookup \
+                   returns.",
+        },
+        run: cmd_last,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["wizinvis", "invis"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -1006,6 +1044,100 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} summons {proto_name} from thin air.\r\n"),
     );
 }
+pub(crate) fn cmd_mute(world: &mut World, player: Entity, args: &str) {
+    use mud_world::Muted;
+    record_admin_action(world, player, "mute", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: mute <player>\r\n");
+        return;
+    }
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(arg))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "Muting yourself would be silly.\r\n");
+        return;
+    }
+    let target_name = name_of(world, target);
+    let admin_name = name_of(world, player);
+    let was_muted = world.get::<Muted>(target).is_some();
+    if was_muted {
+        try_remove::<Muted>(world, target);
+        send_rendered(
+            world,
+            player,
+            &format!("You restore {target_name}'s voice.\r\n"),
+        );
+        send_rendered(
+            world,
+            target,
+            "<b:white>Your voice has been restored — channels are open again.</>\r\n",
+        );
+        info!(admin = %admin_name, target = %target_name, "mute cleared");
+    } else {
+        try_insert(world, target, Muted);
+        send_rendered(
+            world,
+            player,
+            &format!("You mute {target_name} on global channels.\r\n"),
+        );
+        send_rendered(
+            world,
+            target,
+            "<red>Your voice has been muted by staff. Channels won't carry your words.</>\r\n",
+        );
+        info!(admin = %admin_name, target = %target_name, "mute set");
+    }
+}
+
+pub(crate) fn cmd_last(world: &mut World, player: Entity, args: &str) {
+    use crate::commands::{Connection, DbPool};
+    record_admin_action(world, player, "last", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: last <player>\r\n");
+        return;
+    }
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        send_to(world, player, "Database unavailable.\r\n");
+        return;
+    };
+    // Snapshot online status before we cut the World borrow loose.
+    let online_now = {
+        let mut q = world.query_filtered::<&Named, (With<Player>, With<Online>)>();
+        q.iter(world).any(|n| n.name.eq_ignore_ascii_case(arg))
+    };
+    let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
+    let target_name = arg.to_string();
+    tokio::spawn(async move {
+        let Some(out) = outbound else { return };
+        let Ok(Some(row)) = mud_db::characters::find_by_name(&pool, &target_name).await else {
+            let _ = out.send(format!("No character named '{target_name}'.\r\n").into_bytes());
+            return;
+        };
+        let last = row
+            .last_login
+            .map_or_else(|| String::from("(never)"), |t| t.to_string());
+        let online_label = if online_now { " — online now" } else { "" };
+        let class_label = row
+            .class_id
+            .map_or_else(|| String::from("Classless"), |id| format!("class id {id}"));
+        let line = format!(
+            "{} (L{} {} / {})\r\n  last login: {last}{online_label}\r\n",
+            row.name, row.level, row.race, class_label,
+        );
+        let _ = out.send(line.into_bytes());
+    });
+}
+
 pub(crate) fn cmd_wizinvis(world: &mut World, player: Entity, args: &str) {
     use mud_world::WizInvis;
     record_admin_action(world, player, "wizinvis", args);
