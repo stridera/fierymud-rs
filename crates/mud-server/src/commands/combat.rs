@@ -56,6 +56,57 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+    names: &["claw"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Combat,
+    help: Help {
+        usage: "claw <target>",
+        summary: "Slash with bestial claws (Druid / Shaman).",
+        long: "Class-gated to Druid or Shaman. Counts as a violent \
+               opening — engages the target if you're not already \
+               fighting them. Random damage scaled by your level.",
+    },
+    run: cmd_claw,
+    }
+}
+
+inventory::submit! {
+    Command {
+    names: &["peck"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Combat,
+    help: Help {
+        usage: "peck <target>",
+        summary: "Drive your beak into a target (Avariel only).",
+        long: "Race-gated to Avariel. Piercing strike — engages \
+               combat if not already fighting the target. Damage \
+               scales with level.",
+    },
+    run: cmd_peck,
+    }
+}
+
+inventory::submit! {
+    Command {
+    names: &["electrify"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Combat,
+    help: Help {
+        usage: "electrify <target>",
+        summary: "Channel lightning into a target (mage classes).",
+        long: "Class-gated to Sorcerer / Necromancer / Conjurer / \
+               Diabolist. Electric strike — engages combat. Damage \
+               scales with level.",
+    },
+    run: cmd_electrify,
+    }
+}
+
+inventory::submit! {
+    Command {
     names: &["steal"],
     min_role: UserRole::Player,
     required_perm: None,
@@ -994,6 +1045,145 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
 /// "rogue-skill" tag on the class would be the cleaner long-term
 /// shape so subclassing doesn't have to chase the list.
 const STEAL_CLASS_IDS: &[i32] = &[3, 10];
+/// Druid (8) / Shaman (9) for `claw`.
+const CLAW_CLASS_IDS: &[i32] = &[8, 9];
+/// Mage-family classes for `electrify`: Sorcerer (1), Necromancer
+/// (12), Conjurer (13), Diabolist (17).
+const ELECTRIFY_CLASS_IDS: &[i32] = &[1, 12, 13, 17];
+
+/// Body shared by the simple class-skill strikes (claw / peck /
+/// electrify). Verifies the class/race gate, finds a target,
+/// rolls damage, applies it, engages combat. The specifics
+/// (`skill_name`, `verb_self`, `verb_other`, damage band) live in
+/// the per-command call site.
+fn perform_class_strike(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    skill_name: &str,
+    verb_self: &str,
+    verb_other: &str,
+) {
+    let arg = args.trim();
+    let target_word = if arg.is_empty() {
+        // No arg → attack current combat target if any.
+        let Some(f) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, format!("{} whom?\r\n", crate::commands::capitalize(skill_name)));
+            return;
+        };
+        let Some(loc) = world.get::<Located>(player).map(|l| l.0) else {
+            return;
+        };
+        let _ = loc;
+        // Fall through with the current target's name resolved
+        // through the existing find path so the rest of the body
+        // is uniform.
+        crate::commands::name_of(world, f.0)
+    } else {
+        arg.to_string()
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let target = find_actor_in_room(world, &target_word, located.0, player);
+    let Some(target) = target else {
+        send_to(world, player, format!("No '{target_word}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "Ouch, that would hurt.\r\n");
+        return;
+    }
+    let player_level = world.get::<Profile>(player).map_or(1, |p| p.level);
+    // Damage band: low = level + 5, high = level + 20. A 95% skill
+    // success rate at all levels keeps the kit feeling reliable;
+    // refining with an actual skill stat is a follow-up.
+    let dam = if rand::random_range(0..100) < 95 {
+        rand::random_range(player_level + 5..=player_level + 20)
+    } else {
+        0
+    };
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
+    if dam == 0 {
+        send_rendered(
+            world,
+            player,
+            &format!("Your {skill_name} misses {target_name}.\r\n"),
+        );
+        send_rendered(
+            world,
+            target,
+            &format!("{player_name}'s {skill_name} misses you.\r\n"),
+        );
+    } else {
+        send_rendered(
+            world,
+            player,
+            &format!("You {verb_self} {target_name} for {dam} damage.\r\n"),
+        );
+        send_rendered(
+            world,
+            target,
+            &format!("{player_name} {verb_other} you for {dam} damage!\r\n"),
+        );
+        let (dead, _msg) = apply_damage(world, target, dam);
+        if dead
+            && let Some(loc) = world.get::<Located>(target).copied()
+        {
+            crate::combat::handle_death(world, target, &target_name, loc.0);
+            return;
+        }
+    }
+    // Engage combat if not already.
+    if world.get::<Fighting>(player).is_none() {
+        try_insert(world, player, Fighting(target));
+    }
+    if world.get::<Fighting>(target).is_none() {
+        try_insert(world, target, Fighting(player));
+        if world.get::<Mob>(target).is_some() {
+            crate::combat::remember_attacker(world, target, player);
+        }
+    }
+}
+
+pub(crate) fn cmd_claw(world: &mut World, player: Entity, args: &str) {
+    let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    if !class_id.is_some_and(|id| CLAW_CLASS_IDS.contains(&id)) {
+        send_to(
+            world,
+            player,
+            "Grow some longer fingernails first.\r\n",
+        );
+        return;
+    }
+    perform_class_strike(world, player, args, "claw", "rake", "rakes");
+}
+
+pub(crate) fn cmd_peck(world: &mut World, player: Entity, args: &str) {
+    // Avariel race only. Race is stored as a lower-case string on
+    // Profile; substring-match in case the race system adds
+    // sub-races / morph forms later.
+    let race = world.get::<Profile>(player).map(|p| p.race.clone());
+    if !race.is_some_and(|r| r.to_ascii_lowercase().contains("avariel")) {
+        send_to(world, player, "How do you expect to do that?\r\n");
+        return;
+    }
+    perform_class_strike(world, player, args, "peck", "peck", "pecks");
+}
+
+pub(crate) fn cmd_electrify(world: &mut World, player: Entity, args: &str) {
+    let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    if !class_id.is_some_and(|id| ELECTRIFY_CLASS_IDS.contains(&id)) {
+        send_to(
+            world,
+            player,
+            "You haven't the arcane training for that.\r\n",
+        );
+        return;
+    }
+    perform_class_strike(world, player, args, "lightning", "electrify", "electrifies");
+}
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
