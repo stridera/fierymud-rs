@@ -46,10 +46,15 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "goto <zone_id> <room_id>",
-            summary: "Teleport to any room by composite ID.",
-            long: "Builder+ command. Move directly to (zone_id, room_id) \
-                   without checking exits or doors.",
+            usage: "goto <target>",
+            summary: "Teleport to a room by id, or to a player/mob by name.",
+            long: "Builder+ command. Three forms:\r\n\
+                   \r\n\
+                   \x20 goto <id>             — room <id> in your current zone\r\n\
+                   \x20 goto <zone> <id>      — composite (zone, id)\r\n\
+                   \x20 goto <name>           — teleport to a player or mob's room\r\n\
+                   \r\n\
+                   Bypasses exits, doors, and movement gates.",
         },
         run: cmd_goto,
     }
@@ -1148,25 +1153,98 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
 }
 pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() != 2 {
-        send_to(world, player, "Usage: goto <zone_id> <room_id>\r\n");
-        return;
-    }
-    let Ok(zone) = parts[0].parse::<i32>() else {
-        send_to(world, player, "Invalid zone id.\r\n");
-        return;
+    let target: Option<Entity> = match parts.as_slice() {
+        [] => {
+            send_to(
+                world,
+                player,
+                "Usage: goto <id> | goto <zone> <id> | goto <name>\r\n",
+            );
+            return;
+        }
+        [a, b] if a.parse::<i32>().is_ok() && b.parse::<i32>().is_ok() => {
+            // `goto <zone> <id>` — composite key.
+            let zone: i32 = a.parse().unwrap();
+            let room_id: i32 = b.parse().unwrap();
+            let entity = world
+                .resource::<WorldKeyIndex>()
+                .rooms
+                .get(&(zone, room_id))
+                .copied();
+            if entity.is_none() {
+                send_to(world, player, format!("No room ({zone}, {room_id}).\r\n"));
+                return;
+            }
+            entity
+        }
+        [a] if a.parse::<i32>().is_ok() => {
+            // `goto <id>` — room id in the player's current zone.
+            // Falls through to a name lookup if the current zone
+            // doesn't have a matching room (rare, but a name
+            // collision like "999" deserves a useful error).
+            let room_id: i32 = a.parse().unwrap();
+            let here_zone = world
+                .get::<Located>(player)
+                .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone));
+            let Some(zone) = here_zone else {
+                send_to(world, player, "Can't resolve current zone.\r\n");
+                return;
+            };
+            let entity = world
+                .resource::<WorldKeyIndex>()
+                .rooms
+                .get(&(zone, room_id))
+                .copied();
+            if entity.is_none() {
+                send_to(
+                    world,
+                    player,
+                    format!("No room {room_id} in zone {zone}.\r\n"),
+                );
+                return;
+            }
+            entity
+        }
+        _ => {
+            // Anything else: treat as a player or mob name. Players
+            // first (online + named match), then any mob with a
+            // matching Named/Keywords. Resolves to that actor's
+            // current room.
+            let needle = parts.join(" ");
+            let needle_lc = needle.to_ascii_lowercase();
+            let player_target: Option<Entity> = {
+                let mut q = world.query_filtered::<
+                    (Entity, &Named),
+                    (With<mud_world::Player>, With<mud_world::Online>),
+                >();
+                q.iter(world)
+                    .find(|(_, n)| n.name.eq_ignore_ascii_case(&needle))
+                    .map(|(e, _)| e)
+            };
+            let mob_target: Option<Entity> = if player_target.is_some() {
+                None
+            } else {
+                let mut q = world.query_filtered::<
+                    (Entity, &Named, Option<&mud_world::Keywords>),
+                    With<mud_world::Mob>,
+                >();
+                q.iter(world)
+                    .find(|(_, n, kw)| {
+                        n.name.to_ascii_lowercase().contains(&needle_lc)
+                            || kw.is_some_and(|k| k.0.iter().any(|w| w.eq_ignore_ascii_case(&needle)))
+                    })
+                    .map(|(e, _, _)| e)
+            };
+            let Some(actor) = player_target.or(mob_target) else {
+                send_to(world, player, format!("No one named '{needle}' here or anywhere.\r\n"));
+                return;
+            };
+            world.get::<Located>(actor).map(|l| l.0)
+        }
     };
-    let Ok(room_id) = parts[1].parse::<i32>() else {
-        send_to(world, player, "Invalid room id.\r\n");
-        return;
-    };
-    let target = world
-        .resource::<WorldKeyIndex>()
-        .rooms
-        .get(&(zone, room_id))
-        .copied();
+
     let Some(target) = target else {
-        send_to(world, player, format!("No room ({zone}, {room_id}).\r\n"));
+        send_to(world, player, "Couldn't resolve a destination.\r\n");
         return;
     };
     let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);
