@@ -879,6 +879,29 @@ impl ConnRouter {
                     let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
+                // Wizlock: when admin has set the global gate, only
+                // Builder+ accounts may proceed. Refused after auth
+                // so we don't leak whether the gate is on
+                // pre-credential. Reset on server restart so a
+                // forgotten lock doesn't outlive the deploy.
+                let wizlock_active = world
+                    .get_resource::<mud_world::WizLock>()
+                    .is_some_and(|w| w.active);
+                if wizlock_active && !user.role.at_least(mud_db::enums::UserRole::Builder) {
+                    info!(
+                        conn_id,
+                        user_id = %user.id,
+                        "auth refused: wizlock active"
+                    );
+                    let _ = ctx.outbound.send(
+                        "The mud is currently locked for staff only. Please try again later.\r\n"
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    return;
+                }
                 // Ban check. Refuses post-auth so we don't leak
                 // whether an email exists pre-password. The conn
                 // stays in AwaitingIdentifier (mirrors auth-failure

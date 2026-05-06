@@ -826,6 +826,18 @@ impl ScriptErrorLog {
     }
 }
 
+/// Global wiz-lock toggle — when `true`, the login auth path
+/// refuses non-staff (`UserRole` < Builder) accounts at the
+/// password-verify step. Toggled by the admin `wizlock` command;
+/// reset to `false` on server restart so a forgotten lock doesn't
+/// outlive the deploy. Implementation note: a Resource (rather
+/// than a static `AtomicBool`) so world-state inspectors can read
+/// it through the same `World` view the rest of the runtime uses.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct WizLock {
+    pub active: bool,
+}
+
 /// One entry in the trigger fire history — every dispatched
 /// trigger gets a row. Drives the `trighistory <target>` admin
 /// command so builders can confirm whether a trigger actually

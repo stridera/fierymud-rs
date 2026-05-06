@@ -111,6 +111,65 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["peace"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "peace",
+            summary: "Stop all combat in your current room.",
+            long: "Builder+. Removes the `Fighting` component from \
+                   every entity in your room — useful when a brawl \
+                   gets out of hand or a Lua trigger spawned a \
+                   hostile mob you'd rather not pile on. Each \
+                   disengaged combatant gets a quiet \"calm settles \
+                   over the room\" line; a room broadcast confirms \
+                   the action.",
+        },
+        run: cmd_peace,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["unaffect"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "unaffect <target>",
+            summary: "Strip every active effect from a target.",
+            long: "Builder+. Despawns every `EffectInstance` whose \
+                   `AppliedTo` is the target. Reverses any modifier \
+                   deltas via the standard expiry path so stat \
+                   bumps walk back cleanly. <target> is a name in \
+                   the current room.",
+        },
+        run: cmd_unaffect,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["wizlock"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "wizlock [on|off]",
+            summary: "Lock the mud to staff-only logins.",
+            long: "Builder+. With no arg, prints the current state. \
+                   `wizlock on` blocks non-staff (UserRole < Builder) \
+                   from completing login; `wizlock off` clears the \
+                   gate. Reset to off on every server restart so a \
+                   forgotten lock doesn't outlive the deploy.",
+        },
+        run: cmd_wizlock,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["freeze"],
         min_role: UserRole::Implementor,
         required_perm: None,
@@ -906,6 +965,134 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} summons {proto_name} from thin air.\r\n"),
     );
 }
+pub(crate) fn cmd_peace(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "peace", args);
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+    // Snapshot every fighting entity in the room before mutating.
+    let combatants: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located, &Fighting)>();
+        q.iter(world)
+            .filter(|(_, l, _)| l.0 == room)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    if combatants.is_empty() {
+        send_to(world, player, "No combat to interrupt here.\r\n");
+        return;
+    }
+    let count = combatants.len();
+    for entity in &combatants {
+        try_remove::<Fighting>(world, *entity);
+        // Drop any mob hate-list / memory entries so the brawl
+        // doesn't pick right back up on the next tick. Players
+        // don't carry those components so the call is a no-op
+        // for them.
+        try_remove::<crate::combat::MobMemory>(world, *entity);
+        try_remove::<crate::combat::HateList>(world, *entity);
+    }
+    let suffix = if count == 1 { "" } else { "s" };
+    let admin_name = name_of(world, player);
+    send_rendered(
+        world,
+        player,
+        &format!("You quell the violence — {count} combatant{suffix} disengage{}.\r\n",
+            if count == 1 { "s" } else { "" }),
+    );
+    broadcast_room_except_players_rendered(
+        world,
+        room,
+        &[player],
+        &format!("<b:white>A calm settles over the room as {admin_name} commands peace.</>\r\n"),
+    );
+    info!(admin = %admin_name, count, "peace cleared combat");
+}
+
+pub(crate) fn cmd_unaffect(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "unaffect", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: unaffect <target>\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let target = if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        player
+    } else {
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("No '{arg}' here.\r\n"));
+            return;
+        };
+        t
+    };
+    let target_name = name_of(world, target);
+    let removed = commands::remove_all_effects_on(world, target);
+    if removed == 0 {
+        send_to(
+            world,
+            player,
+            format!("{target_name} has no active effects.\r\n"),
+        );
+    } else {
+        let suffix = if removed == 1 { "" } else { "s" };
+        send_rendered(
+            world,
+            player,
+            &format!("Stripped {removed} effect{suffix} from {target_name}.\r\n"),
+        );
+        if target != player {
+            send_rendered(
+                world,
+                target,
+                "<b:white>You feel cleansed; every effect drains away.</>\r\n",
+            );
+        }
+    }
+}
+
+pub(crate) fn cmd_wizlock(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "wizlock", args);
+    let arg = args.trim().to_ascii_lowercase();
+    let current = world
+        .get_resource::<mud_world::WizLock>()
+        .is_some_and(|w| w.active);
+    let new_state = match arg.as_str() {
+        "on" => Some(true),
+        "off" => Some(false),
+        "" => None, // just report
+        _ => {
+            send_to(world, player, "Usage: wizlock [on|off]\r\n");
+            return;
+        }
+    };
+    if let Some(new_state) = new_state {
+        if !world.contains_resource::<mud_world::WizLock>() {
+            world.insert_resource(mud_world::WizLock::default());
+        }
+        world.resource_mut::<mud_world::WizLock>().active = new_state;
+        let admin_name = name_of(world, player);
+        let label = if new_state { "ON" } else { "OFF" };
+        send_rendered(
+            world,
+            player,
+            &format!("Wizlock is now <b:cyan>{label}</>.\r\n"),
+        );
+        info!(admin = %admin_name, state = label, "wizlock toggled");
+    } else {
+        let label = if current { "ON" } else { "OFF" };
+        send_rendered(
+            world,
+            player,
+            &format!("Wizlock is currently <b:cyan>{label}</>.\r\n"),
+        );
+    }
+}
+
 pub(crate) fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "freeze", args);
     let arg = args.trim();

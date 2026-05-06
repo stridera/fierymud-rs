@@ -37,6 +37,6 @@ pub use resources::{
     ScriptError, ScriptErrorLog, Season, ShopAcceptRule,
     ShopCatalog, ShopDef,
     RoomEnvironmentalEffects, ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, SpellSlotData, TargetingRule,
-    TempBand, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, TriggerHistoryEntry, TriggerHistoryLog, WeatherCatalog,
+    TempBand, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, TriggerHistoryEntry, TriggerHistoryLog, WeatherCatalog, WizLock,
     WeatherState, WorldKeyIndex,
 };
