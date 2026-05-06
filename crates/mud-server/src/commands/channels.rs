@@ -69,6 +69,42 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["qsay"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "qsay <message>",
+            summary: "Talk on the quest channel.",
+            long: "Visible to every online player not Deaf and not \
+                   ignoring you. Conventionally used to coordinate \
+                   quest progress with other questers. Same shape as \
+                   `gossip` — separate channel mostly for ear cleanliness.",
+        },
+        run: cmd_qsay,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["qecho"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "qecho <message>",
+            summary: "Admin echo to the quest channel.",
+            long: "Builder+. Drops a flavor announcement onto the \
+                   quest channel without quoting the speaker (e.g. \
+                   \"<msg>\" rather than \"X qsays, '<msg>'\"). \
+                   Useful for run-of-show quest narration.",
+        },
+        run: cmd_qecho,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["lastgossips", "lastgos"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -226,6 +262,47 @@ fn cmd_shout(world: &mut World, player: Entity, args: &str) {
     broadcast_global(
         world, player, args, "shout", "shouts", "Shout what?\r\n", "<b:red>", "shout",
     );
+}
+
+fn cmd_qsay(world: &mut World, player: Entity, args: &str) {
+    broadcast_global(
+        world,
+        player,
+        args,
+        "qsay",
+        "qsays",
+        "Quest-say what?\r\n",
+        "<b:green>",
+        "quest",
+    );
+}
+
+fn cmd_qecho(world: &mut World, player: Entity, args: &str) {
+    let message = args.trim();
+    if message.is_empty() {
+        send_to(world, player, "Quest-echo what?\r\n");
+        return;
+    }
+    let player_name = name_of(world, player);
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
+        q.iter(world).collect()
+    };
+    let line = format!("<b:green>[Quest]</> {message}\r\n");
+    for t in targets {
+        send_to(world, t, line.clone());
+    }
+    if !world.contains_resource::<mud_world::ChannelHistory>() {
+        world.insert_resource(mud_world::ChannelHistory::default());
+    }
+    world
+        .resource_mut::<mud_world::ChannelHistory>()
+        .push(mud_world::ChannelEntry {
+            at: std::time::SystemTime::now(),
+            channel: "quest",
+            speaker: format!("{player_name} (echo)"),
+            body: message.to_string(),
+        });
 }
 
 fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
