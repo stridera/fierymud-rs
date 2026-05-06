@@ -55,7 +55,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["pnote", "playernote"],
+        names: &["pnote", "playernote", "note"],
         min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Admin,

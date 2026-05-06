@@ -119,7 +119,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["gsay", "gtell", "gecho", "gt"],
+        names: &["gsay", "gtell", "gt"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Communication,

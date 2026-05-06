@@ -721,6 +721,18 @@ pub struct Camping {
     pub started_in: Entity,
 }
 
+/// Custom arrival / departure messages a staff member uses on
+/// `goto`-style teleports. Either field empty → falls back to the
+/// generic "$n appears" / "$n vanishes" line. Set via the
+/// `poofin` / `poofout` admin commands. Persistence is a follow-up
+/// — today it's session-scoped, matching the legacy default-on-
+/// connect shape.
+#[derive(Component, Debug, Clone, Default)]
+pub struct Poofs {
+    pub poof_in: Option<String>,
+    pub poof_out: Option<String>,
+}
+
 /// Marker: this player is silenced on global channels (gossip /
 /// shout / wiznet / quest channel). Set by the admin `mute`
 /// command, cleared by re-running `mute <name>`. Does NOT block

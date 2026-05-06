@@ -149,6 +149,162 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["echo"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "echo <message>",
+            summary: "Speak a god-line into your current room.",
+            long: "Builder+. Broadcasts the message verbatim (no \
+                   speaker prefix) to everyone in the caster's \
+                   room — useful for narrative prompts during \
+                   live events. For a global broadcast, see `gecho`.",
+        },
+        run: cmd_echo,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["gecho"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "gecho <message>",
+            summary: "Speak a god-line to every online player.",
+            long: "Builder+. Bypasses Deaf / IgnoreList — gechoes \
+                   are out-of-character announcements that should \
+                   always reach the audience.",
+        },
+        run: cmd_gecho,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["inctime"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "inctime <hours>",
+            summary: "Force-advance the in-game clock.",
+            long: "Implementor-only. Adds <hours> to `MudClock.hour` \
+                   modulo 24 — useful for testing day/night triggers \
+                   and dawn/dusk weather transitions without \
+                   waiting for real time.",
+        },
+        run: cmd_inctime,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["dc"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "dc <player>",
+            summary: "Disconnect a player by name.",
+            long: "Implementor-only. Drops the player's Connection \
+                   so the network task closes the socket cleanly. \
+                   The autosave path runs on disconnect, so progress \
+                   is preserved.",
+        },
+        run: cmd_dc,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["ptell"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "ptell <p1>[,<p2>,...] <message>",
+            summary: "Send a private staff tell to multiple players.",
+            long: "Builder+. Recipients are comma-separated. Useful \
+                   for coordinating with players during live events \
+                   without leaking on `gossip` / `gecho`.",
+        },
+        run: cmd_ptell,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["send"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "send <player> <text>",
+            summary: "Send raw text to a player's connection.",
+            long: "Implementor-only. Skips the rendering pipeline \
+                   entirely — bytes go straight to the descriptor. \
+                   Used to surface diagnostic output that already \
+                   carries ANSI escapes.",
+        },
+        run: cmd_send,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["poofin"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "poofin [<message>]",
+            summary: "Set your custom arrival message on goto / teleport.",
+            long: "Builder+. Replaces the generic \"$n appears in \
+                   a swirl of light.\" with your own line. Bare \
+                   `poofin` shows the current value; `poofin clear` \
+                   removes it.",
+        },
+        run: cmd_poofin,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["poofout"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "poofout [<message>]",
+            summary: "Set your custom departure message on goto / teleport.",
+            long: "Builder+. Mirrors `poofin`. Replaces the generic \
+                   \"$n vanishes.\" departure line.",
+        },
+        run: cmd_poofout,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["cls", "clear"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Settings,
+        help: Help {
+            usage: "cls",
+            summary: "Clear the terminal screen.",
+            long: "Sends the ANSI clear-screen + cursor-home escape \
+                   sequence. Cosmetic only; no game state changes.",
+        },
+        run: cmd_cls,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["zreset"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -1219,6 +1375,229 @@ pub(crate) fn cmd_return(world: &mut World, player: Entity, args: &str) {
         player,
         &format!("<dim>You slip out of {mob_name} and back into your own body.</>\r\n"),
     );
+}
+
+pub(crate) fn cmd_echo(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "echo", args);
+    let msg = args.trim();
+    if msg.is_empty() {
+        send_to(world, player, "Echo what?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let line = format!("{msg}\r\n");
+    // Send to caster + every Player in the room. No speaker prefix —
+    // god-lines are unattributed by convention.
+    send_rendered(world, player, &line);
+    broadcast_room_except_players_rendered(world, located.0, &[player], &line);
+}
+
+pub(crate) fn cmd_gecho(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "gecho", args);
+    let msg = args.trim();
+    if msg.is_empty() {
+        send_to(world, player, "Gecho what?\r\n");
+        return;
+    }
+    let line = format!("{msg}\r\n");
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
+        q.iter(world).collect()
+    };
+    for t in targets {
+        send_rendered(world, t, &line);
+    }
+}
+
+pub(crate) fn cmd_inctime(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "inctime", args);
+    let arg = args.trim();
+    let Ok(hours) = arg.parse::<i32>() else {
+        send_to(world, player, "Usage: inctime <hours>\r\n");
+        return;
+    };
+    let new_hour = {
+        let mut clock = world.resource_mut::<mud_world::MudClock>();
+        let h = (clock.hour + hours).rem_euclid(24);
+        clock.hour = h;
+        h
+    };
+    send_rendered(
+        world,
+        player,
+        &format!("Clock advanced by {hours} hour(s); now hour {new_hour}.\r\n"),
+    );
+}
+
+pub(crate) fn cmd_dc(world: &mut World, player: Entity, args: &str) {
+    use crate::commands::Connection;
+    record_admin_action(world, player, "dc", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Usage: dc <player>\r\n");
+        return;
+    }
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(arg))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "Disconnecting yourself is silly.\r\n");
+        return;
+    }
+    let target_name = name_of(world, target);
+    send_rendered(
+        world,
+        target,
+        "<red>You have been disconnected by an admin.</>\r\n",
+    );
+    // Drop the Connection — the network task sees the channel
+    // close and exits. The disconnect handler runs the autosave
+    // path on tear-down.
+    if let Ok(mut em) = world.get_entity_mut(target) {
+        em.remove::<Connection>();
+    }
+    send_to(
+        world,
+        player,
+        format!("Disconnected {target_name}.\r\n"),
+    );
+}
+
+pub(crate) fn cmd_ptell(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "ptell", args);
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].trim().is_empty() {
+        send_to(
+            world,
+            player,
+            "Usage: ptell <p1>[,<p2>,...] <message>\r\n",
+        );
+        return;
+    }
+    let names: Vec<&str> = parts[0].split(',').map(str::trim).collect();
+    let msg = parts[1].trim();
+    let admin_name = name_of(world, player);
+    let mut delivered = 0usize;
+    for name in &names {
+        let target = {
+            let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+            q.iter(world)
+                .find(|(_, n)| n.name.eq_ignore_ascii_case(name))
+                .map(|(e, _)| e)
+        };
+        if let Some(t) = target {
+            send_rendered(
+                world,
+                t,
+                &format!("<b:magenta>{admin_name} (staff) tells you:</> {msg}\r\n"),
+            );
+            delivered += 1;
+        }
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("Delivered to {delivered} of {} player(s).\r\n", names.len()),
+    );
+}
+
+pub(crate) fn cmd_send(world: &mut World, player: Entity, args: &str) {
+    use crate::commands::send_raw;
+    record_admin_action(world, player, "send", args);
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].trim().is_empty() {
+        send_to(world, player, "Usage: send <player> <text>\r\n");
+        return;
+    }
+    let target = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(parts[0].trim()))
+            .map(|(e, _)| e)
+    };
+    let Some(target) = target else {
+        send_to(world, player, format!("'{}' isn't online.\r\n", parts[0]));
+        return;
+    };
+    send_raw(world, target, format!("{}\r\n", parts[1]));
+    let target_name = name_of(world, target);
+    send_rendered(world, player, &format!("Sent to {target_name}.\r\n"));
+}
+
+pub(crate) fn cmd_poofin(world: &mut World, player: Entity, args: &str) {
+    use mud_world::Poofs;
+    record_admin_action(world, player, "poofin", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        let current = world.get::<Poofs>(player).and_then(|p| p.poof_in.clone());
+        match current {
+            Some(s) => send_rendered(world, player, &format!("Your poofin is: {s}\r\n")),
+            None => send_to(world, player, "You have no poofin set.\r\n"),
+        }
+        return;
+    }
+    if world.get::<Poofs>(player).is_none()
+        && let Ok(mut em) = world.get_entity_mut(player)
+    {
+        em.insert(Poofs::default());
+    }
+    if arg.eq_ignore_ascii_case("clear") {
+        if let Some(mut p) = world.get_mut::<Poofs>(player) {
+            p.poof_in = None;
+        }
+        send_to(world, player, "Poofin cleared.\r\n");
+        return;
+    }
+    if let Some(mut p) = world.get_mut::<Poofs>(player) {
+        p.poof_in = Some(arg.to_string());
+    }
+    send_rendered(world, player, &format!("Poofin set to: {arg}\r\n"));
+}
+
+pub(crate) fn cmd_poofout(world: &mut World, player: Entity, args: &str) {
+    use mud_world::Poofs;
+    record_admin_action(world, player, "poofout", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        let current = world.get::<Poofs>(player).and_then(|p| p.poof_out.clone());
+        match current {
+            Some(s) => send_rendered(world, player, &format!("Your poofout is: {s}\r\n")),
+            None => send_to(world, player, "You have no poofout set.\r\n"),
+        }
+        return;
+    }
+    if world.get::<Poofs>(player).is_none()
+        && let Ok(mut em) = world.get_entity_mut(player)
+    {
+        em.insert(Poofs::default());
+    }
+    if arg.eq_ignore_ascii_case("clear") {
+        if let Some(mut p) = world.get_mut::<Poofs>(player) {
+            p.poof_out = None;
+        }
+        send_to(world, player, "Poofout cleared.\r\n");
+        return;
+    }
+    if let Some(mut p) = world.get_mut::<Poofs>(player) {
+        p.poof_out = Some(arg.to_string());
+    }
+    send_rendered(world, player, &format!("Poofout set to: {arg}\r\n"));
+}
+
+pub(crate) fn cmd_cls(world: &mut World, player: Entity, _args: &str) {
+    use crate::commands::send_raw;
+    // ANSI: ESC[2J clears the screen, ESC[H homes the cursor. Most
+    // terminals support both even when the player has color stripped.
+    send_raw(world, player, "\x1b[2J\x1b[H");
 }
 
 pub(crate) fn cmd_zreset(world: &mut World, player: Entity, args: &str) {
