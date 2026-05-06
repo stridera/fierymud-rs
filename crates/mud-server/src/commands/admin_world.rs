@@ -220,23 +220,6 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["ptell"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "ptell <p1>[,<p2>,...] <message>",
-            summary: "Send a private staff tell to multiple players.",
-            long: "Builder+. Recipients are comma-separated. Useful \
-                   for coordinating with players during live events \
-                   without leaking on `gossip` / `gecho`.",
-        },
-        run: cmd_ptell,
-    }
-}
-
-inventory::submit! {
-    Command {
         names: &["send"],
         min_role: UserRole::Implementor,
         required_perm: None,
@@ -1469,44 +1452,6 @@ pub(crate) fn cmd_dc(world: &mut World, player: Entity, args: &str) {
         world,
         player,
         format!("Disconnected {target_name}.\r\n"),
-    );
-}
-
-pub(crate) fn cmd_ptell(world: &mut World, player: Entity, args: &str) {
-    record_admin_action(world, player, "ptell", args);
-    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
-    if parts.len() != 2 || parts[0].is_empty() || parts[1].trim().is_empty() {
-        send_to(
-            world,
-            player,
-            "Usage: ptell <p1>[,<p2>,...] <message>\r\n",
-        );
-        return;
-    }
-    let names: Vec<&str> = parts[0].split(',').map(str::trim).collect();
-    let msg = parts[1].trim();
-    let admin_name = name_of(world, player);
-    let mut delivered = 0usize;
-    for name in &names {
-        let target = {
-            let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
-            q.iter(world)
-                .find(|(_, n)| n.name.eq_ignore_ascii_case(name))
-                .map(|(e, _)| e)
-        };
-        if let Some(t) = target {
-            send_rendered(
-                world,
-                t,
-                &format!("<b:magenta>{admin_name} (staff) tells you:</> {msg}\r\n"),
-            );
-            delivered += 1;
-        }
-    }
-    send_rendered(
-        world,
-        player,
-        &format!("Delivered to {delivered} of {} player(s).\r\n", names.len()),
     );
 }
 

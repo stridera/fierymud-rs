@@ -5,7 +5,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Account, Located, Online, Player, WorldKey};
+use mud_world::{Account, Located, Named, Online, Player, WorldKey};
 use tracing::info;
 
 use crate::commands::{
@@ -69,12 +69,13 @@ inventory::submit! {
         required_perm: None,
         category: Category::Communication,
         help: Help {
-            usage: "petition <message>",
-            summary: "Send a message to all online immortals.",
-            long: "Quick way to ask a staff member for help. Reaches \
-                   every online player whose role is Immortal+; the \
-                   sender gets a confirmation echo. Mortals never see \
-                   anyone else's petitions.",
+            usage: "petition <message>  |  petition <player> <message>",
+            summary: "Send to immortals — or, as immortal, reply privately.",
+            long: "From a mortal: broadcasts the petition to every \
+                   online Immortal+. From an immortal: if the first \
+                   arg matches an online player name, reply to that \
+                   player privately (the legacy `ptell` form folded \
+                   in). Mortals never see anyone else's petitions.",
         },
         run: cmd_petition,
     }
@@ -153,8 +154,8 @@ fn submit_feedback(world: &mut World, player: Entity, kind: &'static str, args: 
 }
 
 fn cmd_petition(world: &mut World, player: Entity, args: &str) {
-    let message = args.trim();
-    if message.is_empty() {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
         send_to(
             world,
             player,
@@ -167,6 +168,43 @@ fn cmd_petition(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let player_name = name_of(world, player);
+
+    // Staff reply form: if the caller is Immortal+ AND the first
+    // token matches an online player's name, treat it as a private
+    // reply instead of a broadcast. Folds the legacy `ptell` flow
+    // into petition so a god responding to a petition uses the
+    // same verb the player did.
+    let caller_is_staff = world
+        .get::<Account>(player)
+        .is_some_and(|a| a.role.at_least(UserRole::Immortal));
+    if caller_is_staff
+        && let Some((first, rest)) = trimmed.split_once(char::is_whitespace)
+        && !rest.trim().is_empty()
+    {
+        let rest = rest.trim();
+        let target = {
+            let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+            q.iter(world)
+                .find(|(_, n)| n.name.eq_ignore_ascii_case(first))
+                .map(|(e, _)| e)
+        };
+        if let Some(t) = target {
+            send_to(
+                world,
+                t,
+                format!("[STAFF REPLY] {player_name}: {rest}\r\n"),
+            );
+            send_to(
+                world,
+                player,
+                format!("Replied to {}.\r\n", name_of(world, t)),
+            );
+            return;
+        }
+        // First word didn't match an online player — fall through
+        // to the broadcast form.
+    }
+
     let immortals: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Account), (With<Player>, With<Online>)>();
         q.iter(world)
@@ -174,7 +212,7 @@ fn cmd_petition(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _)| e)
             .collect()
     };
-    let line = format!("[PETITION] {player_name}: {message}\r\n");
+    let line = format!("[PETITION] {player_name}: {trimmed}\r\n");
     for t in immortals {
         send_to(world, t, line.clone());
     }
