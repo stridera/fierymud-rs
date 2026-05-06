@@ -2576,6 +2576,31 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             out.push_str(&format!("flags:         {}\r\n", labels.join(", ")));
         }
     }
+    // Admin sanction / state markers — these don't ride on
+    // PlayerFlags but a builder running stat absolutely needs to
+    // see them. Each line emits only when the marker is set, so
+    // a typical NPC's stat block doesn't grow. WizInvis carries
+    // its level so the builder knows whether they're behind it.
+    if world.get::<mud_world::Frozen>(target).is_some() {
+        out.push_str("frozen:        yes — dispatch is locked until thawed\r\n");
+    }
+    if let Some(w) = world.get::<mud_world::WizInvis>(target) {
+        out.push_str(&format!(
+            "wizinvis:      L{} (only visible to viewers at this level or higher)\r\n",
+            w.0,
+        ));
+    }
+    if world.get::<mud_world::Muted>(target).is_some() {
+        out.push_str("muted:         yes — silenced on global channels\r\n");
+    }
+    if let Some(w) = world.get::<mud_world::WimpyThreshold>(target)
+        && w.0 > 0
+    {
+        out.push_str(&format!(
+            "wimpy:         {}% (auto-flee when HP drops below this)\r\n",
+            w.0,
+        ));
+    }
     // EffectInstances applied to this entity.
     let effects: Vec<(String, i32)> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
