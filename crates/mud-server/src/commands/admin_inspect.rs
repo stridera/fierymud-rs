@@ -272,6 +272,62 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["varset"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "varset <target> <key> <value...>",
+            summary: "Set a script variable on an entity (Lua-side state).",
+            long: "Builder+. <target> is `here` (current room), `me` \
+                   (caller), or a mob/item name in the current room. \
+                   Stores into the entity's `ScriptVars` map; reads \
+                   back via `varlist`. Lua trigger bodies will (once \
+                   the binding lands) see the same map via \
+                   `actor:varget(name)`.",
+        },
+        run: cmd_varset,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["varlist"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "varlist [<target>]",
+            summary: "List script variables on an entity.",
+            long: "Builder+. <target> defaults to `here` (current \
+                   room). Renders the entity's `ScriptVars` map sorted \
+                   by key. Empty maps print a contained 'no script \
+                   vars' note.",
+        },
+        run: cmd_varlist,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["varclear", "varunset"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "varclear <target> [<key>]",
+            summary: "Clear one script variable, or wipe the whole map.",
+            long: "Builder+. With <key>, removes that single entry. \
+                   Without, wipes every variable on the target. \
+                   <target> resolves the same way as `varset` / \
+                   `varlist`.",
+        },
+        run: cmd_varclear,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["firetrig"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -515,6 +571,152 @@ pub(crate) fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
         Err(e) => send_to(world, player, format!("{e}\r\n")),
     }
 }
+
+/// Resolve the `<target>` argument used by varset / varlist /
+/// varclear. `here` (or empty) → the current room; `me` / `self` →
+/// the caller; anything else → an actor-or-item lookup in the
+/// current room. Returns `Some(entity)` on hit; `None` (after
+/// sending an error) when the lookup failed.
+fn resolve_var_target(world: &mut World, player: Entity, arg: &str) -> Option<Entity> {
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        send_to(world, player, "You're nowhere.\r\n");
+        return None;
+    };
+    let arg = arg.trim();
+    if arg.is_empty() || arg.eq_ignore_ascii_case("here") {
+        return Some(room);
+    }
+    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+        return Some(player);
+    }
+    if let Some(e) = find_in_room(world, arg, room)
+        .or_else(|| find_actor_in_room(world, arg, room, player))
+    {
+        return Some(e);
+    }
+    send_to(world, player, format!("No '{arg}' here.\r\n"));
+    None
+}
+
+pub(crate) fn cmd_varset(world: &mut World, player: Entity, args: &str) {
+    let trimmed = args.trim();
+    let mut parts = trimmed.splitn(3, char::is_whitespace);
+    let Some(target_word) = parts.next().filter(|s| !s.is_empty()) else {
+        send_to(
+            world,
+            player,
+            "Usage: varset <target> <key> <value...>\r\n",
+        );
+        return;
+    };
+    let Some(key) = parts.next().filter(|s| !s.is_empty()) else {
+        send_to(world, player, "varset needs a <key>.\r\n");
+        return;
+    };
+    let value = parts.next().unwrap_or("").trim().to_string();
+    let Some(target) = resolve_var_target(world, player, target_word) else {
+        return;
+    };
+    // Insert (or upsert) the entry. Inserting the component
+    // first when missing keeps the call site one-branch.
+    if world.get::<mud_world::ScriptVars>(target).is_none()
+        && let Ok(mut em) = world.get_entity_mut(target)
+    {
+        em.insert(mud_world::ScriptVars::default());
+    }
+    if let Some(mut vars) = world.get_mut::<mud_world::ScriptVars>(target) {
+        vars.0.insert(key.to_string(), value.clone());
+    }
+    let target_name = name_of(world, target);
+    send_to(
+        world,
+        player,
+        format!("Set {key}={value:?} on {target_name}.\r\n"),
+    );
+}
+
+pub(crate) fn cmd_varlist(world: &mut World, player: Entity, args: &str) {
+    let Some(target) = resolve_var_target(world, player, args) else {
+        return;
+    };
+    let target_name = name_of(world, target);
+    let entries: Vec<(String, String)> = world
+        .get::<mud_world::ScriptVars>(target)
+        .map(|v| {
+            v.0.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if entries.is_empty() {
+        send_to(
+            world,
+            player,
+            format!("{target_name} has no script vars.\r\n"),
+        );
+        return;
+    }
+    let key_width = entries.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let mut out = format!("\r\n<b:cyan>{target_name}</> script vars:\r\n");
+    for (k, v) in entries {
+        out.push_str(&format!("  {k:<key_width$} = {v}\r\n"));
+    }
+    crate::commands::send_rendered(world, player, &out);
+}
+
+pub(crate) fn cmd_varclear(world: &mut World, player: Entity, args: &str) {
+    let trimmed = args.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let Some(target_word) = parts.next().filter(|s| !s.is_empty()) else {
+        send_to(world, player, "Usage: varclear <target> [<key>]\r\n");
+        return;
+    };
+    let key = parts.next().map(str::trim).filter(|s| !s.is_empty());
+    let Some(target) = resolve_var_target(world, player, target_word) else {
+        return;
+    };
+    let target_name = name_of(world, target);
+    if let Some(key) = key {
+        let removed = world
+            .get_mut::<mud_world::ScriptVars>(target)
+            .is_some_and(|mut v| v.0.remove(key).is_some());
+        if removed {
+            send_to(
+                world,
+                player,
+                format!("Cleared {key} on {target_name}.\r\n"),
+            );
+        } else {
+            send_to(
+                world,
+                player,
+                format!("{target_name} has no var named {key}.\r\n"),
+            );
+        }
+    } else {
+        let count = world
+            .get::<mud_world::ScriptVars>(target)
+            .map_or(0, |v| v.0.len());
+        if let Some(mut v) = world.get_mut::<mud_world::ScriptVars>(target) {
+            v.0.clear();
+        }
+        if count == 0 {
+            send_to(
+                world,
+                player,
+                format!("{target_name} had no script vars to clear.\r\n"),
+            );
+        } else {
+            let suffix = if count == 1 { "" } else { "s" };
+            send_to(
+                world,
+                player,
+                format!("Cleared {count} script var{suffix} on {target_name}.\r\n"),
+            );
+        }
+    }
+}
+
 pub(crate) fn cmd_zstat(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     let zone_id = if parts.is_empty() {

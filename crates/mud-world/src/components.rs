@@ -637,6 +637,18 @@ pub struct BoardLink(pub i32);
 #[derive(Component, Debug, Clone, Default)]
 pub struct AttachedTriggers(pub Vec<(i32, i32)>);
 
+/// Per-entity key-value state — the Lua / DG-script equivalent
+/// of legacy DG `var.<name>`. Triggers store and read named
+/// values across fires (e.g. a quest counter on a mob, a phase
+/// flag on a room). `BTreeMap` so `varlist` always renders keys
+/// in stable alphabetical order — useful when builders compare
+/// state across two entities. Today the admin `varset` /
+/// `varlist` / `varclear` commands are the only consumers; Lua
+/// bindings (`actor:varget` / `actor:varset`) layer on top
+/// once trigger authors need them.
+#[derive(Component, Debug, Clone, Default)]
+pub struct ScriptVars(pub std::collections::BTreeMap<String, String>);
+
 /// Marker: the player is flying. Movement treats every sector as
 /// equally easy (sector cost 1 instead of 4-6 for water etc.) but
 /// adds a flat +1 stamina per move on top — flying is great over
