@@ -34,7 +34,7 @@ pub use resources::{
     MobPrototypes, MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding,
     ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
     ConfigValue, LightFuelProto, PrecipKind, RaceDefaults, RuntimeConfig, SavingThrow,
-    ScriptError, ScriptErrorLog, Season, ShopAcceptRule,
+    ChannelEntry, ChannelHistory, ScriptError, ScriptErrorLog, Season, ShopAcceptRule,
     ShopCatalog, ShopDef,
     RoomEnvironmentalEffects, ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, SpellSlotData, TargetingRule,
     TempBand, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, TriggerHistoryEntry, TriggerHistoryLog, WeatherCatalog, WizLock,

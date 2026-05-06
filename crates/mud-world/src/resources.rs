@@ -826,6 +826,49 @@ impl ScriptErrorLog {
     }
 }
 
+/// One captured global-channel utterance — gossip / shout / music
+/// / quest. Drives `lastgossips` and friends so a player who just
+/// logged in can catch up on the last few channel lines without
+/// asking who's around.
+#[derive(Debug, Clone)]
+pub struct ChannelEntry {
+    pub at: std::time::SystemTime,
+    /// Lower-case channel kind: `gossip`, `shout`, `music`, etc.
+    pub channel: &'static str,
+    pub speaker: String,
+    pub body: String,
+}
+
+/// Bounded ring buffer of recent channel utterances. In-memory
+/// only — clears on restart. Capped at `CAP` entries total
+/// (across all channels) so a chatty world can't bleed memory.
+#[derive(Resource, Debug, Default)]
+pub struct ChannelHistory {
+    pub entries: std::collections::VecDeque<ChannelEntry>,
+}
+
+impl ChannelHistory {
+    pub const CAP: usize = 200;
+
+    pub fn push(&mut self, e: ChannelEntry) {
+        if self.entries.len() >= Self::CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(e);
+    }
+
+    /// Most-recent-first iterator filtered to one channel kind.
+    pub fn recent_on<'a>(
+        &'a self,
+        channel: &'a str,
+    ) -> impl Iterator<Item = &'a ChannelEntry> + 'a {
+        self.entries
+            .iter()
+            .rev()
+            .filter(move |e| e.channel.eq_ignore_ascii_case(channel))
+    }
+}
+
 /// Global wiz-lock toggle — when `true`, the login auth path
 /// refuses non-staff (`UserRole` < Builder) accounts at the
 /// password-verify step. Toggled by the admin `wizlock` command;

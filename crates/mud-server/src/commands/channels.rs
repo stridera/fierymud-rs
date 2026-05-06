@@ -69,6 +69,38 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["lastgossips", "lastgos"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "lastgossips [<n>]",
+            summary: "Replay recent gossip channel lines.",
+            long: "Shows the last <n> gossip utterances (default 10, \
+                   capped at 50). In-memory only — clears on server \
+                   restart, like the legacy ring buffer.",
+        },
+        run: cmd_lastgossips,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["lastshouts"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "lastshouts [<n>]",
+            summary: "Replay recent shout channel lines.",
+            long: "Shows the last <n> shouts (default 10, capped at 50).",
+        },
+        run: cmd_lastshouts,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["wiznet", ";"],
         min_role: UserRole::Immortal,
         required_perm: None,
@@ -91,6 +123,7 @@ inventory::submit! {
 /// — gossip yellow, music magenta, shout bold red. Filters out
 /// Deaf recipients and anyone who's `IgnoreList`-blocked the
 /// sender.
+#[allow(clippy::too_many_arguments)]
 fn broadcast_global(
     world: &mut World,
     player: Entity,
@@ -99,6 +132,7 @@ fn broadcast_global(
     verb_other: &str,
     refusal: &str,
     channel_tag: &str,
+    channel_kind: &'static str,
 ) {
     let message = args.trim();
     if message.is_empty() {
@@ -145,23 +179,52 @@ fn broadcast_global(
         };
         send_to(world, t, line);
     }
+    // Capture into the channel history ring buffer so `lastgossips`
+    // / `lastshouts` can replay recent traffic to a player who
+    // missed it. Push after broadcast so a spammer's own line is
+    // already visible to listeners by the time it lands here.
+    if !world.contains_resource::<mud_world::ChannelHistory>() {
+        world.insert_resource(mud_world::ChannelHistory::default());
+    }
+    world
+        .resource_mut::<mud_world::ChannelHistory>()
+        .push(mud_world::ChannelEntry {
+            at: std::time::SystemTime::now(),
+            channel: channel_kind,
+            speaker: player_name,
+            body: message.to_string(),
+        });
 }
 
 fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
     broadcast_global(
-        world, player, args, "gossip", "gossips", "Gossip what?\r\n", "<yellow>",
+        world,
+        player,
+        args,
+        "gossip",
+        "gossips",
+        "Gossip what?\r\n",
+        "<yellow>",
+        "gossip",
     );
 }
 
 fn cmd_music(world: &mut World, player: Entity, args: &str) {
     broadcast_global(
-        world, player, args, "sing", "sings", "Sing what?\r\n", "<magenta>",
+        world,
+        player,
+        args,
+        "sing",
+        "sings",
+        "Sing what?\r\n",
+        "<magenta>",
+        "music",
     );
 }
 
 fn cmd_shout(world: &mut World, player: Entity, args: &str) {
     broadcast_global(
-        world, player, args, "shout", "shouts", "Shout what?\r\n", "<b:red>",
+        world, player, args, "shout", "shouts", "Shout what?\r\n", "<b:red>", "shout",
     );
 }
 
@@ -192,4 +255,62 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
         };
         send_to(world, t, line);
     }
+}
+
+fn cmd_lastgossips(world: &mut World, player: Entity, args: &str) {
+    show_channel_history(world, player, args, "gossip", "<yellow>", "gossips");
+}
+
+fn cmd_lastshouts(world: &mut World, player: Entity, args: &str) {
+    show_channel_history(world, player, args, "shout", "<b:red>", "shouts");
+}
+
+/// Body shared by `lastgossips` / `lastshouts`. Pulls the channel
+/// subset from `ChannelHistory`, formats most-recent-first, and
+/// hides authored color tags inside the message body so a heated
+/// `<b:red>!!!</>` in someone's gossip line doesn't escape its
+/// envelope. <n> defaults to 10, caps at 50 — the buffer holds
+/// 200 cross-channel total entries.
+fn show_channel_history(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    channel: &'static str,
+    channel_tag: &str,
+    plural_label: &str,
+) {
+    let n: usize = args
+        .trim()
+        .parse()
+        .ok()
+        .filter(|x: &usize| *x > 0)
+        .map_or(10, |x| x.min(50));
+    let Some(history) = world.get_resource::<mud_world::ChannelHistory>() else {
+        send_to(world, player, format!("No recent {plural_label}.\r\n"));
+        return;
+    };
+    let entries: Vec<&mud_world::ChannelEntry> = history.recent_on(channel).take(n).collect();
+    if entries.is_empty() {
+        send_to(world, player, format!("No recent {plural_label}.\r\n"));
+        return;
+    }
+    let mut out = format!(
+        "\r\n<b:cyan>Last {} {plural_label}:</>\r\n",
+        entries.len(),
+    );
+    let now = std::time::SystemTime::now();
+    // Render oldest-first so the player reads chronologically;
+    // recent_on returns reverse-chronological. Reverse our take().
+    let mut chrono: Vec<&mud_world::ChannelEntry> = entries.into_iter().collect();
+    chrono.reverse();
+    for entry in chrono {
+        let secs_ago = now.duration_since(entry.at).map(|d| d.as_secs()).unwrap_or(0);
+        out.push_str(&format!(
+            "  <dim>{ago:>4}s ago</>  {channel_tag}{speaker}: \"{body}\"</>\r\n",
+            ago = secs_ago,
+            speaker = entry.speaker,
+            body = entry.body.replace('"', "'"),
+        ));
+    }
+    crate::commands::send_rendered(world, player, &out);
 }
