@@ -1590,44 +1590,94 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
 
     // Snapshot every Item rooted at the player — both directly carried
     // and nested inside any container the player carries. BFS keeps
-    // parents before children so the eventual save_for can resolve
-    // `parent_idx` correctly.
-    let new_items: Vec<mud_db::character_items::NewCharacterItem> = {
+    // parents before children so save_inventory_diff can resolve
+    // `parent_idx` for newly-acquired items inside newly-acquired
+    // containers. `entity_for_idx` is the parallel Vec we use to write
+    // back assigned PersistedItemId(s) after the diff returns.
+    let (new_items, entity_for_idx): (
+        Vec<mud_db::character_items::CharacterItemSnap>,
+        Vec<Entity>,
+    ) = {
         use std::collections::HashMap;
-        // Snapshot every item entity together with its Located parent and
-        // metadata once, so the rest of the loop doesn't reborrow World.
-        let all_items: Vec<(Entity, Entity, WorldKey, Option<EquippedSlot>)> = {
-            let mut q = world.query::<(Entity, &Located, &WorldKey, Option<&EquippedSlot>, &Item)>();
+        // Single query — every per-item field we need so the build
+        // loop below doesn't reborrow World. `Charges` and
+        // `LiquidContainer` are both Optional since most items have
+        // neither.
+        type ItemSnap = (
+            Entity,
+            Entity,
+            WorldKey,
+            Option<EquippedSlot>,
+            Option<mud_world::PersistedItemId>,
+            Option<mud_world::Charges>,
+            Option<mud_world::LiquidContainer>,
+        );
+        let all_items: Vec<ItemSnap> = {
+            let mut q = world.query::<(
+                Entity,
+                &Located,
+                &WorldKey,
+                Option<&EquippedSlot>,
+                Option<&mud_world::PersistedItemId>,
+                Option<&mud_world::Charges>,
+                Option<&mud_world::LiquidContainer>,
+                &Item,
+            )>();
             q.iter(world)
-                .map(|(e, l, wk, eq, _)| (e, l.0, *wk, eq.copied()))
+                .map(|(e, l, wk, eq, pid, ch, lc, _)| {
+                    (e, l.0, *wk, eq.copied(), pid.copied(), ch.copied(), lc.cloned())
+                })
                 .collect()
         };
         // BFS from `entity` (the player) through "is parent of" edges.
-        let mut order: Vec<(Entity, Entity, WorldKey, Option<EquippedSlot>)> = Vec::new();
+        let mut order: Vec<ItemSnap> = Vec::new();
         let mut entity_to_idx: HashMap<Entity, usize> = HashMap::new();
         let mut frontier: Vec<Entity> = vec![entity];
         while let Some(parent) = frontier.pop() {
-            for (e, p, wk, eq) in &all_items {
+            for snap in &all_items {
+                let (e, p, _, _, _, _, _) = snap;
                 if *p == parent && !entity_to_idx.contains_key(e) {
                     entity_to_idx.insert(*e, order.len());
-                    order.push((*e, *p, *wk, *eq));
+                    order.push(snap.clone());
                     frontier.push(*e);
                 }
             }
         }
-        order
-            .into_iter()
-            .map(|(_, parent, wk, eq)| mud_db::character_items::NewCharacterItem {
+        // Pull persisted-id of the parent (if loaded) from the entity
+        // map so the diff can set container_id directly without waiting
+        // for the parent's INSERT.
+        let parent_pid_lookup: HashMap<Entity, Option<i32>> = order
+            .iter()
+            .map(|(e, _, _, _, pid, _, _)| (*e, pid.map(|p| p.0)))
+            .collect();
+
+        let mut snaps: Vec<mud_db::character_items::CharacterItemSnap> = Vec::with_capacity(order.len());
+        let mut ents: Vec<Entity> = Vec::with_capacity(order.len());
+        for (e, parent, wk, eq, pid, ch, lc) in &order {
+            let parent_persisted_id = if *parent == entity {
+                None
+            } else {
+                parent_pid_lookup.get(parent).copied().flatten()
+            };
+            let parent_idx = if *parent == entity {
+                None
+            } else {
+                entity_to_idx.get(parent).copied()
+            };
+            snaps.push(mud_db::character_items::CharacterItemSnap {
+                persisted_id: pid.map(|p| p.0),
                 object_zone_id: wk.zone,
                 object_id: wk.id,
                 equipped_location: eq.map(|s| s.0.db_label().to_string()),
-                parent_idx: if parent == entity {
-                    None
-                } else {
-                    entity_to_idx.get(&parent).copied()
-                },
-            })
-            .collect()
+                parent_persisted_id,
+                parent_idx,
+                charges: ch.map(|c| c.0),
+                liquid_remaining: lc.as_ref().map(|l| l.remaining),
+                liquid_type: lc.as_ref().map(|l| l.liquid.clone()),
+            });
+            ents.push(*e);
+        }
+        (snaps, ents)
     };
     let item_count = new_items.len();
 
@@ -1662,16 +1712,29 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         warn!(error = %e, character_id = %account.character_id, "save failed");
         return;
     }
-    if let Err(e) = mud_db::character_items::save_for(
+    match mud_db::character_items::save_inventory_diff(
         pool,
         &account.character_id,
         &new_items,
     )
     .await
     {
-        warn!(error = %e, character_id = %account.character_id, "items save failed");
+        Ok(assigned) => {
+            // Stamp newly-INSERTed rows' ids back onto the entities
+            // so a subsequent autosave UPDATEs them in place rather
+            // than INSERTing duplicates.
+            for (idx, new_id) in assigned {
+                if let Some(target) = entity_for_idx.get(idx).copied()
+                    && let Ok(mut em) = world.get_entity_mut(target)
+                {
+                    em.insert(mud_world::PersistedItemId(new_id));
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "items save failed");
+        }
     }
-
     // Drunkenness round-trip. Always write — sobering up to 0 needs
     // to overwrite the loaded nonzero value. The extra write on the
     // sober-steady-state case is cheap and avoids stale data on
@@ -1941,25 +2004,51 @@ pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[Charact
                 bundle.insert(AttachedTriggers(keys));
             }
             let item_entity = bundle.id();
+            // Stamp the row's id so save_inventory_diff knows to UPDATE
+            // this row instead of issuing a delete-and-reinsert that
+            // would clobber DB columns the runtime doesn't own
+            // (condition, instance_flags, custom_name, etc.).
+            if let Ok(mut e) = world.get_entity_mut(item_entity) {
+                e.insert(mud_world::PersistedItemId(row.id));
+            }
             if let Some(slot_str) = row.equipped_location.as_deref()
                 && let Some(slot) = Slot::from_label(slot_str)
                 && let Ok(mut e) = world.get_entity_mut(item_entity)
             {
                 e.insert(EquippedSlot(slot));
             }
-            // Restore Charges from the ObjectAbilities binding's
-            // charges value. CharacterItems doesn't store per-instance
-            // charges yet, so wand/staff items reset to full on
-            // reconnect — generous but consistent with how loadobj
-            // spawns. Logged in SUGGESTIONS for proper persistence.
-            if let Some(charges) = world
+            // Charges: prefer the persisted per-instance value when
+            // the row has one (>= 0); fall back to the proto's binding
+            // charges so freshly-inserted-by-admin rows that left
+            // charges at the schema default `-1` still get a sensible
+            // initial pool. Wands that were half-spent before logout
+            // now come back half-spent.
+            let proto_charges = world
                 .resource::<mud_world::ObjectAbilityCatalog>()
                 .by_key
                 .get(&(proto.zone_id, proto.id))
-                .and_then(|v| v.first().and_then(|b| b.charges))
+                .and_then(|v| v.first().and_then(|b| b.charges));
+            let resolved_charges = if row.charges >= 0 {
+                Some(row.charges)
+            } else {
+                proto_charges
+            };
+            if let Some(charges) = resolved_charges
                 && let Ok(mut e) = world.get_entity_mut(item_entity)
             {
                 e.insert(mud_world::Charges(charges));
+            }
+            // LiquidContainer: if the row has a saved liquid_type, use
+            // the saved liquid+remaining; otherwise the proto default
+            // (already attached above) stands. This makes flask /
+            // waterskin state survive disconnect — no more "drink three
+            // sips, log out, log back in to a full skin" exploit.
+            if let Some(saved_liq) = row.liquid_type.clone()
+                && let Ok(mut e) = world.get_entity_mut(item_entity)
+                && let Some(mut lc) = e.get_mut::<mud_world::LiquidContainer>()
+            {
+                lc.liquid = saved_liq;
+                lc.remaining = row.liquid_remaining.clamp(0, lc.capacity);
             }
             spawned.insert(row.id, item_entity);
             made_progress = true;

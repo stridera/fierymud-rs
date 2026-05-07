@@ -591,6 +591,18 @@ pub struct ExamineText(pub String);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Charges(pub i32);
 
+/// `CharacterItems.id` for an Item the player loaded from the DB
+/// (or whose row was assigned after the first INSERT-on-save).
+/// Drives UPDATE-by-id semantics in the save path: items with this
+/// component get an UPDATE on their existing row (preserving
+/// orthogonal DB columns the runtime doesn't own — `condition`,
+/// `instance_flags`, `custom_name`, etc.); items without it get an
+/// INSERT and the assigned id is written back to the entity. New
+/// items acquired during play (loot drops, shop buys, gives) start
+/// without the component and gain it on the next save.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PersistedItemId(pub i32);
+
 /// Per-character wimpy threshold: when the WIMPY flag is set and
 /// the character's HP falls below this percentage of max, the
 /// combat tick auto-flees them. Default 25 (matches legacy

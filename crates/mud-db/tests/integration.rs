@@ -1,5 +1,5 @@
 use mud_db::{
-    character_items::{list_for, save_for, NewCharacterItem},
+    character_items::{list_for, save_inventory_diff, CharacterItemSnap},
     connect,
     effects::list_effects,
     mob_resets::list_all as list_mob_resets,
@@ -123,22 +123,35 @@ async fn round_trips_character_items() {
     // Snapshot whatever's already on TestWarrior so we restore at end.
     let before = list_for(&pool, &cid).await.expect("list before");
 
-    // Save a known set: one carried, one worn (BODY).
+    // Save a known set: one carried, one worn (BODY). Both are
+    // INSERTs (`persisted_id = None`) since we want the diff path
+    // to delete the existing inventory and add these.
     let payload = vec![
-        NewCharacterItem {
+        CharacterItemSnap {
+            persisted_id: None,
             object_zone_id: keys[0].0,
             object_id: keys[0].1,
             equipped_location: None,
+            parent_persisted_id: None,
             parent_idx: None,
+            charges: None,
+            liquid_remaining: None,
+            liquid_type: None,
         },
-        NewCharacterItem {
+        CharacterItemSnap {
+            persisted_id: None,
             object_zone_id: keys[1].0,
             object_id: keys[1].1,
             equipped_location: Some("BODY".to_string()),
+            parent_persisted_id: None,
             parent_idx: None,
+            charges: None,
+            liquid_remaining: None,
+            liquid_type: None,
         },
     ];
-    save_for(&pool, &cid, &payload).await.expect("save");
+    let assigned = save_inventory_diff(&pool, &cid, &payload).await.expect("save");
+    assert_eq!(assigned.len(), 2, "both rows INSERTed → both ids returned");
 
     let after = list_for(&pool, &cid).await.expect("list after");
     assert_eq!(after.len(), 2, "two rows after save");
@@ -147,15 +160,22 @@ async fn round_trips_character_items() {
     let carried: Vec<_> = after.iter().filter(|r| r.equipped_location.is_none()).collect();
     assert_eq!(carried.len(), 1, "one carried row");
 
-    // Restore the original set so re-runs are idempotent.
-    let restore: Vec<NewCharacterItem> = before
+    // Restore the original set so re-runs are idempotent. Treat each
+    // pre-existing row as an INSERT (the test's save above already
+    // dropped them).
+    let restore: Vec<CharacterItemSnap> = before
         .iter()
-        .map(|r| NewCharacterItem {
+        .map(|r| CharacterItemSnap {
+            persisted_id: None,
             object_zone_id: r.object_zone_id,
             object_id: r.object_id,
             equipped_location: r.equipped_location.clone(),
+            parent_persisted_id: None,
             parent_idx: None,
+            charges: if r.charges >= 0 { Some(r.charges) } else { None },
+            liquid_remaining: r.liquid_type.as_ref().map(|_| r.liquid_remaining),
+            liquid_type: r.liquid_type.clone(),
         })
         .collect();
-    save_for(&pool, &cid, &restore).await.expect("restore");
+    save_inventory_diff(&pool, &cid, &restore).await.expect("restore");
 }
