@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -214,6 +214,11 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/triggers/reload", post(handle_trigger_reload))
         .route("/api/admin/triggers/fire", post(handle_trigger_fire))
         .route("/api/admin/player/set", post(handle_player_set))
+        // 64 KiB cap on admin request bodies. Axum's default is 2 MiB,
+        // generous for a shared-secret control plane that only ever
+        // receives small JSON. Tighter cap means a flooding caller
+        // can't pin server memory through a single in-flight request.
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
 }
 

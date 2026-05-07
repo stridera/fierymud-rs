@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -64,6 +64,22 @@ static THROTTLER: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 const MAX_CONNECTS_PER_MIN: usize = 10;
+
+/// Hard cap on a single inbound command line. A peer streaming bytes
+/// without a newline can otherwise grow `read_until`'s buffer
+/// without bound. 4 KiB is well above any plausible MUD command
+/// (longest legitimate inputs are emote / who-tag / mail-body lines
+/// on the order of a few hundred bytes); going over indicates either
+/// a buggy client or an attacker. On overflow we drop the connection.
+const MAX_LINE_LEN: usize = 4096;
+
+/// Outbound queue depth above which we assume the client is too slow
+/// (or wedged) and drop the connection. The writer task drains
+/// `out_rx` as fast as the socket accepts; an indefinitely growing
+/// queue means writes are blocked. 1024 messages = ~MiB-ish of buffered
+/// text, generous enough that bursts during room-broadcasts or
+/// ANSI-heavy renders don't trigger it.
+const MAX_OUTBOUND_QUEUE: usize = 1024;
 
 /// Hard ban list — IPs that should never connect, regardless of
 /// rate. Initialized once from the `MUD_BANLIST` env var (comma-
@@ -394,6 +410,19 @@ async fn handle_connection<S>(
             if write_half.write_all(&bytes).await.is_err() {
                 break;
             }
+            // Backpressure: if the queue keeps growing past the cap
+            // it means writes are blocked (slow client or wedged
+            // socket). Drop the connection so a misbehaving peer
+            // can't pin server memory. `out_rx.len()` is cheap.
+            if out_rx.len() > MAX_OUTBOUND_QUEUE {
+                warn!(
+                    conn_id,
+                    queue_len = out_rx.len(),
+                    cap = MAX_OUTBOUND_QUEUE,
+                    "outbound queue overflow; dropping connection"
+                );
+                break;
+            }
         }
     });
 
@@ -402,14 +431,35 @@ async fn handle_connection<S>(
     // sequences containing 0xFF — invalid UTF-8, which read_line
     // refuses. We parse out IAC framing here, then lossy-convert
     // what remains to UTF-8 for the line dispatcher.
+    //
+    // Bounded line length: wrap each read_until in a `take(MAX_LINE_LEN)`
+    // so a peer streaming bytes without a newline can't grow the
+    // server-side buffer without bound. If the take limit is hit
+    // before a `\n`, the loop detects it (final byte != '\n', length ==
+    // cap) and drops the connection.
     let mut reader = BufReader::new(read_half);
     let mut buf: Vec<u8> = Vec::with_capacity(256);
     let mut iac_state = IacState::Normal;
     loop {
         buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
+        let read_res = (&mut reader)
+            .take(MAX_LINE_LEN as u64)
+            .read_until(b'\n', &mut buf)
+            .await;
+        match read_res {
             Ok(0) => break,
             Ok(_) => {
+                // Take hit its limit and we never saw a newline —
+                // peer is sending an oversized line. Disconnect
+                // instead of silently truncating.
+                if buf.len() >= MAX_LINE_LEN && !buf.ends_with(b"\n") {
+                    warn!(
+                        conn_id,
+                        cap = MAX_LINE_LEN,
+                        "line exceeded max length; dropping connection"
+                    );
+                    break;
+                }
                 let stripped = strip_iac(&buf, &mut iac_state);
                 let line = String::from_utf8_lossy(&stripped)
                     .trim_end_matches(['\r', '\n'])
