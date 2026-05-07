@@ -628,8 +628,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // line. The full Race row carries more (focusBonus / lifeforce
     // / stat caps); land them here as features need them.
     let race_size_map = races::list_default_sizes(pool).await?;
+    let race_start_rooms = races::list_start_rooms(pool).await?;
     world.insert_resource(crate::resources::RaceDefaults {
         size_by_race: race_size_map,
+        start_room_by_race: race_start_rooms,
     });
 
     // Pass 4c.7: runtime config k/v from `GameConfig`. Replaces the

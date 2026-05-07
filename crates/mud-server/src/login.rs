@@ -1560,8 +1560,14 @@ fn build_achievement_components(
 /// the starting room resolved — keeping the core bundle one place
 /// avoids the recurring "did I update both branches?" bug we hit
 /// three times before consolidating.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outbound) -> Entity {
-    let (zone, room) = pick_starting_room(c);
+    let race_start = world
+        .resource::<mud_world::RaceDefaults>()
+        .start_room_by_race
+        .get(&c.race)
+        .copied();
+    let (zone, room) = pick_starting_room(c, race_start);
 
     let index = world.resource::<WorldKeyIndex>();
     let room_entity = index
@@ -2383,12 +2389,31 @@ fn send_confirm_create_prompt(outbound: &Outbound, identifier: &str, is_email: b
     );
 }
 
-fn pick_starting_room(c: &CharacterRow) -> (i32, i32) {
+/// Spawn-room priority chain, in descending order:
+///
+/// 1. **Last-save location** (`current_room_*`) — what `save_state`
+///    writes on every save / autosave / disconnect. A character who
+///    rented / camped / disconnected mid-zone comes back where they
+///    left off.
+/// 2. **Recall point** (`recall_room_*`) — set when the player
+///    touched a touchstone. Used when the persisted location is
+///    unset (e.g. a never-saved fresh character whose creation flow
+///    set recall but not `current_room`).
+/// 3. **Race starting room** — per-race default from `Races.start_room_*`.
+///    The right place for a fresh character to land before they've
+///    earned a recall.
+/// 4. **Void** — last-resort error fallback (zone 0, room 0). Reached
+///    when even the race lookup is missing (e.g. unmapped legacy
+///    race string, or NULL columns in the `Races` row).
+fn pick_starting_room(c: &CharacterRow, race_start: Option<(i32, i32)>) -> (i32, i32) {
     if let (Some(z), Some(r)) = (c.current_room_zone_id, c.current_room_id) {
         return (z, r);
     }
     if let (Some(z), Some(r)) = (c.recall_room_zone_id, c.recall_room_id) {
         return (z, r);
+    }
+    if let Some(rs) = race_start {
+        return rs;
     }
     FALLBACK_START
 }
@@ -2451,19 +2476,25 @@ mod tests {
     #[test]
     fn current_room_wins_when_both_set() {
         let r = row(Some((30, 5)), Some((10, 1)));
-        assert_eq!(pick_starting_room(&r), (30, 5));
+        assert_eq!(pick_starting_room(&r, Some((50, 1))), (30, 5));
     }
 
     #[test]
     fn falls_back_to_recall_when_current_unset() {
         let r = row(None, Some((10, 1)));
-        assert_eq!(pick_starting_room(&r), (10, 1));
+        assert_eq!(pick_starting_room(&r, Some((50, 1))), (10, 1));
     }
 
     #[test]
-    fn falls_back_to_void_when_neither_set() {
+    fn falls_back_to_race_when_current_and_recall_unset() {
         let r = row(None, None);
-        assert_eq!(pick_starting_room(&r), FALLBACK_START);
+        assert_eq!(pick_starting_room(&r, Some((50, 1))), (50, 1));
+    }
+
+    #[test]
+    fn falls_back_to_void_when_everything_unset() {
+        let r = row(None, None);
+        assert_eq!(pick_starting_room(&r, None), FALLBACK_START);
     }
 
     #[test]
@@ -2472,7 +2503,7 @@ mod tests {
         let mut r = row(None, Some((10, 1)));
         r.current_room_zone_id = Some(30);
         // current_room_id stays None — pick_starting_room should skip it.
-        assert_eq!(pick_starting_room(&r), (10, 1));
+        assert_eq!(pick_starting_room(&r, Some((50, 1))), (10, 1));
     }
 
     // --- creation-flow validators ---

@@ -165,6 +165,13 @@ pub struct RaceDefaults {
     /// Empty when the `Race` table has no rows yet (fresh DB) or
     /// hasn't been loaded.
     pub size_by_race: HashMap<String, String>,
+    /// `(race_label) -> (zone_id, room_id)` from `Races.start_room_*`.
+    /// Used as the spawn fallback when a character has no persisted
+    /// `current_room` and no recall set yet — e.g. a fresh character
+    /// or one whose persisted room no longer loads. Races with NULL
+    /// `start_room` columns are absent from the map; the caller falls
+    /// through to the Void fallback.
+    pub start_room_by_race: HashMap<String, (i32, i32)>,
 }
 
 /// Catalog of effect *types* loaded from the Effect table at startup.
