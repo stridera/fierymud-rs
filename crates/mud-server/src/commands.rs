@@ -604,6 +604,25 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         return;
     }
 
+    // Debug-command gate: even Implementor-tier commands that execute
+    // arbitrary code or dump full server state can be turned off with
+    // `security.enable_debug_commands=false`. Default true (legacy
+    // permissive). Refusal message points at the gate so an admin
+    // doesn't waste time wondering why their `lua` returns nothing.
+    if is_debug_command(cmd.names[0])
+        && !world
+            .resource::<mud_world::RuntimeConfig>()
+            .get_bool("security", "enable_debug_commands", true)
+    {
+        send_to(
+            world,
+            player,
+            "Debug commands are disabled by `security.enable_debug_commands=false`. \
+             An admin must flip the GameConfig row to re-enable them.\r\n",
+        );
+        return;
+    }
+
     let span = info_span!("cmd", name = cmd.names[0]);
     let _g = span.enter();
     let args = skip_n_tokens(trimmed, n_consumed);
@@ -627,6 +646,16 @@ pub(crate) fn expand_alias(world: &World, player: Entity, line: &str) -> Option<
     } else {
         Some(format!("{expansion} {rest}"))
     }
+}
+
+/// Names of commands considered "debug" — arbitrary-code or
+/// world-introspection tools that an operator might want to turn off
+/// in production via `security.enable_debug_commands=false`. Listed
+/// by canonical name (the first entry in the registration's `names`
+/// array). Aliases would never reach the gate because dispatch
+/// resolves them to the same `Command` whose `names[0]` is checked.
+fn is_debug_command(name: &str) -> bool {
+    matches!(name, "lua" | "dumpworld" | "trace")
 }
 
 /// Whitelist of verbs a ghost can use. Covers perception, movement,

@@ -305,7 +305,16 @@ impl ConnRouter {
                     display_name: String::new(),
                     password_hash: None,
                     role: mud_db::enums::UserRole::Player,
+                    failed_login_attempts: 0,
+                    locked_until: None,
                 };
+                // Registration gate: when `security.enable_new_player_creation`
+                // is false, the unknown-identifier path returns a
+                // closed-registration message instead of routing to the
+                // create-account flow. Default true (legacy permissive).
+                let registration_open = world
+                    .resource::<mud_world::RuntimeConfig>()
+                    .get_bool("security", "enable_new_player_creation", true);
                 let mut routed_to_password = false;
                 if is_email {
                     let lookup = users::find_by_email(pool, trimmed).await;
@@ -315,6 +324,16 @@ impl ConnRouter {
                             routed_to_password = true;
                         }
                         Ok(None) => {
+                            if !registration_open {
+                                let _ = ctx.outbound.send(
+                                    "New character creation is currently closed.\r\n"
+                                        .as_bytes()
+                                        .to_vec(),
+                                );
+                                ctx.stage = Stage::AwaitingIdentifier;
+                                let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                                return;
+                            }
                             ctx.stage = Stage::ConfirmCreate {
                                 identifier: trimmed.to_string(),
                                 is_email: true,
@@ -355,6 +374,16 @@ impl ConnRouter {
                             routed_to_password = true;
                         }
                         Ok(None) => {
+                            if !registration_open {
+                                let _ = ctx.outbound.send(
+                                    "New character creation is currently closed.\r\n"
+                                        .as_bytes()
+                                        .to_vec(),
+                                );
+                                ctx.stage = Stage::AwaitingIdentifier;
+                                let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                                return;
+                            }
                             ctx.stage = Stage::ConfirmCreate {
                                 identifier: trimmed.to_string(),
                                 is_email: false,
@@ -868,16 +897,79 @@ impl ConnRouter {
             }
 
             Stage::AwaitingPassword { user, preselected } => {
+                // Lockout pre-check: if `locked_until` is set and in
+                // the future, refuse before bcrypt — both to save the
+                // CPU cost and to keep the lock effective even when
+                // an attacker stops typing the right password.
+                let now = chrono::Utc::now().naive_utc();
+                if let Some(locked_until) = user.locked_until
+                    && locked_until > now
+                {
+                    let secs_remaining = (locked_until - now).num_seconds().max(1);
+                    info!(
+                        conn_id,
+                        email = %user.email,
+                        secs_remaining,
+                        "auth refused: account locked"
+                    );
+                    let _ = ctx.outbound.send(
+                        format!(
+                            "Account is temporarily locked after too many failed \
+                             attempts. Try again in {secs_remaining}s.\r\n"
+                        )
+                        .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    return;
+                }
                 let ok = user
                     .password_hash
                     .as_ref()
                     .is_some_and(|h| bcrypt::verify(trimmed, h).unwrap_or(false));
                 if !ok {
-                    info!(conn_id, email = %user.email, "auth failure");
-                    let _ = ctx.outbound.send("Invalid credentials.\r\n".as_bytes().to_vec());
+                    // Throttle: bump the failed-login counter and lock
+                    // the account once it crosses
+                    // `security.max_login_attempts`. Live config; a 0
+                    // or missing row disables the throttle (legacy
+                    // permissive behavior).
+                    let cfg = world.resource::<mud_world::RuntimeConfig>();
+                    let max_attempts = cfg.get_i32("security", "max_login_attempts", 0);
+                    let lock_minutes = cfg.get_i32("security", "login_timeout_minutes", 15);
+                    let attempts_after = user.failed_login_attempts.saturating_add(1);
+                    let lock_now = max_attempts > 0 && attempts_after >= max_attempts;
+                    let _ = mud_db::users::record_failed_login(
+                        pool,
+                        &user.id,
+                        if lock_now { Some(lock_minutes) } else { None },
+                    )
+                    .await;
+                    info!(
+                        conn_id,
+                        email = %user.email,
+                        attempts_after,
+                        max_attempts,
+                        locked = lock_now,
+                        "auth failure"
+                    );
+                    let msg = if lock_now {
+                        format!(
+                            "Invalid credentials. Account locked for {lock_minutes} \
+                             minutes after {attempts_after} failed attempts.\r\n"
+                        )
+                    } else {
+                        "Invalid credentials.\r\n".to_string()
+                    };
+                    let _ = ctx.outbound.send(msg.into_bytes());
                     ctx.stage = Stage::AwaitingIdentifier;
                     let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
+                }
+                // Auth succeeded — reset the failed-login counter so
+                // a previously-throttled account doesn't carry a
+                // partial strike count into the next session.
+                if user.failed_login_attempts > 0 || user.locked_until.is_some() {
+                    let _ = mud_db::users::clear_failed_logins(pool, &user.id).await;
                 }
                 // Wizlock: when admin has set the global gate, only
                 // Builder+ accounts may proceed. Refused after auth
