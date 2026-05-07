@@ -96,6 +96,79 @@ pub struct ChantExecutor(pub Option<fn(&mut World, Entity, &str)>);
 #[derive(Resource, Default, Clone, Copy)]
 pub struct SongExecutor(pub Option<fn(&mut World, Entity, &str)>);
 
+/// Hard cap on Lua instructions per resume / per call. Trips a Lua
+/// error that aborts the trigger and surfaces through the existing
+/// error-logging path (`ScriptErrorLog`). Sized so a normal trigger
+/// (a few hundred ops) never trips it but an infinite loop does
+/// within a few hundred milliseconds. 5M instructions ≈ ~250ms on
+/// the dev box; raise if a legitimate long-running trigger lands
+/// (and tighten via per-trigger metadata at that point).
+const LUA_MAX_INSTRUCTIONS: u32 = 5_000_000;
+
+/// Strip dangerous globals + install the instruction-budget hook.
+/// Called once from `LuaHost::new`. Best-effort: if a removal fails
+/// the call returns an error so the caller can warn.
+fn sandbox_lua(lua: &Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+
+    // Remove modules that grant filesystem / process / arbitrary-code
+    // access. Triggers don't need any of these. `package` + `require`
+    // gate ad-hoc native module loading; `load` / `loadstring` /
+    // `loadfile` / `dofile` allow runtime compilation of strings into
+    // executable code; `os` + `io` are the obvious ones; `debug`
+    // exposes hook-disable + introspection that defeats the budget
+    // hook. `collectgarbage` stays — Lua needs it for normal GC.
+    for name in [
+        "os",
+        "io",
+        "debug",
+        "package",
+        "require",
+        "load",
+        "loadstring",
+        "loadfile",
+        "dofile",
+    ] {
+        globals.set(name, Value::Nil)?;
+    }
+
+    // `string.dump` serializes a Lua function to bytecode — the
+    // bytecode loader has known sandbox-escape paths in 5.4. Triggers
+    // never need it.
+    if let Ok(string_tbl) = globals.get::<Table>("string") {
+        let _ = string_tbl.set("dump", Value::Nil);
+    }
+
+    // Instruction-budget hook. Fires every N instructions; if the
+    // total this call has accrued exceeds LUA_MAX_INSTRUCTIONS we
+    // raise an error to abort. mlua 0.11 stores the count in app data
+    // so the hook closure stays Fn (the API takes Fn, not FnMut).
+    lua.set_app_data(LuaInstructionCount(0));
+    lua.set_hook(
+        mlua::HookTriggers::new().every_nth_instruction(10_000),
+        |lua, _debug| {
+            let mut count = lua
+                .app_data_mut::<LuaInstructionCount>()
+                .ok_or_else(|| mlua::Error::runtime("instruction count app data missing"))?;
+            count.0 = count.0.saturating_add(10_000);
+            if count.0 > LUA_MAX_INSTRUCTIONS {
+                return Err(mlua::Error::runtime(format!(
+                    "trigger exceeded instruction budget ({LUA_MAX_INSTRUCTIONS} ops)"
+                )));
+            }
+            Ok(mlua::VmState::Continue)
+        },
+    )?;
+
+    Ok(())
+}
+
+/// Per-call instruction counter held in Lua app data. Reset at the
+/// start of every top-level trigger fire (and every coroutine resume)
+/// so the budget is per-call, not lifetime-global.
+#[derive(Default)]
+struct LuaInstructionCount(u32);
+
 impl Default for LuaHost {
     fn default() -> Self {
         Self::new()
@@ -105,12 +178,20 @@ impl Default for LuaHost {
 impl LuaHost {
     #[must_use]
     pub fn new() -> Self {
-        // TODO: lock down os/io/debug modules. mlua 0.11 doesn't expose a
-        // direct sandbox helper for stock Lua 5.4 builds; we'll do explicit
-        // global removal once we land actual triggers (the admin-only
-        // `lua` command isn't a meaningful threat surface).
+        let lua = Lua::new();
+        // Sandbox the interpreter before any trigger code runs. mlua
+        // 0.11 + lua54 doesn't ship a built-in sandbox helper (Luau's
+        // `sandbox()` is feature-gated to the Luau backend), so we
+        // strip dangerous globals by hand and install an
+        // instruction-budget hook to abort runaway triggers. Best-
+        // effort: failures are logged via `tracing::warn!` so a fresh
+        // mlua release that renames a global doesn't silently leave
+        // it in the trigger surface.
+        if let Err(e) = sandbox_lua(&lua) {
+            tracing::warn!(error = %e, "Lua sandbox setup failed; trigger isolation degraded");
+        }
         Self {
-            lua: Lua::new(),
+            lua,
             current_tick: 0,
             yielded: Vec::new(),
         }
@@ -165,6 +246,11 @@ impl LuaHost {
         self.lua.set_app_data(world_ptr);
         self.lua.set_app_data(LuaCapture::default());
         self.lua.set_app_data(SelfEntity(yielded.listener));
+        // Reset the per-resume instruction budget — wait(N) parking
+        // yields control, so each resume gets a fresh budget. A
+        // trigger that loops forever between waits will still trip
+        // the cap on a single resume.
+        self.lua.set_app_data(LuaInstructionCount(0));
 
         let extras_refs: Vec<(&str, &str)> = yielded
             .extras
@@ -329,6 +415,10 @@ impl LuaHost {
         // `combat.engage(target)` can find the engager without a
         // userdata argument.
         self.lua.set_app_data(SelfEntity(listener));
+        // Reset the per-call instruction budget counter. The hook
+        // increments by 10_000 per fire and aborts when the running
+        // total crosses LUA_MAX_INSTRUCTIONS.
+        self.lua.set_app_data(LuaInstructionCount(0));
 
         // Result is one of:
         //   - Ok(None): body finished normally (with optional bool return)
