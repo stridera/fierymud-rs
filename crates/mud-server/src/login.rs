@@ -1657,15 +1657,15 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         warn!(error = %e, character_id = %account.character_id, "items save failed");
     }
 
-    // Drunkenness round-trip. Only write when nonzero so brand-new
-    // characters and steady-state sober players don't take a write
-    // hit on every disconnect.
+    // Drunkenness round-trip. Always write — sobering up to 0 needs
+    // to overwrite the loaded nonzero value. The extra write on the
+    // sober-steady-state case is cheap and avoids stale data on
+    // reconnect.
     let drunk = world
         .get::<mud_world::Drunkenness>(entity)
         .map_or(0, |d| d.0);
-    if drunk > 0
-        && let Err(e) =
-            mud_db::characters::save_drunkenness(pool, &account.character_id, drunk).await
+    if let Err(e) =
+        mud_db::characters::save_drunkenness(pool, &account.character_id, drunk).await
     {
         warn!(error = %e, character_id = %account.character_id, "drunkenness save failed");
     }
@@ -1724,12 +1724,12 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     }
 
     // Persist BankWealth separately from save_state (which doesn't
-    // own the column). Skipped when zero — fresh characters and
-    // perma-broke players don't take a write.
+    // own the column). Always write — withdrawing the last coin to a
+    // zero balance has to overwrite the loaded nonzero value. Cheap
+    // even for perma-broke characters.
     let bank = world.get::<BankWealth>(entity).map_or(0, |b| b.0);
-    if bank != 0
-        && let Err(e) =
-            mud_db::characters::save_bank_wealth(pool, &account.character_id, bank).await
+    if let Err(e) =
+        mud_db::characters::save_bank_wealth(pool, &account.character_id, bank).await
     {
         warn!(error = %e, character_id = %account.character_id, "bank_wealth save failed");
     }
