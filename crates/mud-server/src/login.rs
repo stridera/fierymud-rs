@@ -1055,6 +1055,12 @@ impl ConnRouter {
                 warn!(conn_id, error = %e, "trophy load failed");
                 None
             });
+        let spell_cooldowns_json = mud_db::characters::load_spell_cooldowns(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "spell_cooldowns load failed");
+                None
+            });
 
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
@@ -1210,6 +1216,15 @@ impl ConnRouter {
                 && !entries.is_empty()
             {
                 e.insert(mud_world::Trophy { entries });
+            }
+            // SpellSlots — JSON object {in_flight: [...]} → component.
+            // Tolerant: missing/garbage data starts the player with a
+            // fresh empty pool rather than bouncing login.
+            if let Some(json) = spell_cooldowns_json
+                && let Ok(slots) = serde_json::from_value::<mud_world::SpellSlots>(json)
+                && !slots.in_flight.is_empty()
+            {
+                e.insert(slots);
             }
             if let Some(c) = clan {
                 e.insert(mud_world::ClanMembership {
@@ -1688,6 +1703,24 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     .await
     {
         warn!(error = %e, character_id = %account.character_id, "trophy save failed");
+    }
+
+    // SpellSlots — empty in_flight (the typical state for someone
+    // who's been resting before logout) → NULL so a fresh character
+    // doesn't carry an empty `{}` blob. Write the full component
+    // when there's at least one slot in cooldown.
+    let spell_cooldowns_json = world
+        .get::<mud_world::SpellSlots>(entity)
+        .filter(|s| !s.in_flight.is_empty())
+        .and_then(|s| serde_json::to_value(s).ok());
+    if let Err(e) = mud_db::characters::save_spell_cooldowns(
+        pool,
+        &account.character_id,
+        spell_cooldowns_json.as_ref(),
+    )
+    .await
+    {
+        warn!(error = %e, character_id = %account.character_id, "spell_cooldowns save failed");
     }
 
     // Persist BankWealth separately from save_state (which doesn't

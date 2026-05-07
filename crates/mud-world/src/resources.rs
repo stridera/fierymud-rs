@@ -621,6 +621,30 @@ impl LevelTable {
     }
 }
 
+/// Per-circle base recover time in seconds. Index = circle number
+/// (1..=14), index 0 is unused / "no circle". Ported verbatim from
+/// legacy `spell_mem.cpp:195` (`circle_recover_time[]`). Multiplied
+/// by class-and-stat focus rate at cast time to set how long a spent
+/// slot stays in cooldown. `Ability.addl_mem_time` (per-spell tax)
+/// is added on top in the cast handler.
+pub const CIRCLE_RECOVER_TIME: [i32; 15] = [
+    0,    // 0 — unused
+    30,   // circle 1
+    35,   // circle 2
+    50,   // circle 3
+    65,   // circle 4
+    80,   // circle 5
+    95,   // circle 6
+    130,  // circle 7
+    145,  // circle 8
+    165,  // circle 9
+    210,  // circle 10
+    250,  // circle 11
+    290,  // circle 12
+    310,  // circle 13
+    330,  // circle 14 — extrapolated; legacy table tops out at 12 entries
+];
+
 /// Spell-slot tables loaded once at startup. `progression` maps
 /// `(level, circle)` → max slot count; `class_circles` maps
 /// `class_id` → list of `(circle, min_level)` the class can access;

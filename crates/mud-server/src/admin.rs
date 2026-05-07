@@ -92,6 +92,7 @@ pub enum AdminRequest {
         aliases: Vec<mud_db::character_aliases::CharacterAliasRow>,
         script_vars_json: Option<serde_json::Value>,
         trophy_json: Option<serde_json::Value>,
+        spell_cooldowns_json: Option<serde_json::Value>,
     },
     SessionDestroy { player_name: String },
     /// Mark an online (or virtual-session) player with `PendingSave`
@@ -326,6 +327,9 @@ async fn handle_session_create(
     let trophy_json = characters::load_trophy(&state.pool, &character.id)
         .await
         .unwrap_or_default();
+    let spell_cooldowns_json = characters::load_spell_cooldowns(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
     json_ok(
         enqueue(
             &state,
@@ -338,6 +342,7 @@ async fn handle_session_create(
                 aliases,
                 script_vars_json,
                 trophy_json,
+                spell_cooldowns_json,
             },
         )
         .await,
@@ -724,10 +729,10 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::InspectActor { name } => inspect_actor(world, &name),
         AdminRequest::SessionCreate {
             player_name, user, character, items, abilities, aliases,
-            script_vars_json, trophy_json,
+            script_vars_json, trophy_json, spell_cooldowns_json,
         } => session_create(
             world, &player_name, &user, &character, &items, &abilities, &aliases,
-            script_vars_json, trophy_json,
+            script_vars_json, trophy_json, spell_cooldowns_json,
         ),
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
         AdminRequest::MarkPendingSave { player_name } => mark_pending_save(world, &player_name),
@@ -1297,6 +1302,7 @@ fn session_create(
     aliases: &[mud_db::character_aliases::CharacterAliasRow],
     script_vars_json: Option<serde_json::Value>,
     trophy_json: Option<serde_json::Value>,
+    spell_cooldowns_json: Option<serde_json::Value>,
 ) -> AdminResponse {
     // Reject duplicate by name.
     {
@@ -1386,6 +1392,12 @@ fn session_create(
             && !entries.is_empty()
         {
             e.insert(mud_world::Trophy { entries });
+        }
+        if let Some(json) = spell_cooldowns_json
+            && let Ok(slots) = serde_json::from_value::<mud_world::SpellSlots>(json)
+            && !slots.in_flight.is_empty()
+        {
+            e.insert(slots);
         }
     }
     let mut by_name = world.resource::<VirtualSessions>().by_name.lock().expect("sessions poisoned");

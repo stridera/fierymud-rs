@@ -491,6 +491,41 @@ pub async fn save_trophy(
     Ok(())
 }
 
+/// Read the JSON `spell_cooldowns` blob — the in-flight slot cooldowns
+/// for the legacy slot-pool casting model. Returns `Ok(None)` when the
+/// column is NULL. Caller deserializes into the runtime
+/// `SpellSlots { in_flight: Vec<SpellCooldown> }` shape.
+pub async fn load_spell_cooldowns(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<serde_json::Value>> {
+    let row = sqlx::query!(
+        r#"SELECT spell_cooldowns FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.spell_cooldowns))
+}
+
+/// Persist the `spell_cooldowns` blob. Pass `None` to clear the column
+/// (no slots in cooldown — the common case at logout for a player
+/// who's been resting).
+pub async fn save_spell_cooldowns(
+    pool: &PgPool,
+    character_id: &str,
+    blob: Option<&serde_json::Value>,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET spell_cooldowns = $1 WHERE id = $2"#,
+        blob,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Read the staff-notes blob for a character (Builder+ visibility).
 /// Returns Ok(None) when null. Single shared blob — appended to by
 /// the runtime's `pnote add` path.

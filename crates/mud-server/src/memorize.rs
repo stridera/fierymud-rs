@@ -1,25 +1,29 @@
-//! Spell memorization tick. Decrements `prep_secs_remaining` on
-//! every `MemorizedSpells.entries` for online, non-fighting players,
-//! at a rate that depends on posture: Sleeping fastest, Resting
-//! slower, Sitting slowest, Standing/Kneeling/Fighting halt.
+//! Spell-slot recovery tick. Decrements `secs_remaining` on every
+//! `SpellSlots.in_flight` cooldown for online players, at a rate
+//! that depends on posture: Sleeping fastest, Resting slower,
+//! Sitting slowest, Standing/Kneeling/Fighting halt.
 //!
-//! When a slot's `prep_secs_remaining` hits zero, the slot flips to
-//! `ready=true` and the player gets a "you've finished memorizing X"
-//! line. `cast` consumes only `ready=true` entries (see commands.rs
-//! `invoke_ability`'s memorization gate).
+//! When a slot's `secs_remaining` hits zero the cooldown is removed
+//! (slot is free again) and the player gets a "Your circle N slot
+//! is restored." line. `cast` reads the same component to check
+//! `used_in_circle(C) < max_for(class, level, C)`.
+//!
+//! Mirrors legacy `charge_mem` + the regen event in `spell_mem.cpp` —
+//! the recover-rate dependence on focus/race/class is approximated
+//! today as a flat per-posture multiplier; the legacy
+//! `get_spellslot_restore_rate` formula can be plumbed in later if
+//! the tuning matters.
 
 use bevy_ecs::prelude::*;
-use mud_world::{
-    AbilityCatalog, Fighting, Meditating, MemorizedSpells, Online, Posture, PostureKind,
-};
+use mud_world::{Fighting, Meditating, Online, Posture, PostureKind, SpellSlots};
 
-use crate::commands::send_to;
 use crate::TickCount;
+use crate::commands::send_to;
 
 /// Tick once per second.
-const MEM_PERIOD_TICKS: u64 = 10;
+const RECOVER_PERIOD_TICKS: u64 = 10;
 
-fn prep_seconds_per_tick(p: PostureKind) -> i32 {
+fn recover_seconds_per_tick(p: PostureKind) -> i32 {
     match p {
         PostureKind::Sleeping => 3,
         PostureKind::Resting => 2,
@@ -31,75 +35,50 @@ fn prep_seconds_per_tick(p: PostureKind) -> i32 {
 #[allow(clippy::needless_pass_by_value)]
 pub fn memorize_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
-    if !tick.is_multiple_of(MEM_PERIOD_TICKS) {
+    if !tick.is_multiple_of(RECOVER_PERIOD_TICKS) {
         return;
     }
 
-    // Collect entries to advance + which slot indexes flip ready.
-    // Per-entity vec of newly-ready ability_ids so we can emit the
-    // "finished memorizing" line after the World mutation. The
-    // `Meditating` marker doubles the prep delta — same speed-up
-    // intent as the legacy `mob_mem_time` skill multiplier.
-    let mut newly_ready: Vec<(Entity, Vec<i32>)> = Vec::new();
+    // Per-entity vec of restored circles so we can emit the
+    // "slot restored" line after the World mutation. The
+    // `Meditating` marker doubles the recover delta — same speed-up
+    // intent as the legacy meditate skill multiplier.
+    let mut restored: Vec<(Entity, Vec<i32>)> = Vec::new();
     {
-        let mut q = world
-            .query_filtered::<
-                (Entity, &Posture, &mut MemorizedSpells, Option<&Meditating>),
-                (With<Online>, Without<Fighting>),
-            >();
-        for (entity, posture, mut mem, meditating) in q.iter_mut(world) {
-            let mut delta = prep_seconds_per_tick(posture.0);
+        let mut q = world.query_filtered::<
+            (Entity, &Posture, &mut SpellSlots, Option<&Meditating>),
+            (With<Online>, Without<Fighting>),
+        >();
+        for (entity, posture, mut slots, meditating) in q.iter_mut(world) {
+            let mut delta = recover_seconds_per_tick(posture.0);
             if delta == 0 {
                 continue;
             }
             if meditating.is_some() {
                 delta *= 2;
             }
-            let mut just_ready: Vec<i32> = Vec::new();
-            for e in &mut mem.entries {
-                if e.ready {
-                    continue;
+            let mut just_restored: Vec<i32> = Vec::new();
+            slots.in_flight.retain_mut(|cd| {
+                cd.secs_remaining -= delta;
+                if cd.secs_remaining <= 0 {
+                    just_restored.push(cd.circle);
+                    false
+                } else {
+                    true
                 }
-                e.prep_secs_remaining -= delta;
-                if e.prep_secs_remaining <= 0 {
-                    e.ready = true;
-                    e.prep_secs_remaining = 0;
-                    just_ready.push(e.ability_id);
-                }
-            }
-            if !just_ready.is_empty() {
-                newly_ready.push((entity, just_ready));
+            });
+            if !just_restored.is_empty() {
+                restored.push((entity, just_restored));
             }
         }
     }
 
-    if newly_ready.is_empty() {
-        return;
-    }
-    // Resolve ability names for the just-finished slots.
-    let names: Vec<(Entity, Vec<String>)> = newly_ready
-        .into_iter()
-        .map(|(e, ids)| {
-            let catalog = world.resource::<AbilityCatalog>();
-            let names: Vec<String> = ids
-                .iter()
-                .map(|id| {
-                    catalog
-                        .by_name
-                        .values()
-                        .find(|d| d.id == *id)
-                        .map_or_else(String::new, |d| d.plain_name.clone())
-                })
-                .collect();
-            (e, names)
-        })
-        .collect();
-    for (entity, names) in names {
-        for name in names {
+    for (entity, circles) in restored {
+        for circle in circles {
             send_to(
                 world,
                 entity,
-                format!("You finish memorizing {name}.\r\n"),
+                format!("Your circle {circle} slot is restored.\r\n"),
             );
         }
     }

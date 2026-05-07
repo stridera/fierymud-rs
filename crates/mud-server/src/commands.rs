@@ -5554,10 +5554,10 @@ pub(crate) struct ScoreData<'a> {
     kill_total: i32,
     /// `(name, abbrev, rank)` from `ClanMembership` when present.
     clan: Option<(&'a str, &'a str, &'a str)>,
-    /// Per-circle spell slot summary as `(circle, ready, max)`. Empty
+    /// Per-circle spell slot summary as `(circle, free, max)`. Empty
     /// for non-spellcasters and for spellcasters who haven't reached
     /// circle 1 yet. Score sheet renders one compact line; the full
-    /// "preparing" breakdown lives in `cmd_slots`.
+    /// per-cooldown breakdown lives in `cmd_slots`.
     slots: &'a [(i32, i32, i32)],
     /// Names of active `EffectInstance` rows on the player. Empty
     /// when none are applied. Score sheet renders a comma-joined
@@ -5837,7 +5837,7 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         let summary = d
             .slots
             .iter()
-            .map(|(circle, ready, max)| format!("{circle}:{ready}/{max}"))
+            .map(|(circle, free, max)| format!("{circle}:{free}/{max}"))
             .collect::<Vec<_>>()
             .join("  ");
         out.push_str(&format!("  Slots:  {summary}    (`slots` for prep details)\r\n"));
@@ -6305,7 +6305,7 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         let summary = d
             .slots
             .iter()
-            .map(|(circle, ready, max)| format!("{circle}:{ready}/{max}"))
+            .map(|(circle, free, max)| format!("{circle}:{free}/{max}"))
             .collect::<Vec<_>>()
             .join("  ");
         row(format!("Slots:     {summary}"));
@@ -8022,37 +8022,6 @@ pub(crate) fn name_or_keyword_matches(target: &str, name: &str, kw: Option<&Keyw
     false
 }
 
-/// Resolve a spell name to (`ability_id`, circle) for the player's
-/// class. Returns Err with a player-facing message on failure.
-pub(crate) fn resolve_spell_for_class(
-    world: &World,
-    class_id: i32,
-    name: &str,
-) -> Result<(i32, i32), String> {
-    let key = name.trim().to_ascii_lowercase();
-    if key.is_empty() {
-        return Err("Memorize what?".into());
-    }
-    let Some(def) = world.resource::<AbilityCatalog>().by_name.get(&key) else {
-        return Err(format!("'{name}' isn't a known ability."));
-    };
-    if !matches!(def.kind, mud_db::abilities::AbilityKind::Spell) {
-        return Err(format!("{} isn't a memorizable spell.", def.name));
-    }
-    let Some(&circle) = world
-        .resource::<mud_world::SpellSlotData>()
-        .ability_circle
-        .get(&(class_id, def.id))
-    else {
-        return Err(format!(
-            "{} isn't on your class's spell list.",
-            def.name
-        ));
-    };
-    Ok((def.id, circle))
-}
-
-
 /// `skill <name> [<target>]` — Phase A of the data-driven migration.
 /// Sibling to `cast`/`chant`/`perform`: looks up an `Ability` row of
 /// kind SKILL by name and invokes it through the same `invoke_ability`
@@ -8528,50 +8497,64 @@ pub(crate) fn invoke_ability_with(
         }
     }
 
-    // Gate on memorization when the ability is a Spell AND the
-    // caster's class has it in `ClassAbilities` (i.e. it lands in
-    // a circle slot for this class). Off-class spells, non-Spell
-    // kinds (Skill / Chant / Song), and classless casters skip the
-    // gate. Successful gate consumes one entry from MemorizedSpells
-    // — failed dispatches downstream still pay the slot, mirroring
-    // legacy "fizzles burn the prep" semantics.
+    // Slot gate: legacy slot-pool model. When the ability is a Spell
+    // AND the caster's class has it in `ClassAbilities` (i.e. it
+    // lands in a circle for this class), refuse the cast unless the
+    // class has a free slot of that circle at this level. Off-class
+    // spells, non-Spell kinds (Skill / Chant / Song), and classless
+    // casters skip the gate. On gate pass we push a `SpellCooldown`
+    // for the circle — fizzles still pay the slot ("burn the prep"),
+    // matching legacy `charge_mem` semantics.
+    //
+    // TODO: also add per-spell `Ability.memorization_time` to the
+    // recover_time. Today the column isn't loaded into AbilityDef;
+    // wire it through if you want fine-grained per-spell prep tax.
     if matches!(def.kind, mud_db::abilities::AbilityKind::Spell) {
         let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
-        if let Some(class_id) = class_id
-            && world
+        if let Some(class_id) = class_id {
+            let circle = world
                 .resource::<mud_world::SpellSlotData>()
                 .ability_circle
-                .contains_key(&(class_id, def.id))
-        {
-            // Find the first READY entry for this ability. A
-            // not-ready entry doesn't satisfy the gate — bodies
-            // that are still preparing don't count.
-            let memorized_idx = world
-                .get::<mud_world::MemorizedSpells>(player)
-                .and_then(|m| {
-                    m.entries
-                        .iter()
-                        .position(|e| e.ability_id == def.id && e.ready)
-                });
-            let Some(idx) = memorized_idx else {
-                // Display name in the prose; lowercase + space form
-                // for the `memorize` hint (parser accepts both
-                // underscore and space, but 'magic missile' reads
-                // friendlier than magic_missile to a fresh player).
-                let memorize_hint =
-                    def.plain_name.to_ascii_lowercase().replace('_', " ");
-                send_to(
-                    world,
-                    player,
-                    format!(
-                        "You haven't memorized {}. Use `memorize '{memorize_hint}'` first.\r\n",
-                        def.name,
-                    ),
-                );
-                return;
-            };
-            if let Some(mut mem) = world.get_mut::<mud_world::MemorizedSpells>(player) {
-                mem.entries.remove(idx);
+                .get(&(class_id, def.id))
+                .copied();
+            if let Some(circle) = circle {
+                let level = world.get::<Profile>(player).map_or(0, |p| p.level);
+                let max = world
+                    .resource::<mud_world::SpellSlotData>()
+                    .progression
+                    .get(&(level, circle))
+                    .copied()
+                    .unwrap_or(0);
+                let used = world
+                    .get::<mud_world::SpellSlots>(player)
+                    .map_or(0, |s| s.used_in_circle(circle));
+                if used >= max {
+                    send_to(
+                        world,
+                        player,
+                        format!(
+                            "Your circle {circle} slots are spent ({used}/{max}). \
+                             Wait for one to recover.\r\n"
+                        ),
+                    );
+                    return;
+                }
+                let recover = mud_world::CIRCLE_RECOVER_TIME
+                    .get(usize::try_from(circle).unwrap_or(0))
+                    .copied()
+                    .unwrap_or(0);
+                let cd = mud_world::SpellCooldown {
+                    circle,
+                    secs_remaining: recover,
+                    total_secs: recover,
+                };
+                if let Some(mut s) = world.get_mut::<mud_world::SpellSlots>(player) {
+                    s.in_flight.push(cd);
+                } else {
+                    world
+                        .entity_mut(player)
+                        .insert(mud_world::SpellSlots { in_flight: vec![cd] });
+                }
             }
         }
     }

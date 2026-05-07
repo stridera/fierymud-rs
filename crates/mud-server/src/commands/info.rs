@@ -1412,11 +1412,14 @@ inventory::submit! {
         category: Category::Magic,
         help: Help {
             usage: "slots",
-            summary: "Show your spell-slot allotment per circle.",
-            long: "Read-only readout of how many slots per circle \
-                   your class+level grants you. Format `used / max`. \
-                   Refill-on-rest tick not yet implemented; memorize \
-                   only consumes slots, forget releases them.",
+            summary: "Show your spell-slot pool and any in-flight cooldowns.",
+            long: "Pooled slot model (legacy): each circle has \
+                   `class+level` slots; casting consumes a slot and \
+                   starts a per-circle cooldown timer. Slots regenerate \
+                   on their own under Sleeping / Resting / Sitting \
+                   postures (faster while Meditating). Format \
+                   `Circle N: free/max  (recovering: 12s, 30s)`. \
+                   Cooldowns persist across disconnect.",
         },
         run: cmd_slots,
     }
@@ -5590,14 +5593,16 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         .map(|d| (d.board_alias.clone(), d.body.len()));
     // Per-circle slot summary for spellcasters. Reads
     // SpellSlotData (level + class → slot caps) and the player's
-    // MemorizedSpells (used vs ready). Empty for classless / non-
+    // SpellSlots (in-flight cooldowns). Empty for classless / non-
     // spellcaster characters; the score renderer skips the line.
+    // Tuple shape: (circle, free, max) — score renderer shows
+    // free/max so the player knows how many casts are available.
     let slots: Vec<(i32, i32, i32)> = (|| {
         let prof = world.get::<Profile>(player)?;
         let class_id = prof.class_id?;
         let level = prof.level;
-        let mem = world
-            .get::<mud_world::MemorizedSpells>(player)
+        let pool = world
+            .get::<mud_world::SpellSlots>(player)
             .cloned()
             .unwrap_or_default();
         let caps = world
@@ -5605,7 +5610,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .slots_for(class_id, level);
         Some(
             caps.into_iter()
-                .map(|(circle, max)| (circle, mem.ready_in_circle(circle), max))
+                .map(|(circle, max)| (circle, max - pool.used_in_circle(circle), max))
                 .collect(),
         )
     })()
@@ -9210,10 +9215,10 @@ pub(crate) fn cmd_level(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-/// `slots`: display the player's per-circle slot count along with
-/// how many are currently memorized. Format: `Circle N: used/max`.
+/// `slots`: display the player's per-circle spell-slot pool and any
+/// cooldowns currently in flight. Format: `Circle N: free/max [cd: 12s, 30s]`.
 pub(crate) fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
-    use mud_world::{MemorizedSpells, SpellSlotData};
+    use mud_world::{SpellSlotData, SpellSlots};
     let Some(profile) = world.get::<Profile>(player) else {
         send_to(world, player, "You have no profile.\r\n");
         return;
@@ -9228,8 +9233,8 @@ pub(crate) fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
         .by_id
         .get(&class_id)
         .map_or_else(|| format!("class {class_id}"), |c| c.plain_name.clone());
-    let slots = world.resource::<SpellSlotData>().slots_for(class_id, level);
-    if slots.is_empty() {
+    let caps = world.resource::<SpellSlotData>().slots_for(class_id, level);
+    if caps.is_empty() {
         send_to(
             world,
             player,
@@ -9237,19 +9242,25 @@ pub(crate) fn cmd_slots(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     }
-    let mem = world.get::<MemorizedSpells>(player).cloned().unwrap_or_default();
+    let slots = world.get::<SpellSlots>(player).cloned().unwrap_or_default();
     let mut out = format!("\r\nLevel {level} {class_name} spell slots:\r\n");
-    for (circle, max) in slots {
-        let used = mem.used_in_circle(circle);
-        let ready = mem.ready_in_circle(circle);
-        let preparing = used - ready;
-        if preparing > 0 {
+    for (circle, max) in caps {
+        let used = slots.used_in_circle(circle);
+        let free = max - used;
+        let cooldowns: Vec<String> = slots
+            .in_flight
+            .iter()
+            .filter(|cd| cd.circle == circle)
+            .map(|cd| format!("{}s", cd.secs_remaining))
+            .collect();
+        if cooldowns.is_empty() {
             out.push_str(&format!(
-                "  Circle {circle:>2}: {ready:>2} ready + {preparing} preparing / {max:>2}\r\n"
+                "  Circle {circle:>2}: {free:>2} free / {max:>2}\r\n"
             ));
         } else {
             out.push_str(&format!(
-                "  Circle {circle:>2}: {ready:>2} ready / {max:>2}\r\n"
+                "  Circle {circle:>2}: {free:>2} free / {max:>2}  (recovering: {})\r\n",
+                cooldowns.join(", "),
             ));
         }
     }

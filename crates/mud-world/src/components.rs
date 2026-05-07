@@ -1074,51 +1074,35 @@ pub struct Profile {
     pub gender: String,
 }
 
-/// One prepared spell slot in a player's memorize list. `ready`
-/// flips to true once `prep_secs_remaining` decrements to 0 (the
-/// rest-tick handles that under Sleeping/Resting/Sitting postures).
-/// `cast` consumes only `ready=true` entries.
-#[derive(Debug, Clone, Copy)]
-pub struct MemEntry {
-    pub ability_id: i32,
+/// One spell slot currently in cooldown after a cast. Mirrors
+/// legacy `SpellCast{circle, recover_time}` (`spell_mem.cpp`). The
+/// slot regenerates as `secs_remaining` ticks down; when it hits
+/// 0 the cooldown is removed and the slot is free again. `total_secs`
+/// is preserved so the `slots` readout can show "12s of 30s left".
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct SpellCooldown {
     pub circle: i32,
-    pub ready: bool,
-    pub prep_secs_remaining: i32,
+    pub secs_remaining: i32,
+    pub total_secs: i32,
 }
 
-/// Session-only spell memorization list — one entry per memorized
-/// instance. Caster classes (Sorcerer/Cleric/etc.) populate this
-/// via `memorize <spell>`; `cast` gates on `ready=true`. Not
-/// persisted across disconnect (no schema column today); v1
-/// expects players to re-memorize on reconnect.
-#[derive(Component, Debug, Clone, Default)]
-pub struct MemorizedSpells {
-    /// Order matters: `forget <name>` removes the first matching
-    /// entry (preferring not-yet-ready), mirroring `FieryMUD`'s
-    /// stack-of-prepared-spells semantics.
-    pub entries: Vec<MemEntry>,
+/// Spell-slot pool for caster classes. Legacy slot model: at level
+/// `L` you have `SpellSlotData.progression[(L, C)]` slots in circle
+/// `C`. A slot is "free" if no `SpellCooldown` for that circle is
+/// in `in_flight`; casting consumes a free slot by pushing a
+/// cooldown. Fizzles still pay the slot ("burn the prep"). Persisted
+/// to `Characters.spell_cooldowns` so cooldowns survive disconnect.
+#[derive(Component, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SpellSlots {
+    pub in_flight: Vec<SpellCooldown>,
 }
 
-impl MemorizedSpells {
-    /// Count how many slots in `circle` are currently in use
-    /// (whether or not they're ready). Used by the `slots`
-    /// readout's `used / max` line.
+impl SpellSlots {
+    /// Number of slots in `circle` currently in cooldown.
     #[must_use]
     pub fn used_in_circle(&self, circle: i32) -> i32 {
-        i32::try_from(self.entries.iter().filter(|e| e.circle == circle).count())
+        i32::try_from(self.in_flight.iter().filter(|c| c.circle == circle).count())
             .unwrap_or(0)
-    }
-
-    /// Count how many entries are ready (memorized) in `circle`.
-    #[must_use]
-    pub fn ready_in_circle(&self, circle: i32) -> i32 {
-        i32::try_from(
-            self.entries
-                .iter()
-                .filter(|e| e.circle == circle && e.ready)
-                .count(),
-        )
-        .unwrap_or(0)
     }
 }
 

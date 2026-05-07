@@ -12,8 +12,7 @@ use mud_world::{
 
 use crate::commands::{
     Category, Command, Help, broadcast_room_except_players_rendered, direction_name,
-    flip_door_both_sides, invoke_ability, name_of, parse_direction, resolve_spell_for_class,
-    send_to,
+    flip_door_both_sides, invoke_ability, name_of, parse_direction, send_to,
 };
 
 inventory::submit! {
@@ -62,14 +61,15 @@ inventory::submit! {
         required_perm: None,
         category: Category::Magic,
         help: Help {
-            usage: "memorize <spell>",
-            summary: "Prepare a spell into one of your circle slots.",
-            long: "Looks up the spell by name in your class's circle \
-                   list (via `ClassAbilities`), checks slot availability \
-                   for that circle (via `SpellSlotProgression`), and \
-                   appends the spell to your `MemorizedSpells` list. \
-                   Refuses unknown spells, off-class spells, or full \
-                   circles. Session-only — re-memorize on reconnect.",
+            usage: "memorize",
+            summary: "(legacy alias) Show your spell-slot pool.",
+            long: "FieryMUD uses a slot-pool model, not a Vance-style \
+                   prepared-spell list. There's nothing to memorize ahead \
+                   of time: at each level you have a fixed number of slots \
+                   per circle (see `slots` for your current capacity), and \
+                   any spell you've trained (`study <spell>`) can be cast \
+                   while a slot of its circle is free. This command \
+                   redirects to `slots`.",
         },
         run: cmd_memorize,
     }
@@ -82,11 +82,13 @@ inventory::submit! {
         required_perm: None,
         category: Category::Magic,
         help: Help {
-            usage: "forget <spell>",
-            summary: "Drop a memorized spell from your prepared list.",
-            long: "Removes the first matching memorized spell, freeing \
-                   that circle slot for a new memorize. No-op if the \
-                   spell isn't currently memorized.",
+            usage: "forget",
+            summary: "(legacy alias) Slots aren't pre-prepared — see `slots`.",
+            long: "There's no prepared-spell list to forget from. Spell \
+                   slots are a circle-pool you draw from when casting; a \
+                   slot you've spent regenerates on its own under \
+                   resting / sleeping / meditating postures. Redirects to \
+                   `slots`.",
         },
         run: cmd_forget,
     }
@@ -446,123 +448,24 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         ),
     );
 }
-pub(crate) fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
-    use mud_world::{MemorizedSpells, SpellSlotData};
-    let Some(profile) = world.get::<Profile>(player).cloned() else {
-        send_to(world, player, "You have no profile.\r\n");
-        return;
-    };
-    let Some(class_id) = profile.class_id else {
-        send_to(world, player, "You have no class.\r\n");
-        return;
-    };
-    let (ability_id, circle) = match resolve_spell_for_class(world, class_id, args) {
-        Ok(t) => t,
-        Err(e) => {
-            send_to(world, player, format!("{e}\r\n"));
-            return;
-        }
-    };
-    let max = world
-        .resource::<SpellSlotData>()
-        .progression
-        .get(&(profile.level, circle))
-        .copied()
-        .unwrap_or(0);
-    if max <= 0 {
-        send_to(
-            world,
-            player,
-            format!("You can't memorize circle {circle} spells yet.\r\n"),
-        );
-        return;
-    }
-    let used = world
-        .get::<MemorizedSpells>(player)
-        .map_or(0, |m| m.used_in_circle(circle));
-    if used >= max {
-        send_to(
-            world,
-            player,
-            format!("All circle {circle} slots ({used}/{max}) are already prepared.\r\n"),
-        );
-        return;
-    }
-    let display_name = world
-        .resource::<AbilityCatalog>()
-        .by_name
-        .values()
-        .find(|d| d.id == ability_id)
-        .map_or_else(String::new, |d| d.name.clone());
-    let prep_secs = (circle * 5).max(5); // default 5s/circle until Ability.memorization_time is seeded
-    let entry = mud_world::MemEntry {
-        ability_id,
-        circle,
-        ready: false,
-        prep_secs_remaining: prep_secs,
-    };
-    if let Some(mut mem) = world.get_mut::<MemorizedSpells>(player) {
-        mem.entries.push(entry);
-    } else {
-        world
-            .entity_mut(player)
-            .insert(MemorizedSpells { entries: vec![entry] });
-    }
+pub(crate) fn cmd_memorize(world: &mut World, player: Entity, _args: &str) {
     send_to(
         world,
         player,
-        format!(
-            "You begin memorizing {display_name} (circle {circle}, ~{prep_secs}s while resting).\r\n"
-        ),
+        "FieryMUD uses pooled spell slots — there's nothing to memorize \
+         ahead of time. Spent slots recover on their own under rest / \
+         sleep / meditate. Showing your slot pool:\r\n",
     );
+    crate::commands::info::cmd_slots(world, player, "");
 }
-pub(crate) fn cmd_forget(world: &mut World, player: Entity, args: &str) {
-    use mud_world::MemorizedSpells;
-    let Some(profile) = world.get::<Profile>(player).cloned() else {
-        return;
-    };
-    let Some(class_id) = profile.class_id else {
-        send_to(world, player, "You have no class.\r\n");
-        return;
-    };
-    let (ability_id, _) = match resolve_spell_for_class(world, class_id, args) {
-        Ok(t) => t,
-        Err(e) => {
-            send_to(world, player, format!("{e}\r\n"));
-            return;
-        }
-    };
-    let display_name = world
-        .resource::<AbilityCatalog>()
-        .by_name
-        .values()
-        .find(|d| d.id == ability_id)
-        .map_or_else(String::new, |d| d.name.clone());
-    let removed = if let Some(mut mem) = world.get_mut::<MemorizedSpells>(player) {
-        // Prefer dropping a not-yet-ready entry (cheaper to lose).
-        let idx = mem
-            .entries
-            .iter()
-            .position(|e| e.ability_id == ability_id && !e.ready)
-            .or_else(|| mem.entries.iter().position(|e| e.ability_id == ability_id));
-        if let Some(idx) = idx {
-            mem.entries.remove(idx);
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    if removed {
-        send_to(world, player, format!("You forget {display_name}.\r\n"));
-    } else {
-        send_to(
-            world,
-            player,
-            format!("{display_name} isn't currently memorized.\r\n"),
-        );
-    }
+pub(crate) fn cmd_forget(world: &mut World, player: Entity, _args: &str) {
+    send_to(
+        world,
+        player,
+        "Spell slots aren't pre-prepared, so there's nothing to forget. \
+         Showing your slot pool:\r\n",
+    );
+    crate::commands::info::cmd_slots(world, player, "");
 }
 pub(crate) fn cmd_cast(world: &mut World, player: Entity, args: &str) {
     invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Spell, "cast");
