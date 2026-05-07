@@ -140,8 +140,18 @@ async fn main() {
     // Needs prototypes + WorldKeyIndex which load_from_db populated.
     corpses::load_snapshot(&mut world);
 
-    combat::seed_test_mobs(&mut world);
-    combat::seed_test_items(&mut world);
+    // Test fixtures (training dummy + rusty sword + healing potion in
+    // The Void). Useful for development; surprising in production. Gate
+    // behind an explicit env flag so a prod boot doesn't quietly carry
+    // dev-only props.
+    let seed_test_content = std::env::var("MUD_SEED_TEST_CONTENT")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+    if seed_test_content {
+        info!("MUD_SEED_TEST_CONTENT=true — seeding training dummy + test items");
+        combat::seed_test_mobs(&mut world);
+        combat::seed_test_items(&mut world);
+    }
     commands::validate_registry();
     // Fire LOAD-flagged triggers for every spawned mob now that the
     // world is fully populated (catalogs, prototypes, mob entities,
