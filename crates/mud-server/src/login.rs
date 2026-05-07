@@ -1160,6 +1160,12 @@ impl ConnRouter {
                 warn!(conn_id, error = %e, "spell_cooldowns load failed");
                 None
             });
+        let cooldowns_json = mud_db::characters::load_cooldowns(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "cooldowns load failed");
+                None
+            });
 
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
@@ -1334,6 +1340,37 @@ impl ConnRouter {
                 && !slots.in_flight.is_empty()
             {
                 e.insert(slots);
+            }
+            // Cooldowns — JSON map of ability_id → unix_secs_ready_at.
+            // Convert to Instant by computing the offset from `now`,
+            // dropping any keys whose ready_at has already passed.
+            // Future-proof: if the system clock jumped backwards
+            // since save, the saturating_add keeps the offset
+            // non-negative.
+            if let Some(json) = cooldowns_json
+                && let Ok(map) = serde_json::from_value::<
+                    std::collections::HashMap<String, i64>,
+                >(json)
+            {
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+                let now_inst = std::time::Instant::now();
+                let mut cd = mud_world::Cooldowns::default();
+                for (k, ready_unix) in map {
+                    let Ok(id) = k.parse::<i32>() else { continue };
+                    let secs_left = ready_unix.saturating_sub(now_unix);
+                    if secs_left <= 0 {
+                        continue;
+                    }
+                    cd.ready_at.insert(
+                        id,
+                        now_inst + std::time::Duration::from_secs(u64::try_from(secs_left).unwrap_or(0)),
+                    );
+                }
+                if !cd.ready_at.is_empty() {
+                    e.insert(cd);
+                }
             }
             if let Some(c) = clan {
                 e.insert(mud_world::ClanMembership {
@@ -1647,6 +1684,7 @@ pub(crate) struct SaveOutcome {
     pub script_vars: Option<bool>,
     pub trophy: Option<bool>,
     pub spell_cooldowns: Option<bool>,
+    pub cooldowns: Option<bool>,
     pub bank_wealth: Option<bool>,
     pub time_played: Option<bool>,
     pub abilities: Option<bool>,
@@ -1666,6 +1704,7 @@ impl SaveOutcome {
             (self.script_vars, "script vars"),
             (self.trophy, "trophy"),
             (self.spell_cooldowns, "spell cooldowns"),
+            (self.cooldowns, "ability cooldowns"),
             (self.bank_wealth, "bank wealth"),
             (self.time_played, "time played"),
             (self.abilities, "abilities"),
@@ -1980,6 +2019,48 @@ pub(crate) async fn save_player(
         Err(e) => {
             warn!(error = %e, character_id = %account.character_id, "spell_cooldowns save failed");
             outcome.spell_cooldowns = Some(false);
+        }
+    }
+
+    // Per-ability cooldowns. Serialize ready_at Instants as wall-clock
+    // unix seconds so the value is meaningful across process restarts.
+    // Drop already-expired keys so the JSON stays small. Empty map →
+    // NULL column.
+    let cooldowns_json: Option<serde_json::Value> = world
+        .get::<mud_world::Cooldowns>(entity)
+        .and_then(|cd| {
+            let now = std::time::Instant::now();
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+            let map: std::collections::HashMap<String, i64> = cd
+                .ready_at
+                .iter()
+                .filter_map(|(id, ready_at)| {
+                    if *ready_at <= now {
+                        return None;
+                    }
+                    let secs_left = ready_at.duration_since(now).as_secs();
+                    Some((id.to_string(), now_unix.saturating_add(i64::try_from(secs_left).unwrap_or(0))))
+                })
+                .collect();
+            if map.is_empty() {
+                None
+            } else {
+                serde_json::to_value(&map).ok()
+            }
+        });
+    match mud_db::characters::save_cooldowns(
+        pool,
+        &account.character_id,
+        cooldowns_json.as_ref(),
+    )
+    .await
+    {
+        Ok(()) => outcome.cooldowns = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "cooldowns save failed");
+            outcome.cooldowns = Some(false);
         }
     }
 

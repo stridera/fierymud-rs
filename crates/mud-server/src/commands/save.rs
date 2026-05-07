@@ -23,11 +23,12 @@ inventory::submit! {
             summary: "Force a checkpoint of your character to the database.",
             long: "Persists hp / stamina / xp / inventory / location / \
                    flags / prompt / hunger / thirst / drunk / known \
-                   abilities / spell-slot cooldowns back to the schema. \
-                   The same path runs automatically on disconnect and \
-                   on graceful shutdown — `save` lets you force it \
-                   right now without logging out, useful before a \
-                   risky encounter or when the network feels unstable.",
+                   abilities / spell-slot cooldowns / ability cooldowns \
+                   back to the schema. The same path runs automatically \
+                   on disconnect and on graceful shutdown — `save` lets \
+                   you force it right now without logging out, useful \
+                   before a risky encounter or when the network feels \
+                   unstable.",
         },
         // The sync stub is never the real handler; the AsyncCommand
         // entry below claims `save` first via dispatch order. Reusing

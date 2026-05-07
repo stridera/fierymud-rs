@@ -93,6 +93,7 @@ pub enum AdminRequest {
         script_vars_json: Option<serde_json::Value>,
         trophy_json: Option<serde_json::Value>,
         spell_cooldowns_json: Option<serde_json::Value>,
+        cooldowns_json: Option<serde_json::Value>,
     },
     SessionDestroy { player_name: String },
     /// Mark an online (or virtual-session) player with `PendingSave`
@@ -369,6 +370,9 @@ async fn handle_session_create(
     let spell_cooldowns_json = characters::load_spell_cooldowns(&state.pool, &character.id)
         .await
         .unwrap_or_default();
+    let cooldowns_json = characters::load_cooldowns(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
     json_ok(
         enqueue(
             &state,
@@ -382,6 +386,7 @@ async fn handle_session_create(
                 script_vars_json,
                 trophy_json,
                 spell_cooldowns_json,
+                cooldowns_json,
             },
         )
         .await,
@@ -768,10 +773,10 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::InspectActor { name } => inspect_actor(world, &name),
         AdminRequest::SessionCreate {
             player_name, user, character, items, abilities, aliases,
-            script_vars_json, trophy_json, spell_cooldowns_json,
+            script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
         } => session_create(
             world, &player_name, &user, &character, &items, &abilities, &aliases,
-            script_vars_json, trophy_json, spell_cooldowns_json,
+            script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
         ),
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
         AdminRequest::MarkPendingSave { player_name } => mark_pending_save(world, &player_name),
@@ -1331,6 +1336,7 @@ fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn session_create(
     world: &mut World,
     player_name: &str,
@@ -1342,6 +1348,7 @@ fn session_create(
     script_vars_json: Option<serde_json::Value>,
     trophy_json: Option<serde_json::Value>,
     spell_cooldowns_json: Option<serde_json::Value>,
+    cooldowns_json: Option<serde_json::Value>,
 ) -> AdminResponse {
     // Reject duplicate by name.
     {
@@ -1437,6 +1444,31 @@ fn session_create(
             && !slots.in_flight.is_empty()
         {
             e.insert(slots);
+        }
+        if let Some(json) = cooldowns_json
+            && let Ok(map) = serde_json::from_value::<
+                std::collections::HashMap<String, i64>,
+            >(json)
+        {
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+            let now_inst = std::time::Instant::now();
+            let mut cd = mud_world::Cooldowns::default();
+            for (k, ready_unix) in map {
+                let Ok(id) = k.parse::<i32>() else { continue };
+                let secs_left = ready_unix.saturating_sub(now_unix);
+                if secs_left <= 0 {
+                    continue;
+                }
+                cd.ready_at.insert(
+                    id,
+                    now_inst + std::time::Duration::from_secs(u64::try_from(secs_left).unwrap_or(0)),
+                );
+            }
+            if !cd.ready_at.is_empty() {
+                e.insert(cd);
+            }
         }
     }
     let mut by_name = world.resource::<VirtualSessions>().by_name.lock().expect("sessions poisoned");

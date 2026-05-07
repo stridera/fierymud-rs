@@ -891,8 +891,9 @@ pub struct BankWealth(pub i64);
 /// Per-character ability cooldown table. Maps `Ability.id` → the
 /// `Instant` at which the cooldown expires (i.e. the ability becomes
 /// usable again). Inserted lazily on first cooldown set; entries past
-/// their `ready_at` are stale and ignored. Session-scoped — not
-/// persisted to the database.
+/// their `ready_at` are stale and ignored. Persisted as wall-clock
+/// unix seconds in `Characters.cooldowns` so cooldowns survive
+/// disconnect; players don't get a free reset by relogging.
 #[derive(Component, Debug, Default, Clone)]
 pub struct Cooldowns {
     pub ready_at: std::collections::HashMap<i32, std::time::Instant>,

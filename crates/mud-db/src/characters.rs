@@ -544,6 +544,39 @@ pub async fn save_spell_cooldowns(
     Ok(())
 }
 
+/// Read the JSON `cooldowns` blob — per-ability cooldown ready-at
+/// timestamps as unix seconds. Returns `Ok(None)` when NULL. Caller
+/// converts the seconds to `Instant` and drops already-expired keys.
+pub async fn load_cooldowns(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<serde_json::Value>> {
+    let row = sqlx::query!(
+        r#"SELECT cooldowns FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.cooldowns))
+}
+
+/// Persist the `cooldowns` blob. Pass `None` to clear (caller has
+/// no in-flight cooldowns — the common case for fresh logins).
+pub async fn save_cooldowns(
+    pool: &PgPool,
+    character_id: &str,
+    blob: Option<&serde_json::Value>,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET cooldowns = $1 WHERE id = $2"#,
+        blob,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Read the staff-notes blob for a character (Builder+ visibility).
 /// Returns Ok(None) when null. Single shared blob — appended to by
 /// the runtime's `pnote add` path.
