@@ -150,6 +150,14 @@ struct AppState {
 /// can install it as a bevy resource. The pool is used by handlers
 /// that need DB access (e.g. `session/create` loads the character
 /// and its inventory before handing off to the world tick).
+///
+/// Auth policy: `ADMIN_TOKEN` is required when binding to a non-loopback
+/// address; production deploys that set `ADMIN_LISTEN_ADDR=0.0.0.0:...`
+/// without a token are refused and the listener is not started. To
+/// override for a one-off dev run on a non-loopback bind (e.g. testing
+/// from another machine on a trusted LAN), set
+/// `ADMIN_ALLOW_UNAUTH_LOCAL=true` — explicit and easy to grep for in
+/// production logs.
 pub fn spawn_admin_server(pool: PgPool) -> mpsc::UnboundedReceiver<AdminCommand> {
     let (tx, rx) = mpsc::unbounded_channel::<AdminCommand>();
     let addr: SocketAddr = std::env::var("ADMIN_LISTEN_ADDR")
@@ -157,6 +165,17 @@ pub fn spawn_admin_server(pool: PgPool) -> mpsc::UnboundedReceiver<AdminCommand>
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| "127.0.0.1:8080".parse().expect("default admin addr parses"));
     let token = std::env::var("ADMIN_TOKEN").ok().map(Arc::new);
+    let allow_unauth_local = std::env::var("ADMIN_ALLOW_UNAUTH_LOCAL")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+    if token.is_none() && !addr.ip().is_loopback() && !allow_unauth_local {
+        warn!(
+            %addr,
+            "admin HTTP refused: non-loopback bind without ADMIN_TOKEN. \
+             Set ADMIN_TOKEN, or ADMIN_ALLOW_UNAUTH_LOCAL=true to bypass (dev only)."
+        );
+        return rx;
+    }
     let state = AppState { tx, token, pool };
     tokio::spawn(async move {
         let app = build_router(state);
@@ -198,6 +217,21 @@ fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Constant-time byte-slice equality. Returns true iff the slices have
+/// the same length and all bytes match, without short-circuiting on
+/// the first mismatch. Used for bearer-token comparison so an attacker
+/// can't time-side-channel the prefix.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
 fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let Some(expected) = state.token.as_ref() else {
         return Ok(());
@@ -207,7 +241,7 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, 
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .unwrap_or("");
-    if got == expected.as_str() {
+    if constant_time_eq(got.as_bytes(), expected.as_bytes()) {
         Ok(())
     } else {
         Err((StatusCode::UNAUTHORIZED, "missing or invalid bearer token".into()))
