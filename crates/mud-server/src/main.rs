@@ -160,8 +160,19 @@ async fn main() {
     // legacy "trigger on creation" semantics.
     triggers::fire_load_for_all_mobs(&mut world);
 
-    let listen_addr =
-        std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into());
+    // Listen address precedence: GameConfig > env > hardcoded default.
+    // GameConfig is the operator-facing source of truth; env still
+    // works as a dev-time override (`MUD_LISTEN_ADDR=...`); hardcoded
+    // default is the last-resort fallback when neither is set.
+    let listen_addr = {
+        let cfg = world.resource::<mud_world::RuntimeConfig>();
+        let port = cfg.get_i32("server", "port", 0);
+        if port > 0 {
+            format!("0.0.0.0:{port}")
+        } else {
+            std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into())
+        }
+    };
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<Inbound>();
     let listen_addr_for_task = listen_addr.clone();
     let inbound_tx_plain = inbound_tx.clone();
@@ -172,13 +183,28 @@ async fn main() {
     });
 
     // Optional TLS listener — enabled when both TLS_CERT_PATH and
-    // TLS_KEY_PATH point at PEM files. Cert is a chain (server cert
-    // first, then intermediates); key is PKCS#8 / RSA / SEC1 PEM.
-    if let (Ok(cert_path), Ok(key_path)) =
+    // TLS_KEY_PATH point at PEM files AND `security.enable_tls` isn't
+    // explicitly false. Cert is a chain (server cert first, then
+    // intermediates); key is PKCS#8 / RSA / SEC1 PEM.
+    let enable_tls = world
+        .resource::<mud_world::RuntimeConfig>()
+        .get_bool("security", "enable_tls", true);
+    if !enable_tls {
+        info!("TLS listener disabled by `security.enable_tls=false`");
+    } else if let (Ok(cert_path), Ok(key_path)) =
         (std::env::var("TLS_CERT_PATH"), std::env::var("TLS_KEY_PATH"))
     {
-        let tls_addr = std::env::var("MUD_TLS_LISTEN_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:4443".into());
+        // TLS port: same precedence chain as plain telnet.
+        let tls_addr = {
+            let cfg = world.resource::<mud_world::RuntimeConfig>();
+            let port = cfg.get_i32("server", "tls_port", 0);
+            if port > 0 {
+                format!("0.0.0.0:{port}")
+            } else {
+                std::env::var("MUD_TLS_LISTEN_ADDR")
+                    .unwrap_or_else(|_| "0.0.0.0:4443".into())
+            }
+        };
         // Required by rustls 0.23+: install a default crypto provider
         // before any ServerConfig is built.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -202,7 +228,8 @@ async fn main() {
     } else {
         info!(
             "TLS disabled — set TLS_CERT_PATH and TLS_KEY_PATH to enable on \
-             $MUD_TLS_LISTEN_ADDR (default 0.0.0.0:4443)"
+             the configured tls_port (`server.tls_port` GameConfig row, \
+             then $MUD_TLS_LISTEN_ADDR, then 0.0.0.0:4443)"
         );
     }
     drop(inbound_tx);
