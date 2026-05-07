@@ -11,7 +11,7 @@ use std::ptr::NonNull;
 
 use bevy_ecs::prelude::*;
 use mlua::{
-    AnyUserData, Function, Lua, MetaMethod, MultiValue, Thread, ThreadStatus, UserData,
+    AnyUserData, Function, Lua, MetaMethod, MultiValue, Table, Thread, ThreadStatus, UserData,
     UserDataMethods, Value, Variadic,
 };
 use mud_world::{
@@ -482,6 +482,38 @@ impl LuaHost {
                 })?,
             )?;
             globals.set("world", world_tbl)?;
+
+            // `run_room_trigger(zone, id)` — invoke a room trigger
+            // by composite key. Used by quest scripts that hand off
+            // between rooms (zones 117, 123, 163, 185, etc.). v1 is
+            // a tracing stub; the dispatcher is single-threaded and
+            // re-entrant Lua → Lua firing risks recursion. Returning
+            // nil keeps the corpus parse-clean instead of erroring
+            // on a nil global call.
+            globals.set(
+                "run_room_trigger",
+                self.lua.create_function(
+                    |_, (zone, id): (i32, i32)| -> mlua::Result<()> {
+                        tracing::warn!(zone, id, "run_room_trigger stub no-op");
+                        Ok(())
+                    },
+                )?,
+            )?;
+
+            // `wait_until(hour, minute)` — clock-aligned wait for
+            // game-time triggers (academy class schedule, market
+            // openings). Stub: emits a regular `wait(60)` to keep
+            // the coroutine alive until the next minute boundary
+            // approximation; full clock integration is a follow-up.
+            globals.set(
+                "wait_until",
+                self.lua.create_function(
+                    |_, (_h, _m): (i32, i32)| -> mlua::Result<()> {
+                        tracing::warn!("wait_until stub — falling through without sleeping");
+                        Ok(())
+                    },
+                )?,
+            )?;
 
             // `combat` namespace — engage/rescue. Implemented via
             // direct Fighting component manipulation; the regular
@@ -1899,10 +1931,40 @@ impl UserData for LuaActor {
             },
         );
         methods.add_method(
+            "fail_quest",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
+                tracing::warn!("trigger called fail_quest(...) — stub no-op");
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "restart_quest",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
+                tracing::warn!("trigger called restart_quest(...) — stub no-op");
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "erase_quest",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
+                tracing::warn!("trigger called erase_quest(...) — stub no-op");
+                Ok(())
+            },
+        );
+        methods.add_method(
             "award_exp",
             |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
                 tracing::warn!("trigger called award_exp(...) — stub no-op");
                 Ok(())
+            },
+        );
+        methods.add_method(
+            "get_has_failed",
+            |_, _this, _: Variadic<Value>| -> mlua::Result<bool> {
+                tracing::warn!(
+                    "trigger called get_has_failed(...) — stub returning false"
+                );
+                Ok(false)
             },
         );
 
@@ -3145,6 +3207,179 @@ impl UserData for LuaRoom {
                     }
                     _ => Ok(Value::Nil),
                 }
+            },
+        );
+
+        // `room:exit(direction)` — return a LuaExit userdata bound
+        // to this room's exit in the given direction, or nil when no
+        // such exit exists. The Exit handle exposes mutation methods
+        // (`set_state`, `set_destination`) used by door triggers and
+        // puzzle gates. ~30 corpus refs across zones 014/015/030/040
+        // /178/510 etc.
+        methods.add_method(
+            "exit",
+            |lua, this, direction: String| -> mlua::Result<Value> {
+                let Some(dir) = parse_lua_direction(&direction) else {
+                    return Ok(Value::Nil);
+                };
+                let exists = world_mut_from_lua(lua, |world| {
+                    world
+                        .get::<mud_world::Exits>(this.entity)
+                        .is_some_and(|e| e.0.contains_key(&dir))
+                })?;
+                if !exists {
+                    return Ok(Value::Nil);
+                }
+                Ok(Value::UserData(lua.create_userdata(LuaExit {
+                    room: this.entity,
+                    dir,
+                })?))
+            },
+        );
+    }
+}
+
+/// Direction parser shared by Lua bindings. Mirrors the canonical
+/// runtime parser (`mud-server::commands::parse_direction`) but
+/// duplicates the table here because mud-script can't depend on
+/// mud-server (the dependency goes the other way). 12 cardinal +
+/// In/Out, no Portal/None — those are author-only sentinel values.
+fn parse_lua_direction(s: &str) -> Option<mud_db::enums::Direction> {
+    use mud_db::enums::Direction;
+    match s.to_ascii_lowercase().as_str() {
+        "north" | "n" => Some(Direction::North),
+        "south" | "s" => Some(Direction::South),
+        "east" | "e" => Some(Direction::East),
+        "west" | "w" => Some(Direction::West),
+        "up" | "u" => Some(Direction::Up),
+        "down" | "d" => Some(Direction::Down),
+        "northeast" | "ne" => Some(Direction::Northeast),
+        "northwest" | "nw" => Some(Direction::Northwest),
+        "southeast" | "se" => Some(Direction::Southeast),
+        "southwest" | "sw" => Some(Direction::Southwest),
+        "in" => Some(Direction::In),
+        "out" => Some(Direction::Out),
+        _ => None,
+    }
+}
+
+/// Userdata wrapper around a single (room, direction) exit slot.
+/// Holds Entity + Direction rather than a borrow, so the methods
+/// below can re-acquire `&mut World` via `world_mut_from_lua`
+/// without lifetime knots.
+#[derive(Clone, Copy)]
+pub struct LuaExit {
+    pub room: Entity,
+    pub dir: mud_db::enums::Direction,
+}
+
+impl UserData for LuaExit {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // `exit:state()` — current open/closed/locked state as a
+        // lowercase string, or nil if the exit was deleted between
+        // lookup and call. Read-only convenience for triggers that
+        // gate behavior on the door's current state.
+        methods.add_method("state", |lua, this, ()| -> mlua::Result<Value> {
+            let state = world_mut_from_lua(lua, |world| {
+                world
+                    .get::<mud_world::Exits>(this.room)
+                    .and_then(|e| e.0.get(&this.dir).map(|d| d.state))
+            })?;
+            match state {
+                Some(mud_db::enums::ExitState::Open) => Ok(Value::String(lua.create_string("open")?)),
+                Some(mud_db::enums::ExitState::Closed) => Ok(Value::String(lua.create_string("closed")?)),
+                Some(mud_db::enums::ExitState::Locked) => Ok(Value::String(lua.create_string("locked")?)),
+                None => Ok(Value::Nil),
+            }
+        });
+
+        // `exit:hidden()` — current hidden flag. Used by triggers
+        // that check whether a previously-revealed door is still
+        // visible before re-applying state.
+        methods.add_method("hidden", |lua, this, ()| -> mlua::Result<bool> {
+            let hidden = world_mut_from_lua(lua, |world| {
+                world
+                    .get::<mud_world::Exits>(this.room)
+                    .and_then(|e| e.0.get(&this.dir).map(|d| d.is_hidden))
+                    .unwrap_or(false)
+            })?;
+            Ok(hidden)
+        });
+
+        // `exit:set_state{ open=bool, locked=bool, hidden=bool,
+        // description=string, keywords={"foo","bar"} }` — apply any
+        // subset of door attributes. Unknown table keys are ignored.
+        // `open=true` overrides any prior locked state, since a
+        // locked door obviously can't be open at the same time.
+        methods.add_method("set_state", |lua, this, opts: Table| -> mlua::Result<()> {
+            let open: Option<bool> = opts.get("open").ok();
+            let locked: Option<bool> = opts.get("locked").ok();
+            let hidden: Option<bool> = opts.get("hidden").ok();
+            let description: Option<String> = opts.get("description").ok();
+            let keywords: Option<Vec<String>> = opts.get("keywords").ok();
+            world_mut_from_lua(lua, |world| {
+                let Some(mut exits) = world.get_mut::<mud_world::Exits>(this.room)
+                else {
+                    return;
+                };
+                let Some(exit) = exits.0.get_mut(&this.dir) else {
+                    return;
+                };
+                if let Some(open_v) = open {
+                    exit.state = if open_v {
+                        mud_db::enums::ExitState::Open
+                    } else {
+                        mud_db::enums::ExitState::Closed
+                    };
+                }
+                if let Some(locked_v) = locked {
+                    if locked_v {
+                        exit.state = mud_db::enums::ExitState::Locked;
+                    } else if matches!(exit.state, mud_db::enums::ExitState::Locked) {
+                        // unlocking a locked door reveals it as
+                        // closed — an unlocked-but-still-shut door
+                        // matches player expectation better than
+                        // springing it open automatically.
+                        exit.state = mud_db::enums::ExitState::Closed;
+                    }
+                }
+                if let Some(h) = hidden {
+                    exit.is_hidden = h;
+                }
+                if let Some(d) = description {
+                    exit.description = if d.is_empty() { None::<String> } else { Some(d) };
+                }
+                if let Some(k) = keywords {
+                    exit.keywords = k;
+                }
+            })
+        });
+
+        // `exit:set_destination(room)` — re-target the exit at a
+        // different room. Used by puzzle triggers that wire up
+        // dynamic teleports (Lokari's Wrath, Templace gate, etc.).
+        // `room` is a LuaRoom userdata; passing nil clears the
+        // destination (the exit becomes a dead-end stub the loader
+        // would call "dangling").
+        methods.add_method(
+            "set_destination",
+            |lua, this, target: Value| -> mlua::Result<()> {
+                let to: Option<Entity> = match target {
+                    Value::UserData(ud) => Some(ud.borrow::<LuaRoom>()?.entity),
+                    Value::Nil => None,
+                    _ => {
+                        return Err(mlua::Error::external(
+                            "set_destination expects a LuaRoom or nil",
+                        ));
+                    }
+                };
+                world_mut_from_lua(lua, |world| {
+                    if let Some(mut exits) = world.get_mut::<mud_world::Exits>(this.room)
+                        && let Some(exit) = exits.0.get_mut(&this.dir)
+                    {
+                        exit.to = to;
+                    }
+                })
             },
         );
     }
