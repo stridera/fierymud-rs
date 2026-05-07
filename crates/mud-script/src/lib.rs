@@ -1968,6 +1968,25 @@ impl UserData for LuaActor {
             },
         );
 
+        // `actor:save()` — checkpoint this player's state to the DB
+        // without disconnecting. Inserts a `PendingSave` marker; the
+        // main-loop autosave drain (see main.rs) picks it up on the
+        // next tick and runs `save_player`. No-op for non-player
+        // entities (mobs don't have persistent state). Used by quest
+        // triggers that want to lock in a stage-advance the moment
+        // it happens rather than waiting for the 5-minute autosave.
+        methods.add_method("save", |lua, this, ()| -> mlua::Result<()> {
+            world_mut_from_lua(lua, |world| {
+                if world.get::<mud_world::Player>(this.entity).is_none() {
+                    return;
+                }
+                if let Ok(mut em) = world.get_entity_mut(this.entity) {
+                    em.insert(mud_world::PendingSave);
+                }
+            })
+        });
+
+
         // `actor:damage(amount)` subtracts `amount` from this entity's
         // `Health.hp`, capped at 0. 157 corpus refs — typically used
         // by ATTACK / FIGHT triggers to apply scripted damage on top
@@ -3210,6 +3229,22 @@ impl UserData for LuaRoom {
             },
         );
 
+        // `room:at(func)` — run `func()` once, immediately. The
+        // legacy DG-style chain `get_room(z, l):at(function() ...
+        // end)` was a "do this thing in the context of room (z, l)"
+        // wrapper; in practice the function bodies almost always
+        // reference `self`/`actor` via closure upvalues from the
+        // enclosing trigger, so we just call the function. ~470
+        // corpus refs across zones 030 / 117 / 160 / 510 — every
+        // staging-room spawn / cross-room broadcast pattern.
+        // Returns whatever the inner function returns.
+        methods.add_method(
+            "at",
+            |_, _this, func: Function| -> mlua::Result<Variadic<Value>> {
+                func.call(())
+            },
+        );
+
         // `room:exit(direction)` — return a LuaExit userdata bound
         // to this room's exit in the given direction, or nil when no
         // such exit exists. The Exit handle exposes mutation methods
@@ -3274,6 +3309,7 @@ pub struct LuaExit {
 }
 
 impl UserData for LuaExit {
+    #[allow(clippy::too_many_lines)]
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // `exit:state()` — current open/closed/locked state as a
         // lowercase string, or nil if the exit was deleted between
@@ -3354,6 +3390,40 @@ impl UserData for LuaExit {
                 }
             })
         });
+
+        // `exit:set_key(zone, id)` — set the (zone, id) of the
+        // object that unlocks this door. Pass nil to clear the key
+        // (door reverts to keyed-only-by-pickproof or unlocked-by-
+        // anyone semantics depending on its other flags). Used by
+        // puzzle triggers that swap which key opens a door mid-quest.
+        methods.add_method(
+            "set_key",
+            |lua, this, args: Variadic<Value>| -> mlua::Result<()> {
+                let key: Option<(i32, i32)> = match args.len() {
+                    0 => None,
+                    1 => match &args[0] {
+                        Value::Nil => None,
+                        _ => {
+                            return Err(mlua::Error::external(
+                                "set_key: pass (zone, id) or no args / nil to clear",
+                            ));
+                        }
+                    },
+                    _ => {
+                        let z: i32 = mlua::FromLua::from_lua(args[0].clone(), lua)?;
+                        let l: i32 = mlua::FromLua::from_lua(args[1].clone(), lua)?;
+                        Some((z, l))
+                    }
+                };
+                world_mut_from_lua(lua, |world| {
+                    if let Some(mut exits) = world.get_mut::<mud_world::Exits>(this.room)
+                        && let Some(exit) = exits.0.get_mut(&this.dir)
+                    {
+                        exit.key = key;
+                    }
+                })
+            },
+        );
 
         // `exit:set_destination(room)` — re-target the exit at a
         // different room. Used by puzzle triggers that wire up
