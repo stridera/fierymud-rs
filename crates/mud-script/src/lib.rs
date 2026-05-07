@@ -2071,11 +2071,25 @@ impl UserData for LuaActor {
                 })
             },
         );
+        // `actor:award_exp(amount)` adds the given XP to this
+        // entity's `Profile.experience` via saturating_add. Mirrors
+        // the kill-XP pipeline in combat.rs and the
+        // PendingPlayerUpdate::ExperienceDelta path. Negative
+        // amounts are accepted but clamped at 0 so a "fail penalty"
+        // can't drive the value below the schema's expected
+        // non-negative range. No-op on non-player entities (mobs
+        // don't carry persistent XP).
         methods.add_method(
             "award_exp",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
-                tracing::warn!("trigger called award_exp(...) — stub no-op");
-                Ok(())
+            |lua, this, amount: i32| -> mlua::Result<()> {
+                world_mut_from_lua(lua, |world| {
+                    if world.get::<mud_world::Player>(this.entity).is_none() {
+                        return;
+                    }
+                    if let Some(mut p) = world.get_mut::<mud_world::Profile>(this.entity) {
+                        p.experience = p.experience.saturating_add(amount).max(0);
+                    }
+                })
             },
         );
 
