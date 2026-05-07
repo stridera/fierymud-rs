@@ -325,8 +325,7 @@ pub async fn save_state(
             freeze_level = $17,
             wimpy_threshold = $18,
             poof_in = $19,
-            poof_out = $20,
-            last_login = NOW()
+            poof_out = $20
         WHERE id = $21
         "#,
         state.hit_points,
@@ -349,6 +348,25 @@ pub async fn save_state(
         state.wimpy_threshold,
         state.poof_in,
         state.poof_out,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Stamp `last_login = NOW()` exactly once per session at successful
+/// login. Split out from `save_state` so generic autosave doesn't
+/// keep resetting the column to "the most recent autosave" — the
+/// prior behavior made the column mean "last save," which broke the
+/// `clientinfo` "Last login" line and any downstream return-player
+/// detection.
+pub async fn update_last_login(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET last_login = NOW() WHERE id = $1"#,
         character_id,
     )
     .execute(pool)

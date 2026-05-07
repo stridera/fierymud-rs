@@ -1116,6 +1116,15 @@ impl ConnRouter {
         let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
         let entity = spawn_player(world, &user, &char_row, outbound);
         let item_count = spawn_inventory(world, entity, &item_rows);
+        // Stamp last_login exactly once at successful spawn — split
+        // from save_state, which used to overwrite it on every
+        // autosave (so the column meant "last save," not "last
+        // login"). PreviousLogin was already captured from char_row
+        // before this call, so the displayed "Last login" line keeps
+        // showing the prior session's start.
+        if let Err(e) = mud_db::characters::update_last_login(pool, &char_row.id).await {
+            warn!(conn_id, error = %e, "last_login update failed");
+        }
         let known_abilities = KnownAbilities::from_rows(&ability_rows);
         let ability_count = known_abilities.entries.len();
         let aliases = mud_world::Aliases::from_rows(&alias_rows);
