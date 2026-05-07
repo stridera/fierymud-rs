@@ -90,8 +90,16 @@ pub enum AdminRequest {
         items: Vec<character_items::CharacterItemRow>,
         abilities: Vec<mud_db::character_abilities::CharacterAbilityRow>,
         aliases: Vec<mud_db::character_aliases::CharacterAliasRow>,
+        script_vars_json: Option<serde_json::Value>,
+        trophy_json: Option<serde_json::Value>,
     },
     SessionDestroy { player_name: String },
+    /// Mark an online (or virtual-session) player with `PendingSave`
+    /// so the post-tick autosave loop checkpoints them within the
+    /// next tick. Used by smoke tests to force the disconnect-save
+    /// path without actually disconnecting; not part of the regular
+    /// gameplay surface.
+    MarkPendingSave { player_name: String },
     Command { executor: String, command: String },
     Teleport { player_name: String, zone_id: i32, room_id: i32 },
     Spawn { kind: String, zone_id: i32, id: i32, room_zone: i32, room_id: i32 },
@@ -172,6 +180,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/mob/{zone_id}/{id}", get(handle_inspect_mob))
         .route("/api/admin/session/create", post(handle_session_create))
         .route("/api/admin/session/destroy", post(handle_session_destroy))
+        .route("/api/admin/player/save", post(handle_player_save))
         .route("/api/admin/command", post(handle_command))
         .route("/api/admin/teleport", post(handle_teleport))
         .route("/api/admin/spawn", post(handle_spawn))
@@ -311,6 +320,12 @@ async fn handle_session_create(
     let aliases = mud_db::character_aliases::list_for(&state.pool, &character.id)
         .await
         .unwrap_or_default();
+    let script_vars_json = characters::load_script_vars(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
+    let trophy_json = characters::load_trophy(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
     json_ok(
         enqueue(
             &state,
@@ -321,6 +336,8 @@ async fn handle_session_create(
                 items,
                 abilities,
                 aliases,
+                script_vars_json,
+                trophy_json,
             },
         )
         .await,
@@ -337,6 +354,19 @@ async fn handle_session_destroy(
     }
     json_ok(
         enqueue(&state, AdminRequest::SessionDestroy { player_name: body.player_name }).await,
+    )
+}
+
+async fn handle_player_save(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<SessionBody>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(
+        enqueue(&state, AdminRequest::MarkPendingSave { player_name: body.player_name }).await,
     )
 }
 
@@ -692,10 +722,15 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::WorldStatus => Ok(world_status(world)),
         AdminRequest::LookRoom { zone_id, id } => look_room(world, zone_id, id),
         AdminRequest::InspectActor { name } => inspect_actor(world, &name),
-        AdminRequest::SessionCreate { player_name, user, character, items, abilities, aliases } => {
-            session_create(world, &player_name, &user, &character, &items, &abilities, &aliases)
-        }
+        AdminRequest::SessionCreate {
+            player_name, user, character, items, abilities, aliases,
+            script_vars_json, trophy_json,
+        } => session_create(
+            world, &player_name, &user, &character, &items, &abilities, &aliases,
+            script_vars_json, trophy_json,
+        ),
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
+        AdminRequest::MarkPendingSave { player_name } => mark_pending_save(world, &player_name),
         AdminRequest::Command { executor, command } => run_command(world, &executor, &command),
         AdminRequest::Teleport { player_name, zone_id, room_id } => {
             teleport(world, &player_name, zone_id, room_id)
@@ -1260,6 +1295,8 @@ fn session_create(
     items: &[character_items::CharacterItemRow],
     abilities: &[mud_db::character_abilities::CharacterAbilityRow],
     aliases: &[mud_db::character_aliases::CharacterAliasRow],
+    script_vars_json: Option<serde_json::Value>,
+    trophy_json: Option<serde_json::Value>,
 ) -> AdminResponse {
     // Reject duplicate by name.
     {
@@ -1315,6 +1352,40 @@ fn session_create(
             && !d.trim().is_empty()
         {
             e.insert(mud_world::Description(d.trim().to_string()));
+        }
+        // Mirror login::complete_login for the persisted-state
+        // components — without these the round-trip looks like
+        // a regression even when save_state wrote them correctly.
+        if character.invis_level > 0 {
+            e.insert(mud_world::WizInvis(character.invis_level));
+        }
+        if character.freeze_level.is_some() {
+            e.insert(mud_world::Frozen);
+        }
+        if character.wimpy_threshold > 0 {
+            e.insert(mud_world::WimpyThreshold(character.wimpy_threshold));
+        }
+        if character.poof_in.is_some() || character.poof_out.is_some() {
+            e.insert(mud_world::Poofs {
+                poof_in: character.poof_in.clone(),
+                poof_out: character.poof_out.clone(),
+            });
+        }
+        if let Some(json) = script_vars_json
+            && let Ok(map) = serde_json::from_value::<
+                std::collections::BTreeMap<String, String>,
+            >(json)
+            && !map.is_empty()
+        {
+            e.insert(mud_world::ScriptVars(map));
+        }
+        if let Some(json) = trophy_json
+            && let Ok(entries) = serde_json::from_value::<
+                std::collections::VecDeque<mud_world::TrophyEntry>,
+            >(json)
+            && !entries.is_empty()
+        {
+            e.insert(mud_world::Trophy { entries });
         }
     }
     let mut by_name = world.resource::<VirtualSessions>().by_name.lock().expect("sessions poisoned");
@@ -1373,6 +1444,30 @@ fn session_destroy(world: &mut World, player_name: &str) -> AdminResponse {
         "success": true,
         "player_name": player_name,
         "note": "virtual session despawned (entity + carried items removed; not saved to DB)",
+    }))
+}
+
+fn mark_pending_save(world: &mut World, player_name: &str) -> AdminResponse {
+    let entity = {
+        let mut q = world
+            .query_filtered::<(Entity, &Named), With<Player>>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(player_name))
+            .map(|(e, _)| e)
+    };
+    let Some(entity) = entity else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no online player matching '{player_name}'"),
+        ));
+    };
+    if let Ok(mut em) = world.get_entity_mut(entity) {
+        em.insert(mud_world::PendingSave);
+    }
+    Ok(json!({
+        "success": true,
+        "player_name": player_name,
+        "note": "PendingSave marker inserted; main-loop autosave will checkpoint on the next tick",
     }))
 }
 
