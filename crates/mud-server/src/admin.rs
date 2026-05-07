@@ -79,6 +79,7 @@ pub struct AdminCommand {
     pub reply: oneshot::Sender<AdminResponse>,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum AdminRequest {
     WorldStatus,
     LookRoom { zone_id: i32, id: i32 },
@@ -94,6 +95,7 @@ pub enum AdminRequest {
         trophy_json: Option<serde_json::Value>,
         spell_cooldowns_json: Option<serde_json::Value>,
         cooldowns_json: Option<serde_json::Value>,
+        ignore_list_json: Option<serde_json::Value>,
     },
     SessionDestroy { player_name: String },
     /// Mark an online (or virtual-session) player with `PendingSave`
@@ -373,6 +375,9 @@ async fn handle_session_create(
     let cooldowns_json = characters::load_cooldowns(&state.pool, &character.id)
         .await
         .unwrap_or_default();
+    let ignore_list_json = characters::load_ignore_list(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
     json_ok(
         enqueue(
             &state,
@@ -387,6 +392,7 @@ async fn handle_session_create(
                 trophy_json,
                 spell_cooldowns_json,
                 cooldowns_json,
+                ignore_list_json,
             },
         )
         .await,
@@ -774,9 +780,11 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::SessionCreate {
             player_name, user, character, items, abilities, aliases,
             script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
+            ignore_list_json,
         } => session_create(
             world, &player_name, &user, &character, &items, &abilities, &aliases,
             script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
+            ignore_list_json,
         ),
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
         AdminRequest::MarkPendingSave { player_name } => mark_pending_save(world, &player_name),
@@ -1349,6 +1357,7 @@ fn session_create(
     trophy_json: Option<serde_json::Value>,
     spell_cooldowns_json: Option<serde_json::Value>,
     cooldowns_json: Option<serde_json::Value>,
+    ignore_list_json: Option<serde_json::Value>,
 ) -> AdminResponse {
     // Reject duplicate by name.
     {
@@ -1444,6 +1453,12 @@ fn session_create(
             && !slots.in_flight.is_empty()
         {
             e.insert(slots);
+        }
+        if let Some(json) = ignore_list_json
+            && let Ok(list) = serde_json::from_value::<Vec<String>>(json)
+            && !list.is_empty()
+        {
+            e.insert(mud_world::IgnoreList(list));
         }
         if let Some(json) = cooldowns_json
             && let Ok(map) = serde_json::from_value::<

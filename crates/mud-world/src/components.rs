@@ -932,10 +932,12 @@ pub struct AccountSummary {
     pub characters: Vec<(String, i32)>,
 }
 
-/// Per-session ignore list. A player whose name appears here can't
+/// Tell/socials ignore list. A player whose name appears here can't
 /// reach this entity through `tell` — the sender gets a "they're
 /// ignoring you" message and the receiver sees nothing. Stored as
-/// case-insensitive lowercased names.
+/// case-insensitive lowercased names. Persisted as a JSON array on
+/// `Characters.ignore_list` so a harassing player can't resume
+/// contact after the target reconnects.
 #[derive(Component, Debug, Default, Clone)]
 pub struct IgnoreList(pub Vec<String>);
 

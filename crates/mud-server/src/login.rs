@@ -1166,6 +1166,12 @@ impl ConnRouter {
                 warn!(conn_id, error = %e, "cooldowns load failed");
                 None
             });
+        let ignore_list_json = mud_db::characters::load_ignore_list(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "ignore_list load failed");
+                None
+            });
 
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
@@ -1340,6 +1346,15 @@ impl ConnRouter {
                 && !slots.in_flight.is_empty()
             {
                 e.insert(slots);
+            }
+            // IgnoreList — JSON array of lowercased names. Tolerant:
+            // garbage data starts with an empty list rather than
+            // bouncing login.
+            if let Some(json) = ignore_list_json
+                && let Ok(list) = serde_json::from_value::<Vec<String>>(json)
+                && !list.is_empty()
+            {
+                e.insert(mud_world::IgnoreList(list));
             }
             // Cooldowns — JSON map of ability_id → unix_secs_ready_at.
             // Convert to Instant by computing the offset from `now`,
@@ -1685,6 +1700,7 @@ pub(crate) struct SaveOutcome {
     pub trophy: Option<bool>,
     pub spell_cooldowns: Option<bool>,
     pub cooldowns: Option<bool>,
+    pub ignore_list: Option<bool>,
     pub bank_wealth: Option<bool>,
     pub time_played: Option<bool>,
     pub abilities: Option<bool>,
@@ -1705,6 +1721,7 @@ impl SaveOutcome {
             (self.trophy, "trophy"),
             (self.spell_cooldowns, "spell cooldowns"),
             (self.cooldowns, "ability cooldowns"),
+            (self.ignore_list, "ignore list"),
             (self.bank_wealth, "bank wealth"),
             (self.time_played, "time played"),
             (self.abilities, "abilities"),
@@ -2061,6 +2078,26 @@ pub(crate) async fn save_player(
         Err(e) => {
             warn!(error = %e, character_id = %account.character_id, "cooldowns save failed");
             outcome.cooldowns = Some(false);
+        }
+    }
+
+    // IgnoreList. Empty list → NULL so a fresh character doesn't
+    // carry a `[]` stub in the column.
+    let ignore_list_json: Option<serde_json::Value> = world
+        .get::<mud_world::IgnoreList>(entity)
+        .filter(|l| !l.0.is_empty())
+        .and_then(|l| serde_json::to_value(&l.0).ok());
+    match mud_db::characters::save_ignore_list(
+        pool,
+        &account.character_id,
+        ignore_list_json.as_ref(),
+    )
+    .await
+    {
+        Ok(()) => outcome.ignore_list = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "ignore_list save failed");
+            outcome.ignore_list = Some(false);
         }
     }
 

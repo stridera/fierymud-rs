@@ -577,6 +577,38 @@ pub async fn save_cooldowns(
     Ok(())
 }
 
+/// Read the JSON `ignore_list` blob — array of lowercased names this
+/// player has silenced. Returns `Ok(None)` when NULL.
+pub async fn load_ignore_list(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<serde_json::Value>> {
+    let row = sqlx::query!(
+        r#"SELECT ignore_list FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.ignore_list))
+}
+
+/// Persist the `ignore_list` blob. Pass `None` to clear (caller has
+/// no entries — the typical-player case).
+pub async fn save_ignore_list(
+    pool: &PgPool,
+    character_id: &str,
+    blob: Option<&serde_json::Value>,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET ignore_list = $1 WHERE id = $2"#,
+        blob,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Read the staff-notes blob for a character (Builder+ visibility).
 /// Returns Ok(None) when null. Single shared blob — appended to by
 /// the runtime's `pnote add` path.
