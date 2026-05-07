@@ -33,20 +33,22 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
 }
 
 /// Replace the character's full `CharacterAbilities` set with `rows`.
-/// Wraps DELETE + bulk INSERT in a single transaction — matches the
-/// `character_items::save_for` pattern. Empty `rows` means "wipe
-/// every learned ability" which is rare but valid (e.g. a respec).
+/// Multi-query helper — caller passes a `&mut PgConnection` (use
+/// `&mut *tx` from inside an outer transaction, or
+/// `&mut *pool.acquire().await?` for a stand-alone write). Atomicity
+/// is the caller's responsibility; wrap in a transaction if you need
+/// it. Empty `rows` means "wipe every learned ability" which is rare
+/// but valid (e.g. a respec).
 pub async fn save_for(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     character_id: &str,
     rows: &[CharacterAbilityRow],
 ) -> sqlx::Result<()> {
-    let mut tx = pool.begin().await?;
     sqlx::query!(
         r#"DELETE FROM "CharacterAbilities" WHERE character_id = $1"#,
         character_id
     )
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     for r in rows {
         sqlx::query!(
@@ -60,9 +62,8 @@ pub async fn save_for(
             r.known,
             r.proficiency,
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }

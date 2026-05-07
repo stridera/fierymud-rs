@@ -64,21 +64,18 @@ async fn cmd_save(
         );
         return;
     }
-    let failures = outcome.failures();
-    if failures.is_empty() {
+    if outcome.committed {
         send_to(world, player, "Saved.\r\n");
     } else {
-        // Report each failed sub-step so the player can decide
-        // whether to retry. The full error went to tracing::warn
-        // for staff diagnostics.
-        let names = failures.join(", ");
+        // Tx rolled back; the full error went to tracing::warn for
+        // staff diagnostics. Surface a one-liner pointing the player
+        // at retry.
         send_to(
             world,
             player,
-            format!(
-                "Save partial — these sub-saves failed: {names}. Other state \
-                 was written; ask staff to investigate the syslog.\r\n"
-            ),
+            "Save failed — your last successful checkpoint is intact, \
+             but this attempt rolled back. Try `save` again, or ask \
+             staff to investigate the syslog.\r\n",
         );
     }
 }

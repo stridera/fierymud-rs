@@ -28,20 +28,19 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
 }
 
 /// Replace the character's full `CharacterAliases` set with `rows`.
-/// Wraps DELETE + bulk INSERT in a single transaction — matches the
-/// `character_abilities::save_for` pattern. Empty `rows` clears every
-/// alias for the character.
+/// Multi-query helper — caller passes a `&mut PgConnection` and is
+/// responsible for atomicity (wrap in a transaction if needed).
+/// Empty `rows` clears every alias for the character.
 pub async fn save_for(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     character_id: &str,
     rows: &[CharacterAliasRow],
 ) -> sqlx::Result<()> {
-    let mut tx = pool.begin().await?;
     sqlx::query!(
         r#"DELETE FROM "CharacterAliases" WHERE character_id = $1"#,
         character_id
     )
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     for r in rows {
         sqlx::query!(
@@ -53,9 +52,8 @@ pub async fn save_for(
             r.alias,
             r.command,
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }

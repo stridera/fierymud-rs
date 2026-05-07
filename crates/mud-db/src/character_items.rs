@@ -171,14 +171,14 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
 /// order so a new item placed inside a new container can resolve its
 /// `container_id` from this run's prior insert.
 ///
-/// Single transaction — partial failure rolls back cleanly.
+/// Multi-query helper — caller passes a `&mut PgConnection` and is
+/// responsible for atomicity (wrap in a transaction if the work
+/// should commit-or-rollback as a unit; `save_player` does this).
 pub async fn save_inventory_diff(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     character_id: &str,
     items: &[CharacterItemSnap],
 ) -> sqlx::Result<HashMap<usize, i32>> {
-    let mut tx = pool.begin().await?;
-
     // 1. DELETE rows for this character whose id isn't in the snapshot.
     //    Empty `keep` means delete everything (player gave up every
     //    item this session).
@@ -188,7 +188,7 @@ pub async fn save_inventory_diff(
             r#"DELETE FROM "CharacterItems" WHERE character_id = $1"#,
             character_id,
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     } else {
         sqlx::query!(
@@ -199,7 +199,7 @@ pub async fn save_inventory_diff(
             character_id,
             &keep,
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
 
@@ -232,7 +232,7 @@ pub async fn save_inventory_diff(
             snap.liquid_type.as_deref(),
             id,
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
 
@@ -275,11 +275,10 @@ pub async fn save_inventory_diff(
             snap.liquid_remaining.unwrap_or(0),
             snap.liquid_type.as_deref(),
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
         assigned.insert(idx, row.id);
     }
 
-    tx.commit().await?;
     Ok(assigned)
 }

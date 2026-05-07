@@ -207,8 +207,8 @@ pub struct CoreStatsPayload {
     pub charisma: i32,
 }
 
-pub async fn save_core_stats(
-    pool: &PgPool,
+pub async fn save_core_stats<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     stats: &CoreStatsPayload,
 ) -> sqlx::Result<()> {
@@ -231,7 +231,7 @@ pub async fn save_core_stats(
         stats.charisma,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -298,8 +298,8 @@ pub struct CharacterStatePayload<'a> {
     pub poof_out: Option<&'a str>,
 }
 
-pub async fn save_state(
-    pool: &PgPool,
+pub async fn save_state<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     state: &CharacterStatePayload<'_>,
 ) -> sqlx::Result<()> {
@@ -350,7 +350,7 @@ pub async fn save_state(
         state.poof_out,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -377,8 +377,8 @@ pub async fn update_last_login(
 /// Persist the bank balance separately from `save_state` (which
 /// already takes too many args). Called from `save_player` when the
 /// in-memory `BankWealth` differs from boot.
-pub async fn save_bank_wealth(
-    pool: &PgPool,
+pub async fn save_bank_wealth<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     bank_wealth: i64,
 ) -> sqlx::Result<()> {
@@ -387,7 +387,7 @@ pub async fn save_bank_wealth(
         bank_wealth,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -410,8 +410,8 @@ pub async fn load_drunkenness(pool: &PgPool, character_id: &str) -> sqlx::Result
 /// time elapsed since the previous save anchor) so the column
 /// monotonically grows. Skip the call when the increment would be
 /// zero — fresh saves immediately after another don't pay a write.
-pub async fn save_time_played(
-    pool: &PgPool,
+pub async fn save_time_played<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     time_played: i32,
 ) -> sqlx::Result<()> {
@@ -420,15 +420,15 @@ pub async fn save_time_played(
         time_played,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
 
 /// Save the drunkenness counter. Called from save-on-disconnect
 /// alongside hunger / thirst so the value round-trips.
-pub async fn save_drunkenness(
-    pool: &PgPool,
+pub async fn save_drunkenness<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     drunkenness: i32,
 ) -> sqlx::Result<()> {
@@ -437,7 +437,7 @@ pub async fn save_drunkenness(
         drunkenness,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -461,8 +461,8 @@ pub async fn load_script_vars(
 /// Persist the `script_vars` blob. Pass `None` to clear the column
 /// (player has no surviving vars); pass `Some(...)` to overwrite
 /// with a fresh JSON object.
-pub async fn save_script_vars(
-    pool: &PgPool,
+pub async fn save_script_vars<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     blob: Option<&serde_json::Value>,
 ) -> sqlx::Result<()> {
@@ -471,7 +471,7 @@ pub async fn save_script_vars(
         blob,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -494,8 +494,8 @@ pub async fn load_trophy(
 
 /// Persist the `trophy_data` blob. Same shape as `save_script_vars` —
 /// `None` clears the column, `Some(...)` overwrites.
-pub async fn save_trophy(
-    pool: &PgPool,
+pub async fn save_trophy<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     blob: Option<&serde_json::Value>,
 ) -> sqlx::Result<()> {
@@ -504,7 +504,7 @@ pub async fn save_trophy(
         blob,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -529,8 +529,8 @@ pub async fn load_spell_cooldowns(
 /// Persist the `spell_cooldowns` blob. Pass `None` to clear the column
 /// (no slots in cooldown — the common case at logout for a player
 /// who's been resting).
-pub async fn save_spell_cooldowns(
-    pool: &PgPool,
+pub async fn save_spell_cooldowns<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     blob: Option<&serde_json::Value>,
 ) -> sqlx::Result<()> {
@@ -539,7 +539,7 @@ pub async fn save_spell_cooldowns(
         blob,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -562,8 +562,8 @@ pub async fn load_cooldowns(
 
 /// Persist the `cooldowns` blob. Pass `None` to clear (caller has
 /// no in-flight cooldowns — the common case for fresh logins).
-pub async fn save_cooldowns(
-    pool: &PgPool,
+pub async fn save_cooldowns<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     blob: Option<&serde_json::Value>,
 ) -> sqlx::Result<()> {
@@ -572,7 +572,7 @@ pub async fn save_cooldowns(
         blob,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -594,8 +594,8 @@ pub async fn load_ignore_list(
 
 /// Persist the `ignore_list` blob. Pass `None` to clear (caller has
 /// no entries — the typical-player case).
-pub async fn save_ignore_list(
-    pool: &PgPool,
+pub async fn save_ignore_list<'e, E: PgExecutor<'e>>(
+    executor: E,
     character_id: &str,
     blob: Option<&serde_json::Value>,
 ) -> sqlx::Result<()> {
@@ -604,7 +604,7 @@ pub async fn save_ignore_list(
         blob,
         character_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }

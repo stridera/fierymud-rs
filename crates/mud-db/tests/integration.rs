@@ -150,7 +150,8 @@ async fn round_trips_character_items() {
             liquid_type: None,
         },
     ];
-    let assigned = save_inventory_diff(&pool, &cid, &payload).await.expect("save");
+    let mut conn = pool.acquire().await.expect("acquire conn");
+    let assigned = save_inventory_diff(&mut conn, &cid, &payload).await.expect("save");
     assert_eq!(assigned.len(), 2, "both rows INSERTed → both ids returned");
 
     let after = list_for(&pool, &cid).await.expect("list after");
@@ -177,5 +178,5 @@ async fn round_trips_character_items() {
             liquid_type: r.liquid_type.clone(),
         })
         .collect();
-    save_inventory_diff(&pool, &cid, &restore).await.expect("restore");
+    save_inventory_diff(&mut conn, &cid, &restore).await.expect("restore");
 }
