@@ -229,14 +229,21 @@ impl ConnRouter {
         // across `.await` calls — save_player takes &mut World.
         let entries: Vec<Entity> = self.playing.values().copied().collect();
         for entity in entries {
-            save_player(world, entity, pool).await;
+            // SaveOutcome dropped — broadcast autosave can't surface
+            // a per-player partial-save message anyway, and the
+            // tracing::warn inside save_player covers staff
+            // diagnostics.
+            let _ = save_player(world, entity, pool).await;
         }
     }
 
     pub async fn on_disconnect(&mut self, world: &mut World, conn_id: ConnId, pool: &PgPool) {
         self.login.remove(&conn_id);
         if let Some(entity) = self.playing.remove(&conn_id) {
-            save_player(world, entity, pool).await;
+            // Disconnect path — player is gone before we could
+            // report a partial save. The tracing::warn inside
+            // save_player covers diagnostics.
+            let _ = save_player(world, entity, pool).await;
             // Despawn the player AND every item they were carrying / wearing.
             // Located(player) catches both inventory and equipped (EquippedSlot
             // is additive, items are still Located on the carrier).
@@ -1621,9 +1628,67 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) {
+/// Outcome of one `save_player` run. Each field is the human-
+/// readable name of a sub-step that hit the DB; `None` means the
+/// step was skipped (e.g. no Account → not a player), `Some(true)`
+/// is a successful write, `Some(false)` is a failure (full error
+/// goes to `tracing::warn`). The `save` command consumes this to tell
+/// the player which parts didn't make it instead of always saying
+/// "Saved." even after a partial failure.
+#[derive(Debug, Default)]
+pub(crate) struct SaveOutcome {
+    /// Either the whole pipeline aborted before reaching a per-step
+    /// status (e.g. account missing), or a hard early-return inside
+    /// `save_player` (legacy: `save_state` failure used to short-circuit).
+    pub aborted: bool,
+    pub state: Option<bool>,
+    pub items: Option<bool>,
+    pub drunkenness: Option<bool>,
+    pub script_vars: Option<bool>,
+    pub trophy: Option<bool>,
+    pub spell_cooldowns: Option<bool>,
+    pub bank_wealth: Option<bool>,
+    pub time_played: Option<bool>,
+    pub abilities: Option<bool>,
+    pub aliases: Option<bool>,
+    pub core_stats: Option<bool>,
+}
+
+impl SaveOutcome {
+    /// Names of sub-steps whose write failed. Empty when everything
+    /// succeeded or was skipped. `aborted` is reported separately by
+    /// `cmd_save` since it means the whole pipeline didn't run.
+    pub fn failures(&self) -> Vec<&'static str> {
+        let pairs: &[(Option<bool>, &'static str)] = &[
+            (self.state, "core state"),
+            (self.items, "inventory"),
+            (self.drunkenness, "drunkenness"),
+            (self.script_vars, "script vars"),
+            (self.trophy, "trophy"),
+            (self.spell_cooldowns, "spell cooldowns"),
+            (self.bank_wealth, "bank wealth"),
+            (self.time_played, "time played"),
+            (self.abilities, "abilities"),
+            (self.aliases, "aliases"),
+            (self.core_stats, "core stats"),
+        ];
+        pairs
+            .iter()
+            .filter_map(|(s, name)| (*s == Some(false)).then_some(*name))
+            .collect()
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn save_player(
+    world: &mut World,
+    entity: Entity,
+    pool: &PgPool,
+) -> SaveOutcome {
+    let mut outcome = SaveOutcome::default();
     let Some(account) = world.get::<Account>(entity).cloned() else {
-        return;
+        outcome.aborted = true;
+        return outcome;
     };
     let hp = world.get::<Health>(entity).map_or(0, |h| h.hp);
     let stamina = world.get::<Stamina>(entity).map_or(0, |s| s.current);
@@ -1773,7 +1838,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     };
     let item_count = new_items.len();
 
-    if let Err(e) = characters::save_state(
+    match characters::save_state(
         pool,
         &account.character_id,
         &mud_db::characters::CharacterStatePayload {
@@ -1801,8 +1866,17 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     )
     .await
     {
-        warn!(error = %e, character_id = %account.character_id, "save failed");
-        return;
+        Ok(()) => outcome.state = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "save failed");
+            outcome.state = Some(false);
+            // Core state failure is the most load-bearing step;
+            // skip subsequent sub-saves so a failed UPDATE doesn't
+            // get followed by partial inventory / abilities writes
+            // against a stale base row. Caller sees `state=Some(false)`
+            // and at least one downstream `None`.
+            return outcome;
+        }
     }
     match mud_db::character_items::save_inventory_diff(
         pool,
@@ -1812,6 +1886,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     .await
     {
         Ok(assigned) => {
+            outcome.items = Some(true);
             // Stamp newly-INSERTed rows' ids back onto the entities
             // so a subsequent autosave UPDATEs them in place rather
             // than INSERTing duplicates.
@@ -1825,6 +1900,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         }
         Err(e) => {
             warn!(error = %e, character_id = %account.character_id, "items save failed");
+            outcome.items = Some(false);
         }
     }
     // Drunkenness round-trip. Always write — sobering up to 0 needs
@@ -1834,10 +1910,12 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     let drunk = world
         .get::<mud_world::Drunkenness>(entity)
         .map_or(0, |d| d.0);
-    if let Err(e) =
-        mud_db::characters::save_drunkenness(pool, &account.character_id, drunk).await
-    {
-        warn!(error = %e, character_id = %account.character_id, "drunkenness save failed");
+    match mud_db::characters::save_drunkenness(pool, &account.character_id, drunk).await {
+        Ok(()) => outcome.drunkenness = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "drunkenness save failed");
+            outcome.drunkenness = Some(false);
+        }
     }
 
     // ScriptVars — serialise the BTreeMap directly. NULL when the
@@ -1847,14 +1925,18 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         .get::<mud_world::ScriptVars>(entity)
         .filter(|sv| !sv.0.is_empty())
         .and_then(|sv| serde_json::to_value(&sv.0).ok());
-    if let Err(e) = mud_db::characters::save_script_vars(
+    match mud_db::characters::save_script_vars(
         pool,
         &account.character_id,
         script_vars_json.as_ref(),
     )
     .await
     {
-        warn!(error = %e, character_id = %account.character_id, "script_vars save failed");
+        Ok(()) => outcome.script_vars = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "script_vars save failed");
+            outcome.script_vars = Some(false);
+        }
     }
 
     // Trophy — same shape as ScriptVars. Empty ring buffer →
@@ -1865,14 +1947,18 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         .get::<mud_world::Trophy>(entity)
         .filter(|t| !t.entries.is_empty())
         .and_then(|t| serde_json::to_value(&t.entries).ok());
-    if let Err(e) = mud_db::characters::save_trophy(
+    match mud_db::characters::save_trophy(
         pool,
         &account.character_id,
         trophy_json.as_ref(),
     )
     .await
     {
-        warn!(error = %e, character_id = %account.character_id, "trophy save failed");
+        Ok(()) => outcome.trophy = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "trophy save failed");
+            outcome.trophy = Some(false);
+        }
     }
 
     // SpellSlots — empty in_flight (the typical state for someone
@@ -1883,14 +1969,18 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         .get::<mud_world::SpellSlots>(entity)
         .filter(|s| !s.in_flight.is_empty())
         .and_then(|s| serde_json::to_value(s).ok());
-    if let Err(e) = mud_db::characters::save_spell_cooldowns(
+    match mud_db::characters::save_spell_cooldowns(
         pool,
         &account.character_id,
         spell_cooldowns_json.as_ref(),
     )
     .await
     {
-        warn!(error = %e, character_id = %account.character_id, "spell_cooldowns save failed");
+        Ok(()) => outcome.spell_cooldowns = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "spell_cooldowns save failed");
+            outcome.spell_cooldowns = Some(false);
+        }
     }
 
     // Persist BankWealth separately from save_state (which doesn't
@@ -1898,10 +1988,12 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     // zero balance has to overwrite the loaded nonzero value. Cheap
     // even for perma-broke characters.
     let bank = world.get::<BankWealth>(entity).map_or(0, |b| b.0);
-    if let Err(e) =
-        mud_db::characters::save_bank_wealth(pool, &account.character_id, bank).await
-    {
-        warn!(error = %e, character_id = %account.character_id, "bank_wealth save failed");
+    match mud_db::characters::save_bank_wealth(pool, &account.character_id, bank).await {
+        Ok(()) => outcome.bank_wealth = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "bank_wealth save failed");
+            outcome.bank_wealth = Some(false);
+        }
     }
 
     // Lifetime time-played accumulator. Credit every second since
@@ -1919,17 +2011,20 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
             .get::<mud_world::TimePlayed>(entity)
             .map_or(0, |t| t.0)
             .saturating_add(session_delta_secs);
-        if let Err(e) =
-            mud_db::characters::save_time_played(pool, &account.character_id, new_total).await
-        {
-            warn!(error = %e, character_id = %account.character_id, "time_played save failed");
-        } else {
-            // Bump the in-memory copies only after the DB write
-            // succeeds, so a transient failure doesn't lose the
-            // accumulator on the next attempt.
-            if let Ok(mut em) = world.get_entity_mut(entity) {
-                em.insert(mud_world::TimePlayed(new_total));
-                em.insert(mud_world::LastPersistedAt(now));
+        match mud_db::characters::save_time_played(pool, &account.character_id, new_total).await {
+            Ok(()) => {
+                outcome.time_played = Some(true);
+                // Bump the in-memory copies only after the DB write
+                // succeeds, so a transient failure doesn't lose the
+                // accumulator on the next attempt.
+                if let Ok(mut em) = world.get_entity_mut(entity) {
+                    em.insert(mud_world::TimePlayed(new_total));
+                    em.insert(mud_world::LastPersistedAt(now));
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, character_id = %account.character_id, "time_played save failed");
+                outcome.time_played = Some(false);
             }
         }
     }
@@ -1940,15 +2035,18 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         .get::<KnownAbilities>(entity)
         .map(KnownAbilities::to_rows)
         .unwrap_or_default();
-    if let Err(e) = mud_db::character_abilities::save_for(
+    match mud_db::character_abilities::save_for(
         pool,
         &account.character_id,
         &ability_rows,
     )
     .await
     {
-        warn!(error = %e, character_id = %account.character_id, "abilities save failed");
-        return;
+        Ok(()) => outcome.abilities = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "abilities save failed");
+            outcome.abilities = Some(false);
+        }
     }
 
     // Persist Aliases → CharacterAliases so user-defined shortcuts
@@ -1958,26 +2056,25 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         .map(mud_world::Aliases::to_rows)
         .unwrap_or_default();
     let alias_count = alias_rows.len();
-    if let Err(e) =
-        mud_db::character_aliases::save_for(pool, &account.character_id, &alias_rows).await
-    {
-        warn!(error = %e, character_id = %account.character_id, "aliases save failed");
-        return;
+    match mud_db::character_aliases::save_for(pool, &account.character_id, &alias_rows).await {
+        Ok(()) => outcome.aliases = Some(true),
+        Err(e) => {
+            warn!(error = %e, character_id = %account.character_id, "aliases save failed");
+            outcome.aliases = Some(false);
+        }
     }
 
     // Persist mutable CoreStats (changes via `train`, future stat
     // adjusters). Skipped silently if the entity has no CoreStats —
     // shouldn't happen for a fully-spawned player but defensive.
-    if let Some(stats) = world.get::<CoreStats>(entity).copied()
-        && let Err(e) = characters::save_core_stats(
-            pool,
-            &account.character_id,
-            &stats.into(),
-        )
-        .await
-    {
-        warn!(error = %e, character_id = %account.character_id, "core_stats save failed");
-        return;
+    if let Some(stats) = world.get::<CoreStats>(entity).copied() {
+        match characters::save_core_stats(pool, &account.character_id, &stats.into()).await {
+            Ok(()) => outcome.core_stats = Some(true),
+            Err(e) => {
+                warn!(error = %e, character_id = %account.character_id, "core_stats save failed");
+                outcome.core_stats = Some(false);
+            }
+        }
     }
 
     info!(
@@ -1990,8 +2087,10 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         flag_count = flags.len(),
         item_count,
         alias_count,
+        failures = ?outcome.failures(),
         "player saved"
     );
+    outcome
 }
 
 /// Materialize each saved `CharacterItem` into a live Item entity. Top-

@@ -51,6 +51,33 @@ async fn cmd_save(
     player: Entity,
     pool: &mud_db::sqlx::PgPool,
 ) {
-    save_player(world, player, pool).await;
-    send_to(world, player, "Saved.\r\n");
+    let outcome = save_player(world, player, pool).await;
+    if outcome.aborted {
+        // The aborted path means the entity isn't a Player at all
+        // (no Account component) — caller is most likely a mob in
+        // `switch` mode. Don't report a save when nothing was saved.
+        send_to(
+            world,
+            player,
+            "Nothing to save — you don't have a character record on this entity.\r\n",
+        );
+        return;
+    }
+    let failures = outcome.failures();
+    if failures.is_empty() {
+        send_to(world, player, "Saved.\r\n");
+    } else {
+        // Report each failed sub-step so the player can decide
+        // whether to retry. The full error went to tracing::warn
+        // for staff diagnostics.
+        let names = failures.join(", ");
+        send_to(
+            world,
+            player,
+            format!(
+                "Save partial — these sub-saves failed: {names}. Other state \
+                 was written; ask staff to investigate the syslog.\r\n"
+            ),
+        );
+    }
 }

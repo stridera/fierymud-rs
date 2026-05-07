@@ -330,7 +330,10 @@ async fn main() {
                             if let Ok(mut em) = world.get_entity_mut(e) {
                                 em.remove::<mud_world::PendingSave>();
                             }
-                            login::save_player(&mut world, e, &pool).await;
+                            // PendingSave is the autosave path —
+                            // ignore the outcome (tracing::warn
+                            // covers diagnostics).
+                            let _ = login::save_player(&mut world, e, &pool).await;
                         }
                     }
                     // Drain idle-kick markers before flushing prompts
