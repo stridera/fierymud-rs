@@ -1187,11 +1187,12 @@ impl ConnRouter {
             if char_row.freeze_level.is_some() {
                 e.insert(mud_world::Frozen);
             }
-            // Wimpy threshold — re-attach when nonzero. The combat
-            // flee path falls back to a 25% default with no
-            // component, so the zero case is "use default" not
-            // "auto-flee disabled" today; this is documented on
-            // the component.
+            // Wimpy threshold — the on/off switch is the `Wimpy`
+            // PlayerFlag (loaded above), not this value. The component
+            // is the *override percentage* used when the flag is on;
+            // absent → combat.rs falls back to the 25% default. Skip
+            // the insert when the column is 0 so the default path
+            // doesn't carry an empty component.
             if char_row.wimpy_threshold > 0 {
                 e.insert(mud_world::WimpyThreshold(char_row.wimpy_threshold));
             }
@@ -1572,7 +1573,12 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         .get::<mud_world::Frozen>(entity)
         .map(|_| 1);
     // Wimpy threshold — `WimpyThreshold(pct)` round-trips through
-    // the schema column. Absent component → 0 (no auto-flee).
+    // the schema column. The on/off switch is the `Wimpy` PlayerFlag,
+    // not this value: 0 means "no explicit override; use the 25%
+    // default when the flag is on." Absent component → store 0; on
+    // reload the login path skips the insert (since `> 0` is false)
+    // so combat falls back to the default. Mirrors the contract in
+    // combat.rs:909 and the load comment above.
     let wimpy_threshold = world
         .get::<mud_world::WimpyThreshold>(entity)
         .map_or(0, |w| w.0);
