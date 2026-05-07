@@ -1175,6 +1175,38 @@ fn group_for_actor(world: &mut World, actor: Entity) -> Vec<Entity> {
     group
 }
 
+/// Insert / overwrite a single key in an actor's `ScriptVars` map.
+/// Creates the component if absent. Used by the quest API helpers
+/// to back `quest:NAME:stage` etc. against the same JSON column
+/// that round-trips through `Characters.script_vars` already.
+fn set_script_var(lua: &Lua, entity: Entity, key: &str, value: &str) -> mlua::Result<()> {
+    world_mut_from_lua(lua, |world| {
+        if world.get::<mud_world::ScriptVars>(entity).is_none()
+            && let Ok(mut em) = world.get_entity_mut(entity)
+        {
+            em.insert(mud_world::ScriptVars::default());
+        }
+        if let Some(mut sv) = world.get_mut::<mud_world::ScriptVars>(entity) {
+            sv.0.insert(key.to_string(), value.to_string());
+        }
+    })
+}
+
+/// Best-effort Lua → String coercion for the `set_quest_var` value
+/// arg. Strings pass through verbatim; integers / floats stringify;
+/// booleans become "1"/"0"; nil becomes empty. Anything else (table,
+/// function, userdata) emits the type name as a sentinel.
+fn lua_to_string(v: &Value) -> String {
+    match v {
+        Value::Nil => String::new(),
+        Value::Boolean(b) => if *b { "1".into() } else { "0".into() },
+        Value::Integer(i) => i.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.to_string_lossy(),
+        other => format!("<{}>", other.type_name()),
+    }
+}
+
 fn world_mut_from_lua<R>(lua: &Lua, f: impl FnOnce(&mut World) -> R) -> mlua::Result<R> {
     let ptr = lua
         .app_data_ref::<WorldPtr>()
@@ -1882,73 +1914,161 @@ impl UserData for LuaActor {
             },
         );
 
-        // Quest API stubs. The corpus references these heavily
-        // (get_quest_stage 2271, get_quest_var 2007, set_quest_var
-        // 727, get_has_completed 344, advance_quest 283, start_quest
-        // 92, award_exp 95, complete_quest 76). Real implementation
-        // requires loading per-character `CharacterQuest` rows into
-        // an ECS component and round-tripping them on save —
-        // substantial work deferred to a follow-up. v1 stubs keep
-        // trigger bodies from crashing on a nil index.
+        // Quest API. Backed by the existing `ScriptVars` storage
+        // (BTreeMap<String, String> on each player, persisted as
+        // JSON in `Characters.script_vars`). Keys follow this
+        // namespace contract:
+        //   "quest:NAME:stage"          → integer-as-string, "0" = not started
+        //   "quest:NAME:completed"      → "1" when complete
+        //   "quest:NAME:failed"         → "1" when failed
+        //   "quest:NAME:var:VARNAME"    → free-form per-quest variable
+        //
+        // The legacy DG quest framework had a richer model
+        // (CharacterQuests / CharacterQuestObjectives in the
+        // schema) but the trigger corpus uses the flat
+        // stage/var/flag style almost exclusively, so backing it
+        // with ScriptVars is enough to make the existing 5000+
+        // corpus refs functional. The structured schema can layer
+        // on top later for builder UIs.
         methods.add_method(
             "get_quest_stage",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<i64> { Ok(0) },
+            |lua, this, name: String| -> mlua::Result<i64> {
+                let key = format!("quest:{name}:stage");
+                let val = world_mut_from_lua(lua, |w| {
+                    w.get::<mud_world::ScriptVars>(this.entity)
+                        .and_then(|sv| sv.0.get(&key).cloned())
+                })?;
+                Ok(val.and_then(|s| s.parse::<i64>().ok()).unwrap_or(0))
+            },
         );
         methods.add_method(
             "get_quest_var",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<String> { Ok(String::new()) },
+            |lua, this, key: String| -> mlua::Result<String> {
+                // The corpus convention is `actor:get_quest_var
+                // ("NAME:varname")` — quest name and var name
+                // joined with a colon. We map that to our
+                // namespaced "quest:NAME:var:varname" by splitting
+                // on the first colon.
+                let storage_key = match key.split_once(':') {
+                    Some((quest, var)) => format!("quest:{quest}:var:{var}"),
+                    None => format!("quest:{key}:var:default"),
+                };
+                let val = world_mut_from_lua(lua, |w| {
+                    w.get::<mud_world::ScriptVars>(this.entity)
+                        .and_then(|sv| sv.0.get(&storage_key).cloned())
+                })?;
+                Ok(val.unwrap_or_default())
+            },
         );
         methods.add_method(
             "get_has_completed",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<bool> { Ok(false) },
+            |lua, this, name: String| -> mlua::Result<bool> {
+                let key = format!("quest:{name}:completed");
+                let val = world_mut_from_lua(lua, |w| {
+                    w.get::<mud_world::ScriptVars>(this.entity)
+                        .and_then(|sv| sv.0.get(&key).cloned())
+                })?;
+                Ok(val.as_deref() == Some("1"))
+            },
+        );
+        methods.add_method(
+            "get_has_failed",
+            |lua, this, name: String| -> mlua::Result<bool> {
+                let key = format!("quest:{name}:failed");
+                let val = world_mut_from_lua(lua, |w| {
+                    w.get::<mud_world::ScriptVars>(this.entity)
+                        .and_then(|sv| sv.0.get(&key).cloned())
+                })?;
+                Ok(val.as_deref() == Some("1"))
+            },
         );
         methods.add_method(
             "set_quest_var",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
-                tracing::warn!("trigger called set_quest_var(...) — stub no-op");
-                Ok(())
-            },
-        );
-        methods.add_method(
-            "advance_quest",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
-                tracing::warn!("trigger called advance_quest(...) — stub no-op");
-                Ok(())
-            },
-        );
-        methods.add_method(
-            "complete_quest",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
-                tracing::warn!("trigger called complete_quest(...) — stub no-op");
-                Ok(())
+            |lua, this, args: Variadic<Value>| -> mlua::Result<()> {
+                // Two call shapes in the corpus:
+                //   actor:set_quest_var(quest, key, value)      — 3 args
+                //   actor:set_quest_var("quest:key", value)     — 2 args
+                let (quest, var, value) = match args.len() {
+                    3 => {
+                        let q: String = mlua::FromLua::from_lua(args[0].clone(), lua)?;
+                        let k: String = mlua::FromLua::from_lua(args[1].clone(), lua)?;
+                        let v: String = lua_to_string(&args[2]);
+                        (q, k, v)
+                    }
+                    2 => {
+                        let combo: String = mlua::FromLua::from_lua(args[0].clone(), lua)?;
+                        let v: String = lua_to_string(&args[1]);
+                        match combo.split_once(':') {
+                            Some((q, k)) => (q.to_string(), k.to_string(), v),
+                            None => (combo, "default".to_string(), v),
+                        }
+                    }
+                    _ => return Ok(()),
+                };
+                let storage_key = format!("quest:{quest}:var:{var}");
+                set_script_var(lua, this.entity, &storage_key, &value)
             },
         );
         methods.add_method(
             "start_quest",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
-                tracing::warn!("trigger called start_quest(...) — stub no-op");
-                Ok(())
+            |lua, this, name: String| -> mlua::Result<()> {
+                let stage_key = format!("quest:{name}:stage");
+                set_script_var(lua, this.entity, &stage_key, "1")
+            },
+        );
+        methods.add_method(
+            "advance_quest",
+            |lua, this, name: String| -> mlua::Result<()> {
+                let stage_key = format!("quest:{name}:stage");
+                let cur = world_mut_from_lua(lua, |w| {
+                    w.get::<mud_world::ScriptVars>(this.entity)
+                        .and_then(|sv| sv.0.get(&stage_key).cloned())
+                })?;
+                let next = cur
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                set_script_var(lua, this.entity, &stage_key, &next.to_string())
+            },
+        );
+        methods.add_method(
+            "complete_quest",
+            |lua, this, name: String| -> mlua::Result<()> {
+                let key = format!("quest:{name}:completed");
+                set_script_var(lua, this.entity, &key, "1")
             },
         );
         methods.add_method(
             "fail_quest",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
-                tracing::warn!("trigger called fail_quest(...) — stub no-op");
-                Ok(())
+            |lua, this, name: String| -> mlua::Result<()> {
+                let key = format!("quest:{name}:failed");
+                set_script_var(lua, this.entity, &key, "1")
             },
         );
         methods.add_method(
             "restart_quest",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
-                tracing::warn!("trigger called restart_quest(...) — stub no-op");
-                Ok(())
+            |lua, this, name: String| -> mlua::Result<()> {
+                // Clear stage/completed/failed and any per-quest vars,
+                // then mark stage=1 so the quest re-runs from the top.
+                let prefix = format!("quest:{name}:");
+                world_mut_from_lua(lua, |w| {
+                    if let Some(mut sv) = w.get_mut::<mud_world::ScriptVars>(this.entity) {
+                        sv.0.retain(|k, _| !k.starts_with(&prefix));
+                    }
+                })?;
+                let stage_key = format!("quest:{name}:stage");
+                set_script_var(lua, this.entity, &stage_key, "1")
             },
         );
         methods.add_method(
             "erase_quest",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
-                tracing::warn!("trigger called erase_quest(...) — stub no-op");
-                Ok(())
+            |lua, this, name: String| -> mlua::Result<()> {
+                let prefix = format!("quest:{name}:");
+                world_mut_from_lua(lua, |w| {
+                    if let Some(mut sv) = w.get_mut::<mud_world::ScriptVars>(this.entity) {
+                        sv.0.retain(|k, _| !k.starts_with(&prefix));
+                    }
+                })
             },
         );
         methods.add_method(
@@ -1956,15 +2076,6 @@ impl UserData for LuaActor {
             |_, _this, _: Variadic<Value>| -> mlua::Result<()> {
                 tracing::warn!("trigger called award_exp(...) — stub no-op");
                 Ok(())
-            },
-        );
-        methods.add_method(
-            "get_has_failed",
-            |_, _this, _: Variadic<Value>| -> mlua::Result<bool> {
-                tracing::warn!(
-                    "trigger called get_has_failed(...) — stub returning false"
-                );
-                Ok(false)
             },
         );
 
