@@ -132,7 +132,7 @@ fn cmd_clan(world: &mut World, player: Entity, args: &str) {
                 mud_db::characters::find_by_name(&pool, &target_name).await
             else {
                 let _ = out
-                    .send(format!("No character named '{target_name}'.\r\n").into_bytes());
+                    .try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
                 return;
             };
             let in_clan = mud_db::clans::membership_for(&pool, &target.id)
@@ -142,18 +142,18 @@ fn cmd_clan(world: &mut World, player: Entity, args: &str) {
                 .is_some_and(|m| m.clan_id == clan_id);
             if !in_clan {
                 let _ = out
-                    .send(format!("{} isn't in your clan.\r\n", target.name).into_bytes());
+                    .try_send(format!("{} isn't in your clan.\r\n", target.name).into_bytes());
                 return;
             }
             match mud_db::clans::remove_member(&pool, &target.id).await {
                 Ok(_) => {
-                    let _ = out.send(
+                    let _ = out.try_send(
                         format!("{} kicked from {}.\r\n", target.name, abbrev)
                             .into_bytes(),
                     );
                 }
                 Err(e) => {
-                    let _ = out.send(format!("Kick failed: {e}\r\n").into_bytes());
+                    let _ = out.try_send(format!("Kick failed: {e}\r\n").into_bytes());
                 }
             }
         });
@@ -184,12 +184,12 @@ fn cmd_clan(world: &mut World, player: Entity, args: &str) {
             };
             match mud_db::clans::set_motd(&pool, clan_id, new_motd).await {
                 Ok(_) => {
-                    let _ = out.send(
+                    let _ = out.try_send(
                         format!("MOTD updated on {abbrev_for_msg}.\r\n").into_bytes(),
                     );
                 }
                 Err(e) => {
-                    let _ = out.send(format!("MOTD set failed: {e}\r\n").into_bytes());
+                    let _ = out.try_send(format!("MOTD set failed: {e}\r\n").into_bytes());
                 }
             }
         });
@@ -210,7 +210,7 @@ fn cmd_clan(world: &mut World, player: Entity, args: &str) {
     };
     tokio::spawn(async move {
         let Ok(Some(clan_row)) = mud_db::clans::get_clan(&pool, clan_id).await else {
-            let _ = out.send(b"Couldn't load clan info.\r\n".to_vec());
+            let _ = out.try_send(b"Couldn't load clan info.\r\n".to_vec());
             return;
         };
         let roster = mud_db::clans::members_of(&pool, clan_id)
@@ -238,6 +238,6 @@ fn cmd_clan(world: &mut World, player: Entity, args: &str) {
                 r.rank, r.level, r.name
             ));
         }
-        let _ = out.send(buf.into_bytes());
+        let _ = out.try_send(buf.into_bytes());
     });
 }

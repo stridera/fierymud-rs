@@ -2040,7 +2040,7 @@ pub(crate) fn cmd_last(world: &mut World, player: Entity, args: &str) {
     tokio::spawn(async move {
         let Some(out) = outbound else { return };
         let Ok(Some(row)) = mud_db::characters::find_by_name(&pool, &target_name).await else {
-            let _ = out.send(format!("No character named '{target_name}'.\r\n").into_bytes());
+            let _ = out.try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
             return;
         };
         let last = row
@@ -2054,7 +2054,7 @@ pub(crate) fn cmd_last(world: &mut World, player: Entity, args: &str) {
             "{} (L{} {} / {})\r\n  last login: {last}{online_label}\r\n",
             row.name, row.level, row.race, class_label,
         );
-        let _ = out.send(line.into_bytes());
+        let _ = out.try_send(line.into_bytes());
     });
 }
 

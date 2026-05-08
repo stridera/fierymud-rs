@@ -51,11 +51,11 @@ fn cmd_unban(world: &mut World, player: Entity, args: &str) {
             mud_db::characters::find_by_name(&pool, &target_name).await
         else {
             let _ = out
-                .send(format!("No character named '{target_name}'.\r\n").into_bytes());
+                .try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
             return;
         };
         let Some(uid) = target.user_id else {
-            let _ = out.send(
+            let _ = out.try_send(
                 format!("{} has no associated user account.\r\n", target.name)
                     .into_bytes(),
             );
@@ -63,15 +63,15 @@ fn cmd_unban(world: &mut World, player: Entity, args: &str) {
         };
         match mud_db::bans::unban(&pool, &uid, &admin_uid).await {
             Ok(0) => {
-                let _ = out.send(
+                let _ = out.try_send(
                     format!("{} has no active ban.\r\n", target.name).into_bytes(),
                 );
             }
             Ok(_) => {
-                let _ = out.send(format!("Unbanned {}.\r\n", target.name).into_bytes());
+                let _ = out.try_send(format!("Unbanned {}.\r\n", target.name).into_bytes());
             }
             Err(e) => {
-                let _ = out.send(format!("Unban write failed: {e}\r\n").into_bytes());
+                let _ = out.try_send(format!("Unban write failed: {e}\r\n").into_bytes());
             }
         }
     });

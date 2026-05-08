@@ -207,8 +207,8 @@ impl ConnRouter {
     }
 
     pub fn on_connect(&mut self, conn_id: ConnId, outbound: Outbound) {
-        let _ = outbound.send(BANNER.as_bytes().to_vec());
-        let _ = outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+        let _ = outbound.try_send(BANNER.as_bytes().to_vec());
+        let _ = outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
         self.login.insert(
             conn_id,
             LoginCtx {
@@ -332,13 +332,13 @@ impl ConnRouter {
                         }
                         Ok(None) => {
                             if !registration_open {
-                                let _ = ctx.outbound.send(
+                                let _ = ctx.outbound.try_send(
                                     "New character creation is currently closed.\r\n"
                                         .as_bytes()
                                         .to_vec(),
                                 );
                                 ctx.stage = Stage::AwaitingIdentifier;
-                                let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                                let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                                 return;
                             }
                             ctx.stage = Stage::ConfirmCreate {
@@ -349,9 +349,9 @@ impl ConnRouter {
                         }
                         Err(e) => {
                             warn!(conn_id, error = %e, "user lookup failed");
-                            let _ = ctx.outbound.send("Server error.\r\n".as_bytes().to_vec());
+                            let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
                             ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                            let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                             return;
                         }
                     }
@@ -382,13 +382,13 @@ impl ConnRouter {
                         }
                         Ok(None) => {
                             if !registration_open {
-                                let _ = ctx.outbound.send(
+                                let _ = ctx.outbound.try_send(
                                     "New character creation is currently closed.\r\n"
                                         .as_bytes()
                                         .to_vec(),
                                 );
                                 ctx.stage = Stage::AwaitingIdentifier;
-                                let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                                let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                                 return;
                             }
                             ctx.stage = Stage::ConfirmCreate {
@@ -399,15 +399,15 @@ impl ConnRouter {
                         }
                         Err(e) => {
                             warn!(conn_id, error = %e, "character lookup failed");
-                            let _ = ctx.outbound.send("Server error.\r\n".as_bytes().to_vec());
+                            let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
                             ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                            let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                             return;
                         }
                     }
                 }
                 if routed_to_password {
-                    let _ = ctx.outbound.send(PASSWORD_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(PASSWORD_PROMPT.as_bytes().to_vec());
                 }
             }
 
@@ -416,7 +416,7 @@ impl ConnRouter {
                 let yes = matches!(answer.as_str(), "y" | "yes");
                 let no = matches!(answer.as_str(), "n" | "no" | "");
                 if yes {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         format!(
                             "Great — let's set up `{identifier}`. Pick a password \
                              at least {MIN_NEW_PASSWORD_LEN} characters long.\r\n"
@@ -424,17 +424,17 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
-                    let _ = ctx.outbound.send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
                 } else if no {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         "Okay — please enter an existing email or character name.\r\n"
                             .as_bytes()
                             .to_vec(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                 } else {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         "Please answer 'yes' or 'no'.\r\n".as_bytes().to_vec(),
                     );
                     ctx.stage = Stage::ConfirmCreate { identifier, is_email };
@@ -443,7 +443,7 @@ impl ConnRouter {
 
             Stage::AwaitingNewPassword { identifier, is_email } => {
                 if trimmed.len() < MIN_NEW_PASSWORD_LEN {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         format!(
                             "Password must be at least {MIN_NEW_PASSWORD_LEN} \
                              characters. Try again.\r\n"
@@ -451,7 +451,7 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
-                    let _ = ctx.outbound.send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 ctx.stage = Stage::ConfirmNewPassword {
@@ -459,7 +459,7 @@ impl ConnRouter {
                     is_email,
                     first_attempt: trimmed.to_string(),
                 };
-                let _ = ctx.outbound.send(CONFIRM_PASSWORD_PROMPT.as_bytes().to_vec());
+                let _ = ctx.outbound.try_send(CONFIRM_PASSWORD_PROMPT.as_bytes().to_vec());
             }
 
             Stage::ConfirmNewPassword {
@@ -468,20 +468,20 @@ impl ConnRouter {
                 first_attempt,
             } => {
                 if trimmed != first_attempt {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         "Passwords don't match. Let's start over.\r\n"
                             .as_bytes()
                             .to_vec(),
                     );
                     ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
-                    let _ = ctx.outbound.send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 // Password confirmed. Email path needs to collect a
                 // character name next; character-name path already
                 // has the name (= the identifier they typed).
                 if is_email {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         format!(
                             "Password set for `{identifier}`. Now choose your \
                              character's name ({MIN_CHARACTER_NAME_LEN}–{MAX_CHARACTER_NAME_LEN} \
@@ -495,7 +495,7 @@ impl ConnRouter {
                     };
                     let _ = ctx
                         .outbound
-                        .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                        .try_send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
                 } else {
                     // Character-name path: identifier IS the
                     // character name. Advance to race selection.
@@ -514,19 +514,19 @@ impl ConnRouter {
             } => {
                 let name = trimmed;
                 if let Err(reason) = validate_new_character_name(name) {
-                    let _ = ctx.outbound.send(format!("{reason}\r\n").into_bytes());
+                    let _ = ctx.outbound.try_send(format!("{reason}\r\n").into_bytes());
                     ctx.stage = Stage::AwaitingCharacterName {
                         email,
                         password_plaintext,
                     };
                     let _ = ctx
                         .outbound
-                        .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                        .try_send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 match characters::find_by_name(pool, name).await {
                     Ok(Some(_)) => {
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             format!(
                                 "Sorry, the name `{name}` is already taken. \
                                  Pick another.\r\n"
@@ -539,7 +539,7 @@ impl ConnRouter {
                         };
                         let _ = ctx
                             .outbound
-                            .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                            .try_send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
                     }
                     Ok(None) => {
                         // Name is available. Advance to race
@@ -553,7 +553,7 @@ impl ConnRouter {
                     }
                     Err(e) => {
                         warn!(conn_id, error = %e, "character-name uniqueness check failed");
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             "Server error checking the name. Please try again.\r\n"
                                 .as_bytes()
                                 .to_vec(),
@@ -564,7 +564,7 @@ impl ConnRouter {
                         };
                         let _ = ctx
                             .outbound
-                            .send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                            .try_send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
                     }
                 }
             }
@@ -575,7 +575,7 @@ impl ConnRouter {
                 password_plaintext,
             } => {
                 let Some(race) = match_playable_race(trimmed) else {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         format!("`{trimmed}` isn't one of the available races.\r\n")
                             .into_bytes(),
                     );
@@ -605,7 +605,7 @@ impl ConnRouter {
                 race,
             } => {
                 let Some((class_id, class_plain_name)) = match_base_class(world, trimmed) else {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         format!("`{trimmed}` isn't one of the available classes.\r\n")
                             .into_bytes(),
                     );
@@ -638,7 +638,7 @@ impl ConnRouter {
                 class_plain_name,
             } => {
                 let Some(gender) = match_playable_gender(trimmed) else {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         format!(
                             "`{trimmed}` isn't a recognized gender — pick one of the listed values.\r\n"
                         )
@@ -698,7 +698,7 @@ impl ConnRouter {
                     return;
                 }
                 if !accepted {
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         "Please answer 'accept' or 'reroll'.\r\n".as_bytes().to_vec(),
                     );
                     ctx.stage = Stage::ReviewStatRoll {
@@ -733,14 +733,14 @@ impl ConnRouter {
                     Ok(h) => h,
                     Err(e) => {
                         warn!(conn_id, error = %e, "bcrypt hash failed");
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             "Server error securing your password. Please try again.\r\n"
                                 .as_bytes()
                                 .to_vec(),
                         );
                         drop(password_plaintext);
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
@@ -753,13 +753,13 @@ impl ConnRouter {
                     Ok(t) => t,
                     Err(e) => {
                         warn!(conn_id, error = %e, "creation tx begin failed");
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             "Server error opening a transaction. Please try again.\r\n"
                                 .as_bytes()
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
@@ -774,7 +774,7 @@ impl ConnRouter {
                     Ok(id) => id,
                     Err(e) => {
                         warn!(conn_id, error = %e, "user create failed");
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             format!(
                                 "Couldn't create the account ({e}). Please try again \
                                  with a different identifier.\r\n"
@@ -785,7 +785,7 @@ impl ConnRouter {
                         // INSERT (if any) gets rolled back.
                         drop(tx);
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
@@ -807,7 +807,7 @@ impl ConnRouter {
                     Ok(id) => id,
                     Err(e) => {
                         warn!(conn_id, error = %e, "character create failed");
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             format!(
                                 "Couldn't create the character ({e}). The account \
                                  INSERT was rolled back; please try again.\r\n"
@@ -816,13 +816,13 @@ impl ConnRouter {
                         );
                         drop(tx);
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
                 if let Err(e) = tx.commit().await {
                     warn!(conn_id, error = %e, "creation tx commit failed");
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         format!(
                             "Couldn't finalize creation ({e}). Both rows have been \
                              rolled back; please try again.\r\n"
@@ -830,7 +830,7 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 // Both rows are committed. Re-fetch the User + the
@@ -846,24 +846,24 @@ impl ConnRouter {
                     Ok(Some(u)) => u,
                     Ok(None) => {
                         warn!(conn_id, %user_id, "fresh user vanished post-commit");
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             "Account created but couldn't reload it. Please log in.\r\n"
                                 .as_bytes()
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                     Err(e) => {
                         warn!(conn_id, error = %e, "user reload failed");
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             "Account created but couldn't reload it. Please log in.\r\n"
                                 .as_bytes()
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
@@ -871,28 +871,28 @@ impl ConnRouter {
                     Ok(Some(c)) => c,
                     Ok(None) => {
                         warn!(conn_id, %character_name, "fresh character vanished post-commit");
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             "Character created but couldn't reload it. Please log in.\r\n"
                                 .as_bytes()
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                     Err(e) => {
                         warn!(conn_id, error = %e, "character reload failed");
-                        let _ = ctx.outbound.send(
+                        let _ = ctx.outbound.try_send(
                             "Character created but couldn't reload it. Please log in.\r\n"
                                 .as_bytes()
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
-                let _ = ctx.outbound.send(
+                let _ = ctx.outbound.try_send(
                     format!(
                         "Welcome to FieryMUD, {character_name}! Your {gender} {race} \
                          {class_plain_name} is ready (character id {character_id}, user \
@@ -919,7 +919,7 @@ impl ConnRouter {
                         secs_remaining,
                         "auth refused: account locked"
                     );
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         format!(
                             "Account is temporarily locked after too many failed \
                              attempts. Try again in {secs_remaining}s.\r\n"
@@ -927,7 +927,7 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 let ok = user
@@ -967,9 +967,9 @@ impl ConnRouter {
                     } else {
                         "Invalid credentials.\r\n".to_string()
                     };
-                    let _ = ctx.outbound.send(msg.into_bytes());
+                    let _ = ctx.outbound.try_send(msg.into_bytes());
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 // Auth succeeded — reset the failed-login counter so
@@ -992,13 +992,13 @@ impl ConnRouter {
                         user_id = %user.id,
                         "auth refused: wizlock active"
                     );
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         "The mud is currently locked for staff only. Please try again later.\r\n"
                             .as_bytes()
                             .to_vec(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 // Ban check. Refuses post-auth so we don't leak
@@ -1016,7 +1016,7 @@ impl ConnRouter {
                         .expires_at
                         .map(|t| format!(" (expires {t} UTC)"))
                         .unwrap_or_default();
-                    let _ = ctx.outbound.send(
+                    let _ = ctx.outbound.try_send(
                         format!(
                             "Your account is banned: {}{until}\r\n",
                             ban.reason
@@ -1024,7 +1024,7 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 info!(conn_id, user_id = %user.id, email = %user.email, "auth success");
@@ -1041,18 +1041,18 @@ impl ConnRouter {
                     Ok(c) => c,
                     Err(e) => {
                         warn!(conn_id, error = %e, "character list failed");
-                        let _ = ctx.outbound.send("Server error.\r\n".as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                         return;
                     }
                 };
                 if chars.is_empty() {
                     let _ = ctx
                         .outbound
-                        .send("No characters on this account.\r\n".as_bytes().to_vec());
+                        .try_send("No characters on this account.\r\n".as_bytes().to_vec());
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
                     return;
                 }
                 let mut menu = String::from("\r\nCharacters:\r\n");
@@ -1060,7 +1060,7 @@ impl ConnRouter {
                     menu.push_str(&format!("  {}. {} (level {})\r\n", idx + 1, c.name, c.level));
                 }
                 menu.push_str("Pick a number: ");
-                let _ = ctx.outbound.send(menu.into_bytes());
+                let _ = ctx.outbound.try_send(menu.into_bytes());
                 ctx.stage = Stage::CharSelect {
                     user,
                     characters: chars,
@@ -1076,7 +1076,7 @@ impl ConnRouter {
                 else {
                     let _ = ctx
                         .outbound
-                        .send(format!("Pick 1-{}.\r\n", characters.len()).into_bytes());
+                        .try_send(format!("Pick 1-{}.\r\n", characters.len()).into_bytes());
                     ctx.stage = Stage::CharSelect { user, characters };
                     return;
                 };
@@ -1609,12 +1609,12 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
     // Welcome line — only when we have a room to land in.
     if let Some(room_entity) = room_entity {
         let room_name = commands::name_or(world, room_entity, "<unknown>");
-        let _ = outbound.send(format!(
+        let _ = outbound.try_send(format!(
             "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",
             name = c.name,
         ).into_bytes());
     } else {
-        let _ = outbound.send(
+        let _ = outbound.try_send(
             format!(
                 "No starting room available (tried ({zone},{room}) and fallback {FALLBACK_START:?}).\r\n",
             )
@@ -2264,7 +2264,7 @@ fn send_race_prompt(outbound: &Outbound) {
         msg.push_str(race);
     }
     msg.push_str("\r\nRace: ");
-    let _ = outbound.send(msg.into_bytes());
+    let _ = outbound.try_send(msg.into_bytes());
 }
 
 /// Match a freshly-typed race against the playable list. Returns
@@ -2294,7 +2294,7 @@ fn send_class_prompt(outbound: &Outbound, world: &World) {
     let mut msg = String::from("Available classes: ");
     msg.push_str(&bases.join(", "));
     msg.push_str("\r\nClass: ");
-    let _ = outbound.send(msg.into_bytes());
+    let _ = outbound.try_send(msg.into_bytes());
 }
 
 /// Look up a base class by `plain_name`, case-insensitively.
@@ -2318,7 +2318,7 @@ fn send_gender_prompt(outbound: &Outbound) {
     let mut msg = String::from("Available genders: ");
     msg.push_str(&PLAYABLE_GENDERS.join(", "));
     msg.push_str("\r\nGender: ");
-    let _ = outbound.send(msg.into_bytes());
+    let _ = outbound.try_send(msg.into_bytes());
 }
 
 /// Match a freshly-typed gender against the accepted list.
@@ -2373,7 +2373,7 @@ fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
         stats.charisma,
         CoreStats::bonus(stats.charisma),
     );
-    let _ = outbound.send(line.into_bytes());
+    let _ = outbound.try_send(line.into_bytes());
 }
 
 /// Shared prompt for the `ConfirmCreate` doorway. `is_email`
@@ -2381,7 +2381,7 @@ fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
 /// matching the identifier they typed.
 fn send_confirm_create_prompt(outbound: &Outbound, identifier: &str, is_email: bool) {
     let kind_label = if is_email { "account" } else { "character" };
-    let _ = outbound.send(
+    let _ = outbound.try_send(
         format!(
             "I don't see a {kind_label} for `{identifier}`. Create a new one? (yes/no): "
         )

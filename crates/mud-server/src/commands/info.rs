@@ -10372,11 +10372,11 @@ pub(crate) fn cmd_house_rename(
                     Ok(_) => {
                         let label = if is_description { "description" } else { "name" };
                         let _ = out
-                            .send(format!("Updated room #{local_idx} {label}.\r\n").into_bytes());
+                            .try_send(format!("Updated room #{local_idx} {label}.\r\n").into_bytes());
                     }
                     Err(e) => {
                         let _ = out
-                            .send(format!("DB write failed: {e}\r\n").into_bytes());
+                            .try_send(format!("DB write failed: {e}\r\n").into_bytes());
                     }
                 }
             }
@@ -10424,7 +10424,7 @@ pub(crate) fn cmd_house_guest(
                     Ok(None) => {
                         if let Some(out) = outbound {
                             let _ = out
-                                .send(format!("No character named '{name}'.\r\n").into_bytes());
+                                .try_send(format!("No character named '{name}'.\r\n").into_bytes());
                         }
                         return;
                     }
@@ -10442,7 +10442,7 @@ pub(crate) fn cmd_house_guest(
                                 ""
                             };
                             let _ = out
-                                .send(
+                                .try_send(
                                     format!(
                                         "{} added to your guest list{suffix}.\r\n",
                                         row.name
@@ -10464,7 +10464,7 @@ pub(crate) fn cmd_house_guest(
                     Ok(None) => {
                         if let Some(out) = outbound {
                             let _ = out
-                                .send(format!("No character named '{name}'.\r\n").into_bytes());
+                                .try_send(format!("No character named '{name}'.\r\n").into_bytes());
                         }
                         return;
                     }
@@ -10477,7 +10477,7 @@ pub(crate) fn cmd_house_guest(
                     Ok(0) => {
                         if let Some(out) = outbound {
                             let _ = out
-                                .send(
+                                .try_send(
                                     format!(
                                         "{} wasn't on your guest list.\r\n",
                                         row.name
@@ -10488,7 +10488,7 @@ pub(crate) fn cmd_house_guest(
                     }
                     Ok(_) => {
                         if let Some(out) = outbound {
-                            let _ = out.send(
+                            let _ = out.try_send(
                                 format!("{} removed from your guest list.\r\n", row.name)
                                     .into_bytes(),
                             );

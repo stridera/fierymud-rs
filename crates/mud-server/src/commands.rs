@@ -770,7 +770,7 @@ pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
 pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
     let text = text.into();
     if let Some(conn) = world.get::<Connection>(target) {
-        let _ = conn.0.send(text.clone().into_bytes());
+        let _ = conn.0.try_send(text.clone().into_bytes());
     }
     // Switch puppet: when admin has used `switch <mob>`, the mob
     // doesn't have its own Connection — forward the bytes to the
@@ -779,7 +779,7 @@ pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
         world.get::<mud_world::SwitchedFrom>(target).copied()
         && let Some(puppeteer_conn) = world.get::<Connection>(puppeteer)
     {
-        let _ = puppeteer_conn.0.send(text.clone().into_bytes());
+        let _ = puppeteer_conn.0.try_send(text.clone().into_bytes());
     }
     // Snoop mirror: forward a dim-prefixed copy to the snooper.
     // Skip when the text already starts with the prefix (defensive
@@ -797,7 +797,7 @@ pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
             framed.push_str("\x1b[2m%\x1b[0m ");
             framed.push_str(line);
         }
-        let _ = snooper_conn.0.send(framed.into_bytes());
+        let _ = snooper_conn.0.try_send(framed.into_bytes());
     }
     PROMPT_RECIPIENTS.with(|r| {
         r.borrow_mut().insert(target);
@@ -3892,7 +3892,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // both — and is_tag_shaped lets the default `<%h/%H>` survive
     // since `<42/100>` isn't tag-shaped after %-substitution.
     let mode = color_mode_for(world, target);
-    let _ = conn.send(render_color_tags(&rendered, mode).into_bytes());
+    let _ = conn.try_send(render_color_tags(&rendered, mode).into_bytes());
 
     // Piggyback Char.Vitals on the prompt cadence — same once-per-
     // command frequency, which is reasonable for HUD-style clients.
@@ -3907,7 +3907,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             "{{\"hp\":{},\"max_hp\":{},\"sp\":{},\"max_sp\":{},\"level\":{}}}",
             h.hp, h.max, s.current, s.max, level
         );
-        let _ = conn.send(mud_net::gmcp_packet("Char.Vitals", &payload));
+        let _ = conn.try_send(mud_net::gmcp_packet("Char.Vitals", &payload));
     }
     // Char.Status: longer-lived character metadata (level / xp /
     // class / race / wealth). Same prompt cadence — many of these
@@ -3934,7 +3934,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             prof.race.replace('"', "\\\""),
             wealth,
         );
-        let _ = conn.send(mud_net::gmcp_packet("Char.Status", &payload));
+        let _ = conn.try_send(mud_net::gmcp_packet("Char.Status", &payload));
     }
     // Char.Aggro: every mob (anywhere) that has the player on its
     // HateList or in MobMemory. Lets HUD clients render a "things
@@ -3972,7 +3972,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
                 hating.join(","),
                 remembering.join(",")
             );
-            let _ = conn.send(mud_net::gmcp_packet("Char.Aggro", &payload));
+            let _ = conn.try_send(mud_net::gmcp_packet("Char.Aggro", &payload));
         }
     }
 
@@ -4009,7 +4009,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         let payload = format!(
             "{{\"name\":\"{plain}\",\"zone\":{zone},\"id\":{id},\"exits\":[{exits_json}]}}"
         );
-        let _ = conn.send(mud_net::gmcp_packet("Room.Info", &payload));
+        let _ = conn.try_send(mud_net::gmcp_packet("Room.Info", &payload));
     }
 }
 
@@ -4495,13 +4495,13 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                     .await
                     {
                         Ok(mud_db::quest_objectives::PhaseAdvance::Advanced { name, .. }) => {
-                            let _ = out.send(
+                            let _ = out.try_send(
                                 format!("Quest phase complete — moving to: {name}\r\n")
                                     .into_bytes(),
                             );
                         }
                         Ok(mud_db::quest_objectives::PhaseAdvance::QuestComplete) => {
-                            let _ = out.send(
+                            let _ = out.try_send(
                                 b"*** Quest complete! ***\r\n".to_vec(),
                             );
                             // Grant simple rewards (XP/gold/skill
@@ -4599,7 +4599,7 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                                     buf.push_str(&line);
                                 }
                                 if buf.len() > "Rewards:\r\n".len() {
-                                    let _ = out.send(buf.into_bytes());
+                                    let _ = out.try_send(buf.into_bytes());
                                 }
                             }
                         }
@@ -4630,7 +4630,7 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                         row.player_description
                     )
                 };
-                let _ = out.send(line.into_bytes());
+                let _ = out.try_send(line.into_bytes());
             }
         });
     }

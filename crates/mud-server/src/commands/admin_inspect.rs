@@ -2554,7 +2554,7 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         tokio::spawn(async move {
             match mud_db::characters::load_staff_notes(&pool, &cid).await {
                 Ok(Some(notes)) if !notes.trim().is_empty() => {
-                    let _ = out_chan.send(
+                    let _ = out_chan.try_send(
                         format!(
                             "\r\n=== Staff notes for {target_name_owned} ===\r\n{notes}\r\n",
                         )

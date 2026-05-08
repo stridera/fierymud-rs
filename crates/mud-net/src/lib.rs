@@ -10,7 +10,18 @@ pub type ConnId = u64;
 /// Outbound message to a connected client. Bytes (not String) so the
 /// channel can carry telnet IAC framing for GMCP / MSSP / option
 /// negotiation alongside ordinary UTF-8 text.
-pub type Outbound = mpsc::UnboundedSender<Vec<u8>>;
+///
+/// Bounded — see `OUTBOUND_QUEUE_CAP`. Senders use `try_send` and drop
+/// silently on Full; the bounded channel itself caps server-side
+/// memory growth from a slow client.
+pub type Outbound = mpsc::Sender<Vec<u8>>;
+
+/// Per-connection outbound queue cap. Sized for steady-state burst:
+/// a multi-line render (room look + occupants + exits, large prompt
+/// with color tags expanded) lands as several dozen messages; an
+/// AOE damage broadcast can fan a hundred lines to one observer.
+/// 1024 leaves headroom for those bursts without unbounded growth.
+pub const OUTBOUND_QUEUE_CAP: usize = 1024;
 pub type InboundTx = mpsc::Sender<Inbound>;
 pub type InboundRx = mpsc::Receiver<Inbound>;
 
@@ -81,13 +92,6 @@ const MAX_CONNECTS_PER_MIN: usize = 10;
 /// a buggy client or an attacker. On overflow we drop the connection.
 const MAX_LINE_LEN: usize = 4096;
 
-/// Outbound queue depth above which we assume the client is too slow
-/// (or wedged) and drop the connection. The writer task drains
-/// `out_rx` as fast as the socket accepts; an indefinitely growing
-/// queue means writes are blocked. 1024 messages = ~MiB-ish of buffered
-/// text, generous enough that bursts during room-broadcasts or
-/// ANSI-heavy renders don't trigger it.
-const MAX_OUTBOUND_QUEUE: usize = 1024;
 
 /// Hard ban list — IPs that should never connect, regardless of
 /// rate. Initialized once from the `MUD_BANLIST` env var (comma-
@@ -375,21 +379,21 @@ async fn handle_connection<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (read_half, mut write_half) = tokio::io::split(stream);
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_CAP);
 
     // Advertise GMCP support immediately. Clients that speak it
     // (`Mudlet`, `MUSHclient`, `BlightMUD`) reply `IAC DO 201`; we
     // currently don't parse inbound IAC bytes, so the server
     // assumes "client said yes" if it later receives a GMCP
     // subnegotiation. Plain telnet clients ignore the WILL.
-    let _ = out_tx.send(iac_will_gmcp());
+    let _ = out_tx.try_send(iac_will_gmcp());
     // Same one-shot pattern for MSSP: advertise WILL 70 then push
     // the variable list inline. MUD list scrapers parse the SB
     // frame whether or not they replied with DO; sending it
     // unconditionally costs ~80 bytes per connect and reaches
     // every scraper in one round-trip.
-    let _ = out_tx.send(iac_will_mssp());
-    let _ = out_tx.send(mssp_packet(&[
+    let _ = out_tx.try_send(iac_will_mssp());
+    let _ = out_tx.try_send(mssp_packet(&[
         ("NAME", "fierymud-rs"),
         ("CODEBASE", "fierymud-rs"),
         ("FAMILY", "Custom"),
@@ -415,21 +419,12 @@ async fn handle_connection<S>(
     }
 
     let writer = tokio::spawn(async move {
+        // The channel itself is now bounded (`OUTBOUND_QUEUE_CAP`),
+        // so there's no per-connection memory exhaustion risk to
+        // watch. Senders use `try_send` and drop on Full; this task
+        // just drains as fast as the socket accepts.
         while let Some(bytes) = out_rx.recv().await {
             if write_half.write_all(&bytes).await.is_err() {
-                break;
-            }
-            // Backpressure: if the queue keeps growing past the cap
-            // it means writes are blocked (slow client or wedged
-            // socket). Drop the connection so a misbehaving peer
-            // can't pin server memory. `out_rx.len()` is cheap.
-            if out_rx.len() > MAX_OUTBOUND_QUEUE {
-                warn!(
-                    conn_id,
-                    queue_len = out_rx.len(),
-                    cap = MAX_OUTBOUND_QUEUE,
-                    "outbound queue overflow; dropping connection"
-                );
                 break;
             }
         }

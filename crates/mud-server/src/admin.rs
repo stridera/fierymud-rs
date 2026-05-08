@@ -74,7 +74,7 @@ pub struct VirtualSessions {
 
 pub struct VirtualSession {
     pub entity: Entity,
-    pub rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    pub rx: mpsc::Receiver<Vec<u8>>,
 }
 
 /// One queued HTTP request pending world dispatch. The handler
@@ -1406,7 +1406,7 @@ fn session_create(
     // spawn_inventory rehydrates carried + worn items including
     // the proto-derived component set (LiquidContainer, WearableIn,
     // BoardLink, AttachedTriggers — see commit c332609).
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(mud_net::OUTBOUND_QUEUE_CAP);
     let outbound: Outbound = tx;
     let entity = crate::login::spawn_player(world, user, character, outbound);
     let item_count = crate::login::spawn_inventory(world, entity, items);
