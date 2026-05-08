@@ -510,6 +510,20 @@ impl ConnRouter {
         self.login.remove(&conn_id);
         self.caps.remove(&conn_id);
         if let Some(entity) = self.playing.remove(&conn_id) {
+            // Send Core.Goodbye before any teardown so the client
+            // can show a clean disconnect message instead of a
+            // raw "connection lost". Plain telnet clients ignore
+            // the IAC bytes, so this costs nothing on the
+            // unsupported path.
+            commands::send_core_goodbye(world, entity, "See you next time!");
+            // Broadcast a Room.RemovePlayer diff so other clients in
+            // the room update their "who's here" panel. Done before
+            // save/despawn so the entity's Located is still valid.
+            if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
+                commands::broadcast_room_player_diff(
+                    world, room, entity, "RemovePlayer",
+                );
+            }
             // Disconnect path — player is gone before we could
             // report a partial save. The tracing::warn inside
             // save_player covers diagnostics.
@@ -626,53 +640,53 @@ impl ConnRouter {
             return;
         };
 
+        // Each frame is gated on its primary DB value being set.
+        // An empty / missing URL or application ID means "operator
+        // didn't configure this for the current deployment" — don't
+        // push a frame the client would have to ignore. Compile-
+        // time defaults are emitted only when a *fresh DB* boots
+        // before the seeder has run; once an operator clears a
+        // value via Muditor the corresponding frame stops sending.
+
         // Client.GUI — Mudlet auto-install prompt. `version` must
         // bump whenever we ship a new package so Mudlet detects
         // the update; matches the FierymudRs package's `mfile`.
-        let gui_url = cfg.get_string(
-            "gmcp",
-            "client_gui_url",
-            "https://packages.fierymud.org/FierymudRs.mpackage",
-        );
-        let gui_version = cfg.get_string("gmcp", "client_gui_version", "0.1-rs");
-        let payload = format!(
-            r#"{{"version":"{}","url":"{}"}}"#,
-            json_escape(gui_version),
-            json_escape(gui_url),
-        );
-        let _ = outbound.try_send(mud_net::gmcp_packet("Client.GUI", &payload));
+        let gui_url = cfg.get_string("gmcp", "client_gui_url", "");
+        let gui_version = cfg.get_string("gmcp", "client_gui_version", "");
+        if !gui_url.is_empty() {
+            let payload = format!(
+                r#"{{"version":"{}","url":"{}"}}"#,
+                json_escape(gui_version),
+                json_escape(gui_url),
+            );
+            let _ = outbound.try_send(mud_net::gmcp_packet("Client.GUI", &payload));
+        }
 
-        // Client.Map — initial map data download URL. Empty
-        // string disables the prompt; the placeholder default
-        // points at where a hosted default_map.dat would live.
-        let map_url = cfg.get_string(
-            "gmcp",
-            "client_map_url",
-            "https://packages.fierymud.org/default_map.dat",
-        );
+        // Client.Map — initial map data download URL.
+        let map_url = cfg.get_string("gmcp", "client_map_url", "");
         if !map_url.is_empty() {
             let payload = format!(r#"{{"url":"{}"}}"#, json_escape(map_url));
             let _ = outbound.try_send(mud_net::gmcp_packet("Client.Map", &payload));
         }
 
-        // External.Discord.Info — application ID + invite. App ID
-        // is the legacy FieryMUD Discord application; invite is
-        // the same server. Reused so existing rich-presence assets
-        // (server icon, key text) Just Work for the Rust port.
-        // Operators running their own deployment should override
-        // both via GameConfig.
-        let app_id = cfg.get_string("gmcp", "discord_application_id", "998826809686765569");
-        let invite_url = cfg.get_string(
-            "gmcp",
-            "discord_invite_url",
-            "https://discord.gg/aqhapUCgFz",
-        );
-        let payload = format!(
-            r#"{{"applicationid":"{}","inviteurl":"{}"}}"#,
-            json_escape(app_id),
-            json_escape(invite_url),
-        );
-        let _ = outbound.try_send(mud_net::gmcp_packet("External.Discord.Info", &payload));
+        // External.Discord.Info — application ID + invite. The
+        // application ID is the meaningful field; without it the
+        // Discord SDK can't pair to an app icon, so the frame is
+        // useless. Skip when unset rather than emitting an
+        // application-less Info.
+        let app_id = cfg.get_string("gmcp", "discord_application_id", "");
+        let invite_url = cfg.get_string("gmcp", "discord_invite_url", "");
+        if !app_id.is_empty() {
+            let payload = format!(
+                r#"{{"applicationid":"{}","inviteurl":"{}"}}"#,
+                json_escape(app_id),
+                json_escape(invite_url),
+            );
+            let _ = outbound.try_send(mud_net::gmcp_packet(
+                "External.Discord.Info",
+                &payload,
+            ));
+        }
     }
 
     /// Resolve the outbound channel for a connection regardless of
@@ -709,29 +723,76 @@ fn json_escape(s: &str) -> String {
 // impl. The two blocks compose at compile time.
 impl ConnRouter {
 
-    /// GMCP package received from the client. Today we route
-    /// `Core.Hello` (client identity), `Core.Supports.Set`
-    /// (capability subscription list), and `External.Discord.Hello`
-    /// (Discord rich-presence handshake) into the world's GMCP
-    /// dispatch. Unknown packages are logged at debug — useful when
-    /// adding support for a new client's vendor packages.
+    /// GMCP package received from the client. Dispatches based on
+    /// the package name; unknown packages are logged at debug
+    /// level — useful when wiring support for a new client's
+    /// vendor packages.
+    ///
+    /// Reaching this method means the parser successfully decoded
+    /// a GMCP frame, so we mark the capability as on (defensive —
+    /// the IAC DO 201 path already sets it, but a stray client
+    /// that pushes GMCP without explicit negotiation still shows
+    /// up here).
     pub async fn on_gmcp(
         &mut self,
         conn_id: ConnId,
         package: &str,
         payload: &str,
-        _world: &mut World,
+        world: &mut World,
     ) {
-        // For now: log the package name and forward via tracing.
-        // World-side dispatch (e.g., responding to Core.Hello with
-        // Core.Hello of our own) lands as we expand the GMCP
-        // surface. Capabilities mark the connection as GMCP-active
-        // when the client sends ANY GMCP package, since reaching
-        // this method means the parser successfully decoded one.
         let entry = self.caps.entry(conn_id).or_default();
         entry.gmcp = true;
-        tracing::info!(conn_id, package, "GMCP package received");
-        let _ = payload;
+        let outbound = self.outbound_for(conn_id);
+
+        match package {
+            // Core.Ping — IRE keepalive. Echo the same payload
+            // back so the client can compute round-trip latency.
+            // Empty body is also valid; we echo whatever arrived.
+            "Core.Ping" => {
+                if let Some(out) = outbound {
+                    let _ = out.try_send(mud_net::gmcp_packet("Core.Ping", payload));
+                }
+            }
+            // Core.Hello — client identity announcement. Mudlet
+            // sends `{"client":"Mudlet","version":"4.x"}`. Today
+            // we just log; future work could record client name
+            // for capability-gated rendering.
+            "Core.Hello" => {
+                tracing::info!(conn_id, payload, "GMCP Core.Hello");
+            }
+            // Core.Supports.Set — client tells us which packages
+            // it understands. Today we don't filter our outgoing
+            // pushes by this, but the log helps debugging which
+            // bindings a connecting client expects.
+            "Core.Supports.Set" => {
+                tracing::info!(conn_id, payload, "GMCP Core.Supports.Set");
+            }
+            // External.Discord.Hello — client signals Discord
+            // integration is ready. Re-emit Info so the SDK has
+            // the application id even if our connect-time push
+            // raced the client's hello.
+            "External.Discord.Hello" => {
+                self.send_gmcp_intro_burst(conn_id, world);
+            }
+            // External.Discord.Get — client asks for an immediate
+            // Status refresh. The next prompt cadence will emit
+            // Status anyway; for now we just log and rely on that.
+            "External.Discord.Get" => {
+                tracing::debug!(conn_id, "GMCP External.Discord.Get (deferred to next prompt)");
+            }
+            // Char.Skills.Get — client asks for the player's
+            // skill list. Handled when the connection is past
+            // login (entity exists) — for pre-login connections,
+            // skills don't exist yet so we ignore.
+            "Char.Skills.Get" => {
+                if let Some(&entity) = self.playing.get(&conn_id) {
+                    commands::send_char_skills_list(world, entity);
+                }
+            }
+            other => {
+                tracing::debug!(conn_id, package = other, payload, "GMCP unhandled");
+            }
+        }
     }
 
     pub async fn on_line(
@@ -2004,6 +2065,15 @@ impl ConnRouter {
             .map(str::to_string)
         {
             commands::send_to(world, entity, imotd);
+        }
+        // Broadcast Room.AddPlayer to anyone already in the room so
+        // their "who's here" panel updates. The arriving player's
+        // own snapshot lands at first prompt via send_prompt's
+        // companion frames (or via cmd_look once they look around).
+        if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
+            commands::broadcast_room_player_diff(
+                world, room, entity, "AddPlayer",
+            );
         }
         self.playing.insert(conn_id, entity);
         commands::send_prompt(world, entity);

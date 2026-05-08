@@ -4032,6 +4032,184 @@ fn compute_level_progress(world: &World, level: i32, xp: i32) -> i32 {
     ((into * 100) / span).clamp(0, 100)
 }
 
+/// Push a `Char.Items.List` GMCP frame to `viewer`. `location` is
+/// the IRE-convention slot — `"inv"` (carried), `"wear"` (equipped),
+/// `"room"` (on the ground here), or a numeric container id when
+/// listing a container's contents. `items` is the entity set to
+/// emit; the helper builds the JSON payload and sends in one
+/// telnet frame. Skips gracefully when `viewer` has no connection
+/// (mob, switched-into puppet) since GMCP only makes sense for
+/// real clients.
+///
+/// IRE convention: each item carries `id` (stable within the
+/// session — we use the runtime entity id), `name` (color tags
+/// stripped so the client can re-style), and optional `icon` /
+/// `attrib`. We omit those last two for now — Mudlet renders
+/// items name-only when they're missing.
+pub(crate) fn send_char_items_list(
+    world: &World,
+    viewer: Entity,
+    location: &str,
+    items: &[Entity],
+) {
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let mut entries: Vec<String> = Vec::with_capacity(items.len());
+    for &item in items {
+        let raw_name = world
+            .get::<Named>(item)
+            .map(|n| n.name.as_str())
+            .unwrap_or("");
+        let plain = render_color_tags(raw_name, ColorMode::Strip)
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let id = item.to_bits();
+        entries.push(format!(r#"{{"id":"{id}","name":"{plain}"}}"#));
+    }
+    let payload = format!(
+        r#"{{"location":"{}","items":[{}]}}"#,
+        location.replace('"', "\\\""),
+        entries.join(","),
+    );
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Items.List", &payload));
+}
+
+/// Push a single-item `Char.Items.{Add | Remove | Update}` frame.
+/// Wraps the same item-shape as [`send_char_items_list`] in the
+/// IRE-convention envelope `{location, item: {...}}`. `verb` must
+/// be one of `"Add"` / `"Remove"` / `"Update"` — case-sensitive
+/// per the Mudlet event handler convention. `Remove` only needs
+/// the id but emits the full record for symmetry; clients ignore
+/// extra fields.
+pub(crate) fn send_char_items_diff(
+    world: &World,
+    viewer: Entity,
+    verb: &str,
+    location: &str,
+    item: Entity,
+) {
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let raw_name = world
+        .get::<Named>(item)
+        .map(|n| n.name.as_str())
+        .unwrap_or("");
+    let plain = render_color_tags(raw_name, ColorMode::Strip)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let id = item.to_bits();
+    let payload = format!(
+        r#"{{"location":"{loc}","item":{{"id":"{id}","name":"{plain}"}}}}"#,
+        loc = location.replace('"', "\\\""),
+    );
+    let package = format!("Char.Items.{verb}");
+    let _ = conn.0.try_send(mud_net::gmcp_packet(&package, &payload));
+}
+
+/// Push `Room.Players` to `viewer` — the snapshot of every player
+/// currently in `viewer`'s room (excluding `viewer` themselves, by
+/// IRE convention). Mudlet's "who's here" panel renders this. We
+/// strip color tags from names so the client can re-style.
+///
+/// Takes `&mut World` because `query_filtered` requires a
+/// mutable borrow to construct its state cache. The actual
+/// iteration is read-only.
+pub(crate) fn send_room_players_snapshot(world: &mut World, viewer: Entity) {
+    let Some(room) = world.get::<Located>(viewer).map(|l| l.0) else {
+        return;
+    };
+    let mut entries: Vec<String> = Vec::new();
+    {
+        let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Player>>();
+        for (e, loc, named) in q.iter(world) {
+            if loc.0 == room && e != viewer {
+                let plain = render_color_tags(&named.name, ColorMode::Strip)
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"");
+                entries.push(format!(r#"{{"name":"{plain}","fullname":"{plain}"}}"#));
+            }
+        }
+    }
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let payload = format!("[{}]", entries.join(","));
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Room.Players", &payload));
+}
+
+/// Push a single `Room.AddPlayer` / `Room.RemovePlayer` diff to
+/// every other player in `room`. Used by movement / connect /
+/// disconnect paths so observers refresh their "who's here" panel
+/// without re-querying the room. Self is excluded — they don't
+/// need to know they entered/left their own room.
+pub(crate) fn broadcast_room_player_diff(
+    world: &mut World,
+    room: Entity,
+    subject: Entity,
+    verb: &str, // "AddPlayer" or "RemovePlayer"
+) {
+    let raw_name = world
+        .get::<Named>(subject)
+        .map(|n| n.name.as_str())
+        .unwrap_or("");
+    let plain = render_color_tags(raw_name, ColorMode::Strip)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let payload = format!(r#"{{"name":"{plain}","fullname":"{plain}"}}"#);
+    let frame = mud_net::gmcp_packet(&format!("Room.{verb}"), &payload);
+
+    let recipients: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, loc)| loc.0 == room && *e != subject)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for e in recipients {
+        if let Some(conn) = world.get::<Connection>(e) {
+            let _ = conn.0.try_send(frame.clone());
+        }
+    }
+}
+
+/// Push a `Char.Skills.List` GMCP frame in response to a client's
+/// `Char.Skills.Get`. The IRE convention is a flat array of skill
+/// names — the client groups them however its UI prefers. We
+/// resolve names from `AbilityCatalog` so the strings match
+/// what `spells` / `skills` print in-game.
+pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(known) = world.get::<KnownAbilities>(viewer) else {
+        let empty = "[]";
+        let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills.List", empty));
+        return;
+    };
+    let catalog = world.resource::<AbilityCatalog>();
+    let mut names: Vec<String> = Vec::with_capacity(known.entries.len());
+    for &(ability_id, _, known_flag) in &known.entries {
+        if !known_flag {
+            continue;
+        }
+        if let Some(def) = catalog.by_name.values().find(|d| d.id == ability_id) {
+            let plain = render_color_tags(&def.plain_name, ColorMode::Strip)
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            names.push(format!("\"{plain}\""));
+        }
+    }
+    let payload = format!("[{}]", names.join(","));
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills.List", &payload));
+}
+
+/// Send `Core.Goodbye` immediately before closing the connection.
+/// Standard IRE convention is a single-string body explaining the
+/// reason; clients display it as a clean disconnect message
+/// instead of "connection lost". Skipped silently when there's
+/// no Connection (mob entity, switched puppet without a real
+/// client).
+pub(crate) fn send_core_goodbye(world: &World, viewer: Entity, reason: &str) {
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let safe = reason.replace('\\', "\\\\").replace('"', "\\\"");
+    let payload = format!("\"{safe}\"");
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Core.Goodbye", &payload));
+}
+
 /// Wall-clock epoch seconds at which `target` logged in. Computed
 /// from `LoggedInAt`'s monotonic [`Instant`] minus the elapsed
 /// duration since login: `now_unix - elapsed_secs`. Returns the
@@ -4180,57 +4358,54 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // through Mudlet's Discord SDK integration. Server icon /
     // assets keyed by `applicationid` from External.Discord.Info
     // (sent at GMCP-confirm time). `starttime` is wall-clock
-    // epoch seconds from when the player logged in. Strings come
-    // from `GameConfig` so a deployment can re-skin the rich
-    // presence without rebuilding the server.
+    // epoch seconds from when the player logged in.
+    //
+    // Gated on `discord_application_id` being set — without an
+    // app ID, External.Discord.Info wasn't sent on connect and
+    // the SDK can't bind this Status frame anyway.
     if let Some(prof) = world.get::<Profile>(target) {
-        let class_label = prof
-            .class_id
-            .and_then(|id| {
-                world
-                    .get_resource::<ClassCatalog>()
-                    .and_then(|c| c.by_id.get(&id))
-                    .map(|d| d.plain_name.as_str())
-            })
-            .unwrap_or("Adventurer");
-        let plain_name = name
-            .map(|s| {
-                render_color_tags(s, ColorMode::Strip)
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-            })
-            .unwrap_or_default();
-        let starttime = compute_login_unix_ts(world, target);
         let cfg = world.resource::<mud_world::RuntimeConfig>();
-        let game = cfg.get_string("gmcp", "discord_game_name", "fierymud-rs");
-        let state = cfg.get_string(
-            "gmcp",
-            "discord_state",
-            "Playing fierymud-rs (minastirith.utaboshi.com:4003)",
-        );
-        let small_image = cfg.get_string("gmcp", "discord_small_image", "servericon");
-        let small_image_text = cfg.get_string(
-            "gmcp",
-            "discord_small_image_text",
-            "fierymud-rs",
-        );
-        let details = format!(
-            "Character: {plain_name}  Class: {class}  Level: {lvl}",
-            plain_name = plain_name,
-            class = class_label.replace('"', "\\\""),
-            lvl = prof.level,
-        );
-        let payload = format!(
-            "{{\"state\":\"{state}\",\"details\":\"{details}\",\"game\":\"{game}\",\"smallimage\":[\"{small_image}\"],\"smallimagetext\":\"{small_image_text}\",\"starttime\":{starttime}}}",
-            state = state.replace('"', "\\\""),
-            game = game.replace('"', "\\\""),
-            small_image = small_image.replace('"', "\\\""),
-            small_image_text = small_image_text.replace('"', "\\\""),
-        );
-        let _ = conn.try_send(mud_net::gmcp_packet(
-            "External.Discord.Status",
-            &payload,
-        ));
+        let app_id = cfg.get_string("gmcp", "discord_application_id", "");
+        if !app_id.is_empty() {
+            let class_label = prof
+                .class_id
+                .and_then(|id| {
+                    world
+                        .get_resource::<ClassCatalog>()
+                        .and_then(|c| c.by_id.get(&id))
+                        .map(|d| d.plain_name.as_str())
+                })
+                .unwrap_or("Adventurer");
+            let plain_name = name
+                .map(|s| {
+                    render_color_tags(s, ColorMode::Strip)
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                })
+                .unwrap_or_default();
+            let starttime = compute_login_unix_ts(world, target);
+            let game = cfg.get_string("gmcp", "discord_game_name", "fierymud-rs");
+            let state = cfg.get_string("gmcp", "discord_state", "");
+            let small_image = cfg.get_string("gmcp", "discord_small_image", "");
+            let small_image_text = cfg.get_string("gmcp", "discord_small_image_text", "");
+            let details = format!(
+                "Character: {plain_name}  Class: {class}  Level: {lvl}",
+                plain_name = plain_name,
+                class = class_label.replace('"', "\\\""),
+                lvl = prof.level,
+            );
+            let payload = format!(
+                "{{\"state\":\"{state}\",\"details\":\"{details}\",\"game\":\"{game}\",\"smallimage\":[\"{small_image}\"],\"smallimagetext\":\"{small_image_text}\",\"starttime\":{starttime}}}",
+                state = state.replace('"', "\\\""),
+                game = game.replace('"', "\\\""),
+                small_image = small_image.replace('"', "\\\""),
+                small_image_text = small_image_text.replace('"', "\\\""),
+            );
+            let _ = conn.try_send(mud_net::gmcp_packet(
+                "External.Discord.Status",
+                &payload,
+            ));
+        }
     }
     // Char.Aggro: every mob (anywhere) that has the player on its
     // HateList or in MobMemory. Lets HUD clients render a "things
@@ -12458,6 +12633,20 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     for &mover in &movers {
         if world.get::<Player>(mover).is_some() {
             apply_room_environment(world, mover, target);
+        }
+    }
+
+    // GMCP Room.* diffs: each player mover gets removed from the
+    // source room's "who's here" list and added to the target's,
+    // and receives a fresh Room.Players snapshot for their new
+    // surroundings. Followers who are NPCs are skipped — only
+    // human-driven clients care about the diff. Helper queries are
+    // read-only beyond the snapshot/diff outbound sends.
+    for &mover in &movers {
+        if world.get::<Player>(mover).is_some() {
+            broadcast_room_player_diff(world, from_room, mover, "RemovePlayer");
+            broadcast_room_player_diff(world, target, mover, "AddPlayer");
+            send_room_players_snapshot(world, mover);
         }
     }
 

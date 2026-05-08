@@ -4798,6 +4798,10 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         }
     }
     send_to(world, player, out);
+    // Mudlet "who's here" panel: snapshot every other player in
+    // the room. Skipped silently when the viewer has no Connection
+    // (mob inspection through `switch`).
+    send_room_players_snapshot(world, player);
 }
 
 /// Parse `who`'s optional level-range args. `""` → None (no
@@ -7519,20 +7523,33 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
     // Snapshot in two passes so we can group identical names into a
     // single "3x <name>" line. Order is preserved by tracking the
     // first-seen position so duplicates fold without scrambling.
-    let items: Vec<String> = {
+    // Item entities collected alongside names so we can emit a
+    // matching `Char.Items.List` GMCP frame after rendering the
+    // text — the entity ids stable within the session let the
+    // client correlate Add/Remove diffs.
+    let item_entities: Vec<Entity> = {
         let mut q = world
-            .query_filtered::<(&Located, &Named, Option<&EquippedSlot>), With<Item>>();
+            .query_filtered::<(Entity, &Located, &Named, Option<&EquippedSlot>), With<Item>>();
         q.iter(world)
-            .filter(|(l, _, eq)| l.0 == player && eq.is_none())
-            .map(|(_, n, _)| n.name.clone())
-            .filter(|name| {
+            .filter(|(_, l, _, eq)| l.0 == player && eq.is_none())
+            .filter(|(_, _, n, _)| {
                 filter.is_empty()
-                    || render_color_tags(name, ColorMode::Strip)
+                    || render_color_tags(&n.name, ColorMode::Strip)
                         .to_ascii_lowercase()
                         .contains(&filter)
             })
+            .map(|(e, _, _, _)| e)
             .collect()
     };
+    let items: Vec<String> = item_entities
+        .iter()
+        .map(|&e| {
+            world
+                .get::<Named>(e)
+                .map(|n| n.name.clone())
+                .unwrap_or_default()
+        })
+        .collect();
     let mut order: Vec<String> = Vec::new();
     let mut counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
@@ -7588,6 +7605,10 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
         ));
     }
     send_rendered(world, player, &raw);
+    // Mudlet items panel: push the matching list frame so the GUI
+    // populates without waiting for a Char.Items.Inv request. Sent
+    // after the text so a client race renders the prose first.
+    send_char_items_list(world, player, "inv", &item_entities);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -8927,23 +8948,32 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
-    // Snapshot (slot, name, weight) per worn item. Weight comes from
-    // the proto via WorldKey; synthetic items without a proto count
-    // as 0 (matches the carried_weight contract).
-    let mut by_slot: Vec<(Slot, String, f64)> = {
+    // Snapshot (entity, slot, name, weight) per worn item. Entity
+    // is captured so we can also emit a Char.Items.List frame for
+    // the "wear" location alongside the rendered text. Weight
+    // comes from the proto via WorldKey; synthetic items without
+    // a proto count as 0 (matches the carried_weight contract).
+    let worn_items: Vec<(Entity, Slot, String, f64)> = {
         let mut q = world.query_filtered::<
             (Entity, &Located, &Named, &EquippedSlot),
             With<Item>,
         >();
         q.iter(world)
             .filter(|(_, l, _, _)| l.0 == player)
-            .map(|(e, _, n, eq)| (eq.0, n.name.clone(), item_weight(world, e)))
+            .map(|(e, _, n, eq)| (e, eq.0, n.name.clone(), item_weight(world, e)))
             .collect()
     };
-    if by_slot.is_empty() {
+    if worn_items.is_empty() {
         send_to(world, player, "\r\nYou aren't wearing anything.\r\n");
+        // Push an empty "wear" list so a previously-displayed
+        // Mudlet equipment panel clears.
+        send_char_items_list(world, player, "wear", &[]);
         return;
     }
+    let mut by_slot: Vec<(Slot, String, f64)> = worn_items
+        .iter()
+        .map(|(_, s, n, w)| (*s, n.clone(), *w))
+        .collect();
     by_slot.sort_by_key(|(s, _, _)| Slot::ORDER.iter().position(|x| x == s).unwrap_or(usize::MAX));
     let total_weight: f64 = by_slot.iter().map(|(_, _, w)| w).sum();
     let mut out = String::from("\r\n<b:cyan>Equipment:</>\r\n");
@@ -8968,6 +8998,8 @@ pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
         ));
     }
     send_to(world, player, out);
+    let entities: Vec<Entity> = worn_items.iter().map(|(e, _, _, _)| *e).collect();
+    send_char_items_list(world, player, "wear", &entities);
 }
 
 /// `cooldowns` / `cd`: list active ability cooldowns for the player.
