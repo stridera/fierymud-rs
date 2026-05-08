@@ -4626,16 +4626,36 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // helper's `&mut World` since it's owned.
     send_group_state(world, target);
 
-    // Char.Effects: array of `{name, duration, source, strength}`
-    // for every active effect on the player. Drives client-side
-    // buff/debuff panels (Mudlet's effect icon strip, MUSHclient
-    // status displays). Cadence matches the prompt — per-prompt
-    // refresh is cheap and tracks ticks transparently. `duration`
-    // is seconds remaining (-1 = permanent); `source` is the
-    // string label so clients can tag self-cast vs gear vs admin.
+    // Char.Effects: array of `{name, ability, duration, source,
+    // strength}` for every active effect on the player. Drives
+    // client-side buff/debuff panels.
+    //
+    // Both `name` (the effect's own label, e.g. "ward") AND
+    // `ability` (the spell that caused it, e.g. "armor") are
+    // emitted. The two are distinct in the data model — a single
+    // `armor` cast applies a `ward` effect — but Mudlet's icon
+    // sets and player intuition are keyed off the spell. Clients
+    // pick: name for descriptive display, ability for the icon
+    // and the player-facing label most users expect ("you have
+    // armor up", not "you have ward up"). `ability` is empty
+    // when the effect has no originating ability (admin grants,
+    // environmental auras).
+    //
+    // Cadence matches the prompt — per-prompt refresh is cheap
+    // and tracks ticks transparently. `duration` is seconds
+    // remaining (-1 = permanent); `source` is the high-level
+    // origin tag (spell / item / room / admin / other).
     {
         use mud_world::{AppliedTo as Applied, EffectInstance, EffectSource};
         let mut entries: Vec<String> = Vec::new();
+        // Snapshot ability id → plain name once outside the loop.
+        // The catalog's `by_name` is HashMap<&str, AbilityDef>,
+        // so reverse-lookup by id requires a scan; collecting it
+        // up front avoids re-scanning per effect.
+        let ability_names: std::collections::HashMap<i32, String> = world
+            .get_resource::<AbilityCatalog>()
+            .map(|c| c.by_name.values().map(|d| (d.id, d.plain_name.clone())).collect())
+            .unwrap_or_default();
         let mut q = world.query::<(&EffectInstance, &Applied)>();
         for (inst, applied) in q.iter(world) {
             if applied.0 != target {
@@ -4645,6 +4665,15 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
                 .name
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"");
+            let safe_ability = inst
+                .ability_id
+                .and_then(|id| ability_names.get(&id))
+                .map(|s| {
+                    render_color_tags(s, ColorMode::Strip)
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                })
+                .unwrap_or_default();
             let source_label = match &inst.source {
                 EffectSource::Spell => "spell",
                 EffectSource::Item => "item",
@@ -4653,8 +4682,8 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
                 EffectSource::Other(_) => "other",
             };
             entries.push(format!(
-                "{{\"name\":\"{}\",\"duration\":{},\"source\":\"{}\",\"strength\":{}}}",
-                safe_name, inst.remaining_secs, source_label, inst.strength
+                "{{\"name\":\"{}\",\"ability\":\"{}\",\"duration\":{},\"source\":\"{}\",\"strength\":{}}}",
+                safe_name, safe_ability, inst.remaining_secs, source_label, inst.strength
             ));
         }
         // Always emit, even when empty — clients use the empty
