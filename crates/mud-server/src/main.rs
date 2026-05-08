@@ -10,6 +10,7 @@ mod login;
 mod memorize;
 mod regen;
 mod respawn;
+mod shops;
 mod sleep;
 mod syslog;
 mod wander;
@@ -139,6 +140,9 @@ async fn main() {
     // Recreate any corpses that were on the floor at last shutdown.
     // Needs prototypes + WorldKeyIndex which load_from_db populated.
     corpses::load_snapshot(&mut world);
+    // Restore shop stock deltas from last shutdown so a server
+    // restart doesn't silently refill every depleted shelf.
+    shops::load_snapshot(&mut world);
 
     // Test fixtures (training dummy + rusty sword + healing potion in
     // The Void). Useful for development; surprising in production. Gate
@@ -477,6 +481,7 @@ async fn main() {
     weather::save_snapshot(&world);
     weather::save_clock_snapshot(&world);
     corpses::save_snapshot(&mut world);
+    shops::save_snapshot(&world);
 
     info!(
         final_tick = world.resource::<TickCount>().0,
