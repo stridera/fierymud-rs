@@ -28,6 +28,15 @@ const AMBIENT_TICK_TICKS: u64 = 200;
 /// without being noisy.
 const AMBIENT_CHANCE_DENOM: u32 = 4;
 
+/// Minimum quiet window after a player's last command before another
+/// ambient line is allowed to fire. Without this the ambient tick
+/// can land in the gap between a command's response and the next
+/// prompt, producing the disorienting "I cast a spell and immediately
+/// got a weather line" reading. Two seconds is comfortably longer
+/// than any normal command's response cycle but short enough that
+/// ambient flavor still surfaces between actions.
+const AMBIENT_MIN_QUIET_SECS: u64 = 2;
+
 pub fn weather_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(WEATHER_TICK_TICKS) {
@@ -111,18 +120,30 @@ pub fn ambient_tick(world: &mut World) {
     if !tick.is_multiple_of(AMBIENT_TICK_TICKS) {
         return;
     }
+    let now = std::time::Instant::now();
+    let quiet_floor = std::time::Duration::from_secs(AMBIENT_MIN_QUIET_SECS);
     let candidates: Vec<(Entity, Entity)> = {
-        let mut q = world.query_filtered::<(Entity, &mud_world::Located), (
+        let mut q = world.query_filtered::<(
+            Entity,
+            &mud_world::Located,
+            Option<&mud_world::LastInputAt>,
+        ), (
             With<mud_world::Player>,
             With<mud_world::Online>,
         )>();
         q.iter(world)
-            .filter(|(_, l)| {
+            .filter(|(_, l, _)| {
                 world
                     .get::<mud_world::RoomSector>(l.0)
                     .is_some_and(|s| crate::commands::sector_is_outdoor_for_weather(s.0))
             })
-            .map(|(e, l)| (e, l.0))
+            .filter(|(_, _, last_in)| {
+                // Skip a player whose last command landed within
+                // AMBIENT_MIN_QUIET_SECS — the ambient line would
+                // otherwise crash into their command's output.
+                last_in.is_none_or(|li| now.duration_since(li.0) >= quiet_floor)
+            })
+            .map(|(e, l, _)| (e, l.0))
             .collect()
     };
     for (player, room) in candidates {
