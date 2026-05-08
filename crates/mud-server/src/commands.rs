@@ -8434,8 +8434,7 @@ pub(crate) fn invoke_ability_with(
     // freshly-created warrior can use `bash` / `kick` without
     // first running `practice`. Tightening skills further requires
     // loading `ClassSkills` so the runtime knows what each class
-    // can use at level — tracked alongside the wider class-skill-
-    // gating story in PARITY_BACKLOG.
+    // can use at level.
     let is_staff_caster = world
         .get::<Account>(player)
         .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder));
