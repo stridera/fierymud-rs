@@ -1152,11 +1152,23 @@ fn is_known_tag_part(p: &str) -> bool {
     if let Some(rest) = p.strip_prefix('#') {
         return rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_hexdigit());
     }
-    if let Some(rest) = p.strip_prefix("bgc") {
-        return parse_ansi256_index(rest).is_some();
+    // `bgcN` and `cN` are 256-color forms — accept them only when
+    // the suffix actually parses as a 0..=255 index. Otherwise fall
+    // through so a named color starting with `bgc` / `c` (today the
+    // critical one is `cyan`) still resolves via the named_color
+    // table at the end. A previous regression had this branch
+    // returning `false` whenever the suffix wasn't numeric, which
+    // ate every `<cyan>` / `<bgcyan>` tag and left them as literal
+    // text on the wire.
+    if let Some(rest) = p.strip_prefix("bgc")
+        && parse_ansi256_index(rest).is_some()
+    {
+        return true;
     }
-    if let Some(rest) = p.strip_prefix('c') {
-        return parse_ansi256_index(rest).is_some();
+    if let Some(rest) = p.strip_prefix('c')
+        && parse_ansi256_index(rest).is_some()
+    {
+        return true;
     }
     named_color(p).is_some()
 }
@@ -1231,26 +1243,33 @@ pub(crate) fn apply_modifier(layer: &mut StyleLayer, m: &str) {
         "reverse" => layer.reverse = true,
         "hide" => layer.hidden = true,
         _ => {
-            if let Some(rest) = m.strip_prefix("bg-") {
-                if let Some(c) = named_color(rest) {
-                    layer.bg = Some(Color::Ansi16(c));
-                }
-            } else if let Some(rest) = m.strip_prefix("bg#") {
-                if let Some((r, g, b)) = parse_rgb_hex(rest) {
-                    layer.bg = Some(Color::Rgb(r, g, b));
-                }
-            } else if let Some(rest) = m.strip_prefix("bgc") {
-                if let Some(idx) = parse_ansi256_index(rest) {
-                    layer.bg = Some(Color::Ansi256(idx));
-                }
-            } else if let Some(rest) = m.strip_prefix('#') {
-                if let Some((r, g, b)) = parse_rgb_hex(rest) {
-                    layer.fg = Some(Color::Rgb(r, g, b));
-                }
-            } else if let Some(rest) = m.strip_prefix('c') {
-                if let Some(idx) = parse_ansi256_index(rest) {
-                    layer.fg = Some(Color::Ansi256(idx));
-                }
+            // Same precedence story as `is_known_tag_part`: try the
+            // structured prefixes first, but fall through to the
+            // named-color table when the prefix-strip leaves
+            // something that doesn't parse as the expected payload.
+            // Otherwise `<cyan>` would be eaten by the `c` branch
+            // (numeric parse fails → no fg set → silent drop) and
+            // never reach `named_color`.
+            if let Some(rest) = m.strip_prefix("bg-")
+                && let Some(c) = named_color(rest)
+            {
+                layer.bg = Some(Color::Ansi16(c));
+            } else if let Some(rest) = m.strip_prefix("bg#")
+                && let Some((r, g, b)) = parse_rgb_hex(rest)
+            {
+                layer.bg = Some(Color::Rgb(r, g, b));
+            } else if let Some(rest) = m.strip_prefix("bgc")
+                && let Some(idx) = parse_ansi256_index(rest)
+            {
+                layer.bg = Some(Color::Ansi256(idx));
+            } else if let Some(rest) = m.strip_prefix('#')
+                && let Some((r, g, b)) = parse_rgb_hex(rest)
+            {
+                layer.fg = Some(Color::Rgb(r, g, b));
+            } else if let Some(rest) = m.strip_prefix('c')
+                && let Some(idx) = parse_ansi256_index(rest)
+            {
+                layer.fg = Some(Color::Ansi256(idx));
             } else if let Some(c) = named_color(m) {
                 layer.fg = Some(Color::Ansi16(c));
             }
@@ -1800,6 +1819,28 @@ mod tests {
         // and the whole `<#...>` passes through as literal text.
         let out = ansi("<#abcde>?</>");
         assert!(out.contains("<#abcde>"), "short hex literal: {out:?}");
+    }
+
+    #[test]
+    fn render_color_tags_cyan_is_named_not_256_color_prefix() {
+        // Regression: `<cyan>` starts with `c`, which the 256-color
+        // path is also keyed on. The is_known_tag_part / apply_modifier
+        // pair must fall through `c<digits>` to the named_color table
+        // when the suffix isn't numeric — otherwise `<cyan>` parses
+        // as tag-shaped but emits no fg, leaving the literal `<cyan>`
+        // on the wire OR (when the tag-shape check was returning
+        // false) emitting it as raw literal text.
+        let out = ansi("<cyan>foo</>");
+        assert!(out.contains("\x1b[36m"), "fg cyan present: {out:?}");
+        assert!(out.contains("foo"));
+        // Strip mode should drop the tag entirely (not leak literal):
+        assert_eq!(strip("<cyan>foo</>"), "foo");
+        // Bold-cyan via the `:` modifier syntax — same hazard.
+        assert!(ansi("<b:cyan>x</>").contains("\x1b[1;36m"));
+        // Background flavor — `<bg-cyan>` still works.
+        assert!(ansi("<bg-cyan>x</>").contains("\x1b[46m"));
+        // 256-color form is still functional (precedence didn't break).
+        assert!(ansi("<c196>x</>").contains("\x1b[38;5;196m"));
     }
 
     #[test]

@@ -622,11 +622,12 @@ impl ConnRouter {
     }
 
     /// Connect-time GMCP introduction. Pushed exactly once, the
-    /// first time the client confirms GMCP (`IAC DO 201`). Frame
-    /// shapes follow the IRE conventions Mudlet's stock handlers
-    /// expect; the `Client.GUI` URL points Mudlet at our
-    /// `.mpackage` download so a first-time visitor gets the
-    /// install prompt automatically.
+    /// first time the client confirms GMCP (`IAC DO 201`). Each
+    /// frame is built by a separate helper so paths that only need
+    /// a subset (e.g. an `External.Discord.Hello` handshake from
+    /// the client) can re-emit just that frame without retriggering
+    /// Mudlet's "install package?" prompt with a duplicate
+    /// `Client.GUI`.
     ///
     /// All URLs / version strings / Discord identifiers come from
     /// the `GameConfig` table (category `gmcp`). Compile-time
@@ -635,22 +636,24 @@ impl ConnRouter {
     /// still produces a working intro burst. Operators override
     /// per-deployment via Muditor or psql without rebuilding.
     fn send_gmcp_intro_burst(&self, conn_id: ConnId, world: &World) {
+        self.send_client_gui(conn_id, world);
+        self.send_client_map(conn_id, world);
+        self.send_external_discord_info(conn_id, world);
+    }
+
+    /// Push the `Client.GUI` install-prompt frame. Each frame is
+    /// gated on its primary DB value being set — an empty URL means
+    /// "operator didn't configure this for the current deployment"
+    /// and we skip emission rather than offer an empty install URL.
+    /// Mudlet bumps its install state on `version`, so this frame
+    /// MUST NOT be re-emitted on every reconnect / Discord
+    /// handshake — Mudlet treats a re-emit as a new install offer
+    /// and prompts the user again.
+    fn send_client_gui(&self, conn_id: ConnId, world: &World) {
         let Some(outbound) = self.outbound_for(conn_id) else { return };
         let Some(cfg) = world.get_resource::<mud_world::RuntimeConfig>() else {
             return;
         };
-
-        // Each frame is gated on its primary DB value being set.
-        // An empty / missing URL or application ID means "operator
-        // didn't configure this for the current deployment" — don't
-        // push a frame the client would have to ignore. Compile-
-        // time defaults are emitted only when a *fresh DB* boots
-        // before the seeder has run; once an operator clears a
-        // value via Muditor the corresponding frame stops sending.
-
-        // Client.GUI — Mudlet auto-install prompt. `version` must
-        // bump whenever we ship a new package so Mudlet detects
-        // the update; matches the FierymudRs package's `mfile`.
         let gui_url = cfg.get_string("gmcp", "client_gui_url", "");
         let gui_version = cfg.get_string("gmcp", "client_gui_version", "");
         if !gui_url.is_empty() {
@@ -661,19 +664,33 @@ impl ConnRouter {
             );
             let _ = outbound.try_send(mud_net::gmcp_packet("Client.GUI", &payload));
         }
+    }
 
-        // Client.Map — initial map data download URL.
+    /// Push the `Client.Map` map-data URL frame. Empty URL =
+    /// no hosted map, skip emission entirely.
+    fn send_client_map(&self, conn_id: ConnId, world: &World) {
+        let Some(outbound) = self.outbound_for(conn_id) else { return };
+        let Some(cfg) = world.get_resource::<mud_world::RuntimeConfig>() else {
+            return;
+        };
         let map_url = cfg.get_string("gmcp", "client_map_url", "");
         if !map_url.is_empty() {
             let payload = format!(r#"{{"url":"{}"}}"#, json_escape(map_url));
             let _ = outbound.try_send(mud_net::gmcp_packet("Client.Map", &payload));
         }
+    }
 
-        // External.Discord.Info — application ID + invite. The
-        // application ID is the meaningful field; without it the
-        // Discord SDK can't pair to an app icon, so the frame is
-        // useless. Skip when unset rather than emitting an
-        // application-less Info.
+    /// Push the `External.Discord.Info` rich-presence pairing
+    /// frame. Safe to re-emit: Mudlet's Discord SDK uses the
+    /// applicationid to identify the right app config and treats
+    /// repeats as idempotent. This is the frame the client asks for
+    /// when it sends `External.Discord.Hello` (and `Get`) to start
+    /// rich presence.
+    fn send_external_discord_info(&self, conn_id: ConnId, world: &World) {
+        let Some(outbound) = self.outbound_for(conn_id) else { return };
+        let Some(cfg) = world.get_resource::<mud_world::RuntimeConfig>() else {
+            return;
+        };
         let app_id = cfg.get_string("gmcp", "discord_application_id", "");
         let invite_url = cfg.get_string("gmcp", "discord_invite_url", "");
         if !app_id.is_empty() {
@@ -768,11 +785,13 @@ impl ConnRouter {
                 tracing::info!(conn_id, payload, "GMCP Core.Supports.Set");
             }
             // External.Discord.Hello — client signals Discord
-            // integration is ready. Re-emit Info so the SDK has
-            // the application id even if our connect-time push
-            // raced the client's hello.
+            // integration is ready. Re-emit ONLY External.Discord.Info
+            // (not the whole intro burst) — the connect-time
+            // Client.GUI already triggered Mudlet's install prompt;
+            // re-emitting it here would cause Mudlet to offer a
+            // second install download for the same package.
             "External.Discord.Hello" => {
-                self.send_gmcp_intro_burst(conn_id, world);
+                self.send_external_discord_info(conn_id, world);
             }
             // External.Discord.Get — client asks for an immediate
             // Status refresh. The next prompt cadence will emit
