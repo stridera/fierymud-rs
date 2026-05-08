@@ -472,6 +472,25 @@ fn de_i32_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Erro
     }
 }
 
+// Same shape but for i64. Used by SetPlayerField which carries a
+// wider range (xp, gold, alignment can go to ±2.1B but stay safe at
+// i64). The MCP TS layer marshals these as strings, so without this
+// `set_player_field hp 100` over MCP fails parse.
+fn de_i64_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    use serde::Deserialize as _;
+    match Value::deserialize(d)? {
+        Value::Number(n) => n.as_i64().ok_or_else(|| {
+            serde::de::Error::custom("number out of range for i64")
+        }),
+        Value::String(s) => s
+            .parse::<i64>()
+            .map_err(|e| serde::de::Error::custom(e.to_string())),
+        other => Err(serde::de::Error::custom(format!(
+            "expected number or numeric string, got {other}"
+        ))),
+    }
+}
+
 #[derive(Deserialize)]
 struct FireTriggerBody {
     #[serde(deserialize_with = "de_i32_lenient")]
@@ -486,6 +505,7 @@ struct FireTriggerBody {
 struct SetPlayerFieldBody {
     player_name: String,
     field: String,
+    #[serde(deserialize_with = "de_i64_lenient")]
     value: i64,
 }
 

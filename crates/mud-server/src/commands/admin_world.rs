@@ -17,8 +17,8 @@ use mud_world::{
 use crate::TickCount;
 use crate::commands::{
     self, Category, Command, Help, broadcast_room_except_players_rendered, cmd_look,
-    find_actor_in_room, matches, name_of, name_or, pad_visible, record_admin_action,
-    send_rendered, send_to, try_insert, try_remove,
+    find_actor_in_room, matches, matches_self, name_of, name_or, pad_visible,
+    record_admin_action, send_rendered, send_to, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -800,11 +800,32 @@ pub(crate) fn cmd_slay(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You are nowhere.\r\n");
         return;
     };
-    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+    // Self-target: only Implementor can slay themselves, and only as a
+    // way to test the death/release cycle without finding a willing
+    // mob. find_actor_in_room excludes self, so the keyword check has
+    // to happen first.
+    let self_name = name_of(world, player);
+    let target = if matches_self(&self_name, arg) {
+        let role = world
+            .get::<Account>(player)
+            .map_or(mud_db::enums::UserRole::Player, |a| a.role);
+        if role != mud_db::enums::UserRole::Implementor {
+            send_to(
+                world,
+                player,
+                "You can't slay yourself. (Only Implementor accounts may, for testing the \
+                 death/release cycle.)\r\n",
+            );
+            return;
+        }
+        player
+    } else if let Some(t) = find_actor_in_room(world, arg, located.0, player) {
+        t
+    } else {
         send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
         return;
     };
-    if world.get::<Player>(target).is_some() {
+    if target != player && world.get::<Player>(target).is_some() {
         send_to(
             world,
             player,
