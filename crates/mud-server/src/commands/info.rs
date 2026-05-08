@@ -7729,7 +7729,10 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
             send_rendered(
                 world,
                 player,
-                &format!("{item_name} is too heavy — you'd be encumbered.\r\n"),
+                &format!(
+                "{item_name} is too heavy — you'd be encumbered. \
+                 Drop something with `drop <item>`, or train Strength.\r\n"
+            ),
             );
             return;
         }
@@ -7791,7 +7794,10 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
         send_rendered(
             world,
             player,
-            &format!("{item_name} is too heavy — you'd be encumbered.\r\n"),
+            &format!(
+                "{item_name} is too heavy — you'd be encumbered. \
+                 Drop something with `drop <item>`, or train Strength.\r\n"
+            ),
         );
         return;
     }
