@@ -331,18 +331,25 @@ async fn main() {
                 };
                 if run_world {
                     schedule.run(&mut world);
-                    // Periodic autosave: every 5 minutes of game time
-                    // (3000 ticks at 10Hz), save every still-connected
-                    // player. Cheap insurance against crashes — a SIGKILL
-                    // or a power loss would skip the graceful shutdown
-                    // save_all_online path entirely. Done out-of-band of
-                    // the schedule so any save_player work doesn't get
-                    // re-entered by the schedule's effects/regen ticks.
+                    // Periodic autosave. Cadence reads from
+                    // `server.auto_save_interval_seconds` GameConfig
+                    // (default 300s = 5 min). Cheap insurance against
+                    // crashes — a SIGKILL or a power loss would skip
+                    // the graceful shutdown save_all_online path
+                    // entirely. Done out-of-band of the schedule so
+                    // any save_player work doesn't get re-entered by
+                    // the schedule's effects/regen ticks.
                     {
                         let tick = world.resource::<TickCount>().0;
-                        if tick > 0 && tick.is_multiple_of(3000) {
+                        let autosave_secs = world
+                            .resource::<mud_world::RuntimeConfig>()
+                            .get_i32("server", "auto_save_interval_seconds", 300)
+                            .max(10); // floor to avoid pathological config
+                        let autosave_ticks = u64::from(u32::try_from(autosave_secs).unwrap_or(300))
+                            * TICK_HZ;
+                        if tick > 0 && tick.is_multiple_of(autosave_ticks) {
                             router.save_all_online(&mut world, &pool).await;
-                            info!(tick, "periodic autosave");
+                            info!(tick, autosave_ticks, "periodic autosave");
                         }
                     }
                     // Lua-requested saves: triggers can call

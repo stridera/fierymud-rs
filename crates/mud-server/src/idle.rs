@@ -21,18 +21,25 @@ use crate::TickCount;
 const IDLE_CHECK_PERIOD_TICKS: u64 = 600;
 /// Default idle threshold. 30 minutes mirrors the conventional
 /// MUD idle timer; immortals (any role above Player) are exempt
-/// because admins routinely sit AFK observing. Override via
-/// `MUD_IDLE_KICK_SECS` env var (parsed once at startup).
+/// because admins routinely sit AFK observing. Precedence chain:
+/// `server.connection_timeout_seconds` `GameConfig` row, then
+/// `MUD_IDLE_KICK_SECS` env var, then this default.
 const DEFAULT_IDLE_KICK_SECS: u64 = 30 * 60;
 
-fn idle_kick_secs() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("MUD_IDLE_KICK_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_IDLE_KICK_SECS)
-    })
+fn idle_kick_secs(world: &World) -> u64 {
+    // GameConfig row wins so operators can re-tune at runtime
+    // without restart. A non-positive value falls through to the
+    // env var / hardcoded default.
+    let cfg_secs = world
+        .resource::<mud_world::RuntimeConfig>()
+        .get_i32("server", "connection_timeout_seconds", 0);
+    if cfg_secs > 0 {
+        return u64::try_from(cfg_secs).unwrap_or(DEFAULT_IDLE_KICK_SECS);
+    }
+    std::env::var("MUD_IDLE_KICK_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_IDLE_KICK_SECS)
 }
 
 /// Marker placed on a connected player whose `LastInputAt` (or
@@ -47,7 +54,7 @@ pub fn idle_kick_tick(world: &mut World) {
     if !tick.is_multiple_of(IDLE_CHECK_PERIOD_TICKS) {
         return;
     }
-    let threshold = Duration::from_secs(idle_kick_secs());
+    let threshold = Duration::from_secs(idle_kick_secs(world));
     let to_kick: Vec<Entity> = {
         let mut q = world.query_filtered::<
             (Entity, Option<&LastInputAt>, Option<&LoggedInAt>, &Account),
