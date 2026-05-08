@@ -12,8 +12,8 @@ use mud_db::enums::{PlayerFlag, UserRole};
 use mud_world::{IgnoreList, Online, Player};
 
 use crate::commands::{
-    Account, Category, Command, Help, Prevent, effect_prevents, has_flag, name_of,
-    send_to,
+    Account, Category, ColorMode, Command, Connection, Help, Prevent, effect_prevents,
+    has_flag, name_of, render_color_tags, send_to,
 };
 
 inventory::submit! {
@@ -195,6 +195,37 @@ fn broadcast_global(
         let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
         q.iter(world).collect()
     };
+    // GMCP Comm.Channel.Text: pre-build the JSON payload once
+    // so each recipient gets the same frame. Mudlet (and the
+    // major web clients) route this into a dedicated chat
+    // window via the dotted package name's third segment, so
+    // `gossip` lands in the gossip tab, `shout` in shouts, etc.
+    // Per the IRE spec, text is the *plain rendered* form
+    // (color tags stripped) so client-side display can re-style.
+    let plain_speaker = render_color_tags(&player_name, ColorMode::Strip);
+    let plain_message = render_color_tags(message, ColorMode::Strip);
+    let gmcp_text = format!(
+        "{}{}, \"{}\"",
+        plain_speaker,
+        match channel_kind {
+            "gossip" => " gossips",
+            "shout" => " shouts",
+            "music" => " sings",
+            "quest" => " quest-says",
+            _ => "",
+        },
+        plain_message
+    );
+    let gmcp_payload = format!(
+        "{{\"channel\":\"{}\",\"talker\":\"{}\",\"text\":\"{}\"}}",
+        channel_kind,
+        plain_speaker
+            .replace('\\', "\\\\")
+            .replace('"', "\\\""),
+        gmcp_text
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    );
     for t in targets {
         if t != player && has_flag(world, t, PlayerFlag::Deaf) {
             continue;
@@ -222,6 +253,17 @@ fn broadcast_global(
             )
         };
         send_to(world, t, line);
+        // Push the GMCP companion frame to clients with a
+        // Connection — listeners see it in their chat split,
+        // sender sees it (so client-side echo doesn't have to
+        // synthesize). Sent AFTER the text line so any client
+        // race between text + GMCP renders the text first.
+        if let Some(conn) = world.get::<Connection>(t) {
+            let _ = conn.0.try_send(mud_net::gmcp_packet(
+                "Comm.Channel.Text",
+                &gmcp_payload,
+            ));
+        }
     }
     // Capture into the channel history ring buffer so `lastgossips`
     // / `lastshouts` can replay recent traffic to a player who
