@@ -4767,13 +4767,16 @@ pub(crate) fn colorize_default(s: &str, open: &str) -> String {
 }
 
 /// XML-Lite open tag matching an exit's state. Open exits read
-/// green (welcoming), closed exits yellow (passable but slow),
-/// locked exits red (need a key). Used for the auto-exit list
-/// and the standalone `exits` command.
+/// cyan (open / passable, scannable as the safe default), closed
+/// exits yellow (passable but slow), locked exits red (need a key).
+/// Cyan picks up the same hue as section headers / command names so
+/// the eye groups "things you can interact with" together; green is
+/// reserved for HP / vital stats elsewhere on the sheet. Used for
+/// the auto-exit list and the standalone `exits` command.
 #[must_use]
 pub(crate) fn exit_state_color(state: ExitState) -> &'static str {
     match state {
-        ExitState::Open => "<green>",
+        ExitState::Open => "<cyan>",
         ExitState::Closed => "<yellow>",
         ExitState::Locked => "<red>",
     }
