@@ -173,8 +173,25 @@ async fn main() {
             std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into())
         }
     };
-    let (inbound_tx, mut inbound_rx) =
-        mpsc::channel::<Inbound>(mud_net::INBOUND_QUEUE_CAP);
+    // Inbound command queue cap. Reads from
+    // `server.max_command_queue_size` GameConfig (default 4096); a
+    // non-positive value falls back to the hardcoded
+    // INBOUND_QUEUE_CAP. Operators tune this to absorb burst input
+    // without growing memory unboundedly when the tick is slow.
+    let inbound_cap = {
+        let cfg = world.resource::<mud_world::RuntimeConfig>();
+        let raw = cfg.get_i32(
+            "server",
+            "max_command_queue_size",
+            i32::try_from(mud_net::INBOUND_QUEUE_CAP).unwrap_or(4096),
+        );
+        if raw > 0 {
+            usize::try_from(raw).unwrap_or(mud_net::INBOUND_QUEUE_CAP)
+        } else {
+            mud_net::INBOUND_QUEUE_CAP
+        }
+    };
+    let (inbound_tx, mut inbound_rx) = mpsc::channel::<Inbound>(inbound_cap);
     // Total accepted-and-still-open connection cap, summed across
     // both listeners. Reads from `server.max_connections` GameConfig
     // (default 200, matching the existing imported row); a non-
