@@ -7806,6 +7806,16 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
     let item_name = name_of(world, item);
     let player_name = name_of(world, player);
 
+    // Mobs aren't allowed to pick up corpses. The user's body stays
+    // intact for them to loot on release; otherwise a Lua trigger
+    // (or scripted `actor:command("get corpse")`) could whisk a
+    // freshly-killed player's body away and the body decays inside
+    // the mob's inventory before the player can retrieve it. Players
+    // and staff aren't gated.
+    if world.get::<Mob>(player).is_some() && world.get::<Corpse>(item).is_some() {
+        return;
+    }
+
     if !crate::commands::is_staff(world, player)
         && carried_weight(world, player) + item_weight(world, item)
             > carry_capacity(world, player)
@@ -7846,14 +7856,21 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
 /// fire, and a single broadcast summarizes the count to onlookers.
 fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &str) {
     let needle = filter.to_ascii_lowercase();
+    // Mobs running `get all` (typically via a Lua trigger) don't
+    // sweep up corpses — same rule as the single-item path. Player
+    // floor sweeps still grab corpses if the player wants them.
+    let actor_is_mob = world.get::<Mob>(player).is_some();
     let items: Vec<(Entity, String)> = {
         let mut q = world.query_filtered::<
-            (Entity, &Located, &Named, Option<&Keywords>),
+            (Entity, &Located, &Named, Option<&Keywords>, Option<&Corpse>),
             With<Item>,
         >();
         q.iter(world)
-            .filter(|(_, l, n, kw)| {
+            .filter(|(_, l, n, kw, corpse)| {
                 if l.0 != room {
+                    return false;
+                }
+                if actor_is_mob && corpse.is_some() {
                     return false;
                 }
                 if needle.is_empty() {
@@ -7861,7 +7878,7 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
                 }
                 matches(&needle, n, *kw)
             })
-            .map(|(e, _, n, _)| (e, n.name.clone()))
+            .map(|(e, _, n, _, _)| (e, n.name.clone()))
             .collect()
     };
     if items.is_empty() {

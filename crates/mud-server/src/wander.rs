@@ -16,7 +16,7 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ExitState, MobBehavior};
 use mud_world::{
-    AttachedTriggers, ExitData, Exits, Fighting, Item, Located, Mob, MobBehaviors, Named,
+    AttachedTriggers, Corpse, ExitData, Exits, Fighting, Item, Located, Mob, MobBehaviors, Named,
     RiddenBy, WorldKey,
 };
 
@@ -160,8 +160,15 @@ pub fn scavenger_tick(world: &mut World) {
     for (mob, room) in scavengers {
         // Pick the first free-floor item in the room — items
         // Located on other actors or inside containers stay put.
+        // Corpses are skipped: a player who dies in a Scavenger-
+        // patrolled room and respawns expects to find their own
+        // body still on the floor, not vanished into a mob's
+        // inventory and despawned with the mob's next tick.
         let target_item: Option<(Entity, String)> = {
-            let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Item>>();
+            let mut q = world.query_filtered::<
+                (Entity, &Located, &Named),
+                (With<Item>, Without<Corpse>),
+            >();
             q.iter(world)
                 .find(|(_, l, _)| l.0 == room)
                 .map(|(e, _, n)| (e, n.name.clone()))
