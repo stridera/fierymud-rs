@@ -2383,6 +2383,8 @@ pub(crate) fn cmd_newbie(world: &mut World, player: Entity, _args: &str) {
 }
 
 pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
+    const HELP_INDEX_COL_WIDTH: usize = 16;
+    const HELP_INDEX_COLS_PER_ROW: usize = 4;
     let (role, perms) = world
         .get::<Account>(player)
         .map_or((UserRole::Player, Vec::new()), |a| (a.role, a.perms.clone()));
@@ -2399,16 +2401,33 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
         // Help index reads as a colored TOC: bold-cyan title, each
         // category as a bold-yellow header (matches `who`'s class
         // band hue) and command names in plain cyan so the eye
-        // scans by category first, then alphabetically within.
+        // scans by category first, then alphabetically within. Names
+        // wrap to a 4-column grid so a long category (Admin, Info)
+        // doesn't run off the side of an 80-column terminal — the
+        // single-line `join(", ")` form was the SUGGESTIONS overflow
+        // bullet.
+        let mode = color_mode_for(world, player);
         let mut out = String::from("\r\n<b:cyan>Available commands:</>\r\n");
         for cat in Category::ORDER {
             if let Some(cmds) = by_cat.get(cat) {
                 out.push_str(&format!("\r\n  <b:yellow>{}</>\r\n", cat.label()));
                 let mut names: Vec<&str> = cmds.iter().map(|c| c.names[0]).collect();
                 names.sort_unstable();
-                let colored: Vec<String> =
-                    names.iter().map(|n| format!("<cyan>{n}</>")).collect();
-                out.push_str(&format!("    {}\r\n", colored.join(", ")));
+                for chunk in names.chunks(HELP_INDEX_COLS_PER_ROW) {
+                    out.push_str("    ");
+                    for n in chunk {
+                        // Pad in XML-Lite space, render after — same
+                        // rationale as the spells listing: pad first
+                        // because visible_width understands tag spans
+                        // but ANSI escapes throw it off.
+                        let padded = pad_visible(
+                            &format!("<cyan>{n}</>"),
+                            HELP_INDEX_COL_WIDTH,
+                        );
+                        out.push_str(&render_color_tags(&padded, mode));
+                    }
+                    out.push_str("\r\n");
+                }
             }
         }
         out.push_str("\r\n<dim>Type `help <command>` for details.</>\r\n");
