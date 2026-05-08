@@ -4,10 +4,10 @@ use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
-    effects, game_config, levels,
+    effects, game_config, levels, login_message,
     mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
     objects, races, room_exits, rooms, shops, socials, spell_slots,
-    sqlx::PgPool, triggers, zones,
+    sqlx::PgPool, system_text, triggers, zones,
 };
 use tracing::{info, warn};
 
@@ -685,6 +685,46 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let cfg_count = config.by_key.len();
     world.insert_resource(config);
     info!(rows = cfg_count, skipped, "GameConfig loaded");
+
+    // Pass 4c.8: builder-authored static screens (motd, news,
+    // credits, policies, imotd, ...). Each row's `key` is a stable
+    // string the runtime looks up by name; missing rows fall back
+    // to call-site compile-time defaults so an empty DB still
+    // boots a working set of screens. The runtime never reads
+    // these from disk — DB is the single source of truth, with
+    // builders editing rows via Muditor.
+    let system_text_rows = system_text::list_active(pool).await?;
+    let mut system_texts = crate::resources::SystemTexts::default();
+    for row in system_text_rows {
+        system_texts.by_key.insert(
+            row.key,
+            crate::resources::SystemTextEntry {
+                category: row.category,
+                title: row.title,
+                content: row.content,
+                min_level: row.min_level,
+            },
+        );
+    }
+    let st_count = system_texts.by_key.len();
+    world.insert_resource(system_texts);
+    info!(rows = st_count, "SystemText loaded");
+
+    // Pass 4c.9: per-stage login flow text — banner, prompts,
+    // creation steps, error messages. Same pattern: DB rows
+    // override compile-time fallbacks at lookup time. Variant
+    // defaults to `"default"` everywhere; the schema's
+    // `(stage, variant)` unique key keeps theme/AB callers safe.
+    let login_message_rows = login_message::list_active(pool).await?;
+    let mut login_messages = crate::resources::LoginMessages::default();
+    for row in login_message_rows {
+        login_messages
+            .by_key
+            .insert((row.stage, row.variant), row.message);
+    }
+    let lm_count = login_messages.by_key.len();
+    world.insert_resource(login_messages);
+    info!(rows = lm_count, "LoginMessage loaded");
 
     // Pass 4d: object-ability catalog (scrolls / wands / staves
     // bound abilities). Lookups are by `(zone, id)` matching an item

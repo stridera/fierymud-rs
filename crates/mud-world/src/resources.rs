@@ -153,6 +153,99 @@ impl RuntimeConfig {
     }
 }
 
+/// Builder-authored static screens (MOTD, news, credits, policies,
+/// imotd, …) loaded from the schema's `SystemText` table at boot.
+/// Keyed by the row's stable `key` string. Call sites pass a
+/// hardcoded fallback so an empty DB still renders a working
+/// screen — once a builder edits the row in Muditor, it overrides
+/// the fallback for everyone. The runtime never reads from disk
+/// for this content; the only filesystem dependency is the DB
+/// connection string at startup.
+#[derive(Resource, Debug, Default)]
+pub struct SystemTexts {
+    pub by_key: HashMap<String, SystemTextEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SystemTextEntry {
+    /// Category enum label as text — `"LOGIN"` / `"SYSTEM"` /
+    /// `"COMBAT"` / `"IMMORTAL"`. Today this is informational; if
+    /// we want category-scoped reload or admin listing it's already
+    /// here for the asking.
+    pub category: String,
+    pub title: Option<String>,
+    pub content: String,
+    /// Minimum viewer level to display. `0` = visible to everyone;
+    /// higher gates staff-only screens (`imotd`).
+    pub min_level: i32,
+}
+
+impl SystemTexts {
+    /// Look up the content body for a key, gated by viewer level.
+    /// Returns the row's `content` when the row exists and the
+    /// viewer meets `min_level`, otherwise `None`. Pass
+    /// [`i32::MAX`] to bypass the level gate (admin paths).
+    #[must_use]
+    pub fn content(&self, key: &str, viewer_level: i32) -> Option<&str> {
+        self.by_key
+            .get(key)
+            .filter(|e| viewer_level >= e.min_level)
+            .map(|e| e.content.as_str())
+    }
+
+    /// Same as [`Self::content`] but always falls back to the
+    /// supplied default when the row is missing or the viewer is
+    /// under-leveled. Convenience for `cmd_motd`-style call sites
+    /// that always render *something*.
+    #[must_use]
+    pub fn content_or<'a>(&'a self, key: &str, viewer_level: i32, fallback: &'a str) -> &'a str {
+        self.content(key, viewer_level).unwrap_or(fallback)
+    }
+}
+
+/// Per-stage login flow text — banner, identifier prompt, password
+/// prompts, error messages, character-creation steps. Loaded from
+/// the schema's `LoginMessage` table at boot. Keyed by
+/// `(stage, variant)` so we can A/B-test or theme variants without
+/// schema changes; the lookup falls back to the `"default"` variant
+/// when a non-default variant is requested but not present.
+///
+/// `stage` keys match the Prisma `LoginStage` enum labels verbatim
+/// (`"WELCOME_BANNER"`, `"EMAIL_PROMPT"`, …) — call sites use the
+/// same strings the schema defines. As with `SystemTexts`, every
+/// call site carries a compile-time fallback so an empty DB still
+/// boots a working login screen.
+#[derive(Resource, Debug, Default)]
+pub struct LoginMessages {
+    pub by_key: HashMap<(String, String), String>,
+}
+
+impl LoginMessages {
+    /// Look up the message for `(stage, variant)`. Falls back to
+    /// the `"default"` variant for the same stage when the
+    /// requested variant is missing — that's how we keep theme/AB
+    /// callers safe without forcing every variant to be authored
+    /// before launch.
+    #[must_use]
+    pub fn get(&self, stage: &str, variant: &str) -> Option<&str> {
+        self.by_key
+            .get(&(stage.to_string(), variant.to_string()))
+            .or_else(|| {
+                self.by_key
+                    .get(&(stage.to_string(), "default".to_string()))
+            })
+            .map(String::as_str)
+    }
+
+    /// Convenience: lookup with a hardcoded fallback string. Used
+    /// at call sites where rendering *something* is mandatory
+    /// (the connect-time banner, prompts).
+    #[must_use]
+    pub fn get_or<'a>(&'a self, stage: &str, variant: &str, fallback: &'a str) -> &'a str {
+        self.get(stage, variant).unwrap_or(fallback)
+    }
+}
+
 /// Per-race defaults loaded from the schema's `Race` table at boot.
 /// Today only `default_size` is wired (used by the score sheet); the
 /// fuller surface (`focusBonus` / lifeforce / weight-height ranges)

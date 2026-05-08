@@ -7052,19 +7052,36 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_motd(world: &mut World, player: Entity, _args: &str) {
-    send_to(world, player, MOTD_TEXT.to_string());
+    send_to(world, player, system_text_with_fallback(world, player, "motd", MOTD_TEXT));
 }
 
 pub(crate) fn cmd_news(world: &mut World, player: Entity, _args: &str) {
-    send_to(world, player, NEWS_TEXT.to_string());
+    send_to(world, player, system_text_with_fallback(world, player, "news", NEWS_TEXT));
 }
 
 pub(crate) fn cmd_credits(world: &mut World, player: Entity, _args: &str) {
-    send_to(world, player, CREDITS_TEXT.to_string());
+    send_to(world, player, system_text_with_fallback(world, player, "credits", CREDITS_TEXT));
 }
 
 pub(crate) fn cmd_policies(world: &mut World, player: Entity, _args: &str) {
-    send_to(world, player, POLICIES_TEXT.to_string());
+    send_to(world, player, system_text_with_fallback(world, player, "policies", POLICIES_TEXT));
+}
+
+/// Resolve a `SystemText` row by key, gated by the viewer's level,
+/// falling back to a hardcoded constant when the row is missing or
+/// the viewer is under-leveled. Returns an owned `String` because
+/// `send_to` consumes its input — the resource borrow can't outlive
+/// the call. Keeping the fallback in code (not on disk) means a
+/// fresh DB still produces a working `motd` / `news` / `credits` /
+/// `policies` for muscle-memory players, and the only filesystem
+/// dependency is the database connection string itself.
+fn system_text_with_fallback(world: &World, player: Entity, key: &str, fallback: &str) -> String {
+    let viewer_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    world
+        .get_resource::<SystemTexts>()
+        .and_then(|t| t.content(key, viewer_level))
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 /// `account`: read-only summary from the `AccountSummary` component

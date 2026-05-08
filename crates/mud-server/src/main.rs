@@ -451,10 +451,22 @@ async fn main() {
                 match msg.kind {
                     InboundKind::Connected { peer, outbound } => {
                         info!(conn_id = msg.conn, %peer, "client connected");
-                        router.on_connect(msg.conn, outbound);
+                        router.on_connect(msg.conn, outbound, &world);
                     }
                     InboundKind::Line(text) => {
                         router.on_line(msg.conn, text, &pool, &mut world).await;
+                    }
+                    InboundKind::WindowSize { cols, rows } => {
+                        router.on_window_size(msg.conn, cols, rows, &mut world);
+                    }
+                    InboundKind::Terminal { index, value } => {
+                        router.on_terminal(msg.conn, index, &value, &mut world);
+                    }
+                    InboundKind::Capability { name, on } => {
+                        router.on_capability(msg.conn, name, on, &mut world);
+                    }
+                    InboundKind::Gmcp { package, payload } => {
+                        router.on_gmcp(msg.conn, &package, &payload, &mut world).await;
                     }
                     InboundKind::Disconnected => {
                         info!(conn_id = msg.conn, "client disconnected");

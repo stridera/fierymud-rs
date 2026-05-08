@@ -1,10 +1,16 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+pub mod telnet;
+pub use telnet::{
+    charset_request_utf8, do_, dont, iac_eor, iac_ga, mccp2_start, negotiate, opt, parse_mtts,
+    parse_naws, subneg, ttype_send, will, wont, Event as TelnetEvent, Parser as TelnetParser,
+};
 
 pub type ConnId = u64;
 /// Outbound message to a connected client. Bytes (not String) so the
@@ -70,8 +76,46 @@ pub struct Inbound {
 
 #[derive(Debug)]
 pub enum InboundKind {
-    Connected { peer: SocketAddr, outbound: Outbound },
+    Connected {
+        peer: SocketAddr,
+        outbound: Outbound,
+    },
     Line(String),
+    /// Client reported its window size via NAWS (RFC 1073).
+    /// Forwarded so the world can size who/score/look output to
+    /// the actual viewport. Resizes mid-session resend NAWS, so
+    /// this event can fire repeatedly per connection.
+    WindowSize {
+        cols: u16,
+        rows: u16,
+    },
+    /// Client reported a terminal-type response. The MTTS cycle
+    /// produces three responses on consecutive `IAC SB TTYPE
+    /// SEND`s — the first is the client name (e.g. `"Mudlet"`),
+    /// the second a TERM-style name (e.g. `"XTERM-256COLOR"`),
+    /// the third an MTTS bitmap (`"MTTS 285"`). Sequence-ordered
+    /// in `index` so the receiver can map them.
+    Terminal {
+        index: u8,
+        value: String,
+    },
+    /// Client confirmed a capability with `IAC DO <option>` (we
+    /// said WILL first) or `IAC WILL <option>` (we said DO first).
+    /// Tracked at the world layer so commands can gate behavior
+    /// (e.g. `setOR` only emits when EOR is on, MXP `<send>` only
+    /// when MXP is confirmed).
+    Capability {
+        name: &'static str,
+        on: bool,
+    },
+    /// GMCP subnegotiation arrived from the client. `package` is
+    /// the dotted path (`Core.Hello`, `Char.Login`, ...); `payload`
+    /// is the raw JSON string remainder (may be empty for
+    /// content-less packages). The world layer parses + dispatches.
+    Gmcp {
+        package: String,
+        payload: String,
+    },
     Disconnected,
 }
 
@@ -141,13 +185,17 @@ static THROTTLER: std::sync::OnceLock<
 const MAX_CONNECTS_PER_MIN: usize = 10;
 
 /// Hard cap on a single inbound command line. A peer streaming bytes
-/// without a newline can otherwise grow `read_until`'s buffer
-/// without bound. 4 KiB is well above any plausible MUD command
-/// (longest legitimate inputs are emote / who-tag / mail-body lines
-/// on the order of a few hundred bytes); going over indicates either
-/// a buggy client or an attacker. On overflow we drop the connection.
+/// without a newline can otherwise grow the line buffer unboundedly.
+/// 4 KiB is well above any plausible MUD command (longest legitimate
+/// inputs are emote / who-tag / mail-body lines on the order of a
+/// few hundred bytes); going over indicates either a buggy client
+/// or an attacker. On overflow we drop the connection.
 const MAX_LINE_LEN: usize = 4096;
 
+/// Per-read chunk size for the inbound socket. Sized to comfortably
+/// hold a typical telnet round-trip (input line + IAC negotiation +
+/// occasional GMCP heartbeat) without forcing many tiny reads.
+const READ_CHUNK: usize = 4096;
 
 /// Hard ban list — IPs that should never connect, regardless of
 /// rate. Initialized once from the `MUD_BANLIST` env var (comma-
@@ -271,39 +319,6 @@ fn load_private_key(path: &str) -> std::io::Result<rustls::pki_types::PrivateKey
     Ok(key)
 }
 
-// Telnet protocol bytes used for GMCP framing.
-const TELNET_IAC: u8 = 0xFF;
-const TELNET_WILL: u8 = 0xFB;
-const TELNET_SB: u8 = 0xFA;
-const TELNET_SE: u8 = 0xF0;
-/// GMCP option number per the protocol (decimal 201, hex 0xC9).
-const TELNET_OPT_GMCP: u8 = 0xC9;
-/// MSSP option number (RFC-ish, decimal 70). Servers advertise
-/// MSSP via `IAC WILL 70`; clients (MUD listing scrapers) request
-/// the data via `IAC DO 70`. The reply is a single SB frame
-/// holding `<MSSP_VAR> <name> <MSSP_VAL> <value>` pairs.
-const TELNET_OPT_MSSP: u8 = 0x46;
-/// MSSP variable-name marker per the spec (1 = `MSSP_VAR`).
-const MSSP_VAR: u8 = 0x01;
-/// MSSP value marker per the spec (2 = `MSSP_VAL`).
-const MSSP_VAL: u8 = 0x02;
-
-/// Build the 3-byte `IAC WILL GMCP` sequence the server sends on
-/// connect to advertise GMCP support. Mainstream MUD clients
-/// (`Mudlet`, `MUSHclient`, `BlightMUD`) reply `IAC DO 201` to confirm.
-#[must_use]
-pub fn iac_will_gmcp() -> Vec<u8> {
-    vec![TELNET_IAC, TELNET_WILL, TELNET_OPT_GMCP]
-}
-
-/// Build the 3-byte `IAC WILL MSSP` advertisement. MUD list
-/// scrapers (`TMS`, `MudConnect`) reply `IAC DO 70` and expect the
-/// server to follow with an MSSP subnegotiation frame.
-#[must_use]
-pub fn iac_will_mssp() -> Vec<u8> {
-    vec![TELNET_IAC, TELNET_WILL, TELNET_OPT_MSSP]
-}
-
 /// Build an MSSP subnegotiation frame: `IAC SB 70 (MSSP_VAR name
 /// MSSP_VAL value)+ IAC SE`. Vars / values are framed per the spec
 /// with their leading 1 / 2 bytes. Standard variable names per the
@@ -311,28 +326,19 @@ pub fn iac_will_mssp() -> Vec<u8> {
 /// GENRE, LANGUAGE — the caller picks which to send.
 #[must_use]
 pub fn mssp_packet(vars: &[(&str, &str)]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + vars.iter().map(|(k, v)| k.len() + v.len() + 2).sum::<usize>());
-    out.push(TELNET_IAC);
-    out.push(TELNET_SB);
-    out.push(TELNET_OPT_MSSP);
+    /// MSSP variable-name marker per the spec (1 = MSSP_VAR).
+    const MSSP_VAR: u8 = 0x01;
+    /// MSSP value marker per the spec (2 = MSSP_VAL).
+    const MSSP_VAL: u8 = 0x02;
+    let mut payload =
+        Vec::with_capacity(2 + vars.iter().map(|(k, v)| k.len() + v.len() + 2).sum::<usize>());
     for (name, value) in vars {
-        out.push(MSSP_VAR);
-        out.extend_from_slice(name.as_bytes());
-        out.push(MSSP_VAL);
-        // Escape any 0xFF in the value (unlikely for ASCII metadata
-        // but cheap insurance).
-        for b in value.as_bytes() {
-            if *b == TELNET_IAC {
-                out.push(TELNET_IAC);
-                out.push(TELNET_IAC);
-            } else {
-                out.push(*b);
-            }
-        }
+        payload.push(MSSP_VAR);
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(MSSP_VAL);
+        payload.extend_from_slice(value.as_bytes());
     }
-    out.push(TELNET_IAC);
-    out.push(TELNET_SE);
-    out
+    subneg(opt::MSSP, &payload)
 }
 
 /// Build a GMCP subnegotiation frame:
@@ -341,99 +347,50 @@ pub fn mssp_packet(vars: &[(&str, &str)]) -> Vec<u8> {
 /// `package` is the dotted package name like `Char.Vitals` or
 /// `Room.Info`. `payload` is a JSON literal — pass an empty string
 /// for packages that don't carry data.
-///
-/// The frame escapes any 0xFF byte in the payload as `IAC IAC`
-/// per the telnet protocol so clients see a single 0xFF in their
-/// reassembled payload.
 #[must_use]
 pub fn gmcp_packet(package: &str, payload: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + package.len() + payload.len());
-    out.push(TELNET_IAC);
-    out.push(TELNET_SB);
-    out.push(TELNET_OPT_GMCP);
-    out.extend_from_slice(package.as_bytes());
+    let mut body = Vec::with_capacity(package.len() + 1 + payload.len());
+    body.extend_from_slice(package.as_bytes());
     if !payload.is_empty() {
-        out.push(b' ');
-        for b in payload.as_bytes() {
-            if *b == TELNET_IAC {
-                out.push(TELNET_IAC);
-                out.push(TELNET_IAC);
-            } else {
-                out.push(*b);
-            }
-        }
+        body.push(b' ');
+        body.extend_from_slice(payload.as_bytes());
     }
-    out.push(TELNET_IAC);
-    out.push(TELNET_SE);
-    out
+    subneg(opt::GMCP, &body)
 }
 
-/// State for the inbound IAC stripper. Persists across `read_until`
-/// calls because telnet subnegotiation sequences may span multiple
-/// reads (rare in practice but legal per RFC 854).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IacState {
-    /// Pass-through. Switch to `AfterIac` on 0xFF.
-    Normal,
-    /// Saw an IAC byte. Next byte tells us what kind of sequence.
-    AfterIac,
-    /// Saw IAC + DO/DONT/WILL/WONT (0xFB–0xFE). Next byte is the
-    /// option number; drop it and return to Normal.
-    AfterCommand,
-    /// Inside `IAC SB ... IAC SE`. Consume bytes until IAC SE.
-    InSubneg,
-    /// Inside SB and just saw an IAC. The next byte is either SE
-    /// (0xF0, end of subneg) or another IAC (0xFF, escaped data
-    /// byte). Either way return to `InSubneg` or Normal accordingly.
-    SubnegAfterIac,
+// -----------------------------------------------------------------
+// Compatibility shims for callers that built negotiation frames
+// directly. New code should call `telnet::will`, `telnet::do_`, etc.
+// -----------------------------------------------------------------
+
+#[must_use]
+pub fn iac_will_gmcp() -> Vec<u8> {
+    will(opt::GMCP)
 }
 
-/// Filter telnet IAC sequences out of a byte buffer. Returns only
-/// the data bytes (player text); IAC negotiation and subnegotiation
-/// frames are silently dropped. The state machine persists across
-/// calls so multi-read subnegotiations resolve correctly.
-fn strip_iac(input: &[u8], state: &mut IacState) -> Vec<u8> {
-    let mut out = Vec::with_capacity(input.len());
-    for &b in input {
-        match *state {
-            IacState::Normal => {
-                if b == 0xFF {
-                    *state = IacState::AfterIac;
-                } else {
-                    out.push(b);
-                }
-            }
-            IacState::AfterIac => {
-                match b {
-                    0xFF => {
-                        // Escaped data byte (IAC IAC). Telnet says
-                        // emit a single 0xFF, but player text won't
-                        // contain such bytes legitimately and we
-                        // can't UTF-8-encode them, so drop.
-                        *state = IacState::Normal;
-                    }
-                    0xFB..=0xFE => *state = IacState::AfterCommand,
-                    0xFA => *state = IacState::InSubneg,
-                    _ => *state = IacState::Normal,
-                }
-            }
-            IacState::AfterCommand => *state = IacState::Normal,
-            IacState::InSubneg => {
-                if b == 0xFF {
-                    *state = IacState::SubnegAfterIac;
-                }
-                // else: subnegotiation payload byte, drop.
-            }
-            IacState::SubnegAfterIac => {
-                if b == 0xF0 {
-                    *state = IacState::Normal;
-                } else {
-                    *state = IacState::InSubneg;
-                }
-            }
-        }
-    }
-    out
+#[must_use]
+pub fn iac_will_mssp() -> Vec<u8> {
+    will(opt::MSSP)
+}
+
+/// Per-connection negotiation state. Tracks which optional
+/// capabilities the client has accepted so the connection task
+/// can gate dependent behavior (EOR emission, MXP tags, MCCP2
+/// compression). Reset on disconnect — every connect re-negotiates
+/// from scratch since clients may differ between sessions.
+#[derive(Debug, Default, Clone, Copy)]
+struct CapsLocal {
+    gmcp: bool,
+    eor: bool,
+    mxp: bool,
+    naws: bool,
+    ttype: bool,
+    charset_utf8: bool,
+    /// Number of `IAC SB TTYPE SEND` polls we've sent. Mudlet's
+    /// MTTS cycle yields name → terminal → bitmap on the first
+    /// three; further polls return the same bitmap. We poll up
+    /// to three times then stop.
+    ttype_polls: u8,
 }
 
 async fn handle_connection<S>(
@@ -444,21 +401,34 @@ async fn handle_connection<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (read_half, mut write_half) = tokio::io::split(stream);
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_CAP);
 
-    // Advertise GMCP support immediately. Clients that speak it
-    // (`Mudlet`, `MUSHclient`, `BlightMUD`) reply `IAC DO 201`; we
-    // currently don't parse inbound IAC bytes, so the server
-    // assumes "client said yes" if it later receives a GMCP
-    // subnegotiation. Plain telnet clients ignore the WILL.
-    let _ = out_tx.try_send(iac_will_gmcp());
-    // Same one-shot pattern for MSSP: advertise WILL 70 then push
-    // the variable list inline. MUD list scrapers parse the SB
-    // frame whether or not they replied with DO; sending it
-    // unconditionally costs ~80 bytes per connect and reaches
-    // every scraper in one round-trip.
-    let _ = out_tx.try_send(iac_will_mssp());
+    // Push the full negotiation advertisement on connect. Each
+    // `will`/`do_` is 3 bytes; the whole burst is well under a
+    // single TCP segment so clients see it as one round-trip and
+    // reply in order. Options we send WILL for: GMCP (we'll push
+    // JSON state), MSSP (we'll respond with server metadata),
+    // MCCP2 (the client opts in to compression by replying DO),
+    // EOR (prompt boundary marker), CHARSET (for UTF-8 confirmation),
+    // MXP (clickable links — optional). Options we send DO for:
+    // NAWS (window size), TTYPE (terminal type / MTTS), NEW-ENVIRON
+    // (env vars). Suppress-Go-Ahead is mutually negotiated — both
+    // WILL and DO so each side knows the other won't send GA.
+    let _ = out_tx.try_send(will(opt::SGA));
+    let _ = out_tx.try_send(do_(opt::SGA));
+    let _ = out_tx.try_send(will(opt::GMCP));
+    let _ = out_tx.try_send(will(opt::MSSP));
+    let _ = out_tx.try_send(will(opt::EOR));
+    let _ = out_tx.try_send(will(opt::CHARSET));
+    let _ = out_tx.try_send(will(opt::MXP));
+    let _ = out_tx.try_send(do_(opt::NAWS));
+    let _ = out_tx.try_send(do_(opt::TTYPE));
+    let _ = out_tx.try_send(do_(opt::NEW_ENVIRON));
+    // MSSP advertised + payload pushed inline. MUD list scrapers
+    // parse the SB frame whether or not they replied with DO;
+    // sending it unconditionally costs ~80 bytes and reaches every
+    // scraper in one round-trip.
     let _ = out_tx.try_send(mssp_packet(&[
         ("NAME", "fierymud-rs"),
         ("CODEBASE", "fierymud-rs"),
@@ -475,7 +445,7 @@ async fn handle_connection<S>(
             conn: conn_id,
             kind: InboundKind::Connected {
                 peer,
-                outbound: out_tx,
+                outbound: out_tx.clone(),
             },
         })
         .await
@@ -485,10 +455,10 @@ async fn handle_connection<S>(
     }
 
     let writer = tokio::spawn(async move {
-        // The channel itself is now bounded (`OUTBOUND_QUEUE_CAP`),
-        // so there's no per-connection memory exhaustion risk to
-        // watch. Senders use `try_send` and drop on Full; this task
-        // just drains as fast as the socket accepts.
+        // The channel itself is bounded (`OUTBOUND_QUEUE_CAP`),
+        // so there's no per-connection memory exhaustion risk.
+        // Senders use `try_send` and drop on Full; this task just
+        // drains as fast as the socket accepts.
         while let Some(bytes) = out_rx.recv().await {
             if write_half.write_all(&bytes).await.is_err() {
                 break;
@@ -496,52 +466,43 @@ async fn handle_connection<S>(
         }
     });
 
-    // Raw-bytes reader: read_until(\n) instead of read_line because
-    // clients that speak GMCP (or any telnet option) reply with IAC
-    // sequences containing 0xFF — invalid UTF-8, which read_line
-    // refuses. We parse out IAC framing here, then lossy-convert
-    // what remains to UTF-8 for the line dispatcher.
-    //
-    // Bounded line length: wrap each read_until in a `take(MAX_LINE_LEN)`
-    // so a peer streaming bytes without a newline can't grow the
-    // server-side buffer without bound. If the take limit is hit
-    // before a `\n`, the loop detects it (final byte != '\n', length ==
-    // cap) and drops the connection.
-    let mut reader = BufReader::new(read_half);
-    let mut buf: Vec<u8> = Vec::with_capacity(256);
-    let mut iac_state = IacState::Normal;
+    let mut parser = TelnetParser::new();
+    let mut caps = CapsLocal::default();
+    let mut line_buf: Vec<u8> = Vec::with_capacity(256);
+    let mut chunk = [0u8; READ_CHUNK];
+
     loop {
-        buf.clear();
-        let read_res = (&mut reader)
-            .take(MAX_LINE_LEN as u64)
-            .read_until(b'\n', &mut buf)
-            .await;
-        match read_res {
+        let n = match read_half.read(&mut chunk).await {
             Ok(0) => break,
-            Ok(_) => {
-                // Take hit its limit and we never saw a newline —
-                // peer is sending an oversized line. Disconnect
-                // instead of silently truncating.
-                if buf.len() >= MAX_LINE_LEN && !buf.ends_with(b"\n") {
-                    warn!(
-                        conn_id,
-                        cap = MAX_LINE_LEN,
-                        "line exceeded max length; dropping connection"
-                    );
-                    break;
-                }
-                let stripped = strip_iac(&buf, &mut iac_state);
-                let line = String::from_utf8_lossy(&stripped)
-                    .trim_end_matches(['\r', '\n'])
-                    .to_string();
-                // A line that was nothing but IAC bytes (option
-                // negotiation reply, GMCP subneg, etc.) leaves
-                // `stripped` empty after filtering — skip the
-                // empty-line forward instead of treating it as an
-                // empty player command.
-                if stripped.is_empty() {
-                    continue;
-                }
+            Ok(n) => n,
+            Err(e) => {
+                warn!(conn_id, error = %e, "read error");
+                break;
+            }
+        };
+        let (data, events) = parser.feed(&chunk[..n]);
+
+        // Handle telnet events first so any negotiation reply lands
+        // before the line we forward upstream.
+        for event in events {
+            if !handle_telnet_event(conn_id, &out_tx, &inbound, &mut caps, event).await {
+                // Connection-fatal event (rare — we don't currently
+                // emit any). Bail out of the read loop.
+                break;
+            }
+        }
+
+        // Append data bytes to line buffer; flush on each newline.
+        // CRLF / CR / LF are all treated as line terminators per
+        // RFC 854 §3.3.5 — strip a trailing CR before forwarding.
+        for b in data {
+            if b == b'\n' {
+                strip_trailing_cr(&mut line_buf);
+                let line = String::from_utf8_lossy(&line_buf).to_string();
+                line_buf.clear();
+                // A blank line still gets forwarded — players use
+                // `<enter>` to dismiss prompts; the dispatcher
+                // treats it as a no-op and refreshes the prompt.
                 if inbound
                     .send(Inbound {
                         conn: conn_id,
@@ -552,10 +513,22 @@ async fn handle_connection<S>(
                 {
                     break;
                 }
-            }
-            Err(e) => {
-                warn!(conn_id, error = %e, "read error");
-                break;
+            } else if line_buf.len() < MAX_LINE_LEN {
+                line_buf.push(b);
+            } else {
+                warn!(
+                    conn_id,
+                    cap = MAX_LINE_LEN,
+                    "line exceeded max length; dropping connection"
+                );
+                let _ = inbound
+                    .send(Inbound {
+                        conn: conn_id,
+                        kind: InboundKind::Disconnected,
+                    })
+                    .await;
+                writer.abort();
+                return;
             }
         }
     }
@@ -570,44 +543,255 @@ async fn handle_connection<S>(
     writer.abort();
 }
 
+/// Trim a single trailing `\r` from the line buffer, in place.
+/// Callers invoke this exactly when they're about to emit a line
+/// that ended with `\n`; CR-LF clients send `\r\n` and we strip
+/// the CR here so the dispatcher sees clean text. LF-only clients
+/// just no-op through this path.
+fn strip_trailing_cr(buf: &mut Vec<u8>) {
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+}
+
+/// Handle one parsed telnet event — respond locally where the
+/// answer is purely protocol (option negotiation acks, TTYPE
+/// SENDs), forward to the world layer where the data is meaningful
+/// (NAWS sizes, GMCP packages). Returns false on a connection-
+/// fatal event so the read loop can break; today every event is
+/// non-fatal and this is always true.
+async fn handle_telnet_event(
+    conn_id: ConnId,
+    out_tx: &Outbound,
+    inbound: &InboundTx,
+    caps: &mut CapsLocal,
+    event: TelnetEvent,
+) -> bool {
+    match event {
+        TelnetEvent::Negotiate { command, option } => {
+            handle_negotiate(conn_id, out_tx, inbound, caps, command, option).await;
+        }
+        TelnetEvent::Subneg { option, payload } => {
+            handle_subneg(conn_id, out_tx, inbound, caps, option, &payload).await;
+        }
+        TelnetEvent::GoAhead | TelnetEvent::EndOfRecord => {
+            // Inbound GA / EOR is unusual — modern MUD clients
+            // don't send these to the server. Log and ignore.
+            debug!(conn_id, ?event, "inbound IAC marker (ignored)");
+        }
+    }
+    true
+}
+
+async fn handle_negotiate(
+    conn_id: ConnId,
+    out_tx: &Outbound,
+    inbound: &InboundTx,
+    caps: &mut CapsLocal,
+    command: u8,
+    option: u8,
+) {
+    use telnet::{DO, DONT, WILL, WONT};
+    match (command, option) {
+        // Client confirms our WILLs (it agrees we may speak this).
+        (DO, opt::GMCP) => {
+            caps.gmcp = true;
+            forward_capability(inbound, conn_id, "gmcp", true).await;
+        }
+        (DO, opt::EOR) => {
+            caps.eor = true;
+            forward_capability(inbound, conn_id, "eor", true).await;
+        }
+        (DO, opt::MXP) => {
+            caps.mxp = true;
+            forward_capability(inbound, conn_id, "mxp", true).await;
+        }
+        (DO, opt::CHARSET) => {
+            // Client agreed we may negotiate charset; send the
+            // request now. ACCEPTED comes back as a SB CHARSET
+            // ACCEPTED frame (handled in handle_subneg).
+            let _ = out_tx.try_send(charset_request_utf8());
+        }
+        (DO, opt::MSSP) => {
+            // MSSP payload was already sent unconditionally on
+            // connect; nothing more to do.
+        }
+        (DO, opt::SGA) => {
+            // Standard line-mode negotiation; nothing to track.
+        }
+        (DO, opt::MCCP2) => {
+            // Client agreed to compression. Today we don't have
+            // the zlib write side wired; ack with subneg-start
+            // and immediately disable (so the client doesn't
+            // expect compressed data we won't send). When MCCP2
+            // lands, replace this with `out_tx.try_send(mccp2_start())`
+            // followed by a flag flip on the writer.
+            debug!(conn_id, "MCCP2 DO received; deferred until writer compression lands");
+        }
+        // Client refuses our WILLs.
+        (DONT, _) => {
+            // Quietly accept. The tracking flag stays false.
+        }
+        // Client offers a capability we asked DO for.
+        (WILL, opt::NAWS) => {
+            caps.naws = true;
+            // Subneg payload carries the size; arrives next.
+        }
+        (WILL, opt::TTYPE) => {
+            caps.ttype = true;
+            // Start the MTTS cycle: poll once now; subsequent
+            // polls happen as we receive SUBNEG responses.
+            let _ = out_tx.try_send(ttype_send());
+            caps.ttype_polls = 1;
+        }
+        (WILL, opt::NEW_ENVIRON) => {
+            // We agree, but we don't currently query env vars.
+            // Could send `IAC SB NEW-ENVIRON SEND VAR LANG VAR
+            // CHARSET IAC SE` here for future use.
+        }
+        (WILL, opt::SGA) => {
+            // Client also agrees to SGA — line mode confirmed.
+        }
+        // Client refuses our DOs.
+        (WONT, _) => {
+            // Client doesn't speak the option. No-op; tracking
+            // flag stays false. We don't bother replying (the
+            // protocol says we could send DONT but most clients
+            // won't care and Mudlet's negotiation history is
+            // already settled at this point).
+        }
+        _ => {
+            debug!(conn_id, command, option, "unhandled IAC negotiate");
+        }
+    }
+}
+
+async fn handle_subneg(
+    conn_id: ConnId,
+    out_tx: &Outbound,
+    inbound: &InboundTx,
+    caps: &mut CapsLocal,
+    option: u8,
+    payload: &[u8],
+) {
+    match option {
+        opt::NAWS => {
+            if let Some((cols, rows)) = parse_naws(payload) {
+                let _ = inbound
+                    .send(Inbound {
+                        conn: conn_id,
+                        kind: InboundKind::WindowSize { cols, rows },
+                    })
+                    .await;
+            }
+        }
+        opt::TTYPE => {
+            // Payload format: `IS <name>` — first byte 0x00, rest
+            // is the value. We forward the value upstream and
+            // poll for the next response in the MTTS cycle.
+            if payload.first() == Some(&telnet::ttype::IS) {
+                let value = String::from_utf8_lossy(&payload[1..]).into_owned();
+                let _ = inbound
+                    .send(Inbound {
+                        conn: conn_id,
+                        kind: InboundKind::Terminal {
+                            index: caps.ttype_polls,
+                            value,
+                        },
+                    })
+                    .await;
+                // Cycle up to 3 polls (name → term → MTTS bitmap).
+                if caps.ttype_polls < 3 {
+                    caps.ttype_polls += 1;
+                    let _ = out_tx.try_send(ttype_send());
+                }
+            }
+        }
+        opt::CHARSET => {
+            // First byte: ACCEPTED (2) / REJECTED (3).
+            match payload.first() {
+                Some(&telnet::charset::ACCEPTED) => {
+                    caps.charset_utf8 = true;
+                    forward_capability(inbound, conn_id, "utf8", true).await;
+                }
+                Some(&telnet::charset::REJECTED) => {
+                    forward_capability(inbound, conn_id, "utf8", false).await;
+                }
+                _ => {}
+            }
+        }
+        opt::GMCP => {
+            // Payload shape: "<Package.Name>[ <json>]". Split on
+            // the first space; everything after is the JSON body.
+            let s = String::from_utf8_lossy(payload);
+            let (package, body) = match s.find(' ') {
+                Some(i) => (s[..i].to_string(), s[i + 1..].to_string()),
+                None => (s.to_string(), String::new()),
+            };
+            let _ = inbound
+                .send(Inbound {
+                    conn: conn_id,
+                    kind: InboundKind::Gmcp {
+                        package,
+                        payload: body,
+                    },
+                })
+                .await;
+        }
+        _ => {
+            debug!(conn_id, option, len = payload.len(), "unhandled subneg");
+        }
+    }
+}
+
+async fn forward_capability(inbound: &InboundTx, conn_id: ConnId, name: &'static str, on: bool) {
+    let _ = inbound
+        .send(Inbound {
+            conn: conn_id,
+            kind: InboundKind::Capability { name, on },
+        })
+        .await;
+}
 
 #[cfg(test)]
 mod iac_tests {
-    use super::{strip_iac, IacState};
+    use super::*;
 
-    fn run(input: &[u8]) -> Vec<u8> {
-        let mut state = IacState::Normal;
-        strip_iac(input, &mut state)
+    #[test]
+    fn strip_trailing_cr_handles_crlf_and_lf() {
+        let mut b = b"hello\r".to_vec();
+        strip_trailing_cr(&mut b);
+        assert_eq!(b, b"hello");
+
+        let mut b2 = b"hello".to_vec();
+        strip_trailing_cr(&mut b2);
+        assert_eq!(b2, b"hello"); // no CR — no change
     }
 
     #[test]
-    fn passes_plain_text() {
-        assert_eq!(run(b"hello\r\n"), b"hello\r\n");
+    fn mssp_packet_has_iac_sb_se_envelope() {
+        let frame = mssp_packet(&[("NAME", "test"), ("PORT", "4003")]);
+        assert_eq!(frame[0], telnet::IAC);
+        assert_eq!(frame[1], telnet::SB);
+        assert_eq!(frame[2], opt::MSSP);
+        assert_eq!(&frame[frame.len() - 2..], &[telnet::IAC, telnet::SE]);
     }
 
     #[test]
-    fn strips_iac_do_gmcp() {
-        // Mudlet's reply to our IAC WILL 201: IAC DO 201
-        let input = [b'h', b'i', 0xFF, 0xFD, 0xC9, b'\r', b'\n'];
-        assert_eq!(run(&input), b"hi\r\n");
+    fn gmcp_packet_includes_space_separator_when_payload_present() {
+        let frame = gmcp_packet("Char.Vitals", r#"{"hp":50}"#);
+        // After IAC SB OPT comes "Char.Vitals" then ' ' then JSON.
+        let body_start = 3;
+        let space_pos = body_start + b"Char.Vitals".len();
+        assert_eq!(frame[space_pos], b' ');
     }
 
     #[test]
-    fn strips_iac_subneg() {
-        // IAC SB 201 some payload IAC SE
-        let input: Vec<u8> =
-            [&[b'a'][..], &[0xFF, 0xFA, 0xC9], b"payload", &[0xFF, 0xF0], b"b"].concat();
-        assert_eq!(run(&input), b"ab");
-    }
-
-    #[test]
-    fn state_persists_across_calls() {
-        let mut state = IacState::Normal;
-        // First chunk: opens a subneg but doesn't close it.
-        assert_eq!(strip_iac(&[b'x', 0xFF, 0xFA, 0xC9, b'p'], &mut state), b"x");
-        assert_eq!(state, IacState::InSubneg);
-        // Second chunk: more subneg payload then IAC SE then real text.
-        assert_eq!(strip_iac(&[b'q', 0xFF, 0xF0, b'y'], &mut state), b"y");
-        assert_eq!(state, IacState::Normal);
+    fn gmcp_packet_omits_separator_for_empty_payload() {
+        let frame = gmcp_packet("Core.Hello", "");
+        // Body is just the package name; immediately followed by
+        // IAC SE — no space.
+        let body_end = 3 + b"Core.Hello".len();
+        assert_eq!(frame[body_end], telnet::IAC);
     }
 }

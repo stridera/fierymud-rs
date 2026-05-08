@@ -15,34 +15,73 @@ use tracing::{info, warn};
 
 use crate::commands::{self, Connection};
 
-/// Pre-login banner. Sent as raw bytes (no XML-Lite renderer in
-/// the login path) so ANSI escapes are inlined directly. Bold red
-/// flame border + bold yellow title + dim subtitle reads warm
-/// without leaning on terminal-capability negotiation. The
-/// 41-char interior keeps the box flush in 80-col clients.
-const BANNER: &str = concat!(
-    "\r\n",
-    "\x1b[1;31m  /\\  /\\  /\\  /\\  /\\  /\\  /\\  /\\  /\\  /\\\x1b[0m\r\n",
-    "\x1b[1;33m              fierymud-rs\x1b[0m\r\n",
-    "\x1b[2m       a Rust rewrite of FieryMUD\x1b[0m\r\n",
-    "\x1b[1;31m  \\/  \\/  \\/  \\/  \\/  \\/  \\/  \\/  \\/  \\/\x1b[0m\r\n",
-    "\r\n",
-    "\x1b[2m  Type your email or character name to begin.\x1b[0m\r\n",
-    "\r\n",
-);
+/// Pre-login banner — XML-Lite content. Live banner content lives
+/// in the schema's `LoginMessage` table (stage `WELCOME_BANNER`,
+/// variant `default`) and is loaded into [`mud_world::LoginMessages`]
+/// at boot. This constant is the compile-time fallback used when
+/// the row is missing (fresh DB / empty table). `login_message_bytes`
+/// renders the markup to ANSI before it reaches the wire, so
+/// builders can edit the row without touching escape sequences.
+///
+/// 5-stop xterm-256 fire gradient (`<c196>` → `<c202>` → `<c208>`
+/// → `<c214>` → `<c220>`) — the same palette the legacy C++ logo
+/// uses, peaking at the Y in the middle and fading back through
+/// 214/208/202 for M U D so the flame is brightest at its core.
+/// Glyphs are the `╗ ╝ ║ ═` Unicode box-drawing block, which
+/// Mudlet, `BlightMud`, and the major web clients all render with
+/// their default fonts; 16-color terminals quietly down-sample
+/// the gradient to their nearest match.
+const BANNER_FALLBACK: &str = "\
+\r\n\
+   <c196> ███████╗</> <c196>██╗</><c202>███████╗</><c202>██████╗ </><c208>██╗   ██╗</><c214>███╗   ███╗</><c214>██╗   ██╗</><c220>██████╗ </>\r\n\
+   <c196> ██╔════╝</> <c196>██║</><c202>██╔════╝</><c202>██╔══██╗</><c208>╚██╗ ██╔╝</><c214>████╗ ████║</><c214>██║   ██║</><c220>██╔══██╗</>\r\n\
+   <c196> █████╗  </> <c196>██║</><c202>█████╗  </><c202>██████╔╝</><c208> ╚████╔╝ </><c214>██╔████╔██║</><c214>██║   ██║</><c220>██║  ██║</>\r\n\
+   <c196> ██╔══╝  </> <c196>██║</><c202>██╔══╝  </><c202>██╔══██╗</><c208>  ╚██╔╝  </><c214>██║╚██╔╝██║</><c214>██║   ██║</><c220>██║  ██║</>\r\n\
+   <c196> ██║     </> <c196>██║</><c202>███████╗</><c202>██║  ██║</><c208>   ██║   </><c214>██║ ╚═╝ ██║</><c214>╚██████╔╝</><c220>██████╔╝</>\r\n\
+   <c196> ╚═╝     </> <c196>╚═╝</><c202>╚══════╝</><c202>╚═╝  ╚═╝</><c208>   ╚═╝   </><c214>╚═╝     ╚═╝</><c214> ╚═════╝ </><c220>╚═════╝ </>\r\n\
+\r\n\
+   <c238>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</>\r\n\
+   <c220>             A classic fantasy MUD, forged in fire.</>\r\n\
+   <c244>                         www.fierymud.org</>\r\n\
+   <c238>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</>\r\n\
+\r\n\
+   <c244>Login with your account email or character name.</>\r\n\
+\r\n\
+";
 /// Combined identifier prompt — accepts either an email or a
 /// character name. Email is detected by the presence of '@' (the
 /// only thing legacy MUD usernames couldn't legally contain).
-const IDENT_PROMPT: &str = "Email or character name: ";
-const PASSWORD_PROMPT: &str = "Password: ";
-const NEW_PASSWORD_PROMPT: &str = "Choose a password: ";
-const CONFIRM_PASSWORD_PROMPT: &str = "Re-enter password to confirm: ";
+/// Compile-time fallback for the `EMAIL_PROMPT` `LoginMessage` row.
+const IDENT_PROMPT_FALLBACK: &str = "Email or character name: ";
+const PASSWORD_PROMPT_FALLBACK: &str = "Password: ";
+const NEW_PASSWORD_PROMPT_FALLBACK: &str = "Choose a password: ";
+const CONFIRM_PASSWORD_PROMPT_FALLBACK: &str = "Re-enter password to confirm: ";
 /// Minimum length for a freshly-created password. Mirrors the
 /// existing `bcrypt::hash` cost path — bcrypt itself doesn't
 /// enforce a length, but anything shorter than this is a
 /// hard pass for a new account regardless.
 const MIN_NEW_PASSWORD_LEN: usize = 6;
-const NEW_CHARACTER_NAME_PROMPT: &str = "Character name: ";
+const NEW_CHARACTER_NAME_PROMPT_FALLBACK: &str = "Character name: ";
+
+/// Look up a `LoginMessage` row by stage, render its XML-Lite
+/// markup to ANSI, and return the bytes ready to write to an
+/// `Outbound` channel. Stage names match the schema's
+/// `LoginStage` enum labels verbatim (`"WELCOME_BANNER"`,
+/// `"EMAIL_PROMPT"`, ...). Falls back to the supplied compile-time
+/// default when the row is missing or the resource is absent —
+/// keeps a fresh database (no `LoginMessage` rows yet) producing
+/// a working login flow.
+///
+/// Login-stage entities don't have a `Connection` component, so
+/// the normal [`crate::commands::send_to`] path doesn't apply;
+/// we render here and write the bytes directly to the outbound
+/// channel held in `LoginCtx`.
+fn login_message_bytes(world: &World, stage: &str, fallback: &str) -> Vec<u8> {
+    let raw = world
+        .get_resource::<mud_world::LoginMessages>()
+        .map_or(fallback, |m| m.get_or(stage, "default", fallback));
+    crate::commands::render_color_tags(raw, crate::commands::ColorMode::Ansi).into_bytes()
+}
 /// Inclusive length window for a new character name. Lower bound
 /// keeps single-letter ambiguity out of `who`-style listings;
 /// upper bound matches the existing `Characters.name` column
@@ -352,6 +391,55 @@ pub struct LoginCtx {
 pub struct ConnRouter {
     login: HashMap<ConnId, LoginCtx>,
     playing: HashMap<ConnId, Entity>,
+    /// Per-connection negotiated state — window size, terminal
+    /// type, MTTS bitmap, and capability flags. Populated as
+    /// telnet events arrive from `mud_net`. Persists across the
+    /// login → playing transition so commands can consult the
+    /// player's actual viewport / capabilities once spawned.
+    caps: HashMap<ConnId, ConnCapabilities>,
+}
+
+/// Per-connection capability snapshot. Updated by the telnet
+/// negotiation handlers (`on_window_size`, `on_terminal`,
+/// `on_capability`); read by display code that wants to adapt
+/// to the client (table widths, color depth gating, EOR-after-
+/// prompt). All fields default to "we don't know yet" — a fresh
+/// connection that hasn't replied to NAWS shows `cols == 0`,
+/// which calling code interprets as "fall back to 80".
+#[derive(Debug, Default, Clone)]
+pub struct ConnCapabilities {
+    pub cols: u16,
+    pub rows: u16,
+    /// First TTYPE response — the client's product name, e.g.
+    /// `"Mudlet"`, `"BlightMud"`, `"MUSHCLIENT"`. Empty until
+    /// the first poll lands.
+    pub client_name: String,
+    /// Second TTYPE response — TERM-style identifier, e.g.
+    /// `"XTERM-256COLOR"`. Helpful for distinguishing terminal
+    /// emulators connecting via raw `telnet`.
+    pub term_name: String,
+    /// MTTS capability bitmap from the third TTYPE poll. See
+    /// [`mud_net::parse_mtts`] for the bit assignments. Bit 8
+    /// indicates truecolor support; bit 3 indicates xterm-256.
+    pub mtts: u32,
+    pub gmcp: bool,
+    pub eor: bool,
+    pub mxp: bool,
+    pub utf8: bool,
+}
+
+impl ConnCapabilities {
+    /// Effective column count for layout — 80 if NAWS hasn't
+    /// landed yet, otherwise whatever the client reported. Width
+    /// 0 from a misbehaving client also collapses to the default.
+    #[must_use]
+    pub fn effective_cols(&self) -> u16 {
+        if self.cols == 0 {
+            80
+        } else {
+            self.cols
+        }
+    }
 }
 
 impl ConnRouter {
@@ -359,11 +447,21 @@ impl ConnRouter {
         Self {
             login: HashMap::new(),
             playing: HashMap::new(),
+            caps: HashMap::new(),
         }
     }
 
     pub fn live_connections(&self) -> usize {
         self.login.len() + self.playing.len()
+    }
+
+    /// Read the current capability snapshot for a connection.
+    /// Returns `None` when the connection isn't tracked (already
+    /// disconnected, or the negotiation events arrived before
+    /// `Connected` — shouldn't happen in practice).
+    #[must_use]
+    pub fn caps(&self, conn_id: ConnId) -> Option<&ConnCapabilities> {
+        self.caps.get(&conn_id)
     }
 
     /// Reverse lookup: which `ConnId` (if any) is currently driving
@@ -377,9 +475,9 @@ impl ConnRouter {
             .find_map(|(cid, e)| if *e == entity { Some(*cid) } else { None })
     }
 
-    pub fn on_connect(&mut self, conn_id: ConnId, outbound: Outbound) {
-        let _ = outbound.try_send(BANNER.as_bytes().to_vec());
-        let _ = outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+    pub fn on_connect(&mut self, conn_id: ConnId, outbound: Outbound, world: &World) {
+        let _ = outbound.try_send(login_message_bytes(world, "WELCOME_BANNER", BANNER_FALLBACK));
+        let _ = outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
         self.login.insert(
             conn_id,
             LoginCtx {
@@ -410,6 +508,7 @@ impl ConnRouter {
 
     pub async fn on_disconnect(&mut self, world: &mut World, conn_id: ConnId, pool: &PgPool) {
         self.login.remove(&conn_id);
+        self.caps.remove(&conn_id);
         if let Some(entity) = self.playing.remove(&conn_id) {
             // Disconnect path — player is gone before we could
             // report a partial save. The tracing::warn inside
@@ -430,6 +529,93 @@ impl ConnRouter {
             }
             world.despawn(entity);
         }
+    }
+
+    /// NAWS payload — the client reported its terminal viewport.
+    /// Re-fires on every resize, so the snapshot tracks the live
+    /// state. Width drives table layouts (`who`, `score`, `look`)
+    /// at command time via [`ConnCapabilities::effective_cols`].
+    pub fn on_window_size(
+        &mut self,
+        conn_id: ConnId,
+        cols: u16,
+        rows: u16,
+        _world: &mut World,
+    ) {
+        let entry = self.caps.entry(conn_id).or_default();
+        entry.cols = cols;
+        entry.rows = rows;
+    }
+
+    /// TTYPE / MTTS response. The MTTS cycle yields three
+    /// responses to consecutive `IAC SB TTYPE SEND`s — index 1 is
+    /// the client product name, index 2 is the terminal type, and
+    /// index 3 is the MTTS bitmap. We persist all three so display
+    /// code can both gate features (truecolor via the bitmap) and
+    /// log the client identity.
+    pub fn on_terminal(&mut self, conn_id: ConnId, index: u8, value: &str, _world: &mut World) {
+        let entry = self.caps.entry(conn_id).or_default();
+        match index {
+            1 => entry.client_name = value.to_string(),
+            2 => entry.term_name = value.to_string(),
+            3 => {
+                if let Some(bits) = mud_net::parse_mtts(value) {
+                    entry.mtts = bits;
+                }
+            }
+            _ => {
+                // Mudlet's cycle stops at 3; further polls would
+                // re-emit the bitmap. Ignore — we already have it.
+            }
+        }
+    }
+
+    /// Capability flag from the telnet negotiation layer. Names
+    /// are stable strings emitted by `mud_net` (`"gmcp"`, `"eor"`,
+    /// `"mxp"`, `"utf8"`). New names land here as we wire more
+    /// options; unknown names log at debug level.
+    pub fn on_capability(
+        &mut self,
+        conn_id: ConnId,
+        name: &str,
+        on: bool,
+        _world: &mut World,
+    ) {
+        let entry = self.caps.entry(conn_id).or_default();
+        match name {
+            "gmcp" => entry.gmcp = on,
+            "eor" => entry.eor = on,
+            "mxp" => entry.mxp = on,
+            "utf8" => entry.utf8 = on,
+            _ => {
+                tracing::debug!(conn_id, name, on, "unhandled capability flag");
+            }
+        }
+    }
+
+    /// GMCP package received from the client. Today we route
+    /// `Core.Hello` (client identity), `Core.Supports.Set`
+    /// (capability subscription list), and `External.Discord.Hello`
+    /// (Discord rich-presence handshake) into the world's GMCP
+    /// dispatch. Unknown packages are logged at debug — useful when
+    /// adding support for a new client's vendor packages.
+    pub async fn on_gmcp(
+        &mut self,
+        conn_id: ConnId,
+        package: &str,
+        payload: &str,
+        _world: &mut World,
+    ) {
+        // For now: log the package name and forward via tracing.
+        // World-side dispatch (e.g., responding to Core.Hello with
+        // Core.Hello of our own) lands as we expand the GMCP
+        // surface. Capabilities mark the connection as GMCP-active
+        // when the client sends ANY GMCP package, since reaching
+        // this method means the parser successfully decoded one.
+        let entry = self.caps.entry(conn_id).or_default();
+        entry.gmcp = true;
+        tracing::info!(conn_id, package, "GMCP package received");
+        let _ = payload;
     }
 
     pub async fn on_line(
@@ -509,7 +695,7 @@ impl ConnRouter {
                                         .to_vec(),
                                 );
                                 ctx.stage = Stage::AwaitingIdentifier;
-                                let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                                let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                                 return;
                             }
                             ctx.stage = Stage::ConfirmCreate {
@@ -522,7 +708,7 @@ impl ConnRouter {
                             warn!(conn_id, error = %e, "user lookup failed");
                             let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
                             ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                            let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                             return;
                         }
                     }
@@ -559,7 +745,7 @@ impl ConnRouter {
                                         .to_vec(),
                                 );
                                 ctx.stage = Stage::AwaitingIdentifier;
-                                let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                                let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                                 return;
                             }
                             ctx.stage = Stage::ConfirmCreate {
@@ -572,13 +758,13 @@ impl ConnRouter {
                             warn!(conn_id, error = %e, "character lookup failed");
                             let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
                             ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                            let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                             return;
                         }
                     }
                 }
                 if routed_to_password {
-                    let _ = ctx.outbound.try_send(PASSWORD_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "PASSWORD_PROMPT", PASSWORD_PROMPT_FALLBACK));
                 }
             }
 
@@ -595,7 +781,7 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
-                    let _ = ctx.outbound.try_send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "CREATE_PASSWORD", NEW_PASSWORD_PROMPT_FALLBACK));
                 } else if no {
                     let _ = ctx.outbound.try_send(
                         "Okay — please enter an existing email or character name.\r\n"
@@ -603,7 +789,7 @@ impl ConnRouter {
                             .to_vec(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                 } else {
                     let _ = ctx.outbound.try_send(
                         "Please answer 'yes' or 'no'.\r\n".as_bytes().to_vec(),
@@ -622,7 +808,7 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
-                    let _ = ctx.outbound.try_send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "CREATE_PASSWORD", NEW_PASSWORD_PROMPT_FALLBACK));
                     return;
                 }
                 ctx.stage = Stage::ConfirmNewPassword {
@@ -630,7 +816,7 @@ impl ConnRouter {
                     is_email,
                     first_attempt: trimmed.to_string(),
                 };
-                let _ = ctx.outbound.try_send(CONFIRM_PASSWORD_PROMPT.as_bytes().to_vec());
+                let _ = ctx.outbound.try_send(login_message_bytes(world, "CONFIRM_PASSWORD", CONFIRM_PASSWORD_PROMPT_FALLBACK));
             }
 
             Stage::ConfirmNewPassword {
@@ -645,7 +831,7 @@ impl ConnRouter {
                             .to_vec(),
                     );
                     ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
-                    let _ = ctx.outbound.try_send(NEW_PASSWORD_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "CREATE_PASSWORD", NEW_PASSWORD_PROMPT_FALLBACK));
                     return;
                 }
                 // Password confirmed. Email path needs to collect a
@@ -666,7 +852,7 @@ impl ConnRouter {
                     };
                     let _ = ctx
                         .outbound
-                        .try_send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                        .try_send(login_message_bytes(world, "CREATE_NAME_PROMPT", NEW_CHARACTER_NAME_PROMPT_FALLBACK));
                 } else {
                     // Character-name path: identifier IS the
                     // character name. Advance to race selection.
@@ -692,7 +878,7 @@ impl ConnRouter {
                     };
                     let _ = ctx
                         .outbound
-                        .try_send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                        .try_send(login_message_bytes(world, "CREATE_NAME_PROMPT", NEW_CHARACTER_NAME_PROMPT_FALLBACK));
                     return;
                 }
                 match characters::find_by_name(pool, name).await {
@@ -710,7 +896,7 @@ impl ConnRouter {
                         };
                         let _ = ctx
                             .outbound
-                            .try_send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                            .try_send(login_message_bytes(world, "CREATE_NAME_PROMPT", NEW_CHARACTER_NAME_PROMPT_FALLBACK));
                     }
                     Ok(None) => {
                         // Name is available. Advance to race
@@ -735,7 +921,7 @@ impl ConnRouter {
                         };
                         let _ = ctx
                             .outbound
-                            .try_send(NEW_CHARACTER_NAME_PROMPT.as_bytes().to_vec());
+                            .try_send(login_message_bytes(world, "CREATE_NAME_PROMPT", NEW_CHARACTER_NAME_PROMPT_FALLBACK));
                     }
                 }
             }
@@ -911,7 +1097,7 @@ impl ConnRouter {
                         );
                         drop(password_plaintext);
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                         return;
                     }
                 };
@@ -930,7 +1116,7 @@ impl ConnRouter {
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                         return;
                     }
                 };
@@ -956,7 +1142,7 @@ impl ConnRouter {
                         // INSERT (if any) gets rolled back.
                         drop(tx);
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                         return;
                     }
                 };
@@ -987,7 +1173,7 @@ impl ConnRouter {
                         );
                         drop(tx);
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                         return;
                     }
                 };
@@ -1001,7 +1187,7 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                     return;
                 }
                 // Both rows are committed. Re-fetch the User + the
@@ -1023,7 +1209,7 @@ impl ConnRouter {
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                         return;
                     }
                     Err(e) => {
@@ -1034,7 +1220,7 @@ impl ConnRouter {
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                         return;
                     }
                 };
@@ -1048,7 +1234,7 @@ impl ConnRouter {
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                         return;
                     }
                     Err(e) => {
@@ -1059,7 +1245,7 @@ impl ConnRouter {
                                 .to_vec(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                         return;
                     }
                 };
@@ -1102,7 +1288,7 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                     return;
                 }
                 let ok = user
@@ -1144,7 +1330,7 @@ impl ConnRouter {
                     };
                     let _ = ctx.outbound.try_send(msg.into_bytes());
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                     return;
                 }
                 // Auth succeeded — reset the failed-login counter so
@@ -1173,7 +1359,7 @@ impl ConnRouter {
                             .to_vec(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                     return;
                 }
                 // Ban check. Refuses post-auth so we don't leak
@@ -1199,7 +1385,7 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                     return;
                 }
                 info!(conn_id, user_id = %user.id, email = %user.email, "auth success");
@@ -1218,7 +1404,7 @@ impl ConnRouter {
                         warn!(conn_id, error = %e, "character list failed");
                         let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                         return;
                     }
                 };
@@ -1227,7 +1413,7 @@ impl ConnRouter {
                         .outbound
                         .try_send("No characters on this account.\r\n".as_bytes().to_vec());
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(IDENT_PROMPT.as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                     return;
                 }
                 let mut menu = String::from("\r\nCharacters:\r\n");
@@ -1673,6 +1859,35 @@ impl ConnRouter {
         if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
             commands::mark_room_visited(world, entity, room);
             commands::apply_room_environment_at_login(world, entity, room);
+        }
+        // Display MOTD before the spawn-prompt. Pulled from the
+        // schema's `SystemText` table (key `"motd"`) via the
+        // [`mud_world::SystemTexts`] resource; falls back to the
+        // compile-time constant when the row is missing. Skipped
+        // entirely when the row exists but is empty so a builder
+        // can disable the auto-display by clearing the content
+        // without dropping the row. `imotd` (staff-only) is also
+        // shown when the viewer's level qualifies — the
+        // `min_level` gate makes that automatic.
+        let viewer_level = world.get::<Profile>(entity).map_or(0, |p| p.level);
+        let motd = world
+            .get_resource::<mud_world::SystemTexts>()
+            .and_then(|t| t.content("motd", viewer_level))
+            .unwrap_or(crate::commands::MOTD_TEXT);
+        if !motd.trim().is_empty() {
+            commands::send_to(world, entity, motd.to_string());
+        }
+        // Staff-only `imotd`: shown after `motd` so it sits closer
+        // to the prompt where eyes land. No fallback constant —
+        // an absent row simply means "no immortal motd today,"
+        // which is the right behavior for a fresh DB.
+        if let Some(imotd) = world
+            .get_resource::<mud_world::SystemTexts>()
+            .and_then(|t| t.content("imotd", viewer_level))
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+        {
+            commands::send_to(world, entity, imotd);
         }
         self.playing.insert(conn_id, entity);
         commands::send_prompt(world, entity);

@@ -908,6 +908,31 @@ pub(crate) enum ColorMode {
     Strip,
 }
 
+/// Single foreground/background color value carried on a style layer.
+/// Three variants cover the full XML-Lite color surface:
+///
+/// * `Ansi16` — basic 8 + bright 8 colors. Stored as the literal
+///   ANSI fg code (30–37, 90–97); background emits `+10`. This is
+///   what `<red>` / `<b:yellow>` / `<bg-blue>` produce.
+/// * `Ansi256` — xterm 256-color palette. Index 0–255. `<c196>` /
+///   `<bgc208>` produce these. Emits `38;5;N` / `48;5;N`.
+/// * `Rgb` — 24-bit truecolor. `<#FF8800>` / `<bg#001020>` produce
+///   these. Emits `38;2;R;G;B` / `48;2;R;G;B`.
+///
+/// All three are emitted unconditionally — gating on detected client
+/// capability (MTTS truecolor bit) is the renderer caller's job, not
+/// this layer's. Modern clients (Mudlet, BlightMud, MUSHclient,
+/// every web client) handle all three; legacy 16-color terminals
+/// will quietly down-sample 256/RGB to the nearest match. We don't
+/// try to translate server-side because the client's mapping is
+/// invariably better than ours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Color {
+    Ansi16(u8),
+    Ansi256(u8),
+    Rgb(u8, u8, u8),
+}
+
 /// Per-layer style state. Each opening tag pushes one of these to the
 /// stack; closes pop. Anonymous tags (`<b:red>` style) keep `name`
 /// empty and can only be closed via `</>`. The 8 bool fields map 1:1
@@ -925,10 +950,8 @@ pub(crate) struct StyleLayer {
     reverse: bool,
     hidden: bool,
     strikethrough: bool,
-    /// ANSI foreground code (30–37 for normal, 90–97 for bright).
-    fg: Option<u8>,
-    /// ANSI background code (40–47 for normal, 100–107 for bright).
-    bg: Option<u8>,
+    fg: Option<Color>,
+    bg: Option<Color>,
 }
 
 /// Render `FieryMUD` XML-Lite markup. Stack-based: `<name>` pushes,
@@ -1123,10 +1146,43 @@ fn is_known_tag_part(p: &str) -> bool {
     if let Some(rest) = p.strip_prefix("bg-") {
         return named_color(rest).is_some();
     }
+    if let Some(rest) = p.strip_prefix("bg#") {
+        return rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_hexdigit());
+    }
     if let Some(rest) = p.strip_prefix('#') {
         return rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_hexdigit());
     }
+    if let Some(rest) = p.strip_prefix("bgc") {
+        return parse_ansi256_index(rest).is_some();
+    }
+    if let Some(rest) = p.strip_prefix('c') {
+        return parse_ansi256_index(rest).is_some();
+    }
     named_color(p).is_some()
+}
+
+/// Parse an xterm 256-color index. Accepts `0`-`255` decimal; returns
+/// `None` for empty / non-numeric / out-of-range. Pulled out so
+/// `is_known_tag_part` and `apply_modifier` agree on what counts as
+/// a valid `cN` / `bgcN` body.
+fn parse_ansi256_index(s: &str) -> Option<u8> {
+    if s.is_empty() {
+        return None;
+    }
+    s.parse::<u8>().ok()
+}
+
+/// Parse `RRGGBB` hex into an `(r, g, b)` triple. Caller has already
+/// stripped the leading `#` / `bg#`. Returns `None` on wrong length
+/// or non-hex digits.
+fn parse_rgb_hex(s: &str) -> Option<(u8, u8, u8)> {
+    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some((r, g, b))
 }
 
 /// Mutate the style stack in response to one parsed tag. Returns true
@@ -1177,13 +1233,32 @@ pub(crate) fn apply_modifier(layer: &mut StyleLayer, m: &str) {
         _ => {
             if let Some(rest) = m.strip_prefix("bg-") {
                 if let Some(c) = named_color(rest) {
-                    layer.bg = Some(c + 10); // bg ANSI = fg + 10
+                    layer.bg = Some(Color::Ansi16(c));
+                }
+            } else if let Some(rest) = m.strip_prefix("bg#") {
+                if let Some((r, g, b)) = parse_rgb_hex(rest) {
+                    layer.bg = Some(Color::Rgb(r, g, b));
+                }
+            } else if let Some(rest) = m.strip_prefix("bgc") {
+                if let Some(idx) = parse_ansi256_index(rest) {
+                    layer.bg = Some(Color::Ansi256(idx));
+                }
+            } else if let Some(rest) = m.strip_prefix('#') {
+                if let Some((r, g, b)) = parse_rgb_hex(rest) {
+                    layer.fg = Some(Color::Rgb(r, g, b));
+                }
+            } else if let Some(rest) = m.strip_prefix('c') {
+                if let Some(idx) = parse_ansi256_index(rest) {
+                    layer.fg = Some(Color::Ansi256(idx));
                 }
             } else if let Some(c) = named_color(m) {
-                layer.fg = Some(c);
+                layer.fg = Some(Color::Ansi16(c));
             }
-            // Other modifier shapes (cN / #RRGGBB / etc.) parse as
-            // no-ops; layer contributes nothing for those positions.
+            // Anything left over parses as a no-op; layer contributes
+            // nothing for those positions. Mismatched tags
+            // (`<unknown>`) are filtered out earlier by
+            // `is_known_tag_part`, so this branch only handles
+            // malformed-but-tag-shaped input like `<c999>`.
         }
     }
 }
@@ -1216,44 +1291,79 @@ pub(crate) fn emit_ansi_state(out: &mut String, stack: &[StyleLayer]) {
         return;
     }
     let merged = merge_stack(stack);
-    let mut codes: Vec<u8> = Vec::new();
+    // Build the parameter list as strings rather than `u8` codes —
+    // 256-color and truecolor SGR introducers (`38;5;N`, `38;2;R;G;B`)
+    // span multiple parameters, which the previous `Vec<u8>` shape
+    // couldn't express. Attribute toggles still emit single-number
+    // params; only the fg/bg paths fan out.
+    let mut params: Vec<String> = Vec::new();
     if merged.bold {
-        codes.push(1);
+        params.push("1".to_string());
     }
     if merged.dim {
-        codes.push(2);
+        params.push("2".to_string());
     }
     if merged.italic {
-        codes.push(3);
+        params.push("3".to_string());
     }
     if merged.underline {
-        codes.push(4);
+        params.push("4".to_string());
     }
     if merged.blink {
-        codes.push(5);
+        params.push("5".to_string());
     }
     if merged.reverse {
-        codes.push(7);
+        params.push("7".to_string());
     }
     if merged.hidden {
-        codes.push(8);
+        params.push("8".to_string());
     }
     if merged.strikethrough {
-        codes.push(9);
+        params.push("9".to_string());
     }
     if let Some(fg) = merged.fg {
-        codes.push(fg);
+        push_color_params(&mut params, fg, false);
     }
     if let Some(bg) = merged.bg {
-        codes.push(bg);
+        push_color_params(&mut params, bg, true);
     }
-    if codes.is_empty() {
+    if params.is_empty() {
         return;
     }
     out.push_str("\x1b[");
-    let strs: Vec<String> = codes.iter().map(u8::to_string).collect();
-    out.push_str(&strs.join(";"));
+    out.push_str(&params.join(";"));
     out.push('m');
+}
+
+/// Append the SGR parameters for a single color value. The
+/// foreground/background distinction collapses to: ANSI16 fg uses
+/// the raw code (30-37 / 90-97), ANSI16 bg adds 10 (40-47 /
+/// 100-107); 256-color uses the `38;5;N` / `48;5;N` introducer; RGB
+/// uses `38;2;R;G;B` / `48;2;R;G;B`. All three SGR forms are
+/// fixture-grade widely supported — 256 since xterm 88 (~2002),
+/// truecolor since xterm 256 (~2012), and modern MUD clients all
+/// implement them.
+fn push_color_params(params: &mut Vec<String>, color: Color, is_bg: bool) {
+    match color {
+        Color::Ansi16(code) => {
+            // Bright codes are 90-97; their bg counterpart is 100-107
+            // — same +10 offset as the basic block (30-37 → 40-47).
+            let emitted = if is_bg { code + 10 } else { code };
+            params.push(emitted.to_string());
+        }
+        Color::Ansi256(idx) => {
+            params.push(if is_bg { "48".to_string() } else { "38".to_string() });
+            params.push("5".to_string());
+            params.push(idx.to_string());
+        }
+        Color::Rgb(r, g, b) => {
+            params.push(if is_bg { "48".to_string() } else { "38".to_string() });
+            params.push("2".to_string());
+            params.push(r.to_string());
+            params.push(g.to_string());
+            params.push(b.to_string());
+        }
+    }
 }
 
 /// Collapse the stack into one effective style: attributes OR-combined,
@@ -1637,12 +1747,69 @@ mod tests {
     }
 
     #[test]
-    fn render_color_tags_unknown_modifier_does_not_panic() {
-        // RGB and indexed forms aren't implemented yet — they parse as
-        // no-op modifiers (push a layer with no effect).
-        let out = ansi("<#ff0000>red?</>");
-        // Layer has no fg/bg/attributes, so emit_state produces just \x1b[0m.
-        assert!(out.contains("red?"));
+    fn render_color_tags_truecolor_rgb_emits_38_2_form() {
+        // <#FF0000>...</> → \x1b[0m\x1b[38;2;255;0;0m text \x1b[0m\x1b[0m
+        let out = ansi("<#FF0000>red</>");
+        assert!(out.contains("\x1b[38;2;255;0;0m"), "fg rgb present: {out:?}");
+        assert!(out.contains("red"));
+    }
+
+    #[test]
+    fn render_color_tags_truecolor_rgb_lowercase_hex_works() {
+        // hex digits are case-insensitive; both forms accepted.
+        let out = ansi("<#ff8800>orange</>");
+        assert!(out.contains("\x1b[38;2;255;136;0m"), "fg rgb lowercase: {out:?}");
+    }
+
+    #[test]
+    fn render_color_tags_truecolor_bg_emits_48_2_form() {
+        // <bg#001020>... — background path uses 48 instead of 38.
+        let out = ansi("<bg#001020>x</>");
+        assert!(out.contains("\x1b[48;2;0;16;32m"), "bg rgb present: {out:?}");
+    }
+
+    #[test]
+    fn render_color_tags_ansi256_emits_38_5_form() {
+        // <c196>... → \x1b[38;5;196m text \x1b[0m
+        let out = ansi("<c196>fire</>");
+        assert!(out.contains("\x1b[38;5;196m"), "256-color present: {out:?}");
+        assert!(out.contains("fire"));
+    }
+
+    #[test]
+    fn render_color_tags_ansi256_bg_emits_48_5_form() {
+        let out = ansi("<bgc208>x</>");
+        assert!(out.contains("\x1b[48;5;208m"), "bg 256 present: {out:?}");
+    }
+
+    #[test]
+    fn render_color_tags_ansi256_out_of_range_is_no_op() {
+        // u8 parse caps at 255; `c999` exceeds the range and parses as
+        // a no-op modifier (still tag-shaped via parse_ansi256_index
+        // returning None, so the tag falls through to literal text
+        // rather than emitting a malformed escape).
+        let out = ansi("<c999>?</>");
+        // The whole tag is preserved as literal because is_known_tag_part
+        // rejects it (parse_ansi256_index returned None).
+        assert!(out.contains("<c999>"), "tag treated as literal: {out:?}");
+    }
+
+    #[test]
+    fn render_color_tags_truecolor_bad_hex_is_literal() {
+        // 5 hex digits — not a valid #RRGGBB form. Tag-shape check fails
+        // and the whole `<#...>` passes through as literal text.
+        let out = ansi("<#abcde>?</>");
+        assert!(out.contains("<#abcde>"), "short hex literal: {out:?}");
+    }
+
+    #[test]
+    fn render_color_tags_mixed_palettes_in_one_string() {
+        // ANSI16 + 256 + truecolor in one render — exercises
+        // push_color_params for all three branches at once.
+        let out = ansi("<red>R</><c208>O</><#FFEE00>Y</>");
+        assert!(out.contains("\x1b[31m"));
+        assert!(out.contains("\x1b[38;5;208m"));
+        assert!(out.contains("\x1b[38;2;255;238;0m"));
     }
 
     #[test]
@@ -3974,6 +4141,43 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             );
             let _ = conn.try_send(mud_net::gmcp_packet("Char.Aggro", &payload));
         }
+    }
+
+    // Char.Effects: array of `{name, duration, source, strength}`
+    // for every active effect on the player. Drives client-side
+    // buff/debuff panels (Mudlet's effect icon strip, MUSHclient
+    // status displays). Cadence matches the prompt — per-prompt
+    // refresh is cheap and tracks ticks transparently. `duration`
+    // is seconds remaining (-1 = permanent); `source` is the
+    // string label so clients can tag self-cast vs gear vs admin.
+    {
+        use mud_world::{AppliedTo as Applied, EffectInstance, EffectSource};
+        let mut entries: Vec<String> = Vec::new();
+        let mut q = world.query::<(&EffectInstance, &Applied)>();
+        for (inst, applied) in q.iter(world) {
+            if applied.0 != target {
+                continue;
+            }
+            let safe_name = inst
+                .name
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            let source_label = match &inst.source {
+                EffectSource::Spell => "spell",
+                EffectSource::Item => "item",
+                EffectSource::Room => "room",
+                EffectSource::Admin => "admin",
+                EffectSource::Other(_) => "other",
+            };
+            entries.push(format!(
+                "{{\"name\":\"{}\",\"duration\":{},\"source\":\"{}\",\"strength\":{}}}",
+                safe_name, inst.remaining_secs, source_label, inst.strength
+            ));
+        }
+        // Always emit, even when empty — clients use the empty
+        // array to clear stale icons.
+        let payload = format!("[{}]", entries.join(","));
+        let _ = conn.try_send(mud_net::gmcp_packet("Char.Effects", &payload));
     }
 
     // Room.Info: lightweight room metadata for Mudlet-style
@@ -7028,12 +7232,16 @@ pub(crate) fn flip_door_both_sides(world: &mut World, room: Entity, dir: Directi
     }
 }
 
-/// `motd` / `news` / `credits` / `policies`: static-text dumps.
-/// Each command prints a hardcoded constant for now; once a
-/// `GameConfig` table or files-on-disk source lands, the bodies move
-/// to a dynamic lookup. Today the goal is: muscle-memory commands
-/// shouldn't error out, and players get useful prose.
-const MOTD_TEXT: &str = "\
+/// `motd` / `news` / `credits` / `policies`: long-form static text.
+/// Live content lives in the schema's `SystemText` table (one row
+/// per key, edited via Muditor) and is loaded once at boot into
+/// the [`mud_world::SystemTexts`] resource. The constants below
+/// are the compile-time fallbacks — they only render when the DB
+/// is missing the corresponding row, which today only happens on a
+/// completely fresh database. The fallback also doubles as the
+/// authoritative reference for what the row should say if a
+/// builder asks to seed defaults.
+pub(crate) const MOTD_TEXT: &str = "\
 \r\n<b:red>~~~ </><b:yellow>Welcome to FieryMUD</> <b:red> ~~~</>\r\n\
 \r\n\
 You stand at the threshold of a world older than memory — its \
@@ -7052,7 +7260,7 @@ keepers.</>\r\n\
 \r\n\
 <yellow>The fires are fed. The doors are open. Walk in.</>\r\n\
 ";
-const NEWS_TEXT: &str = "\
+pub(crate) const NEWS_TEXT: &str = "\
 \r\n<b:cyan>=== Recent Changes ===</>\r\n\
 \r\n\
 <dim>This list is curated by hand from the commit log. Most \
@@ -7075,7 +7283,7 @@ CoinPile and reclaim it via `get all from corpse`.\r\n\
 \r\n\
 <dim>Run `commands` for everything you can use today.</>\r\n\
 ";
-const CREDITS_TEXT: &str = "\
+pub(crate) const CREDITS_TEXT: &str = "\
 \r\n<b:cyan>=== Credits ===</>\r\n\
 \r\n\
 <yellow>FieryMUD</> stands on the shoulders of a long lineage:\r\n\
@@ -7094,7 +7302,7 @@ all of it in 1990\r\n\
 tokio, mlua. Thanks to the lineage above, and to everyone who \
 keeps a public MUD running.</>\r\n\
 ";
-const POLICIES_TEXT: &str = "\
+pub(crate) const POLICIES_TEXT: &str = "\
 \r\n<b:cyan>=== Server Policies ===</>\r\n\
 \r\n\
 <yellow>1.</> <b:white>No harassment</>, slurs, or threats — to \
