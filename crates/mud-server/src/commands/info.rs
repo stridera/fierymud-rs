@@ -25,9 +25,28 @@ inventory::submit! {
             summary: "List commands or show details on a specific one.",
             long: "With no arguments, shows commands available to you grouped \
                    by category. With an argument, shows the usage and details \
-                   for that command.",
+                   for that command. Try `help newbie` for a starter-pack of \
+                   practical first goals.",
         },
         run: cmd_help,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["newbie", "tutorial"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Info,
+        help: Help {
+            usage: "newbie",
+            summary: "Show a short starter-pack of first goals.",
+            long: "Lists the practical next steps for a new character: get \
+                   oriented, equip gear, find a trainer, fight a safe mob, \
+                   and recall back. Re-run any time you forget where you \
+                   were — it's not state-dependent.",
+        },
+        run: cmd_newbie,
     }
 }
 
@@ -2341,6 +2360,27 @@ inventory::submit! {
     }
 }
 
+
+pub(crate) fn cmd_newbie(world: &mut World, player: Entity, _args: &str) {
+    // Static starter-pack — read on every call so a one-shot
+    // `newbie` always renders. Steps roughly map to "first 30
+    // minutes of play." The list is conservative and intentionally
+    // class-agnostic; class-specific advice belongs in `help <class>`
+    // pages once those land.
+    let body = "\r\n\
+        <b:cyan>Newbie starter pack:</>\r\n\
+        \r\n\
+        <yellow>1.</> <b:cyan>Get oriented.</> <dim>Try</> <cyan>look</> <dim>and</> <cyan>exits</> <dim>to see your room and where you can go.</>\r\n\
+        <yellow>2.</> <b:cyan>Check yourself.</> <dim>Try</> <cyan>score</> <dim>(stats),</> <cyan>inventory</> <dim>(carried items), and</> <cyan>equipment</> <dim>(worn).</>\r\n\
+        <yellow>3.</> <b:cyan>Equip what you have.</> <dim>Try</> <cyan>wear &lt;item&gt;</> <dim>or</> <cyan>wield &lt;weapon&gt;</> <dim>— a half-dressed character takes far more damage.</>\r\n\
+        <yellow>4.</> <b:cyan>Find a trainer.</> <dim>Trainers teach skills and spells. Ask local NPCs or use</> <cyan>where &lt;name&gt;</> <dim>to track one down. Spend points with</> <cyan>practice</>.\r\n\
+        <yellow>5.</> <b:cyan>Fight something safe.</> <dim>Use</> <cyan>consider &lt;target&gt;</> <dim>to gauge danger before</> <cyan>kill &lt;target&gt;</>. <dim>If a fight goes poorly,</> <cyan>flee</> <dim>or set</> <cyan>wimpy 30</> <dim>to auto-flee at low HP.</>\r\n\
+        <yellow>6.</> <b:cyan>Stay alive.</> <dim>Watch hunger / thirst on</> <cyan>score</>. <dim>Eat / drink and</> <cyan>rest</> <dim>or</> <cyan>sleep</> <dim>to regen.</>\r\n\
+        <yellow>7.</> <b:cyan>Set a recall.</> <dim>Touch a touchstone in a safe spot, then</> <cyan>recall</> <dim>warps you back from anywhere — invaluable when a fight goes wrong.</>\r\n\
+        \r\n\
+        <dim>Type</> <cyan>help &lt;command&gt;</> <dim>for any of the verbs above.</>\r\n";
+    send_to(world, player, body);
+}
 
 pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
     let (role, perms) = world

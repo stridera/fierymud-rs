@@ -1063,11 +1063,15 @@ impl ConnRouter {
                         return;
                     }
                 };
+                // Internal IDs (character_id, user_id) intentionally
+                // omitted from the player-facing welcome — they're
+                // diagnostic and live in `clientinfo` for staff.
+                let _ = character_id;
+                let _ = user_id;
                 let _ = ctx.outbound.try_send(
                     format!(
                         "Welcome to FieryMUD, {character_name}! Your {gender} {race} \
-                         {class_plain_name} is ready (character id {character_id}, user \
-                         id {user_id}). Stepping into the world…\r\n"
+                         {class_plain_name} is ready. Stepping into the world…\r\n"
                     )
                     .into_bytes(),
                 );
@@ -1813,6 +1817,21 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
             "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",
             name = c.name,
         ).into_bytes());
+        // First-login guidance: a brand-new character has no prior
+        // `last_login` stamp. Drop a one-line "Try: ..." pointing at
+        // the most useful first commands so a fresh player isn't
+        // staring at a blank prompt. Suppressed for returning
+        // characters (last_login set) to avoid nagging veterans.
+        if c.last_login.is_none() {
+            // Plain text — the welcome is sent directly through the
+            // outbound channel without going through `send_raw`'s
+            // XML-Lite renderer, so color tags would show literally.
+            let _ = outbound.try_send(
+                "Try:  look  ·  exits  ·  score  ·  inventory  ·  help newbie\r\n\r\n"
+                    .as_bytes()
+                    .to_vec(),
+            );
+        }
     } else {
         let _ = outbound.try_send(
             format!(
