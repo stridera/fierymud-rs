@@ -4197,6 +4197,91 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
     let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills.List", &payload));
 }
 
+/// Push a `Group` GMCP frame to `viewer`. The frame describes the
+/// whole party rooted at `viewer`'s leader: name, count, and a
+/// member array. Each member entry carries name, level, race,
+/// class, current room (true if same as `viewer`'s room — the
+/// `with_leader` IRE convention), and a `stats` block with
+/// hp/maxhp/mv/maxmv. Mudlet's party panel renders directly off
+/// this shape.
+///
+/// Empty / solo case: no Group frame is emitted (the player isn't
+/// in a group). Callers can also push `Group.End` (empty body) to
+/// signal teardown — handled by the prompt-cadence emit's
+/// member-count check.
+pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
+    let root = group_root(world, viewer);
+    let members = group_members(world, root);
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    if members.len() <= 1 {
+        // Solo — push an empty Group frame so a previously-visible
+        // panel clears.
+        let _ = conn.0.try_send(mud_net::gmcp_packet("Group", "{}"));
+        return;
+    }
+    let viewer_room = world.get::<Located>(viewer).map(|l| l.0);
+    let leader_name = world
+        .get::<Named>(root)
+        .map(|n| n.name.clone())
+        .unwrap_or_default();
+    let leader_plain = render_color_tags(&leader_name, ColorMode::Strip)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let mut entries: Vec<String> = Vec::with_capacity(members.len());
+    for &m in &members {
+        let raw = world
+            .get::<Named>(m)
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        let plain = render_color_tags(&raw, ColorMode::Strip)
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let level = world.get::<Profile>(m).map_or(0, |p| p.level);
+        let race = world
+            .get::<Profile>(m)
+            .map(|p| p.race.clone())
+            .unwrap_or_default();
+        let class = world
+            .get::<Profile>(m)
+            .and_then(|p| p.class_id)
+            .and_then(|id| {
+                world
+                    .get_resource::<ClassCatalog>()
+                    .and_then(|c| c.by_id.get(&id))
+                    .map(|d| d.plain_name.clone())
+            })
+            .unwrap_or_default();
+        let with_leader = match (viewer_room, world.get::<Located>(m).map(|l| l.0)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        };
+        let (hp, max_hp) = world
+            .get::<Health>(m)
+            .map_or((0, 0), |h| (h.hp, h.max));
+        let (mv, max_mv) = world
+            .get::<Stamina>(m)
+            .map_or((0, 0), |s| (s.current, s.max));
+        entries.push(format!(
+            r#"{{"name":"{plain}","with_leader":{with},"level":{level},"race":"{race}","class":"{class}","stats":{{"hp":{hp},"maxhp":{maxhp},"mp":0,"maxmp":0,"mv":{mv},"maxmv":{maxmv}}}}}"#,
+            plain = plain,
+            with = with_leader,
+            level = level,
+            race = race.replace('"', "\\\""),
+            class = class.replace('"', "\\\""),
+            hp = hp,
+            maxhp = max_hp,
+            mv = mv,
+            maxmv = max_mv,
+        ));
+    }
+    let payload = format!(
+        r#"{{"groupname":"{leader_plain}'s group","leader":"{leader_plain}","count":{count},"members":[{members}]}}"#,
+        count = members.len(),
+        members = entries.join(","),
+    );
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Group", &payload));
+}
+
 /// Send `Core.Goodbye` immediately before closing the connection.
 /// Standard IRE convention is a single-string body explaining the
 /// reason; clients display it as a clean disconnect message
@@ -4447,6 +4532,15 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         }
     }
 
+    // Group — IRE-shaped party panel. Solo players get an empty
+    // `{}` frame so a previously-visible panel clears; grouped
+    // players get the full roster with per-member stats. Per-prompt
+    // cadence is generous; the helper short-circuits the empty
+    // case so it stays cheap. `conn` is the cloned Outbound from
+    // the top of this function — it stays valid across the
+    // helper's `&mut World` since it's owned.
+    send_group_state(world, target);
+
     // Char.Effects: array of `{name, duration, source, strength}`
     // for every active effect on the player. Drives client-side
     // buff/debuff panels (Mudlet's effect icon strip, MUSHclient
@@ -4484,40 +4578,127 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         let _ = conn.try_send(mud_net::gmcp_packet("Char.Effects", &payload));
     }
 
-    // Room.Info: lightweight room metadata for Mudlet-style
-    // mappers. Same prompt cadence as Char.Vitals; per-prompt
-    // re-emit is cheap (one telnet frame, ~80 bytes) and lets
-    // the client refresh on any view change. Room name is
-    // sanitized of XML-Lite tags so the JSON stays well-formed.
+    // Room.Info — IRE-shaped mapper feed. Mudlet's stock mapper
+    // script keys off this exact field set; emitting the legacy
+    // {zone, id, exits:[...]} shape silently dropped the room
+    // from any Mudlet auto-mapping. Shape:
+    //   { num: int           // composite key, zone*100000+id
+    //   , name: string       // room title (color-stripped)
+    //   , area: string       // zone display name
+    //   , environment: string  // sector type label
+    //   , exits: { dir: int }  // direction → destination composite num
+    //   , doors: { dir: state }  // direction → "closed" / "locked"
+    //   }
+    // The composite num encoding is reversible (id = num %
+    // 100000, zone = num / 100000) and unique within a 5-digit
+    // local-id space — comfortably above any zone we have today.
     if let Some(located) = world.get::<Located>(target) {
         let room = located.0;
         let room_name = world
             .get::<Named>(room)
             .map_or_else(String::new, |n| n.name.clone());
-        let plain = render_color_tags(&room_name, ColorMode::Strip)
-            .replace('"', "\\\"")
-            .replace('\\', "\\\\");
-        let (zone, id) = world
+        let plain_name = render_color_tags(&room_name, ColorMode::Strip)
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let (zone_id, room_id) = world
             .get::<WorldKey>(room)
             .map_or((-1, -1), |k| (k.zone, k.id));
-        let exits: Vec<&'static str> = world
-            .get::<Exits>(room)
-            .map(|e| {
-                e.0.keys()
-                    .copied()
-                    .map(direction_name)
-                    .collect::<Vec<_>>()
-            })
+        let num = room_composite_num(zone_id, room_id);
+        // Zone display name: walk to the zone entity via WorldKeyIndex.
+        let area_name = world
+            .get_resource::<WorldKeyIndex>()
+            .and_then(|idx| idx.zones.get(&zone_id).copied())
+            .and_then(|zone_e| world.get::<Named>(zone_e).map(|n| n.name.clone()))
             .unwrap_or_default();
-        let exits_json = exits
-            .iter()
-            .map(|e| format!("\"{e}\""))
-            .collect::<Vec<_>>()
-            .join(",");
+        let area_plain = render_color_tags(&area_name, ColorMode::Strip)
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let environment = world
+            .get::<RoomSector>(room)
+            .map(|s| sector_label(s.0))
+            .unwrap_or("Unknown");
+        // Exits dict: direction → destination composite num. Doors
+        // dict: direction → "closed" / "locked" for non-Open
+        // states. Hidden exits omitted entirely (the same way
+        // `look` hides them from unsearched rooms).
+        let mut exit_entries: Vec<String> = Vec::new();
+        let mut door_entries: Vec<String> = Vec::new();
+        if let Some(exits) = world.get::<Exits>(room) {
+            for (dir, data) in &exits.0 {
+                if data.is_hidden {
+                    continue;
+                }
+                let dir_name = direction_name(*dir);
+                let dest_num = data
+                    .to
+                    .and_then(|e| world.get::<WorldKey>(e))
+                    .map_or(0, |k| room_composite_num(k.zone, k.id));
+                exit_entries.push(format!("\"{dir_name}\":{dest_num}"));
+                let door_state = match data.state {
+                    mud_db::enums::ExitState::Open => None,
+                    mud_db::enums::ExitState::Closed => Some("closed"),
+                    mud_db::enums::ExitState::Locked => Some("locked"),
+                };
+                if let Some(state) = door_state {
+                    door_entries.push(format!("\"{dir_name}\":\"{state}\""));
+                }
+            }
+        }
         let payload = format!(
-            "{{\"name\":\"{plain}\",\"zone\":{zone},\"id\":{id},\"exits\":[{exits_json}]}}"
+            "{{\"num\":{num},\"name\":\"{plain_name}\",\"area\":\"{area_plain}\",\"environment\":\"{environment}\",\"exits\":{{{}}},\"doors\":{{{}}}}}",
+            exit_entries.join(","),
+            door_entries.join(","),
         );
         let _ = conn.try_send(mud_net::gmcp_packet("Room.Info", &payload));
+    }
+}
+
+/// Encode a `(zone, id)` composite room key as a single integer
+/// for clients that expect IRE-style integer room ids. The legacy
+/// CircleMUD vnum scheme (`zone*100 + id`) maxes out around 10000;
+/// our (i32, i32) namespace is much larger so we use a
+/// 5-decimal-digit local-id field — `zone*100000 + id`. Reversible:
+/// `id = num % 100000`, `zone = num / 100000`. Returns `0` for
+/// missing keys, which Mudlet's mapper treats as "no destination
+/// known yet" and drops the edge gracefully.
+fn room_composite_num(zone: i32, id: i32) -> i32 {
+    if zone < 0 || id < 0 || id >= 100_000 {
+        return 0;
+    }
+    zone.saturating_mul(100_000).saturating_add(id)
+}
+
+/// Map a `Sector` enum value to the IRE-convention environment
+/// label. Mudlet's mapper uses these labels to pick a per-sector
+/// terrain color; the strings match the seeded sector names from
+/// the C++ legacy package's mapper config so existing Mudlet
+/// scripts work without re-keying.
+fn sector_label(s: mud_db::enums::Sector) -> &'static str {
+    use mud_db::enums::Sector;
+    match s {
+        Sector::Structure => "Structure",
+        Sector::City => "City",
+        Sector::Field => "Field",
+        Sector::Forest => "Forest",
+        Sector::Hills => "Hills",
+        Sector::Mountain => "Mountains",
+        Sector::Shallows => "Shallows",
+        Sector::Water => "Water",
+        Sector::Underwater => "Underwater",
+        Sector::Air => "Air",
+        Sector::Road => "Road",
+        Sector::Grasslands => "Grasslands",
+        Sector::Cave => "Cave",
+        Sector::Ruins => "Ruins",
+        Sector::Swamp => "Swamp",
+        Sector::Beach => "Beach",
+        Sector::Underdark => "Underdark",
+        Sector::Astralplane => "Astralplane",
+        Sector::Airplane => "Airplane",
+        Sector::Fireplane => "Fireplane",
+        Sector::Earthplane => "Earthplane",
+        Sector::Etherealplane => "Etherealplane",
+        Sector::Avernus => "Avernus",
     }
 }
 
