@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgPool};
 
-use crate::enums::{Permission, PlayerFlag};
+use crate::enums::{Permission, PlayerFlag, Position};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterRow {
@@ -105,6 +105,14 @@ pub struct CharacterRow {
     /// the runtime's `Poofs` component.
     pub poof_in: Option<String>,
     pub poof_out: Option<String>,
+    /// Body / life-state — schema enum mirror. Loaded once at spawn
+    /// so a player who logged out asleep stays asleep on reconnect,
+    /// and a ghost stays a ghost instead of popping back to a live
+    /// body. The runtime maps `Sleeping` / `Resting` / `Sitting` /
+    /// `Standing` onto `PostureKind`, `Ghost` onto a runtime marker;
+    /// the unmodeled life-state values (`Dead`, `MortallyWounded`,
+    /// `Incapacitated`, `Stunned`) fall through to `Standing`.
+    pub position: Position,
 }
 
 /// Bundle of fields fed into `create` from the login-creation
@@ -296,6 +304,11 @@ pub struct CharacterStatePayload<'a> {
     /// "$n appears" / "$n vanishes" lines at render time.
     pub poof_in: Option<&'a str>,
     pub poof_out: Option<&'a str>,
+    /// Body / life-state — schema enum, mirrored as
+    /// `mud_db::enums::Position`. Saved so posture and ghost state
+    /// survive disconnect; the runtime translates `Posture` and the
+    /// `Ghost` marker into a `Position` value at save time.
+    pub position: Position,
 }
 
 pub async fn save_state<'e, E: PgExecutor<'e>>(
@@ -325,8 +338,9 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
             freeze_level = $17,
             wimpy_threshold = $18,
             poof_in = $19,
-            poof_out = $20
-        WHERE id = $21
+            poof_out = $20,
+            position = $21
+        WHERE id = $22
         "#,
         state.hit_points,
         state.stamina,
@@ -348,6 +362,7 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
         state.wimpy_threshold,
         state.poof_in,
         state.poof_out,
+        state.position as Position,
         character_id,
     )
     .execute(executor)
@@ -759,7 +774,8 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             wealth, bank_wealth, gender, skill_points, hunger, thirst, time_played,
             last_login AS "last_login: chrono::NaiveDateTime",
             invis_level, freeze_level, wimpy_threshold,
-            poof_in, poof_out
+            poof_in, poof_out,
+            position AS "position!: Position"
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -817,7 +833,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             freeze_level,
             wimpy_threshold,
             poof_in,
-            poof_out
+            poof_out,
+            position AS "position!: Position"
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name

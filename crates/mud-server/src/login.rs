@@ -1857,7 +1857,19 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
             stamina,
             combat,
             core_stats,
-            Posture(PostureKind::Standing),
+            // Posture restored from the schema's `Position` enum so a
+            // player who logged out asleep stays asleep. Ghost is the
+            // dead-but-incorporeal state — the marker gets applied
+            // separately below since it's a marker rather than data.
+            // Unmodeled life-state values (Dead / MortallyWounded /
+            // Incapacitated / Stunned) fall through to Standing until
+            // we have those states in the runtime.
+            Posture(match c.position {
+                mud_db::enums::Position::Sleeping => PostureKind::Sleeping,
+                mud_db::enums::Position::Resting => PostureKind::Resting,
+                mud_db::enums::Position::Sitting => PostureKind::Sitting,
+                _ => PostureKind::Standing,
+            }),
             PlayerFlags(c.player_flags.clone()),
             Prompt(commands::sanitize_prompt_template(&c.prompt)),
             LoggedInAt(std::time::Instant::now()),
@@ -1899,6 +1911,13 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         // the current login. Absent for first-time logins.
         if let Some(ts) = c.last_login {
             e.insert(mud_world::PreviousLogin(ts.and_utc().timestamp()));
+        }
+        // Restore the dead-but-incorporeal marker if the player
+        // logged out as a ghost. The matching Posture column was
+        // already mapped in the spawn bundle; this side just adds
+        // the marker so `release` works and combat skip-paths fire.
+        if c.position == mud_db::enums::Position::Ghost {
+            e.insert(mud_world::Ghost);
         }
     }
     entity
@@ -2244,6 +2263,25 @@ pub(crate) async fn save_player(
         None
     };
 
+    // Body / life-state for the schema's `Position` enum. Ghost
+    // wins — a player who logged out as a ghost (post-death,
+    // pre-`release`) stays a ghost on reconnect rather than popping
+    // back into a pristine body. Otherwise translate `Posture` onto
+    // the schema variant; `Kneeling` collapses onto `Sitting`
+    // because the schema doesn't model kneeling separately.
+    let position = if world.get::<mud_world::Ghost>(entity).is_some() {
+        mud_db::enums::Position::Ghost
+    } else {
+        match world.get::<Posture>(entity).map(|p| p.0) {
+            Some(PostureKind::Sleeping) => mud_db::enums::Position::Sleeping,
+            Some(PostureKind::Resting) => mud_db::enums::Position::Resting,
+            Some(PostureKind::Sitting | PostureKind::Kneeling) => {
+                mud_db::enums::Position::Sitting
+            }
+            Some(PostureKind::Standing) | None => mud_db::enums::Position::Standing,
+        }
+    };
+
     // === Single transaction wraps every per-character DB write ===
     //
     // All-or-nothing: if any save_X fails, the `?` short-circuits,
@@ -2280,6 +2318,7 @@ pub(crate) async fn save_player(
                 wimpy_threshold,
                 poof_in: poof_in.as_deref(),
                 poof_out: poof_out.as_deref(),
+                position,
             },
         )
         .await?;
@@ -2768,6 +2807,7 @@ mod tests {
             wimpy_threshold: 0,
             poof_in: None,
             poof_out: None,
+            position: mud_db::enums::Position::Standing,
         }
     }
 

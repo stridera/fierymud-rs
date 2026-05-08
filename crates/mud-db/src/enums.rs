@@ -72,6 +72,45 @@ pub enum Sector {
     Avernus,
 }
 
+/// Body / life-state position. Mirrors the schema's `Position` enum
+/// (Prisma model). The runtime maps the active subset
+/// (`STANDING`/`SITTING`/`RESTING`/`SLEEPING`) onto `PostureKind` and
+/// the dead-but-incorporeal `GHOST` value onto a runtime marker; the
+/// remaining values (`DEAD`/`MORTALLY_WOUNDED`/`INCAPACITATED`/`STUNNED`)
+/// aren't yet modeled and round-trip as `STANDING` on load.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = "Position", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Position {
+    Dead,
+    Ghost,
+    MortallyWounded,
+    Incapacitated,
+    Stunned,
+    Sleeping,
+    Resting,
+    Sitting,
+    Standing,
+}
+
+impl Position {
+    /// Schema-text form for the wire — kept stable so save sites can
+    /// round-trip without re-deriving the macro mapping.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dead => "DEAD",
+            Self::Ghost => "GHOST",
+            Self::MortallyWounded => "MORTALLY_WOUNDED",
+            Self::Incapacitated => "INCAPACITATED",
+            Self::Stunned => "STUNNED",
+            Self::Sleeping => "SLEEPING",
+            Self::Resting => "RESTING",
+            Self::Sitting => "SITTING",
+            Self::Standing => "STANDING",
+        }
+    }
+}
+
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[sqlx(type_name = "Direction", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Direction {
