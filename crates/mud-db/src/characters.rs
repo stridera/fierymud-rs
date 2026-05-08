@@ -609,6 +609,39 @@ pub async fn save_ignore_list<'e, E: PgExecutor<'e>>(
     Ok(())
 }
 
+/// Read the JSON `effect_instances` blob — wall-clock-stamped list of
+/// active `EffectInstance`s at the time of save. Returns `Ok(None)` when
+/// NULL. Caller filters expired entries against the configured
+/// disconnect cap and restores the remainder as ECS entities.
+pub async fn load_effect_instances(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<serde_json::Value>> {
+    let row = sqlx::query!(
+        r#"SELECT effect_instances FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.effect_instances))
+}
+
+/// Persist the `effect_instances` blob. Pass `None` to clear.
+pub async fn save_effect_instances<'e, E: PgExecutor<'e>>(
+    executor: E,
+    character_id: &str,
+    blob: Option<&serde_json::Value>,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET effect_instances = $1 WHERE id = $2"#,
+        blob,
+        character_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// Read the staff-notes blob for a character (Builder+ visibility).
 /// Returns Ok(None) when null. Single shared blob — appended to by
 /// the runtime's `pnote add` path.

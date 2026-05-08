@@ -1367,7 +1367,7 @@ impl PostureKind {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Posture(pub PostureKind);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectSource {
     Spell,
     Item,

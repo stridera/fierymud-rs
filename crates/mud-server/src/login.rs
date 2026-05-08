@@ -55,6 +55,89 @@ const MAX_CHARACTER_NAME_LEN: usize = 20;
 /// (0, 0) is "The Void" — fitting.
 const FALLBACK_START: (i32, i32) = (0, 0);
 
+/// Maximum disconnect window across which non-staff effects persist,
+/// in seconds. Reconnect within this window restores active buffs /
+/// debuffs / poisons / blinds with their elapsed time deducted from
+/// `remaining_secs`. Beyond it, non-staff effects are wiped — closing
+/// the "log off for the night and come back fresh" loop the design
+/// targets, and intentionally not exploitable for short death-staving
+/// disconnects since the timer keeps ticking. Staff-applied effects
+/// (`EffectSource::Admin`) bypass this cap entirely; they're often
+/// rewards and should outlive a single sleep cycle.
+const EFFECT_DISCONNECT_CAP_SECS: i64 = 3600;
+
+/// Persisted shape of one `EffectInstance` — flattened so we don't
+/// have to round-trip through ECS-internal types. The runtime
+/// component shape (`EffectInstance` + `AppliedTo` + optional
+/// `ModifyDelta`) collapses into this single record per entry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedEffectInstance {
+    kind: i32,
+    name: String,
+    strength: i32,
+    remaining_secs: i32,
+    source: mud_world::EffectSource,
+    ability_id: Option<i32>,
+    /// Present iff the effect entity also had a `ModifyDelta` (stat-
+    /// modifying buff). Captured as a 2-tuple to keep the JSON shape
+    /// shallow: (`target_label`, amount).
+    modify_delta: Option<(String, i32)>,
+}
+
+/// Persisted shape of the active-effects blob. Wraps the per-entry
+/// list in an envelope that records the wall-clock save time, so the
+/// load path can compute "elapsed since save" without trusting any
+/// per-entry timestamp.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedEffects {
+    saved_at_unix: i64,
+    effects: Vec<PersistedEffectInstance>,
+}
+
+/// Shared restore logic: spawn one effect entity per persisted entry,
+/// dropping non-Admin entries past the disconnect cap and adjusting
+/// `remaining_secs` for elapsed time. Used by both the telnet login
+/// path and the admin virtual-session path.
+pub(crate) fn restore_persisted_effects(
+    world: &mut World,
+    entity: Entity,
+    persisted: PersistedEffects,
+) {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+    let elapsed = now_unix.saturating_sub(persisted.saved_at_unix).max(0);
+    for eff in persisted.effects {
+        let is_admin = matches!(eff.source, mud_world::EffectSource::Admin);
+        if !is_admin && elapsed > EFFECT_DISCONNECT_CAP_SECS {
+            continue;
+        }
+        let restored_secs = if eff.remaining_secs < 0 {
+            -1
+        } else {
+            let after = i64::from(eff.remaining_secs).saturating_sub(elapsed);
+            if after <= 0 {
+                continue;
+            }
+            i32::try_from(after).unwrap_or(eff.remaining_secs)
+        };
+        let mut effect_entity = world.spawn((
+            mud_world::EffectInstance {
+                kind: eff.kind,
+                name: eff.name.clone(),
+                strength: eff.strength,
+                remaining_secs: restored_secs,
+                source: eff.source,
+                ability_id: eff.ability_id,
+            },
+            mud_world::AppliedTo(entity),
+        ));
+        if let Some((target, amount)) = eff.modify_delta {
+            effect_entity.insert(mud_world::ModifyDelta { target, amount });
+        }
+    }
+}
+
 pub enum Stage {
     /// Initial prompt accepts either an email (contains `@`) or a
     /// character name. Email path leads to `CharSelect` like before;
@@ -1172,6 +1255,12 @@ impl ConnRouter {
                 warn!(conn_id, error = %e, "ignore_list load failed");
                 None
             });
+        let effect_instances_json = mud_db::characters::load_effect_instances(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "effect_instances load failed");
+                None
+            });
 
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
@@ -1460,6 +1549,15 @@ impl ConnRouter {
                         .collect(),
                 });
             }
+        }
+        // EffectInstances — wall-clock-stamped envelope. The helper
+        // drops non-Admin entries past EFFECT_DISCONNECT_CAP_SECS,
+        // restores the rest with elapsed time deducted, and spawns
+        // one effect entity per surviving record.
+        if let Some(json) = effect_instances_json
+            && let Ok(persisted) = serde_json::from_value::<PersistedEffects>(json)
+        {
+            restore_persisted_effects(world, entity, persisted);
         }
         // Track the spawn room toward zone-clear, so a player who
         // logs in inside the last unvisited room of a zone gets the
@@ -1919,6 +2017,43 @@ pub(crate) async fn save_player(
         .get::<mud_world::IgnoreList>(entity)
         .filter(|l| !l.0.is_empty())
         .and_then(|l| serde_json::to_value(&l.0).ok());
+    // Active EffectInstances on this player. Query for every effect
+    // entity whose AppliedTo points at the player; flatten to the
+    // persistence shape with optional ModifyDelta. Permanent effects
+    // (`remaining_secs < 0`) and short-lived buffs alike are
+    // captured — the load path is what enforces the 1h cap.
+    let effect_instances_json: Option<serde_json::Value> = {
+        let mut q = world.query::<(
+            &mud_world::EffectInstance,
+            &mud_world::AppliedTo,
+            Option<&mud_world::ModifyDelta>,
+        )>();
+        let effects: Vec<PersistedEffectInstance> = q
+            .iter(world)
+            .filter(|(_, applied, _)| applied.0 == entity)
+            .map(|(inst, _, modd)| PersistedEffectInstance {
+                kind: inst.kind,
+                name: inst.name.clone(),
+                strength: inst.strength,
+                remaining_secs: inst.remaining_secs,
+                source: inst.source.clone(),
+                ability_id: inst.ability_id,
+                modify_delta: modd.map(|m| (m.target.clone(), m.amount)),
+            })
+            .collect();
+        if effects.is_empty() {
+            None
+        } else {
+            let saved_at_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+            serde_json::to_value(&PersistedEffects {
+                saved_at_unix,
+                effects,
+            })
+            .ok()
+        }
+    };
     let ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow> = world
         .get::<KnownAbilities>(entity)
         .map(KnownAbilities::to_rows)
@@ -2005,6 +2140,12 @@ pub(crate) async fn save_player(
         .await?;
         mud_db::characters::save_cooldowns(&mut *tx, &cid, cooldowns_json.as_ref()).await?;
         mud_db::characters::save_ignore_list(&mut *tx, &cid, ignore_list_json.as_ref()).await?;
+        mud_db::characters::save_effect_instances(
+            &mut *tx,
+            &cid,
+            effect_instances_json.as_ref(),
+        )
+        .await?;
         mud_db::characters::save_bank_wealth(&mut *tx, &cid, bank).await?;
         if let Some(t) = new_time_played {
             mud_db::characters::save_time_played(&mut *tx, &cid, t).await?;

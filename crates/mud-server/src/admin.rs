@@ -101,6 +101,7 @@ pub enum AdminRequest {
         spell_cooldowns_json: Option<serde_json::Value>,
         cooldowns_json: Option<serde_json::Value>,
         ignore_list_json: Option<serde_json::Value>,
+        effect_instances_json: Option<serde_json::Value>,
     },
     SessionDestroy { player_name: String },
     /// Mark an online (or virtual-session) player with `PendingSave`
@@ -396,6 +397,9 @@ async fn handle_session_create(
     let ignore_list_json = characters::load_ignore_list(&state.pool, &character.id)
         .await
         .unwrap_or_default();
+    let effect_instances_json = characters::load_effect_instances(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
     json_ok(
         enqueue(
             &state,
@@ -411,6 +415,7 @@ async fn handle_session_create(
                 spell_cooldowns_json,
                 cooldowns_json,
                 ignore_list_json,
+                effect_instances_json,
             },
         )
         .await,
@@ -798,11 +803,11 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::SessionCreate {
             player_name, user, character, items, abilities, aliases,
             script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
-            ignore_list_json,
+            ignore_list_json, effect_instances_json,
         } => session_create(
             world, &player_name, &user, &character, &items, &abilities, &aliases,
             script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
-            ignore_list_json,
+            ignore_list_json, effect_instances_json,
         ),
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
         AdminRequest::MarkPendingSave { player_name } => mark_pending_save(world, &player_name),
@@ -1376,6 +1381,7 @@ fn session_create(
     spell_cooldowns_json: Option<serde_json::Value>,
     cooldowns_json: Option<serde_json::Value>,
     ignore_list_json: Option<serde_json::Value>,
+    effect_instances_json: Option<serde_json::Value>,
 ) -> AdminResponse {
     // Reject duplicate by name.
     {
@@ -1503,6 +1509,16 @@ fn session_create(
                 e.insert(cd);
             }
         }
+    }
+    // EffectInstance hydration runs OUTSIDE the entity_mut scope —
+    // each effect spawns a child entity with `AppliedTo(player)`.
+    // Mirrors the login path's restore logic (login.rs); shared
+    // policy: drop non-Admin effects beyond a 1-hour disconnect cap,
+    // restore the rest with elapsed time deducted.
+    if let Some(json) = effect_instances_json
+        && let Ok(persisted) = serde_json::from_value::<crate::login::PersistedEffects>(json)
+    {
+        crate::login::restore_persisted_effects(world, entity, persisted);
     }
     let mut by_name = world.resource::<VirtualSessions>().by_name.lock().expect("sessions poisoned");
     by_name.insert(
