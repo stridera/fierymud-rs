@@ -1563,18 +1563,29 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
             s.max = s.max.saturating_add(next_row.stamina_gain);
             s.current = s.max;
         }
-        // Grant 1 practice point per level gained. The runtime
-        // formula isn't carried by `LevelDefinition` today; bumping
-        // the schema is logged in SUGGESTIONS for the user.
+        // Practice points per level: a base of 2, plus the better
+        // of the caster's INT or WIS bonus. Scales mental-stat-heavy
+        // builds without making physical-stat builds bone-dry.
+        // Floor at 1 so a level-up always grants something even for
+        // a -2-bonus character.
+        let bonus = world
+            .get::<mud_world::CoreStats>(entity)
+            .map_or(0, |s| {
+                let int_b = mud_world::CoreStats::bonus(s.intelligence);
+                let wis_b = mud_world::CoreStats::bonus(s.wisdom);
+                int_b.max(wis_b)
+            });
+        let granted = (2 + bonus).max(1);
         if let Some(mut sp) = world.get_mut::<mud_world::SkillPoints>(entity) {
-            sp.0 = sp.0.saturating_add(1);
+            sp.0 = sp.0.saturating_add(granted);
         }
+        let plural = if granted == 1 { "point" } else { "points" };
         send_to(
             world,
             entity,
             format!(
                 "*** You have advanced to level {next}{}! ***\r\n\
-                 You gained 1 practice point.\r\n",
+                 You gained {granted} practice {plural}.\r\n",
                 next_row
                     .name
                     .as_deref()
