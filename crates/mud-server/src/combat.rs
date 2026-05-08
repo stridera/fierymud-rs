@@ -1103,10 +1103,23 @@ pub(crate) fn handle_death(
             hp.hp = 0;
         }
 
+        // Death recovery hint: name the room the corpse landed in so
+        // the player knows where to return for their gear. The corpse
+        // decays after 10 minutes (CorpseDecay { remaining_secs: 600 }
+        // above), so include the timer in the hint — players who get
+        // released without seeing this can run `corpse` once back
+        // alive for the same info.
+        let death_room_name = name_of(world, room);
         send_to(
             world,
             victim,
-            "You collapse, your spirit drifting free of your dying body.\r\nType `release` to return to your recall point.\r\n",
+            format!(
+                "You collapse, your spirit drifting free of your dying body.\r\n\
+                 Your corpse lies in <b:yellow>{death_room_name}</> — it will \
+                 decay in about 10 minutes.\r\n\
+                 Type <b:cyan>release</> to return to your recall point, then \
+                 head back for your gear.\r\n"
+            ),
         );
         broadcast_room_except_rendered(
             world,
