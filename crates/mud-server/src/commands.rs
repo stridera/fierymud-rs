@@ -8776,6 +8776,22 @@ pub(crate) fn invoke_ability_with(
     // the caster's own display name as the target word — match
     // that to self alongside the literal "me" / "self" strings.
     let caster_self_name = name_of(world, player);
+    // Hostile abilities with no target word: don't silently fall
+    // through to self-target (which trips the type gate with a
+    // confusing "this isn't a valid target" line). Refuse early
+    // with a hint that points at the right shape.
+    if is_hostile_ability && target_word.is_none() {
+        let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
+        send_to(
+            world,
+            player,
+            format!(
+                "{} needs a target. Try: {verb} '{display}' <target>.\r\n",
+                def.name
+            ),
+        );
+        return;
+    }
     let target_entity = if let Some(word) = target_word
         && !word.eq_ignore_ascii_case("me")
         && !word.eq_ignore_ascii_case("self")
