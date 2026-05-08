@@ -642,6 +642,38 @@ pub async fn save_effect_instances<'e, E: PgExecutor<'e>>(
     Ok(())
 }
 
+/// Read the JSON `pets` blob — wall-clock-stamped list of hired /
+/// charmed pets at save time. Returns `Ok(None)` when NULL.
+pub async fn load_pets(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<serde_json::Value>> {
+    let row = sqlx::query!(
+        r#"SELECT pets FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.pets))
+}
+
+/// Persist the `pets` blob. Pass `None` to clear (the typical case —
+/// no active pets at logout).
+pub async fn save_pets<'e, E: PgExecutor<'e>>(
+    executor: E,
+    character_id: &str,
+    blob: Option<&serde_json::Value>,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET pets = $1 WHERE id = $2"#,
+        blob,
+        character_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// Read the staff-notes blob for a character (Builder+ visibility).
 /// Returns Ok(None) when null. Single shared blob — appended to by
 /// the runtime's `pnote add` path.

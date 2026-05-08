@@ -6,10 +6,10 @@ use mud_net::{ConnId, Outbound};
 use mud_db::character_items::CharacterItemRow;
 use mud_world::{
     Account, AccountSummary, AttachedTriggers, BankWealth, BoardLink, CombatStats, CoreStats,
-    Description, EquippedSlot, Health, Item, Keywords, KnownAbilities, LiquidContainer, Located,
-    LoggedInAt, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind,
-    Profile, Prompt, RecallPoint, Slot, Stamina, Title, TriggerCatalog, Wealth, WearableIn,
-    WorldKey, WorldKeyIndex, wear_flags_primary_slot,
+    Description, EquippedSlot, Follower, Health, Item, Keywords, KnownAbilities, LiquidContainer,
+    Located, LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags,
+    Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title, TriggerCatalog,
+    Wealth, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
 };
 use tracing::{info, warn};
 
@@ -92,6 +92,94 @@ pub(crate) struct PersistedEffectInstance {
 pub(crate) struct PersistedEffects {
     saved_at_unix: i64,
     effects: Vec<PersistedEffectInstance>,
+}
+
+/// Persisted shape of one pet entry — proto key + the runtime
+/// state we want to round-trip. Saved location intentionally absent
+/// (Q9): pets always respawn next to the player, sidestepping
+/// zone-not-loaded edge cases and matching the "the pet was with
+/// you" mental model.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedPet {
+    proto_zone_id: i32,
+    proto_id: i32,
+    /// Custom-named pet keeps its name. Hire path renames to
+    /// `"<player>'s <mob_name>"`; charm leaves the proto name. We
+    /// just round-trip whatever's in `Named`.
+    name: String,
+    hp: i32,
+    max_hp: i32,
+}
+
+/// Persisted active-pets envelope. Same 1h disconnect-cap pattern as
+/// `PersistedEffects`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedPets {
+    saved_at_unix: i64,
+    pets: Vec<PersistedPet>,
+}
+
+/// Shared restore logic: spawn one mob entity per persisted pet
+/// entry, dropping all entries past the disconnect cap (no staff-
+/// exception equivalent for pets — they're player-owned investments,
+/// not staff rewards). Located next to the player; HP restored
+/// verbatim (a wounded pet stays wounded). Pulls cosmetic /
+/// combat-stat fields from the proto.
+pub(crate) fn restore_persisted_pets(
+    world: &mut World,
+    player: Entity,
+    persisted: PersistedPets,
+) {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+    let elapsed = now_unix.saturating_sub(persisted.saved_at_unix).max(0);
+    if elapsed > EFFECT_DISCONNECT_CAP_SECS {
+        // All pets exceeded the cap — drop them all. Mirrors the
+        // effects rule: log off for the night, come back without.
+        return;
+    }
+    let player_room = match world.get::<Located>(player) {
+        Some(l) => l.0,
+        None => return,
+    };
+    for pet in persisted.pets {
+        let proto = world
+            .resource::<MobPrototypes>()
+            .by_key
+            .get(&(pet.proto_zone_id, pet.proto_id))
+            .cloned();
+        let Some(proto) = proto else {
+            warn!(
+                proto = ?(pet.proto_zone_id, pet.proto_id),
+                "persisted pet's proto missing; skipping"
+            );
+            continue;
+        };
+        let dmg = proto.avg_damage();
+        let mut pet_entity = world.spawn((
+            Mob,
+            Named { name: pet.name.clone() },
+            Keywords(proto.keywords.clone()),
+            Description(proto.room_description.clone()),
+            WorldKey { zone: proto.zone_id, id: proto.id },
+            Located(player_room),
+            Health { hp: pet.hp, max: pet.max_hp },
+            CombatStats {
+                hit_roll: proto.hit_roll,
+                dmg_roll: dmg,
+                ac: proto.armor_class,
+                alignment: proto.alignment,
+                ward_pct: proto.ward_percent,
+            },
+            Posture(PostureKind::Standing),
+            Follower(player),
+            mud_world::PersistentPet,
+        ));
+        if !proto.examine_description.trim().is_empty() {
+            pet_entity.insert(mud_world::ExamineText(proto.examine_description.clone()));
+        }
+    }
 }
 
 /// Shared restore logic: spawn one effect entity per persisted entry,
@@ -1261,6 +1349,12 @@ impl ConnRouter {
                 warn!(conn_id, error = %e, "effect_instances load failed");
                 None
             });
+        let pets_json = mud_db::characters::load_pets(pool, &char_row.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(conn_id, error = %e, "pets load failed");
+                None
+            });
 
         // Housing summary — Ok(None) for the typical player who
         // doesn't own a house. Unwrap-Some path fires the rest of
@@ -1558,6 +1652,14 @@ impl ConnRouter {
             && let Ok(persisted) = serde_json::from_value::<PersistedEffects>(json)
         {
             restore_persisted_effects(world, entity, persisted);
+        }
+        // Hired / charmed pets — same 1h cap. Helper drops the
+        // whole envelope when elapsed exceeds the cap, otherwise
+        // spawns each pet next to the player with HP restored.
+        if let Some(json) = pets_json
+            && let Ok(persisted) = serde_json::from_value::<PersistedPets>(json)
+        {
+            restore_persisted_pets(world, entity, persisted);
         }
         // Track the spawn room toward zone-clear, so a player who
         // logs in inside the last unvisited room of a zone gets the
@@ -2054,6 +2156,41 @@ pub(crate) async fn save_player(
             .ok()
         }
     };
+    // Pets — query mob entities with `Follower(player)` AND
+    // `PersistentPet` (the durability marker attached at hire / charm
+    // sites). Other followers (random tagalong, ephemeral summons)
+    // are session-only by intentionally lacking the marker.
+    let pets_json: Option<serde_json::Value> = {
+        let mut q = world.query_filtered::<(
+            &Named,
+            &WorldKey,
+            &Health,
+            &Follower,
+        ), (With<Mob>, With<mud_world::PersistentPet>)>();
+        let pets: Vec<PersistedPet> = q
+            .iter(world)
+            .filter(|(_, _, _, follower)| follower.0 == entity)
+            .map(|(named, wk, health, _)| PersistedPet {
+                proto_zone_id: wk.zone,
+                proto_id: wk.id,
+                name: named.name.clone(),
+                hp: health.hp,
+                max_hp: health.max,
+            })
+            .collect();
+        if pets.is_empty() {
+            None
+        } else {
+            let saved_at_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+            serde_json::to_value(&PersistedPets {
+                saved_at_unix,
+                pets,
+            })
+            .ok()
+        }
+    };
     let ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow> = world
         .get::<KnownAbilities>(entity)
         .map(KnownAbilities::to_rows)
@@ -2146,6 +2283,7 @@ pub(crate) async fn save_player(
             effect_instances_json.as_ref(),
         )
         .await?;
+        mud_db::characters::save_pets(&mut *tx, &cid, pets_json.as_ref()).await?;
         mud_db::characters::save_bank_wealth(&mut *tx, &cid, bank).await?;
         if let Some(t) = new_time_played {
             mud_db::characters::save_time_played(&mut *tx, &cid, t).await?;

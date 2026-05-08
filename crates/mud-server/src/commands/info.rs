@@ -3481,7 +3481,10 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
     }
     // Spawn the pet as a fresh mob attached as a Follower(player).
     // Name is renamed to "<player>'s <mob_name>" so room listings
-    // disambiguate from wild mobs of the same proto.
+    // disambiguate from wild mobs of the same proto. The
+    // `PersistentPet` marker tags this as a paid follower so the
+    // disconnect-save snapshots it (gold spent → durable across
+    // reconnect under the 1h cap).
     let player_name = name_of(world, player);
     let pet_name = format!("{player_name}'s {}", proto.name);
     let hp = proto.rolled_hp();
@@ -3504,6 +3507,7 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
             },
             Posture(PostureKind::Standing),
             Follower(player),
+            mud_world::PersistentPet,
         ))
         .id();
     if !proto.examine_description.trim().is_empty()

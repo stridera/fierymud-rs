@@ -905,6 +905,16 @@ pub struct Cooldowns {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Follower(pub Entity);
 
+/// Marker on a follower mob that should round-trip across the
+/// player's reconnect window. Attached at hire / charm sites where
+/// the player invested resources (gold or spell-effort) — the design
+/// matches the buff-persistence rule: hired and charmed pets survive
+/// disconnects up to ~1 hour, then despawn when the player goes
+/// offline overnight. Random tagalong followers (group walk-ins,
+/// ephemeral summons) don't get this marker and are session-only.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PersistentPet;
+
 /// Bodyguard pairing: this entity intercepts incoming swings that
 /// were aimed at the target. Combat snapshots redirect swing.target
 /// from `Guarding.0` onto the guarder when both are in the same

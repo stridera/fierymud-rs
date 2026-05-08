@@ -12,7 +12,7 @@ pub use components::{
     HouseRoom, HouseRoomEntry, HouseSummary, Hunger, IgnoreList, Item, Keywords, KillStats,
     KnownAbilities, LastInputAt, LastPersistedAt,
     LastTeller, LightFuel, LiquidContainer, Lit, Located, LoggedInAt, LootClaim, MailDraft,
-    PendingSave, PersistedItemId, PreviousLogin,
+    PendingSave, PersistedItemId, PersistentPet, PreviousLogin,
     SpellCooldown,
     SpellSlots,
     Mob, MobBehaviors, ModifyDelta, Mountable, Mounted, Named, Online, Player, PlayerFlags, Posture,

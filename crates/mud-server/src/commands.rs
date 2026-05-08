@@ -9684,6 +9684,9 @@ pub(crate) fn invoke_ability_with(
                     && world.get::<Player>(target_entity).is_none()
                 {
                     try_insert(world, target_entity, Follower(player));
+                    // Spell-effort spent → tag as durable so the
+                    // disconnect-save snapshots it for ≤1h restore.
+                    try_insert(world, target_entity, mud_world::PersistentPet);
                 }
                 applied_msgs.push(spec.name.clone());
             }
