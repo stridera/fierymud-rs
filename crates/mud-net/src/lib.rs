@@ -11,8 +11,16 @@ pub type ConnId = u64;
 /// channel can carry telnet IAC framing for GMCP / MSSP / option
 /// negotiation alongside ordinary UTF-8 text.
 pub type Outbound = mpsc::UnboundedSender<Vec<u8>>;
-pub type InboundTx = mpsc::UnboundedSender<Inbound>;
-pub type InboundRx = mpsc::UnboundedReceiver<Inbound>;
+pub type InboundTx = mpsc::Sender<Inbound>;
+pub type InboundRx = mpsc::Receiver<Inbound>;
+
+/// Cap for the global inbound channel that carries
+/// `Connected` / `Line` / `Disconnected` events from every accepted
+/// connection into the world tick. Sized for steady-state burst:
+/// ~50 connected players × ~80 ops/sec headroom on a slow tick. When
+/// full, `send().await` blocks the connection's read task — natural
+/// backpressure to the slow client.
+pub const INBOUND_QUEUE_CAP: usize = 4096;
 
 #[derive(Debug)]
 pub struct Inbound {
@@ -400,6 +408,7 @@ async fn handle_connection<S>(
                 outbound: out_tx,
             },
         })
+        .await
         .is_err()
     {
         return;
@@ -477,6 +486,7 @@ async fn handle_connection<S>(
                         conn: conn_id,
                         kind: InboundKind::Line(line),
                     })
+                    .await
                     .is_err()
                 {
                     break;
@@ -489,10 +499,12 @@ async fn handle_connection<S>(
         }
     }
 
-    let _ = inbound.send(Inbound {
-        conn: conn_id,
-        kind: InboundKind::Disconnected,
-    });
+    let _ = inbound
+        .send(Inbound {
+            conn: conn_id,
+            kind: InboundKind::Disconnected,
+        })
+        .await;
 
     writer.abort();
 }

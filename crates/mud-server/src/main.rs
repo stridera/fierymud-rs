@@ -173,7 +173,8 @@ async fn main() {
             std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into())
         }
     };
-    let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<Inbound>();
+    let (inbound_tx, mut inbound_rx) =
+        mpsc::channel::<Inbound>(mud_net::INBOUND_QUEUE_CAP);
     let listen_addr_for_task = listen_addr.clone();
     let inbound_tx_plain = inbound_tx.clone();
     tokio::spawn(async move {
@@ -248,8 +249,12 @@ async fn main() {
     world.insert_resource(commands::DbPool(pool.clone()));
     // Channel for async tasks to push live ECS deltas back to the
     // world (quest reward grants, etc.). Tick drains the inbox.
-    let (player_update_tx, player_update_rx) =
-        tokio::sync::mpsc::unbounded_channel::<commands::PendingPlayerUpdate>();
+    // Bounded so a flood of background tasks (e.g. mass quest
+    // completion) can't grow memory without a cap; on overflow the
+    // sending task awaits until the tick drains a slot.
+    let (player_update_tx, player_update_rx) = tokio::sync::mpsc::channel::<
+        commands::PendingPlayerUpdate,
+    >(commands::PLAYER_UPDATE_QUEUE_CAP);
     world.insert_resource(commands::PlayerUpdateTx(player_update_tx));
     world.insert_resource(commands::PlayerUpdateInbox(std::sync::Mutex::new(
         player_update_rx,

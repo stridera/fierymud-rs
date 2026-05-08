@@ -96,13 +96,20 @@ impl PendingPlayerUpdate {
 /// Sender side of the async-to-world channel for player ECS
 /// updates. Cloned by command handlers before `tokio::spawn`.
 #[derive(Resource, Clone)]
-pub struct PlayerUpdateTx(pub tokio::sync::mpsc::UnboundedSender<PendingPlayerUpdate>);
+pub struct PlayerUpdateTx(pub tokio::sync::mpsc::Sender<PendingPlayerUpdate>);
 
 /// Receiver side, drained once per tick by `drain_player_updates`.
 #[derive(Resource)]
 pub struct PlayerUpdateInbox(
-    pub std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<PendingPlayerUpdate>>,
+    pub std::sync::Mutex<tokio::sync::mpsc::Receiver<PendingPlayerUpdate>>,
 );
+
+/// Cap for the player-update channel that async tasks (quest
+/// rewards, delayed grants, etc.) push deltas into. Sized for the
+/// expected concurrency: a few dozen in-flight grants at any moment
+/// is plenty; on overflow the sending task awaits until the tick
+/// drains a slot.
+pub const PLAYER_UPDATE_QUEUE_CAP: usize = 1024;
 
 /// Tick system that drains the player-update inbox and applies
 /// each message to the matching online player. Idempotent —
@@ -4561,7 +4568,10 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                                         _ => None,
                                     };
                                     if let (Some(u), Some(tx)) = (update, update_tx.as_ref()) {
-                                        let _ = tx.send(u);
+                                        // Bounded channel — await until the tick drains
+                                        // a slot. Failure means the receiver dropped
+                                        // (server shutting down); silently ignore.
+                                        let _ = tx.send(u).await;
                                     }
                                 }
                                 let mut buf = String::from("Rewards:\r\n");

@@ -44,7 +44,12 @@ use crate::commands::{self, name_of};
 /// Where the world tick reads pending admin requests from. Installed
 /// as a resource at boot.
 #[derive(Resource)]
-pub struct AdminInbox(pub Mutex<mpsc::UnboundedReceiver<AdminCommand>>);
+pub struct AdminInbox(pub Mutex<mpsc::Receiver<AdminCommand>>);
+
+/// Cap for the admin command channel. The control plane is shared-
+/// secret only and very low-traffic; 256 in-flight commands is
+/// generous. On overflow `enqueue` returns 503 — caller can retry.
+pub const ADMIN_QUEUE_CAP: usize = 256;
 
 /// Pause state. While `paused`, the main tick loop skips the
 /// gameplay schedule (combat, effects, regen, mob AI, respawn,
@@ -143,7 +148,7 @@ pub type AdminResponse = Result<Value, (StatusCode, String)>;
 
 #[derive(Clone)]
 struct AppState {
-    tx: mpsc::UnboundedSender<AdminCommand>,
+    tx: mpsc::Sender<AdminCommand>,
     token: Option<Arc<String>>,
     pool: PgPool,
 }
@@ -161,8 +166,8 @@ struct AppState {
 /// from another machine on a trusted LAN), set
 /// `ADMIN_ALLOW_UNAUTH_LOCAL=true` — explicit and easy to grep for in
 /// production logs.
-pub fn spawn_admin_server(pool: PgPool) -> mpsc::UnboundedReceiver<AdminCommand> {
-    let (tx, rx) = mpsc::unbounded_channel::<AdminCommand>();
+pub fn spawn_admin_server(pool: PgPool) -> mpsc::Receiver<AdminCommand> {
+    let (tx, rx) = mpsc::channel::<AdminCommand>(ADMIN_QUEUE_CAP);
     let addr: SocketAddr = std::env::var("ADMIN_LISTEN_ADDR")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -261,10 +266,23 @@ async fn enqueue(
     request: AdminRequest,
 ) -> Result<Value, (StatusCode, String)> {
     let (tx, rx) = oneshot::channel();
+    // try_send instead of .send().await — admin requests are
+    // synchronous from the caller's perspective, and a saturated
+    // queue means the world tick is already overloaded; better to
+    // 503 immediately than have the HTTP request hang on backpressure.
     state
         .tx
-        .send(AdminCommand { request, reply: tx })
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "world tick channel closed".into()))?;
+        .try_send(AdminCommand { request, reply: tx })
+        .map_err(|e| match e {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "admin command queue full; world tick saturated".into(),
+            ),
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "world tick channel closed".into(),
+            ),
+        })?;
     rx.await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "no reply from world tick".into()))?
 }
