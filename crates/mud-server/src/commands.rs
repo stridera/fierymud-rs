@@ -4073,6 +4073,38 @@ pub(crate) fn send_char_items_list(
     let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Items.List", &payload));
 }
 
+/// Re-emit `Char.Items.List` for both the player's inventory and
+/// equipment. Used after item-mutation commands (get / drop /
+/// wear / remove / give) so Mudlet's items panel re-renders
+/// without the client having to issue a follow-up Char.Items.Inv
+/// request. Cheaper than a granular Add/Remove pairing here
+/// because the snapshot is small (~one telnet frame per slot
+/// list) and the call site doesn't need to track which item moved.
+pub(crate) fn refresh_player_items_gmcp(world: &mut World, player: Entity) {
+    let inv: Vec<Entity> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, Option<&EquippedSlot>),
+            With<Item>,
+        >();
+        q.iter(world)
+            .filter(|(_, l, eq)| l.0 == player && eq.is_none())
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    send_char_items_list(world, player, "inv", &inv);
+    let worn: Vec<Entity> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &EquippedSlot),
+            With<Item>,
+        >();
+        q.iter(world)
+            .filter(|(_, l, _)| l.0 == player)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    send_char_items_list(world, player, "wear", &worn);
+}
+
 /// Push a single-item `Char.Items.{Add | Remove | Update}` frame.
 /// Wraps the same item-shape as [`send_char_items_list`] in the
 /// IRE-convention envelope `{location, item: {...}}`. `verb` must

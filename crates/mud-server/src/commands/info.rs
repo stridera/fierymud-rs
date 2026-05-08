@@ -7970,6 +7970,9 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
             format!("You're too encumbered to carry {skipped} more item(s).\r\n"),
         );
     }
+    if moved > 0 {
+        refresh_player_items_gmcp(world, player);
+    }
 }
 
 /// `put <item> <container>`: move a carried item into a container
@@ -8193,6 +8196,7 @@ pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
             &[player],
             &format!("{player_name} drops {count} item(s).\r\n"),
         );
+        refresh_player_items_gmcp(world, player);
         return;
     }
 
@@ -8217,6 +8221,7 @@ pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} drops {item_name}.\r\n"),
     );
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Drop);
+    refresh_player_items_gmcp(world, player);
 }
 
 pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
@@ -8333,17 +8338,21 @@ pub(crate) fn cmd_wear(world: &mut World, player: Entity, args: &str) {
             let name = name_of(world, item);
             wear_into(world, player, &name, None);
         }
+        refresh_player_items_gmcp(world, player);
         return;
     }
     wear_into(world, player, trimmed, None);
+    refresh_player_items_gmcp(world, player);
 }
 
 pub(crate) fn cmd_wield(world: &mut World, player: Entity, args: &str) {
     wear_into(world, player, args.trim(), Some(Slot::Wield));
+    refresh_player_items_gmcp(world, player);
 }
 
 pub(crate) fn cmd_hold(world: &mut World, player: Entity, args: &str) {
     wear_into(world, player, args.trim(), Some(Slot::Hold));
+    refresh_player_items_gmcp(world, player);
 }
 
 /// `light <item>`: mark a Light-type carried item as lit. Refused
@@ -8933,6 +8942,7 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
                 mud_world::TriggerEvent::Remove,
             );
         }
+        refresh_player_items_gmcp(world, player);
         return;
     }
     let item = find_carried_by(world, target_word, player, EquipFilter::Equipped);
@@ -8945,6 +8955,7 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     try_remove::<EquippedSlot>(world, item);
     send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Remove);
+    refresh_player_items_gmcp(world, player);
 }
 
 pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
