@@ -4010,6 +4010,45 @@ mod tests {
     }
 }
 
+/// Compute the IRE-style "next level" progress (`nl` in
+/// `Char.Vitals`). Returns the integer percentage `[0, 100]` of the
+/// way from this level's XP threshold toward the next level's,
+/// matching what Mudlet's stock gauge bindings expect. Returns 0
+/// for the immortal levels (no "next") and 0 when the level table
+/// hasn't loaded yet — calling code treats either as "no progress
+/// bar to draw" rather than as a real measurement.
+fn compute_level_progress(world: &World, level: i32, xp: i32) -> i32 {
+    let Some(table) = world.get_resource::<mud_world::LevelTable>() else {
+        return 0;
+    };
+    let Some(curr_thr) = table.exp_for(level) else {
+        return 0;
+    };
+    let Some(next_thr) = table.exp_for(level + 1) else {
+        return 0;
+    };
+    let span = (next_thr - curr_thr).max(1);
+    let into = (xp - curr_thr).max(0);
+    ((into * 100) / span).clamp(0, 100)
+}
+
+/// Wall-clock epoch seconds at which `target` logged in. Computed
+/// from `LoggedInAt`'s monotonic [`Instant`] minus the elapsed
+/// duration since login: `now_unix - elapsed_secs`. Returns the
+/// current time as a fallback when LoggedInAt is missing — a
+/// rare edge case (Discord just shows 0:00 elapsed).
+fn compute_login_unix_ts(world: &World, target: Entity) -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map_or(0, |d| d.as_secs());
+    let elapsed_secs = world
+        .get::<mud_world::LoggedInAt>(target)
+        .map_or(0, |l| l.0.elapsed().as_secs());
+    now_unix.saturating_sub(elapsed_secs)
+}
+
 /// Send the player's prompt template with variables substituted. Falls back
 /// to a sensible default if no Prompt component is attached or the template
 /// is empty.
@@ -4061,20 +4100,53 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     let mode = color_mode_for(world, target);
     let _ = conn.try_send(render_color_tags(&rendered, mode).into_bytes());
 
-    // Piggyback Char.Vitals on the prompt cadence — same once-per-
-    // command frequency, which is reasonable for HUD-style clients.
-    // Mudlet / MUSHclient parse the GMCP frame; plain telnet clients
-    // see the IAC bytes as garbage which most terminal emulators
-    // strip (they're outside the ASCII range). A future commit will
-    // add inbound IAC parsing and gate the push on the client
-    // confirming `IAC DO 201`.
+    // Char.Vitals — IRE-shaped per-prompt vitals frame. Field
+    // names match what Mudlet's stock gauge bindings expect:
+    // hp/maxhp/mp/maxmp/mv/maxmv plus `nl` (% to next level) and
+    // a compact `string` form ("H:312/450 M:0/0 V:95/120"). This
+    // package has no mana, so mp/maxmp report zero; clients that
+    // don't draw a 0/0 gauge skip rendering the bar. The `nl`
+    // value comes from the LevelTable: relative position between
+    // the current level's threshold and the next level's
+    // threshold, capped at 100. Plain telnet clients see the IAC
+    // bytes as garbage which most terminal emulators strip
+    // (they're outside the ASCII range).
     if let (Some(h), Some(s)) = (hp, stamina) {
-        let level = world.get::<Profile>(target).map_or(0, |p| p.level);
+        let (level, xp) = world
+            .get::<Profile>(target)
+            .map_or((0, 0), |p| (p.level, p.experience));
+        let nl = compute_level_progress(world, level, xp);
         let payload = format!(
-            "{{\"hp\":{},\"max_hp\":{},\"sp\":{},\"max_sp\":{},\"level\":{}}}",
-            h.hp, h.max, s.current, s.max, level
+            "{{\"hp\":{hp},\"maxhp\":{maxhp},\"mp\":0,\"maxmp\":0,\"mv\":{mv},\"maxmv\":{maxmv},\"nl\":{nl},\"string\":\"H:{hp}/{maxhp} M:0/0 V:{mv}/{maxmv}\"}}",
+            hp = h.hp,
+            maxhp = h.max,
+            mv = s.current,
+            maxmv = s.max,
+            nl = nl,
         );
         let _ = conn.try_send(mud_net::gmcp_packet("Char.Vitals", &payload));
+    }
+    // Char.Name — IRE-style identity frame. Sent every prompt for
+    // simplicity; the payload is small and idempotent on the
+    // client side. Mudlet binds `gmcp.Char.Name.name` for profile
+    // automation (per-character config files keyed by name).
+    if let Some(name_str) = name {
+        let plain = render_color_tags(name_str, ColorMode::Strip)
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let payload = format!(
+            "{{\"name\":\"{plain}\",\"fullname\":\"{plain}\"}}"
+        );
+        let _ = conn.try_send(mud_net::gmcp_packet("Char.Name", &payload));
+    }
+    // Char.StatusVars — schema descriptor: maps each Char.Status
+    // field to a human label so generic clients can build a
+    // status panel without per-MUD code. Once-per-login would be
+    // ideal but emitting per prompt is cheap (~120 bytes) and
+    // sidesteps the "did the client miss the first push?" race.
+    {
+        let payload = "{\"name\":\"Name\",\"fullname\":\"Full Name\",\"level\":\"Level\",\"class\":\"Class\",\"race\":\"Race\",\"xp\":\"Experience\",\"wealth\":\"Wealth\"}";
+        let _ = conn.try_send(mud_net::gmcp_packet("Char.StatusVars", payload));
     }
     // Char.Status: longer-lived character metadata (level / xp /
     // class / race / wealth). Same prompt cadence — many of these
@@ -4102,6 +4174,63 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             wealth,
         );
         let _ = conn.try_send(mud_net::gmcp_packet("Char.Status", &payload));
+    }
+    // External.Discord.Status — Discord rich-presence frame.
+    // Drives the "Playing fierymud-rs — Lvl X Class" overlay
+    // through Mudlet's Discord SDK integration. Server icon /
+    // assets keyed by `applicationid` from External.Discord.Info
+    // (sent at GMCP-confirm time). `starttime` is wall-clock
+    // epoch seconds from when the player logged in. Strings come
+    // from `GameConfig` so a deployment can re-skin the rich
+    // presence without rebuilding the server.
+    if let Some(prof) = world.get::<Profile>(target) {
+        let class_label = prof
+            .class_id
+            .and_then(|id| {
+                world
+                    .get_resource::<ClassCatalog>()
+                    .and_then(|c| c.by_id.get(&id))
+                    .map(|d| d.plain_name.as_str())
+            })
+            .unwrap_or("Adventurer");
+        let plain_name = name
+            .map(|s| {
+                render_color_tags(s, ColorMode::Strip)
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+            })
+            .unwrap_or_default();
+        let starttime = compute_login_unix_ts(world, target);
+        let cfg = world.resource::<mud_world::RuntimeConfig>();
+        let game = cfg.get_string("gmcp", "discord_game_name", "fierymud-rs");
+        let state = cfg.get_string(
+            "gmcp",
+            "discord_state",
+            "Playing fierymud-rs (minastirith.utaboshi.com:4003)",
+        );
+        let small_image = cfg.get_string("gmcp", "discord_small_image", "servericon");
+        let small_image_text = cfg.get_string(
+            "gmcp",
+            "discord_small_image_text",
+            "fierymud-rs",
+        );
+        let details = format!(
+            "Character: {plain_name}  Class: {class}  Level: {lvl}",
+            plain_name = plain_name,
+            class = class_label.replace('"', "\\\""),
+            lvl = prof.level,
+        );
+        let payload = format!(
+            "{{\"state\":\"{state}\",\"details\":\"{details}\",\"game\":\"{game}\",\"smallimage\":[\"{small_image}\"],\"smallimagetext\":\"{small_image_text}\",\"starttime\":{starttime}}}",
+            state = state.replace('"', "\\\""),
+            game = game.replace('"', "\\\""),
+            small_image = small_image.replace('"', "\\\""),
+            small_image_text = small_image_text.replace('"', "\\\""),
+        );
+        let _ = conn.try_send(mud_net::gmcp_packet(
+            "External.Discord.Status",
+            &payload,
+        ));
     }
     // Char.Aggro: every mob (anywhere) that has the player on its
     // HateList or in MobMemory. Lets HUD clients render a "things

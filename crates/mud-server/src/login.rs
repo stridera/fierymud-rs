@@ -574,14 +574,24 @@ impl ConnRouter {
     /// are stable strings emitted by `mud_net` (`"gmcp"`, `"eor"`,
     /// `"mxp"`, `"utf8"`). New names land here as we wire more
     /// options; unknown names log at debug level.
+    ///
+    /// On `gmcp` going true (i.e. client confirmed `IAC DO 201`),
+    /// we push the connect-time GMCP intro burst — `Client.GUI`
+    /// (Mudlet auto-install URL), `Client.Map` (mapper data URL),
+    /// and `External.Discord.Info` (Discord application ID + invite
+    /// link). Sending these in response to the capability flip
+    /// matches the IRE / Mudlet idiom and gives Mudlet enough to
+    /// either prompt the player to install our package or refresh
+    /// an existing install.
     pub fn on_capability(
         &mut self,
         conn_id: ConnId,
         name: &str,
         on: bool,
-        _world: &mut World,
+        world: &mut World,
     ) {
         let entry = self.caps.entry(conn_id).or_default();
+        let was_gmcp = entry.gmcp;
         match name {
             "gmcp" => entry.gmcp = on,
             "eor" => entry.eor = on,
@@ -589,9 +599,115 @@ impl ConnRouter {
             "utf8" => entry.utf8 = on,
             _ => {
                 tracing::debug!(conn_id, name, on, "unhandled capability flag");
+                return;
             }
         }
+        if name == "gmcp" && on && !was_gmcp {
+            self.send_gmcp_intro_burst(conn_id, world);
+        }
     }
+
+    /// Connect-time GMCP introduction. Pushed exactly once, the
+    /// first time the client confirms GMCP (`IAC DO 201`). Frame
+    /// shapes follow the IRE conventions Mudlet's stock handlers
+    /// expect; the `Client.GUI` URL points Mudlet at our
+    /// `.mpackage` download so a first-time visitor gets the
+    /// install prompt automatically.
+    ///
+    /// All URLs / version strings / Discord identifiers come from
+    /// the `GameConfig` table (category `gmcp`). Compile-time
+    /// fallbacks below match the values the legacy MUD shipped
+    /// with — adjusted for the Rust package name — so a fresh DB
+    /// still produces a working intro burst. Operators override
+    /// per-deployment via Muditor or psql without rebuilding.
+    fn send_gmcp_intro_burst(&self, conn_id: ConnId, world: &World) {
+        let Some(outbound) = self.outbound_for(conn_id) else { return };
+        let Some(cfg) = world.get_resource::<mud_world::RuntimeConfig>() else {
+            return;
+        };
+
+        // Client.GUI — Mudlet auto-install prompt. `version` must
+        // bump whenever we ship a new package so Mudlet detects
+        // the update; matches the FierymudRs package's `mfile`.
+        let gui_url = cfg.get_string(
+            "gmcp",
+            "client_gui_url",
+            "https://packages.fierymud.org/FierymudRs.mpackage",
+        );
+        let gui_version = cfg.get_string("gmcp", "client_gui_version", "0.1-rs");
+        let payload = format!(
+            r#"{{"version":"{}","url":"{}"}}"#,
+            json_escape(gui_version),
+            json_escape(gui_url),
+        );
+        let _ = outbound.try_send(mud_net::gmcp_packet("Client.GUI", &payload));
+
+        // Client.Map — initial map data download URL. Empty
+        // string disables the prompt; the placeholder default
+        // points at where a hosted default_map.dat would live.
+        let map_url = cfg.get_string(
+            "gmcp",
+            "client_map_url",
+            "https://packages.fierymud.org/default_map.dat",
+        );
+        if !map_url.is_empty() {
+            let payload = format!(r#"{{"url":"{}"}}"#, json_escape(map_url));
+            let _ = outbound.try_send(mud_net::gmcp_packet("Client.Map", &payload));
+        }
+
+        // External.Discord.Info — application ID + invite. App ID
+        // is the legacy FieryMUD Discord application; invite is
+        // the same server. Reused so existing rich-presence assets
+        // (server icon, key text) Just Work for the Rust port.
+        // Operators running their own deployment should override
+        // both via GameConfig.
+        let app_id = cfg.get_string("gmcp", "discord_application_id", "998826809686765569");
+        let invite_url = cfg.get_string(
+            "gmcp",
+            "discord_invite_url",
+            "https://discord.gg/aqhapUCgFz",
+        );
+        let payload = format!(
+            r#"{{"applicationid":"{}","inviteurl":"{}"}}"#,
+            json_escape(app_id),
+            json_escape(invite_url),
+        );
+        let _ = outbound.try_send(mud_net::gmcp_packet("External.Discord.Info", &payload));
+    }
+
+    /// Resolve the outbound channel for a connection regardless of
+    /// login stage. Returns the LoginCtx outbound while still
+    /// pre-spawn; switches to the entity's `Connection` component
+    /// once the player has spawned. Used by GMCP push paths that
+    /// need to reach the wire from non-command code.
+    fn outbound_for(&self, conn_id: ConnId) -> Option<Outbound> {
+        if let Some(ctx) = self.login.get(&conn_id) {
+            return Some(ctx.outbound.clone());
+        }
+        // Spawned-player path needs World access; not available
+        // here. Callers running with World can do the lookup
+        // themselves via `playing[conn_id]` → Connection. Today
+        // the GMCP intro burst only fires pre-spawn (the client
+        // confirms GMCP in the first round-trip, well before the
+        // player picks a character) so this branch is rarely hit.
+        let _ = conn_id;
+        None
+    }
+}
+
+/// Escape a string for safe embedding in a JSON literal — the
+/// shape every GMCP payload builder in this crate needs. Replaces
+/// backslash and double-quote; leaves bytes outside that pair
+/// alone since the rest of our config strings are URL/identifier-
+/// shaped (no control bytes, no Unicode-escape territory).
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+// Continuation of `impl ConnRouter` — split because `json_escape`
+// is a free function and Rust doesn't allow free fns inside an
+// impl. The two blocks compose at compile time.
+impl ConnRouter {
 
     /// GMCP package received from the client. Today we route
     /// `Core.Hello` (client identity), `Core.Supports.Set`
