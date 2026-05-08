@@ -33,6 +33,35 @@ pub type InboundRx = mpsc::Receiver<Inbound>;
 /// backpressure to the slow client.
 pub const INBOUND_QUEUE_CAP: usize = 4096;
 
+/// Live count of accepted-but-not-yet-disconnected connections,
+/// summed across both the plain-telnet and TLS listeners. Compared
+/// against the per-`serve()` cap on every accept; the connection-
+/// handler decrements on exit via the `ConnGuard` RAII handle so the
+/// count reflects sockets that have actually closed.
+static ACTIVE_CONNECTIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// RAII guard that increments `ACTIVE_CONNECTIONS` on construction
+/// and decrements on Drop. Owned by the spawned per-connection task
+/// so the count reflects the connection's actual lifetime — Drop
+/// fires whether the task ends gracefully, errors out (TLS
+/// handshake failure, IAC parse panic), or is cancelled. Without
+/// this, a failure path would leak a permanent +1 against the cap.
+struct ConnGuard;
+
+impl ConnGuard {
+    fn new() -> Self {
+        ACTIVE_CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        ACTIVE_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[derive(Debug)]
 pub struct Inbound {
     pub conn: ConnId,
@@ -49,9 +78,24 @@ pub enum InboundKind {
 /// Bind a plain-TCP listener and forward every accepted connection's
 /// lines into `inbound`. Returns only on listener error; runs forever
 /// otherwise.
-pub async fn serve(bind_addr: &str, inbound: InboundTx) -> std::io::Result<()> {
+///
+/// `max_connections` caps the *total* accepted-and-still-open count
+/// across this listener and the TLS sibling — they share the same
+/// `ACTIVE_CONNECTIONS` counter, so a flood that fills the plain-TCP
+/// channel can't leave the TLS listener wide open. A zero or
+/// negative-sized cap (sentinel `usize::MAX`) means "no limit," for
+/// dev / unrestricted operator override.
+pub async fn serve(
+    bind_addr: &str,
+    inbound: InboundTx,
+    max_connections: usize,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
-    info!(addr = %listener.local_addr()?, "telnet listener accepting connections");
+    info!(
+        addr = %listener.local_addr()?,
+        max_connections,
+        "telnet listener accepting connections"
+    );
 
     let mut next_id: ConnId = 1;
     loop {
@@ -66,9 +110,21 @@ pub async fn serve(bind_addr: &str, inbound: InboundTx) -> std::io::Result<()> {
             drop(stream);
             continue;
         }
+        if ACTIVE_CONNECTIONS.load(std::sync::atomic::Ordering::SeqCst) >= max_connections {
+            warn!(%peer, max_connections, "max_connections reached; refusing");
+            drop(stream);
+            continue;
+        }
         let conn_id = next_id;
         next_id += 1;
-        tokio::spawn(handle_connection(conn_id, peer, stream, inbound.clone()));
+        let inbound = inbound.clone();
+        tokio::spawn(async move {
+            // ConnGuard lifetime spans the whole task, so a panic /
+            // early-return inside `handle_connection` still
+            // decrements the counter on Drop.
+            let _guard = ConnGuard::new();
+            handle_connection(conn_id, peer, stream, inbound).await;
+        });
     }
 }
 
@@ -147,6 +203,7 @@ pub async fn serve_tls(
     cert_path: &str,
     key_path: &str,
     inbound: InboundTx,
+    max_connections: usize,
 ) -> std::io::Result<()> {
     let certs = load_cert_chain(cert_path)?;
     let key = load_private_key(key_path)?;
@@ -176,11 +233,20 @@ pub async fn serve_tls(
             drop(stream);
             continue;
         }
+        if ACTIVE_CONNECTIONS.load(std::sync::atomic::Ordering::SeqCst) >= max_connections {
+            warn!(%peer, max_connections, "max_connections reached; refusing TLS");
+            drop(stream);
+            continue;
+        }
         let acceptor = acceptor.clone();
         let inbound = inbound.clone();
         let conn_id = next_id;
         next_id += 1;
         tokio::spawn(async move {
+            // Guard before TLS handshake so a handshake failure also
+            // decrements; the count tracks accept-side commitment,
+            // not just successfully-handshaked connections.
+            let _guard = ConnGuard::new();
             match acceptor.accept(stream).await {
                 Ok(tls) => handle_connection(conn_id, peer, tls, inbound).await,
                 Err(e) => warn!(conn_id, peer = %peer, error = %e, "TLS accept failed"),

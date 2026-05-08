@@ -175,10 +175,26 @@ async fn main() {
     };
     let (inbound_tx, mut inbound_rx) =
         mpsc::channel::<Inbound>(mud_net::INBOUND_QUEUE_CAP);
+    // Total accepted-and-still-open connection cap, summed across
+    // both listeners. Reads from `server.max_connections` GameConfig
+    // (default 200, matching the existing imported row); a non-
+    // positive value or missing row falls back to usize::MAX (no
+    // limit) for dev / unrestricted operator override.
+    let max_connections = {
+        let cfg = world.resource::<mud_world::RuntimeConfig>();
+        let raw = cfg.get_i32("server", "max_connections", 200);
+        if raw > 0 {
+            usize::try_from(raw).unwrap_or(usize::MAX)
+        } else {
+            usize::MAX
+        }
+    };
     let listen_addr_for_task = listen_addr.clone();
     let inbound_tx_plain = inbound_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = mud_net::serve(&listen_addr_for_task, inbound_tx_plain).await {
+        if let Err(e) =
+            mud_net::serve(&listen_addr_for_task, inbound_tx_plain, max_connections).await
+        {
             error!(addr = %listen_addr_for_task, error = %e, "listener stopped");
         }
     });
@@ -220,6 +236,7 @@ async fn main() {
                 &cert_path_for_task,
                 &key_path_for_task,
                 inbound_tx_tls,
+                max_connections,
             )
             .await
             {
