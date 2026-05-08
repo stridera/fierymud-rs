@@ -10290,13 +10290,43 @@ pub(crate) fn remove_effects_by_tag(
         .filter(|(_, def)| def.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
         .map(|(id, _)| *id)
         .collect();
-    if tag_match.is_empty() {
+    // For tag="magic" we also count EffectInstances whose source
+    // Ability is SPELL / CHANT / SONG, regardless of the catalog
+    // Effect's own tags. Generic effects like `status` and `modify`
+    // power both magical (bless, web, slow) and non-magical (berserk,
+    // poison) abilities; tagging the catalog row as "magic" would
+    // dispel both. Filtering on the *source ability* lets
+    // DISPEL_MAGIC clean up bless without touching berserk.
+    let magic_ability_ids: std::collections::HashSet<i32> = if tag.eq_ignore_ascii_case("magic") {
+        use mud_db::abilities::AbilityKind;
+        world
+            .resource::<AbilityCatalog>()
+            .by_name
+            .values()
+            .filter(|def| {
+                matches!(
+                    def.kind,
+                    AbilityKind::Spell | AbilityKind::Chant | AbilityKind::Song
+                )
+            })
+            .map(|def| def.id)
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+    if tag_match.is_empty() && magic_ability_ids.is_empty() {
         return 0;
     }
     let mut to_remove: Vec<Entity> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
-            .filter(|(_, eff, applied)| applied.0 == target && tag_match.contains(&eff.kind))
+            .filter(|(_, eff, applied)| {
+                applied.0 == target
+                    && (tag_match.contains(&eff.kind)
+                        || eff
+                            .ability_id
+                            .is_some_and(|aid| magic_ability_ids.contains(&aid)))
+            })
             .map(|(e, _, _)| e)
             .collect()
     };
