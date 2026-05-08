@@ -4395,6 +4395,18 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     let mode = color_mode_for(world, target);
     let _ = conn.try_send(render_color_tags(&rendered, mode).into_bytes());
 
+    // IAC EOR — end-of-record marker so MUD clients can split the
+    // prompt from the preceding output (Mudlet uses it to anchor
+    // the prompt line at the bottom of the input area; MUSHclient
+    // and BeipMU bind triggers off "prompt detected"). Sent
+    // unconditionally as a 2-byte IAC sequence — clients that
+    // didn't negotiate EOR (or don't recognize it) silently strip
+    // it, so this is safe to push even when the WILL EOR
+    // negotiation got DONT'd. Legacy MUDs gate this behind cap
+    // tracking; the client cost of an unsolicited frame is zero,
+    // so we skip the cap lookup.
+    let _ = conn.try_send(mud_net::iac_eor());
+
     // Char.Vitals — IRE-shaped per-prompt vitals frame. Field
     // names match what Mudlet's stock gauge bindings expect:
     // hp/maxhp/mp/maxmp/mv/maxmv plus `nl` (% to next level) and

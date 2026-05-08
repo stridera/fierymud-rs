@@ -419,6 +419,7 @@ async fn handle_connection<S>(
     let _ = out_tx.try_send(do_(opt::SGA));
     let _ = out_tx.try_send(will(opt::GMCP));
     let _ = out_tx.try_send(will(opt::MSSP));
+    let _ = out_tx.try_send(will(opt::MCCP2));
     let _ = out_tx.try_send(will(opt::EOR));
     let _ = out_tx.try_send(will(opt::CHARSET));
     let _ = out_tx.try_send(will(opt::MXP));
@@ -455,13 +456,60 @@ async fn handle_connection<S>(
     }
 
     let writer = tokio::spawn(async move {
+        // MCCP2 — server-to-client zlib compression. Stays at
+        // `None` until the read task observes `IAC DO 86` and
+        // pushes the start-of-compression marker (`IAC SB 86 IAC SE`)
+        // through this channel. The marker frame itself is sent
+        // *uncompressed*; the next byte after the marker begins the
+        // zlib stream. We detect the marker by exact-match on the
+        // outgoing Vec — the protocol guarantees it arrives as a
+        // standalone 5-byte frame (built via `mccp2_start()`),
+        // never split or concatenated with other content.
+        //
+        // The compressor is a `flate2::Compress` rather than a
+        // `ZlibEncoder<Vec<u8>>` because the streaming pattern
+        // requires per-frame `Sync` flushes against a long-lived
+        // zlib context. `compress_vec` with `FlushCompress::Sync`
+        // emits a flush marker after each chunk so the client can
+        // decompress incrementally without buffering whole
+        // messages.
+        //
         // The channel itself is bounded (`OUTBOUND_QUEUE_CAP`),
         // so there's no per-connection memory exhaustion risk.
         // Senders use `try_send` and drop on Full; this task just
         // drains as fast as the socket accepts.
+        let mut compressor: Option<flate2::Compress> = None;
         while let Some(bytes) = out_rx.recv().await {
-            if write_half.write_all(&bytes).await.is_err() {
+            // Wrap in compression if active. Otherwise pass
+            // through. The `bytes` Vec is cheaply moved either
+            // way — we don't clone unless compression is on.
+            let payload: Vec<u8> = if let Some(z) = compressor.as_mut() {
+                let mut out = Vec::with_capacity(bytes.len() + 16);
+                if z
+                    .compress_vec(&bytes, &mut out, flate2::FlushCompress::Sync)
+                    .is_err()
+                {
+                    // Compression error is fatal — the stream is
+                    // now out of sync with the client's decoder.
+                    // Drop the connection rather than corrupt the
+                    // wire.
+                    break;
+                }
+                out
+            } else {
+                bytes.clone()
+            };
+            if write_half.write_all(&payload).await.is_err() {
                 break;
+            }
+            // Detect the MCCP2 start marker AFTER writing — the
+            // marker itself must reach the client uncompressed,
+            // and only subsequent frames are deflated.
+            if compressor.is_none() && bytes_are_mccp2_marker(&bytes) {
+                compressor = Some(flate2::Compress::new(
+                    flate2::Compression::default(),
+                    true, // zlib header
+                ));
             }
         }
     });
@@ -543,6 +591,22 @@ async fn handle_connection<S>(
     writer.abort();
 }
 
+/// True if `bytes` is exactly the MCCP2 start-of-compression
+/// marker — `IAC SB 86 IAC SE`, 5 bytes — produced by
+/// [`mccp2_start`]. Used by the writer task to detect when to
+/// flip into compressed mode AFTER passing the marker through
+/// uncompressed. Exact-match is safe because we only build this
+/// frame in one place; nothing else queues this byte sequence.
+fn bytes_are_mccp2_marker(bytes: &[u8]) -> bool {
+    bytes == [
+        telnet::IAC,
+        telnet::SB,
+        telnet::opt::MCCP2,
+        telnet::IAC,
+        telnet::SE,
+    ]
+}
+
 /// Trim a single trailing `\r` from the line buffer, in place.
 /// Callers invoke this exactly when they're about to emit a line
 /// that ended with `\n`; CR-LF clients send `\r\n` and we strip
@@ -620,13 +684,14 @@ async fn handle_negotiate(
             // Standard line-mode negotiation; nothing to track.
         }
         (DO, opt::MCCP2) => {
-            // Client agreed to compression. Today we don't have
-            // the zlib write side wired; ack with subneg-start
-            // and immediately disable (so the client doesn't
-            // expect compressed data we won't send). When MCCP2
-            // lands, replace this with `out_tx.try_send(mccp2_start())`
-            // followed by a flag flip on the writer.
-            debug!(conn_id, "MCCP2 DO received; deferred until writer compression lands");
+            // Client confirmed MCCP2. Push the start-of-compression
+            // marker through the outbound channel — the writer
+            // task detects it (last frame to be sent uncompressed)
+            // and flips into zlib-deflate mode for everything that
+            // follows. Subsequent frames go on the wire compressed
+            // automatically; nothing else needs to know.
+            let _ = out_tx.try_send(mccp2_start());
+            debug!(conn_id, "MCCP2 enabled (marker queued)");
         }
         // Client refuses our WILLs.
         (DONT, _) => {
@@ -793,5 +858,32 @@ mod iac_tests {
         // IAC SE — no space.
         let body_end = 3 + b"Core.Hello".len();
         assert_eq!(frame[body_end], telnet::IAC);
+    }
+
+    #[test]
+    fn mccp2_marker_round_trips() {
+        // The start-of-compression marker must be exactly 5 bytes
+        // and exact-match against `bytes_are_mccp2_marker`.
+        let marker = mccp2_start();
+        assert_eq!(marker.len(), 5);
+        assert!(bytes_are_mccp2_marker(&marker));
+    }
+
+    #[test]
+    fn mccp2_marker_does_not_match_other_subneg() {
+        // GMCP and MSSP subneg frames share the IAC SB / IAC SE
+        // envelope but use different option bytes — must not be
+        // mistaken for the MCCP2 marker.
+        assert!(!bytes_are_mccp2_marker(&gmcp_packet("Core.Hello", "")));
+        assert!(!bytes_are_mccp2_marker(&mssp_packet(&[("X", "Y")])));
+        // 5-byte sequence with the wrong option also doesn't match.
+        let fake = [
+            telnet::IAC,
+            telnet::SB,
+            opt::GMCP,
+            telnet::IAC,
+            telnet::SE,
+        ];
+        assert!(!bytes_are_mccp2_marker(&fake));
     }
 }
