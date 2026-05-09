@@ -4758,10 +4758,23 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
                 }
             }
         }
+        // Server-side layout coords. Builders set Room.layoutX /
+        // layoutY / layoutZ in Muditor; the loader attaches them
+        // as a `RoomLayout` component. When present, emit them
+        // as `coords` so client-side mappers can place rooms
+        // exactly where the builder laid them out instead of
+        // doing compass-walk auto-placement. Absence of the
+        // field signals "auto-place me" — the Mudlet rewrite
+        // gates on `coords` when picking a strategy.
+        let coords_field = world
+            .get::<mud_world::RoomLayout>(room)
+            .map(|l| format!(",\"coords\":\"{},{},{}\"", l.x, l.y, l.z))
+            .unwrap_or_default();
         let payload = format!(
-            "{{\"num\":{num},\"name\":\"{plain_name}\",\"area\":\"{area_plain}\",\"environment\":\"{environment}\",\"exits\":{{{}}},\"doors\":{{{}}}}}",
+            "{{\"num\":{num},\"name\":\"{plain_name}\",\"area\":\"{area_plain}\",\"environment\":\"{environment}\",\"exits\":{{{}}},\"doors\":{{{}}}{}}}",
             exit_entries.join(","),
             door_entries.join(","),
+            coords_field,
         );
         let _ = conn.try_send(mud_net::gmcp_packet("Room.Info", &payload));
     }

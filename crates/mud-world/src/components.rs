@@ -1449,6 +1449,21 @@ pub struct Located(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct RoomSector(pub Sector);
 
+/// Builder-authored mapper coordinates from `Room.layout_x` /
+/// `layout_y` / `layout_z`. Attached only to rooms that have at
+/// least one of the three set; absence of the component on a
+/// room means the builder didn't specify a layout, and the
+/// `Room.Info` GMCP emit omits the `coords` field so the client
+/// falls back to its own auto-placement strategy. Z defaults to
+/// 0 (matches the schema column default) when only X/Y are
+/// authored.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RoomLayout {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExitData {
     /// Resolved target room entity, if the target exists in the loaded world.

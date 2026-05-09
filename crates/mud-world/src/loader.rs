@@ -131,6 +131,20 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 .entity_mut(entity)
                 .insert(crate::BaseLightLevel(r.base_light_level));
         }
+        // Attach RoomLayout only when the builder authored at
+        // least one coordinate. Missing axes default to 0 (which
+        // matches the schema's z default and is a sensible
+        // "centered" fallback for x/y on partial-layout zones).
+        // Rooms without any layout authored stay component-free
+        // so the GMCP emit can detect "no server-side layout"
+        // and let the client auto-place.
+        if r.layout_x.is_some() || r.layout_y.is_some() || r.layout_z.is_some() {
+            world.entity_mut(entity).insert(crate::RoomLayout {
+                x: r.layout_x.unwrap_or(0),
+                y: r.layout_y.unwrap_or(0),
+                z: r.layout_z.unwrap_or(0),
+            });
+        }
         room_index.insert((r.zone_id, r.id), entity);
     }
     stats.rooms = room_index.len();
