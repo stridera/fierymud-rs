@@ -979,6 +979,16 @@ pub struct ObjectProto {
     /// player can tell the attack family at a glance without
     /// knowing the proto's keyword.
     pub weapon_damage_type: Option<String>,
+    /// `Armor`-typed objects only: base armor value from
+    /// `Objects.values.AC`. This is the per-slot armor that the
+    /// item type itself provides (e.g. a leather body 4, a
+    /// chainmail body 8) — independent of any apply-block
+    /// enchantments which flow through `ObjectEffects(modify)`.
+    /// `apply_object_to_wearer` calls `apply_modify_delta(wearer,
+    /// "ac", armor_ac)` at wear time so the legacy ×5 scaler
+    /// (per combat-rebalance.md) folds it into `CombatStats.armor_pct`.
+    /// Zero for non-armor and for armor with missing/zero AC.
+    pub armor_ac: i32,
     /// Base value in copper (the schema's `Objects.cost`). Shops will
     /// pay some fraction of this on sell; appraisal commands surface
     /// the raw number split into denominations.

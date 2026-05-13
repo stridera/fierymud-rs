@@ -395,6 +395,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         } else {
             None
         };
+        let armor_ac = if matches!(row.r#type, mud_db::enums::ObjectType::Armor) {
+            parse_armor_ac(&row.values)
+        } else {
+            0
+        };
         object_prototypes.by_key.insert(
             (row.zone_id, row.id),
             ObjectProto {
@@ -412,6 +417,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 weapon_dice_size,
                 weapon_dice_bonus,
                 weapon_damage_type,
+                armor_ac,
                 cost: row.cost,
                 portal_destination_vnum,
                 board_id,
@@ -2011,6 +2017,23 @@ fn parse_weapon_dice(values: &serde_json::Value) -> (i32, i32, i32) {
 /// Pull `Destination` from a Portal's `values` JSONB. Stored either
 /// as a number or a string in the legacy data; `0` (or missing /
 /// non-portal) is treated as "no destination".
+/// Extract the base armor value from an `Armor` object's `values`
+/// JSONB (`Objects.values.AC`). Legacy CircleMUD stored this as a
+/// positive integer where higher = stronger armor (the schema-import
+/// already flipped CircleMUD's "lower-is-better" AC convention). The
+/// equip path passes this through `apply_modify_delta(wearer, "ac",
+/// n)`, which scales ×5 into `CombatStats.armor_pct` per the legacy
+/// alias in `commands.rs::apply_modify_delta`. Returns 0 for missing
+/// or malformed values.
+fn parse_armor_ac(values: &serde_json::Value) -> i32 {
+    let Some(v) = values.get("AC") else { return 0 };
+    match v {
+        serde_json::Value::Number(n) => i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0),
+        serde_json::Value::String(s) => s.parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 fn parse_portal_destination(values: &serde_json::Value) -> Option<i32> {
     let v = values.get("Destination")?;
     let raw = match v {

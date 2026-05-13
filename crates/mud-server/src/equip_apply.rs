@@ -117,6 +117,18 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
         .collect();
     let mut applied_deltas: Vec<(String, i32)> = Vec::new();
     let mut spawned_effect_entities: Vec<Entity> = Vec::new();
+    // ---- Base armor (from Objects.values.AC) ----
+    // Apply the item-type's base armor before iterating ObjectEffects.
+    // This is the per-slot AC that fierylib stored on the row directly
+    // (leather body = 4, chainmail body = 8, etc.), distinct from the
+    // apply-block bonuses that flow through ObjectEffects(modify).
+    // The legacy "ac" target scales ×5 into armor_pct inside
+    // apply_modify_delta (commands.rs:11952), capped at 100.
+    if proto.armor_ac != 0
+        && apply_modify_delta(world, wearer, "ac", proto.armor_ac)
+    {
+        applied_deltas.push(("ac".to_string(), proto.armor_ac));
+    }
     for grant in granted_effects_to_spawn {
         let effect_def = world
             .get_resource::<mud_world::EffectCatalog>()
