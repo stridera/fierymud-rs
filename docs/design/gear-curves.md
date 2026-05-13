@@ -463,6 +463,38 @@ Mob would die in ~50 more rounds; tank would die in ~115 more rounds. **Projecte
 
 The math model's "30 HP/round sustained heal exceeds incoming damage" assumed the cleric heals the *correct* target. With naive scripting that targets a non-damaged player, the heal effectively never lands. This is a teaching moment for the design: combat balance depends on *play patterns*, not just stat math.
 
+### 6f. Empirical L50 group fight v2 — aggro fix + working healer
+
+After committing the first-attacker-priority fix to `commands/combat.rs` (commit a246dfa: 6 sites in cmd_attack / springleap / throatcut / hitall family etc. now guard against overwriting the mob's existing Fighting target), re-ran the group fight with the same composition but using AdminChar as the healer (Implementor role bypasses class+known-ability checks, so heals actually fire).
+
+Setup: TestWarrior (tank) + AdminChar (Implementor-as-cleric, casts `'heal' TestWarrior` every 3 bursts = 15 rounds) + BuilderChar (DPS) + Bungle (L50 trash, 2666 HP, 62 dmg).
+
+**Result: stable equilibrium WIN trajectory.**
+- Tank HP oscillated between ~1750-1900 over 250 rounds (heal cycle adds +112 every 15 rnd, mob does ~3 dpr to tank with armor)
+- DPS untouched (aggro fix held)
+- Healer untouched
+- Mob HP at timeout (rnd 250): ~16% remaining (party DPS ~9 dpr × 250 = 2250 / 2666)
+- Projected WIN at ~rnd 295-300 (TIMEOUT'd at the 250-rnd budget but trajectory was clearly winning)
+
+**Sample trace:**
+```
+rnd  70: tank=2278 healer=2555 dps=2555
+rnd 100: tank=2173 healer=2555 dps=2555     ← heals keep tank above 2000
+rnd 150: tank=2021 healer=2555 dps=2555
+rnd 200: tank=1881 healer=2555 dps=2555
+rnd 250: tank=1747 healer=2555 dps=2555     ← steady equilibrium
+```
+
+### 6g. Outstanding gaps from group testing
+
+1. **`CharacterAbilities` aren't seeded for test cleric.** TestCleric (class=Cleric) can't cast Heal because `KnownAbilities` is empty — the test seed creates the character row but not the per-character ability grants. AdminChar's Implementor role bypasses the check, which is why heal works for them. **Fix**: extend `user_seeder.py` to also insert `CharacterAbilities` for the cleric class's full spell list (Heal, Cure Light, Cure Serious, Full Heal, Bless, Armor, Vitality). Without this, group testing requires Implementor characters.
+
+2. **Heal targeting in real play needs intelligence.** A real cleric player can see who's low HP and pick a target; a scripted cleric needs an "auto-heal lowest" command or a UI affordance. Not a system bug, just a UX consideration.
+
+3. **Tank-pull convention.** The aggro fix means whoever attacks first holds aggro. Group communication: "Tank pulls first, DPS waits 1-2 rounds." `rescue` exists for recovery if a DPS pulls accidentally. Worth documenting in the player-facing combat docs (separate from this design doc).
+
+4. **No mana economy.** Cleric heal is unlimited in current build. Once mana lands, sustained 1-heal-per-15-rounds will need ~10 mana/cast × ~17 casts in a 250-round fight = 170 mana. Most caster gear in T5+ grants `+max_mana` apply blocks (per §3a fix), so the mana pool should scale with gear once implemented.
+
 ## 7. Recommendations
 
 Roughly ordered by impact:
