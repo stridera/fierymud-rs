@@ -108,7 +108,7 @@ needs a decision: ship the feature or drop the table.
 
 | Table(s) | Use | Recommendation |
 |---|---|---|
-| `EntityVariables` | Lua trigger persistent vars across calls | **wire** (small loader pass; trigger system already wants this) |
+| `EntityVariables` | Lua trigger persistent vars across calls | ✅ **wired** 2026-05-12 (boot-time hydration into `EntityVariableCache`, Lua `:setvar/:getvar/:clearvar`, 10s flush tick) |
 | `CombatMessage`, `PositionMessage`, `SystemMessage`, `LoginMessage`, `SystemText` | Builder-authored flavor text replacing hardcoded strings | **wire** (high content-leverage, modest loader work) |
 | `HelpEntry` | In-game help articles | **wire** (already a `help` command; just needs DB-backed lookup) |
 | `PlayerToggle` | Configurable per-player flag set | **drop** — `PlayerFlag` enum + `PlayerFlags` component already covers this |
