@@ -14,11 +14,13 @@ use mlua::{
     AnyUserData, Function, Lua, MetaMethod, MultiValue, Table, Thread, ThreadStatus, UserData,
     UserDataMethods, Value, Variadic,
 };
+use mud_db::enums::EntityType;
 use mud_world::{
     AbilityCatalog, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats, CoreStats, Description,
-    EffectCatalog, EffectInstance, EquippedSlot, Fighting, Follower, Health, Item, Keywords,
-    KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named, ObjectPrototypes, Online,
-    Player, Posture, PostureKind, Profile, Stealth, Title, TriggerCatalog, WorldKey, WorldKeyIndex,
+    EffectCatalog, EffectInstance, EntityVariableCache, EquippedSlot, Fighting, Follower, Health,
+    Item, Keywords, KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named,
+    ObjectPrototypes, Online, Player, Posture, PostureKind, Profile, Stealth, Title,
+    TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 
 /// One trigger body that ran into `wait(N)` and got parked. We hold the
@@ -575,34 +577,89 @@ impl LuaHost {
 
             // `run_room_trigger(zone, id)` — invoke a room trigger
             // by composite key. Used by quest scripts that hand off
-            // between rooms (zones 117, 123, 163, 185, etc.). v1 is
-            // a tracing stub; the dispatcher is single-threaded and
-            // re-entrant Lua → Lua firing risks recursion. Returning
-            // nil keeps the corpus parse-clean instead of erroring
-            // on a nil global call.
+            // between rooms (zones 117, 123, 163, 185, etc.).
+            //
+            // mlua's per-`Lua` re-entrancy guard would panic if we
+            // fired the target trigger synchronously from inside the
+            // current Lua frame. Instead we enqueue onto the
+            // `DeferredRoomTriggerFires` resource; mud-server drains
+            // the queue after the current Lua frame returns (see
+            // `triggers::drain_deferred_room_triggers`). Always
+            // returns `nil`; the actual fire is asynchronous from
+            // the caller's perspective.
             globals.set(
                 "run_room_trigger",
                 self.lua.create_function(
-                    |_, (zone, id): (i32, i32)| -> mlua::Result<()> {
-                        tracing::warn!(zone, id, "run_room_trigger stub no-op");
-                        Ok(())
+                    |lua, (zone, id): (i32, i32)| -> mlua::Result<()> {
+                        let caller = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
+                        world_mut_from_lua(lua, |world| {
+                            if !world.contains_resource::<mud_world::DeferredRoomTriggerFires>() {
+                                world.insert_resource(
+                                    mud_world::DeferredRoomTriggerFires::default(),
+                                );
+                            }
+                            world
+                                .resource_mut::<mud_world::DeferredRoomTriggerFires>()
+                                .queue
+                                .push(mud_world::DeferredRoomTriggerFire {
+                                    room_zone: zone,
+                                    room_id: id,
+                                    caller,
+                                });
+                        })
+                    },
+                )?,
+            )?;
+
+            // `_seconds_until(hour, minute)` — internal helper that
+            // returns seconds until `MudClock.hour` reaches the
+            // target. Minute is accepted for forward-compatibility
+            // with a future minute-granularity clock; today it's
+            // ignored (the clock advances one game hour every 750
+            // real ticks ≈ 75s real). Used by the Lua `wait_until`
+            // wrapper below.
+            //
+            // Same-hour returns a full 24-hour wait (matching the
+            // legacy "wait until next occurrence" semantic).
+            globals.set(
+                "_seconds_until",
+                self.lua.create_function(
+                    |lua, (h, _m): (i32, i32)| -> mlua::Result<i64> {
+                        const SECS_PER_GAME_HOUR: i64 = 75;
+                        let target = h.rem_euclid(24);
+                        let current = world_from_lua(lua, |w| {
+                            w.get_resource::<mud_world::MudClock>()
+                                .map(|c| c.hour.rem_euclid(24))
+                                .unwrap_or(0)
+                        })?;
+                        let mut delta_hours = i64::from(target - current);
+                        if delta_hours <= 0 {
+                            delta_hours += 24;
+                        }
+                        Ok(delta_hours.saturating_mul(SECS_PER_GAME_HOUR).max(1))
                     },
                 )?,
             )?;
 
             // `wait_until(hour, minute)` — clock-aligned wait for
             // game-time triggers (academy class schedule, market
-            // openings). Stub: emits a regular `wait(60)` to keep
-            // the coroutine alive until the next minute boundary
-            // approximation; full clock integration is a follow-up.
+            // openings, dawn-opens-the-gate). Implemented as
+            // sugar over `wait(N)` via the internal
+            // `_seconds_until` helper, so it parks on the same
+            // coroutine-yield mechanism the rest of the host uses.
+            // Minute granularity isn't modeled by `MudClock` today
+            // (one game hour per 750 ticks); the arg is accepted
+            // for forward-compatibility but ignored — wakes on
+            // hour boundary only.
             globals.set(
                 "wait_until",
-                self.lua.create_function(
-                    |_, (_h, _m): (i32, i32)| -> mlua::Result<()> {
-                        tracing::warn!("wait_until stub — falling through without sleeping");
-                        Ok(())
-                    },
-                )?,
+                self.lua
+                    .load(
+                        "local y = coroutine.yield; \
+                         local s = _seconds_until; \
+                         return function(h, m) y(s(h, m or 0)) end",
+                    )
+                    .eval::<Function>()?,
             )?;
 
             // `combat` namespace — engage/rescue. Implemented via
@@ -1054,6 +1111,70 @@ impl LuaHost {
                 .eval::<Function>()?,
         )?;
 
+        // run_room_trigger(zone, id) — enqueue a deferred fire onto
+        // `DeferredRoomTriggerFires`. mud-server drains the queue
+        // after the current Lua frame returns. See the matching
+        // binding in `exec_for_event_with_value` for the full
+        // commentary; this mirror exists for the coroutine-resume
+        // path where Lua globals are re-bound after a wait.
+        globals.set(
+            "run_room_trigger",
+            self.lua.create_function(
+                |lua, (zone, id): (i32, i32)| -> mlua::Result<()> {
+                    let caller = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
+                    world_mut_from_lua(lua, |world| {
+                        if !world.contains_resource::<mud_world::DeferredRoomTriggerFires>() {
+                            world.insert_resource(
+                                mud_world::DeferredRoomTriggerFires::default(),
+                            );
+                        }
+                        world
+                            .resource_mut::<mud_world::DeferredRoomTriggerFires>()
+                            .queue
+                            .push(mud_world::DeferredRoomTriggerFire {
+                                room_zone: zone,
+                                room_id: id,
+                                caller,
+                            });
+                    })
+                },
+            )?,
+        )?;
+
+        // `_seconds_until(hour, minute)` mirror — see the matching
+        // binding in `exec_for_event_with_value` for the rationale.
+        globals.set(
+            "_seconds_until",
+            self.lua.create_function(
+                |lua, (h, _m): (i32, i32)| -> mlua::Result<i64> {
+                    const SECS_PER_GAME_HOUR: i64 = 75;
+                    let target = h.rem_euclid(24);
+                    let current = world_from_lua(lua, |w| {
+                        w.get_resource::<mud_world::MudClock>()
+                            .map(|c| c.hour.rem_euclid(24))
+                            .unwrap_or(0)
+                    })?;
+                    let mut delta_hours = i64::from(target - current);
+                    if delta_hours <= 0 {
+                        delta_hours += 24;
+                    }
+                    Ok(delta_hours.saturating_mul(SECS_PER_GAME_HOUR).max(1))
+                },
+            )?,
+        )?;
+
+        // wait_until(hour, minute) — sugar over wait(_seconds_until(h, m)).
+        globals.set(
+            "wait_until",
+            self.lua
+                .load(
+                    "local y = coroutine.yield; \
+                     local s = _seconds_until; \
+                     return function(h, m) y(s(h, m or 0)) end",
+                )
+                .eval::<Function>()?,
+        )?;
+
         let mobiles_tbl = self.lua.create_table()?;
         mobiles_tbl.set(
             "template",
@@ -1280,6 +1401,128 @@ fn set_script_var(lua: &Lua, entity: Entity, key: &str, value: &str) -> mlua::Re
             sv.0.insert(key.to_string(), value.to_string());
         }
     })
+}
+
+/// Recursively convert an mlua `Value` into `serde_json::Value`. Used
+/// by the `:setvar` binding so trigger bodies can stash arbitrary
+/// shapes in `EntityVariables`. Numbers / strings / booleans / nil
+/// round-trip cleanly; tables become objects or arrays depending on
+/// whether their keys are contiguous 1-indexed integers (Lua's array
+/// convention).
+///
+/// Function / Thread / UserData / LightUserData / Error values are not
+/// representable in JSON; the function returns a Lua error so the
+/// trigger surfaces the mistake instead of silently writing a
+/// placeholder.
+fn lua_value_to_json(v: &Value) -> mlua::Result<serde_json::Value> {
+    match v {
+        Value::Nil => Ok(serde_json::Value::Null),
+        Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
+        Value::Integer(i) => Ok(serde_json::Value::Number((*i).into())),
+        Value::Number(n) => Ok(serde_json::Number::from_f64(*n)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number)),
+        Value::String(s) => Ok(serde_json::Value::String(s.to_string_lossy())),
+        Value::Table(t) => lua_table_to_json(t),
+        other => Err(mlua::Error::external(format!(
+            "cannot serialize Lua value of type {} into entity variable",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Pick the array-vs-object shape for a Lua table. Tables with
+/// contiguous integer keys starting at 1 become JSON arrays; anything
+/// else becomes a JSON object with string-coerced keys (numeric keys
+/// stringify, so a sparse table like `{[1]=..., [3]=...}` round-trips
+/// as `{"1":..., "3":...}`).
+fn lua_table_to_json(table: &Table) -> mlua::Result<serde_json::Value> {
+    // Determine length-by-1-indexed-contiguous-integer-keys. Walk
+    // `pairs` once; collect (key, value) pairs and classify.
+    let mut entries: Vec<(Value, Value)> = Vec::new();
+    for pair in table.pairs::<Value, Value>() {
+        entries.push(pair?);
+    }
+    let is_array = !entries.is_empty()
+        && entries.iter().enumerate().all(|(i, (k, _))| {
+            matches!(k, Value::Integer(n) if *n as i64 == (i as i64) + 1)
+        });
+    if is_array {
+        let mut arr = Vec::with_capacity(entries.len());
+        for (_, v) in &entries {
+            arr.push(lua_value_to_json(v)?);
+        }
+        Ok(serde_json::Value::Array(arr))
+    } else {
+        let mut obj = serde_json::Map::with_capacity(entries.len());
+        for (k, v) in &entries {
+            let key = match k {
+                Value::String(s) => s.to_string_lossy(),
+                Value::Integer(i) => i.to_string(),
+                Value::Number(n) => n.to_string(),
+                Value::Boolean(b) => b.to_string(),
+                other => {
+                    return Err(mlua::Error::external(format!(
+                        "table key of type {} not serializable",
+                        other.type_name()
+                    )));
+                }
+            };
+            obj.insert(key, lua_value_to_json(v)?);
+        }
+        Ok(serde_json::Value::Object(obj))
+    }
+}
+
+/// Inverse of `lua_value_to_json` — materialize a JSON value as a Lua
+/// value for `:getvar`. Numbers become Integer when integral, Number
+/// otherwise; arrays/objects become Lua tables with the obvious shape.
+fn json_to_lua_value(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
+    Ok(match v {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(b) => Value::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Number(f)
+            } else {
+                Value::Nil
+            }
+        }
+        serde_json::Value::String(s) => Value::String(lua.create_string(s)?),
+        serde_json::Value::Array(arr) => {
+            let t = lua.create_table()?;
+            for (i, item) in arr.iter().enumerate() {
+                let idx = i64::try_from(i + 1).unwrap_or(i64::MAX);
+                t.set(idx, json_to_lua_value(lua, item)?)?;
+            }
+            Value::Table(t)
+        }
+        serde_json::Value::Object(map) => {
+            let t = lua.create_table()?;
+            for (k, item) in map {
+                t.set(k.as_str(), json_to_lua_value(lua, item)?)?;
+            }
+            Value::Table(t)
+        }
+    })
+}
+
+/// Classify an entity into `EntityType` for the `EntityVariables` row
+/// key. Mob marker beats Item marker on a single entity (none have
+/// both today); Room is exclusive. Returns `None` for ad-hoc spawned
+/// entities the runtime doesn't yet tag, in which case the binding is
+/// a quiet no-op.
+fn classify_entity(world: &World, entity: Entity) -> Option<EntityType> {
+    if world.get::<mud_world::Room>(entity).is_some() {
+        Some(EntityType::Room)
+    } else if world.get::<Item>(entity).is_some() {
+        Some(EntityType::Object)
+    } else if world.get::<Mob>(entity).is_some() {
+        Some(EntityType::Mob)
+    } else {
+        None
+    }
 }
 
 /// Best-effort Lua → String coercion for the `set_quest_var` value
@@ -2516,6 +2759,144 @@ impl UserData for LuaActor {
             })
         });
 
+        // `self:setvar(name, value)` — persistent per-entity trigger
+        // variable. Backed by the `entity_variables` Postgres table
+        // through the in-memory `EntityVariableCache` resource: writes
+        // hit the cache immediately so subsequent `:getvar` reads see
+        // the update without a DB round trip; the flush tick in
+        // mud-server batches dirty bags back to the DB every ~10s.
+        //
+        // `value = nil` is equivalent to `:clearvar(name)` so trigger
+        // bodies can do `self:setvar("state", nil)` to drop a key
+        // without branching. Numbers / strings / booleans / tables all
+        // round-trip; functions / userdata / threads error so the
+        // typo doesn't silently write garbage.
+        //
+        // Requires the entity to carry a `WorldKey` so we can build
+        // the `(EntityType, zone, id)` row key. Ad-hoc spawned
+        // entities (those without a stable proto identity) are a
+        // quiet no-op — the cache key would collide arbitrarily.
+        methods.add_method(
+            "setvar",
+            |lua, this, (name, value): (String, Value)| -> mlua::Result<()> {
+                if name.is_empty() {
+                    return Ok(());
+                }
+                let entity = this.entity;
+                // Convert outside the world borrow so a malformed
+                // value (function / userdata) surfaces a Lua error
+                // without leaving the cache half-touched.
+                let json = lua_value_to_json(&value)?;
+                world_mut_from_lua(lua, |world| {
+                    let Some(kind) = classify_entity(world, entity) else {
+                        return;
+                    };
+                    let Some(key) = world.get::<WorldKey>(entity).copied() else {
+                        return;
+                    };
+                    if !world.contains_resource::<EntityVariableCache>() {
+                        world.insert_resource(EntityVariableCache::default());
+                    }
+                    let mut cache = world.resource_mut::<EntityVariableCache>();
+                    if matches!(json, serde_json::Value::Null) {
+                        cache.clear(kind, key.zone, key.id, &name);
+                    } else {
+                        cache.set(kind, key.zone, key.id, name, json);
+                    }
+                })
+            },
+        );
+
+        // `self:getvar(name)` — read a key from the persistent
+        // variable bag. Returns nil when the key is unset or the
+        // entity isn't tagged with a `WorldKey` (script-spawned). The
+        // returned shape mirrors the original `:setvar` payload:
+        // numbers stay numbers, strings stay strings, nested
+        // tables/arrays reconstruct.
+        methods.add_method(
+            "getvar",
+            |lua, this, name: String| -> mlua::Result<Value> {
+                if name.is_empty() {
+                    return Ok(Value::Nil);
+                }
+                let entity = this.entity;
+                let value = world_from_lua(lua, |world| -> Option<serde_json::Value> {
+                    let kind = classify_entity(world, entity)?;
+                    let key = world.get::<WorldKey>(entity)?;
+                    let cache = world.get_resource::<EntityVariableCache>()?;
+                    cache.get(kind, key.zone, key.id, &name).cloned()
+                })?;
+                match value {
+                    Some(v) => json_to_lua_value(lua, &v),
+                    None => Ok(Value::Nil),
+                }
+            },
+        );
+
+        // `self:clearvar(name)` — drop a key from the variable bag.
+        // The next flush tick deletes the row from `entity_variables`.
+        // Returns true if the key had a value at call time, false
+        // otherwise (mirrors `HashMap::remove(...).is_some()` so a
+        // trigger can short-circuit on first-time clears).
+        methods.add_method(
+            "clearvar",
+            |lua, this, name: String| -> mlua::Result<bool> {
+                if name.is_empty() {
+                    return Ok(false);
+                }
+                let entity = this.entity;
+                world_mut_from_lua(lua, |world| -> bool {
+                    let Some(kind) = classify_entity(world, entity) else {
+                        return false;
+                    };
+                    let Some(key) = world.get::<WorldKey>(entity).copied() else {
+                        return false;
+                    };
+                    if !world.contains_resource::<EntityVariableCache>() {
+                        world.insert_resource(EntityVariableCache::default());
+                    }
+                    let mut cache = world.resource_mut::<EntityVariableCache>();
+                    cache.clear(kind, key.zone, key.id, &name)
+                })
+            },
+        );
+
+        // `actor:active_quest(quest_zone, quest_id)` — return a
+        // LuaQuest userdata that exposes `getvar` / `setvar` /
+        // `clearvar` against this actor's `CharacterQuest.variables`
+        // bag for the given quest. Returns nil when the actor isn't
+        // a player (mobs / scripted entities don't have a
+        // character_id). The userdata is "cheap": it just packages
+        // `(character_id, quest_zone, quest_id)`; the actual storage
+        // is the world's `QuestVariableCache` resource, which a
+        // mud-server flush tick periodically persists back to the
+        // DB.
+        //
+        // The binding deliberately doesn't validate "does the row
+        // exist?" — that's a DB round-trip and the cache + flush
+        // path is happy to write a row that's about to be created
+        // by `accept_for_player`. A `getvar` against a non-existent
+        // row simply returns nil.
+        methods.add_method(
+            "active_quest",
+            |lua, this, (qz, qid): (i32, i32)| -> mlua::Result<Value> {
+                let entity = this.entity;
+                let cid_opt = world_from_lua(lua, |world| {
+                    world
+                        .get::<mud_world::Account>(entity)
+                        .map(|a| a.character_id.clone())
+                })?;
+                match cid_opt {
+                    Some(cid) => Ok(Value::UserData(lua.create_userdata(LuaQuest {
+                        character_id: cid,
+                        quest_zone: qz,
+                        quest_id: qid,
+                    })?)),
+                    None => Ok(Value::Nil),
+                }
+            },
+        );
+
         // Field access (`self.room`, `self.id`, `self.zone_id`,
         // `self.name`, `self.hp`, `self.max_hp`). The DG-Script-converted
         // corpus uses `obj.field` syntax, not `obj:field()`. Returning
@@ -2834,19 +3215,37 @@ impl UserData for LuaActor {
                                 .into(),
                         )
                     }),
-                    // CombatStats fields for `actor.armor` /
-                    // `actor.damroll`. Both default 0 if no stats.
-                    "armor" => world_from_lua(lua, |w| {
+                    // CombatStats accessors. Renamed from legacy
+                    // `armor` / `damroll` to the new acc/ev model
+                    // names. Old names map to the closest
+                    // equivalents so existing triggers keep
+                    // working (armor → armor_pct, damroll →
+                    // attack_power).
+                    "armor" | "armor_pct" => world_from_lua(lua, |w| {
                         Value::Integer(
                             w.get::<CombatStats>(this.entity)
-                                .map_or(0, |c| c.ac)
+                                .map_or(0, |c| c.armor_pct)
                                 .into(),
                         )
                     }),
-                    "damroll" => world_from_lua(lua, |w| {
+                    "damroll" | "attack_power" => world_from_lua(lua, |w| {
                         Value::Integer(
                             w.get::<CombatStats>(this.entity)
-                                .map_or(0, |c| c.dmg_roll)
+                                .map_or(0, |c| c.attack_power)
+                                .into(),
+                        )
+                    }),
+                    "accuracy" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CombatStats>(this.entity)
+                                .map_or(0, |c| c.accuracy)
+                                .into(),
+                        )
+                    }),
+                    "evasion" => world_from_lua(lua, |w| {
+                        Value::Integer(
+                            w.get::<CombatStats>(this.entity)
+                                .map_or(0, |c| c.evasion)
                                 .into(),
                         )
                     }),
@@ -3058,6 +3457,98 @@ impl UserData for LuaActor {
 }
 
 // ---------------------------------------------------------------------------
+// LuaQuest userdata
+// ---------------------------------------------------------------------------
+
+/// A handle to a player's quest-variable bag, returned by
+/// `actor:active_quest(quest_zone, quest_id)`. The userdata is
+/// purely identity — the actual storage is the world's
+/// `QuestVariableCache` resource, mirrored to `CharacterQuests.
+/// variables` by a periodic flush tick in mud-server.
+///
+/// `getvar` reads through the cache (no DB round-trip). `setvar`
+/// writes to the cache and marks the row dirty for the next flush.
+/// `clearvar` is `setvar(name, nil)`.
+///
+/// The quest doesn't have to "exist" yet — a `setvar` on a
+/// not-yet-accepted quest creates the cache entry, and the flush
+/// tick's UPDATE silently no-ops against a missing
+/// CharacterQuest row. Once `accept_for_player` lands the row
+/// (with `variables = '{}'`), the next flush sees the cache entries
+/// and merges them in.
+#[derive(Clone)]
+pub struct LuaQuest {
+    pub character_id: String,
+    pub quest_zone: i32,
+    pub quest_id: i32,
+}
+
+impl UserData for LuaQuest {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method(
+            "getvar",
+            |lua, this, name: String| -> mlua::Result<Value> {
+                if name.is_empty() {
+                    return Ok(Value::Nil);
+                }
+                let cid = this.character_id.clone();
+                let qz = this.quest_zone;
+                let qid = this.quest_id;
+                let value = world_from_lua(lua, |world| -> Option<serde_json::Value> {
+                    let cache = world.get_resource::<mud_world::QuestVariableCache>()?;
+                    cache.get(&cid, qz, qid, &name).cloned()
+                })?;
+                match value {
+                    Some(v) => json_to_lua_value(lua, &v),
+                    None => Ok(Value::Nil),
+                }
+            },
+        );
+        methods.add_method(
+            "setvar",
+            |lua, this, (name, value): (String, Value)| -> mlua::Result<()> {
+                if name.is_empty() {
+                    return Ok(());
+                }
+                let json = lua_value_to_json(&value)?;
+                let cid = this.character_id.clone();
+                let qz = this.quest_zone;
+                let qid = this.quest_id;
+                world_mut_from_lua(lua, |world| {
+                    if !world.contains_resource::<mud_world::QuestVariableCache>() {
+                        world.insert_resource(mud_world::QuestVariableCache::default());
+                    }
+                    let mut cache = world.resource_mut::<mud_world::QuestVariableCache>();
+                    if matches!(json, serde_json::Value::Null) {
+                        cache.clear(cid, qz, qid, &name);
+                    } else {
+                        cache.set(cid, qz, qid, name, json);
+                    }
+                })
+            },
+        );
+        methods.add_method(
+            "clearvar",
+            |lua, this, name: String| -> mlua::Result<bool> {
+                if name.is_empty() {
+                    return Ok(false);
+                }
+                let cid = this.character_id.clone();
+                let qz = this.quest_zone;
+                let qid = this.quest_id;
+                world_mut_from_lua(lua, |world| -> bool {
+                    if !world.contains_resource::<mud_world::QuestVariableCache>() {
+                        world.insert_resource(mud_world::QuestVariableCache::default());
+                    }
+                    let mut cache = world.resource_mut::<mud_world::QuestVariableCache>();
+                    cache.clear(cid, qz, qid, &name)
+                })
+            },
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LuaRoom userdata
 // ---------------------------------------------------------------------------
 
@@ -3084,6 +3575,77 @@ impl UserData for LuaRoom {
                     .push((this.entity, msg, None));
             })
         });
+
+        // `room:setvar/getvar/clearvar` — room-attached triggers (eg
+        // PREENTRY / RESET hooks) often want their own persistent
+        // state separate from the mobs/objects passing through. Same
+        // backing store as the LuaActor methods, just keyed under
+        // `EntityType::Room`. See the LuaActor analogues for shape
+        // and edge-case notes (nil-collapses-to-clear, JSON
+        // round-trip, etc.).
+        methods.add_method(
+            "setvar",
+            |lua, this, (name, value): (String, Value)| -> mlua::Result<()> {
+                if name.is_empty() {
+                    return Ok(());
+                }
+                let entity = this.entity;
+                let json = lua_value_to_json(&value)?;
+                world_mut_from_lua(lua, |world| {
+                    let Some(key) = world.get::<WorldKey>(entity).copied() else {
+                        return;
+                    };
+                    if !world.contains_resource::<EntityVariableCache>() {
+                        world.insert_resource(EntityVariableCache::default());
+                    }
+                    let mut cache = world.resource_mut::<EntityVariableCache>();
+                    if matches!(json, serde_json::Value::Null) {
+                        cache.clear(EntityType::Room, key.zone, key.id, &name);
+                    } else {
+                        cache.set(EntityType::Room, key.zone, key.id, name, json);
+                    }
+                })
+            },
+        );
+        methods.add_method(
+            "getvar",
+            |lua, this, name: String| -> mlua::Result<Value> {
+                if name.is_empty() {
+                    return Ok(Value::Nil);
+                }
+                let entity = this.entity;
+                let value = world_from_lua(lua, |world| -> Option<serde_json::Value> {
+                    let key = world.get::<WorldKey>(entity)?;
+                    let cache = world.get_resource::<EntityVariableCache>()?;
+                    cache
+                        .get(EntityType::Room, key.zone, key.id, &name)
+                        .cloned()
+                })?;
+                match value {
+                    Some(v) => json_to_lua_value(lua, &v),
+                    None => Ok(Value::Nil),
+                }
+            },
+        );
+        methods.add_method(
+            "clearvar",
+            |lua, this, name: String| -> mlua::Result<bool> {
+                if name.is_empty() {
+                    return Ok(false);
+                }
+                let entity = this.entity;
+                world_mut_from_lua(lua, |world| -> bool {
+                    let Some(key) = world.get::<WorldKey>(entity).copied() else {
+                        return false;
+                    };
+                    if !world.contains_resource::<EntityVariableCache>() {
+                        world.insert_resource(EntityVariableCache::default());
+                    }
+                    let mut cache = world.resource_mut::<EntityVariableCache>();
+                    cache.clear(EntityType::Room, key.zone, key.id, &name)
+                })
+            },
+        );
 
         // `room:send_except(target, msg)` broadcasts to every player
         // in the room except `target`. 791 corpus refs — typically
@@ -3757,7 +4319,6 @@ fn spawn_mob_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<
             .get(&(zone, id))
             .cloned();
         let hp = proto.rolled_hp();
-        let dmg = proto.avg_damage();
         let mut em = world.spawn((
             Mob,
             Named { name: proto.name.clone() },
@@ -3766,14 +4327,13 @@ fn spawn_mob_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<
             WorldKey { zone, id },
             Located(room),
             Health { hp, max: hp },
-            CombatStats {
-                hit_roll: proto.hit_roll,
-                dmg_roll: dmg,
-                ac: proto.armor_class,
-                alignment: proto.alignment,
-                ward_pct: proto.ward_percent,
-            },
+            proto.derived_combat_stats(),
             Posture(PostureKind::Standing),
+            mud_world::NaturalDamage {
+                num: proto.damage_dice_num,
+                size: proto.damage_dice_size,
+                bonus: proto.damage_dice_bonus,
+            },
         ));
         if let Some(keys) = trigger_keys {
             em.insert(AttachedTriggers(keys));
@@ -4083,5 +4643,268 @@ mod tests {
             .expect("ok");
         // Named missing falls back to "<unknown>".
         assert_eq!(tostring, "Actor(<unknown>)\r\n");
+    }
+
+    /// Spawn a Mob with a WorldKey so `:setvar` has the (kind, zone,
+    /// id) tuple it needs to slot a row into the `EntityVariableCache`.
+    /// The Player-only test fixture above is intentionally bare; this
+    /// helper is the canonical "scripted entity" shape.
+    fn make_world_with_mob() -> (World, Entity) {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Mob,
+                Named { name: "TestMob".to_string() },
+                Health { hp: 10, max: 10 },
+                WorldKey { zone: 99, id: 1 },
+            ))
+            .id();
+        (world, entity)
+    }
+
+    #[test]
+    fn setvar_then_getvar_round_trips_value() {
+        // Smoke test for the EntityVariables wiring: Lua `:setvar`
+        // writes to the cache, `:getvar` reads it back. The DB is not
+        // touched here — flush is its own concern in mud-server.
+        let (mut world, entity) = make_world_with_mob();
+        let mut host = LuaHost::new();
+        // Write three shapes (number, string, table) and read them back.
+        host.exec_for_actor(
+            &mut world,
+            entity,
+            r#"
+            self:setvar("count", 7)
+            self:setvar("name", "phyllis")
+            self:setvar("data", { x = 1, y = 2 })
+            "#,
+        )
+        .expect("set");
+        let n = host
+            .exec_for_actor(&mut world, entity, "print(self:getvar('count'))")
+            .expect("get count");
+        assert_eq!(n, "7\r\n");
+        let s = host
+            .exec_for_actor(&mut world, entity, "print(self:getvar('name'))")
+            .expect("get name");
+        assert_eq!(s, "phyllis\r\n");
+        // Tables round-trip as Lua tables; index by key to spot-check.
+        let d = host
+            .exec_for_actor(
+                &mut world,
+                entity,
+                "print(self:getvar('data').x, self:getvar('data').y)",
+            )
+            .expect("get data");
+        assert_eq!(d, "1\t2\r\n");
+
+        // Cache should have the entity tracked + dirty.
+        let cache = world.resource::<EntityVariableCache>();
+        assert_eq!(cache.entity_count(), 1);
+        assert_eq!(
+            cache.get(EntityType::Mob, 99, 1, "count"),
+            Some(&serde_json::json!(7))
+        );
+    }
+
+    #[test]
+    fn setvar_nil_clears_the_key() {
+        // `self:setvar(name, nil)` is the same as `self:clearvar(name)` —
+        // tombstones the entry so the next flush deletes the row.
+        let (mut world, entity) = make_world_with_mob();
+        let mut host = LuaHost::new();
+        host.exec_for_actor(
+            &mut world,
+            entity,
+            r#"
+            self:setvar("flag", true)
+            self:setvar("flag", nil)
+            "#,
+        )
+        .expect("ok");
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                entity,
+                "print(tostring(self:getvar('flag')))",
+            )
+            .expect("ok");
+        // Cleared key reads as nil → tostring(nil) == "nil".
+        assert_eq!(out, "nil\r\n");
+    }
+
+    #[test]
+    fn clearvar_returns_true_when_value_existed() {
+        let (mut world, entity) = make_world_with_mob();
+        let mut host = LuaHost::new();
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                entity,
+                r#"
+                self:setvar("k", 1)
+                print(tostring(self:clearvar("k")))
+                print(tostring(self:clearvar("missing")))
+                "#,
+            )
+            .expect("ok");
+        // First clear had a value → "true"; second never existed → "false".
+        assert_eq!(out, "true\r\nfalse\r\n");
+    }
+
+    // ----------------------------------------------------------------
+    // quest:setvar / quest:getvar (parking-lot resolution)
+    // ----------------------------------------------------------------
+
+    fn make_world_with_player_and_account() -> (World, Entity) {
+        use mud_world::Account;
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Player,
+                Named { name: "Hero".to_string() },
+                Account {
+                    user_id: "u-1".to_string(),
+                    character_id: "char-1".to_string(),
+                    role: mud_db::enums::UserRole::Player,
+                    perms: vec![],
+                },
+            ))
+            .id();
+        (world, entity)
+    }
+
+    #[test]
+    fn quest_setvar_then_getvar_round_trips_through_cache() {
+        // The parking-lot test: spawn a player, give them an Account,
+        // grab a LuaQuest userdata via `actor:active_quest(30, 1)`,
+        // and round-trip a numeric value through setvar/getvar. No DB
+        // — that's the flush tick's concern, exercised through the
+        // `QuestVariableCache` unit tests in mud-world.
+        let (mut world, player) = make_world_with_player_and_account();
+        let mut host = LuaHost::new();
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                player,
+                r#"
+                local q = actor:active_quest(30, 1)
+                q:setvar("progress", 5)
+                print(tostring(q:getvar("progress")))
+                "#,
+            )
+            .expect("ok");
+        assert_eq!(out, "5\r\n");
+        // Verify the cache itself holds the value (the actual store).
+        let cache = world
+            .get_resource::<mud_world::QuestVariableCache>()
+            .expect("cache installed on first setvar");
+        assert_eq!(
+            cache.get("char-1", 30, 1, "progress"),
+            Some(&serde_json::json!(5))
+        );
+    }
+
+    #[test]
+    fn quest_active_quest_returns_nil_for_mob_without_account() {
+        // Non-player entities don't carry an Account (no character_id);
+        // `actor:active_quest(...)` returns nil so the trigger body
+        // can `if q then ...` without crashing.
+        let (mut world, mob) = make_world_with_mob();
+        let mut host = LuaHost::new();
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                mob,
+                "print(tostring(actor:active_quest(30, 1)))",
+            )
+            .expect("ok");
+        assert_eq!(out, "nil\r\n");
+    }
+
+    #[test]
+    fn quest_clearvar_tombstones_value() {
+        // `quest:clearvar` removes the cache entry from the read
+        // perspective; `quest:getvar` then returns nil. The next
+        // flush tick translates the tombstone into a DB delete.
+        let (mut world, player) = make_world_with_player_and_account();
+        let mut host = LuaHost::new();
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                player,
+                r#"
+                local q = actor:active_quest(30, 1)
+                q:setvar("stage", "alpha")
+                print(tostring(q:getvar("stage")))
+                q:clearvar("stage")
+                print(tostring(q:getvar("stage")))
+                "#,
+            )
+            .expect("ok");
+        assert_eq!(out, "alpha\r\nnil\r\n");
+    }
+
+    #[test]
+    fn quest_setvar_nil_collapses_to_clear() {
+        // `q:setvar(name, nil)` is identical to `q:clearvar(name)` —
+        // matches the actor-side setvar contract so authors don't
+        // have to special-case "clear by writing nil" vs explicit
+        // clearvar.
+        let (mut world, player) = make_world_with_player_and_account();
+        let mut host = LuaHost::new();
+        host.exec_for_actor(
+            &mut world,
+            player,
+            r#"
+            local q = actor:active_quest(30, 1)
+            q:setvar("flag", true)
+            q:setvar("flag", nil)
+            "#,
+        )
+        .expect("ok");
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                player,
+                r#"
+                local q = actor:active_quest(30, 1)
+                print(tostring(q:getvar("flag")))
+                "#,
+            )
+            .expect("ok");
+        assert_eq!(out, "nil\r\n");
+    }
+
+    #[test]
+    fn quest_var_drain_dirty_yields_writeback_payload() {
+        // After a Lua setvar, the world's cache is dirty. Draining
+        // it produces the (character_id, zone, id, sets, clears)
+        // tuple the flush tick consumes. This is the contract the
+        // mud-server flush tick depends on, locked in here.
+        let (mut world, player) = make_world_with_player_and_account();
+        let mut host = LuaHost::new();
+        host.exec_for_actor(
+            &mut world,
+            player,
+            r#"
+            local q = actor:active_quest(30, 7)
+            q:setvar("a", 1)
+            q:setvar("b", "two")
+            q:clearvar("c")
+            "#,
+        )
+        .expect("ok");
+        let drained = world
+            .resource_mut::<mud_world::QuestVariableCache>()
+            .drain_dirty();
+        assert_eq!(drained.len(), 1);
+        let (cid, qz, qid, sets, clears) = &drained[0];
+        assert_eq!(cid, "char-1");
+        assert_eq!(*qz, 30);
+        assert_eq!(*qid, 7);
+        assert_eq!(sets.len(), 2);
+        assert_eq!(clears.len(), 1);
+        assert_eq!(clears[0], "c");
     }
 }

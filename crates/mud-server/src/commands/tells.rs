@@ -8,7 +8,8 @@ use mud_world::{IgnoreList, LastTeller, Named, Online, Player, TellLog};
 
 use crate::commands::{
     Account, Category, Command, DbPool, Help, Prevent, effect_prevents, format_idle,
-    has_flag, name_of, send_rendered, send_to, try_insert,
+    has_flag, name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to,
+    try_insert,
 };
 
 inventory::submit! {
@@ -108,6 +109,9 @@ fn cmd_tell(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
+    if name_approval_gate(world, player) {
+        return;
+    }
     if effect_prevents(world, player, Prevent::Speaking) {
         send_to(world, player, "Your voice is silenced.\r\n");
         return;
@@ -200,6 +204,14 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
         &format!("<cyan><b:cyan>{player_name}</> tells you, \"{message}\"</>\r\n"),
     );
 
+    // GMCP companion frame for both ends of the conversation —
+    // sender and receiver land in the Tells tab via the same
+    // third-person body. Bystanders don't exist for a tell, so
+    // there's no information leak to worry about.
+    let gmcp_text = format!("{player_name} tells {target_name}, \"{message}\"");
+    send_comm_channel_text(world, player, "tells", &player_name, &gmcp_text);
+    send_comm_channel_text(world, target, "tells", &player_name, &gmcp_text);
+
     try_insert(world, target, LastTeller(player));
     let player_name_owned = player_name.clone();
     if let Some(mut log) = world.get_mut::<TellLog>(target) {
@@ -230,6 +242,9 @@ fn cmd_reply(world: &mut World, player: Entity, args: &str) {
     let message = args.trim();
     if message.is_empty() {
         send_to(world, player, "Reply with what?\r\n");
+        return;
+    }
+    if name_approval_gate(world, player) {
         return;
     }
     let Some(LastTeller(last)) = world.get::<LastTeller>(player).copied() else {

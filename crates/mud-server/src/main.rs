@@ -5,6 +5,9 @@ mod commands;
 mod corpses;
 mod drowning;
 mod effects;
+mod entity_vars;
+mod equip_apply;
+mod events;
 mod idle;
 mod login;
 mod memorize;
@@ -14,6 +17,9 @@ mod shops;
 mod sleep;
 mod syslog;
 mod wander;
+mod quest_dialogue;
+mod quest_triggers;
+mod quest_vars;
 mod triggers;
 mod weather;
 
@@ -129,6 +135,37 @@ async fn main() {
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
         error!(error = %e, "world load failed");
         return;
+    }
+    // Wire CUSTOM_LUA sweep channel + dialogue catalog defaults
+    // (Wave 4.5 / 4.11). Must happen before the dialogue load so
+    // the resource is in place when the loader fills it.
+    quest_triggers::init_resources(&mut world);
+    // Wire the world-event catalog + poll inbox so the first
+    // `events_poll_tick` (fires on tick 0) has somewhere to send
+    // its result and the `drain_events_inbox` has a catalog to
+    // mutate. Catalog starts empty; the first poll fills it.
+    events::init_resources(&mut world);
+    // Per-quest variable cache (`quest:setvar` / `quest:getvar`
+    // Lua bindings). Empty by default; `quest_var_flush_tick`
+    // drains dirty rows to the DB every 10s. Hydration is
+    // implicit — the first `quest:getvar` against a freshly-
+    // accepted quest sees no cache entry and returns nil, which
+    // is the same result as a DB row with `variables = '{}'`.
+    world.insert_resource(mud_world::QuestVariableCache::default());
+    if let Err(e) = quest_dialogue::load_catalog(&mut world, &pool).await {
+        tracing::warn!(error = %e, "dialogue catalog load failed");
+    }
+    // After load_from_db spawned mobs (Pass 5) and equipped them
+    // from MobResetEquipment (Pass 6), apply each equipped item's
+    // ObjectAffects / ObjectEffects / ObjectResistance bonuses
+    // onto its mob. Without this, an L99 mob wielding a +5 sword
+    // wouldn't get the +5 hitroll.
+    let mob_entities: Vec<bevy_ecs::prelude::Entity> = {
+        let mut q = world.query_filtered::<bevy_ecs::prelude::Entity, bevy_ecs::prelude::With<mud_world::Mob>>();
+        q.iter(&world).collect()
+    };
+    for mob in mob_entities {
+        equip_apply::recompute_equipped_for(&mut world, mob);
     }
 
     // Overlay persisted weather (if any) on top of the climate-default
@@ -329,7 +366,13 @@ async fn main() {
                 memorize::memorize_tick,
                 respawn::respawn_tick,
                 triggers::lua_coroutine_tick,
+                entity_vars::entity_var_flush_tick,
+                quest_vars::quest_var_flush_tick,
                 commands::drain_player_updates,
+                quest_triggers::quest_sweep_tick,
+                quest_triggers::quest_custom_lua_drain,
+                events::events_poll_tick,
+                events::drain_events_inbox,
                 log_heartbeat,
             )
                 .chain(),
@@ -390,6 +433,32 @@ async fn main() {
                             info!(tick, autosave_ticks, "periodic autosave");
                         }
                     }
+                    // Periodic expiry of in-memory Discord-link
+                    // verification codes. Cadence: every 30 simulated
+                    // seconds (300 ticks at 10 Hz). A stalled link
+                    // request shouldn't leave a code reservable
+                    // forever — this is the only persistent cost of
+                    // the link flow that needs aging.
+                    //
+                    // The LoginRequests-based approval flow that used
+                    // to live on this tick was removed in favor of
+                    // the per-character `Characters.name_approved`
+                    // gate; that flag is staff-resolved through
+                    // `approve_name` / `reject_name` and needs no
+                    // periodic sweep.
+                    {
+                        let tick = world.resource::<TickCount>().0;
+                        let expire_ticks = 30u64 * TICK_HZ;
+                        if tick > 0 && tick.is_multiple_of(expire_ticks) {
+                            let now = std::time::Instant::now();
+                            let dropped = world
+                                .resource_mut::<mud_world::PendingDiscordLinks>()
+                                .expire_old(now);
+                            if dropped > 0 {
+                                info!(dropped, "pending discord-link codes aged off");
+                            }
+                        }
+                    }
                     // Lua-requested saves: triggers can call
                     // `actor:save()` to checkpoint progress mid-tick.
                     // The Lua callback inserts a `PendingSave` marker
@@ -438,6 +507,12 @@ async fn main() {
                         }
                     }
                 }
+                // Drain real-time syslog WARN+ events to subscribers
+                // before the prompt flush so any pushed lines land
+                // ahead of the next prompt refresh and appear cleanly
+                // separated from gameplay output. Cheap when no one
+                // is watching (early-out on empty subscriber list).
+                commands::drain_syslog_to_watchers(&mut world);
                 // After all systems for this tick have run, refresh
                 // prompts for anyone who received output (combat hits,
                 // effect fades, broadcasts, etc.).

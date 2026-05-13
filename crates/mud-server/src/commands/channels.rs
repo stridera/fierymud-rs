@@ -12,8 +12,8 @@ use mud_db::enums::{PlayerFlag, UserRole};
 use mud_world::{IgnoreList, Online, Player};
 
 use crate::commands::{
-    Account, Category, ColorMode, Command, Connection, Help, Prevent, effect_prevents,
-    has_flag, name_of, render_color_tags, send_to,
+    Account, Category, Command, Help, Prevent, effect_prevents, has_flag, name_approval_gate,
+    name_of, send_comm_channel_text, send_to,
 };
 
 inventory::submit! {
@@ -175,6 +175,9 @@ fn broadcast_global(
         send_to(world, player, refusal);
         return;
     }
+    if name_approval_gate(world, player) {
+        return;
+    }
     if effect_prevents(world, player, Prevent::Speaking) {
         send_to(world, player, "Your voice is silenced.\r\n");
         return;
@@ -195,18 +198,14 @@ fn broadcast_global(
         let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
         q.iter(world).collect()
     };
-    // GMCP Comm.Channel.Text: pre-build the JSON payload once
-    // so each recipient gets the same frame. Mudlet (and the
-    // major web clients) route this into a dedicated chat
-    // window via the dotted package name's third segment, so
-    // `gossip` lands in the gossip tab, `shout` in shouts, etc.
-    // Per the IRE spec, text is the *plain rendered* form
-    // (color tags stripped) so client-side display can re-style.
-    let plain_speaker = render_color_tags(&player_name, ColorMode::Strip);
-    let plain_message = render_color_tags(message, ColorMode::Strip);
+    // GMCP Comm.Channel.Text body: the rendered third-person
+    // line that Mudlet / web clients drop into a chat tab keyed
+    // off `channel_kind`. Same string for every recipient —
+    // the speaker sees their own gossip in the chat tab in
+    // third-person form, matching the IRE convention.
     let gmcp_text = format!(
         "{}{}, \"{}\"",
-        plain_speaker,
+        player_name,
         match channel_kind {
             "gossip" => " gossips",
             "shout" => " shouts",
@@ -214,17 +213,7 @@ fn broadcast_global(
             "quest" => " quest-says",
             _ => "",
         },
-        plain_message
-    );
-    let gmcp_payload = format!(
-        "{{\"channel\":\"{}\",\"talker\":\"{}\",\"text\":\"{}\"}}",
-        channel_kind,
-        plain_speaker
-            .replace('\\', "\\\\")
-            .replace('"', "\\\""),
-        gmcp_text
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
+        message
     );
     for t in targets {
         if t != player && has_flag(world, t, PlayerFlag::Deaf) {
@@ -234,6 +223,15 @@ fn broadcast_global(
             && world
                 .get::<IgnoreList>(t)
                 .is_some_and(|l| l.contains(&player_name))
+        {
+            continue;
+        }
+        // SoundproofRoom: occupants of soundproof rooms don't hear
+        // global channels. Speaker still hears their own line
+        // (otherwise they'd think the command silently failed).
+        if t != player
+            && let Some(located) = world.get::<mud_world::Located>(t)
+            && world.get::<mud_world::SoundproofRoom>(located.0).is_some()
         {
             continue;
         }
@@ -253,17 +251,11 @@ fn broadcast_global(
             )
         };
         send_to(world, t, line);
-        // Push the GMCP companion frame to clients with a
-        // Connection — listeners see it in their chat split,
-        // sender sees it (so client-side echo doesn't have to
-        // synthesize). Sent AFTER the text line so any client
+        // GMCP companion frame — listeners see it in their chat
+        // split, sender sees it too (so client-side echo doesn't
+        // have to synthesize). Sent after the text so any client
         // race between text + GMCP renders the text first.
-        if let Some(conn) = world.get::<Connection>(t) {
-            let _ = conn.0.try_send(mud_net::gmcp_packet(
-                "Comm.Channel.Text",
-                &gmcp_payload,
-            ));
-        }
+        send_comm_channel_text(world, t, channel_kind, &player_name, &gmcp_text);
     }
     // Capture into the channel history ring buffer so `lastgossips`
     // / `lastshouts` can replay recent traffic to a player who
@@ -339,8 +331,15 @@ fn cmd_qecho(world: &mut World, player: Entity, args: &str) {
         q.iter(world).collect()
     };
     let line = format!("<b:green>[Quest]</> {message}\r\n");
+    // GMCP body: bracket-tagged so the client tab makes the
+    // origin obvious. Talker is the issuing builder/admin even
+    // though the rendered line is anonymous — clients can hide
+    // it for player-facing display while keeping it for staff
+    // logs / replays.
+    let gmcp_text = format!("[Quest] {message}");
     for t in targets {
         send_to(world, t, line.clone());
+        send_comm_channel_text(world, t, "quest", &player_name, &gmcp_text);
     }
     if !world.contains_resource::<mud_world::ChannelHistory>() {
         world.insert_resource(mud_world::ChannelHistory::default());
@@ -369,6 +368,12 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _)| e)
             .collect()
     };
+    // GMCP companion: third-person rendering ("X: msg") drops into
+    // the staff tab on capable clients. Mudlet (and the FieryMud
+    // package) routes Comm.Channel.Text by `channel`, so every
+    // recipient gets the same body text — even the speaker, who
+    // sees the "You:" form in the main window separately.
+    let gmcp_text = format!("{player_name}: {message}");
     for t in targets {
         // Wiznet reads bold cyan to match its staff-only role —
         // distinct from the public channels (gossip/shout/music)
@@ -381,6 +386,7 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
             )
         };
         send_to(world, t, line);
+        send_comm_channel_text(world, t, "wiznet", &player_name, &gmcp_text);
     }
 }
 

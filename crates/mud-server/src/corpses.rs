@@ -227,6 +227,12 @@ fn spawn_item_into(world: &mut World, proto_zone: i32, proto_id: i32, parent: En
     if let Some(keys) = trigger_keys {
         bundle.insert(AttachedTriggers(keys));
     }
+    if !proto.flags.is_empty() {
+        bundle.insert(mud_world::ObjectFlags(proto.flags.clone()));
+    }
+    if !proto.restrictions.is_empty() {
+        bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
+    }
     true
 }
 

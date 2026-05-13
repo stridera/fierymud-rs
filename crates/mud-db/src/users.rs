@@ -19,6 +19,12 @@ pub struct User {
     /// account regardless of credentials. Cleared on successful
     /// login or admin unlock.
     pub locked_until: Option<chrono::NaiveDateTime>,
+    /// Account-shared bank balance, in copper. Pooled across every
+    /// character on this user account; the per-character
+    /// `Characters.bank_wealth` is independent. Wired by the
+    /// `account_balance` / `account_deposit` / `account_withdraw`
+    /// command family. Schema default is 0.
+    pub account_wealth: i64,
 }
 
 pub async fn find_by_email(pool: &PgPool, email: &str) -> sqlx::Result<Option<User>> {
@@ -32,7 +38,8 @@ pub async fn find_by_email(pool: &PgPool, email: &str) -> sqlx::Result<Option<Us
             password_hash,
             role AS "role: UserRole",
             failed_login_attempts,
-            locked_until
+            locked_until,
+            account_wealth
         FROM "Users"
         WHERE email = $1 AND deleted_at IS NULL
         "#,
@@ -53,7 +60,8 @@ pub async fn find_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<User>> {
             password_hash,
             role AS "role: UserRole",
             failed_login_attempts,
-            locked_until
+            locked_until,
+            account_wealth
         FROM "Users"
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -61,6 +69,40 @@ pub async fn find_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<User>> {
     )
     .fetch_optional(pool)
     .await
+}
+
+/// Persist the account-shared bank balance. Used by the
+/// `account_deposit` / `account_withdraw` commands and the save-player
+/// path when one character on the account adjusted the shared pool
+/// in-memory. Mirrors `characters::save_bank_wealth` for the per-
+/// character balance.
+pub async fn save_account_wealth<'e, E: PgExecutor<'e>>(
+    executor: E,
+    user_id: &str,
+    amount: i64,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Users" SET account_wealth = $1, updated_at = NOW() WHERE id = $2"#,
+        amount,
+        user_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// Read the account-shared bank balance only. Cheaper than the full
+/// `find_by_id` and useful for online-character sync where every
+/// other character on the account needs its `AccountWealth` component
+/// refreshed after a transfer.
+pub async fn load_account_wealth(pool: &PgPool, user_id: &str) -> sqlx::Result<i64> {
+    let row = sqlx::query!(
+        r#"SELECT account_wealth FROM "Users" WHERE id = $1"#,
+        user_id,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.account_wealth)
 }
 
 /// Bump the failed-login counter and set `last_failed_login = NOW()`.

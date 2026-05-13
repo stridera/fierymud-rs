@@ -964,23 +964,65 @@ fn set_player_field(
                 applied = false;
             }
         }
-        "hit_roll" => {
+        "accuracy" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
-                cs.hit_roll = v32;
+                cs.accuracy = v32;
             } else {
                 applied = false;
             }
         }
-        "dmg_roll" => {
+        "evasion" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
-                cs.dmg_roll = v32;
+                cs.evasion = v32;
             } else {
                 applied = false;
             }
         }
-        "ac" => {
+        "attack_power" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
-                cs.ac = v32;
+                cs.attack_power = v32;
+            } else {
+                applied = false;
+            }
+        }
+        "spell_power" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.spell_power = v32;
+            } else {
+                applied = false;
+            }
+        }
+        "armor_pct" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.armor_pct = v32.clamp(0, 100);
+            } else {
+                applied = false;
+            }
+        }
+        "armor_flat" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.armor_flat = v32.max(0);
+            } else {
+                applied = false;
+            }
+        }
+        "ward_pct" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.ward_pct = v32.clamp(0, 100);
+            } else {
+                applied = false;
+            }
+        }
+        "hardness" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.hardness = v32.max(0);
+            } else {
+                applied = false;
+            }
+        }
+        "crit_chance" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
+                cs.crit_chance = v32.clamp(0, 100);
             } else {
                 applied = false;
             }
@@ -991,7 +1033,8 @@ fn set_player_field(
                 format!(
                     "unsupported field '{other}'. Allowed: hp, hp_max, stamina, \
                      stamina_max, level, experience, hunger, thirst, alignment, \
-                     hit_roll, dmg_roll, ac"
+                     accuracy, evasion, attack_power, spell_power, armor_pct, \
+                     armor_flat, ward_pct, hardness, crit_chance"
                 ),
             ));
         }
@@ -1436,6 +1479,11 @@ fn session_create(
     let outbound: Outbound = tx;
     let entity = crate::login::spawn_player(world, user, character, outbound);
     let item_count = crate::login::spawn_inventory(world, entity, items);
+    // Apply gear stat bonuses for every item that respawned with
+    // an EquippedSlot. Mirrors the recompute pass in
+    // login::complete_login so virtual sessions land with the same
+    // stat sheet a real-telnet login would.
+    crate::equip_apply::recompute_equipped_for(world, entity);
     // Match login::complete_login: attach KnownAbilities + Aliases +
     // Title + Description so commands that read those (invoke_ability's
     // skill lookup, alias expansion, etc.) work for virtual sessions.
@@ -1740,7 +1788,6 @@ fn spawn_into(
                 ));
             };
             let hp = proto.rolled_hp();
-            let dmg = proto.avg_damage();
             let trigger_keys = world
                 .resource::<TriggerCatalog>()
                 .mob_attachments
@@ -1754,14 +1801,13 @@ fn spawn_into(
                 WorldKey { zone: proto.zone_id, id: proto.id },
                 Located(room_entity),
                 Health { hp, max: hp },
-                CombatStats {
-                    hit_roll: proto.hit_roll,
-                    dmg_roll: dmg,
-                    ac: proto.armor_class,
-                    alignment: proto.alignment,
-                    ward_pct: proto.ward_percent,
-                },
+                proto.derived_combat_stats(),
                 Posture(PostureKind::Standing),
+                mud_world::NaturalDamage {
+                    num: proto.damage_dice_num,
+                    size: proto.damage_dice_size,
+                    bonus: proto.damage_dice_bonus,
+                },
             ));
             if let Some(keys) = trigger_keys {
                 em.insert(AttachedTriggers(keys));
@@ -1875,8 +1921,15 @@ fn inspect_mob(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
         "hp_avg": p.rolled_hp(),
         "damage_dice": format!("{}d{}+{}", p.damage_dice_num, p.damage_dice_size, p.damage_dice_bonus),
         "damage_avg": p.avg_damage(),
-        "hit_roll": p.hit_roll,
-        "armor_class": p.armor_class,
+        "accuracy": p.accuracy,
+        "evasion": p.evasion,
+        "attack_power": p.attack_power,
+        "spell_power": p.spell_power,
+        "armor_rating": p.armor_rating,
+        "damage_reduction_percent": p.damage_reduction_percent,
+        "soak": p.soak,
+        "hardness": p.hardness,
+        "ward_percent": p.ward_percent,
         "wealth": p.wealth,
         "class_id": p.class_id,
     }))

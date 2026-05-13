@@ -17,6 +17,12 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
 const CAP: usize = 512;
+/// Real-time broadcast queue. Capped so a runaway log loop can't
+/// exhaust memory before the tick loop drains; overflow simply
+/// drops the oldest pending notification rather than blocking the
+/// tracing thread (which can be _any_ thread) on a Mutex contention
+/// or back-pressure. Drain runs once per tick in `main.rs`.
+const BROADCAST_CAP: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SyslogEntry {
@@ -29,9 +35,26 @@ pub(crate) struct SyslogEntry {
 static SYSLOG: LazyLock<Mutex<VecDeque<SyslogEntry>>> =
     LazyLock::new(|| Mutex::new(VecDeque::with_capacity(CAP)));
 
+/// Cross-thread queue feeding the in-game `syslog watch` push path.
+/// `SyslogLayer::on_event` appends WARN+ entries here from arbitrary
+/// threads; the tick loop drains via `drain_broadcast` and fans out
+/// to each subscribed player. Separate from `SYSLOG` so the pull-mode
+/// `syslog` command's history doesn't get truncated by drain reads.
+static BROADCAST: LazyLock<Mutex<VecDeque<SyslogEntry>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(BROADCAST_CAP)));
+
 fn push(entry: SyslogEntry) {
     if let Ok(mut buf) = SYSLOG.lock() {
         if buf.len() >= CAP {
+            buf.pop_front();
+        }
+        buf.push_back(entry);
+    }
+}
+
+fn push_broadcast(entry: SyslogEntry) {
+    if let Ok(mut buf) = BROADCAST.lock() {
+        if buf.len() >= BROADCAST_CAP {
             buf.pop_front();
         }
         buf.push_back(entry);
@@ -45,6 +68,16 @@ pub(crate) fn snapshot() -> Vec<SyslogEntry> {
         .unwrap_or_default()
 }
 
+/// Take everything pending on the real-time broadcast queue, leaving
+/// it empty. Called once per tick from `main.rs` so subscribers see
+/// every WARN+ event with at most one tick of latency.
+pub(crate) fn drain_broadcast() -> Vec<SyslogEntry> {
+    BROADCAST
+        .lock()
+        .map(|mut g| g.drain(..).collect())
+        .unwrap_or_default()
+}
+
 pub(crate) struct SyslogLayer;
 
 impl<S: Subscriber> Layer<S> for SyslogLayer {
@@ -52,12 +85,22 @@ impl<S: Subscriber> Layer<S> for SyslogLayer {
         let meta = event.metadata();
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
-        push(SyslogEntry {
+        let entry = SyslogEntry {
             at: SystemTime::now(),
             level: *meta.level(),
             target: meta.target().to_string(),
             message: visitor.into_message(),
-        });
+        };
+        // Pull-mode history — every level is captured for the
+        // `syslog` command's after-the-fact tail.
+        push(entry.clone());
+        // Real-time push — only WARN and above. INFO is too noisy
+        // (every heartbeat / autosave / connect line) to land on
+        // staff prompts, and DEBUG / TRACE only fire when explicitly
+        // enabled via RUST_LOG.
+        if matches!(*meta.level(), Level::WARN | Level::ERROR) {
+            push_broadcast(entry);
+        }
     }
 }
 

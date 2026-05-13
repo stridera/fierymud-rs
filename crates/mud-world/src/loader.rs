@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
-    effects, game_config, levels, login_message,
+    discord_config, effects, game_config, help, levels, liquids, login_message,
     mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
     objects, races, room_exits, rooms, shops, socials, spell_slots,
     sqlx::PgPool, system_text, triggers, zones,
@@ -12,19 +12,21 @@ use mud_db::{
 use tracing::{info, warn};
 
 use crate::components::{
-    AttachedTriggers, BoardLink, CombatStats, Description, EquippedSlot, ExitData, Exits,
+    AttachedTriggers, BoardLink, Description, EquippedSlot, ExitData, Exits,
     FromMobReset, FromObjectReset, Health, Item, Keywords, LiquidContainer, Located, Mob,
     Mountable, Named, Posture,
-    PostureKind, Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
+    Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog, DamageComponent, EffectCatalog,
-    EffectDef, LiquidIndex, LiquidProto, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry,
-    ObjectAbilityCatalog, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
-    SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef,
-    SocialRegistry, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent,
-    WorldKeyIndex,
+    EffectDef, HelpCatalog, HelpEntry as HelpEntryDef, LiquidCatalog, LiquidDef, LiquidIndex,
+    LiquidProto, MobProto,
+    MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto,
+    ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry, RaceCatalog, RaceDef, RaceStatCaps,
+    SavingThrow, ShopAcceptRule,
+    ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, TargetingRule,
+    TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -55,6 +57,10 @@ pub struct LoadStats {
     pub object_contents_skipped: usize,
     /// Lua trigger rows in the `Triggers` table.
     pub triggers_loaded: usize,
+    /// `HelpEntry` rows loaded into the HelpCatalog. 0 with a fresh DB
+    /// (builder content not yet imported); the `help` command surfaces
+    /// "no help available" rather than crashing.
+    pub help_entries_loaded: usize,
 }
 
 /// Load the persistent world from the database into the ECS World:
@@ -125,6 +131,50 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .id();
         if r.is_peaceful {
             world.entity_mut(entity).insert(crate::PeacefulRoom);
+        }
+        // 13-flag room-boolean wiring. Negative-polarity flags
+        // (`allows_*`) only attach when false; positive-polarity
+        // flags (`is_*`) only attach when true. This keeps the
+        // common case (a normal room) component-free and lets a
+        // gate-check read "absent component = default behavior."
+        if !r.allows_magic {
+            world.entity_mut(entity).insert(crate::NoMagicRoom);
+        }
+        if !r.allows_recall {
+            world.entity_mut(entity).insert(crate::NoRecallRoom);
+        }
+        if !r.allows_summon {
+            world.entity_mut(entity).insert(crate::NoSummonRoom);
+        }
+        if !r.allows_teleport {
+            world.entity_mut(entity).insert(crate::NoTeleportRoom);
+        }
+        if r.is_death_trap {
+            world.entity_mut(entity).insert(crate::DeathTrap);
+        }
+        if r.is_indoors {
+            world.entity_mut(entity).insert(crate::IndoorRoom);
+        }
+        if r.is_soundproof {
+            world.entity_mut(entity).insert(crate::SoundproofRoom);
+        }
+        if r.is_arena {
+            world.entity_mut(entity).insert(crate::ArenaRoom);
+        }
+        if r.is_guildhall {
+            world.entity_mut(entity).insert(crate::GuildhallRoom);
+        }
+        if !r.allows_mobs {
+            world.entity_mut(entity).insert(crate::NoMobsRoom);
+        }
+        if !r.allows_tracking {
+            world.entity_mut(entity).insert(crate::NoTrackingRoom);
+        }
+        if !r.allows_portals {
+            world.entity_mut(entity).insert(crate::NoPortalsRoom);
+        }
+        if !r.allows_scanning {
+            world.entity_mut(entity).insert(crate::NoScanningRoom);
         }
         if r.base_light_level != 0 {
             world
@@ -236,14 +286,33 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 damage_dice_num: row.damage_dice_num,
                 damage_dice_size: row.damage_dice_size,
                 damage_dice_bonus: row.damage_dice_bonus,
-                hit_roll: row.hit_roll,
-                armor_class: row.armor_class,
+                accuracy: row.accuracy,
+                evasion: row.evasion,
+                attack_power: row.attack_power,
+                spell_power: row.spell_power,
+                penetration_flat: row.penetration_flat,
+                penetration_percent: row.penetration_percent,
+                armor_rating: row.armor_rating,
+                damage_reduction_percent: row.damage_reduction_percent,
+                soak: row.soak,
+                hardness: row.hardness,
+                perception: row.perception,
+                concealment: row.concealment,
+                resistances: row.resistances,
                 ward_percent: row.ward_percent,
                 wealth: row.wealth,
                 class_id: row.class_id,
                 behaviors: row.behaviors,
                 protected_kind: row.protected_kind,
                 professions: row.professions,
+                size: row.size,
+                life_force: row.life_force,
+                damage_type: row.damage_type,
+                move_points: row.move_points,
+                default_position: row.default_position,
+                traits: row.traits,
+                movement_mode: row.movement_mode,
+                default_movement_mode: row.default_movement_mode,
             },
         );
     }
@@ -262,6 +331,37 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .entry((r.object_zone_id, r.object_id))
             .or_default()
             .push((r.keywords, r.description));
+    }
+    // ObjectResistance: per-element resistance % from worn gear.
+    let object_resistance_rows = mud_db::object_resistance::list_all(pool).await?;
+    let mut object_resistance_by_key: HashMap<
+        (i32, i32),
+        Vec<(mud_db::enums::ElementType, i32, bool)>,
+    > = HashMap::new();
+    for r in object_resistance_rows {
+        object_resistance_by_key
+            .entry((r.object_zone_id, r.object_id))
+            .or_default()
+            .push((r.element, r.value, r.allow_absorption));
+    }
+    // ObjectEffects: spell-like effects spawned on the wearer for as
+    // long as the item is equipped (slot-restricted when
+    // `wear_location` is set).
+    let object_effect_rows = mud_db::object_effects::list_all(pool).await?;
+    let mut object_effects_by_key: HashMap<
+        (i32, i32),
+        Vec<crate::resources::ObjectGrantedEffect>,
+    > = HashMap::new();
+    for r in object_effect_rows {
+        object_effects_by_key
+            .entry((r.object_zone_id, r.object_id))
+            .or_default()
+            .push(crate::resources::ObjectGrantedEffect {
+                effect_id: r.effect_id,
+                strength: r.strength,
+                modifier_data: r.modifier_data,
+                wear_location: r.wear_location,
+            });
     }
     let mut object_prototypes = ObjectPrototypes::default();
     for row in object_rows {
@@ -323,6 +423,14 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 extras: object_extras_by_key
                     .remove(&(row.zone_id, row.id))
                     .unwrap_or_default(),
+                resistances: object_resistance_by_key
+                    .remove(&(row.zone_id, row.id))
+                    .unwrap_or_default(),
+                granted_effects: object_effects_by_key
+                    .remove(&(row.zone_id, row.id))
+                    .unwrap_or_default(),
+                flags: row.flags,
+                restrictions: row.restrictions,
             },
         );
     }
@@ -555,12 +663,16 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         );
     }
 
-    // Pass 4c: class catalog. Just identity for the score / who readouts;
-    // full mechanics (proficiencies, stat bonuses, allowed abilities) load
-    // on demand once the systems that need them land.
+    // Pass 4c: class catalog. Identity for the score / who readouts
+    // plus the legacy-parity detail columns (`description` /
+    // `hit_dice` / `primary_stat` / `hp_per_level` / `resistances`).
+    // Resistance JSON is distilled into a typed `ElementType` map
+    // via the shared `parse_resistance_json` helper so unknown
+    // schema labels are dropped consistently with the race catalog.
     let class_rows = classes::list_all(pool).await?;
     let mut class_catalog = ClassCatalog::default();
     for row in class_rows {
+        let resistances = crate::resources::parse_resistance_json(&row.resistances);
         class_catalog.by_id.insert(
             row.id,
             ClassDef {
@@ -569,6 +681,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 plain_name: row.plain_name,
                 is_subclass: row.is_subclass,
                 parent_class_id: row.parent_class_id,
+                description: row.description,
+                hit_dice: row.hit_dice,
+                primary_stat: row.primary_stat,
+                hp_per_level: row.hp_per_level,
+                resistances,
             },
         );
     }
@@ -637,16 +754,70 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     world.insert_resource(class_skills_data);
 
-    // Pass 4c.6: race defaults. Today only `default_size` is wired —
-    // surfaced on the score sheet so the player sees "Size: Medium"
-    // line. The full Race row carries more (focusBonus / lifeforce
-    // / stat caps); land them here as features need them.
+    // Pass 4c.6: race defaults + full catalog. `RaceDefaults` carries
+    // the narrow size + start-room maps that older callers consult.
+    // `RaceCatalog` hydrates the full Race row — stat caps,
+    // height/weight ranges, XP/HP/damage/coin factors, enter/leave
+    // verb overrides, and the parsed resistance map. Character
+    // creation rolls height/weight from the catalog; the train /
+    // examine paths clamp stats / render size + lifeforce off it.
     let race_size_map = races::list_default_sizes(pool).await?;
     let race_start_rooms = races::list_start_rooms(pool).await?;
     world.insert_resource(crate::resources::RaceDefaults {
         size_by_race: race_size_map,
         start_room_by_race: race_start_rooms,
     });
+    let race_rows = races::list_all(pool).await?;
+    let mut race_catalog = RaceCatalog::default();
+    for row in race_rows {
+        let resistances = crate::resources::parse_resistance_json(&row.resistances);
+        let stat_caps = RaceStatCaps {
+            strength: row.max_strength,
+            dexterity: row.max_dexterity,
+            constitution: row.max_constitution,
+            intelligence: row.max_intelligence,
+            wisdom: row.max_wisdom,
+            charisma: row.max_charisma,
+        };
+        race_catalog.by_race.insert(
+            row.race.clone(),
+            RaceDef {
+                race: row.race,
+                name: row.name,
+                plain_name: row.plain_name,
+                keywords: row.keywords,
+                playable: row.playable,
+                humanoid: row.humanoid,
+                magical: row.magical,
+                race_align: row.race_align,
+                default_alignment: row.default_alignment,
+                default_size: row.default_size,
+                focus_bonus: row.focus_bonus,
+                default_lifeforce: row.default_lifeforce,
+                male_weight_low: row.male_weight_low,
+                male_weight_high: row.male_weight_high,
+                male_height_low: row.male_height_low,
+                male_height_high: row.male_height_high,
+                female_weight_low: row.female_weight_low,
+                female_weight_high: row.female_weight_high,
+                female_height_low: row.female_height_low,
+                female_height_high: row.female_height_high,
+                stat_caps,
+                exp_factor: row.exp_factor,
+                hp_factor: row.hp_factor,
+                hit_damage_factor: row.hit_damage_factor,
+                damage_dice_factor: row.damage_dice_factor,
+                copper_factor: row.copper_factor,
+                enter_verb: row.enter_verb,
+                leave_verb: row.leave_verb,
+                start_room_zone_id: row.start_room_zone_id,
+                start_room_id: row.start_room_id,
+                resistances,
+                resistances_raw: row.resistances,
+            },
+        );
+    }
+    world.insert_resource(race_catalog);
 
     // Pass 4c.7: runtime config k/v from `GameConfig`. Replaces the
     // per-callsite `pub(crate) const FOO_COST` constants. Call
@@ -740,6 +911,37 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(login_messages);
     info!(rows = lm_count, "LoginMessage loaded");
 
+    // Pass 4c.10: Discord guild configuration (singleton row at PK
+    // 1). Channel IDs are consumed by future outbound-to-Discord
+    // pipelines (gossip mirror, admin notifications, server
+    // start/restart announcements). The bot itself runs out-of-
+    // process (Muditor-side) — we only publish the destination
+    // addressing here. Missing row = disabled.
+    let discord_cfg = discord_config::get(pool).await?;
+    let discord_catalog = match discord_cfg {
+        Some(row) => crate::resources::DiscordConfigCatalog {
+            enabled: row.enabled,
+            guild_id: Some(row.guild_id),
+            gossip_channel_id: row.gossip_channel_id,
+            admin_channel_id: row.admin_channel_id,
+            announcement_channel_id: row.announcement_channel_id,
+        },
+        None => crate::resources::DiscordConfigCatalog::default(),
+    };
+    let dc_loaded = discord_catalog.enabled;
+    let dc_guild = discord_catalog.guild_id.clone();
+    world.insert_resource(discord_catalog);
+    // PendingDiscordLink runtime resource — in-memory verification-
+    // code holding pen for the Discord-link flow. The bot side
+    // (out-of-process) reads it when a player echoes the code into
+    // the gossip channel; we just hand out + age off entries here.
+    world.insert_resource(crate::resources::PendingDiscordLinks::default());
+    info!(
+        enabled = dc_loaded,
+        guild_id = dc_guild.as_deref().unwrap_or(""),
+        "DiscordConfig loaded"
+    );
+
     // Pass 4d: object-ability catalog (scrolls / wands / staves
     // bound abilities). Lookups are by `(zone, id)` matching an item
     // entity's `WorldKey`.
@@ -817,23 +1019,40 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         "consumable effect catalog loaded"
     );
 
-    // Liquids name → id index for the drink path's per-liquid
-    // ConsumableEffects lookup. `LiquidContainer` stores the name;
-    // this resolves to the schema's id.
+    // Liquids catalog + lean id index. Single DB pass populates
+    // both: `LiquidIndex` is the hot-path lookup for the
+    // `ConsumableEffects.liquid_id` join and the drunk-delta on
+    // every swig; `LiquidCatalog` carries the rich payload (color,
+    // hunger/thirst deltas, flavor description) consumed by the
+    // drink/taste/examine renderers and by `pour`/`fill` to
+    // canonicalize the alias on a refilled container. Aliases are
+    // also inserted into `by_name` because legacy `LiquidContainer`
+    // instances carry the alias on `liquid` and existing code paths
+    // expect to find them through `LiquidIndex.by_name`.
     let mut liquid_index = LiquidIndex::default();
-    let liquid_rows = sqlx::query!(
-        r#"SELECT id, name, drunk_effect FROM "Liquids""#
-    )
-    .fetch_all(pool)
-    .await?;
+    let mut liquid_catalog = LiquidCatalog::default();
+    let liquid_rows = liquids::list_all(pool).await?;
     for row in liquid_rows {
         let name_lc = row.name.to_ascii_lowercase();
+        let alias_lc = row.alias.to_ascii_lowercase();
         liquid_index.by_name.insert(name_lc.clone(), row.id);
+        liquid_index.by_name.insert(alias_lc.clone(), row.id);
         liquid_index.drunk_effect.insert(name_lc, row.drunk_effect);
+        liquid_index.drunk_effect.insert(alias_lc, row.drunk_effect);
+        liquid_catalog.insert(LiquidDef {
+            id: row.id,
+            name: row.name,
+            alias: row.alias,
+            color_desc: row.color_desc,
+            drunk_effect: row.drunk_effect,
+            hunger_effect: row.hunger_effect,
+            thirst_effect: row.thirst_effect,
+            description: row.description,
+        });
     }
     info!(
-        liquids = liquid_index.by_name.len(),
-        "liquid index loaded"
+        liquids = liquid_catalog.len(),
+        "liquid catalog loaded"
     );
 
     // RoomEnvironmentalEffect: per-room link to Effect rows. The
@@ -941,6 +1160,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(object_ability_catalog);
     world.insert_resource(consumable_catalog);
     world.insert_resource(liquid_index);
+    world.insert_resource(liquid_catalog);
     world.insert_resource(room_env_effects);
     world.insert_resource(shop_catalog);
 
@@ -961,6 +1181,42 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     info!(boards = board_catalog.by_id.len(), "board catalog loaded");
     world.insert_resource(board_catalog);
+
+    // Pass 4.6b: HelpEntry catalog. Builder-authored articles indexed
+    // by case-insensitive keyword. The `help` command resolves a typed
+    // topic by exact keyword match first, then title-prefix fallback.
+    // Empty table with a fresh DB is fine — the command surfaces
+    // "No help available for that topic." until builders import content.
+    let help_rows = help::list_all(pool).await?;
+    let mut help_catalog = HelpCatalog::default();
+    for row in help_rows {
+        let entry = HelpEntryDef {
+            id: row.id,
+            title: row.title,
+            content: row.content,
+            min_level: row.min_level,
+            category: row.category,
+            usage: row.usage,
+            duration: row.duration,
+            sphere: row.sphere,
+            keywords: row.keywords.clone(),
+        };
+        for kw in &row.keywords {
+            help_catalog
+                .by_keyword
+                .entry(kw.to_ascii_lowercase())
+                .or_default()
+                .push(row.id);
+        }
+        help_catalog.entries.insert(row.id, entry);
+    }
+    stats.help_entries_loaded = help_catalog.entries.len();
+    info!(
+        rows = help_catalog.entries.len(),
+        keywords = help_catalog.by_keyword.len(),
+        "help catalog loaded"
+    );
+    world.insert_resource(help_catalog);
 
     // Pass 4.7: load Lua trigger catalog + per-prototype attachment
     // indexes. Triggers fire from junction tables (MobTriggers /
@@ -1079,6 +1335,29 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     world.insert_resource(trigger_catalog);
 
+    // Pass 4.7c: hydrate the EntityVariableCache from the
+    // `entity_variables` table. One bulk read at boot is cheaper than
+    // a per-spawn round trip — typical loads return a few hundred rows
+    // across all mobs/objects/rooms. Lua `:setvar` reads and writes
+    // through the cache from here on; the flush tick in mud-server
+    // batches dirty bags back to the DB every 10s.
+    let entity_var_rows = mud_db::entity_variables::list_all(pool).await?;
+    let mut entity_var_cache = crate::resources::EntityVariableCache::default();
+    for row in entity_var_rows {
+        entity_var_cache.hydrate(
+            row.entity_type,
+            row.zone_id,
+            row.entity_id,
+            row.key,
+            row.value,
+        );
+    }
+    info!(
+        entities = entity_var_cache.entity_count(),
+        "entity variables loaded"
+    );
+    world.insert_resource(entity_var_cache);
+
     // Pass 5: spawn live entities from MobResets / ObjectResets. Each
     // reset row spawns *exactly one* entity, only when the world's
     // count of that proto is below the row's `max_instances` (the
@@ -1130,7 +1409,6 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             continue;
         }
         let hp = proto.rolled_hp();
-        let dmg = proto.avg_damage();
         let shop_key = world
             .resource::<ShopCatalog>()
             .keeper_index
@@ -1141,6 +1419,12 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .mob_attachments
             .get(&proto_key)
             .cloned();
+        // Derive spawn posture from the proto's `default_position`.
+        // Helper handles the SLEEPING / RESTING / SITTING / STANDING
+        // mapping; legacy DEAD / GHOST / MORTALLY_WOUNDED /
+        // INCAPACITATED / STUNNED values fall back to Standing
+        // (those aren't valid spawn postures).
+        let spawn_posture = Posture::from_default_position(proto.default_position);
         let mut em = world.spawn((
             Mob,
             Named { name: proto.name.clone() },
@@ -1149,16 +1433,43 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             WorldKey { zone: proto.zone_id, id: proto.id },
             Located(room_entity),
             Health { hp, max: hp },
-            CombatStats {
-                hit_roll: proto.hit_roll,
-                dmg_roll: dmg,
-                ac: proto.armor_class,
-                alignment: proto.alignment,
-                ward_pct: proto.ward_percent,
-            },
-            Posture(PostureKind::Standing),
+            // Derive accuracy/evasion/armor_pct/etc. from the
+            // legacy mob columns per combat.md migration plan.
+            // No more raw hit_roll / armor_class on the entity.
+            proto.derived_combat_stats(),
+            Posture(spawn_posture),
             FromMobReset(r.id),
+            // Natural-attack dice for the per-swing roll. Bonus
+            // collapses into the dice tuple here so combat.rs can
+            // pull a single component to do `roll_dice(num, size,
+            // bonus)`. Mobs whose proto has zero dice (placeholder
+            // / non-combat NPC) still get the component but it
+            // resolves to zero damage at swing time.
+            crate::components::NaturalDamage {
+                num: proto.damage_dice_num,
+                size: proto.damage_dice_size,
+                bonus: proto.damage_dice_bonus,
+            },
         ));
+        // Mob latent parity (Wave 2.L): size / lifeForce / damageType /
+        // movementMode / traits land on every spawned mob so the
+        // bash / detect-undead / attack-message / wander pipelines
+        // can read them off the entity without re-resolving the proto.
+        em.insert((
+            crate::components::Sized(proto.size),
+            crate::components::LifeForceTag(proto.life_force),
+            crate::components::NaturalAttackType(proto.damage_type),
+            crate::components::MobTraits(proto.traits.clone()),
+            crate::components::MovementModeTag(proto.default_movement_mode),
+        ));
+        // Movement-point pool: only mobs with a non-zero proto value
+        // carry the component. Zero = "unconstrained" per legacy.
+        if proto.move_points > 0 {
+            em.insert(crate::components::MovementPoints {
+                current: proto.move_points,
+                max: proto.move_points,
+            });
+        }
         if let Some((shop_zone_id, shop_id)) = shop_key {
             em.insert(Shopkeeper { shop_zone_id, shop_id });
         }
@@ -1171,11 +1482,16 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         if !proto.examine_description.trim().is_empty() {
             em.insert(crate::ExamineText(proto.examine_description.clone()));
         }
-        // Mountable inference: keywords containing horse/steed/mount
-        // get the marker. Builders can refine via richer mount data
-        // later; for now this catches every horse/warhorse/donkey
-        // in the imported world.
-        if proto.keywords.iter().any(|k| {
+        // Mountable inference: MOUNT-traited mobs are mountable by
+        // design. Otherwise fall back to the legacy keyword heuristic
+        // for un-tagged content (horse/warhorse/donkey/etc.) so the
+        // imported world still surfaces mounts even before content
+        // authors have tagged every horse with MobTrait::Mount.
+        let mount_via_trait = proto
+            .traits
+            .iter()
+            .any(|t| matches!(t, mud_db::enums::MobTrait::Mount));
+        let mount_via_keyword = proto.keywords.iter().any(|k| {
             let lc = k.to_ascii_lowercase();
             lc.contains("horse")
                 || lc.contains("steed")
@@ -1183,7 +1499,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 || lc.contains("donkey")
                 || lc.contains("mare")
                 || lc.contains("nightmare")
-        }) {
+        });
+        if mount_via_trait || mount_via_keyword {
             em.insert(Mountable);
         }
         let e = em.id();
@@ -1279,6 +1596,17 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             if let Some(ref keys) = trigger_keys {
                 bundle.insert(AttachedTriggers(keys.clone()));
             }
+            // Per-instance attribute components — only attached when
+            // the proto carries any flags / restrictions so plain
+            // items stay component-light. Consumers (drop / get /
+            // sell / look / examine) gate on these via the
+            // component lookup rather than the proto store.
+            if !proto.flags.is_empty() {
+                bundle.insert(crate::components::ObjectFlags(proto.flags.clone()));
+            }
+            if !proto.restrictions.is_empty() {
+                bundle.insert(crate::components::ObjectRestrictions(proto.restrictions.clone()));
+            }
             objects_by_reset.insert(r.id, vec![bundle.id()]);
             stats.object_resets_spawned += 1;
         }
@@ -1329,6 +1657,12 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             }
             if let Some(ref keys) = trigger_keys {
                 bundle.insert(AttachedTriggers(keys.clone()));
+            }
+            if !proto.flags.is_empty() {
+                bundle.insert(crate::components::ObjectFlags(proto.flags.clone()));
+            }
+            if !proto.restrictions.is_empty() {
+                bundle.insert(crate::components::ObjectRestrictions(proto.restrictions.clone()));
             }
             stats.mob_equipment_spawned += 1;
         }
@@ -1395,6 +1729,14 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                     }
                     if let Some(ref keys) = trigger_keys {
                         bundle.insert(AttachedTriggers(keys.clone()));
+                    }
+                    if !proto.flags.is_empty() {
+                        bundle.insert(crate::components::ObjectFlags(proto.flags.clone()));
+                    }
+                    if !proto.restrictions.is_empty() {
+                        bundle.insert(crate::components::ObjectRestrictions(
+                            proto.restrictions.clone(),
+                        ));
                     }
                     spawned_for_content.push(bundle.id());
                     stats.object_contents_spawned += 1;

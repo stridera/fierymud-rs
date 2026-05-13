@@ -941,14 +941,16 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
 
     let self_max_hp = world.get::<Health>(player).map_or(1, |h| h.max).max(1);
     let self_stats = world.get::<CombatStats>(player).copied();
-    let self_dmg = self_stats.map_or(0, |c| c.dmg_roll);
-    let self_hit_roll = self_stats.map_or(0, |c| c.hit_roll);
+    // attack_power feeds the consider verdict in place of the
+    // legacy dmg_roll. Same intent: "how hard does this side hit?"
+    let self_dmg = self_stats.map_or(0, |c| c.attack_power);
+    let self_hit_roll = self_stats.map_or(0, |c| c.accuracy);
     let target_max_hp = world.get::<Health>(target).map_or(0, |h| h.max);
     let target_stats = world.get::<CombatStats>(target).copied();
-    let target_dmg = target_stats.map_or(0, |c| c.dmg_roll);
-    let target_hit_roll = target_stats.map_or(0, |c| c.hit_roll);
-    let self_ac = self_stats.map_or(0, |c| c.ac);
-    let target_ac = target_stats.map_or(0, |c| c.ac);
+    let target_dmg = target_stats.map_or(0, |c| c.attack_power);
+    let target_hit_roll = target_stats.map_or(0, |c| c.accuracy);
+    let self_ac = self_stats.map_or(0, |c| c.armor_pct);
+    let target_ac = target_stats.map_or(0, |c| c.armor_pct);
 
     if target_max_hp == 0 {
         send_rendered(world, player, &format!("{target_name} doesn't look like a fighter at all.\r\n"),
@@ -1567,7 +1569,14 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
-    let dmg = world.get::<CombatStats>(player).map_or(1, |c| (c.dmg_roll / 2).max(1));
+    // Skill base damage scales with the attacker's attack_power.
+    // Pre-pivot this read `dmg_roll / 2`; in the new model
+    // attack_power is a +%, so we recover an effective dmg_roll
+    // as `attack_power / 5` (the inverse of the migration's
+    // `damage_roll * 5 = attack_power` mapping).
+    let dmg = world
+        .get::<CombatStats>(player)
+        .map_or(1, |c| ((c.attack_power / 5) / 2).max(1));
     drain_stamina(world, player, cost);
 
     let player_name = name_of(world, player);
@@ -1647,7 +1656,9 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let room = located.0;
-    let dmg = world.get::<CombatStats>(player).map_or(1, |c| (c.dmg_roll / 4).max(1));
+    let dmg = world
+        .get::<CombatStats>(player)
+        .map_or(1, |c| ((c.attack_power / 5) / 4).max(1));
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located, Option<&Posture>, Option<&Health>), With<Mob>>();
         q.iter(world)
@@ -1962,7 +1973,7 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
 
     let dmg = world
         .get::<CombatStats>(player)
-        .map_or(1, |c| (c.dmg_roll / 2).max(1));
+        .map_or(1, |c| ((c.attack_power / 5) / 2).max(1));
     let mob_targets: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located, Option<&Health>), With<Mob>>();
         q.iter(world)
@@ -2516,9 +2527,10 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         e.insert(Fighting(player));
     }
 
+    // Effective legacy damroll for the +3 flat formula.
     let dmg_roll = world
         .get::<CombatStats>(player)
-        .map_or(1, |cs| cs.dmg_roll);
+        .map_or(1, |cs| cs.attack_power / 5);
     let damage = (dmg_roll + 3).max(1);
     drain_stamina(world, player, cost);
 

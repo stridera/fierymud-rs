@@ -262,9 +262,21 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "syslog [<n>]",
-            summary: "Show recent server log lines.",
-            long: "Builder+. In-memory tail of the tracing log.",
+            usage: "syslog [<n> [<filter>] | watch [warn|error|off]]",
+            summary: "Show recent server log lines or subscribe to live errors.",
+            long: "Builder+. Two modes:\r\n\
+                   \x20 syslog                 — last 30 entries from \
+                       the in-memory ring (newest at the bottom).\r\n\
+                   \x20 syslog <n> [<filter>]  — last n entries (1-500), \
+                       optionally filtered by level (`WARN`, `ERROR`) or \
+                       a substring matched against target / message.\r\n\
+                   \x20 syslog watch           — subscribe to live WARN+ \
+                       events; each new line lands on your prompt as it \
+                       fires. Same as `syslog watch warn`.\r\n\
+                   \x20 syslog watch error     — subscribe but raise the \
+                       floor to ERROR-only.\r\n\
+                   \x20 syslog watch off       — unsubscribe. \
+                       Disconnect also clears the subscription.",
         },
         run: cmd_syslog,
     }
@@ -640,14 +652,33 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
 }
 pub(crate) fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() < 2 {
-        send_to(world, player, "Usage: firetrig <zone> <id> [<keyword>]\r\n");
+    if parts.is_empty() {
+        send_to(world, player, "Usage: firetrig [<zone>] <id> [<keyword>]\r\n");
         return;
     }
-    let (Ok(zone), Ok(id)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
-        send_to(world, player, "Zone and id must be integers.\r\n");
-        return;
-    };
+    // Disambiguate `firetrig <zone> <id> [actor]` from
+    // `firetrig <id> [actor]`. If the first two tokens are both
+    // ints, treat as zone+id; otherwise treat the first as id and
+    // use the current zone, leaving the rest as actor keyword.
+    let (zone, id, actor_start) =
+        if parts.len() >= 2
+            && let (Ok(z), Ok(i)) =
+                (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+        {
+            (z, i, 2)
+        } else if let Ok(i) = parts[0].parse::<i32>() {
+            let Some(z) = world
+                .get::<Located>(player)
+                .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone))
+            else {
+                send_to(world, player, "Can't resolve current zone.\r\n");
+                return;
+            };
+            (z, i, 1)
+        } else {
+            send_to(world, player, "Usage: firetrig [<zone>] <id> [<keyword>]\r\n");
+            return;
+        };
     let body = world
         .resource::<TriggerCatalog>()
         .by_key
@@ -658,8 +689,8 @@ pub(crate) fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
-    let actor = if parts.len() >= 3 {
-        let needle = parts[2..].join(" ");
+    let actor = if parts.len() > actor_start {
+        let needle = parts[actor_start..].join(" ");
         let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
             send_to(world, player, "You're nowhere.\r\n");
             return;
@@ -848,18 +879,30 @@ fn parse_trigattach_args(
     verb: &str,
 ) -> Option<(Entity, i32, i32)> {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() != 3 {
+    let target_str = parts.first()?;
+    let id_parts: &[&str] = match parts.len() {
+        2 | 3 => &parts[1..],
+        _ => {
+            send_to(
+                world,
+                player,
+                format!("Usage: {verb} <target> [<zone>] <id>\r\n"),
+            );
+            return None;
+        }
+    };
+    let Some((zone, id)) = try_parse_zone_id(world, player, id_parts) else {
         send_to(
             world,
             player,
-            format!("Usage: {verb} <target> <zone> <id>\r\n"),
+            format!("Usage: {verb} <target> [<zone>] <id>\r\n"),
         );
         return None;
-    }
-    let (Ok(zone), Ok(id)) = (parts[1].parse::<i32>(), parts[2].parse::<i32>()) else {
-        send_to(world, player, "Zone and id must be integers.\r\n");
-        return None;
     };
+    // Re-bind the target str into a stable reference so the later
+    // `resolve_var_target` call uses the captured token rather than
+    // a stale slice.
+    let target_str = *target_str;
     if !world
         .resource::<mud_world::TriggerCatalog>()
         .by_key
@@ -872,7 +915,7 @@ fn parse_trigattach_args(
         );
         return None;
     }
-    let target = resolve_var_target(world, player, parts[0])?;
+    let target = resolve_var_target(world, player, target_str)?;
     Some((target, zone, id))
 }
 
@@ -1198,6 +1241,34 @@ fn resolve_object_target(
     hit
 }
 
+/// Silent variant of `resolve_zone_id`: parse `<zone> <id>` or
+/// `<id>` (with current zone) from a token slice. Returns None
+/// without printing on failure so the caller can emit its own
+/// command-specific usage message. Used by loadobj / summon /
+/// firetrig / trigattach so a builder working inside a zone can
+/// omit the zone arg.
+pub(crate) fn try_parse_zone_id(
+    world: &mut World,
+    player: Entity,
+    parts: &[&str],
+) -> Option<(i32, i32)> {
+    match parts.len() {
+        2 => {
+            let zone = parts[0].parse::<i32>().ok()?;
+            let id = parts[1].parse::<i32>().ok()?;
+            Some((zone, id))
+        }
+        1 => {
+            let id = parts[0].parse::<i32>().ok()?;
+            let zone = world
+                .get::<Located>(player)
+                .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone))?;
+            Some((zone, id))
+        }
+        _ => None,
+    }
+}
+
 /// Try `<zone> <id>` / `<id>` parsing only. Used by sstat / tstat
 /// where there's no name-search fallback (shop names aren't in
 /// the proto, trigger names live in the catalog body).
@@ -1270,6 +1341,33 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     out.push_str(&format!("role:          {}\r\n", p.role.label()));
     out.push_str(&format!("race:          {}\r\n", p.race));
     out.push_str(&format!("gender:        {}\r\n", p.gender));
+    // Mob latent parity (Wave 2.L) fields — size / life force /
+    // attack flavor / movement mode / traits / starting posture /
+    // movement-point pool. Surfaced verbatim so builders can confirm
+    // the proto without round-tripping through Muditor.
+    out.push_str(&format!("size:          {}\r\n", p.size.label()));
+    out.push_str(&format!("life force:    {}\r\n", p.life_force.label()));
+    out.push_str(&format!("damage type:   {}\r\n", p.damage_type.label()));
+    out.push_str(&format!(
+        "default pos:   {}\r\n",
+        p.default_position.as_str()
+    ));
+    out.push_str(&format!(
+        "movement mode: {} (default {})\r\n",
+        p.movement_mode.label(),
+        p.default_movement_mode.label(),
+    ));
+    let traits_str = if p.traits.is_empty() {
+        String::from("(none)")
+    } else {
+        p.traits
+            .iter()
+            .map(|t| t.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    out.push_str(&format!("traits:        {traits_str}\r\n"));
+    out.push_str(&format!("move points:   {}\r\n", p.move_points));
     out.push_str(&format!(
         "hp dice:       {}d{}+{}\r\n",
         p.hp_dice_num, p.hp_dice_size, p.hp_dice_bonus
@@ -1278,8 +1376,17 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
         "damage dice:   {}d{}+{}\r\n",
         p.damage_dice_num, p.damage_dice_size, p.damage_dice_bonus
     ));
-    out.push_str(&format!("hit_roll:      {}\r\n", p.hit_roll));
-    out.push_str(&format!("armor_class:   {}\r\n", p.armor_class));
+    out.push_str(&format!("accuracy:      {}\r\n", p.accuracy));
+    out.push_str(&format!("evasion:       {}\r\n", p.evasion));
+    out.push_str(&format!("attack_power:  {}\r\n", p.attack_power));
+    out.push_str(&format!("spell_power:   {}\r\n", p.spell_power));
+    out.push_str(&format!("armor_rating:  {}\r\n", p.armor_rating));
+    out.push_str(&format!("dmg_reduction: {}%\r\n", p.damage_reduction_percent));
+    out.push_str(&format!("soak:          {}\r\n", p.soak));
+    out.push_str(&format!("hardness:      {}\r\n", p.hardness));
+    out.push_str(&format!("ward_pct:      {}%\r\n", p.ward_percent));
+    out.push_str(&format!("perception:    {}\r\n", p.perception));
+    out.push_str(&format!("concealment:   {}\r\n", p.concealment));
     out.push_str(&format!("wealth:        {} cp\r\n", p.wealth));
     // class_id → resolved class name when the catalog has a row;
     // raw `Some(N)` is unhelpful to a human reader.
@@ -1328,11 +1435,11 @@ pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
         align_bucket.label(),
     ));
 
-    // Combat readout in plain English. dice → "rolls 2d6+3"; HR/AC
-    // expanded so a designer doesn't need to remember which is the
-    // attack stat and which is the defense.
+    // Combat readout in plain English. dice → "rolls 2d6+3"; new
+    // combat-redesign axes expanded so a designer can see at a glance
+    // what the mob is tuned for offensively/defensively.
     out.push_str(&format!(
-        "Combat:        L{} — rolls {}d{}{} damage, hit roll {:+}, AC {}\r\n",
+        "Combat:        L{} — rolls {}d{}{} damage, acc {} / eva {}, AP {} / armor {}%\r\n",
         p.level,
         p.damage_dice_num,
         p.damage_dice_size,
@@ -1341,8 +1448,10 @@ pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
         } else {
             format!("{:+}", p.damage_dice_bonus)
         },
-        p.hit_roll,
-        p.armor_class,
+        p.accuracy,
+        p.evasion,
+        p.attack_power,
+        p.armor_rating.saturating_add(p.damage_reduction_percent).clamp(0, 100),
     ));
 
     // Class-driven AI: a mob with a class id and without NoClassAi
@@ -2049,6 +2158,66 @@ pub(crate) fn cmd_trace(world: &mut World, player: Entity, args: &str) {
     crate::commands::send_rendered(world, player, &out);
 }
 pub(crate) fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
+    // `syslog watch [warn|error|off]` — subscribe / unsubscribe path.
+    // Routed before the count/filter parser so a leading `watch` token
+    // doesn't accidentally land in the substring filter.
+    let mut head_iter = args.split_whitespace();
+    if let Some(head) = head_iter.next()
+        && head.eq_ignore_ascii_case("watch")
+    {
+        let arg = head_iter.next().unwrap_or("warn").to_ascii_lowercase();
+        match arg.as_str() {
+            "off" | "stop" | "none" => {
+                let had = world
+                    .get_entity_mut(player)
+                    .ok()
+                    .and_then(|mut em| em.take::<mud_world::WatchingSyslog>())
+                    .is_some();
+                if had {
+                    send_to(world, player, "Syslog watch: <yellow>off</>.\r\n");
+                } else {
+                    send_to(world, player, "You weren't watching the syslog.\r\n");
+                }
+            }
+            "warn" | "warning" => {
+                if let Ok(mut em) = world.get_entity_mut(player) {
+                    em.insert(mud_world::WatchingSyslog {
+                        min_level: mud_world::SyslogMinLevel::Warn,
+                    });
+                }
+                send_to(
+                    world,
+                    player,
+                    "Syslog watch: <yellow>WARN</> and above. \
+                     `syslog watch off` to stop.\r\n",
+                );
+            }
+            "error" | "err" | "errors" => {
+                if let Ok(mut em) = world.get_entity_mut(player) {
+                    em.insert(mud_world::WatchingSyslog {
+                        min_level: mud_world::SyslogMinLevel::Error,
+                    });
+                }
+                send_to(
+                    world,
+                    player,
+                    "Syslog watch: <red>ERROR</> only. \
+                     `syslog watch off` to stop.\r\n",
+                );
+            }
+            other => {
+                send_to(
+                    world,
+                    player,
+                    format!(
+                        "Unknown level '{other}'. Use `warn`, `error`, or `off`.\r\n",
+                    ),
+                );
+            }
+        }
+        return;
+    }
+
     let mut tokens = args.split_whitespace();
     let count: usize = tokens
         .next()
@@ -2269,8 +2438,60 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
             level.0
         ));
     }
-    if world.get::<mud_world::PeacefulRoom>(room).is_some() {
-        out.push_str("flags:         peaceful\r\n");
+    {
+        // Builder/admin room-flag dump — every set flag, raw.
+        // Walks the full 14-flag set so the inspector can see at a
+        // glance what's been authored. Output stays one line per
+        // flag when several are set (keeps `rstat` scannable for
+        // a builder eyeballing odd behavior).
+        let mut flags: Vec<&'static str> = Vec::new();
+        if world.get::<mud_world::PeacefulRoom>(room).is_some() {
+            flags.push("peaceful");
+        }
+        if world.get::<mud_world::NoMagicRoom>(room).is_some() {
+            flags.push("no_magic");
+        }
+        if world.get::<mud_world::NoRecallRoom>(room).is_some() {
+            flags.push("no_recall");
+        }
+        if world.get::<mud_world::NoSummonRoom>(room).is_some() {
+            flags.push("no_summon");
+        }
+        if world.get::<mud_world::NoTeleportRoom>(room).is_some() {
+            flags.push("no_teleport");
+        }
+        if world.get::<mud_world::DeathTrap>(room).is_some() {
+            flags.push("death_trap");
+        }
+        if world.get::<mud_world::IndoorRoom>(room).is_some() {
+            flags.push("indoors");
+        }
+        if world.get::<mud_world::SoundproofRoom>(room).is_some() {
+            flags.push("soundproof");
+        }
+        if world.get::<mud_world::ArenaRoom>(room).is_some() {
+            flags.push("arena");
+        }
+        if world.get::<mud_world::GuildhallRoom>(room).is_some() {
+            flags.push("guildhall");
+        }
+        if world.get::<mud_world::NoMobsRoom>(room).is_some() {
+            flags.push("no_mobs");
+        }
+        if world.get::<mud_world::NoTrackingRoom>(room).is_some() {
+            flags.push("no_tracking");
+        }
+        if world.get::<mud_world::NoPortalsRoom>(room).is_some() {
+            flags.push("no_portals");
+        }
+        if world.get::<mud_world::NoScanningRoom>(room).is_some() {
+            flags.push("no_scanning");
+        }
+        if flags.is_empty() {
+            out.push_str("flags:         <none>\r\n");
+        } else {
+            out.push_str(&format!("flags:         {}\r\n", flags.join(", ")));
+        }
     }
     if let Some(extras) = world.get::<mud_world::RoomExtras>(room) {
         if extras.entries.is_empty() {
@@ -2297,11 +2518,35 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
                 let key_label = ed
                     .key
                     .map_or_else(String::new, |(z, i)| format!(" key=({z}, {i})"));
+                let mut flag_bits: Vec<&str> = Vec::new();
+                if ed.is_hidden {
+                    flag_bits.push("hidden");
+                }
+                if ed.is_pickproof {
+                    flag_bits.push("pickproof");
+                }
+                let flag_label = if flag_bits.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {{{}}}", flag_bits.join(","))
+                };
                 out.push_str(&format!(
-                    "               {:>9} -> {target_label} ({target_name}) [{:?}]{key_label}\r\n",
+                    "               {:>9} -> {target_label} ({target_name}) [{:?}]{key_label}{flag_label}\r\n",
                     direction_name(*dir),
                     ed.state,
                 ));
+                if !ed.keywords.is_empty() {
+                    out.push_str(&format!(
+                        "                          keywords: {}\r\n",
+                        ed.keywords.join(", "),
+                    ));
+                }
+                if let Some(desc) = ed.description.as_ref() {
+                    let trimmed = desc.trim();
+                    if !trimmed.is_empty() {
+                        out.push_str(&format!("                          desc: {trimmed}\r\n"));
+                    }
+                }
             }
         }
     }
@@ -2508,8 +2753,15 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
     }
     if let Some(cs) = world.get::<CombatStats>(target) {
         out.push_str(&format!(
-            "combat:        hit {} / dmg {} / ac {} / align {}\r\n",
-            cs.hit_roll, cs.dmg_roll, cs.ac, cs.alignment
+            "combat:        acc {} / eva {} / atk {:+} / armor {}%/{} / ward {}% / hardness {} / align {}\r\n",
+            cs.accuracy,
+            cs.evasion,
+            cs.attack_power,
+            cs.armor_pct,
+            cs.armor_flat,
+            cs.ward_pct,
+            cs.hardness,
+            cs.alignment,
         ));
     }
     if let Some(prof) = world.get::<Profile>(target) {

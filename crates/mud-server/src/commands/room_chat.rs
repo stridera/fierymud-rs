@@ -10,7 +10,7 @@ use mud_world::{Located, Mob, Player, WorldKey};
 use crate::commands::{
     Category, Command, Help, Prevent, broadcast_room_except_players_rendered,
     bump_talk_quest_progress, effect_prevents, find_actor_in_room, group_members,
-    group_root, name_of, send_rendered, send_to,
+    group_root, name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to,
 };
 
 inventory::submit! {
@@ -140,6 +140,9 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
         send_to(world, player, "Say what?\r\n");
         return;
     }
+    if name_approval_gate(world, player) {
+        return;
+    }
     if effect_prevents(world, player, Prevent::Speaking) {
         send_to(world, player, "Your voice is silenced.\r\n");
         return;
@@ -155,6 +158,7 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
             .map(|(e, _)| e)
             .collect()
     };
+    let gmcp_text = format!("{speaker} says, \"{message}\"");
     for target in targets {
         // Say/says verb framed in green (room-local speech reads
         // friendly / open vs the louder yellow/red wide channels).
@@ -166,6 +170,7 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
             format!("<b:green>{speaker}</> <green>says,</> \"{message}\"\r\n")
         };
         send_rendered(world, target, &line);
+        send_comm_channel_text(world, target, "say", &speaker, &gmcp_text);
     }
     crate::triggers::fire_speech_in_room(world, player, located.0, message);
 }
@@ -181,6 +186,11 @@ fn cmd_emote(world: &mut World, player: Entity, args: &str) {
     };
     let player_name = name_of(world, player);
     let line = format!("{player_name} {action}\r\n");
+    // Emote body is already third-person ("Strider smiles."),
+    // so the GMCP frame is just the line minus its trailing
+    // CRLF — every recipient sees the same thing in the chat
+    // tab regardless of whether they're the speaker.
+    let gmcp_text = format!("{player_name} {action}");
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
@@ -190,6 +200,7 @@ fn cmd_emote(world: &mut World, player: Entity, args: &str) {
     };
     for t in targets {
         send_to(world, t, line.clone());
+        send_comm_channel_text(world, t, "emote", &player_name, &gmcp_text);
     }
 }
 
@@ -226,11 +237,40 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} asks {target_name} about something.\r\n"),
     );
+    // GMCP only to participants — the topic stays private to
+    // the speaker and addressee, matching the "asks something"
+    // rendering bystanders see in the main window. Target may
+    // be a mob (no Connection); the helper no-ops cleanly.
+    let gmcp_text = format!("{player_name} asks {target_name} about \"{topic}\"");
+    send_comm_channel_text(world, player, "ask", &player_name, &gmcp_text);
+    send_comm_channel_text(world, target, "ask", &player_name, &gmcp_text);
     crate::triggers::fire_speech_at(world, target, player, topic);
     if world.get::<Mob>(target).is_some()
         && let Some(key) = world.get::<WorldKey>(target).copied()
     {
         bump_talk_quest_progress(world, player, key.zone, key.id);
+        // Wave 4.13: mid-tree fast path. When the player is
+        // already walking a dialogue tree, match the utterance
+        // against the current node's responses and emit the next
+        // node's `npc_message` in-band. No DB round-trip.
+        if let Some(reply) = crate::quest_dialogue::try_advance_active_tree(
+            world, player, topic,
+        ) {
+            let target_name = name_of(world, target);
+            send_rendered(
+                world,
+                player,
+                &format!("{target_name} says, \"{reply}\"\r\n"),
+            );
+        } else {
+            // Not mid-tree (or no response matched). Fall through
+            // to the per-objective QuestDialogue lookup. Async +
+            // fire-and-forget; the NPC reply (if any) lands via
+            // the player's Outbound on the next tick.
+            crate::quest_triggers::dispatch_dialogue_attempt(
+                world, player, key.zone, key.id, topic,
+            );
+        }
     }
 }
 
@@ -238,6 +278,9 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.len() != 2 || parts[1].trim().is_empty() {
         send_to(world, player, "Usage: whisper <target> <message>\r\n");
+        return;
+    }
+    if name_approval_gate(world, player) {
         return;
     }
     let target_word = parts[0].trim();
@@ -272,6 +315,13 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
         &[player, target],
         &format!("{speaker} whispers something to {target_name}.\r\n"),
     );
+    // GMCP only to the two participants. Bystanders see the
+    // muffled "whispers something" line in the main window and
+    // get no GMCP frame — keeps the message body private to
+    // its intended audience.
+    let gmcp_text = format!("{speaker} whispers to {target_name}, \"{message}\"");
+    send_comm_channel_text(world, player, "whisper", &speaker, &gmcp_text);
+    send_comm_channel_text(world, target, "whisper", &speaker, &gmcp_text);
 }
 
 const INSULT_LINES: &[&str] = &[
@@ -322,6 +372,12 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
     for e in bystanders {
         send_to(world, e, line_room.clone());
     }
+    // GMCP only to the two participants — the full insult line
+    // is content; bystanders see the muffled action in the main
+    // window and don't need it in their chat tab.
+    let gmcp_text = format!("{actor_name} insults {target_name}: {line}");
+    send_comm_channel_text(world, player, "insult", &actor_name, &gmcp_text);
+    send_comm_channel_text(world, target, "insult", &actor_name, &gmcp_text);
 }
 
 fn cmd_greport(world: &mut World, player: Entity, _args: &str) {
@@ -359,6 +415,9 @@ fn cmd_gsay(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Group-say what?\r\n");
         return;
     }
+    if name_approval_gate(world, player) {
+        return;
+    }
     let root = group_root(world, player);
     let members = group_members(world, root);
     if members.len() <= 1 {
@@ -370,6 +429,7 @@ fn cmd_gsay(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let speaker = name_of(world, player);
+    let gmcp_text = format!("{speaker} group-says, \"{message}\"");
     for m in members {
         let line = if m == player {
             format!("You group-say, \"{message}\"\r\n")
@@ -377,5 +437,6 @@ fn cmd_gsay(world: &mut World, player: Entity, args: &str) {
             format!("({speaker} group-says) \"{message}\"\r\n")
         };
         send_rendered(world, m, &line);
+        send_comm_channel_text(world, m, "group", &speaker, &gmcp_text);
     }
 }

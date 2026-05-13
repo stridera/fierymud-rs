@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 bevy_ecs = "0.18.1"
 mud-db = { version = "0.1.0", path = "../mud-db" }
+rand = "0.10.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.149"
 sqlx = { version = "0.8.6", default-features = false, features = ["postgres", "macros"] }

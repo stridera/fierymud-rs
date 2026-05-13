@@ -190,9 +190,105 @@ impl MobBehaviors {
     }
 }
 
+/// Current body / form size — drives bash, drag, and mount-eligibility
+/// size disparity gates and surfaces in examine ("It is a HUGE
+/// creature."). Attached to every spawned mob from
+/// `MobProto.size`; players don't carry this today (size is
+/// race-default, derived at lookup if/when consumers need it).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Sized(pub mud_db::enums::Size);
+
+/// Life-force category — gates holy/unholy interactions, undead
+/// detection, and certain ability filters. `LIFE` is the default
+/// for organic mobs; UNDEAD makes a mob a valid `turn_undead` /
+/// `dispel_undead` target, CELESTIAL/DEMONIC drive opposed-faction
+/// damage bonuses, ELEMENTAL gates "dismiss elemental" style
+/// abilities.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LifeForceTag(pub mud_db::enums::LifeForce);
+
+/// Natural attack type (HIT / BITE / CLAW / STING / etc) used in
+/// unarmed mob-swing rendering — the per-swing verb pulls from
+/// `DamageType::verb()` so a wolf bites where an orc claws. Fed
+/// into the combat `attack_message` formatter.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct NaturalAttackType(pub mud_db::enums::DamageType);
+
+/// Identity flags on a mob instance — what the mob IS
+/// (ILLUSION / ANIMATED / PLAYER_PHANTASM / AQUATIC / MOUNT /
+/// SUMMONED / PET). Orthogonal to `MobBehaviors` (how the mob
+/// ACTS). Consumed by wander gates (AQUATIC stays in water),
+/// the dispel-illusion path (ILLUSION), and mount management.
+#[derive(Component, Debug, Clone, Default)]
+pub struct MobTraits(pub Vec<mud_db::enums::MobTrait>);
+
+impl MobTraits {
+    /// True when the mob carries the given trait. Linear scan —
+    /// most mobs have 0-2 traits so a hashset would be more
+    /// expensive than the search.
+    #[must_use]
+    pub fn has(&self, trait_: mud_db::enums::MobTrait) -> bool {
+        self.0.contains(&trait_)
+    }
+}
+
+/// Current movement mode — orthogonal to `Posture` (which tracks
+/// standing/sitting/etc.). FLYING gates aerial-combat rendering
+/// ("The drake soars overhead."), SWIMMING vs UNDERWATER
+/// discriminates surface vs submerged water rooms, MOUNTED
+/// indicates the mob is being ridden, ETHEREAL marks the mob as
+/// phased/incorporeal.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MovementModeTag(pub mud_db::enums::MovementMode);
+
+/// Movement-point pool (legacy "move"). Mob's stamina equivalent
+/// for long wanders; restored by regen, drained by wander_tick.
+/// Optional component — mobs whose proto has `move_points == 0`
+/// don't carry one and remain unconstrained (the legacy default).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MovementPoints {
+    pub current: i32,
+    pub max: i32,
+}
+
 /// Marker: this entity is an item instance (weapon, potion, container, …).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Item;
+
+/// Per-instance copy of the proto's `flags` list — classic MUD
+/// `EXTRA_*` bits (GLOW / HUM / INVISIBLE / MAGIC / PERMANENT /
+/// TEMPORARY / DECOMPOSING / FLOAT / BUOYANT / VEHICLE / SOULBOUND).
+/// Attached at spawn time when the proto carries any flags. Command
+/// handlers consult `has()` to gate per-flag behavior (drop/give
+/// blockers, look filters, save filters) without reaching back to
+/// the proto store.
+#[derive(Component, Debug, Clone, Default)]
+pub struct ObjectFlags(pub Vec<mud_db::enums::ObjectFlag>);
+
+impl ObjectFlags {
+    /// True when the item carries this flag. Linear scan — `n` is
+    /// almost always ≤ 3, mirrors the legacy `EXTRA_*` bitmask
+    /// hit-test in shape.
+    #[must_use]
+    pub fn has(&self, flag: mud_db::enums::ObjectFlag) -> bool {
+        self.0.contains(&flag)
+    }
+}
+
+/// Per-instance copy of the proto's `restrictions` list. Each
+/// variant gates one specific command (`drop` / `get` / `sell` /
+/// `locate` / etc.) so a quest item flagged NO_DROP never lands on
+/// the floor by accident. Mirrors `ObjectFlags` in shape; kept
+/// separate so the two attribute kinds can evolve independently.
+#[derive(Component, Debug, Clone, Default)]
+pub struct ObjectRestrictions(pub Vec<mud_db::enums::ObjectRestriction>);
+
+impl ObjectRestrictions {
+    #[must_use]
+    pub fn has(&self, r: mud_db::enums::ObjectRestriction) -> bool {
+        self.0.contains(&r)
+    }
+}
 
 /// Marker: a Light-type item is currently lit. Display-only today;
 /// once room-darkness mechanics land, this component on a held/worn
@@ -398,11 +494,90 @@ pub struct Stamina {
     pub max: i32,
 }
 
-/// Hunger gauge — game-hours since the last meal. 0 = sated. Once
-/// the value crosses a threshold (legacy `CircleMUD`: 48 hours), the
-/// hunger tick (TBD) starts draining stamina then HP. Loaded from
-/// `Characters.hunger` at spawn; persisted on disconnect. Wiring is
-/// load + save only today; the tick consumer arrives in a follow-up.
+/// Mana pool. Spell costs deduct from `current`; regen is wired to
+/// `regen.rs` at the same cadence as `Health`. `max` grows on
+/// level-up and from gear that grants `MANA` `ObjectAffects` rows.
+/// `current = max = 0` is fine — score sheet hides the line for
+/// non-casters.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Mana {
+    pub current: i32,
+    pub max: i32,
+}
+
+/// Five-axis saving throws (legacy `SAVING_PARA` / `_ROD` / `_PETRI`
+/// / `_BREATH` / `_SPELL`). Lower is better — saves are rolled
+/// against and a *lower* `save` makes the wearer more resistant
+/// (matches legacy convention). Gear modifiers are typically
+/// negative for "improves resistance"; positive on cursed items.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SavingThrows {
+    pub para: i32,
+    pub rod: i32,
+    pub petri: i32,
+    pub breath: i32,
+    pub spell: i32,
+}
+
+/// Spell-slot regen rate modifier. Positive values make the
+/// memorize / regen tick refill slots faster; negative slows it.
+/// Legacy `APPLY_FOCUS` modifiers stack here.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Focus(pub i32);
+
+/// Detect-hidden / detect-stealth modifier. Compared against
+/// defenders' `Stealth` bonus to decide whether the wearer can see
+/// hidden mobs / players. Legacy `APPLY_PERCEPTION` lives here.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct Perception(pub i32);
+
+/// Flat regen-rate bonuses applied on top of the base `regen.rs`
+/// scaling. Each field is added to the per-tick gain; negative
+/// numbers are valid (cursed gear). Used by gear's
+/// `APPLY_HIT_REGEN` and similar follow-up effects.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct RegenBonus {
+    pub hp: i32,
+    pub mana: i32,
+    pub stamina: i32,
+}
+
+/// Per-element resistance map. Positive = mitigate, negative =
+/// vulnerable. Aggregated across all worn items; equivalent to a
+/// summed `ObjectResistance` view. Combat pipeline reads this at
+/// the type-resist step. Empty when no resistances are applied.
+#[derive(Component, Debug, Clone, Default)]
+pub struct Resistances(pub std::collections::HashMap<mud_db::enums::ElementType, i32>);
+
+/// Marker on an `EffectInstance` entity recording the worn item
+/// that granted it. Set when `equip_apply::apply_object_to_wearer`
+/// spawns gear-granted effects so the unequip path can despawn
+/// only effects from the item being removed (rather than every
+/// effect of the same type the wearer might have from another
+/// source).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GrantedByItem(pub Entity);
+
+/// Per-attacker natural-attack dice (claws/teeth/fists) — what a
+/// barehanded mob "wields." Rolled fresh per swing so an L85
+/// `27d10+15` mob delivers a real spread (42…270 + bonus) instead of
+/// the legacy bug where the swing snapshot used the average as a
+/// flat damage value. Set at mob spawn from
+/// `MobProto.damage_dice_*`. Players don't have this — they fall
+/// back to a hardcoded barehand formula or weapon dice.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct NaturalDamage {
+    pub num: i32,
+    pub size: i32,
+    pub bonus: i32,
+}
+
+/// Hunger gauge — game-hours since the last meal. 0 = sated. The
+/// per-game-hour `regen::hunger_thirst_tick` increments this and
+/// emits the crossing flavor lines at hungry / starving thresholds
+/// (legacy `CircleMUD`: 48 hours starving). No stat drain — see
+/// `regen::DEFAULT_STARVING_AT` for the rationale. Loaded from
+/// `Characters.hunger` at spawn; persisted on disconnect.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Hunger(pub i32);
 
@@ -413,30 +588,70 @@ pub struct Thirst(pub i32);
 
 /// Lifetime seconds the character has been logged in across all
 /// sessions, sourced from `Characters.time_played` at spawn. Score
-/// renders this on its "Played:" line. Incrementing across
-/// sessions (a save-time accumulator) is a deliberate follow-up;
-/// the column round-trips at zero today, so all players currently
-/// see suppression of the line until persistence lands.
+/// renders this on its "Played:" line. The save-time accumulator
+/// in `save_player` credits `now - LastPersistedAt` into both the
+/// component and the DB column on each save, then resets the
+/// anchor — autosave + final-save together cover the full session
+/// without double-counting any window.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct TimePlayed(pub i32);
 
+/// Combat stats per `docs/design/combat.md` — the modern accuracy /
+/// evasion / armor pipeline. **No `ac` / `hit_roll` / `dmg_roll`
+/// fields** — those are legacy CircleMUD/THACO concepts. Loader
+/// derives the values below from the legacy DB columns at spawn:
+///
+/// ```text
+/// accuracy     = 50 + hit_roll * 2
+/// evasion      = 50 + dex_bonus * 5
+/// attack_power = damage_roll * 5
+/// armor_pct    = clamp(0, 80, (10 - armor_class) * 5)
+/// ```
+///
+/// Every swing runs the [combat.md pipeline](docs/design/combat.md):
+/// hit roll → crit → base damage → armor → ward → resist → hardness.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct CombatStats {
-    pub hit_roll: i32,
-    pub dmg_roll: i32,
-    pub ac: i32,
-    pub alignment: i32,
+    /// Attacker's hit-roll side of the d100 contest. 50 = baseline
+    /// (50% hit rate vs an equal-evasion defender). Each point of
+    /// legacy `hit_roll` adds 2 here.
+    pub accuracy: i32,
+    /// Defender's side of the d100 contest. 50 = baseline. Each
+    /// point of dex_bonus adds 5 here.
+    pub evasion: i32,
+    /// Physical damage multiplier as additive percent:
+    /// `attack_power = 25` adds +25% to weapon damage. Legacy
+    /// `damroll * 5`. Default 0 (raw weapon dice).
+    pub attack_power: i32,
+    /// Magical damage multiplier (used by `Ability.uses_stat ==
+    /// MAGICAL` casts in place of `attack_power`). Default 0.
+    pub spell_power: i32,
+    /// 0..=100 percent crit chance per swing. Default 5.
+    pub crit_chance: i32,
+    /// Penetration counter to the defender's `armor_pct`. Subtracted
+    /// before armor mitigation. Default 0.
+    pub pen_pct: i32,
+    /// Penetration counter to the defender's `armor_flat`. Default 0.
+    pub pen_flat: i32,
+    /// Percent damage mitigation 0..=100. PHYSICAL types engage
+    /// armor; ELEMENTAL / MYSTIC / TRUE skip (per
+    /// `damage-types.md`). Default 0.
+    pub armor_pct: i32,
+    /// Flat damage soak per swing. Subtracted after `armor_pct`.
+    /// Default 0.
+    pub armor_flat: i32,
     /// Magical mitigation percentage (0..=100). Applied at combat
-    /// pipeline step 5 ("Wards") per `docs/design/combat.md` —
-    /// engaged only when the damage source is magical
-    /// (`Ability.is_magical = true`). Independent axis from `ac`,
-    /// which keys on damage-type *category* (PHYSICAL engages
-    /// armor; ELEMENTAL/MYSTIC/TRUE skip). Mundane weapon swings
-    /// and on-hit abilities skip ward entirely. Default 0; loaded
-    /// from `Mobs.ward_percent` for mobs (follow-up — currently
-    /// every mob spawns with 0) and from per-effect Ward modifier
-    /// stacks for players.
+    /// pipeline step 5 ("Wards") — engaged only when the damage
+    /// source is magical (`Ability.is_magical = true`). Independent
+    /// axis from `armor_pct` which keys on damage-type category.
     pub ward_pct: i32,
+    /// Damage floor — final damage below this is zeroed.
+    /// Bypasses `pen_*`. Boss-content lever for adamantine-scales
+    /// encounters. Default 0.
+    pub hardness: i32,
+    /// -1000..1000 alignment scalar. -1000 = pure evil, +1000 =
+    /// pure good. Drives protect-good/protect-evil branches.
+    pub alignment: i32,
 }
 
 /// `D&D`-style ability scores (3..=25 in classic `CircleMUD`; schema
@@ -552,6 +767,83 @@ pub struct RevealedExits {
 /// at startup; admin re-flag would need a reload pass.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PeacefulRoom;
+
+/// Marker on rooms with `Room.allows_magic = false`. Cast / chant
+/// / perform are refused with a fizzle message before mana or
+/// cooldown consumption. Skill kind (purely physical) bypasses.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct NoMagicRoom;
+
+/// Marker on rooms with `Room.allows_recall = false`. `recall` /
+/// `home` refuses to fire — a power blocks the link to the
+/// recall point.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct NoRecallRoom;
+
+/// Marker on rooms with `Room.allows_summon = false`. Summoning
+/// (player-to-player or staff mob-spawn) refuses; the destination
+/// rejects the inbound entity rather than the origin.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct NoSummonRoom;
+
+/// Marker on rooms with `Room.allows_teleport = false`. `teleport`
+/// / staff `goto` refuses when the *destination* carries this
+/// marker (matching legacy parity: the gate is on the target).
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct NoTeleportRoom;
+
+/// Marker on rooms with `Room.is_death_trap = true`. Players who
+/// enter are killed immediately on arrival — classic CircleMUD
+/// DT semantics. Staff (Builder+) bypass.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct DeathTrap;
+
+/// Marker on rooms with `Room.is_indoors = true`. Weather /
+/// time-of-day rendering suppresses sky descriptions; informs
+/// the outdoor-weather sector heuristic.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct IndoorRoom;
+
+/// Marker on rooms with `Room.is_soundproof = true`. Global
+/// channels (shout / gossip / music / quest-say) skip delivery
+/// to occupants of soundproof rooms.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct SoundproofRoom;
+
+/// Marker on rooms with `Room.is_arena = true`. Combat is welcome
+/// here regardless of PK consent (no PK gate exists yet — the
+/// marker is consumed today only as a visible `look` tag and
+/// reserved for the future PK opt-in check).
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct ArenaRoom;
+
+/// Marker on rooms with `Room.is_guildhall = true`. Class
+/// trainers gate visitors against this; also a visible `look`
+/// tag.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct GuildhallRoom;
+
+/// Marker on rooms with `Room.allows_mobs = false`. Wandering
+/// mobs refuse to enter; staff-spawned mobs may still be placed
+/// here directly.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct NoMobsRoom;
+
+/// Marker on rooms with `Room.allows_tracking = false`. `track`
+/// refuses to route through this room (BFS treats it as a wall).
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct NoTrackingRoom;
+
+/// Marker on rooms with `Room.allows_portals = false`. Portal /
+/// moonwell creation refuses to link to or from this room.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct NoPortalsRoom;
+
+/// Marker on rooms with `Room.allows_scanning = false`. `scan`
+/// refuses to peer into (or, when applied to the scanner's own
+/// room, out of) this room.
+#[derive(Component, Default, Debug, Clone, Copy)]
+pub struct NoScanningRoom;
 
 /// Per-room ambient light override loaded from
 /// `Room.base_light_level`. Positive forces the room lit
@@ -847,6 +1139,29 @@ pub struct LiquidContainer {
     pub poisoned: bool,
 }
 
+/// Marker component on items the current carrier has "identified"
+/// (via the `identify` spell / command). Presence flips `look <item>`
+/// from the basic description to the full proto stat block, and
+/// drives the `identified` flag in the `Char.Items.List` GMCP frame.
+///
+/// Lifecycle, mirroring the legacy C++ ItemInstanceFlag::Identified
+/// + LiquidInfo.identified semantics:
+///
+/// * Cast `identify` → component inserted on the item entity.
+/// * **Drop** → cleared. Item leaves the player's possession to the
+///   ground; whoever picks it up next has to re-identify.
+/// * Put-into-container → **preserved**. The item is still in the
+///   player's possession (their bag); the magical link holds.
+/// * Give → **preserved**. The receiving player inherits the
+///   knowledge — this is a feature, not a bug, in the legacy
+///   semantics.
+/// * Sell → **preserved**. The shopkeeper "knows" what they're
+///   selling, and items they put back on the rack stay tagged.
+/// * Junk → no special handling needed; the item entity is
+///   destroyed and the marker goes with it.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Identified;
+
 /// In-flight mail composition. Attached when the player runs
 /// `mail <recipient>`; while present, every line of input is routed
 /// to the mail-composition handler instead of normal dispatch. The
@@ -887,6 +1202,22 @@ pub struct BoardDraft {
 /// through `save_state`.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct BankWealth(pub i64);
+
+/// Account-shared bank balance, in copper. Loaded once from
+/// `Users.account_wealth` at character spawn (same shape as
+/// `BankWealth` for per-character bank). The shared pool is what
+/// makes this an account-level resource: every online character on
+/// the same user account holds an `AccountWealth` component, and
+/// each transfer fans the new value out to all of them so the
+/// readout stays consistent without a DB roundtrip.
+///
+/// Save path: `users::save_account_wealth` writes back when the
+/// in-memory value diverges from the schema default. The component
+/// is keyed on the *character*, but the DB column is keyed on the
+/// *user* — the runtime reconciles by iterating online characters
+/// and matching their `Account.user_id` after each transfer.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct AccountWealth(pub i64);
 
 /// Per-character ability cooldown table. Maps `Ability.id` → the
 /// `Instant` at which the cooldown expires (i.e. the ability becomes
@@ -1075,10 +1406,24 @@ pub struct FromObjectReset(pub i32);
 /// Player-set epithet shown after the character name on `who` and
 /// (eventually) on the long room-occupant line. Loaded from
 /// `Characters.title` at login; absent when the column is NULL or
-/// empty. Mutable via the `title` command (setter to land in a
-/// follow-up commit).
+/// empty. Mutable via the `title` command.
 #[derive(Component, Debug, Clone)]
 pub struct Title(pub String);
+
+/// Physical body metrics — height in inches, weight in pounds.
+/// Rolled at character creation from the race + gender range bands
+/// in `RaceCatalog` and persisted on `Characters.height` /
+/// `Characters.weight`. Round-tripped so a character's body
+/// dimensions stay stable across sessions instead of re-rolling on
+/// each login. Mob entities don't carry this component — they
+/// have no body metrics on the schema.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct BodyMetrics {
+    /// Height in inches.
+    pub height: i32,
+    /// Weight in pounds.
+    pub weight: i32,
+}
 
 /// Character identity beyond name: class, race, experience. Loaded
 /// from `Characters` at login. Class and race are display-only for
@@ -1260,6 +1605,20 @@ impl Aliases {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Frozen;
 
+/// Name-approval gate: the character's chosen name has not yet been
+/// reviewed by staff. The player can play normally (move / look /
+/// fight) but every social command (`tell` / `say` / `gossip` /
+/// `group invite` / clan chat / etc.) refuses with a "your name is
+/// awaiting staff approval" line. Persisted via `Characters.name_approved`:
+/// on load, this marker is attached iff the column is `false`; on
+/// `approve_name` it's removed in-process and the column flips to
+/// `true`; on `reject_name <new>` the row is renamed (which by
+/// definition makes the new name staff-approved) and the marker is
+/// dropped. Session-scoped at the component level — the DB column
+/// is the source of truth across restart.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct NameApprovalPending;
+
 /// Output verbosity preference for info commands (score/equipment/look/etc).
 /// Session-scoped for now — eventual home is an Account field or a
 /// `PlayerToggle` row so it persists across logins.
@@ -1377,6 +1736,24 @@ impl PostureKind {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Posture(pub PostureKind);
 
+impl Posture {
+    /// Map a schema `Position` onto the runtime `PostureKind`. The
+    /// active subset (SLEEPING / RESTING / SITTING / STANDING)
+    /// round-trips; DEAD / GHOST / MORTALLY_WOUNDED / INCAPACITATED
+    /// / STUNNED fall back to STANDING (they aren't valid spawn
+    /// postures). Used by the mob-spawn paths to derive
+    /// `proto.default_position → Posture` at boot and respawn.
+    #[must_use]
+    pub fn from_default_position(p: mud_db::enums::Position) -> PostureKind {
+        match p {
+            mud_db::enums::Position::Sleeping => PostureKind::Sleeping,
+            mud_db::enums::Position::Resting => PostureKind::Resting,
+            mud_db::enums::Position::Sitting => PostureKind::Sitting,
+            _ => PostureKind::Standing,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectSource {
     Spell,
@@ -1493,10 +1870,80 @@ pub struct ExitData {
 #[derive(Component, Debug, Clone, Default)]
 pub struct Exits(pub HashMap<Direction, ExitData>);
 
+/// Real-time syslog subscription marker. Builder+ players carrying
+/// this component receive a one-line push every time a tracing
+/// event fires at or above `min_level`. Set / cleared via
+/// `syslog watch [warn|error|off]`. Session-only — not persisted to
+/// the DB; reconnect resets to no subscription so a forgotten
+/// `syslog watch` doesn't follow the player into next login.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WatchingSyslog {
+    pub min_level: SyslogMinLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyslogMinLevel {
+    /// WARN and ERROR — the default; surfaces save failures, trigger
+    /// errors, missing-resource warnings, and similar staff-relevant
+    /// signals without picking up routine INFO heartbeats.
+    Warn,
+    /// ERROR only — for when WARN is too chatty during an investigation.
+    Error,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mud_db::enums::PlayerFlag;
+
+    #[test]
+    fn from_default_position_maps_active_subset() {
+        // SLEEPING / RESTING / SITTING / STANDING are the legitimate
+        // spawn postures and must round-trip onto the matching
+        // `PostureKind` variant — content authors rely on this when
+        // staging "dragon sleeps on its hoard" / "patron sits at the
+        // bar" / etc.
+        use mud_db::enums::Position;
+        assert_eq!(
+            Posture::from_default_position(Position::Sleeping),
+            PostureKind::Sleeping
+        );
+        assert_eq!(
+            Posture::from_default_position(Position::Resting),
+            PostureKind::Resting
+        );
+        assert_eq!(
+            Posture::from_default_position(Position::Sitting),
+            PostureKind::Sitting
+        );
+        assert_eq!(
+            Posture::from_default_position(Position::Standing),
+            PostureKind::Standing
+        );
+    }
+
+    #[test]
+    fn from_default_position_falls_back_to_standing_for_lifestate_variants() {
+        // DEAD / GHOST / MORTALLY_WOUNDED / INCAPACITATED / STUNNED
+        // are runtime-only lifestate values; if a content author
+        // stuck one in `defaultPosition` (or future schema growth
+        // adds new variants), the spawn falls back to Standing
+        // rather than spawning a mob in an unresponsive state.
+        use mud_db::enums::Position;
+        for p in [
+            Position::Dead,
+            Position::Ghost,
+            Position::MortallyWounded,
+            Position::Incapacitated,
+            Position::Stunned,
+        ] {
+            assert_eq!(
+                Posture::from_default_position(p),
+                PostureKind::Standing,
+                "{p:?} should fall back to Standing"
+            );
+        }
+    }
 
     #[test]
     fn player_flags_toggle_round_trip() {

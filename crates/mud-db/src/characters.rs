@@ -13,10 +13,25 @@ pub struct CharacterRow {
     pub hit_points_max: i32,
     pub stamina: i32,
     pub stamina_max: i32,
-    pub hit_roll: i32,
-    pub damage_roll: i32,
-    pub armor_class: i32,
     pub alignment: i32,
+    // Combat redesign axes (Phase 1) — replace legacy hit_roll /
+    // damage_roll / armor_class with the explicit offense/defense
+    // split documented in `docs/design/combat.md`. All default to 0;
+    // class/race progression fills them in over time.
+    pub accuracy: i32,
+    pub attack_power: i32,
+    pub spell_power: i32,
+    pub penetration_flat: i32,
+    pub penetration_percent: i32,
+    pub evasion: i32,
+    pub armor_rating: i32,
+    pub damage_reduction_percent: i32,
+    pub soak: i32,
+    pub hardness: i32,
+    pub ward_percent: i32,
+    pub perception: i32,
+    pub concealment: i32,
+    pub resistances: serde_json::Value,
     pub permissions: Vec<Permission>,
     pub player_flags: Vec<PlayerFlag>,
     pub prompt: String,
@@ -59,19 +74,19 @@ pub struct CharacterRow {
     /// Practice points awarded on level-up; spent by `practice <ability>`
     /// to bump proficiency. Defaults to 0 in the schema.
     pub skill_points: i32,
-    /// Hunger gauge — game-hours since last meal. 0 = sated. Drained
-    /// stamina/hp once over threshold (legacy `CircleMUD`: ~48). Tick
-    /// system not yet wired; column is loaded and persisted so the
-    /// tick can come up later without touching login flow again.
+    /// Hunger gauge — game-hours since last meal. 0 = sated.
+    /// `regen::hunger_thirst_tick` advances this every game-hour and
+    /// emits crossing flavor lines (hungry / starving). No stat drain
+    /// today by design — see `regen.rs` for the rationale.
     pub hunger: i32,
     /// Thirst gauge — game-hours since last drink. 0 = sated. Same
     /// tick contract as `hunger` but with a tighter threshold (~24).
     pub thirst: i32,
     /// Lifetime seconds the character has been logged in across all
-    /// sessions. Schema column defaults to 0; the runtime surfaces
-    /// it via the `TimePlayed` component on score's "Played:" line.
-    /// Incrementing on save is a follow-up — the column round-trips
-    /// at zero for now until that lands.
+    /// sessions. The runtime surfaces it via the `TimePlayed`
+    /// component on score's "Played:" line. `save_player` accumulates
+    /// `now - LastPersistedAt` into this column on each save, so
+    /// autosave + final-save together cover the full session.
     pub time_played: i32,
     /// Wall-clock timestamp of the previous session's login. Read
     /// once at spawn and stashed on a `PreviousLogin` component;
@@ -113,6 +128,15 @@ pub struct CharacterRow {
     /// the unmodeled life-state values (`Dead`, `MortallyWounded`,
     /// `Incapacitated`, `Stunned`) fall through to `Standing`.
     pub position: Position,
+    /// Name-approval gate. `true` (default) means the character can
+    /// use every social channel. `false` is set at character-creation
+    /// time when the live `social.name_approval_required` toggle is
+    /// on; the runtime then attaches a `NameApprovalPending` marker
+    /// at spawn and the social commands refuse with a "your name
+    /// is awaiting staff approval" line. Staff flips this back to
+    /// `true` via `approve_name` (keep name) or `reject_name <new>`
+    /// (force-rename + auto-approve).
+    pub name_approved: bool,
 }
 
 /// Bundle of fields fed into `create` from the login-creation
@@ -134,6 +158,13 @@ pub struct NewCharacter<'a> {
     pub dexterity: i32,
     pub constitution: i32,
     pub charisma: i32,
+    /// Initial `name_approved` value. `true` (the schema default)
+    /// means the character can use every social channel immediately.
+    /// `false` is set by the login flow when the live
+    /// `social.name_approval_required` toggle is on — the runtime
+    /// then attaches the `NameApprovalPending` marker at spawn and
+    /// staff resolves via `approve_name` / `reject_name`.
+    pub name_approved: bool,
 }
 
 /// INSERT a fresh `Characters` row. Generates the id via
@@ -169,12 +200,12 @@ pub async fn create<'e, E: PgExecutor<'e>>(
         INSERT INTO "Characters" (
             id, name, user_id, race, gender, class_id,
             strength, intelligence, wisdom, dexterity, constitution, charisma,
-            password_hash, updated_at
+            password_hash, updated_at, name_approved
         )
         VALUES (
             gen_random_uuid()::text, $1, $2, $3::"Race", $4, $5,
             $6, $7, $8, $9, $10, $11,
-            '', NOW()
+            '', NOW(), $12
         )
         RETURNING id
         "#,
@@ -190,6 +221,7 @@ pub async fn create<'e, E: PgExecutor<'e>>(
     .bind(new.dexterity)
     .bind(new.constitution)
     .bind(new.charisma)
+    .bind(new.name_approved)
     .fetch_one(executor)
     .await?;
     Ok(row)
@@ -348,7 +380,7 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
         state.current_room_id,
         state.recall_room_zone_id,
         state.recall_room_id,
-        state.player_flags as &[PlayerFlag],
+        state.player_flags as _,
         state.prompt,
         state.title,
         state.description,
@@ -362,7 +394,16 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
         state.wimpy_threshold,
         state.poof_in,
         state.poof_out,
-        state.position as Position,
+        // `as _` lets sqlx use the column's type info from PG's
+        // prepare metadata to encode the param without injecting a
+        // literal `::Position` cast into the SQL. Writing `as Position`
+        // here would emit `$21::Position`, which Postgres folds to
+        // `::position` on the unquoted form — and the actual type is
+        // case-preserved `"Position"`, so the cast fails at execute
+        // time with `syntax error at or near "Position"`. Dropping
+        // the override entirely fails the macro check; `as _` is the
+        // sweet spot.
+        state.position as _,
         character_id,
     )
     .execute(executor)
@@ -763,7 +804,11 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
         r#"
         SELECT
             id, name, user_id, level, hit_points, hit_points_max, stamina, stamina_max,
-            hit_roll, damage_roll, armor_class, alignment,
+            alignment,
+            accuracy, attack_power, spell_power, penetration_flat, penetration_percent,
+            evasion, armor_rating, damage_reduction_percent, soak, hardness,
+            ward_percent, perception, concealment,
+            resistances AS "resistances!: serde_json::Value",
             permissions AS "permissions!: Vec<Permission>",
             player_flags AS "player_flags!: Vec<PlayerFlag>",
             prompt, current_room_zone_id, current_room_id,
@@ -775,7 +820,8 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             last_login AS "last_login: chrono::NaiveDateTime",
             invis_level, freeze_level, wimpy_threshold,
             poof_in, poof_out,
-            position AS "position!: Position"
+            position AS "position!: Position",
+            name_approved
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -799,10 +845,21 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             hit_points_max,
             stamina,
             stamina_max,
-            hit_roll,
-            damage_roll,
-            armor_class,
             alignment,
+            accuracy,
+            attack_power,
+            spell_power,
+            penetration_flat,
+            penetration_percent,
+            evasion,
+            armor_rating,
+            damage_reduction_percent,
+            soak,
+            hardness,
+            ward_percent,
+            perception,
+            concealment,
+            resistances AS "resistances!: serde_json::Value",
             permissions AS "permissions!: Vec<Permission>",
             player_flags AS "player_flags!: Vec<PlayerFlag>",
             prompt,
@@ -834,7 +891,8 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             wimpy_threshold,
             poof_in,
             poof_out,
-            position AS "position!: Position"
+            position AS "position!: Position",
+            name_approved
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name
@@ -843,4 +901,24 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
     )
     .fetch_all(pool)
     .await
+}
+
+/// Flip a character's `name_approved` column. Used by the
+/// `approve_name` / `reject_name` admin commands (the latter
+/// pairs the flip with a `rename` so the new staff-chosen name
+/// auto-clears the gate). Returns the row count touched —
+/// 0 means the id didn't exist.
+pub async fn set_name_approved(
+    pool: &PgPool,
+    character_id: &str,
+    approved: bool,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query!(
+        r#"UPDATE "Characters" SET name_approved = $1 WHERE id = $2"#,
+        approved,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
 }

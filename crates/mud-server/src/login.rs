@@ -195,7 +195,6 @@ pub(crate) fn restore_persisted_pets(
             );
             continue;
         };
-        let dmg = proto.avg_damage();
         let mut pet_entity = world.spawn((
             Mob,
             Named { name: pet.name.clone() },
@@ -204,16 +203,15 @@ pub(crate) fn restore_persisted_pets(
             WorldKey { zone: proto.zone_id, id: proto.id },
             Located(player_room),
             Health { hp: pet.hp, max: pet.max_hp },
-            CombatStats {
-                hit_roll: proto.hit_roll,
-                dmg_roll: dmg,
-                ac: proto.armor_class,
-                alignment: proto.alignment,
-                ward_pct: proto.ward_percent,
-            },
+            proto.derived_combat_stats(),
             Posture(PostureKind::Standing),
             Follower(player),
             mud_world::PersistentPet,
+            mud_world::NaturalDamage {
+                num: proto.damage_dice_num,
+                size: proto.damage_dice_size,
+                bonus: proto.damage_dice_bonus,
+            },
         ));
         if !proto.examine_description.trim().is_empty() {
             pet_entity.insert(mud_world::ExamineText(proto.examine_description.clone()));
@@ -808,6 +806,19 @@ impl ConnRouter {
                     commands::send_char_skills_list(world, entity);
                 }
             }
+            // Char.Items.Inv / Char.Items.Worn — client asks for
+            // a fresh items snapshot. Each GET handler re-emits
+            // the matching `Char.Items.List` frame so a client
+            // that came up after login (e.g., subsystem setup
+            // happened too late to catch the initial push) can
+            // ask explicitly. Both handlers also re-push the
+            // *other* location since `refresh_player_items_gmcp`
+            // is cheap and keeps the client's two panels in sync.
+            "Char.Items.Inv" | "Char.Items.Worn" => {
+                if let Some(&entity) = self.playing.get(&conn_id) {
+                    commands::refresh_player_items_gmcp(world, entity);
+                }
+            }
             other => {
                 tracing::debug!(conn_id, package = other, payload, "GMCP unhandled");
             }
@@ -867,6 +878,7 @@ impl ConnRouter {
                     role: mud_db::enums::UserRole::Player,
                     failed_login_attempts: 0,
                     locked_until: None,
+                    account_wealth: 0,
                 };
                 // Registration gate: when `security.enable_new_player_creation`
                 // is false, the unknown-identifier path returns a
@@ -1208,7 +1220,8 @@ impl ConnRouter {
                     send_gender_prompt(&ctx.outbound);
                     return;
                 };
-                let stats = roll_starting_stats();
+                let stats =
+                    roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), race);
                 send_stat_review(&ctx.outbound, &stats);
                 ctx.stage = Stage::ReviewStatRoll {
                     email,
@@ -1236,7 +1249,8 @@ impl ConnRouter {
                 let accepted = matches!(answer.as_str(), "a" | "accept" | "y" | "yes" | "");
                 let rerolled = matches!(answer.as_str(), "r" | "reroll" | "n" | "no");
                 if rerolled {
-                    let new_stats = roll_starting_stats();
+                    let new_stats =
+                        roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), race);
                     send_stat_review(&ctx.outbound, &new_stats);
                     ctx.stage = Stage::ReviewStatRoll {
                         email,
@@ -1342,6 +1356,17 @@ impl ConnRouter {
                         return;
                     }
                 };
+                // Name-approval toggle: when `social.name_approval_required`
+                // is ON in the live GameConfig, fresh characters land
+                // unapproved and get the `NameApprovalPending` marker at
+                // spawn — they can play but every social channel is
+                // silenced until staff runs `approve_name`. When the
+                // toggle is OFF (the default), new characters are
+                // auto-approved on creation. Existing characters carry
+                // their column value regardless of the toggle's state.
+                let name_approval_required = world
+                    .resource::<mud_world::RuntimeConfig>()
+                    .get_bool("social", "name_approval_required", false);
                 let new_character = mud_db::characters::NewCharacter {
                     user_id: &user_id,
                     name: &character_name,
@@ -1354,6 +1379,7 @@ impl ConnRouter {
                     dexterity: stats.dexterity,
                     constitution: stats.constitution,
                     charisma: stats.charisma,
+                    name_approved: !name_approval_required,
                 };
                 let character_id = match mud_db::characters::create(&mut *tx, &new_character).await
                 {
@@ -1587,7 +1613,11 @@ impl ConnRouter {
                 info!(conn_id, user_id = %user.id, email = %user.email, "auth success");
 
                 // Character-name path: preselected character → spawn it
-                // directly without showing the CharSelect menu.
+                // directly without showing the CharSelect menu. The
+                // name-approval gate runs at spawn time, not at auth
+                // time — players with an unapproved character still
+                // log in and can play; social commands are silenced
+                // until staff resolves the name.
                 if let Some(char_row) = preselected {
                     self.complete_login(conn_id, world, pool, user, *char_row).await;
                     return;
@@ -1637,6 +1667,9 @@ impl ConnRouter {
                     ctx.stage = Stage::CharSelect { user, characters };
                     return;
                 };
+                // Name-approval gate runs at spawn time, not here —
+                // see `complete_login` (NameApprovalPending marker
+                // attach + welcome notice).
                 self.complete_login(conn_id, world, pool, user, char_row).await;
             }
         }
@@ -1796,6 +1829,13 @@ impl ConnRouter {
         let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
         let entity = spawn_player(world, &user, &char_row, outbound);
         let item_count = spawn_inventory(world, entity, &item_rows);
+        // Apply gear stat bonuses (ObjectAffects), per-element
+        // resistances (ObjectResistance), and wear-granted effects
+        // (ObjectEffects) for every item that just respawned with
+        // an EquippedSlot. The CombatStats base loaded into
+        // spawn_player above is the *unmodified* DB row; this pass
+        // stacks the gear-derived deltas on top.
+        crate::equip_apply::recompute_equipped_for(world, entity);
         // Stamp last_login exactly once at successful spawn — split
         // from save_state, which used to overwrite it on every
         // autosave (so the column meant "last save," not "last
@@ -1866,6 +1906,17 @@ impl ConnRouter {
             // by `quit` + reconnect.
             if char_row.freeze_level.is_some() {
                 e.insert(mud_world::Frozen);
+            }
+            // Name-approval gate — attach the `NameApprovalPending`
+            // marker when the DB column is `false`. The player can
+            // play (move / look / fight) but every social channel
+            // (`tell` / `say` / `gossip` / `group invite` / clan)
+            // refuses until staff runs `approve_name` or
+            // `reject_name <new>`. The welcome notice below mirrors
+            // the marker so the player isn't confused why `tell`
+            // refuses.
+            if !char_row.name_approved {
+                e.insert(mud_world::NameApprovalPending);
             }
             // Wimpy threshold — the on/off switch is the `Wimpy`
             // PlayerFlag (loaded above), not this value. The component
@@ -2085,6 +2136,22 @@ impl ConnRouter {
         {
             commands::send_to(world, entity, imotd);
         }
+        // Name-approval notice: when the marker is present (i.e. the
+        // `Characters.name_approved` column is `false`), surface a
+        // one-line heads-up after the MOTD so the player understands
+        // why social channels refuse. The marker itself is what gates
+        // the social commands; this just explains the gate.
+        if world.get::<mud_world::NameApprovalPending>(entity).is_some() {
+            commands::send_to(
+                world,
+                entity,
+                "\r\n<b:yellow>Your character name is awaiting staff approval.</> \
+                 You can move, look, and fight; chat channels (tell / say / \
+                 gossip / group) are silenced until a staff member runs \
+                 `approve_name` or `reject_name`. Run `name_status` for the \
+                 current state.\r\n",
+            );
+        }
         // Broadcast Room.AddPlayer to anyone already in the room so
         // their "who's here" panel updates. The arriving player's
         // own snapshot lands at first prompt via send_prompt's
@@ -2094,6 +2161,22 @@ impl ConnRouter {
                 world, room, entity, "AddPlayer",
             );
         }
+        // One-shot per login: ship the chat-channel directory so
+        // the client can build chat tabs from server data instead
+        // of hardcoding the channel list. Role-aware — wiznet
+        // only appears for immortals.
+        commands::send_comm_channel_list(world, entity);
+        // Same idea for inventory + equipment frames: client
+        // panels need a baseline view at login. Without this push
+        // the floating Inventory / Equipment windows stay empty
+        // until the player gets / drops / wears something for the
+        // first time, which is misleading.
+        commands::refresh_player_items_gmcp(world, entity);
+        // Quest trigger: AUTO (Wave 4.1). Any quest with
+        // `triggerType = AUTO` is granted at login — the dispatcher
+        // skips characters already on the quest, so this is safe
+        // to re-fire every login.
+        crate::quest_triggers::dispatch_auto_trigger(world, entity);
         self.playing.insert(conn_id, entity);
         commands::send_prompt(world, entity);
         info!(
@@ -2214,12 +2297,27 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         current: c.stamina,
         max: c.stamina_max,
     };
+    // Build CombatStats directly from the new combat columns on
+    // Characters (combat redesign complete — see migration-plan.md
+    // wave 3). armor_rating + damage_reduction_percent fold into
+    // armor_pct (sum clamped to 100); soak renames to armor_flat.
+    let armor_pct = c
+        .armor_rating
+        .saturating_add(c.damage_reduction_percent)
+        .clamp(0, 100);
     let combat = CombatStats {
-        hit_roll: c.hit_roll,
-        dmg_roll: c.damage_roll,
-        ac: c.armor_class,
+        accuracy: c.accuracy,
+        evasion: c.evasion,
+        attack_power: c.attack_power,
+        spell_power: c.spell_power,
+        crit_chance: 5,
+        pen_pct: c.penetration_percent,
+        pen_flat: c.penetration_flat,
+        armor_pct,
+        armor_flat: c.soak,
+        ward_pct: c.ward_percent,
+        hardness: c.hardness,
         alignment: c.alignment,
-        ward_pct: 0,
     };
     let core_stats = CoreStats {
         strength: c.strength,
@@ -2303,6 +2401,7 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
                 },
                 Wealth(c.wealth),
                 BankWealth(c.bank_wealth),
+                mud_world::AccountWealth(user.account_wealth),
                 mud_world::SkillPoints(c.skill_points),
             ),
         ))
@@ -2314,8 +2413,9 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         if let Some(re) = recall_entity {
             e.insert(RecallPoint(re));
         }
-        // Hunger/Thirst loaded from the row. Tick consumer is a
-        // follow-up; for now the gauges just round-trip.
+        // Hunger/Thirst loaded from the row. `regen::hunger_thirst_tick`
+        // increments both gauges every game-hour and emits the
+        // crossing flavor lines (hungry/starving/thirsty/parched).
         e.insert(mud_world::Hunger(c.hunger));
         e.insert(mud_world::Thirst(c.thirst));
         // Lifetime time-played in seconds, with a paired anchor
@@ -2338,6 +2438,53 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         // the marker so `release` works and combat skip-paths fire.
         if c.position == mud_db::enums::Position::Ghost {
             e.insert(mud_world::Ghost);
+        }
+    }
+    // Body metrics — height (inches) + weight (lbs). Rolled fresh
+    // from `RaceCatalog::random_{height,weight}` for any character
+    // without persisted values yet. Wave 3 wires the
+    // `Characters.height` / `weight` columns onto `CharacterRow`;
+    // once that lands the spawn path will prefer the persisted
+    // values and fall back to the random roll here. Characters
+    // whose race or gender band isn't authored in the catalog get
+    // skipped — no zero-stamped fallback that would render as
+    // "0 lbs" on examine.
+    {
+        let race_catalog = world.resource::<mud_world::RaceCatalog>();
+        let height = race_catalog.random_height(&c.race, &c.gender);
+        let weight = race_catalog.random_weight(&c.race, &c.gender);
+        if let (Some(h), Some(w)) = (height, weight)
+            && let Ok(mut em) = world.get_entity_mut(entity)
+        {
+            em.insert(mud_world::BodyMetrics {
+                height: h,
+                weight: w,
+            });
+        }
+    }
+    // Race-granted resistances. `Races.resistances` JSON folds
+    // into the player's `Resistances` map at spawn time so combat
+    // reads a single aggregated lookup. Class resistances stack
+    // additively on top — same shape, same map. Empty maps are
+    // skipped so we don't allocate a Resistances component just
+    // to hold nothing.
+    {
+        let mut race_map: std::collections::HashMap<mud_db::enums::ElementType, i32> =
+            std::collections::HashMap::new();
+        if let Some(def) = world.resource::<mud_world::RaceCatalog>().get(&c.race) {
+            race_map.clone_from(&def.resistances);
+        }
+        if let Some(cid) = c.class_id
+            && let Some(class_def) = world.resource::<mud_world::ClassCatalog>().by_id.get(&cid)
+        {
+            for (el, v) in &class_def.resistances {
+                *race_map.entry(*el).or_insert(0) += v;
+            }
+        }
+        if !race_map.is_empty()
+            && let Ok(mut em) = world.get_entity_mut(entity)
+        {
+            em.insert(mud_world::Resistances(race_map));
         }
     }
     entity
@@ -2465,10 +2612,19 @@ pub(crate) async fn save_player(
                 Option<&mud_world::PersistedItemId>,
                 Option<&mud_world::Charges>,
                 Option<&mud_world::LiquidContainer>,
+                Option<&mud_world::ObjectFlags>,
                 &Item,
             )>();
             q.iter(world)
-                .map(|(e, l, wk, eq, pid, ch, lc, _)| {
+                // TEMPORARY items vanish on rent / logout — drop them
+                // from the snapshot so they don't round-trip into the
+                // next session. Permanent disappearance is the
+                // canonical behavior; the DB row is also released by
+                // the diff (an item not in the snapshot is deleted).
+                .filter(|(_, _, _, _, _, _, _, flags, _)| {
+                    !flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Temporary))
+                })
+                .map(|(e, l, wk, eq, pid, ch, lc, _, _)| {
                     (e, l.0, *wk, eq.copied(), pid.copied(), ch.copied(), lc.cloned())
                 })
                 .collect()
@@ -2534,6 +2690,16 @@ pub(crate) async fn save_player(
         .get::<mud_world::Drunkenness>(entity)
         .map_or(0, |d| d.0);
     let bank = world.get::<BankWealth>(entity).map_or(0, |b| b.0);
+    // Account-shared bank balance — keyed on the *user*, not the
+    // character. Whichever character on the account triggers the
+    // save persists the in-memory value back to `Users.account_wealth`.
+    // Cross-character sync happens at command time via
+    // `fanout_account_wealth`; the save path just snapshots what
+    // this character's component currently shows.
+    let account_wealth = world
+        .get::<mud_world::AccountWealth>(entity)
+        .map_or(0, |a| a.0);
+    let user_id = account.user_id.clone();
     let script_vars_json = world
         .get::<mud_world::ScriptVars>(entity)
         .filter(|sv| !sv.0.is_empty())
@@ -2763,6 +2929,7 @@ pub(crate) async fn save_player(
         .await?;
         mud_db::characters::save_pets(&mut *tx, &cid, pets_json.as_ref()).await?;
         mud_db::characters::save_bank_wealth(&mut *tx, &cid, bank).await?;
+        mud_db::users::save_account_wealth(&mut *tx, &user_id, account_wealth).await?;
         if let Some(t) = new_time_played {
             mud_db::characters::save_time_played(&mut *tx, &cid, t).await?;
         }
@@ -2921,6 +3088,16 @@ pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[Charact
             }
             if let Some(keys) = trigger_keys {
                 bundle.insert(AttachedTriggers(keys));
+            }
+            // Per-instance attribute flags carry along through
+            // login rehydration the same as proto-spawned items
+            // — without this, a quest item flagged NO_DROP would
+            // lose its restriction on logout/login.
+            if !proto.flags.is_empty() {
+                bundle.insert(mud_world::ObjectFlags(proto.flags.clone()));
+            }
+            if !proto.restrictions.is_empty() {
+                bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
             }
             let item_entity = bundle.id();
             // Stamp the row's id so save_inventory_diff knows to UPDATE
@@ -3087,24 +3264,27 @@ fn match_playable_gender(input: &str) -> Option<&'static str> {
     PLAYABLE_GENDERS.iter().copied().find(|g| *g == needle)
 }
 
-/// Classic 3d6-per-stat roll for a brand-new character. No race
-/// or class adjustments here — those layer on at spawn time
-/// from per-race / per-class modifier tables once the gating
-/// data lands. Returns six stats in the canonical order STR /
-/// INT / WIS / DEX / CON / CHA.
-fn roll_starting_stats() -> CoreStats {
+/// Classic 3d6-per-stat roll for a brand-new character, clamped
+/// at the race's per-attribute max from `Races.max_*` columns.
+/// 3d6 tops out at 18 and the schema default cap is 76, so the
+/// clamp is normally a no-op — but a race that lowers a specific
+/// cap (e.g. low-INT brutes capped at 12) will see freshly-rolled
+/// stats respect the schema authoring. Returns six stats in the
+/// canonical order STR / INT / WIS / DEX / CON / CHA.
+fn roll_starting_stats(race_catalog: &mud_world::RaceCatalog, race: &str) -> CoreStats {
     let roll = || -> i32 {
         (0..3)
             .map(|_| i32::try_from(rand::random_range(1u32..=6)).unwrap_or(1))
             .sum()
     };
+    let cap = |stat: &str, val: i32| val.min(race_catalog.stat_cap(race, stat, i32::MAX));
     CoreStats {
-        strength: roll(),
-        intelligence: roll(),
-        wisdom: roll(),
-        dexterity: roll(),
-        constitution: roll(),
-        charisma: roll(),
+        strength: cap("strength", roll()),
+        intelligence: cap("intelligence", roll()),
+        wisdom: cap("wisdom", roll()),
+        dexterity: cap("dexterity", roll()),
+        constitution: cap("constitution", roll()),
+        charisma: cap("charisma", roll()),
     }
 }
 
@@ -3192,10 +3372,21 @@ mod tests {
             hit_points_max: 10,
             stamina: 10,
             stamina_max: 10,
-            hit_roll: 0,
-            damage_roll: 0,
-            armor_class: 10,
             alignment: 0,
+            accuracy: 0,
+            attack_power: 0,
+            spell_power: 0,
+            penetration_flat: 0,
+            penetration_percent: 0,
+            evasion: 0,
+            armor_rating: 0,
+            damage_reduction_percent: 0,
+            soak: 0,
+            hardness: 0,
+            ward_percent: 0,
+            perception: 0,
+            concealment: 0,
+            resistances: serde_json::json!({}),
             permissions: vec![],
             player_flags: vec![],
             prompt: String::new(),
@@ -3228,6 +3419,7 @@ mod tests {
             poof_in: None,
             poof_out: None,
             position: mud_db::enums::Position::Standing,
+            name_approved: true,
         }
     }
 

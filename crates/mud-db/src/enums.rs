@@ -1,3 +1,20 @@
+// IMPORTANT: every `#[sqlx(type_name = ...)]` attribute on a custom
+// Postgres enum below uses the embedded-quote form `r#""TypeName""#`
+// rather than the bare `"TypeName"` you'd expect. Reason: Prisma
+// generates these types case-preserved (`CREATE TYPE "Position"
+// AS ENUM ...`), and sqlx 0.8 resolves a custom type's OID at encode
+// time via `SELECT $1::regtype::oid`. With an unquoted value,
+// Postgres folds the identifier to lowercase inside the regtype cast
+// and the lookup fails at runtime with `syntax error at or near
+// "<Name>"`. The macro-time `query!` prepare check does NOT exercise
+// that regtype path, so the bug only surfaces when a parameter is
+// actually bound on a live query.
+//
+// When adding a new mixed-case Prisma-generated PG enum here, copy
+// the embedded-quote pattern. Lowercase / all-caps PG types don't
+// need it, but applying it uniformly is harmless and keeps the
+// convention skim-readable.
+
 use serde::{Deserialize, Serialize};
 
 /// Player feedback categories — drives `reports.report_type` on the
@@ -5,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// reporter, room, and free-text message; staff triages via the
 /// open/in-progress/closed status field.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "ReportType", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""ReportType""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ReportType {
     Bug,
     Idea,
@@ -13,7 +30,7 @@ pub enum ReportType {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "ResetMode", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""ResetMode""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ResetMode {
     Never,
     Empty,
@@ -21,7 +38,7 @@ pub enum ResetMode {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "Hemisphere", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""Hemisphere""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Hemisphere {
     Northwest,
     Northeast,
@@ -30,7 +47,7 @@ pub enum Hemisphere {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "Climate", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""Climate""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Climate {
     None,
     Semiarid,
@@ -45,7 +62,7 @@ pub enum Climate {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "Sector", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""Sector""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Sector {
     Structure,
     City,
@@ -78,8 +95,14 @@ pub enum Sector {
 /// the dead-but-incorporeal `GHOST` value onto a runtime marker; the
 /// remaining values (`DEAD`/`MORTALLY_WOUNDED`/`INCAPACITATED`/`STUNNED`)
 /// aren't yet modeled and round-trip as `STANDING` on load.
+// `type_name` carries embedded quotes because sqlx 0.8 looks the
+// type's OID up at encode time via `SELECT $1::regtype::oid`. PG
+// folds the unquoted form to lowercase and the cast fails with
+// `syntax error at or near "Position"`. The macro-time prepare
+// doesn't exercise this path, so the bug only surfaces at runtime.
+// Required for every Prisma-generated mixed-case enum type.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "Position", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""Position""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Position {
     Dead,
     Ghost,
@@ -112,7 +135,7 @@ impl Position {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[sqlx(type_name = "Direction", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""Direction""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Direction {
     North,
     East,
@@ -131,7 +154,7 @@ pub enum Direction {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "ExitState", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""ExitState""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExitState {
     Open,
     Closed,
@@ -148,7 +171,7 @@ pub enum ExitState {
 /// impl so the manual impl below can supply the case-preserving
 /// quoted array name (`_ExitFlag`); the auto-derive lowercases.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[sqlx(type_name = "ExitFlag", rename_all = "SCREAMING_SNAKE_CASE", no_pg_array)]
+#[sqlx(type_name = r#""ExitFlag""#, rename_all = "SCREAMING_SNAKE_CASE", no_pg_array)]
 pub enum ExitFlag {
     IsDoor,
     Pickproof,
@@ -164,7 +187,7 @@ impl sqlx::postgres::PgHasArrayType for ExitFlag {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "ObjectType", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""ObjectType""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ObjectType {
     Nothing,
     Light,
@@ -257,7 +280,7 @@ impl ObjectType {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "AchievementCategory", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""AchievementCategory""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AchievementCategory {
     Combat,
     Exploration,
@@ -280,7 +303,7 @@ impl AchievementCategory {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "MobRole", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""MobRole""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MobRole {
     Trash,
     Normal,
@@ -311,7 +334,7 @@ impl MobRole {
 /// professions (banker + receptionist, etc). Mirrors the schema
 /// enum verbatim.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "MobProfession", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""MobProfession""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MobProfession {
     Banker,
     Shopkeeper,
@@ -326,7 +349,7 @@ pub enum MobProfession {
 /// of these. The runtime compares against the killer's i32
 /// alignment via `Alignment::from_score`.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "Alignment", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""Alignment""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Alignment {
     Good,
     Neutral,
@@ -363,7 +386,7 @@ impl Alignment {
 /// `Normal` is the default and incurs no penalty; the others
 /// scale a player's alignment toward EVIL on kill.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[sqlx(type_name = "ProtectedKind", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""ProtectedKind""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ProtectedKind {
     #[default]
     Normal,
@@ -393,7 +416,7 @@ impl ProtectedKind {
 /// doesn't read yet stay in the spawn-time list; future systems
 /// can light them up without re-running the DB query.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = "MobBehavior", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""MobBehavior""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MobBehavior {
     Sentinel,
     StayZone,
@@ -480,7 +503,7 @@ impl MobBehavior {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[sqlx(type_name = "UserRole", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""UserRole""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum UserRole {
     Player,
     Immortal,
@@ -530,7 +553,7 @@ impl UserRole {
 /// from the first relevant flag. The runtime maps subsets of these
 /// onto our smaller `PostureKind`-shaped slot enum.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[sqlx(type_name = "WearFlag", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""WearFlag""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WearFlag {
     Finger,
     Neck,
@@ -590,10 +613,10 @@ impl WearFlag {
     }
 }
 
-// `type_name` carries embedded quotes so sqlx preserves the mixed-case
-// identifier through Postgres's name lookup; without quotes the
-// element name `PlayerFlag` is folded to lowercase by the server and
-// the encode path fails with "type playerflag does not exist".
+// `type_name` carries embedded quotes for the same reason as
+// `Position`: sqlx 0.8 resolves the type OID at encode time via
+// `SELECT $1::regtype::oid`, and the unquoted `PlayerFlag` is folded
+// to lowercase by Postgres, failing with a runtime syntax error.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[sqlx(type_name = r#""PlayerFlag""#, rename_all = "SCREAMING_SNAKE_CASE")]
 #[sqlx(no_pg_array)]
@@ -709,7 +732,7 @@ impl PlayerFlag {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[sqlx(type_name = "Permission", rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(type_name = r#""Permission""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Permission {
     Build,
     Code,
@@ -781,3 +804,438 @@ impl Permission {
         }
     }
 }
+
+/// Which kind of world entity owns an `EntityVariables` row. Mirrors the
+/// schema's `EntityType` Prisma enum verbatim — `MOB` / `OBJECT` / `ROOM`.
+/// The (entity_type, zone, id, key) tuple is the primary key on
+/// `entity_variables`, so this enum is the discriminator that lets one
+/// table back trigger-set vars for all three runtime entity shapes.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[sqlx(type_name = r#""EntityType""#, rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EntityType {
+    Mob,
+    Object,
+    Room,
+}
+
+impl EntityType {
+    /// Human-readable single-word label. Used by admin readouts that
+    /// dump an entity's variable bag and the unit-test diagnostics in
+    /// `EntityVariableCache`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Mob => "Mob",
+            Self::Object => "Object",
+            Self::Room => "Room",
+        }
+    }
+}
+
+/// Damage element categories — drives `ObjectResistance.element` and
+/// (eventually) ability damage typing for the combat resist step.
+/// Mirrors the schema's `ElementType` enum verbatim. SLASH/PIERCE/
+/// CRUSH are physical sub-types; FIRE/COLD/SHOCK are elemental;
+/// MENTAL/HOLY/UNHOLY/NECROTIC are mystic.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[sqlx(type_name = r#""ElementType""#, rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ElementType {
+    Physical,
+    Slash,
+    Pierce,
+    Crush,
+    Force,
+    Sonic,
+    Bleed,
+    Fire,
+    Cold,
+    Water,
+    Earth,
+    Air,
+    Shock,
+    Acid,
+    Poison,
+    Radiant,
+    Shadow,
+    Holy,
+    Unholy,
+    Heal,
+    Necrotic,
+    Mental,
+    Nature,
+}
+
+/// Boolean flags on an object proto — classic MUD `EXTRA_*` bits.
+/// Stored as a Postgres `_ObjectFlag` array on `Objects.flags`. The
+/// runtime reads them at spawn time and attaches them as the
+/// `ObjectFlags` component so command handlers (look / examine /
+/// give / drop) can gate on a flag without reaching back to the
+/// proto store.
+///
+/// `no_pg_array` disables sqlx's auto-derived `PgHasArrayType` impl
+/// so the manual impl below can supply the case-preserving quoted
+/// array name (`_ObjectFlag`); the auto-derive lowercases.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[sqlx(type_name = r#""ObjectFlag""#, rename_all = "SCREAMING_SNAKE_CASE", no_pg_array)]
+pub enum ObjectFlag {
+    Glow,
+    Hum,
+    Invisible,
+    Magic,
+    Permanent,
+    Temporary,
+    Decomposing,
+    Float,
+    Buoyant,
+    Vehicle,
+    Soulbound,
+}
+
+impl sqlx::postgres::PgHasArrayType for ObjectFlag {
+    fn array_type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_name(r#""_ObjectFlag""#)
+    }
+}
+
+impl ObjectFlag {
+    /// Short human label for `identify` / `examine` flag readouts.
+    /// Variants stay one-word so the readout reads as a comma-list
+    /// without awkward wrapping.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Glow => "Glow",
+            Self::Hum => "Hum",
+            Self::Invisible => "Invisible",
+            Self::Magic => "Magic",
+            Self::Permanent => "Permanent",
+            Self::Temporary => "Temporary",
+            Self::Decomposing => "Decomposing",
+            Self::Float => "Float",
+            Self::Buoyant => "Buoyant",
+            Self::Vehicle => "Vehicle",
+            Self::Soulbound => "Soulbound",
+        }
+    }
+}
+
+/// "Can't do that" restrictions on an object proto. Stored as a
+/// Postgres `_ObjectRestriction` array on `Objects.restrictions`.
+/// Each variant gates a specific command (`drop` / `get` / `sell`
+/// / etc.); the gate fires before any state mutation so a NO_DROP
+/// quest item can't accidentally land on the floor.
+///
+/// `no_pg_array` for the same case-preserved array-type reason as
+/// `ObjectFlag` above.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[sqlx(
+    type_name = r#""ObjectRestriction""#,
+    rename_all = "SCREAMING_SNAKE_CASE",
+    no_pg_array
+)]
+pub enum ObjectRestriction {
+    NoDrop,
+    NoTake,
+    NoSell,
+    NoBurn,
+    NoLocate,
+    NoInvisible,
+}
+
+impl sqlx::postgres::PgHasArrayType for ObjectRestriction {
+    fn array_type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_name(r#""_ObjectRestriction""#)
+    }
+}
+
+impl ObjectRestriction {
+    /// Builder-facing label for `identify` / `examine` restriction
+    /// readouts. Hyphenated form so "No-drop" reads as a single
+    /// token in a comma-separated list.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NoDrop => "No-drop",
+            Self::NoTake => "No-take",
+            Self::NoSell => "No-sell",
+            Self::NoBurn => "No-burn",
+            Self::NoLocate => "No-locate",
+            Self::NoInvisible => "No-invisible",
+        }
+    }
+}
+
+/// Body / form size class. Stored on `Mobs.size`; consumed by
+/// bash-style takedowns (size disparity refusals), drag/throw checks,
+/// mount eligibility, and the player-facing examine summary. Bands
+/// match the schema enum verbatim; numeric `rank()` is the ordinal
+/// used by gameplay gates that compare sizes ("bash refuses targets
+/// more than one band larger than you").
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[sqlx(type_name = r#""Size""#, rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Size {
+    Tiny,
+    Small,
+    Medium,
+    Large,
+    Huge,
+    Giant,
+    Gargantuan,
+    Colossal,
+    Titanic,
+    Mountainous,
+}
+
+impl Size {
+    /// Numeric ordinal — TINY=0 .. MOUNTAINOUS=9. Bash / drag /
+    /// throw gates compare ranks; "more than one band bigger" =
+    /// `target.rank() > attacker.rank() + 1`.
+    #[must_use]
+    pub const fn rank(self) -> i32 {
+        match self {
+            Self::Tiny => 0,
+            Self::Small => 1,
+            Self::Medium => 2,
+            Self::Large => 3,
+            Self::Huge => 4,
+            Self::Giant => 5,
+            Self::Gargantuan => 6,
+            Self::Colossal => 7,
+            Self::Titanic => 8,
+            Self::Mountainous => 9,
+        }
+    }
+
+    /// Human-readable label for `examine` / `stat mob`. All variants
+    /// fit a single word and read cleanly inline.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tiny => "tiny",
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+            Self::Huge => "huge",
+            Self::Giant => "giant",
+            Self::Gargantuan => "gargantuan",
+            Self::Colossal => "colossal",
+            Self::Titanic => "titanic",
+            Self::Mountainous => "mountainous",
+        }
+    }
+}
+
+/// Life-force / vitality category. Mirrors the schema's `LifeForce`
+/// enum and gates holy/unholy interactions: `detect_undead` reveals
+/// UNDEAD-classed mobs, `turn_undead` / `holy_word` filter their
+/// candidate lists by this tag, "celestial damage vs demonic" damage
+/// bonus rules look it up. `LIFE` is the default for organic mobs
+/// and incurs no special interactions.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = r#""LifeForce""#, rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LifeForce {
+    Life,
+    Undead,
+    Magic,
+    Celestial,
+    Demonic,
+    Elemental,
+}
+
+impl LifeForce {
+    /// Human-readable label for `examine` / `stat mob`. Lower-cased
+    /// because the examine sentence reads better as "Aura of unlife
+    /// clings to it." rather than the raw enum spelling.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Life => "life",
+            Self::Undead => "undead",
+            Self::Magic => "magical",
+            Self::Celestial => "celestial",
+            Self::Demonic => "demonic",
+            Self::Elemental => "elemental",
+        }
+    }
+}
+
+/// Natural attack flavor for a mob's unarmed swing — drives the
+/// per-swing verb in combat narration ("The orc claws you." vs
+/// "The wolf bites you."). Mirrors `Mobs.damage_type` in the
+/// schema. Independent of `ElementType` (which tracks the resist
+/// channel); `DamageType::FIRE` here is the mob's "shape" of
+/// attack, not the resist axis.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = r#""DamageType""#, rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DamageType {
+    Hit,
+    Sting,
+    Whip,
+    Slash,
+    Bite,
+    Bludgeon,
+    Crush,
+    Pound,
+    Claw,
+    Maul,
+    Thrash,
+    Pierce,
+    Blast,
+    Punch,
+    Stab,
+    Fire,
+    Cold,
+    Acid,
+    Shock,
+    Poison,
+    Align,
+    Mental,
+    Rot,
+    Energy,
+    Water,
+}
+
+impl DamageType {
+    /// Third-person singular verb for the natural-attack swing line.
+    /// Used by `attack_message` to render "The bear MAULS you."
+    /// without each consumer hard-coding the inflection.
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Hit => "hits",
+            Self::Sting => "stings",
+            Self::Whip => "whips",
+            Self::Slash => "slashes",
+            Self::Bite => "bites",
+            Self::Bludgeon => "bludgeons",
+            Self::Crush => "crushes",
+            Self::Pound => "pounds",
+            Self::Claw => "claws",
+            Self::Maul => "mauls",
+            Self::Thrash => "thrashes",
+            Self::Pierce => "pierces",
+            Self::Blast => "blasts",
+            Self::Punch => "punches",
+            Self::Stab => "stabs",
+            Self::Fire => "burns",
+            Self::Cold => "freezes",
+            Self::Acid => "scalds",
+            Self::Shock => "shocks",
+            Self::Poison => "poisons",
+            Self::Align => "smites",
+            Self::Mental => "psychically lashes",
+            Self::Rot => "withers",
+            Self::Energy => "blasts",
+            Self::Water => "douses",
+        }
+    }
+
+    /// Human-readable label for proto readouts (`mstat`). Title-case
+    /// single word; `verb()` is for in-combat narration.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Hit => "Hit",
+            Self::Sting => "Sting",
+            Self::Whip => "Whip",
+            Self::Slash => "Slash",
+            Self::Bite => "Bite",
+            Self::Bludgeon => "Bludgeon",
+            Self::Crush => "Crush",
+            Self::Pound => "Pound",
+            Self::Claw => "Claw",
+            Self::Maul => "Maul",
+            Self::Thrash => "Thrash",
+            Self::Pierce => "Pierce",
+            Self::Blast => "Blast",
+            Self::Punch => "Punch",
+            Self::Stab => "Stab",
+            Self::Fire => "Fire",
+            Self::Cold => "Cold",
+            Self::Acid => "Acid",
+            Self::Shock => "Shock",
+            Self::Poison => "Poison",
+            Self::Align => "Align",
+            Self::Mental => "Mental",
+            Self::Rot => "Rot",
+            Self::Energy => "Energy",
+            Self::Water => "Water",
+        }
+    }
+}
+
+/// Identity flags on a mob — "what the mob IS" (orthogonal to
+/// `MobBehavior` which tracks "how the mob ACTS"). Mirrors the
+/// schema's `MobTrait` enum verbatim. Stored as a Postgres
+/// `_MobTrait` array on `Mobs.traits`; per-instance copy lands on
+/// the spawned entity as a `MobTraits` component.
+///
+/// `no_pg_array` for the same case-preserved array-type reason as
+/// `ObjectFlag` above — the auto-derive lowercases the array name.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[sqlx(type_name = r#""MobTrait""#, rename_all = "SCREAMING_SNAKE_CASE", no_pg_array)]
+pub enum MobTrait {
+    Illusion,
+    Animated,
+    PlayerPhantasm,
+    Aquatic,
+    Mount,
+    Summoned,
+    Pet,
+}
+
+impl sqlx::postgres::PgHasArrayType for MobTrait {
+    fn array_type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_name(r#""_MobTrait""#)
+    }
+}
+
+impl MobTrait {
+    /// Short human label for `mstat` / `mob-ai` readouts. Multi-
+    /// word variants hyphenate so the comma-list stays scannable.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Illusion => "Illusion",
+            Self::Animated => "Animated",
+            Self::PlayerPhantasm => "Player-Phantasm",
+            Self::Aquatic => "Aquatic",
+            Self::Mount => "Mount",
+            Self::Summoned => "Summoned",
+            Self::Pet => "Pet",
+        }
+    }
+}
+
+/// Mob movement mode — orthogonal to `PostureKind` (which tracks
+/// standing/sitting/etc). FLYING gates aerial combat / "soars
+/// overhead" rendering; SWIMMING and UNDERWATER discriminate
+/// surface vs submerged water; MOUNTED indicates the mob is
+/// presently being ridden; ETHEREAL is the phased/incorporeal
+/// state. Mirrors the schema's `MovementMode` enum verbatim.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = r#""MovementMode""#, rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MovementMode {
+    Normal,
+    Flying,
+    Swimming,
+    Underwater,
+    Mounted,
+    Ethereal,
+}
+
+impl MovementMode {
+    /// Human-readable label for examine / proto readouts.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "ground",
+            Self::Flying => "flying",
+            Self::Swimming => "swimming",
+            Self::Underwater => "submerged",
+            Self::Mounted => "mounted",
+            Self::Ethereal => "ethereal",
+        }
+    }
+}
+

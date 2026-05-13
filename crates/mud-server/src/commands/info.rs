@@ -25,10 +25,30 @@ inventory::submit! {
             summary: "List commands or show details on a specific one.",
             long: "With no arguments, shows commands available to you grouped \
                    by category. With an argument, shows the usage and details \
-                   for that command. Try `help newbie` for a starter-pack of \
-                   practical first goals.",
+                   for that command. Admin commands live in `wizhelp` (Builder+ \
+                   only). Try `help newbie` for a starter-pack of practical \
+                   first goals.",
         },
         run: cmd_help,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["wizhelp", "whelp"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "wizhelp [command]",
+            summary: "List admin commands or show details on a specific one.",
+            long: "Builder+ counterpart of `help`. With no arguments, lists \
+                   every admin command you can run. With an argument, shows \
+                   the usage and details for that command — same shape as \
+                   `help`, but scoped to admin tools so the player help \
+                   stays uncluttered.",
+        },
+        run: cmd_wizhelp,
     }
 }
 
@@ -1143,13 +1163,27 @@ inventory::submit! {
         category: Category::Info,
         help: Help {
             usage: "account",
-            summary: "Show your account email, role, and character roster.",
+            summary: "Show your account email, role, character roster, and linked Discord/Google.",
             long: "Read-only summary of who you're logged in as and \
                    which character is currently active. Snapshot taken \
                    at login — characters created mid-session won't \
-                   appear until you reconnect.",
+                   appear until you reconnect. Also reads `discord_links` \
+                   and `google_links` for your Users row and prints \
+                   whatever's bound; Discord links display as \
+                   `verified` / `unverified` so you can tell whether \
+                   the bot will honor messages from the linked account. \
+                   (`whoami` is a separate one-line identity command.)",
         },
-        run: cmd_account,
+        run: cmd_mail_stub,
+    }
+}
+
+inventory::submit! {
+    AsyncCommand {
+        dispatch: |world, player, pool, head, _args| match head {
+            "account" => Some(Box::pin(cmd_account(world, player, pool))),
+            _ => None,
+        },
     }
 }
 
@@ -2382,7 +2416,153 @@ pub(crate) fn cmd_newbie(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, body);
 }
 
+/// Render `help <social>` as a sample of every message variant the
+/// social can produce. Substitutions use the player's own name as the
+/// actor and a generic placeholder as the target so the example
+/// reads as a concrete sentence. Sections with no message templates
+/// are skipped — many socials are no-arg-only or target-only.
+fn render_social_help(world: &mut World, player: Entity, social: &SocialDef) {
+    const PLACEHOLDER_TARGET: &str = "someone";
+    let actor_name = name_of(world, player);
+
+    let has_no_arg = social.char_no_arg.is_some() || social.others_no_arg.is_some();
+    let has_found =
+        social.char_found.is_some() || social.others_found.is_some() || social.vict_found.is_some();
+    let has_auto = social.char_auto.is_some() || social.others_auto.is_some();
+
+    let usage = match (has_no_arg, has_found) {
+        (true, true) => format!("{} [target]", social.name),
+        (false, true) => format!("{} <target>", social.name),
+        _ => social.name.clone(),
+    };
+
+    let mut out = format!("\r\n<b:cyan>{}</> <dim>(social)</>\r\n", social.name);
+    out.push_str("\r\n  An emote — describes how you're acting toward the room or a target.\r\n");
+    out.push_str(&format!("\r\n  <cyan>Usage:</> {usage}\r\n"));
+
+    if has_no_arg {
+        out.push_str("\r\n  <cyan>Without a target:</>\r\n");
+        if let Some(line) = social.char_no_arg.as_ref() {
+            let s = substitute(line, &actor_name, None);
+            out.push_str(&format!("    <dim>You see:</>    {s}\r\n"));
+        }
+        if let Some(line) = social.others_no_arg.as_ref() {
+            let s = substitute(line, &actor_name, None);
+            out.push_str(&format!("    <dim>Others see:</> {s}\r\n"));
+        }
+    }
+
+    if has_found {
+        out.push_str("\r\n  <cyan>With a target:</>\r\n");
+        if let Some(line) = social.char_found.as_ref() {
+            let s = substitute(line, &actor_name, Some(PLACEHOLDER_TARGET));
+            out.push_str(&format!("    <dim>You see:</>    {s}\r\n"));
+        }
+        if let Some(line) = social.vict_found.as_ref() {
+            let s = substitute(line, &actor_name, Some(PLACEHOLDER_TARGET));
+            out.push_str(&format!("    <dim>Target sees:</> {s}\r\n"));
+        }
+        if let Some(line) = social.others_found.as_ref() {
+            let s = substitute(line, &actor_name, Some(PLACEHOLDER_TARGET));
+            out.push_str(&format!("    <dim>Others see:</> {s}\r\n"));
+        }
+    }
+
+    if has_auto {
+        out.push_str("\r\n  <cyan>On yourself:</>\r\n");
+        if let Some(line) = social.char_auto.as_ref() {
+            let s = substitute(line, &actor_name, Some(&actor_name));
+            out.push_str(&format!("    <dim>You see:</>    {s}\r\n"));
+        }
+        if let Some(line) = social.others_auto.as_ref() {
+            let s = substitute(line, &actor_name, Some(&actor_name));
+            out.push_str(&format!("    <dim>Others see:</> {s}\r\n"));
+        }
+    }
+
+    out.push_str("\r\n  <cyan>Category:</> <dim>Social</>\r\n");
+    send_to(world, player, out);
+}
+
+/// Render a DB-backed `HelpEntry`. Matches the per-command help page
+/// shape so a player can't tell from layout whether they hit a
+/// hand-authored command page or a builder-authored article — same
+/// bold-cyan title, cyan section labels for metadata, body content
+/// last. Usage / Sphere / Duration only render when set on the row.
+fn render_help_entry(world: &mut World, player: Entity, entry: &mud_world::HelpEntry) {
+    let mut out = format!("\r\n<b:cyan>{}</>\r\n", entry.title);
+    let has_meta = entry.usage.is_some() || entry.sphere.is_some() || entry.duration.is_some();
+    if let Some(usage) = entry.usage.as_ref() {
+        out.push_str(&format!("\r\n  <cyan>Usage:</> {usage}\r\n"));
+    }
+    if let Some(sphere) = entry.sphere.as_ref() {
+        out.push_str(&format!("  <cyan>Sphere:</> {sphere}\r\n"));
+    }
+    if let Some(duration) = entry.duration.as_ref() {
+        out.push_str(&format!("  <cyan>Duration:</> {duration}\r\n"));
+    }
+    if !has_meta {
+        out.push_str("\r\n");
+    } else {
+        out.push_str("\r\n");
+    }
+    // Body. Trim trailing whitespace so we don't double-blank the
+    // tail before the category gloss.
+    out.push_str(entry.content.trim_end());
+    out.push_str("\r\n");
+    if let Some(category) = entry.category.as_ref() {
+        out.push_str(&format!("\r\n  <cyan>Category:</> <dim>{category}</>\r\n"));
+    }
+    send_to(world, player, out);
+}
+
+/// Player-side help: every category except Admin.
 pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
+    run_help(world, player, args, HelpScope::Player);
+}
+
+/// Builder+ counterpart: only the Admin category. Registered with
+/// `min_role: Builder` so normal players can't even invoke it.
+pub(crate) fn cmd_wizhelp(world: &mut World, player: Entity, args: &str) {
+    run_help(world, player, args, HelpScope::Wiz);
+}
+
+#[derive(Clone, Copy)]
+enum HelpScope {
+    /// Player help — excludes Admin category from the index, the
+    /// per-topic lookup, and the prefix-suggestion list.
+    Player,
+    /// Wiz / admin help — only the Admin category is in scope.
+    Wiz,
+}
+
+impl HelpScope {
+    fn includes(self, cmd: &Command) -> bool {
+        match self {
+            Self::Player => cmd.category != Category::Admin,
+            Self::Wiz => cmd.category == Category::Admin,
+        }
+    }
+    fn index_title(self) -> &'static str {
+        match self {
+            Self::Player => "Available commands:",
+            Self::Wiz => "Admin commands:",
+        }
+    }
+    fn invocation(self) -> &'static str {
+        match self {
+            Self::Player => "help",
+            Self::Wiz => "wizhelp",
+        }
+    }
+    /// Socials only ever surface through the player-side help; an
+    /// admin chasing `wizhelp` is looking for command tooling.
+    fn allow_socials(self) -> bool {
+        matches!(self, Self::Player)
+    }
+}
+
+fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
     const HELP_INDEX_COL_WIDTH: usize = 16;
     const HELP_INDEX_COLS_PER_ROW: usize = 4;
     let (role, perms) = world
@@ -2393,7 +2573,7 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
     if topic.is_empty() {
         let mut by_cat: HashMap<Category, Vec<&Command>> = HashMap::new();
         for cmd in all_commands() {
-            if !visible(cmd, role, &perms) {
+            if !visible(cmd, role, &perms) || !scope.includes(cmd) {
                 continue;
             }
             by_cat.entry(cmd.category).or_default().push(cmd);
@@ -2407,7 +2587,7 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
         // single-line `join(", ")` form was the SUGGESTIONS overflow
         // bullet.
         let mode = color_mode_for(world, player);
-        let mut out = String::from("\r\n<b:cyan>Available commands:</>\r\n");
+        let mut out = format!("\r\n<b:cyan>{}</>\r\n", scope.index_title());
         for cat in Category::ORDER {
             if let Some(cmds) = by_cat.get(cat) {
                 out.push_str(&format!("\r\n  <b:yellow>{}</>\r\n", cat.label()));
@@ -2430,12 +2610,35 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
                 }
             }
         }
-        out.push_str("\r\n<dim>Type `help <command>` for details.</>\r\n");
+        out.push_str(&format!(
+            "\r\n<dim>Type `{} <command>` for details.</>\r\n",
+            scope.invocation()
+        ));
+        // DB-backed help articles (HelpEntry) — spells / lore / mechanics
+        // glosses. Only nudge when the catalog has visible rows; a fresh
+        // DB with zero help entries shouldn't advertise "type help X" to
+        // dead-end the player. Player scope only — wiz scope is command
+        // tooling, not lore.
+        if matches!(scope, HelpScope::Player) {
+            let viewer_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+            let n = world.resource::<HelpCatalog>().visible_count(viewer_level);
+            if n > 0 {
+                out.push_str(&format!(
+                    "<dim>{n} help articles available — type `help <topic>` to read one.</>\r\n"
+                ));
+            }
+        }
+        // Builder+ playing through `help` get a one-line nudge to the
+        // admin-side index. Skipped when they're already in `wizhelp`,
+        // and skipped for plain players who can't run it anyway.
+        if matches!(scope, HelpScope::Player) && role.at_least(UserRole::Builder) {
+            out.push_str("<dim>Builder+: type `wizhelp` for admin commands.</>\r\n");
+        }
         send_to(world, player, out);
         return;
     }
 
-    if let Some(cmd) = REGISTRY.get(topic.as_str()) {
+    if let Some(cmd) = REGISTRY.get(topic.as_str()).filter(|c| scope.includes(c)) {
         if !visible(cmd, role, &perms) {
             send_to(world, player, format!("<dim>No help on '{topic}'.</>\r\n"));
             return;
@@ -2463,49 +2666,109 @@ pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
             cmd.category.label()
         ));
         send_to(world, player, out);
-    } else {
-        // No exact match — surface visible commands whose primary
-        // or alias name starts with the typed prefix. Players who
-        // type "sl" usually want one of slay / sleep / slots; the
-        // suggestion list saves them a second `help` round-trip.
-        let mut suggestions: Vec<&'static str> = all_commands()
-            .filter(|cmd| visible(cmd, role, &perms))
-            .filter(|cmd| {
-                cmd.names
-                    .iter()
-                    .any(|n: &&'static str| n.starts_with(topic.as_str()))
-            })
-            .map(|cmd| cmd.names[0])
-            .collect();
-        suggestions.sort_unstable();
-        suggestions.dedup();
-        if suggestions.is_empty() {
-            send_to(world, player, format!("<dim>No help on '{topic}'.</>\r\n"));
-        } else {
-            const MAX_SUGGESTIONS: usize = 8;
-            let shown: Vec<String> = suggestions
-                .iter()
-                .take(MAX_SUGGESTIONS)
-                .map(|n| format!("<cyan>{n}</>"))
-                .collect();
-            let trailer = if suggestions.len() > MAX_SUGGESTIONS {
-                format!(
-                    " <dim>({} more)</>",
-                    suggestions.len() - MAX_SUGGESTIONS
-                )
-            } else {
-                String::new()
-            };
-            send_to(
-                world,
-                player,
-                format!(
-                    "<dim>No exact help for '{topic}'.</> Did you mean: {}{}?\r\n",
-                    shown.join(", "),
-                    trailer,
-                ),
-            );
+        return;
+    }
+
+    // Social fallback. The command registry is hand-authored; socials
+    // come from the DB. A topic like `sing` has no Help entry but is
+    // a valid social — render its message variants as the help page
+    // so `help sing` doesn't dead-end. Wiz scope skips this — socials
+    // aren't admin tooling.
+    if scope.allow_socials()
+        && let Some(social) = world
+            .resource::<SocialRegistry>()
+            .get(topic.as_str())
+            .cloned()
+        && !social.hide
+    {
+        render_social_help(world, player, &social);
+        return;
+    }
+
+    // HelpEntry fallback. Builder-authored articles in the `HelpEntry`
+    // table — spells ("FIREBALL"), lore ("DRAGONS"), mechanic glosses
+    // ("PRACTICE"). Indexed by case-insensitive keyword; the lookup
+    // falls back to title-prefix match when no keyword hits. Same
+    // viewer-level gate the system_text path uses.
+    let viewer_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    let lookup = world
+        .resource::<HelpCatalog>()
+        .lookup(topic.as_str(), viewer_level);
+    match lookup {
+        HelpLookup::Found(entry) => {
+            render_help_entry(world, player, &entry);
+            return;
         }
+        HelpLookup::AmbiguousMatches(titles) => {
+            const MAX_AMBIGUOUS: usize = 20;
+            let mut out = format!("<dim>Multiple matches for '{topic}':</>\r\n");
+            for t in titles.iter().take(MAX_AMBIGUOUS) {
+                out.push_str(&format!("  <cyan>{t}</>\r\n"));
+            }
+            if titles.len() > MAX_AMBIGUOUS {
+                out.push_str(&format!(
+                    "<dim>  ...and {} more.</>\r\n",
+                    titles.len() - MAX_AMBIGUOUS
+                ));
+            }
+            out.push_str("<dim>Type the full title for the article you want.</>\r\n");
+            send_to(world, player, out);
+            return;
+        }
+        HelpLookup::NotFound => {}
+    }
+
+    // No exact match — surface visible commands and socials whose
+    // primary/alias name starts with the typed prefix. Players who
+    // type "sl" usually want one of slay / sleep / slots; the
+    // suggestion list saves them a second `help` round-trip.
+    let mut suggestions: Vec<String> = all_commands()
+        .filter(|cmd| visible(cmd, role, &perms) && scope.includes(cmd))
+        .filter(|cmd| {
+            cmd.names
+                .iter()
+                .any(|n: &&'static str| n.starts_with(topic.as_str()))
+        })
+        .map(|cmd| cmd.names[0].to_string())
+        .collect();
+    if scope.allow_socials() {
+        suggestions.extend(
+            world
+                .resource::<SocialRegistry>()
+                .by_name
+                .values()
+                .filter(|s| !s.hide && s.name.starts_with(topic.as_str()))
+                .map(|s| s.name.clone()),
+        );
+    }
+    suggestions.sort_unstable();
+    suggestions.dedup();
+    if suggestions.is_empty() {
+        send_to(world, player, format!("<dim>No help on '{topic}'.</>\r\n"));
+    } else {
+        const MAX_SUGGESTIONS: usize = 8;
+        let shown: Vec<String> = suggestions
+            .iter()
+            .take(MAX_SUGGESTIONS)
+            .map(|n| format!("<cyan>{n}</>"))
+            .collect();
+        let trailer = if suggestions.len() > MAX_SUGGESTIONS {
+            format!(
+                " <dim>({} more)</>",
+                suggestions.len() - MAX_SUGGESTIONS
+            )
+        } else {
+            String::new()
+        };
+        send_to(
+            world,
+            player,
+            format!(
+                "<dim>No exact help for '{topic}'.</> Did you mean: {}{}?\r\n",
+                shown.join(", "),
+                trailer,
+            ),
+        );
     }
 }
 
@@ -2605,13 +2868,36 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // description fallthroughs continue advancing the counter so a
     // player can step past a real grimoire to land on its
     // "ancient" extra-description body.
+    //
+    // INVISIBLE items are filtered out unless the observer has
+    // HOLY_LIGHT (staff vision). Mob/player invisibility is a
+    // separate system; this filter only fires on Item entities
+    // (other entities don't carry `ObjectFlags`).
+    let can_see_invis = crate::commands::player_can_see_in_dark(world, player);
     let entity_matches: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>)>();
+        let mut q = world.query::<(
+            Entity,
+            &Located,
+            &Named,
+            Option<&Keywords>,
+            Option<&mud_world::ObjectFlags>,
+        )>();
         q.iter(world)
-            .filter(|(e, l, n, kw)| {
-                *e != player && (l.0 == room || l.0 == player) && matches(&needle, n, *kw)
+            .filter(|(e, l, n, kw, flags)| {
+                if *e == player {
+                    return false;
+                }
+                if !(l.0 == room || l.0 == player) {
+                    return false;
+                }
+                if !can_see_invis
+                    && flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Invisible))
+                {
+                    return false;
+                }
+                matches(&needle, n, *kw)
             })
-            .map(|(e, _, _, _)| e)
+            .map(|(e, _, _, _, _)| e)
             .collect()
     };
     let target = if remaining <= entity_matches.len() {
@@ -2742,6 +3028,34 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
              {race_label}{class_label}.\r\n",
             prof.level,
         ));
+        // Size + lifeforce + body metrics from `RaceCatalog`.
+        // Surfaced on examine so a player can gauge a stranger's
+        // physique without poking their score sheet. Size + lifeforce
+        // come straight from the race row; height/weight come from
+        // the per-character `BodyMetrics` component when set
+        // (rolled at character creation from the race + gender
+        // band; absent for legacy characters whose race / gender
+        // band wasn't authored yet).
+        let race_def_owned = world
+            .resource::<mud_world::RaceCatalog>()
+            .get(&prof.race)
+            .cloned();
+        if let Some(def) = race_def_owned {
+            let size = capitalize(&def.default_size.to_ascii_lowercase());
+            let life = capitalize(&def.default_lifeforce.to_ascii_lowercase());
+            out.push_str(&format!("Size: {size}; lifeforce: {life}.\r\n"));
+        }
+        if let Some(bm) = world.get::<mud_world::BodyMetrics>(target).copied() {
+            // Render height as feet+inches so the readout matches
+            // how the legacy game presented it (`5'9"`); weight in
+            // pounds raw.
+            let feet = bm.height / 12;
+            let inches = bm.height % 12;
+            out.push_str(&format!(
+                "Height: {feet}'{inches}\", weight: {} lbs.\r\n",
+                bm.weight,
+            ));
+        }
     } else if world.get::<Mob>(target).is_some()
         && let Some(key) = world.get::<WorldKey>(target).copied()
         && let Some(proto) = world
@@ -2808,6 +3122,64 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     }
     if world.get::<mud_world::Flying>(target).is_some() {
         out.push_str(&format!("{name_rendered} hovers in mid-air.\r\n"));
+    }
+    // Mob latent parity (Wave 2.L) atmospheric flavor lines.
+    // Size: surface non-MEDIUM body classes — most mobs are MEDIUM
+    // so the line stays absent for the common case.
+    if let Some(mud_world::Sized(size)) = world.get::<mud_world::Sized>(target).copied()
+        && !matches!(size, mud_db::enums::Size::Medium)
+    {
+        out.push_str(&format!(
+            "It is a <yellow>{}</> creature.\r\n",
+            size.label().to_ascii_uppercase()
+        ));
+    }
+    // LifeForce: only surface non-LIFE (the default). UNDEAD gets a
+    // distinctive line; the other supernatural forms share a shorter
+    // "aura" cue so players can identify the mob's nature without
+    // probing for `detect_undead` parity.
+    if let Some(mud_world::LifeForceTag(lf)) = world.get::<mud_world::LifeForceTag>(target).copied()
+    {
+        let line = match lf {
+            mud_db::enums::LifeForce::Life => None,
+            mud_db::enums::LifeForce::Undead => Some("<dim>An aura of unlife clings to it.</>"),
+            mud_db::enums::LifeForce::Magic => Some("<magenta>An aura of raw magic surrounds it.</>"),
+            mud_db::enums::LifeForce::Celestial => {
+                Some("<b:white>A celestial radiance attends it.</>")
+            }
+            mud_db::enums::LifeForce::Demonic => Some("<red>A demonic miasma roils about it.</>"),
+            mud_db::enums::LifeForce::Elemental => {
+                Some("<cyan>Raw elemental force ripples across it.</>")
+            }
+        };
+        if let Some(line) = line {
+            out.push_str(&format!("{line}\r\n"));
+        }
+    }
+    // MovementMode flavor: FLYING reads as airborne even when no
+    // `Flying` marker is present (proto-set vs spell-set). The other
+    // non-NORMAL modes pick up short cues.
+    if let Some(mud_world::MovementModeTag(mode)) =
+        world.get::<mud_world::MovementModeTag>(target).copied()
+    {
+        let line = match mode {
+            mud_db::enums::MovementMode::Normal | mud_db::enums::MovementMode::Mounted => None,
+            mud_db::enums::MovementMode::Flying => {
+                // Skip when the Flying marker already fired the
+                // "hovers in mid-air" line above.
+                if world.get::<mud_world::Flying>(target).is_some() {
+                    None
+                } else {
+                    Some("<cyan>It hovers in the air.</>")
+                }
+            }
+            mud_db::enums::MovementMode::Swimming => Some("<cyan>It is swimming on the surface.</>"),
+            mud_db::enums::MovementMode::Underwater => Some("<cyan>It is submerged beneath the water.</>"),
+            mud_db::enums::MovementMode::Ethereal => Some("<dim>It is partly phased out of reality.</>"),
+        };
+        if let Some(line) = line {
+            out.push_str(&format!("{line}\r\n"));
+        }
     }
     if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(target).copied() {
         let mount_name = name_or(world, mount, "(unknown)");
@@ -2887,31 +3259,70 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 "It weighs about <dim>{weight:.1} lbs.</>\r\n"
             ));
         }
-        // Wearable slot. Tells a player "this fits on the head" /
-        // "this is wielded" without making them try `wear it` and
-        // see where it lands. Skipped silently for non-wearable
-        // items (most consumables, decorations). Wield/hold slots
-        // collapse to a one-word phrase since the slot label and
-        // the verb are the same word — "It is wielded." instead of
-        // the awkward "It is wielded on the wielded."
+        // Atmospheric notes on proto-derived flags. GLOW / MAGIC
+        // surface as faint cues; DECOMPOSING is cosmetic flavor
+        // (rotten-smell); SOULBOUND is a bond reminder. Other
+        // flags either drive command behavior (NO_DROP, INVISIBLE)
+        // and don't need narration here, or stay silent until the
+        // matching system lands (PERMANENT/TEMPORARY/FLOAT/etc.).
+        if has_object_flag(world, target, mud_db::enums::ObjectFlag::Glow) {
+            out.push_str("<yellow>It emits a soft glow.</>\r\n");
+        }
+        if has_object_flag(world, target, mud_db::enums::ObjectFlag::Magic) {
+            out.push_str("<magenta>It pulses faintly with magic.</>\r\n");
+        }
+        if has_object_flag(world, target, mud_db::enums::ObjectFlag::Decomposing) {
+            out.push_str("<dim>It smells faintly of rot.</>\r\n");
+        }
+        if has_object_flag(world, target, mud_db::enums::ObjectFlag::Soulbound) {
+            out.push_str("<cyan>It is soulbound to you.</>\r\n");
+        }
+        // Wearable slot. The phrasing depends on whether the
+        // item is *currently equipped* (has `EquippedSlot`) or
+        // just *wearable in this slot* (carries `WearableIn`
+        // proto-side). Without the distinction the inventory
+        // listing for a stowed badge reads "It is pinned as a
+        // badge." which is a lie — the player is carrying it,
+        // not wearing it.
         if let Some(slot) = world.get::<WearableIn>(target).map(|w| w.0) {
-            // Slot-by-slot phrasing — most slots are simple "worn on
-            // your <slot>" but a handful (wield/hold/hover/light/about/
-            // rings/badge) read as broken or weirdly impersonal under
-            // the generic template.
-            let line = match slot {
-                Slot::Wield => "It is <cyan>wielded</>.\r\n".to_string(),
-                Slot::Hold => "It is <cyan>held</>.\r\n".to_string(),
-                Slot::Hover => "It <cyan>hovers</> beside you.\r\n".to_string(),
-                Slot::Light => "It is <cyan>held aloft</> as a light source.\r\n".to_string(),
-                Slot::About => "It is <cyan>worn about your body</>.\r\n".to_string(),
-                Slot::LeftFinger => "It is <cyan>worn</> on your <cyan>left finger</>.\r\n".to_string(),
-                Slot::RightFinger => "It is <cyan>worn</> on your <cyan>right finger</>.\r\n".to_string(),
-                Slot::Badge => "It is <cyan>pinned</> as a badge.\r\n".to_string(),
-                _ => format!(
-                    "It is <cyan>worn</> on your <cyan>{}</>.\r\n",
-                    slot.label()
-                ),
+            let equipped = world.get::<EquippedSlot>(target).is_some();
+            let line = if equipped {
+                // Currently worn / wielded. Present-tense
+                // statement; covers the slot in player-relative
+                // terms ("on your left finger").
+                match slot {
+                    Slot::Wield => "It is <cyan>wielded</>.\r\n".to_string(),
+                    Slot::Hold => "It is <cyan>held</>.\r\n".to_string(),
+                    Slot::Hover => "It <cyan>hovers</> beside you.\r\n".to_string(),
+                    Slot::Light => "It is <cyan>held aloft</> as a light source.\r\n".to_string(),
+                    Slot::About => "It is <cyan>worn about your body</>.\r\n".to_string(),
+                    Slot::LeftFinger => "It is <cyan>worn</> on your <cyan>left finger</>.\r\n".to_string(),
+                    Slot::RightFinger => "It is <cyan>worn</> on your <cyan>right finger</>.\r\n".to_string(),
+                    Slot::Badge => "It is <cyan>pinned</> as a badge.\r\n".to_string(),
+                    _ => format!(
+                        "It is <cyan>worn</> on your <cyan>{}</>.\r\n",
+                        slot.label()
+                    ),
+                }
+            } else {
+                // Carried / not currently equipped. Reads as a
+                // capability hint — "this can go in your <slot>"
+                // — so the player knows where it will land
+                // without having to try `wear it`.
+                match slot {
+                    Slot::Wield => "It can be <cyan>wielded</>.\r\n".to_string(),
+                    Slot::Hold => "It can be <cyan>held</>.\r\n".to_string(),
+                    Slot::Hover => "It can be set to <cyan>hover</> beside you.\r\n".to_string(),
+                    Slot::Light => "It can be <cyan>held aloft</> as a light source.\r\n".to_string(),
+                    Slot::About => "It can be <cyan>worn about your body</>.\r\n".to_string(),
+                    Slot::LeftFinger | Slot::RightFinger =>
+                        "It can be <cyan>worn</> on a <cyan>finger</>.\r\n".to_string(),
+                    Slot::Badge => "It can be <cyan>pinned</> as a badge.\r\n".to_string(),
+                    _ => format!(
+                        "It can be <cyan>worn</> on your <cyan>{}</>.\r\n",
+                        slot.label()
+                    ),
+                }
             };
             out.push_str(&line);
         }
@@ -2948,6 +3359,15 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 } else {
                     out.push_str(&format!("  {rendered}\r\n"));
                 }
+            }
+        }
+        // If the player has identified this item (presence of the
+        // marker component, set by the `identify` spell), splice
+        // in the full stat block after the contents listing. The
+        // helper renders the same body `cmd_identify` uses.
+        if world.get::<mud_world::Identified>(target).is_some() {
+            if let Some(block) = render_identify_block(world, player, target) {
+                out.push_str(&block);
             }
         }
     }
@@ -3547,7 +3967,6 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
     let player_name = name_of(world, player);
     let pet_name = format!("{player_name}'s {}", proto.name);
     let hp = proto.rolled_hp();
-    let dmg = proto.avg_damage();
     let pet_entity = world
         .spawn((
             Mob,
@@ -3557,16 +3976,15 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
             WorldKey { zone: proto.zone_id, id: proto.id },
             Located(located.0),
             Health { hp, max: hp },
-            CombatStats {
-                hit_roll: proto.hit_roll,
-                dmg_roll: dmg,
-                ac: proto.armor_class,
-                alignment: proto.alignment,
-                ward_pct: proto.ward_percent,
-            },
+            proto.derived_combat_stats(),
             Posture(PostureKind::Standing),
             Follower(player),
             mud_world::PersistentPet,
+            mud_world::NaturalDamage {
+                num: proto.damage_dice_num,
+                size: proto.damage_dice_size,
+                bonus: proto.damage_dice_bonus,
+            },
         ))
         .id();
     if !proto.examine_description.trim().is_empty()
@@ -3625,6 +4043,26 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let item_name = name_of(world, item);
+    // NO_SELL / SOULBOUND gates — quest items and bound gear can't
+    // be liquidated for coin. Done before the shop-catalog lookup
+    // so the player sees a specific reason rather than the generic
+    // "shopkeeper isn't interested" fall-through.
+    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoSell) {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} refuses to buy {item_name}.\r\n"),
+        );
+        return;
+    }
+    if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} is soulbound — it cannot be sold.\r\n"),
+        );
+        return;
+    }
     let Some(shop) = world
         .resource::<ShopCatalog>()
         .by_key
@@ -3910,25 +4348,41 @@ pub(crate) fn cmd_train(world: &mut World, player: Entity, args: &str) {
     let points = world
         .get::<mud_world::SkillPoints>(player)
         .map_or(0, |s| s.0);
+    // Per-race stat caps from `RaceCatalog` (loaded from
+    // `Races.max_*` columns). The trainable cap is the lower of
+    // the legacy `TRAIN_STAT_CAP` (18 — kept as a soft ceiling on
+    // practice-point spending) and the race max (the schema's
+    // hard ceiling, typically 76+). A race whose authoring lowers
+    // a specific cap below 18 will see that cap respected here.
+    let race = world
+        .get::<Profile>(player)
+        .map(|p| p.race.clone())
+        .unwrap_or_default();
+    let race_catalog = world.resource::<mud_world::RaceCatalog>();
+    let effective_cap = |stat: &str| -> i32 {
+        let race_max = race_catalog.stat_cap(&race, stat, i32::MAX);
+        TRAIN_STAT_CAP.min(race_max)
+    };
     if arg.is_empty() {
         // Show each stat with its derived bonus so a player can see
         // what training a stat would actually do for their rolls
         // (a 13 → 14 bump still gives +2 bonus; 14 → 15 unlocks +3
         // at the next odd-step boundary). Same `(stat - 10) / 2`
         // formula the score sheet uses via `CoreStats::bonus`.
-        let mut out = format!("\r\nCurrent stats (cap {TRAIN_STAT_CAP}):\r\n");
-        let pair = |val: i32| format!("{val:>2}({:+})", CoreStats::bonus(val));
+        let mut out = String::from("\r\nCurrent stats:\r\n");
+        let pair =
+            |val: i32, cap: i32| format!("{val:>2}({:+})/{cap}", CoreStats::bonus(val));
         out.push_str(&format!(
             "  str {}   dex {}   con {}\r\n",
-            pair(stats.strength),
-            pair(stats.dexterity),
-            pair(stats.constitution),
+            pair(stats.strength, effective_cap("strength")),
+            pair(stats.dexterity, effective_cap("dexterity")),
+            pair(stats.constitution, effective_cap("constitution")),
         ));
         out.push_str(&format!(
             "  int {}   wis {}   cha {}\r\n",
-            pair(stats.intelligence),
-            pair(stats.wisdom),
-            pair(stats.charisma),
+            pair(stats.intelligence, effective_cap("intelligence")),
+            pair(stats.wisdom, effective_cap("wisdom")),
+            pair(stats.charisma, effective_cap("charisma")),
         ));
         out.push_str(&format!("Practice points: {points}\r\n"));
         out.push_str("Use `train <stat>` to spend one.\r\n");
@@ -3952,13 +4406,12 @@ pub(crate) fn cmd_train(world: &mut World, player: Entity, args: &str) {
             return;
         }
     };
-    if current >= TRAIN_STAT_CAP {
+    let cap = effective_cap(label);
+    if current >= cap {
         send_to(
             world,
             player,
-            format!(
-                "Your {label} is at the trainable cap of {TRAIN_STAT_CAP}.\r\n"
-            ),
+            format!("Your {label} is at the cap of {cap}.\r\n"),
         );
         return;
     }
@@ -4015,6 +4468,20 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
     };
     let start = located.0;
 
+    // NoTrackingRoom gate at the source — if the tracker stands in
+    // a no-tracking room they get no trail at all. Mirrors the
+    // legacy "you can't sense anything here" message before any
+    // candidate scan so the wording doesn't imply the target is
+    // gone.
+    if world.get::<mud_world::NoTrackingRoom>(start).is_some() {
+        send_rendered(
+            world,
+            player,
+            "The trail is lost — this place defies your senses.\r\n",
+        );
+        return;
+    }
+
     // Collect every room->target candidate in one pass: any entity
     // with Named matching the needle (excluding the player), keyed
     // by their current room. Then BFS rooms until we hit one in the
@@ -4066,6 +4533,13 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
                 continue;
             }
             let Some(to) = ed.to else { continue };
+            // NoTrackingRoom is treated as a wall on both sides:
+            // the trail neither enters nor passes through. Match
+            // candidates inside such rooms are unreachable — the
+            // overall search will fall through to "too far away".
+            if world.get::<mud_world::NoTrackingRoom>(to).is_some() {
+                continue;
+            }
             if visited.insert(to) {
                 queue.push_back((to, *dir, 1));
             }
@@ -4098,6 +4572,9 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
                     continue;
                 }
                 let Some(to) = ed.to else { continue };
+                if world.get::<mud_world::NoTrackingRoom>(to).is_some() {
+                    continue;
+                }
                 if visited.insert(to) {
                     queue.push_back((to, first_dir, dist + 1));
                 }
@@ -4194,6 +4671,18 @@ pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let here = located.0;
+    // NoScanningRoom: anti-scan wards block the caster's senses
+    // outright. Mirrors the "you don't see anyone" branch instead
+    // of inventing a separate message — the legacy assassin/scout
+    // contract was just "scan fails here", not flavor text.
+    if world.get::<mud_world::NoScanningRoom>(here).is_some() {
+        send_to(
+            world,
+            player,
+            "Your senses can't penetrate the wards in this room.\r\n",
+        );
+        return;
+    }
     // Legacy maxdis: rogues/assassins/staff get 3, everyone else 1.
     // We don't carry a class-name string on the runtime side yet
     // (class is an i32 catalog id), so for now staff get the long
@@ -4239,6 +4728,12 @@ pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
             let Some(to_room) = ed.to else {
                 break;
             };
+            // NoScanningRoom is a one-way curtain — the scan stops
+            // at the threshold and doesn't see into or beyond it.
+            // Matches the source-room gate above for symmetry.
+            if world.get::<mud_world::NoScanningRoom>(to_room).is_some() {
+                break;
+            }
             found += scan_room_actors(world, &mut out, to_room, dis, dir, player);
             from_room = to_room;
         }
@@ -4567,6 +5062,16 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         && !crate::commands::player_can_see_in_dark(world, player)
     {
         let mut out = String::from("\r\nIt is pitch black; you can see nothing.\r\n");
+        // HUM items still carry through the dark — sound doesn't
+        // need light. Single line regardless of count; the room
+        // gets one ambient cue, not one per humming item.
+        let any_hum_dark = world
+            .query_filtered::<(&Located, &mud_world::ObjectFlags), With<Item>>()
+            .iter(world)
+            .any(|(l, f)| l.0 == room && f.has(mud_db::enums::ObjectFlag::Hum));
+        if any_hum_dark {
+            out.push_str("You hear something humming nearby.\r\n");
+        }
         if has_flag(world, player, PlayerFlag::AutoExit) {
             // Hidden exits stay out of the auto-listing even in
             // pitch-black unless this player has already found
@@ -4656,6 +5161,11 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             let body = desc
                 .filter(|d| !d.0.trim().is_empty())
                 .map_or_else(|| n.name.clone(), |d| d.0.trim_end().to_string());
+            // Default yellow on plain mob descriptions so they stand
+            // out from the white room description above. Builder
+            // colors are preserved — `colorize_default` only adds
+            // hue when the body carries no XML-Lite markup.
+            let body = colorize_default(&body, "<yellow>");
             let line = if stats.is_some_and(|s| s.alignment <= aggro_threshold) {
                 format!("{body} <red>(HOSTILE)</>")
             } else {
@@ -4682,12 +5192,28 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // so a pile of identical coins / arrows / corpses doesn't show
     // up as ten copies of `a copper coin` separated by commas.
     // Pattern matches `cmd_inventory`.
+    //
+    // INVISIBLE items vanish from the listing unless the observer
+    // has HOLY_LIGHT (staff vision — also used as the dark-room
+    // bypass). Detect-Invisible as a normal player effect doesn't
+    // exist yet; when it lands, route it through this gate.
+    // TODO: route a real "see invisible" perception once that
+    // pipeline exists.
+    let can_see_invis = crate::commands::player_can_see_in_dark(world, player);
     let items: Vec<String> = {
         let mut order: Vec<String> = Vec::new();
         let mut counts: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
-        for (_, n) in q.iter(world).filter(|(l, _)| l.0 == room) {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &Named, Option<&mud_world::ObjectFlags>),
+            With<Item>,
+        >();
+        for (_e, _l, n, flags) in q.iter(world).filter(|(_, l, _, _)| l.0 == room) {
+            if !can_see_invis
+                && flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Invisible))
+            {
+                continue;
+            }
             if !counts.contains_key(&n.name) {
                 order.push(n.name.clone());
             }
@@ -4705,6 +5231,15 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             })
             .collect()
     };
+    // Auditory cue: blind / pitch-dark observers can still HEAR
+    // HUM items in the room. Pre-flight check — if any HUM item
+    // is on the floor we add a "you hear something humming" line
+    // below regardless of light state. Cheap to compute (filter
+    // pass + bool).
+    let any_hum_item = world
+        .query_filtered::<(&Located, &mud_world::ObjectFlags), With<Item>>()
+        .iter(world)
+        .any(|(l, f)| l.0 == room && f.has(mud_db::enums::ObjectFlag::Hum));
 
     let mode = color_mode_for(world, player);
     let mut out = String::new();
@@ -4735,11 +5270,44 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             render_color_tags(room_desc.trim_end(), mode)
         ));
     }
+    // Subtle flavor lines for "exceptional" room flags. The other
+    // flags (NoMagic/NoRecall/NoSummon/NoTeleport/NoTracking/
+    // NoScanning/NoPortals/NoMobs/Indoor/Soundproof) stay invisible
+    // — players discover them by trying. Match the legacy "feel"
+    // contract: only DeathTrap, Arena, and Guildhall get a hint,
+    // because a player can't recover from blind-walking into a DT
+    // and the social contract for PK / class training depends on
+    // the player knowing where they are.
+    if !has_flag(world, player, PlayerFlag::Brief) {
+        if world.get::<mud_world::DeathTrap>(room).is_some() {
+            out.push_str(&render_color_tags(
+                "<b:red>An aura of doom hangs heavy here.</>\r\n",
+                mode,
+            ));
+        }
+        if world.get::<mud_world::ArenaRoom>(room).is_some() {
+            out.push_str(&render_color_tags(
+                "<b:yellow>Combat is welcome here.</>\r\n",
+                mode,
+            ));
+        }
+        if world.get::<mud_world::GuildhallRoom>(room).is_some() {
+            out.push_str(&render_color_tags(
+                "<b:cyan>This is a guild hall.</>\r\n",
+                mode,
+            ));
+        }
+    }
     // Weather hint for outdoor rooms — drawn from the per-zone live
     // WeatherCatalog. Skipped for STRUCTURE / CAVE / UNDERWATER /
     // UNDERDARK / planes where the sky isn't visible. BRIEF mode
     // also suppresses to keep the terse output truly terse.
+    // IndoorRoom: builder-flagged shelter overrides the sector
+    // heuristic — an outdoor-sector room marked `is_indoors = true`
+    // (covered market, awning, tent interior) suppresses the sky
+    // description.
     if !has_flag(world, player, PlayerFlag::Brief)
+        && world.get::<mud_world::IndoorRoom>(room).is_none()
         && let Some(sector) = world.get::<RoomSector>(room).map(|s| s.0)
         && sector_is_outdoor_for_weather(sector)
         && let Some(zone_id) = world.get::<WorldKey>(room).map(|k| k.zone)
@@ -4750,6 +5318,12 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             .copied()
     {
         out.push_str(&format!("{}\r\n", crate::weather::describe(state)));
+    }
+    // Blank line between description / weather and the actor block
+    // so mob lines don't read as another sentence of the description.
+    // Only inserted when there's actually something to separate.
+    if !mob_lines.is_empty() {
+        out.push_str("\r\n");
     }
     for line in &mob_lines {
         out.push_str(&format!("{}\r\n", render_color_tags(line, mode)));
@@ -4769,6 +5343,14 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             .collect();
         let header = render_color_tags("<cyan>On the ground:</>", mode);
         out.push_str(&format!("{header} {}\r\n", rendered.join(", ")));
+    }
+    // Atmospheric cue: anything HUMs? Surfaces a single ambient
+    // line, after the items list so the player connects "I see
+    // these items + I hear a hum". An INVISIBLE+HUM item (e.g. a
+    // magical-but-cloaked instrument) thus reveals its presence to
+    // an ear that the eye misses.
+    if any_hum_item {
+        out.push_str("<dim>You hear something humming nearby.</>\r\n");
     }
     // Auto-exits: only render the exits line on look when the player has the
     // AUTO_EXIT flag set. Without it, the room shows clean and the player
@@ -5166,7 +5748,6 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
         .cloned();
     let Some(proto) = proto else { return };
     let hp = proto.rolled_hp();
-    let dmg = proto.avg_damage();
     let player_name = name_of(world, player);
     let mount_entity = world
         .spawn((
@@ -5177,16 +5758,15 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
             WorldKey { zone, id },
             Located(room),
             Health { hp, max: hp },
-            CombatStats {
-                hit_roll: proto.hit_roll,
-                dmg_roll: dmg,
-                ac: proto.armor_class,
-                alignment: proto.alignment,
-                ward_pct: proto.ward_percent,
-            },
+            proto.derived_combat_stats(),
             Posture(PostureKind::Standing),
             mud_world::Mountable,
             Follower(player),
+            mud_world::NaturalDamage {
+                num: proto.damage_dice_num,
+                size: proto.damage_dice_size,
+                bonus: proto.damage_dice_bonus,
+            },
         ))
         .id();
     let mount_name = name_of(world, mount_entity);
@@ -6593,7 +7173,7 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
 /// needs `open` afterward). Two-sided sync.
 pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
-    let Some(dir) = parse_direction(arg) else {
+    let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Unlock which way?\r\n");
         return;
     };
@@ -6625,15 +7205,15 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
             .any(|(l, k)| l.0 == player && k.zone == key_req.0 && k.id == key_req.1)
     };
     if !has_key {
-        let hint = world
-            .resource::<ObjectPrototypes>()
-            .by_key
-            .get(&key_req)
-            .and_then(|p| p.keywords.first().cloned())
-            .unwrap_or_else(|| format!("({}, {})", key_req.0, key_req.1));
-        send_to(world, player, format!(
-            "You need '{hint}' to unlock that.\r\n",
-        ));
+        // Don't reveal which key fits — some doors are puzzles and
+        // naming the key short-circuits the hunt. Players see only
+        // that the door is locked, picking up the exit's keyword so
+        // a curtain reads as a curtain.
+        let noun = world
+            .get::<Exits>(room)
+            .and_then(|e| e.0.get(&dir).map(exit_noun_phrase))
+            .unwrap_or_else(|| "The way".to_string());
+        send_to(world, player, format!("{noun} is locked.\r\n"));
         return;
     }
     flip_door_both_sides(world, room, dir, ExitState::Closed);
@@ -6651,7 +7231,7 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
 /// locked exits and on exits that don't exist.
 pub(crate) fn cmd_open(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
-    let Some(dir) = parse_direction(arg) else {
+    let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Open which way?\r\n");
         return;
     };
@@ -6692,7 +7272,7 @@ pub(crate) fn cmd_open(world: &mut World, player: Entity, args: &str) {
 /// already-closed/locked or non-existent exits.
 pub(crate) fn cmd_close(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
-    let Some(dir) = parse_direction(arg) else {
+    let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Close which way?\r\n");
         return;
     };
@@ -6730,7 +7310,7 @@ pub(crate) fn cmd_close(world: &mut World, player: Entity, args: &str) {
 /// Already-locked / open / no-keyhole / no-key cases all refuse.
 pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
-    let Some(dir) = parse_direction(arg) else {
+    let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Lock which way?\r\n");
         return;
     };
@@ -7204,15 +7784,50 @@ pub(crate) fn cmd_clientinfo(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-pub(crate) fn cmd_account(world: &mut World, player: Entity, _args: &str) {
+/// `account` (alias `whoami`): unified identity readout. Renders the
+/// in-memory `AccountSummary` snapshot (email + role + character
+/// roster) plus a live read of `discord_links` and `google_links` for
+/// the player's `Users.id`. Discord links surface `verified` /
+/// `unverified` so the player can confirm the bot side has confirmed
+/// the binding; missing rows render as `not linked`.
+///
+/// Async because the federated-identity lookups hit the DB. The
+/// AccountSummary half stays in memory (a snapshot taken at login),
+/// matching pre-Wave-6 behavior.
+pub(crate) async fn cmd_account(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+) {
     let Some(summary) = world.get::<AccountSummary>(player).cloned() else {
         send_to(world, player, "No account info available.\r\n");
         return;
     };
     let active_name = name_of(world, player);
-    let role = world
-        .get::<Account>(player)
-        .map_or(UserRole::Player, |a| a.role);
+    let account = world.get::<Account>(player).cloned();
+    let role = account.as_ref().map_or(UserRole::Player, |a| a.role);
+
+    // Federated-identity lookups. Either may legitimately be absent
+    // (player hasn't linked) or fail (transient DB hiccup); both
+    // collapse to `not linked` in the render so the command never
+    // hard-errors on a side-table read.
+    let (discord, google) = if let Some(acct) = &account {
+        let discord = mud_db::discord_links::for_user(pool, &acct.user_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "discord_links lookup failed");
+                None
+            });
+        let google = mud_db::google_links::for_user(pool, &acct.user_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "google_links lookup failed");
+                None
+            });
+        (discord, google)
+    } else {
+        (None, None)
+    };
 
     // Account readout: email + display name read as reference
     // metadata (dim values), role picks up `role_color_tag`'s
@@ -7251,6 +7866,30 @@ pub(crate) fn cmd_account(world: &mut World, player: Entity, _args: &str) {
         }
     }
     out.push_str("\r\n  <dim>* = currently playing</>\r\n");
+
+    // Linked accounts block — pulled from the DB above. Verified
+    // state surfaces on Discord so the player can tell whether the
+    // bot has confirmed the binding; Google links don't carry a
+    // verification flag (OAuth handshake is implicitly the proof).
+    out.push_str("\r\n<b:cyan>Linked accounts</>\r\n");
+    out.push_str(&format!(
+        "  <cyan>Discord:</>      {}\r\n",
+        match &discord {
+            Some(d) if d.verified => format!("<dim>{} (verified)</>", d.discord_name),
+            Some(d) => format!("<dim>{} (unverified)</>", d.discord_name),
+            None => "<dim>not linked</>".to_string(),
+        }
+    ));
+    out.push_str(&format!(
+        "  <cyan>Google:</>       {}\r\n",
+        match &google {
+            Some(g) => {
+                let label = g.google_name.as_deref().unwrap_or(g.google_email.as_str());
+                format!("<dim>signed in as {} &lt;{}&gt;</>", label, g.google_email)
+            }
+            None => "<dim>not linked</>".to_string(),
+        }
+    ));
     send_to(world, player, out);
 }
 
@@ -7730,6 +8369,15 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
             // honest, but the gate doesn't reject.
             let bypass_encumbrance = crate::commands::is_staff(world, player);
             for (item, item_name) in &items {
+                // NO_TAKE items inside containers also stay put.
+                // Plausible: a fixed lectern inside a shrine, a
+                // welded gear inside a clockwork chassis. Staff
+                // bypass mirrors the floor sweep.
+                if !bypass_encumbrance
+                    && has_restriction(world, *item, mud_db::enums::ObjectRestriction::NoTake)
+                {
+                    continue;
+                }
                 let w = item_weight(world, *item);
                 if !bypass_encumbrance && running + w > cap {
                     skipped += 1;
@@ -7779,6 +8427,17 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
             return;
         };
         let item_name = name_of(world, item);
+        // NO_TAKE — same fixture gate as the floor path.
+        if !crate::commands::is_staff(world, player)
+            && has_restriction(world, item, mud_db::enums::ObjectRestriction::NoTake)
+        {
+            send_rendered(
+                world,
+                player,
+                &format!("{item_name} is fixed in place.\r\n"),
+            );
+            return;
+        }
         if !crate::commands::is_staff(world, player)
             && carried_weight(world, player) + item_weight(world, item)
                 > carry_capacity(world, player)
@@ -7851,6 +8510,20 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
     // the mob's inventory before the player can retrieve it. Players
     // and staff aren't gated.
     if world.get::<Mob>(player).is_some() && world.get::<Corpse>(item).is_some() {
+        return;
+    }
+
+    // NO_TAKE — the item is bolted to the room (fixture, prop,
+    // scenery in container shape). Skip staff: builders sometimes
+    // need to relocate fixtures via the loadobj-and-get path.
+    if !crate::commands::is_staff(world, player)
+        && has_restriction(world, item, mud_db::enums::ObjectRestriction::NoTake)
+    {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} is fixed in place.\r\n"),
+        );
         return;
     }
 
@@ -7938,6 +8611,17 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
     let mut skipped = 0usize;
     let bypass_encumbrance = crate::commands::is_staff(world, player);
     for (item, item_name) in &items {
+        // NO_TAKE fixtures skip silently in the bulk path — the
+        // singular `get <item>` path surfaces the message. Staff
+        // bypass mirrors the singular path: builders sometimes
+        // need to relocate fixtures via a `loadobj`-and-`get`
+        // chain. (No "blocked" counter line; sweeps are common
+        // and a tail-count would spam.)
+        if !bypass_encumbrance
+            && has_restriction(world, *item, mud_db::enums::ObjectRestriction::NoTake)
+        {
+            continue;
+        }
         let w = item_weight(world, *item);
         if !bypass_encumbrance && running + w > cap {
             skipped += 1;
@@ -8156,6 +8840,44 @@ pub(crate) fn cmd_donate(world: &mut World, player: Entity, args: &str) {
     );
 }
 
+/// True when `item` carries the given proto-derived attribute flag
+/// (GLOW / HUM / INVISIBLE / SOULBOUND / …). Returns false when the
+/// `ObjectFlags` component is missing — the loader only attaches it
+/// when the proto's flag list is non-empty.
+pub(crate) fn has_object_flag(
+    world: &World,
+    item: Entity,
+    flag: mud_db::enums::ObjectFlag,
+) -> bool {
+    world
+        .get::<mud_world::ObjectFlags>(item)
+        .is_some_and(|f| f.has(flag))
+}
+
+/// True when `item` carries the given restriction (NO_DROP / NO_TAKE
+/// / NO_SELL / …). Same component-absence semantics as
+/// `has_object_flag`.
+pub(crate) fn has_restriction(
+    world: &World,
+    item: Entity,
+    restriction: mud_db::enums::ObjectRestriction,
+) -> bool {
+    world
+        .get::<mud_world::ObjectRestrictions>(item)
+        .is_some_and(|r| r.has(restriction))
+}
+
+/// True when dropping this item should be refused — either it
+/// carries NO_DROP (curse / quest lock) or SOULBOUND (bound on
+/// equip / pickup). Used by the bulk `drop all` path to skip
+/// without spamming one rejection line per item; the singular
+/// `drop <item>` path surfaces the specific reason.
+#[must_use]
+pub(crate) fn item_drop_blocked(world: &World, item: Entity) -> bool {
+    has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop)
+        || has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound)
+}
+
 pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
@@ -8182,20 +8904,46 @@ pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, "You aren't carrying anything to drop.\r\n");
             return;
         }
-        let count = items.len();
+        let mut dropped = 0usize;
+        let mut blocked = 0usize;
         for (item, item_name) in &items {
+            // NO_DROP / SOULBOUND skip silently in the bulk path —
+            // the singular path below surfaces the message. Mass-
+            // dropping shouldn't spam one rejection line per
+            // protected item; a tail-count line summarizes instead.
+            if item_drop_blocked(world, *item) {
+                blocked += 1;
+                continue;
+            }
             if let Some(mut l) = world.get_mut::<Located>(*item) {
                 l.0 = room;
             }
+            // Identification is broken when the item leaves the
+            // player's possession to the ground. Whoever picks it
+            // up next will see only its surface description until
+            // they re-identify.
+            if let Ok(mut e) = world.get_entity_mut(*item) {
+                e.remove::<mud_world::Identified>();
+            }
             send_rendered(world, player, &format!("You drop {item_name}.\r\n"));
             crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Drop);
+            dropped += 1;
         }
-        broadcast_room_except_rendered(
-            world,
-            room,
-            &[player],
-            &format!("{player_name} drops {count} item(s).\r\n"),
-        );
+        if dropped > 0 {
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[player],
+                &format!("{player_name} drops {dropped} item(s).\r\n"),
+            );
+        }
+        if blocked > 0 {
+            send_to(
+                world,
+                player,
+                format!("{blocked} item(s) refused to leave your grasp.\r\n"),
+            );
+        }
         refresh_player_items_gmcp(world, player);
         return;
     }
@@ -8209,8 +8957,34 @@ pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
 
     let item_name = name_of(world, item);
 
+    // NO_DROP / SOULBOUND gates. Two separate messages so the player
+    // can tell which kind of stickiness they're dealing with (curse
+    // vs. permanent bond) — useful when planning around either.
+    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop) {
+        send_rendered(
+            world,
+            player,
+            &format!("You can't seem to let go of {item_name}.\r\n"),
+        );
+        return;
+    }
+    if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} is soulbound — it stays with you.\r\n"),
+        );
+        return;
+    }
+
     if let Some(mut l) = world.get_mut::<Located>(item) {
         l.0 = room;
+    }
+    // Drop breaks identification — see `Identified` doc comment.
+    // Cleared after the Located mutation so the bookkeeping
+    // stays sequential with the move.
+    if let Ok(mut e) = world.get_entity_mut(item) {
+        e.remove::<mud_world::Identified>();
     }
 
     send_rendered(world, player, &format!("You drop {item_name}.\r\n"));
@@ -8244,6 +9018,28 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
+    // SOULBOUND blocks trade. Bound gear cannot change hands; the
+    // bond is on the person, not the room. NO_DROP also implies
+    // "won't leave your grasp" so block trade too — consistent
+    // with the legacy MUD semantics where an !NODROP gate covered
+    // both drop and give.
+    let item_name_pre = name_of(world, item);
+    if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name_pre} is soulbound — it cannot change hands.\r\n"),
+        );
+        return;
+    }
+    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop) {
+        send_rendered(
+            world,
+            player,
+            &format!("You can't seem to let go of {item_name_pre}.\r\n"),
+        );
+        return;
+    }
     let target = find_actor_in_room(world, target_word, room, player);
     let Some(target) = target else {
         send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
@@ -8616,11 +9412,14 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
         if let Some(mut lc) = world.get_mut::<mud_world::LiquidContainer>(src) {
             lc.remaining = 0;
         }
-        let liquid_lc = src_state.liquid.to_ascii_lowercase();
+        // Identified src → real liquid name; otherwise color desc.
+        // Matches the drink-path render convention.
+        let identified = world.get::<mud_world::Identified>(src).is_some();
+        let liquid_label = pour_label(world, &src_state.liquid, identified);
         send_rendered(
             world,
             player,
-            &format!("You pour the {liquid_lc} from {src_name} onto the ground.\r\n"),
+            &format!("You pour the {liquid_label} from {src_name} onto the ground.\r\n"),
         );
         return;
     };
@@ -8660,12 +9459,20 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let amount = dest_room.min(src_state.remaining);
+    // Canonicalize the alias before persisting on the destination —
+    // catalog alias wins, so a hand-edited DB row's variant like
+    // "Water" becomes "water". Falls back to the raw source string
+    // when the catalog doesn't know the alias.
+    let canon_alias = world
+        .resource::<mud_world::LiquidCatalog>()
+        .lookup_alias(&src_state.liquid)
+        .map_or_else(|| src_state.liquid.clone(), |def| def.alias.clone());
     if let Some(mut s) = world.get_mut::<mud_world::LiquidContainer>(src) {
         s.remaining -= amount;
     }
     if let Some(mut d) = world.get_mut::<mud_world::LiquidContainer>(dest) {
         if d.remaining == 0 {
-            d.liquid.clone_from(&src_state.liquid);
+            d.liquid = canon_alias;
             d.poisoned = src_state.poisoned;
         } else if src_state.poisoned {
             // Poisoning spreads when topping up a non-poisoned with
@@ -8674,12 +9481,34 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
         }
         d.remaining += amount;
     }
-    let liquid_lc = src_state.liquid.to_ascii_lowercase();
+    let identified = world.get::<mud_world::Identified>(src).is_some();
+    let liquid_label = pour_label(world, &src_state.liquid, identified);
     send_rendered(
         world,
         player,
-        &format!("You pour {amount} units of {liquid_lc} from {src_name} into {dest_name}.\r\n"),
+        &format!("You pour {amount} units of {liquid_label} from {src_name} into {dest_name}.\r\n"),
     );
+}
+
+/// Render the liquid noun for `pour`/`fill` output. Identified
+/// containers show the catalog's real name ("dark ale"); otherwise
+/// the color description ("brown liquid"). Unknown aliases fall
+/// back to the raw string lowercased — keeps legacy / hand-edited
+/// values surfacing instead of silently swallowing them.
+fn pour_label(world: &World, alias: &str, identified: bool) -> String {
+    world
+        .resource::<mud_world::LiquidCatalog>()
+        .lookup_alias(alias)
+        .map_or_else(
+            || alias.to_ascii_lowercase(),
+            |def| {
+                if identified {
+                    def.name.to_ascii_lowercase()
+                } else {
+                    format!("{} liquid", def.color_desc.to_ascii_lowercase())
+                }
+            },
+        )
 }
 
 /// `fill <container> [from] [<source>]`: top up the destination
@@ -8783,6 +9612,12 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
     } else {
         dest_room.min(src_state.remaining)
     };
+    // Canonicalize alias before persisting on the destination —
+    // see the matching block in `cmd_pour`.
+    let canon_alias = world
+        .resource::<mud_world::LiquidCatalog>()
+        .lookup_alias(&src_state.liquid)
+        .map_or_else(|| src_state.liquid.clone(), |def| def.alias.clone());
     if !src_is_fountain
         && let Some(mut s) = world.get_mut::<mud_world::LiquidContainer>(src)
     {
@@ -8790,7 +9625,7 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
     }
     if let Some(mut d) = world.get_mut::<mud_world::LiquidContainer>(dest) {
         if d.remaining == 0 {
-            d.liquid.clone_from(&src_state.liquid);
+            d.liquid = canon_alias;
             d.poisoned = src_state.poisoned;
         } else if src_state.poisoned {
             // Poisoning spreads when topping up a non-poisoned with
@@ -8799,11 +9634,17 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
         }
         d.remaining += amount;
     }
-    let liquid_lc = src_state.liquid.to_ascii_lowercase();
+    // Fountains aren't "identified" the way carried containers are,
+    // but their proto name is always public knowledge — show the
+    // real liquid name. Carried sources get the standard
+    // identified-or-color treatment.
+    let src_identified =
+        src_is_fountain || world.get::<mud_world::Identified>(src).is_some();
+    let liquid_label = pour_label(world, &src_state.liquid, src_identified);
     send_rendered(
         world,
         player,
-        &format!("You fill {dest_name} with {liquid_lc} from {src_name}.\r\n"),
+        &format!("You fill {dest_name} with {liquid_label} from {src_name}.\r\n"),
     );
 }
 
@@ -8853,7 +9694,6 @@ pub(crate) fn cmd_taste(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    let liquid_lc = state.liquid.to_ascii_lowercase();
     if state.remaining <= 0 {
         send_rendered(
             world,
@@ -8862,10 +9702,20 @@ pub(crate) fn cmd_taste(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
+    // Taste always identifies. Show the real liquid name from the
+    // catalog regardless of `Identified` — that's the point of
+    // tasting. Unknown aliases fall back to the lowercased alias.
+    let liquid_label = world
+        .resource::<mud_world::LiquidCatalog>()
+        .lookup_alias(&state.liquid)
+        .map_or_else(
+            || state.liquid.to_ascii_lowercase(),
+            |def| def.name.to_ascii_lowercase(),
+        );
     send_rendered(
         world,
         player,
-        &format!("It tastes like {liquid_lc}.\r\n"),
+        &format!("It tastes like {liquid_label}.\r\n"),
     );
     if state.poisoned {
         send_to(
@@ -8933,6 +9783,12 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
             return;
         }
         for (item, item_name) in &items {
+            // Reverse the wear-granted stat bonuses BEFORE removing
+            // the EquippedSlot — `unapply_object_from_wearer` reads
+            // the slot to log effect-grant filtering decisions
+            // (no-op semantically, but the order is the legacy
+            // contract: unapply, then remove).
+            crate::equip_apply::unapply_object_from_wearer(world, *item, player);
             try_remove::<EquippedSlot>(world, *item);
             send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
             crate::triggers::fire_item_event(
@@ -8952,6 +9808,7 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let item_name = name_of(world, item);
+    crate::equip_apply::unapply_object_from_wearer(world, item, player);
     try_remove::<EquippedSlot>(world, item);
     send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Remove);
@@ -9595,6 +10452,9 @@ pub(crate) fn cmd_invite(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Invite whom?\r\n");
         return;
     }
+    if name_approval_gate(world, player) {
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
@@ -10053,8 +10913,16 @@ pub(crate) fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
     }
 }
 
-/// `identify <item>`: dump proto + runtime state for a carried item.
-#[allow(clippy::too_many_lines)]
+/// `identify <item>`: dump proto + runtime state for a carried
+/// item. Also flips the `Identified` marker on the item itself
+/// — once tagged, `look <item>` shows the same stat block, the
+/// `Char.Items.List` GMCP frame includes `identified:true` for
+/// it, and the item-detail panel in the client renders the full
+/// data instead of just the name. The marker survives give/sell
+/// (legacy semantic — the receiving player inherits the
+/// knowledge) but is cleared on drop / junk / put-into-container,
+/// since the player's hands-on link to the item is what's
+/// driving the identification in the fiction.
 pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
     let needle = args.trim();
     if needle.is_empty() {
@@ -10069,6 +10937,44 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
+    // Render the stat block. If the proto is missing this also
+    // sends a "no prototype data" line and returns None.
+    let Some(out) = render_identify_block(world, player, item) else {
+        return;
+    };
+    // Mark the item as identified for this player's view. Putting
+    // the marker on the item entity (not a per-player set) means
+    // give/sell automatically carry the knowledge with the item,
+    // matching the legacy semantic. The presence of `Identified`
+    // also flips the GMCP item-list payload below.
+    if let Ok(mut e) = world.get_entity_mut(item) {
+        if e.get::<mud_world::Identified>().is_none() {
+            e.insert(mud_world::Identified);
+        }
+    }
+    // Re-emit Char.Items.List for the player so the inventory
+    // panel updates to show the new identified state without
+    // waiting for the next inventory mutation. Keeps the Mudlet
+    // window in sync with the spell's effect immediately.
+    crate::commands::refresh_player_items_gmcp(world, player);
+    send_rendered(world, player, &out);
+}
+
+/// Build the multi-line stat block that `cmd_identify` and the
+/// `look <identified item>` path both render. Returns None when
+/// the item has no associated prototype (in which case we've
+/// already sent the failure line to the player and the caller
+/// should bail without further output).
+///
+/// Takes `&mut World` because the active-effects scan uses a
+/// `world.query` which requires mutable access — bevy_ecs has no
+/// shared-borrow equivalent.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn render_identify_block(
+    world: &mut World,
+    player: Entity,
+    item: Entity,
+) -> Option<String> {
     let item_name = name_of(world, item);
     let key = world.get::<WorldKey>(item).copied();
     let Some(key) = key else {
@@ -10077,7 +10983,7 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
             player,
             &format!("{item_name} has no proto link.\r\n"),
         );
-        return;
+        return None;
     };
     let proto = world
         .resource::<ObjectPrototypes>()
@@ -10090,78 +10996,142 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
             player,
             &format!("No prototype data for {item_name}.\r\n"),
         );
-        return;
+        return None;
     };
     let mode = color_mode_for(world, player);
-    let mut out = String::from("\r\n<b:cyan>Identify</>\r\n");
+    // Header — boxed item title with type badge. Width chosen to
+    // match common 80-column game windows; the strip-color length
+    // matters for the corner alignment, not the rendered width.
+    let plain_name = render_color_tags(&p.name, ColorMode::Strip);
+    let title_inner = format!(" {} ", plain_name);
+    let bar_width = title_inner.chars().count().max(40);
+    let bar = "─".repeat(bar_width);
+    let mut out = String::new();
+    out.push_str(&format!("\r\n<b:cyan>╭{bar}╮</>\r\n"));
+    let pad = bar_width.saturating_sub(title_inner.chars().count());
     out.push_str(&format!(
-        "  <cyan>Item:</>      <b:cyan>{}</>\r\n",
-        render_color_tags(&p.name, mode)
+        "<b:cyan>│</> <b:white>{}</><b:cyan>{}│</>\r\n",
+        render_color_tags(&p.name, mode),
+        " ".repeat(pad + 1),
     ));
-    out.push_str(&format!("  <cyan>Type:</>      {}\r\n", p.r#type.label()));
+    out.push_str(&format!("<b:cyan>╰{bar}╯</>\r\n"));
+
+    // Properties block — basics that apply to almost every item.
+    out.push_str("  <b:cyan>Properties</>\r\n");
     out.push_str(&format!(
-        "  <cyan>Weight:</>    <dim>{:.1}</>\r\n",
-        p.weight
+        "    <cyan>Type:</>     <yellow>{}</>\r\n",
+        p.r#type.label()
     ));
-    // Level 0 is the schema default — don't pad the readout with
-    // "Level: 0" when the proto carries no requirement.
+    out.push_str(&format!("    <cyan>Weight:</>   <dim>{:.1} lbs</>\r\n", p.weight));
     if p.level > 0 {
-        out.push_str(&format!("  <cyan>Level:</>     {}\r\n", p.level));
+        out.push_str(&format!("    <cyan>Min Lvl:</>  {}\r\n", p.level));
     }
     if p.cost > 0
         && let Some(coin) = format_wealth(i64::from(p.cost))
     {
-        out.push_str(&format!("  <cyan>Value:</>     {coin}\r\n"));
+        out.push_str(&format!("    <cyan>Value:</>    {coin}\r\n"));
     }
     if !p.wear_flags.is_empty() {
         let labels: Vec<&'static str> = p.wear_flags.iter().map(|f| f.label()).collect();
         out.push_str(&format!(
-            "  <cyan>Wear:</>      <dim>{}</>\r\n",
+            "    <cyan>Wear:</>     <dim>{}</>\r\n",
             labels.join(", ")
         ));
     }
+
+    // Combat block — only for weapons. Avg damage and damage type
+    // are the headline numbers for "should I wield this".
     if p.weapon_dice_num > 0 {
-        // Match compare's bonus formatting: positive bonus gets a
-        // "+", negative shows verbatim, zero hides. Keeps the line
-        // readable for "1d8" weapons that don't carry a flat bonus.
+        out.push_str("\r\n  <b:cyan>Combat</>\r\n");
         let bonus = match p.weapon_dice_bonus.cmp(&0) {
             std::cmp::Ordering::Equal => String::new(),
             std::cmp::Ordering::Greater => format!("+{}", p.weapon_dice_bonus),
             std::cmp::Ordering::Less => format!("{}", p.weapon_dice_bonus),
         };
-        // Damage type from the proto's values blob — slash/pierce/
-        // crush/bludgeon/etc. Suffix as a colored parenthetical so
-        // the player can tell the attack family without `examine`.
         let dtype_suffix = p
             .weapon_damage_type
             .as_deref()
             .map(|t| format!("  <yellow>({t})</>"))
             .unwrap_or_default();
         out.push_str(&format!(
-            "  <cyan>Damage:</>    <yellow>{}d{}{bonus}</>  <dim>(avg {})</>{dtype_suffix}\r\n",
+            "    <cyan>Damage:</>   <b:yellow>{}d{}{bonus}</>  <dim>avg {}</>{dtype_suffix}\r\n",
             p.weapon_dice_num,
             p.weapon_dice_size,
             p.avg_damage(),
         ));
     }
+
+    // Type-specific blocks — drink containers, lights, portals,
+    // boards. Each only renders when the proto carries the
+    // matching values, so a plain weapon doesn't drag a "Liquid:
+    // none" line through the readout.
     if let Some(liq) = &p.liquid {
+        out.push_str("\r\n  <b:cyan>Liquid Container</>\r\n");
         let state = world.get::<mud_world::LiquidContainer>(item).cloned();
         let (remaining, capacity) =
             state.as_ref().map_or((liq.remaining, liq.capacity), |s| (s.remaining, s.capacity));
+        // The proto's `liquid` is the initial alias; the live
+        // `LiquidContainer` overrides on pour/fill. Use the live
+        // value when present so a refilled wineskin shows what's
+        // actually in it now.
+        let live_alias = state.as_ref().map_or(liq.liquid.as_str(), |s| s.liquid.as_str());
+        let catalog = world.resource::<mud_world::LiquidCatalog>();
+        let identified = world.get::<mud_world::Identified>(item).is_some();
+        let contents_label = catalog.lookup_alias(live_alias).map_or_else(
+            || live_alias.to_string(),
+            |def| {
+                if identified {
+                    def.name.clone()
+                } else {
+                    // Unidentified: show the color description only
+                    // ("clear liquid", "thick red liquid").
+                    format!("{} liquid", def.color_desc)
+                }
+            },
+        );
         out.push_str(&format!(
-            "  <cyan>Liquid:</>    {} <dim>({}/{})</>{}\r\n",
-            liq.liquid,
-            remaining,
-            capacity,
-            if state.as_ref().is_some_and(|s| s.poisoned) {
-                " <b:red>— POISONED</>"
-            } else {
-                ""
-            }
+            "    <cyan>Contains:</> {} <dim>({}/{} units)</>\r\n",
+            contents_label, remaining, capacity,
+        ));
+        // Flavor description from the catalog, shown only when the
+        // container is identified. Keeps the unidentified readout
+        // short and hint-free.
+        if identified
+            && let Some(def) = catalog.lookup_alias(live_alias)
+            && let Some(desc) = &def.description
+        {
+            out.push_str(&format!("    <dim>{}</>\r\n", desc));
+        }
+        if state.as_ref().is_some_and(|s| s.poisoned) {
+            out.push_str("    <b:red>! Poisoned</>\r\n");
+        }
+    }
+    if let Some(fuel) = &p.light_fuel {
+        out.push_str("\r\n  <b:cyan>Light Source</>\r\n");
+        if fuel.remaining < 0 {
+            out.push_str("    <cyan>Fuel:</>     <b:yellow>eternal</>\r\n");
+        } else {
+            out.push_str(&format!(
+                "    <cyan>Fuel:</>     {} hours <dim>(of {})</>\r\n",
+                fuel.remaining, fuel.capacity,
+            ));
+        }
+    }
+    if let Some(dest_vnum) = p.portal_destination_vnum {
+        out.push_str("\r\n  <b:cyan>Portal</>\r\n");
+        out.push_str(&format!(
+            "    <cyan>Destination:</> <dim>vnum {}</>\r\n",
+            dest_vnum
         ));
     }
+    if let Some(board) = p.board_id {
+        out.push_str("\r\n  <b:cyan>Message Board</>\r\n");
+        out.push_str(&format!("    <cyan>Board id:</> <dim>{}</>\r\n", board));
+    }
 
-    // Bound abilities (scrolls, wands, staves).
+    // Bound abilities — scrolls, wands, staves. Charges-remaining
+    // pulled from the per-instance Charges component when present;
+    // otherwise the proto's "unlimited / N charges" hint stays.
     let bindings = world
         .resource::<mud_world::ObjectAbilityCatalog>()
         .by_key
@@ -10169,14 +11139,9 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
         .cloned()
         .unwrap_or_default();
     if !bindings.is_empty() {
-        out.push_str("  <cyan>Bound abilities:</>\r\n");
+        out.push_str("\r\n  <b:cyan>Bound Abilities</>\r\n");
         let abilities = world.resource::<AbilityCatalog>();
         for b in bindings {
-            // Render through the same sphere-coloring formatter as
-            // the spells listing so identify reads consistently —
-            // `Magic Missile (force)` with the parenthetical in
-            // the sphere's hue. Falls back to "ability #N" when
-            // the catalog has no row for the binding (orphan).
             let entry = abilities
                 .by_name
                 .values()
@@ -10193,13 +11158,96 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
                 b.level
             ));
         }
-    }
-    if let Some(c) = world.get::<mud_world::Charges>(item) {
-        out.push_str(&format!("  <cyan>Charges remaining:</> {}\r\n", c.0));
+        if let Some(c) = world.get::<mud_world::Charges>(item) {
+            out.push_str(&format!(
+                "    <cyan>Charges remaining:</> <b:yellow>{}</>\r\n",
+                c.0
+            ));
+        }
+    } else if let Some(c) = world.get::<mud_world::Charges>(item) {
+        out.push_str(&format!(
+            "\r\n  <cyan>Charges remaining:</> <b:yellow>{}</>\r\n",
+            c.0
+        ));
     }
 
-    // Active effects on the item (rare today; surfaces if any are
-    // applied via consume/quaff bindings later).
+    // Restrictions — who CAN'T wield/wear this. Resolved from the
+    // proto's restriction lists: alignments by enum label, classes
+    // through the `ClassCatalog`, races by raw name. An empty
+    // section is omitted entirely so unrestricted gear stays clean.
+    let mut restrictions: Vec<(&'static str, String)> = Vec::new();
+    if !p.restricted_alignments.is_empty() {
+        let labels: Vec<&'static str> = p
+            .restricted_alignments
+            .iter()
+            .map(|a| a.label())
+            .collect();
+        restrictions.push(("Alignments", labels.join(", ")));
+    }
+    if !p.restricted_class_ids.is_empty() {
+        let catalog = world.resource::<ClassCatalog>();
+        let names: Vec<String> = p
+            .restricted_class_ids
+            .iter()
+            .map(|id| {
+                catalog
+                    .by_id
+                    .get(id)
+                    .map(|d| d.plain_name.clone())
+                    .unwrap_or_else(|| format!("class #{id}"))
+            })
+            .collect();
+        restrictions.push(("Classes", names.join(", ")));
+    }
+    if !p.restricted_races.is_empty() {
+        // Title-case the raw enum strings (HUMAN → Human) so the
+        // restriction reads as a sentence rather than shouted SQL.
+        let names: Vec<String> = p
+            .restricted_races
+            .iter()
+            .map(|r| {
+                let mut chars: Vec<char> = r.to_lowercase().chars().collect();
+                if let Some(c) = chars.first_mut() {
+                    *c = c.to_ascii_uppercase();
+                }
+                chars.into_iter().collect()
+            })
+            .collect();
+        restrictions.push(("Races", names.join(", ")));
+    }
+    if !restrictions.is_empty() {
+        out.push_str("\r\n  <b:red>Restrictions</> <dim>(cannot equip)</>\r\n");
+        for (label, body) in restrictions {
+            out.push_str(&format!(
+                "    <red>·</> <cyan>{label}:</> <dim>{body}</>\r\n"
+            ));
+        }
+    }
+
+    // Per-instance attribute flags from `ObjectFlags` and
+    // `ObjectRestrictions`. These flow from the proto and aren't
+    // changeable by the player, but surfacing them on identify
+    // lets a player know up-front that this is a NO_DROP quest
+    // hook or a GLOW lantern-replacement.
+    if !p.flags.is_empty() {
+        let labels: Vec<&'static str> = p.flags.iter().map(|f| f.label()).collect();
+        out.push_str("\r\n  <b:cyan>Flags</>\r\n");
+        out.push_str(&format!(
+            "    <cyan>·</> <dim>{}</>\r\n",
+            labels.join(", ")
+        ));
+    }
+    if !p.restrictions.is_empty() {
+        let labels: Vec<&'static str> = p.restrictions.iter().map(|r| r.label()).collect();
+        out.push_str("\r\n  <b:red>Item Locks</>\r\n");
+        out.push_str(&format!(
+            "    <red>·</> <dim>{}</>\r\n",
+            labels.join(", ")
+        ));
+    }
+
+    // Active effects on the item itself (rare today; surfaces if
+    // any are applied via consume/quaff bindings later).
     let item_effects: Vec<String> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         q.iter(world)
@@ -10209,12 +11257,12 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
     };
     if !item_effects.is_empty() {
         out.push_str(&format!(
-            "  <cyan>Effects:</>   {}\r\n",
+            "\r\n  <cyan>Effects:</> <b:magenta>{}</>\r\n",
             item_effects.join(", ")
         ));
     }
 
-    send_rendered(world, player, &out);
+    Some(out)
 }
 
 /// `home` — teleport to the foyer of the player's house. Lazily
@@ -10769,7 +11817,16 @@ pub(crate) fn cmd_abilities_kind(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_who_level_filter;
+    use super::{
+        cmd_drop, cmd_get, cmd_sell, has_object_flag, has_restriction, item_drop_blocked,
+        parse_who_level_filter,
+    };
+    use bevy_ecs::prelude::*;
+    use mud_db::enums::{ObjectFlag, ObjectRestriction, Sector};
+    use mud_world::{
+        Item, Keywords, Located, Mob, Named, ObjectFlags, ObjectPrototypes, ObjectRestrictions,
+        Player, Room, RoomSector, Shopkeeper, ShopCatalog,
+    };
 
     #[test]
     fn no_args_returns_none() {
@@ -10806,5 +11863,221 @@ mod tests {
         // Lenient parser: skip non-numeric tokens entirely.
         assert_eq!(parse_who_level_filter("abc"), None);
         assert_eq!(parse_who_level_filter("xyz 50"), Some((50, i32::MAX)));
+    }
+
+    // ---------------------------------------------------------------
+    // Object flag / restriction wiring — wave 2.B
+    //
+    // These tests construct minimal worlds and exercise the gates
+    // we wired through cmd_drop / cmd_get / cmd_sell. Each test
+    // proves the gate fires (item stays where it was) AND the
+    // unflagged control case lets the action complete.
+    // ---------------------------------------------------------------
+
+    /// Spawn a Room + Player + Item-in-inventory minimal setup.
+    /// Returns `(world, room, player, item)`. The item starts in the
+    /// player's inventory (`Located(player)`). Tests then attach
+    /// flag / restriction components as needed.
+    fn make_inventory_world() -> (World, Entity, Entity, Entity) {
+        let mut world = World::new();
+        world.insert_resource(ObjectPrototypes::default());
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Strider".to_string() },
+                Located(room),
+            ))
+            .id();
+        let item = world
+            .spawn((
+                Item,
+                Named { name: "a sword".to_string() },
+                Keywords(vec!["sword".to_string()]),
+                Located(player),
+            ))
+            .id();
+        (world, room, player, item)
+    }
+
+    #[test]
+    fn no_drop_restriction_blocks_drop() {
+        // NO_DROP gate refuses to let the item touch the floor. Item
+        // stays Located on the player.
+        let (mut world, room, player, item) = make_inventory_world();
+        if let Ok(mut e) = world.get_entity_mut(item) {
+            e.insert(ObjectRestrictions(vec![ObjectRestriction::NoDrop]));
+        }
+        cmd_drop(&mut world, player, "sword");
+        let located = world.get::<Located>(item).expect("item missing Located");
+        assert_eq!(
+            located.0, player,
+            "NO_DROP item should still be on the player after drop attempt"
+        );
+        let _ = room;
+    }
+
+    #[test]
+    fn soulbound_flag_blocks_drop() {
+        // SOULBOUND has the same "won't leave you" semantic.
+        let (mut world, _room, player, item) = make_inventory_world();
+        if let Ok(mut e) = world.get_entity_mut(item) {
+            e.insert(ObjectFlags(vec![ObjectFlag::Soulbound]));
+        }
+        cmd_drop(&mut world, player, "sword");
+        let located = world.get::<Located>(item).expect("item missing Located");
+        assert_eq!(located.0, player, "SOULBOUND item should not drop");
+    }
+
+    #[test]
+    fn unflagged_item_drops_normally() {
+        // Control: a vanilla item with no flags drops to the room.
+        let (mut world, room, player, item) = make_inventory_world();
+        cmd_drop(&mut world, player, "sword");
+        let located = world.get::<Located>(item).expect("item missing Located");
+        assert_eq!(
+            located.0, room,
+            "unflagged item should land in the room on drop"
+        );
+    }
+
+    /// Spawn a Room + Player + Item-on-floor. Mirror of
+    /// `make_inventory_world` but the item is in the room, not on
+    /// the player — for `get` gate tests.
+    fn make_floor_world() -> (World, Entity, Entity, Entity) {
+        let mut world = World::new();
+        world.insert_resource(ObjectPrototypes::default());
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Strider".to_string() },
+                Located(room),
+            ))
+            .id();
+        let item = world
+            .spawn((
+                Item,
+                Named { name: "an anvil".to_string() },
+                Keywords(vec!["anvil".to_string()]),
+                Located(room),
+            ))
+            .id();
+        (world, room, player, item)
+    }
+
+    #[test]
+    fn no_take_restriction_blocks_get() {
+        // NO_TAKE fixture stays in the room; the gate fires before
+        // the carry-weight check so a heavy fixture reads as
+        // "fixed in place" rather than "too heavy".
+        let (mut world, room, player, item) = make_floor_world();
+        if let Ok(mut e) = world.get_entity_mut(item) {
+            e.insert(ObjectRestrictions(vec![ObjectRestriction::NoTake]));
+        }
+        cmd_get(&mut world, player, "anvil");
+        let located = world.get::<Located>(item).expect("item missing Located");
+        assert_eq!(
+            located.0, room,
+            "NO_TAKE item should remain on the floor"
+        );
+    }
+
+    #[test]
+    fn unrestricted_floor_item_can_be_picked_up() {
+        // Control: a vanilla floor item moves to the player.
+        let (mut world, _room, player, item) = make_floor_world();
+        cmd_get(&mut world, player, "anvil");
+        let located = world.get::<Located>(item).expect("item missing Located");
+        assert_eq!(
+            located.0, player,
+            "unrestricted item should move to player inventory"
+        );
+    }
+
+    #[test]
+    fn no_sell_restriction_blocks_sell_in_shop() {
+        // NO_SELL refuses the trade. Item stays in inventory (not
+        // despawned) and player gains no wealth. We spawn a
+        // shopkeeper in the room so cmd_sell finds a buyer; the
+        // ShopCatalog is empty (no actual shop) but cmd_sell checks
+        // the NO_SELL gate BEFORE the catalog lookup, so the test
+        // exercises only the flag path.
+        let mut world = World::new();
+        world.insert_resource(ObjectPrototypes::default());
+        world.insert_resource(ShopCatalog::default());
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let player = world
+            .spawn((
+                Player,
+                Named { name: "Strider".to_string() },
+                Located(room),
+            ))
+            .id();
+        let _shopkeeper = world
+            .spawn((
+                Mob,
+                Named { name: "a shopkeeper".to_string() },
+                Located(room),
+                Shopkeeper { shop_zone_id: 1, shop_id: 1 },
+            ))
+            .id();
+        let item = world
+            .spawn((
+                Item,
+                Named { name: "a quest token".to_string() },
+                Keywords(vec!["token".to_string()]),
+                Located(player),
+                ObjectRestrictions(vec![ObjectRestriction::NoSell]),
+            ))
+            .id();
+        cmd_sell(&mut world, player, "token");
+        // Item still exists and is on the player.
+        assert!(
+            world.get_entity(item).is_ok(),
+            "NO_SELL item should not be despawned"
+        );
+        let located = world.get::<Located>(item).expect("item missing Located");
+        assert_eq!(
+            located.0, player,
+            "NO_SELL item should remain in inventory"
+        );
+    }
+
+    #[test]
+    fn has_object_flag_returns_false_when_component_absent() {
+        // Helper-level smoke check: items without an ObjectFlags
+        // component should always read as "no flag" so handlers
+        // that gate on a flag never erroneously fire.
+        let mut world = World::new();
+        let entity = world.spawn(()).id();
+        assert!(!has_object_flag(&world, entity, ObjectFlag::Glow));
+        assert!(!has_restriction(&world, entity, ObjectRestriction::NoDrop));
+        assert!(!item_drop_blocked(&world, entity));
+    }
+
+    #[test]
+    fn item_drop_blocked_covers_both_kinds() {
+        // NO_DROP alone, SOULBOUND alone, both together → all
+        // block. Vanilla → false. Sanity that the unified gate
+        // catches every sticky path used by `drop all`.
+        let mut world = World::new();
+        let nothing = world.spawn(()).id();
+        let no_drop = world
+            .spawn(ObjectRestrictions(vec![ObjectRestriction::NoDrop]))
+            .id();
+        let bound = world
+            .spawn(ObjectFlags(vec![ObjectFlag::Soulbound]))
+            .id();
+        let both = world
+            .spawn((
+                ObjectFlags(vec![ObjectFlag::Soulbound]),
+                ObjectRestrictions(vec![ObjectRestriction::NoDrop]),
+            ))
+            .id();
+        assert!(!item_drop_blocked(&world, nothing));
+        assert!(item_drop_blocked(&world, no_drop));
+        assert!(item_drop_blocked(&world, bound));
+        assert!(item_drop_blocked(&world, both));
     }
 }

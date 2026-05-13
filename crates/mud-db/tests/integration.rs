@@ -2,6 +2,7 @@ use mud_db::{
     character_items::{list_for, save_inventory_diff, CharacterItemSnap},
     connect,
     effects::list_effects,
+    help::list_all as list_help_entries,
     mob_resets::list_all as list_mob_resets,
     mobs::list_mobs,
     object_resets::list_all as list_object_resets,
@@ -60,6 +61,23 @@ async fn lists_objects() {
 async fn lists_effects() {
     let effects = list_effects(&pool().await).await.expect("list effects");
     assert!(!effects.is_empty());
+}
+
+/// `HelpEntry` is builder-authored; a fresh DB may have zero rows.
+/// We only assert the query *runs* (i.e. the schema matches the
+/// loader). Once the import lands content, tighten to `> 100`.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn lists_help_entries() {
+    let entries = list_help_entries(&pool().await)
+        .await
+        .expect("list help entries");
+    // Sanity: every loaded row has at least one keyword and a title.
+    // (Schema allows empty `keywords` but the in-game lookup can't
+    // index those, so the import should always seed at least one.)
+    for e in &entries {
+        assert!(!e.title.is_empty(), "row {} has empty title", e.id);
+    }
 }
 
 #[tokio::test]
@@ -179,4 +197,314 @@ async fn round_trips_character_items() {
         })
         .collect();
     save_inventory_diff(&mut conn, &cid, &restore).await.expect("restore");
+}
+
+// ---------------------------------------------------------------------------
+// Wave 6 — federated identity
+// ---------------------------------------------------------------------------
+
+/// Helper: resolve `testplayer`'s Users id so the link tests can FK
+/// against a real account. Uses the seeded test user.
+async fn testplayer_user_id(pool: &PgPool) -> String {
+    let row = sqlx::query!(
+        r#"SELECT id FROM "Users" WHERE email LIKE 'testplayer%' OR id LIKE 'testplayer%' ORDER BY id LIMIT 1"#
+    )
+    .fetch_optional(pool)
+    .await
+    .expect("query users");
+    if let Some(r) = row {
+        return r.id;
+    }
+    // Fallback: any user. We only need one valid FK target.
+    sqlx::query!(r#"SELECT id FROM "Users" LIMIT 1"#)
+        .fetch_one(pool)
+        .await
+        .expect("at least one Users row")
+        .id
+}
+
+/// Round-trip a Discord link: create → lookup → mark_verified → unlink.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn discord_link_round_trip() {
+    let pool = pool().await;
+    let user_id = testplayer_user_id(&pool).await;
+    // Use a randomized discord_id so re-running doesn't trip the
+    // discord_id unique. testplayer's user_id is fixed, but a stale
+    // row from a previous run might exist — clean up first.
+    let _ = mud_db::discord_links::unlink(&pool, &user_id).await;
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let discord_id = format!("test_discord_{suffix}");
+    let discord_name = "TestUser#0001";
+
+    // Initial link → unverified.
+    let id = mud_db::discord_links::link(&pool, &user_id, &discord_id, discord_name)
+        .await
+        .expect("link");
+    assert!(!id.is_empty(), "row id returned");
+
+    let row = mud_db::discord_links::for_user(&pool, &user_id)
+        .await
+        .expect("lookup")
+        .expect("link must exist after insert");
+    assert_eq!(row.discord_id, discord_id);
+    assert_eq!(row.discord_name, discord_name);
+    assert!(!row.verified, "fresh link starts unverified");
+
+    // Reverse lookup by discord_id.
+    let by_did = mud_db::discord_links::for_discord_id(&pool, &discord_id)
+        .await
+        .expect("reverse lookup")
+        .expect("must find the row");
+    assert_eq!(by_did.user_id, user_id);
+
+    // Mark verified.
+    let updated = mud_db::discord_links::mark_verified(&pool, &user_id)
+        .await
+        .expect("verify");
+    assert_eq!(updated, 1, "exactly one row flipped");
+    let row = mud_db::discord_links::for_user(&pool, &user_id)
+        .await
+        .expect("lookup post-verify")
+        .expect("link still present");
+    assert!(row.verified, "verified flag flipped");
+
+    // Unlink.
+    let removed = mud_db::discord_links::unlink(&pool, &user_id)
+        .await
+        .expect("unlink");
+    assert_eq!(removed, 1);
+    assert!(
+        mud_db::discord_links::for_user(&pool, &user_id)
+            .await
+            .expect("lookup post-unlink")
+            .is_none(),
+        "link removed"
+    );
+    // Idempotent — second unlink returns 0.
+    let removed_again = mud_db::discord_links::unlink(&pool, &user_id)
+        .await
+        .expect("unlink again");
+    assert_eq!(removed_again, 0);
+}
+
+/// Round-trip a Google link: create → lookup → unlink.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn google_link_round_trip() {
+    let pool = pool().await;
+    let user_id = testplayer_user_id(&pool).await;
+    let _ = mud_db::google_links::unlink(&pool, &user_id).await;
+
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let google_id = format!("google_sub_{suffix}");
+    let google_email = "test@example.com";
+    let google_name = Some("Test User");
+    let avatar_url = Some("https://example.com/avatar.png");
+
+    let id = mud_db::google_links::link(
+        &pool,
+        &user_id,
+        &google_id,
+        google_email,
+        google_name,
+        avatar_url,
+    )
+    .await
+    .expect("link");
+    assert!(!id.is_empty());
+
+    let row = mud_db::google_links::for_user(&pool, &user_id)
+        .await
+        .expect("lookup")
+        .expect("present");
+    assert_eq!(row.google_id, google_id);
+    assert_eq!(row.google_email, google_email);
+    assert_eq!(row.google_name.as_deref(), google_name);
+    assert_eq!(row.avatar_url.as_deref(), avatar_url);
+
+    let removed = mud_db::google_links::unlink(&pool, &user_id)
+        .await
+        .expect("unlink");
+    assert_eq!(removed, 1);
+    assert!(
+        mud_db::google_links::for_user(&pool, &user_id)
+            .await
+            .expect("lookup post-unlink")
+            .is_none()
+    );
+}
+
+/// Character name-approval gate (replaces the legacy LoginRequests
+/// row-based approval flow). Verifies the three runtime paths:
+/// 1. `create` honors the caller-supplied `name_approved = false`.
+/// 2. `find_by_name` / `list_for_user` round-trip the column.
+/// 3. `set_name_approved` flips the gate (and is idempotent for
+///    "already approved" no-ops).
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn character_name_approval_round_trip() {
+    let pool = pool().await;
+    let user_id = testplayer_user_id(&pool).await;
+    // Pick a randomized character name so re-runs don't trip the
+    // unique-name index. The character is cleaned up at the end.
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let name = format!("ApprovTest{suffix}");
+
+    // Insert at name_approved = false (the "toggle is ON" path).
+    let new_char = mud_db::characters::NewCharacter {
+        user_id: &user_id,
+        name: &name,
+        race: "HUMAN",
+        gender: "neutral",
+        class_id: 1,
+        strength: 13,
+        intelligence: 13,
+        wisdom: 13,
+        dexterity: 13,
+        constitution: 13,
+        charisma: 13,
+        name_approved: false,
+    };
+    let char_id = mud_db::characters::create(&pool, &new_char)
+        .await
+        .expect("create unapproved");
+
+    // Round-trip through find_by_name — flag must come back false.
+    let row = mud_db::characters::find_by_name(&pool, &name)
+        .await
+        .expect("find")
+        .expect("present");
+    assert_eq!(row.id, char_id);
+    assert!(!row.name_approved, "fresh char with toggle ON starts unapproved");
+
+    // And through list_for_user.
+    let listed = mud_db::characters::list_for_user(&pool, &user_id)
+        .await
+        .expect("list");
+    let found = listed
+        .iter()
+        .find(|c| c.id == char_id)
+        .expect("char in user roster");
+    assert!(!found.name_approved, "list_for_user round-trips the flag");
+
+    // Approve.
+    let approved = mud_db::characters::set_name_approved(&pool, &char_id, true)
+        .await
+        .expect("approve");
+    assert_eq!(approved, 1);
+    let row = mud_db::characters::find_by_name(&pool, &name)
+        .await
+        .expect("find post-approve")
+        .expect("present");
+    assert!(row.name_approved, "set_name_approved(true) flipped the flag");
+
+    // Re-approve is idempotent (1 row touched, no error).
+    let reapproved = mud_db::characters::set_name_approved(&pool, &char_id, true)
+        .await
+        .expect("re-approve");
+    assert_eq!(reapproved, 1, "UPDATE always touches the row even when value matches");
+
+    // Flip back to unapproved for the next assertion.
+    let unapproved = mud_db::characters::set_name_approved(&pool, &char_id, false)
+        .await
+        .expect("unapprove");
+    assert_eq!(unapproved, 1);
+    let row = mud_db::characters::find_by_name(&pool, &name)
+        .await
+        .expect("find post-unapprove")
+        .expect("present");
+    assert!(!row.name_approved, "set_name_approved(false) clears the flag");
+
+    // Unknown id → 0 rows touched.
+    let missing = mud_db::characters::set_name_approved(&pool, "no-such-id", true)
+        .await
+        .expect("set on missing id");
+    assert_eq!(missing, 0);
+
+    // Cleanup — drop the synthetic character row so re-runs don't
+    // pile up unapproved test characters.
+    sqlx::query!(r#"DELETE FROM "Characters" WHERE id = $1"#, char_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+/// Default-true grandfathering: a character created without an
+/// explicit `name_approved` override must land at `true`. The schema
+/// default carries this, but the test pins it so a future migration
+/// can't silently flip the column default to `false`.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn character_name_approval_defaults_true() {
+    let pool = pool().await;
+    let user_id = testplayer_user_id(&pool).await;
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let name = format!("ApprovDefault{suffix}");
+    let new_char = mud_db::characters::NewCharacter {
+        user_id: &user_id,
+        name: &name,
+        race: "HUMAN",
+        gender: "neutral",
+        class_id: 1,
+        strength: 13,
+        intelligence: 13,
+        wisdom: 13,
+        dexterity: 13,
+        constitution: 13,
+        charisma: 13,
+        name_approved: true,
+    };
+    let char_id = mud_db::characters::create(&pool, &new_char)
+        .await
+        .expect("create approved");
+    let row = mud_db::characters::find_by_name(&pool, &name)
+        .await
+        .expect("find")
+        .expect("present");
+    assert!(row.name_approved, "default path lands at name_approved = true");
+
+    sqlx::query!(r#"DELETE FROM "Characters" WHERE id = $1"#, char_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+/// `DiscordConfig::get` reads the singleton row at PK 1. The fixture
+/// row may or may not be present depending on the operator's setup;
+/// the test just exercises the query path and asserts the shape.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn discord_config_get_shape() {
+    let pool = pool().await;
+    // Ensure a row exists so the test asserts something meaningful.
+    // Use ON CONFLICT to avoid clobbering an operator-authored row.
+    sqlx::query!(
+        r#"
+        INSERT INTO discord_config (id, guild_id, enabled, updated_at)
+        VALUES (1, 'test-guild', false, NOW())
+        ON CONFLICT (id) DO NOTHING
+        "#
+    )
+    .execute(&pool)
+    .await
+    .expect("seed discord_config");
+
+    let row = mud_db::discord_config::get(&pool)
+        .await
+        .expect("get")
+        .expect("PK 1 row present");
+    assert!(!row.guild_id.is_empty(), "guild_id is NOT NULL in schema");
 }

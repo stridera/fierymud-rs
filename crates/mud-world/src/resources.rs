@@ -1,6 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
+
+use mud_db::enums::EntityType;
 
 /// Authored achievement catalog loaded at boot. Hooks reference
 /// rows by their stable `code` string (e.g. `"first_kill"`,
@@ -246,6 +248,229 @@ impl LoginMessages {
     }
 }
 
+/// Discord guild configuration loaded once at boot. The schema
+/// pins this row to primary key 1, so the runtime treats it as a
+/// singleton resource. Channel IDs are consumed by command handlers
+/// that mirror in-game broadcasts to Discord (gossip channel),
+/// admin events (login approvals + bans), and start/restart
+/// announcements. `None` means the operator hasn't populated the
+/// row — the runtime then treats the bot as disabled.
+///
+/// The bot itself runs out-of-process (Muditor-side); the Rust
+/// runtime just publishes the channel IDs so a future outbound
+/// message-queue wire-up can pick them up without DB hits per send.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct DiscordConfigCatalog {
+    pub enabled: bool,
+    pub guild_id: Option<String>,
+    pub gossip_channel_id: Option<String>,
+    pub admin_channel_id: Option<String>,
+    pub announcement_channel_id: Option<String>,
+}
+
+impl DiscordConfigCatalog {
+    /// Convenience: is the bot wired up enough to send to the
+    /// gossip channel? The guild row must exist, be enabled, AND
+    /// the gossip channel must be set. Mirrors the same gate the
+    /// admin / announcement channels apply.
+    #[must_use]
+    pub fn can_send_gossip(&self) -> bool {
+        self.enabled
+            && self.guild_id.is_some()
+            && self.gossip_channel_id.is_some()
+    }
+
+    #[must_use]
+    pub fn can_send_admin(&self) -> bool {
+        self.enabled
+            && self.guild_id.is_some()
+            && self.admin_channel_id.is_some()
+    }
+
+    #[must_use]
+    pub fn can_send_announcement(&self) -> bool {
+        self.enabled
+            && self.guild_id.is_some()
+            && self.announcement_channel_id.is_some()
+    }
+}
+
+/// Pending Discord-link verification codes. Populated by
+/// `cmd_discord_link` when a player kicks off the verification
+/// flow; consumed by the bot-side ingress (out-of-process today)
+/// when it sees the matching `/verify <code>` arrive in the
+/// configured gossip channel.
+///
+/// Storage shape: `user_id -> (discord_id, code, expires_at)`. One
+/// pending request per user — re-running `discord link` overwrites
+/// the entry rather than queuing.
+///
+/// In-memory only; clears on restart by design (a code that was
+/// minted before a restart wouldn't be honored by the in-process
+/// state machine anyway, even if it survived).
+#[derive(Resource, Debug, Default)]
+pub struct PendingDiscordLinks {
+    pub by_user: HashMap<String, PendingDiscordLink>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingDiscordLink {
+    pub discord_id: String,
+    pub code: String,
+    pub expires_at: std::time::Instant,
+}
+
+impl PendingDiscordLinks {
+    /// Drop entries whose `expires_at` has passed. Called from a
+    /// periodic tick so a stale entry doesn't sit in the map forever
+    /// after the player abandoned the flow.
+    pub fn expire_old(&mut self, now: std::time::Instant) -> usize {
+        let before = self.by_user.len();
+        self.by_user.retain(|_, e| e.expires_at > now);
+        before - self.by_user.len()
+    }
+}
+
+/// Catalog of builder-authored help articles loaded from the
+/// `HelpEntry` table at boot. Each row carries one or more
+/// `keywords` ("FIREBALL", "FIRE BALL") plus a `title`, body
+/// `content`, and optional metadata (usage / sphere / duration /
+/// category). The `help` command resolves a typed topic by
+/// case-insensitive exact keyword match — substrings do *not*
+/// match (a substring of `BALL` would otherwise hit `FIREBALL`,
+/// `SNOWBALL`, etc.), but title-prefix matches surface when no
+/// keyword hits exactly.
+///
+/// `min_level` gates visibility — wizard-tier articles stay
+/// invisible until the viewer is at least that level. When more
+/// than one entry shares a keyword (e.g. duplicate import or a
+/// later builder addition with overlapping keyword), the caller
+/// gets back an `AmbiguousMatches` list of titles instead of
+/// picking one arbitrarily.
+#[derive(Resource, Debug, Default)]
+pub struct HelpCatalog {
+    /// All entries, indexed by case-insensitive keyword. Multiple
+    /// keywords on the same row each map back to the same entry id;
+    /// duplicate keywords across rows produce a Vec<id> the lookup
+    /// disambiguates by min_level filter then ambiguity check.
+    pub by_keyword: HashMap<String, Vec<i32>>,
+    /// All entries, indexed by id. Title-prefix fallback walks this
+    /// map directly.
+    pub entries: HashMap<i32, HelpEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HelpEntry {
+    pub id: i32,
+    pub title: String,
+    pub content: String,
+    pub min_level: i32,
+    pub category: Option<String>,
+    pub usage: Option<String>,
+    pub duration: Option<String>,
+    pub sphere: Option<String>,
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HelpLookup {
+    /// Exactly one matching entry the viewer is allowed to read.
+    Found(HelpEntry),
+    /// Multiple matching entries — the caller renders the titles so
+    /// the player can `help <title>` to disambiguate.
+    AmbiguousMatches(Vec<String>),
+    /// No keyword or title-prefix match the viewer can see.
+    NotFound,
+}
+
+impl HelpCatalog {
+    /// Find an entry by exact keyword match (case-insensitive) or
+    /// by case-insensitive title-prefix when no keyword hits. Entries
+    /// the viewer can't see (their `min_level` exceeds `viewer_level`)
+    /// are filtered before the ambiguity check, so a low-level player
+    /// asking for `"slay"` skips over a staff-only `SLAY` entry instead
+    /// of being told it exists.
+    #[must_use]
+    pub fn lookup(&self, keyword: &str, viewer_level: i32) -> HelpLookup {
+        let needle = keyword.trim();
+        if needle.is_empty() {
+            return HelpLookup::NotFound;
+        }
+        let lower = needle.to_ascii_lowercase();
+
+        // 1) Exact keyword hit.
+        if let Some(ids) = self.by_keyword.get(&lower) {
+            let visible: Vec<&HelpEntry> = ids
+                .iter()
+                .filter_map(|id| self.entries.get(id))
+                .filter(|e| viewer_level >= e.min_level)
+                .collect();
+            match visible.len() {
+                0 => {} // fall through to prefix match
+                1 => return HelpLookup::Found(visible[0].clone()),
+                _ => {
+                    let mut titles: Vec<String> =
+                        visible.iter().map(|e| e.title.clone()).collect();
+                    titles.sort_unstable();
+                    titles.dedup();
+                    return if titles.len() == 1 {
+                        // Same title under multiple ids — treat as a
+                        // single match using the first entry.
+                        HelpLookup::Found(visible[0].clone())
+                    } else {
+                        HelpLookup::AmbiguousMatches(titles)
+                    };
+                }
+            }
+        }
+
+        // 2) Title-prefix fallback. A player who types `help fire`
+        //    with no `FIRE` keyword still surfaces `FIREBALL`,
+        //    `FIRESHIELD`, etc. — same shape as the SUGGESTIONS
+        //    block in the command-help path.
+        let mut matches: Vec<&HelpEntry> = self
+            .entries
+            .values()
+            .filter(|e| viewer_level >= e.min_level)
+            .filter(|e| e.title.to_ascii_lowercase().starts_with(&lower))
+            .collect();
+        matches.sort_by(|a, b| a.title.cmp(&b.title));
+        match matches.len() {
+            0 => HelpLookup::NotFound,
+            1 => HelpLookup::Found(matches[0].clone()),
+            _ => HelpLookup::AmbiguousMatches(
+                matches.into_iter().map(|e| e.title.clone()).collect(),
+            ),
+        }
+    }
+
+    /// Distinct categories present in the visible catalog, sorted
+    /// alphabetically. Used by `help` with no args to render a
+    /// "type help <topic>" index gated by viewer level.
+    #[must_use]
+    pub fn visible_categories(&self, viewer_level: i32) -> Vec<String> {
+        let mut cats: Vec<String> = self
+            .entries
+            .values()
+            .filter(|e| viewer_level >= e.min_level)
+            .filter_map(|e| e.category.clone())
+            .collect();
+        cats.sort_unstable();
+        cats.dedup();
+        cats
+    }
+
+    /// Entry count visible to the viewer. Used for the empty-arg
+    /// help screen ("123 articles available").
+    #[must_use]
+    pub fn visible_count(&self, viewer_level: i32) -> usize {
+        self.entries
+            .values()
+            .filter(|e| viewer_level >= e.min_level)
+            .count()
+    }
+}
+
 /// Per-race defaults loaded from the schema's `Race` table at boot.
 /// Today only `default_size` is wired (used by the score sheet); the
 /// fuller surface (`focusBonus` / lifeforce / weight-height ranges)
@@ -265,6 +490,269 @@ pub struct RaceDefaults {
     /// `start_room` columns are absent from the map; the caller falls
     /// through to the Void fallback.
     pub start_room_by_race: HashMap<String, (i32, i32)>,
+}
+
+/// Full per-race catalog loaded from `Races` at boot. The narrow
+/// `RaceDefaults` map is kept alongside for callers that only need
+/// the size / start-room lookups; this catalog carries the rest of
+/// the row so character-creation, score, combat, and rendering can
+/// all read a single authoritative source. Keys are the raw `Race`
+/// enum text (`HUMAN` / `ELF` / ...) — same shape as
+/// `Profile.race`. Empty when the `Race` table has no rows yet.
+#[derive(Resource, Debug, Default)]
+pub struct RaceCatalog {
+    pub by_race: HashMap<String, RaceDef>,
+}
+
+impl RaceCatalog {
+    #[must_use]
+    pub fn get(&self, race: &str) -> Option<&RaceDef> {
+        self.by_race.get(race)
+    }
+
+    /// Inclusive height range for the given race + gender. Falls
+    /// back to the male range when `gender` doesn't match the
+    /// schema's `male`/`female` axis (the schema only authors two
+    /// height bands; `neutral` / other strings land on the male
+    /// band, which is what the legacy code did). Returns `None`
+    /// when the race isn't in the catalog OR the relevant low/high
+    /// columns are both zero (unauthored), so the caller can fall
+    /// through to a fixed default instead of generating a `0`.
+    #[must_use]
+    pub fn height_range(&self, race: &str, gender: &str) -> Option<(i32, i32)> {
+        let def = self.by_race.get(race)?;
+        let (low, high) = if gender.eq_ignore_ascii_case("female") {
+            (def.female_height_low, def.female_height_high)
+        } else {
+            (def.male_height_low, def.male_height_high)
+        };
+        if low == 0 && high == 0 {
+            return None;
+        }
+        Some((low, high.max(low)))
+    }
+
+    /// Inclusive weight range for the given race + gender. Same
+    /// gender-fallback semantics as `height_range`.
+    #[must_use]
+    pub fn weight_range(&self, race: &str, gender: &str) -> Option<(i32, i32)> {
+        let def = self.by_race.get(race)?;
+        let (low, high) = if gender.eq_ignore_ascii_case("female") {
+            (def.female_weight_low, def.female_weight_high)
+        } else {
+            (def.male_weight_low, def.male_weight_high)
+        };
+        if low == 0 && high == 0 {
+            return None;
+        }
+        Some((low, high.max(low)))
+    }
+
+    /// Roll a fresh height for a character of the given race +
+    /// gender. Inclusive range. `None` when the catalog doesn't
+    /// carry an authored band; caller falls through to a fixed
+    /// default rather than persisting a meaningless 0.
+    #[must_use]
+    pub fn random_height(&self, race: &str, gender: &str) -> Option<i32> {
+        let (low, high) = self.height_range(race, gender)?;
+        if high <= low {
+            return Some(low);
+        }
+        Some(rand::random_range(low..=high))
+    }
+
+    /// Roll a fresh weight for a character of the given race +
+    /// gender. Same shape as `random_height`.
+    #[must_use]
+    pub fn random_weight(&self, race: &str, gender: &str) -> Option<i32> {
+        let (low, high) = self.weight_range(race, gender)?;
+        if high <= low {
+            return Some(low);
+        }
+        Some(rand::random_range(low..=high))
+    }
+
+    /// Stat-cap clamp helper. Returns the catalog's per-race max
+    /// for the named stat (`"strength"` / `"str"` / `"dex"` / ...),
+    /// or the supplied `fallback` when the race isn't authored.
+    /// Match is case-insensitive on the leading letters so command
+    /// handlers can pass through user input without normalizing.
+    #[must_use]
+    pub fn stat_cap(&self, race: &str, stat: &str, fallback: i32) -> i32 {
+        let Some(def) = self.by_race.get(race) else {
+            return fallback;
+        };
+        match stat.to_ascii_lowercase().as_str() {
+            "str" | "strength" => def.stat_caps.strength,
+            "dex" | "dexterity" => def.stat_caps.dexterity,
+            "con" | "constitution" => def.stat_caps.constitution,
+            "int" | "intelligence" => def.stat_caps.intelligence,
+            "wis" | "wisdom" => def.stat_caps.wisdom,
+            "cha" | "charisma" => def.stat_caps.charisma,
+            _ => fallback,
+        }
+    }
+}
+
+/// Parse a `{"FIRE": 25, "COLD": -10}`-style JSON object into the
+/// typed `ElementType` map used by the runtime. Keys are matched
+/// case-insensitively against the SCREAMING_SNAKE schema labels;
+/// unknown keys and non-number values are dropped silently. Shared
+/// between race + class catalog hydration so the parsing rules
+/// stay in one place.
+#[must_use]
+pub fn parse_resistance_json(
+    raw: &serde_json::Value,
+) -> HashMap<mud_db::enums::ElementType, i32> {
+    use mud_db::enums::ElementType;
+    let mut out: HashMap<ElementType, i32> = HashMap::new();
+    let Some(obj) = raw.as_object() else {
+        return out;
+    };
+    for (k, v) in obj {
+        let element = match k.to_ascii_uppercase().as_str() {
+            "PHYSICAL" => ElementType::Physical,
+            "SLASH" => ElementType::Slash,
+            "PIERCE" => ElementType::Pierce,
+            "CRUSH" => ElementType::Crush,
+            "FORCE" => ElementType::Force,
+            "SONIC" => ElementType::Sonic,
+            "BLEED" => ElementType::Bleed,
+            "FIRE" => ElementType::Fire,
+            "COLD" => ElementType::Cold,
+            "WATER" => ElementType::Water,
+            "EARTH" => ElementType::Earth,
+            "AIR" => ElementType::Air,
+            "SHOCK" => ElementType::Shock,
+            "ACID" => ElementType::Acid,
+            "POISON" => ElementType::Poison,
+            "RADIANT" => ElementType::Radiant,
+            "SHADOW" => ElementType::Shadow,
+            "HOLY" => ElementType::Holy,
+            "UNHOLY" => ElementType::Unholy,
+            "HEAL" => ElementType::Heal,
+            "NECROTIC" => ElementType::Necrotic,
+            "MENTAL" => ElementType::Mental,
+            "NATURE" => ElementType::Nature,
+            _ => continue,
+        };
+        if let Some(n) = v.as_i64() {
+            let clamped = i32::try_from(n.clamp(i64::from(i32::MIN), i64::from(i32::MAX)))
+                .unwrap_or(0);
+            out.insert(element, clamped);
+        } else if let Some(f) = v.as_f64() {
+            #[allow(clippy::cast_possible_truncation)]
+            let n = f.round() as i32;
+            out.insert(element, n);
+        }
+    }
+    out
+}
+
+/// Stat-cap bundle. Mirrors the per-attribute layout of the
+/// schema's `Races.max_*` columns. The runtime keeps a separate
+/// struct (rather than reusing `components::CoreStats`) so
+/// `mud-world` doesn't have to import that component into the
+/// resource layer.
+#[derive(Debug, Clone, Copy)]
+pub struct RaceStatCaps {
+    pub strength: i32,
+    pub dexterity: i32,
+    pub constitution: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub charisma: i32,
+}
+
+impl Default for RaceStatCaps {
+    fn default() -> Self {
+        // Mirrors the schema defaults (76 for every column).
+        Self {
+            strength: 76,
+            dexterity: 76,
+            constitution: 76,
+            intelligence: 76,
+            wisdom: 76,
+            charisma: 76,
+        }
+    }
+}
+
+/// One row of `RaceCatalog`. Holds the full schema column set
+/// (plus a pre-computed `stat_caps` bundle) so command and combat
+/// handlers don't have to re-aggregate per call. Resistance JSON
+/// is distilled at hydration into a typed `ElementType` map; the
+/// raw JSON is kept alongside in case authoring metadata needs to
+/// round-trip without lossiness.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct RaceDef {
+    /// Raw `Race` enum text — same shape as `Profile.race`.
+    pub race: String,
+    /// Display name (XML-Lite color tags).
+    pub name: String,
+    pub plain_name: String,
+    /// Space-separated keyword list (lookup convenience — split on
+    /// whitespace at the call site).
+    pub keywords: String,
+    pub playable: bool,
+    pub humanoid: bool,
+    pub magical: bool,
+    /// `RaceAlign` enum text (`GOOD` / `NEUTRAL` / `EVIL`).
+    pub race_align: String,
+    pub default_alignment: i32,
+    /// `Size` enum text — duplicated into `RaceDefaults.size_by_race`
+    /// for the narrow lookup, also carried here so the catalog is
+    /// self-contained.
+    pub default_size: String,
+    pub focus_bonus: i32,
+    /// `LifeForce` enum text.
+    pub default_lifeforce: String,
+    pub male_weight_low: i32,
+    pub male_weight_high: i32,
+    pub male_height_low: i32,
+    pub male_height_high: i32,
+    pub female_weight_low: i32,
+    pub female_weight_high: i32,
+    pub female_height_low: i32,
+    pub female_height_high: i32,
+    /// Pre-assembled stat-cap bundle so the cap-check at training
+    /// / rolling time is one field access. Built from the six
+    /// `max_*` columns at hydration time.
+    pub stat_caps: RaceStatCaps,
+    /// XP gain multiplier in percent. `100` = unchanged; `120` →
+    /// each kill awards 1.2× XP. Schema default `100`.
+    pub exp_factor: i32,
+    /// HP gain multiplier in percent. Applied on top of
+    /// `LevelDefinition.hp_gain` at level-up.
+    pub hp_factor: i32,
+    /// Damage scalar in percent. Each swing's damage gets scaled
+    /// by `damage * hit_damage_factor / 100`.
+    pub hit_damage_factor: i32,
+    /// Per-die damage scalar. Applied to natural-damage dice rolls
+    /// (claws / teeth) before the per-swing `hit_damage_factor`.
+    pub damage_dice_factor: i32,
+    /// Coin-drop scalar in percent. Drops awarded to a player of
+    /// this race get scaled by `coin * copper_factor / 100`.
+    pub copper_factor: i32,
+    /// Movement-broadcast override for arrivals. `Some("swoops
+    /// down")` means the room sees "The pegasus swoops down from
+    /// the south."; `None` falls back to the default "arrives
+    /// from <dir>".
+    pub enter_verb: Option<String>,
+    /// Movement-broadcast override for departures. Paired with
+    /// `enter_verb` semantically.
+    pub leave_verb: Option<String>,
+    pub start_room_zone_id: Option<i32>,
+    pub start_room_id: Option<i32>,
+    /// Per-element resistance map. Parsed once at hydration from
+    /// the schema's `Races.resistances` JSON — keys outside the
+    /// runtime's `ElementType` set are dropped, keys are matched
+    /// case-insensitively against the SCREAMING_SNAKE schema label.
+    /// Empty when the row has `{}` or NULL.
+    pub resistances: HashMap<mud_db::enums::ElementType, i32>,
+    /// Original JSON blob, kept for round-trip / authoring debug.
+    pub resistances_raw: serde_json::Value,
 }
 
 /// Catalog of effect *types* loaded from the Effect table at startup.
@@ -356,10 +844,96 @@ pub struct ConsumableEffectBinding {
 /// bindings. Names are normalized to lowercase at insert.
 /// `drunk_effect` is the per-unit alcohol contribution (0 for
 /// non-alcoholic drinks).
+///
+/// Kept as a thin sibling of `LiquidCatalog`: callers that only
+/// need the id (effect dispatch, drunk delta) avoid pulling the
+/// full `LiquidDef`.
 #[derive(Resource, Debug, Default)]
 pub struct LiquidIndex {
     pub by_name: HashMap<String, i32>,
     pub drunk_effect: HashMap<String, i32>,
+}
+
+/// Rich catalog of `Liquids` rows hydrated at boot. Indexed by
+/// alias (the single-token keyword carried on
+/// `LiquidContainer.liquid`) and by id. Drink commands look up the
+/// def to fetch color, hunger/thirst/drunk deltas, and flavor
+/// description; `pour`/`fill` use it to canonicalize the alias
+/// stored on a refilled container.
+///
+/// Pair with `LiquidIndex` — both populate from the same DB pass.
+/// `LiquidCatalog` carries the full per-row payload; `LiquidIndex`
+/// stays as the leaner shape consumed by hot paths.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct LiquidCatalog {
+    by_alias: HashMap<String, LiquidDef>,
+    by_id: HashMap<i32, LiquidDef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiquidDef {
+    pub id: i32,
+    pub name: String,
+    pub alias: String,
+    pub color_desc: String,
+    pub drunk_effect: i32,
+    pub hunger_effect: i32,
+    pub thirst_effect: i32,
+    pub description: Option<String>,
+}
+
+impl LiquidCatalog {
+    /// Insert a row. `alias` is matched case-insensitively, so we
+    /// normalize at insert. A duplicate alias (shouldn't happen —
+    /// the DB has a UNIQUE on `alias`) overwrites the prior entry.
+    pub fn insert(&mut self, def: LiquidDef) {
+        self.by_id.insert(def.id, def.clone());
+        self.by_alias.insert(def.alias.to_ascii_lowercase(), def);
+    }
+
+    /// Look up by alias / keyword (case-insensitive). Aliases match
+    /// what `LiquidContainer.liquid` carries on a spawned item.
+    #[must_use]
+    pub fn lookup_alias(&self, alias: &str) -> Option<&LiquidDef> {
+        self.by_alias.get(&alias.to_ascii_lowercase())
+    }
+
+    /// Look up by schema id (`Liquids.id`).
+    #[must_use]
+    pub fn lookup_id(&self, id: i32) -> Option<&LiquidDef> {
+        self.by_id.get(&id)
+    }
+
+    /// Number of rows loaded — used by the loader's boot summary
+    /// log line.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+
+    /// "Water-like" fallback used when a `LiquidContainer` carries
+    /// an alias the catalog doesn't know (legacy import drift,
+    /// hand-edited DB rows). Picks the real `water` entry when it
+    /// exists; otherwise synthesizes a minimal default so the
+    /// drink path stays usable.
+    #[must_use]
+    pub fn fallback(&self) -> LiquidDef {
+        self.lookup_alias("water").cloned().unwrap_or(LiquidDef {
+            id: 0,
+            name: "water".to_string(),
+            alias: "water".to_string(),
+            color_desc: "clear".to_string(),
+            drunk_effect: 0,
+            hunger_effect: 0,
+            thirst_effect: 10,
+            description: None,
+        })
+    }
 }
 
 /// Catalog of `ConsumableEffects` rows: which effects fire on
@@ -445,6 +1019,40 @@ pub struct ObjectProto {
     /// item ("look pommel" on an ornate sword shows the jeweled
     /// pommel detail). Empty for plain items.
     pub extras: Vec<(Vec<String>, String)>,
+    /// `ObjectResistance` rows for this proto: per-element resistance
+    /// percentages applied to the wearer while equipped. Empty for
+    /// items with no resistance grants.
+    pub resistances: Vec<(mud_db::enums::ElementType, i32, bool)>,
+    /// `ObjectEffects` rows for this proto: spell-like effects spawned
+    /// onto the wearer while equipped. Each entry pairs an `Effect.id`
+    /// with a strength and an optional slot restriction (only fires
+    /// when worn in `wear_location`). Empty for items with no granted
+    /// effects.
+    pub granted_effects: Vec<ObjectGrantedEffect>,
+    /// Boolean attribute flags from `Objects.flags`: GLOW / HUM /
+    /// INVISIBLE / MAGIC / PERMANENT / TEMPORARY / DECOMPOSING /
+    /// FLOAT / BUOYANT / VEHICLE / SOULBOUND. Stamped on the spawned
+    /// entity as an `ObjectFlags` component when non-empty;
+    /// consumers (look / examine / drop / give) gate on it through
+    /// the component rather than reaching back to the proto.
+    pub flags: Vec<mud_db::enums::ObjectFlag>,
+    /// "Can't do that" restriction flags from `Objects.restrictions`:
+    /// NO_DROP / NO_TAKE / NO_SELL / NO_BURN / NO_LOCATE /
+    /// NO_INVISIBLE. Per-command gates consult these before
+    /// mutating world state so a quest item never lands on the
+    /// floor by accident.
+    pub restrictions: Vec<mud_db::enums::ObjectRestriction>,
+}
+
+/// One `ObjectEffects` row, denormalized into the proto.
+#[derive(Debug, Clone)]
+pub struct ObjectGrantedEffect {
+    pub effect_id: i32,
+    pub strength: i32,
+    pub modifier_data: serde_json::Value,
+    /// When `Some(slot)`, the effect only fires while the item is
+    /// equipped in that legacy wear-flag slot. `None` = any slot.
+    pub wear_location: Option<mud_db::enums::WearFlag>,
 }
 
 /// Static initial-spawn data for a `DrinkContainer` proto. Mirrors
@@ -1039,6 +1647,35 @@ impl TriggerHistoryLog {
     }
 }
 
+/// One pending `run_room_trigger(zone, id)` Lua call. The Lua
+/// binding enqueues into `DeferredRoomTriggerFires` instead of
+/// firing inline so a trigger body running in coroutine `A`
+/// cannot synchronously re-enter another Lua frame on coroutine
+/// `B` — mlua's per-`Lua` re-entrancy guard would panic. The
+/// mud-server drain pass runs the queue after the current Lua
+/// frame unwinds, on the world thread, with a fresh Lua frame.
+#[derive(Debug, Clone)]
+pub struct DeferredRoomTriggerFire {
+    /// Target room composite key `(zone, id)`.
+    pub room_zone: i32,
+    pub room_id: i32,
+    /// The Lua `self` entity at the call site (typically the mob /
+    /// object / room whose trigger called `run_room_trigger`).
+    /// Used as the `actor` binding when firing the target room's
+    /// triggers. `None` is acceptable — the drain falls back to
+    /// using the target room as both `self` and `actor`.
+    pub caller: Option<Entity>,
+}
+
+/// Queue of `run_room_trigger(zone, id)` Lua calls that fired
+/// during the current world tick. Drained by mud-server's
+/// `lua_coroutine_tick` after the originating Lua frame returns.
+/// Empty between drain cycles.
+#[derive(Resource, Debug, Default)]
+pub struct DeferredRoomTriggerFires {
+    pub queue: Vec<DeferredRoomTriggerFire>,
+}
+
 /// Queued output produced by Lua trigger bodies. `messages` carries
 /// room broadcasts (`room.send` / `room.send_except`); `direct`
 /// carries one-to-one lines (`actor.send`). mud-server drains both
@@ -1086,6 +1723,23 @@ pub struct ClassDef {
     pub plain_name: String,
     pub is_subclass: bool,
     pub parent_class_id: Option<i32>,
+    /// Long-form builder prose. `None` when not yet authored —
+    /// `cmd_info <class>` falls through to the bare identity line.
+    pub description: Option<String>,
+    /// Hit-dice expression (`"1d8"` / `"1d10"`) used for natural HP
+    /// rolls per class. Schema default `"1d8"`.
+    pub hit_dice: String,
+    /// Primary attribute label (`"STR"`, `"DEX"`, ...). `None` when
+    /// the class doesn't designate one.
+    pub primary_stat: Option<String>,
+    /// Flat HP gain per level layered on `LevelDefinition.hp_gain`.
+    /// Schema default `10`.
+    pub hp_per_level: i32,
+    /// Per-element resistance map distilled from the schema's
+    /// `Class.resistances` JSON: keys are `ElementType` variants
+    /// the runtime models, unrecognized strings are dropped at
+    /// catalog hydration time so combat reads a clean Rust map.
+    pub resistances: HashMap<mud_db::enums::ElementType, i32>,
 }
 
 /// Catalog of every ability (spell / chant / song / skill) in the game,
@@ -1333,8 +1987,29 @@ pub struct MobProto {
     pub damage_dice_num: i32,
     pub damage_dice_size: i32,
     pub damage_dice_bonus: i32,
-    pub hit_roll: i32,
-    pub armor_class: i32,
+    /// Combat redesign axes — direct mirror of `Mobs` schema columns
+    /// per `docs/design/combat.md`. `derived_combat_stats()` folds
+    /// these into a `CombatStats` component at spawn time.
+    pub accuracy: i32,
+    pub evasion: i32,
+    pub attack_power: i32,
+    pub spell_power: i32,
+    pub penetration_flat: i32,
+    pub penetration_percent: i32,
+    pub armor_rating: i32,
+    /// Folded into `CombatStats.armor_pct` together with `armor_rating`
+    /// at conversion time (sum clamped to 100). Schema retains both
+    /// columns for content-authoring clarity; the runtime conflates
+    /// them per the audit's "fold into armor_pct" plan.
+    pub damage_reduction_percent: i32,
+    pub soak: i32,
+    pub hardness: i32,
+    pub perception: i32,
+    pub concealment: i32,
+    /// Per-damage-type / per-effect resistance map. JSON shape:
+    /// `{"FIRE": 50, "COLD": 200, "charm": 0, ...}`. Loaded as-is;
+    /// downstream consumers read via the resistance lookup helpers.
+    pub resistances: serde_json::Value,
     /// Magical mitigation percentage from `Mobs.ward_percent`
     /// (0..=100). Engaged at combat pipeline step 5 when the
     /// damage source is magical (`Ability.is_magical`). Zero on
@@ -1358,6 +2033,38 @@ pub struct MobProto {
     pub protected_kind: mud_db::enums::ProtectedKind,
     /// Service-role flags (banker / shopkeeper / trainer / ...).
     pub professions: Vec<mud_db::enums::MobProfession>,
+    /// Body / form size class. Drives bash/drag/mount disparity
+    /// gates and the examine flavor ("It is a HUGE creature.").
+    /// Spawns onto each instance as a `Sized` component.
+    pub size: mud_db::enums::Size,
+    /// Vitality category (LIFE / UNDEAD / MAGIC / CELESTIAL /
+    /// DEMONIC / ELEMENTAL). Gates holy/unholy ability filters and
+    /// surfaces in examine; spawns as a `LifeForceTag` component.
+    pub life_force: mud_db::enums::LifeForce,
+    /// Natural attack flavor — drives the combat narration verb
+    /// ("The wolf bites you."). Spawns as a `NaturalAttackType`
+    /// component.
+    pub damage_type: mud_db::enums::DamageType,
+    /// Movement-point pool capacity (legacy `move` column). Mob's
+    /// stamina equivalent for long wanders; zero means "no pool".
+    /// Non-zero values surface as a `MovementPoints` component.
+    pub move_points: i32,
+    /// Posture the mob starts in (STANDING / SITTING / RESTING /
+    /// SLEEPING). The loader derives the runtime `Posture(PostureKind)`
+    /// from this at spawn time.
+    pub default_position: mud_db::enums::Position,
+    /// Identity-flag list: what the mob IS (illusion / animated /
+    /// mount / aquatic / summoned / pet). Spawns as a `MobTraits`
+    /// component; AQUATIC gates wander targets to water sectors,
+    /// MOUNT auto-attaches the `Mountable` marker on spawn.
+    pub traits: Vec<mud_db::enums::MobTrait>,
+    /// Live movement mode at spawn — usually equals
+    /// `default_movement_mode`. Surfaces as a `MovementModeTag`
+    /// component.
+    pub movement_mode: mud_db::enums::MovementMode,
+    /// Reset / re-spawn movement mode. Re-applied each respawn so
+    /// a flying drake always comes back airborne.
+    pub default_movement_mode: mud_db::enums::MovementMode,
 }
 
 impl MobProto {
@@ -1384,6 +2091,38 @@ impl MobProto {
         let m = self.damage_dice_size;
         let b = self.damage_dice_bonus;
         (n * (m + 1) / 2 + b).max(1)
+    }
+
+    /// Build a `CombatStats` component from this proto's new combat
+    /// fields. Direct mapping with two conflations:
+    ///   * `armor_rating + damage_reduction_percent → armor_pct`
+    ///     (sum clamped to 100). Schema keeps both for builder
+    ///     clarity; runtime collapses them onto the single mitigation
+    ///     axis.
+    ///   * `soak → armor_flat` (rename only).
+    /// `crit_chance` is fixed at 5 (parity with legacy d20==20 → 5%);
+    /// promote to a schema column later if balance demands per-mob
+    /// crit tuning.
+    #[must_use]
+    pub fn derived_combat_stats(&self) -> crate::components::CombatStats {
+        let armor_pct = self
+            .armor_rating
+            .saturating_add(self.damage_reduction_percent)
+            .clamp(0, 100);
+        crate::components::CombatStats {
+            accuracy: self.accuracy,
+            evasion: self.evasion,
+            attack_power: self.attack_power,
+            spell_power: self.spell_power,
+            crit_chance: 5,
+            pen_pct: self.penetration_percent,
+            pen_flat: self.penetration_flat,
+            armor_pct,
+            armor_flat: self.soak,
+            ward_pct: self.ward_percent,
+            hardness: self.hardness,
+            alignment: self.alignment,
+        }
     }
 }
 
@@ -1486,6 +2225,296 @@ pub struct WeatherState {
 #[derive(Resource, Default, Debug)]
 pub struct WeatherCatalog {
     pub by_zone: HashMap<i32, WeatherState>,
+}
+
+/// Per-entity bag of Lua-trigger-set variables, backed by the
+/// `entity_variables` table. Hydrated once at world boot via
+/// `mud_db::entity_variables::list_all` (see `loader::load_from_db`);
+/// the runtime then services Lua `:setvar` / `:getvar` / `:clearvar`
+/// from this in-memory cache without round-tripping the DB.
+///
+/// Writes mark the `(EntityType, zone, id)` key dirty; a flush tick in
+/// mud-server drains the dirty set via `drain_dirty` and persists each
+/// entity's bag with `entity_variables::upsert_many`. Keys whose new
+/// value is `None` (Lua `clearvar` / `setvar(nil)`) flush as deletes.
+///
+/// One cache covers all three entity shapes (mob / object / room) so a
+/// trigger body that hops across `self` / `actor.room` / a found
+/// object can read and write through the same resource without juggling
+/// per-kind handles.
+#[derive(Resource, Default, Debug)]
+pub struct EntityVariableCache {
+    /// In-memory bag. Outer key is the entity-identity tuple; inner
+    /// `None` value is the tombstone shape — present in the map so
+    /// the next flush deletes the row, then dropped from the map
+    /// after the flush completes.
+    inner: HashMap<(EntityType, i32, i32), HashMap<String, Option<serde_json::Value>>>,
+    /// Entities whose bag changed since the last flush — written to
+    /// the DB on the next tick. Cleared by `drain_dirty`.
+    dirty: HashSet<(EntityType, i32, i32)>,
+}
+
+impl EntityVariableCache {
+    /// Read one variable. Returns `None` when the entity has no bag,
+    /// the key isn't set, or the key was just cleared (tombstone
+    /// awaiting flush).
+    #[must_use]
+    pub fn get(
+        &self,
+        kind: EntityType,
+        zone: i32,
+        id: i32,
+        key: &str,
+    ) -> Option<&serde_json::Value> {
+        self.inner.get(&(kind, zone, id))?.get(key)?.as_ref()
+    }
+
+    /// Insert or overwrite a single key. Marks the entity dirty so the
+    /// next flush tick persists the change. The previous value (if
+    /// any) is discarded — callers that need a swap should `get`
+    /// first.
+    pub fn set(
+        &mut self,
+        kind: EntityType,
+        zone: i32,
+        id: i32,
+        key: String,
+        value: serde_json::Value,
+    ) {
+        let bag = self.inner.entry((kind, zone, id)).or_default();
+        bag.insert(key, Some(value));
+        self.dirty.insert((kind, zone, id));
+    }
+
+    /// Drop a single key. Marks the entity dirty even when the key
+    /// wasn't present in the cache: a `clearvar` issued before the
+    /// hydration sees the row still needs to issue a DELETE on the
+    /// next flush. Returns `true` if the key had a non-tombstoned
+    /// value at call time (useful for Lua return values).
+    pub fn clear(&mut self, kind: EntityType, zone: i32, id: i32, key: &str) -> bool {
+        let bag = self.inner.entry((kind, zone, id)).or_default();
+        let had_value = bag.get(key).is_some_and(Option::is_some);
+        bag.insert(key.to_string(), None);
+        self.dirty.insert((kind, zone, id));
+        had_value
+    }
+
+    /// Hydration entry point — called once from the loader per row
+    /// returned by `entity_variables::list_all`. Inserts without
+    /// marking dirty, so the bag is durable but the flush tick won't
+    /// re-write rows that came straight off disk.
+    pub fn hydrate(
+        &mut self,
+        kind: EntityType,
+        zone: i32,
+        id: i32,
+        key: String,
+        value: serde_json::Value,
+    ) {
+        self.inner
+            .entry((kind, zone, id))
+            .or_default()
+            .insert(key, Some(value));
+    }
+
+    /// Pull every dirty entity's (sets, clears) so the flush tick can
+    /// persist them. Returns `(EntityType, zone, id, sets, clears)`
+    /// tuples. After this returns, tombstones are evicted from the
+    /// cache — the row has been "scheduled for delete," and any
+    /// subsequent `get` would correctly miss.
+    ///
+    /// Empty `inner` bags left over from a clear-only entity are also
+    /// dropped to keep memory bounded.
+    #[must_use]
+    pub fn drain_dirty(
+        &mut self,
+    ) -> Vec<(
+        EntityType,
+        i32,
+        i32,
+        Vec<(String, serde_json::Value)>,
+        Vec<String>,
+    )> {
+        let mut out = Vec::with_capacity(self.dirty.len());
+        let dirty: Vec<_> = self.dirty.drain().collect();
+        for key in dirty {
+            let Some(bag) = self.inner.get_mut(&key) else {
+                continue;
+            };
+            let mut sets = Vec::new();
+            let mut clears = Vec::new();
+            // Walk the bag once: collect (k, v) for sets and tombstoned
+            // keys for clears. Drop tombstones from the live map now
+            // that the flush has them.
+            let keys: Vec<String> = bag.keys().cloned().collect();
+            for k in keys {
+                match bag.get(&k) {
+                    Some(Some(v)) => sets.push((k.clone(), v.clone())),
+                    Some(None) => {
+                        clears.push(k.clone());
+                        bag.remove(&k);
+                    }
+                    None => {}
+                }
+            }
+            if bag.is_empty() {
+                self.inner.remove(&key);
+            }
+            if !sets.is_empty() || !clears.is_empty() {
+                out.push((key.0, key.1, key.2, sets, clears));
+            }
+        }
+        out
+    }
+
+    /// Diagnostic count of distinct entities currently tracked.
+    /// Used by admin readouts; not load-bearing.
+    #[must_use]
+    pub fn entity_count(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+/// Per-quest, per-character variable cache (parking-lot resolution).
+///
+/// Mirrors `EntityVariableCache` in shape, but the key is
+/// `(character_id, quest_zone, quest_id)` and the bag is a top-level
+/// JSON object stored in `CharacterQuests.variables`. The Lua
+/// bindings (`quest:getvar` / `quest:setvar` / `quest:clearvar`)
+/// hit this cache; a flush tick in mud-server writes dirty quests
+/// back to the DB via `mud_db::quests::set_quest_variable`.
+///
+/// Empty `inner` bags hint that the row exists but has no variables;
+/// they're harmless. Tombstone semantics: `None` value means "delete
+/// on flush" — same shape as the entity cache so the flush logic
+/// is dual-purpose.
+#[derive(Resource, Default, Debug)]
+pub struct QuestVariableCache {
+    inner: HashMap<
+        (String, i32, i32),
+        HashMap<String, Option<serde_json::Value>>,
+    >,
+    dirty: HashSet<(String, i32, i32)>,
+}
+
+impl QuestVariableCache {
+    /// Read one variable from the quest bag. Returns `None` when the
+    /// bag is missing, the key is unset, or the key is tombstoned
+    /// awaiting flush.
+    #[must_use]
+    pub fn get(
+        &self,
+        character_id: &str,
+        quest_zone: i32,
+        quest_id: i32,
+        key: &str,
+    ) -> Option<&serde_json::Value> {
+        self.inner
+            .get(&(character_id.to_string(), quest_zone, quest_id))?
+            .get(key)?
+            .as_ref()
+    }
+
+    /// Insert or overwrite a single key. Marks the quest dirty.
+    pub fn set(
+        &mut self,
+        character_id: String,
+        quest_zone: i32,
+        quest_id: i32,
+        key: String,
+        value: serde_json::Value,
+    ) {
+        let row_key = (character_id, quest_zone, quest_id);
+        let bag = self.inner.entry(row_key.clone()).or_default();
+        bag.insert(key, Some(value));
+        self.dirty.insert(row_key);
+    }
+
+    /// Drop a single key. Marks the quest dirty so the next flush
+    /// issues a DELETE-equivalent via
+    /// `set_quest_variable(..., &Value::Null)`. Returns `true` if
+    /// the key had a value at call time.
+    pub fn clear(
+        &mut self,
+        character_id: String,
+        quest_zone: i32,
+        quest_id: i32,
+        key: &str,
+    ) -> bool {
+        let row_key = (character_id, quest_zone, quest_id);
+        let bag = self.inner.entry(row_key.clone()).or_default();
+        let had = bag.get(key).is_some_and(Option::is_some);
+        bag.insert(key.to_string(), None);
+        self.dirty.insert(row_key);
+        had
+    }
+
+    /// Hydration entry — used by the loader to pre-fill the cache
+    /// from `CharacterQuest.variables` so the first `quest:getvar`
+    /// for a hydrated quest doesn't have to hit the DB. Inserts
+    /// without marking dirty.
+    pub fn hydrate(
+        &mut self,
+        character_id: String,
+        quest_zone: i32,
+        quest_id: i32,
+        key: String,
+        value: serde_json::Value,
+    ) {
+        self.inner
+            .entry((character_id, quest_zone, quest_id))
+            .or_default()
+            .insert(key, Some(value));
+    }
+
+    /// Drain dirty quests for the flush tick. Returns
+    /// `(character_id, quest_zone, quest_id, sets, clears)`.
+    /// Tombstoned keys come back as `clears` and are evicted from
+    /// the live map so subsequent `get`s correctly miss.
+    #[must_use]
+    pub fn drain_dirty(
+        &mut self,
+    ) -> Vec<(
+        String,
+        i32,
+        i32,
+        Vec<(String, serde_json::Value)>,
+        Vec<String>,
+    )> {
+        let mut out = Vec::with_capacity(self.dirty.len());
+        let dirty: Vec<_> = self.dirty.drain().collect();
+        for key in dirty {
+            let Some(bag) = self.inner.get_mut(&key) else {
+                continue;
+            };
+            let mut sets = Vec::new();
+            let mut clears = Vec::new();
+            let keys: Vec<String> = bag.keys().cloned().collect();
+            for k in keys {
+                match bag.get(&k) {
+                    Some(Some(v)) => sets.push((k.clone(), v.clone())),
+                    Some(None) => {
+                        clears.push(k.clone());
+                        bag.remove(&k);
+                    }
+                    None => {}
+                }
+            }
+            if bag.is_empty() {
+                self.inner.remove(&key);
+            }
+            if !sets.is_empty() || !clears.is_empty() {
+                out.push((key.0, key.1, key.2, sets, clears));
+            }
+        }
+        out
+    }
+
+    /// Diagnostic count.
+    #[must_use]
+    pub fn quest_count(&self) -> usize {
+        self.inner.len()
+    }
 }
 
 #[cfg(test)]
@@ -1594,5 +2623,539 @@ mod tests {
         assert_eq!(data.min_level_for(4, 5), Some(1));
         // Warrior eventually learns RIPOSTE — at level 40.
         assert_eq!(data.min_level_for(4, 287), Some(40));
+    }
+
+    // ---------------------------------------------------------------
+    // EntityVariableCache
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn entity_var_cache_set_get_roundtrip() {
+        let mut c = EntityVariableCache::default();
+        c.set(
+            EntityType::Mob,
+            30,
+            1,
+            "count".to_string(),
+            serde_json::json!(7),
+        );
+        assert_eq!(c.get(EntityType::Mob, 30, 1, "count"), Some(&serde_json::json!(7)));
+        assert_eq!(c.get(EntityType::Mob, 30, 2, "count"), None, "different id");
+        assert_eq!(c.get(EntityType::Object, 30, 1, "count"), None, "different type");
+    }
+
+    #[test]
+    fn entity_var_cache_clear_marks_dirty_and_drains() {
+        let mut c = EntityVariableCache::default();
+        c.set(EntityType::Room, 10, 5, "state".to_string(), serde_json::json!("alpha"));
+        // Drain — should produce one set.
+        let drained = c.drain_dirty();
+        assert_eq!(drained.len(), 1);
+        let (kind, z, id, sets, clears) = &drained[0];
+        assert_eq!(*kind, EntityType::Room);
+        assert_eq!(*z, 10);
+        assert_eq!(*id, 5);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].0, "state");
+        assert!(clears.is_empty());
+        // The value is still readable post-drain.
+        assert_eq!(
+            c.get(EntityType::Room, 10, 5, "state"),
+            Some(&serde_json::json!("alpha"))
+        );
+        // Clear it — drain should now report a clear.
+        assert!(c.clear(EntityType::Room, 10, 5, "state"));
+        let drained = c.drain_dirty();
+        assert_eq!(drained.len(), 1);
+        let (_, _, _, sets, clears) = &drained[0];
+        assert!(sets.is_empty());
+        assert_eq!(clears, &vec!["state".to_string()]);
+        // After flush the tombstone evaporates.
+        assert_eq!(c.get(EntityType::Room, 10, 5, "state"), None);
+        assert_eq!(c.entity_count(), 0, "empty bag pruned");
+    }
+
+    #[test]
+    fn entity_var_cache_hydrate_does_not_dirty() {
+        let mut c = EntityVariableCache::default();
+        c.hydrate(EntityType::Object, 1, 2, "loaded".to_string(), serde_json::json!(true));
+        let drained = c.drain_dirty();
+        assert!(drained.is_empty(), "hydrate must not mark dirty");
+        assert_eq!(c.get(EntityType::Object, 1, 2, "loaded"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn entity_var_cache_drain_combines_sets_and_clears_for_one_entity() {
+        let mut c = EntityVariableCache::default();
+        c.set(EntityType::Mob, 7, 7, "a".into(), serde_json::json!(1));
+        c.set(EntityType::Mob, 7, 7, "b".into(), serde_json::json!(2));
+        c.clear(EntityType::Mob, 7, 7, "c");
+        let drained = c.drain_dirty();
+        assert_eq!(drained.len(), 1, "one entity, one row");
+        let (_, _, _, sets, clears) = &drained[0];
+        assert_eq!(sets.len(), 2);
+        assert_eq!(clears.len(), 1);
+        // Drain a second time with no changes — empty.
+        assert!(c.drain_dirty().is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // QuestVariableCache
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn quest_var_cache_set_get_roundtrip() {
+        let mut c = QuestVariableCache::default();
+        c.set("char-1".into(), 30, 1, "progress".into(), serde_json::json!(5));
+        assert_eq!(c.get("char-1", 30, 1, "progress"), Some(&serde_json::json!(5)));
+        // Different character / zone / quest id all miss.
+        assert!(c.get("char-2", 30, 1, "progress").is_none(), "different char");
+        assert!(c.get("char-1", 31, 1, "progress").is_none(), "different zone");
+        assert!(c.get("char-1", 30, 2, "progress").is_none(), "different quest");
+    }
+
+    #[test]
+    fn quest_var_cache_set_marks_dirty_and_drains() {
+        let mut c = QuestVariableCache::default();
+        c.set("char-1".into(), 30, 1, "stage".into(), serde_json::json!("alpha"));
+        let drained = c.drain_dirty();
+        assert_eq!(drained.len(), 1);
+        let (cid, qz, qid, sets, clears) = &drained[0];
+        assert_eq!(cid, "char-1");
+        assert_eq!(*qz, 30);
+        assert_eq!(*qid, 1);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].0, "stage");
+        assert_eq!(sets[0].1, serde_json::json!("alpha"));
+        assert!(clears.is_empty());
+        // Value still readable post-drain (mirrors entity_var_cache shape).
+        assert_eq!(c.get("char-1", 30, 1, "stage"), Some(&serde_json::json!("alpha")));
+    }
+
+    #[test]
+    fn quest_var_cache_clear_tombstones_until_flush() {
+        let mut c = QuestVariableCache::default();
+        c.set("char-1".into(), 30, 1, "stage".into(), serde_json::json!("alpha"));
+        let _ = c.drain_dirty();
+        // Clear → read sees None (the tombstone shadows the prior value);
+        // drain produces a `clears` entry; after drain the entry evaporates.
+        assert!(c.clear("char-1".into(), 30, 1, "stage"), "had value before clear");
+        assert!(c.get("char-1", 30, 1, "stage").is_none(), "tombstone reads as None");
+        let drained = c.drain_dirty();
+        assert_eq!(drained.len(), 1);
+        let (_, _, _, sets, clears) = &drained[0];
+        assert!(sets.is_empty());
+        assert_eq!(clears, &vec!["stage".to_string()]);
+        assert_eq!(c.quest_count(), 0, "empty bag pruned after flush");
+    }
+
+    #[test]
+    fn quest_var_cache_hydrate_does_not_dirty() {
+        let mut c = QuestVariableCache::default();
+        c.hydrate("char-1".into(), 30, 1, "preset".into(), serde_json::json!("from-db"));
+        assert!(c.drain_dirty().is_empty(), "hydrate must not mark dirty");
+        // The hydrated value is still readable through `get`.
+        assert_eq!(
+            c.get("char-1", 30, 1, "preset"),
+            Some(&serde_json::json!("from-db"))
+        );
+    }
+
+    #[test]
+    fn quest_var_cache_drain_combines_sets_and_clears_for_one_quest() {
+        let mut c = QuestVariableCache::default();
+        c.set("char-1".into(), 30, 1, "a".into(), serde_json::json!(1));
+        c.set("char-1".into(), 30, 1, "b".into(), serde_json::json!(2));
+        c.clear("char-1".into(), 30, 1, "c");
+        let drained = c.drain_dirty();
+        assert_eq!(drained.len(), 1, "one quest, one drain row");
+        let (_, _, _, sets, clears) = &drained[0];
+        assert_eq!(sets.len(), 2);
+        assert_eq!(clears.len(), 1);
+        assert!(c.drain_dirty().is_empty(), "second drain after no writes is empty");
+    }
+
+    // ---- HelpCatalog ----
+
+    fn help_entry(
+        id: i32,
+        title: &str,
+        keywords: &[&str],
+        min_level: i32,
+    ) -> HelpEntry {
+        HelpEntry {
+            id,
+            title: title.to_string(),
+            content: format!("Body of {title}."),
+            min_level,
+            category: None,
+            usage: None,
+            duration: None,
+            sphere: None,
+            keywords: keywords.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    fn insert_help(cat: &mut HelpCatalog, entry: HelpEntry) {
+        for kw in &entry.keywords {
+            cat.by_keyword
+                .entry(kw.to_ascii_lowercase())
+                .or_default()
+                .push(entry.id);
+        }
+        cat.entries.insert(entry.id, entry);
+    }
+
+    fn fireball_only() -> HelpCatalog {
+        let mut c = HelpCatalog::default();
+        insert_help(&mut c, help_entry(1, "Fireball", &["FIREBALL", "FIRE BALL"], 0));
+        c
+    }
+
+    #[test]
+    fn help_lookup_exact_keyword_returns_found() {
+        let cat = fireball_only();
+        match cat.lookup("fireball", 50) {
+            HelpLookup::Found(e) => assert_eq!(e.title, "Fireball"),
+            other => panic!("expected Found, got {other:?}"),
+        }
+        // Case-insensitive.
+        match cat.lookup("FIREBALL", 50) {
+            HelpLookup::Found(e) => assert_eq!(e.title, "Fireball"),
+            other => panic!("expected Found, got {other:?}"),
+        }
+        // Multi-word keyword also matches.
+        match cat.lookup("fire ball", 50) {
+            HelpLookup::Found(e) => assert_eq!(e.title, "Fireball"),
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_lookup_substring_of_keyword_does_not_match() {
+        // "ball" is a substring of FIREBALL but not its own keyword,
+        // and "ball" isn't a title prefix of "Fireball" → NotFound.
+        let cat = fireball_only();
+        assert!(matches!(cat.lookup("ball", 50), HelpLookup::NotFound));
+        // "fire" IS a title prefix of "Fireball" → that's the
+        // title-prefix fallback, which is allowed.
+        match cat.lookup("fire", 50) {
+            HelpLookup::Found(e) => assert_eq!(e.title, "Fireball"),
+            other => panic!("expected title-prefix Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_lookup_min_level_hides_high_level_entries() {
+        let mut cat = HelpCatalog::default();
+        // Public spell — anyone can read.
+        insert_help(&mut cat, help_entry(1, "Fireball", &["FIREBALL"], 0));
+        // Staff-only article — players shouldn't even discover it exists.
+        insert_help(&mut cat, help_entry(2, "SlayCommand", &["SLAY"], 100));
+
+        // Low-level viewer hits Fireball fine.
+        assert!(matches!(cat.lookup("fireball", 1), HelpLookup::Found(_)));
+        // Low-level viewer asking for "slay" gets NotFound — the
+        // entry is in the keyword index but filtered out by level.
+        assert!(matches!(cat.lookup("slay", 1), HelpLookup::NotFound));
+        // Staff viewer sees it.
+        match cat.lookup("slay", 105) {
+            HelpLookup::Found(e) => assert_eq!(e.title, "SlayCommand"),
+            other => panic!("expected staff Found, got {other:?}"),
+        }
+        // visible_count obeys the gate too.
+        assert_eq!(cat.visible_count(1), 1);
+        assert_eq!(cat.visible_count(105), 2);
+    }
+
+    #[test]
+    fn help_lookup_multiple_matches_yields_ambiguous() {
+        let mut cat = HelpCatalog::default();
+        // Two distinct entries share the keyword "FIRE" — builder
+        // mistake or intentional gloss + spell collision. The lookup
+        // should hand the player the title list to disambiguate.
+        insert_help(&mut cat, help_entry(1, "Fireball", &["FIRE"], 0));
+        insert_help(&mut cat, help_entry(2, "Fire (Element)", &["FIRE"], 0));
+        match cat.lookup("fire", 50) {
+            HelpLookup::AmbiguousMatches(titles) => {
+                assert_eq!(titles.len(), 2);
+                assert!(titles.contains(&"Fireball".to_string()));
+                assert!(titles.contains(&"Fire (Element)".to_string()));
+            }
+            other => panic!("expected AmbiguousMatches, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_lookup_title_prefix_with_multiple_matches_is_ambiguous() {
+        let mut cat = HelpCatalog::default();
+        insert_help(&mut cat, help_entry(1, "Fireball", &["FIREBALL"], 0));
+        insert_help(&mut cat, help_entry(2, "Fireshield", &["FIRESHIELD"], 0));
+        // "fire" hits neither keyword exactly; the title-prefix
+        // fallback yields both — should surface as Ambiguous.
+        match cat.lookup("fire", 50) {
+            HelpLookup::AmbiguousMatches(titles) => {
+                assert_eq!(titles, vec!["Fireball".to_string(), "Fireshield".to_string()]);
+            }
+            other => panic!("expected AmbiguousMatches, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_lookup_empty_keyword_returns_not_found() {
+        let cat = fireball_only();
+        assert!(matches!(cat.lookup("", 50), HelpLookup::NotFound));
+        assert!(matches!(cat.lookup("   ", 50), HelpLookup::NotFound));
+    }
+
+    #[test]
+    fn help_lookup_duplicate_ids_under_same_keyword_resolves_to_single_match() {
+        // Pathological case: same entry id pushed twice into the
+        // keyword index (defensive — the loader shouldn't, but the
+        // table doesn't enforce keyword uniqueness across rows).
+        // Same title → treated as a single match, not Ambiguous.
+        let mut cat = HelpCatalog::default();
+        insert_help(&mut cat, help_entry(1, "Fireball", &["FIREBALL"], 0));
+        // Force a second push under the same keyword.
+        cat.by_keyword
+            .entry("fireball".to_string())
+            .or_default()
+            .push(1);
+        match cat.lookup("fireball", 50) {
+            HelpLookup::Found(e) => assert_eq!(e.title, "Fireball"),
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    // ---- LiquidCatalog ----
+
+    fn liquid(id: i32, name: &str, alias: &str, color: &str) -> LiquidDef {
+        LiquidDef {
+            id,
+            name: name.to_string(),
+            alias: alias.to_string(),
+            color_desc: color.to_string(),
+            drunk_effect: 0,
+            hunger_effect: 0,
+            thirst_effect: 10,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn liquid_catalog_lookup_by_alias_is_case_insensitive() {
+        let mut cat = LiquidCatalog::default();
+        cat.insert(liquid(1, "water", "water", "clear"));
+        cat.insert(liquid(5, "dark ale", "dark-ale", "dark"));
+        assert!(cat.lookup_alias("water").is_some());
+        assert!(cat.lookup_alias("WATER").is_some());
+        assert_eq!(cat.lookup_alias("dark-ale").unwrap().name, "dark ale");
+        assert!(cat.lookup_alias("nonexistent").is_none());
+        assert_eq!(cat.len(), 2);
+    }
+
+    #[test]
+    fn liquid_catalog_lookup_by_id() {
+        let mut cat = LiquidCatalog::default();
+        cat.insert(liquid(7, "lemonade", "lemonade", "yellow"));
+        cat.insert(liquid(8, "firebreather", "firebreather", "green"));
+        assert_eq!(cat.lookup_id(7).unwrap().alias, "lemonade");
+        assert_eq!(cat.lookup_id(8).unwrap().color_desc, "green");
+        assert!(cat.lookup_id(999).is_none());
+    }
+
+    #[test]
+    fn liquid_catalog_fallback_picks_water_when_present() {
+        let mut cat = LiquidCatalog::default();
+        cat.insert(liquid(1, "water", "water", "clear"));
+        let f = cat.fallback();
+        assert_eq!(f.alias, "water");
+        assert_eq!(f.id, 1);
+    }
+
+    #[test]
+    fn liquid_catalog_fallback_synthesizes_when_water_absent() {
+        // Empty catalog: still produces a usable LiquidDef so the
+        // drink path keeps working on a catalog-less test world.
+        let cat = LiquidCatalog::default();
+        let f = cat.fallback();
+        assert_eq!(f.alias, "water");
+        assert_eq!(f.drunk_effect, 0);
+        assert_eq!(f.thirst_effect, 10, "fallback quenches like water");
+    }
+
+    /// Build a minimal `RaceDef` for tests. Defaults match the
+    /// schema (76 stat caps, 100 factors). Callers override only
+    /// what they actually exercise.
+    fn race_def_for_test(
+        race: &str,
+        male_height: (i32, i32),
+        female_height: (i32, i32),
+        male_weight: (i32, i32),
+        female_weight: (i32, i32),
+        stat_caps: RaceStatCaps,
+    ) -> RaceDef {
+        RaceDef {
+            race: race.to_string(),
+            name: race.to_string(),
+            plain_name: race.to_string(),
+            keywords: String::new(),
+            playable: true,
+            humanoid: true,
+            magical: false,
+            race_align: "NEUTRAL".to_string(),
+            default_alignment: 0,
+            default_size: "MEDIUM".to_string(),
+            focus_bonus: 100,
+            default_lifeforce: "LIFE".to_string(),
+            male_weight_low: male_weight.0,
+            male_weight_high: male_weight.1,
+            male_height_low: male_height.0,
+            male_height_high: male_height.1,
+            female_weight_low: female_weight.0,
+            female_weight_high: female_weight.1,
+            female_height_low: female_height.0,
+            female_height_high: female_height.1,
+            stat_caps,
+            exp_factor: 100,
+            hp_factor: 100,
+            hit_damage_factor: 100,
+            damage_dice_factor: 100,
+            copper_factor: 100,
+            enter_verb: None,
+            leave_verb: None,
+            start_room_zone_id: None,
+            start_room_id: None,
+            resistances: HashMap::new(),
+            resistances_raw: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn race_catalog_random_height_lands_in_gender_range() {
+        let mut cat = RaceCatalog::default();
+        cat.by_race.insert(
+            "ELF".to_string(),
+            race_def_for_test(
+                "ELF",
+                (60, 72),
+                (56, 66),
+                (120, 180),
+                (100, 150),
+                RaceStatCaps::default(),
+            ),
+        );
+        for _ in 0..32 {
+            let m = cat.random_height("ELF", "male").expect("male band set");
+            assert!(
+                (60..=72).contains(&m),
+                "male height {m} outside [60,72]",
+            );
+            let f = cat
+                .random_height("ELF", "female")
+                .expect("female band set");
+            assert!(
+                (56..=66).contains(&f),
+                "female height {f} outside [56,66]",
+            );
+        }
+    }
+
+    #[test]
+    fn race_catalog_random_height_returns_none_for_unauthored() {
+        let cat = RaceCatalog::default();
+        assert!(cat.random_height("HUMAN", "male").is_none());
+        // Race in catalog but both height columns zero → unauthored.
+        let mut cat = RaceCatalog::default();
+        cat.by_race.insert(
+            "GHOST".to_string(),
+            race_def_for_test(
+                "GHOST",
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+                RaceStatCaps::default(),
+            ),
+        );
+        assert!(cat.random_height("GHOST", "male").is_none());
+    }
+
+    #[test]
+    fn race_catalog_random_weight_collapses_to_low_when_band_singular() {
+        let mut cat = RaceCatalog::default();
+        cat.by_race.insert(
+            "DWARF".to_string(),
+            race_def_for_test(
+                "DWARF",
+                (50, 60),
+                (48, 56),
+                (200, 200),
+                (180, 180),
+                RaceStatCaps::default(),
+            ),
+        );
+        assert_eq!(cat.random_weight("DWARF", "male"), Some(200));
+        assert_eq!(cat.random_weight("DWARF", "female"), Some(180));
+    }
+
+    #[test]
+    fn race_catalog_stat_cap_falls_back_for_unauthored_race() {
+        let cat = RaceCatalog::default();
+        assert_eq!(cat.stat_cap("UNKNOWN", "strength", 18), 18);
+    }
+
+    #[test]
+    fn race_catalog_stat_cap_reads_per_attribute_max() {
+        let mut cat = RaceCatalog::default();
+        cat.by_race.insert(
+            "GIANT".to_string(),
+            race_def_for_test(
+                "GIANT",
+                (90, 120),
+                (85, 110),
+                (300, 500),
+                (280, 460),
+                RaceStatCaps {
+                    strength: 80,
+                    dexterity: 60,
+                    constitution: 75,
+                    intelligence: 50,
+                    wisdom: 60,
+                    charisma: 60,
+                },
+            ),
+        );
+        assert_eq!(cat.stat_cap("GIANT", "str", i32::MAX), 80);
+        assert_eq!(cat.stat_cap("GIANT", "dex", i32::MAX), 60);
+        assert_eq!(cat.stat_cap("GIANT", "intelligence", i32::MAX), 50);
+        // Case-insensitive on the stat label.
+        assert_eq!(cat.stat_cap("GIANT", "Wisdom", i32::MAX), 60);
+        // Unknown stat token: caller's fallback wins.
+        assert_eq!(cat.stat_cap("GIANT", "luck", 42), 42);
+    }
+
+    #[test]
+    fn parse_resistance_json_drops_unknown_keys() {
+        let raw = serde_json::json!({
+            "FIRE": 25,
+            "ColD": -10,
+            "Wibble": 99,
+            "MENTAL": 50,
+        });
+        let map = parse_resistance_json(&raw);
+        assert_eq!(map.get(&mud_db::enums::ElementType::Fire), Some(&25));
+        assert_eq!(map.get(&mud_db::enums::ElementType::Cold), Some(&-10));
+        assert_eq!(map.get(&mud_db::enums::ElementType::Mental), Some(&50));
+        assert!(!map
+            .keys()
+            .any(|k| matches!(k, mud_db::enums::ElementType::Slash)));
+    }
+
+    #[test]
+    fn parse_resistance_json_handles_null_and_non_object() {
+        assert!(parse_resistance_json(&serde_json::json!(null)).is_empty());
+        assert!(parse_resistance_json(&serde_json::json!("FIRE")).is_empty());
+        assert!(parse_resistance_json(&serde_json::json!([1, 2, 3])).is_empty());
     }
 }

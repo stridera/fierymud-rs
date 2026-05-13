@@ -7,8 +7,8 @@ use mud_db::enums::UserRole;
 use mud_world::{Account, ClanMembership, Online, Player};
 
 use crate::commands::{
-    Category, Command, Connection, DbPool, Help, Prevent, effect_prevents, name_of,
-    send_to,
+    Category, Command, Connection, DbPool, Help, Prevent, effect_prevents, name_approval_gate,
+    name_of, send_comm_channel_text, send_to,
 };
 
 inventory::submit! {
@@ -56,6 +56,9 @@ fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Clan-tell what?\r\n");
         return;
     }
+    if name_approval_gate(world, player) {
+        return;
+    }
     if effect_prevents(world, player, Prevent::Speaking) {
         send_to(world, player, "Your voice is silenced.\r\n");
         return;
@@ -76,6 +79,10 @@ fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _)| e)
             .collect()
     };
+    // GMCP body keeps the abbrev prefix so a player in (history)
+    // multiple clans across alts can still tell which one is
+    // talking when their chat tab aggregates the channel.
+    let gmcp_text = format!("[{abbrev}] {player_name}: {message}");
     for t in targets {
         // Clan-tell channel tag in bold yellow (matches the
         // clan-abbreviation tag color already used on `who` and
@@ -91,6 +98,7 @@ fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
             )
         };
         send_to(world, t, line);
+        send_comm_channel_text(world, t, "clan", &player_name, &gmcp_text);
     }
 }
 

@@ -14,9 +14,9 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AttachedTriggers, CombatStats, Description, Health, Item, Keywords, LiquidContainer, Located,
+    AttachedTriggers, Description, Health, Item, Keywords, LiquidContainer, Located,
     Mob, MobPrototypes, MobResetCatalog, Mountable, Named, ObjectPrototypes, ObjectResetCatalog,
-    Posture, PostureKind, ShopCatalog, Shopkeeper, TriggerCatalog, WorldKey,
+    Posture, ShopCatalog, Shopkeeper, TriggerCatalog, WorldKey,
 };
 use mud_world::{FromMobReset, FromObjectReset};
 use tracing::info;
@@ -90,7 +90,6 @@ pub fn respawn_tick(world: &mut World) {
         let proto = world.resource::<MobPrototypes>().by_key.get(&proto_key).cloned();
         let Some(proto) = proto else { continue };
         let hp = proto.rolled_hp();
-        let dmg = proto.avg_damage();
         let shop_key = world
             .resource::<ShopCatalog>()
             .keeper_index
@@ -105,6 +104,7 @@ pub fn respawn_tick(world: &mut World) {
         // running `world_counts` is incremented locally so subsequent
         // reset rows for the same proto see the new count and stop
         // when full.
+        let spawn_posture = Posture::from_default_position(proto.default_position);
         let mut em = world.spawn((
             Mob,
             Named { name: proto.name.clone() },
@@ -113,16 +113,29 @@ pub fn respawn_tick(world: &mut World) {
             WorldKey { zone: proto.zone_id, id: proto.id },
             Located(entry.room_entity),
             Health { hp, max: hp },
-            CombatStats {
-                hit_roll: proto.hit_roll,
-                dmg_roll: dmg,
-                ac: proto.armor_class,
-                alignment: proto.alignment,
-                ward_pct: proto.ward_percent,
-            },
-            Posture(PostureKind::Standing),
+            proto.derived_combat_stats(),
+            Posture(spawn_posture),
             FromMobReset(entry.reset_id),
+            mud_world::NaturalDamage {
+                num: proto.damage_dice_num,
+                size: proto.damage_dice_size,
+                bonus: proto.damage_dice_bonus,
+            },
         ));
+        // Mob latent parity (Wave 2.L) — same set the loader attaches.
+        em.insert((
+            mud_world::Sized(proto.size),
+            mud_world::LifeForceTag(proto.life_force),
+            mud_world::NaturalAttackType(proto.damage_type),
+            mud_world::MobTraits(proto.traits.clone()),
+            mud_world::MovementModeTag(proto.default_movement_mode),
+        ));
+        if proto.move_points > 0 {
+            em.insert(mud_world::MovementPoints {
+                current: proto.move_points,
+                max: proto.move_points,
+            });
+        }
         if let Some((shop_zone_id, shop_id)) = shop_key {
             em.insert(Shopkeeper { shop_zone_id, shop_id });
         }
@@ -136,7 +149,11 @@ pub fn respawn_tick(world: &mut World) {
         if !proto.examine_description.trim().is_empty() {
             em.insert(mud_world::ExamineText(proto.examine_description.clone()));
         }
-        if proto.keywords.iter().any(|k| {
+        let mount_via_trait = proto
+            .traits
+            .iter()
+            .any(|t| matches!(t, mud_db::enums::MobTrait::Mount));
+        let mount_via_keyword = proto.keywords.iter().any(|k| {
             let lc = k.to_ascii_lowercase();
             lc.contains("horse")
                 || lc.contains("steed")
@@ -144,7 +161,8 @@ pub fn respawn_tick(world: &mut World) {
                 || lc.contains("donkey")
                 || lc.contains("mare")
                 || lc.contains("nightmare")
-        }) {
+        });
+        if mount_via_trait || mount_via_keyword {
             em.insert(Mountable);
         }
         reset_id_alive.insert(entry.reset_id);

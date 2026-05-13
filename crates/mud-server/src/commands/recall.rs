@@ -32,6 +32,21 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "You can't recall while fighting!\r\n");
         return;
     }
+    // NoRecallRoom gate — `Room.allows_recall = false` blocks the
+    // teleport home. Checked before the recall-point lookup so a
+    // player who hasn't bound one yet still gets the dead-magic
+    // refusal rather than the "no recall point" message that
+    // would imply touching a touchstone here might help.
+    if let Some(located) = world.get::<Located>(player)
+        && world.get::<mud_world::NoRecallRoom>(located.0).is_some()
+    {
+        send_to(
+            world,
+            player,
+            "Some power blocks your recall.\r\n",
+        );
+        return;
+    }
     let Some(target) = world.get::<RecallPoint>(player).map(|r| r.0) else {
         send_to(
             world,

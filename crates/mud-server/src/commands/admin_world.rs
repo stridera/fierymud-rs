@@ -8,9 +8,9 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use tracing::info;
 use mud_world::{
-    Account, AppliedTo, CombatStats, Description, EffectCatalog, EffectInstance,
+    Account, AppliedTo, Description, EffectCatalog, EffectInstance,
     EffectSource, Fighting, Frozen, Health, Item, Keywords, Located, Mob, MobPrototypes,
-    Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Stamina, Wealth,
+    Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, Profile, Stamina, Wealth,
     WearableIn, WorldKey, WorldKeyIndex,
 };
 
@@ -1192,16 +1192,10 @@ pub(crate) fn cmd_load(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "loadobj", args);
     let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() != 2 {
-        send_to(world, player, "Usage: loadobj <zone_id> <obj_id>\r\n");
-        return;
-    }
-    let Ok(zone) = parts[0].parse::<i32>() else {
-        send_to(world, player, "Invalid zone id.\r\n");
-        return;
-    };
-    let Ok(obj_id) = parts[1].parse::<i32>() else {
-        send_to(world, player, "Invalid object id.\r\n");
+    let Some((zone, obj_id)) =
+        super::admin_inspect::try_parse_zone_id(world, player, &parts)
+    else {
+        send_to(world, player, "Usage: loadobj [<zone_id>] <obj_id>\r\n");
         return;
     };
 
@@ -1264,6 +1258,12 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
             remaining: fuel.remaining,
         });
     }
+    if !proto.flags.is_empty() {
+        bundle.insert(mud_world::ObjectFlags(proto.flags.clone()));
+    }
+    if !proto.restrictions.is_empty() {
+        bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
+    }
     let item = bundle.id();
     // Populate Charges from the first ObjectAbilities binding
     // (wands and staves carry finite-use charges in the schema's
@@ -1296,16 +1296,10 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "summon", args);
     let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() != 2 {
-        send_to(world, player, "Usage: summon <zone_id> <mob_id>\r\n");
-        return;
-    }
-    let Ok(zone) = parts[0].parse::<i32>() else {
-        send_to(world, player, "Invalid zone id.\r\n");
-        return;
-    };
-    let Ok(mob_id) = parts[1].parse::<i32>() else {
-        send_to(world, player, "Invalid mob id.\r\n");
+    let Some((zone, mob_id)) =
+        super::admin_inspect::try_parse_zone_id(world, player, &parts)
+    else {
+        send_to(world, player, "Usage: summon [<zone_id>] <mob_id>\r\n");
         return;
     };
 
@@ -1325,6 +1319,20 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
+    // NoSummonRoom gate — `Room.allows_summon = false` refuses any
+    // mob materialization in this room (anti-summon wards, planar
+    // boundaries). Admin staff still see the refusal; legacy
+    // parity left even imm-tier verbs honoring the gate so that
+    // sanctuary content stays inviolate. To override, builders
+    // must clear the flag first.
+    if world.get::<mud_world::NoSummonRoom>(room).is_some() {
+        send_to(
+            world,
+            player,
+            "An anti-summon ward in this room rebuffs the call.\r\n",
+        );
+        return;
+    }
 
     let hp = proto.rolled_hp();
     let dmg = proto.avg_damage();
@@ -1332,10 +1340,24 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     let proto_keywords = proto.keywords.clone();
     let proto_room_desc = proto.room_description.clone();
     let proto_examine_desc = proto.examine_description.clone();
-    let proto_alignment = proto.alignment;
-    let proto_hit_roll = proto.hit_roll;
-    let proto_armor_class = proto.armor_class;
-    let proto_ward_percent = proto.ward_percent;
+    let proto_dmg_dice_num = proto.damage_dice_num;
+    let proto_dmg_dice_size = proto.damage_dice_size;
+    let proto_dmg_dice_bonus = proto.damage_dice_bonus;
+    let derived_combat = proto.derived_combat_stats();
+    // Derive spawn posture from the proto's `default_position`,
+    // matching the loader path. Keeps `summon` and the boot-time
+    // reset-pass spawn behavior in sync.
+    let spawn_posture = Posture::from_default_position(proto.default_position);
+    let proto_size = proto.size;
+    let proto_life_force = proto.life_force;
+    let proto_damage_type = proto.damage_type;
+    let proto_traits = proto.traits.clone();
+    let proto_default_movement = proto.default_movement_mode;
+    let proto_move_points = proto.move_points;
+    let mount_via_trait = proto
+        .traits
+        .iter()
+        .any(|t| matches!(t, mud_db::enums::MobTrait::Mount));
 
     let mob_entity = world
         .spawn((
@@ -1345,16 +1367,34 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
             Description(proto_room_desc),
             Located(room),
             Health { hp, max: hp },
-            CombatStats {
-                hit_roll: proto_hit_roll,
-                dmg_roll: dmg,
-                ac: proto_armor_class,
-                alignment: proto_alignment,
-                ward_pct: proto_ward_percent,
+            derived_combat,
+            Posture(spawn_posture),
+            mud_world::NaturalDamage {
+                num: proto_dmg_dice_num,
+                size: proto_dmg_dice_size,
+                bonus: proto_dmg_dice_bonus,
             },
-            Posture(PostureKind::Standing),
         ))
         .id();
+    // Mob latent parity (Wave 2.L) — same set the loader attaches.
+    if let Ok(mut em) = world.get_entity_mut(mob_entity) {
+        em.insert((
+            mud_world::Sized(proto_size),
+            mud_world::LifeForceTag(proto_life_force),
+            mud_world::NaturalAttackType(proto_damage_type),
+            mud_world::MobTraits(proto_traits),
+            mud_world::MovementModeTag(proto_default_movement),
+        ));
+        if proto_move_points > 0 {
+            em.insert(mud_world::MovementPoints {
+                current: proto_move_points,
+                max: proto_move_points,
+            });
+        }
+        if mount_via_trait {
+            em.insert(mud_world::Mountable);
+        }
+    }
     if !proto_examine_desc.trim().is_empty()
         && let Ok(mut em) = world.get_entity_mut(mob_entity)
     {
@@ -1365,7 +1405,7 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         world,
         player,
         &format!(
-            "Summoned {proto_name} (entity {mob_entity:?}) — HP {hp}, dmg {dmg}.\r\n"
+            "Summoned {proto_name} (entity {mob_entity:?}) — HP {hp}, dmg avg {dmg}.\r\n"
         ),
     );
     let player_name = name_of(world, player);
@@ -2534,6 +2574,18 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("No room ({zone}, {room_id}).\r\n"));
         return;
     };
+    // NoTeleportRoom gate — `Room.allows_teleport = false` on the
+    // *destination* refuses the teleport (legacy gates the target,
+    // not the origin). Admin staff still honor it: builders clear
+    // the flag explicitly when staging an admin destination.
+    if world.get::<mud_world::NoTeleportRoom>(dest).is_some() {
+        send_to(
+            world,
+            player,
+            &format!("Room ({zone}, {room_id}) refuses inbound teleports.\r\n"),
+        );
+        return;
+    }
     let admin_name = name_of(world, player);
     let target_name = name_of(world, target);
     let Some(src_loc) = world.get::<Located>(target).copied() else {
@@ -2690,6 +2742,17 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Couldn't resolve a destination.\r\n");
         return;
     };
+    // NoTeleportRoom gate on the destination — same contract as
+    // `cmd_teleport`. The gate honors staff: builders must clear
+    // the flag before they can `goto` into a no-teleport room.
+    if world.get::<mud_world::NoTeleportRoom>(target).is_some() {
+        send_to(
+            world,
+            player,
+            "That room refuses inbound teleports.\r\n",
+        );
+        return;
+    }
     let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);
     if let Some(mut l) = world.get_mut::<Located>(player) {
         l.0 = target;

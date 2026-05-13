@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AttachedTriggers, Located, Mob, Room, ScriptError, ScriptErrorLog, TriggerCatalog,
-    TriggerEvent, WorldKey,
+    AttachedTriggers, DeferredRoomTriggerFire, DeferredRoomTriggerFires, Located, Mob, Room,
+    ScriptError, ScriptErrorLog, TriggerCatalog, TriggerEvent, WorldKey, WorldKeyIndex,
 };
 use tracing::warn;
 
@@ -638,10 +638,100 @@ pub fn fire_load_for_all_mobs(world: &mut World) {
     tracing::info!(mobs = count, "fired LOAD triggers for spawned mobs");
 }
 
+/// Fire every trigger attached to `room` with `self = room` and
+/// `actor = caller` (falling back to `room` when the caller is
+/// gone). Used by the deferred-fire drain to honor a Lua
+/// `run_room_trigger(zone, id)` call from another script.
+///
+/// Unlike `fire_event`, we do NOT filter by event flag — the
+/// legacy DG-Script `run_room_trigger` invokes the room's
+/// script unconditionally, and the corpus's target triggers
+/// (zones 117 / 123 / 163 / 185) are authored with probability
+/// 0% so they never fire on their own; `run_room_trigger` is
+/// the only entry that wakes them. Filtering by flag would
+/// require choosing one (PREENTRY? RANDOM?) and miss the
+/// others.
+fn fire_all_room_triggers(world: &mut World, room: Entity, caller: Option<Entity>) {
+    let to_fire: Vec<(i32, i32, String, String)> = {
+        let Some(at) = world.get::<AttachedTriggers>(room) else {
+            return;
+        };
+        let keys = at.0.clone();
+        let catalog = world.resource::<TriggerCatalog>();
+        keys.into_iter()
+            .filter_map(|(zone, id)| {
+                let def = catalog.by_key.get(&(zone, id))?;
+                Some((zone, id, def.name.clone(), def.commands.clone()))
+            })
+            .collect()
+    };
+    if to_fire.is_empty() {
+        return;
+    }
+    // If the caller is gone (despawned between enqueue and drain),
+    // bind `actor` to the room itself — matches legacy "no actor"
+    // semantics and keeps the body from seeing a stale entity.
+    let acting = caller
+        .filter(|&e| world.get_entity(e).is_ok())
+        .unwrap_or(room);
+    for (zone, id, name, body) in to_fire {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
+            host.exec_for_listener_with_extras(world, room, acting, &body, &[])
+        });
+        drain_lua_outbox(world);
+        // Pick a representative event for the history row — RANDOM
+        // is the closest legacy match for "fired manually with no
+        // particular event context."
+        record_fire(world, room, zone, id, TriggerEvent::Random, result.is_ok());
+        if let Err(e) = result {
+            record_failure(world, zone, id, &name, "RUN_ROOM_TRIGGER", &e);
+        }
+    }
+}
+
+/// Drain the `DeferredRoomTriggerFires` queue, firing each entry
+/// against the target room. Called from `lua_coroutine_tick` so
+/// the drain happens once per world tick, outside any Lua frame
+/// (no re-entrancy hazard).
+///
+/// Entries whose target room doesn't resolve via `WorldKeyIndex`
+/// are silently dropped — same shape as `get_room(zone, id)`
+/// returning nil, which the corpus already tolerates.
+pub fn drain_deferred_room_triggers(world: &mut World) {
+    let pending: Vec<DeferredRoomTriggerFire> = {
+        let Some(mut q) = world.get_resource_mut::<DeferredRoomTriggerFires>() else {
+            return;
+        };
+        std::mem::take(&mut q.queue)
+    };
+    if pending.is_empty() {
+        return;
+    }
+    for entry in pending {
+        let key = (entry.room_zone, entry.room_id);
+        let room_entity = world
+            .get_resource::<WorldKeyIndex>()
+            .and_then(|idx| idx.rooms.get(&key).copied());
+        let Some(room_entity) = room_entity else {
+            tracing::warn!(
+                zone = entry.room_zone,
+                id = entry.room_id,
+                "run_room_trigger target room not found in WorldKeyIndex"
+            );
+            continue;
+        };
+        fire_all_room_triggers(world, room_entity, entry.caller);
+    }
+}
+
 /// Tick system: advance the `LuaHost`'s view of the current tick, then
 /// resume any parked threads whose `wait(N)` deadline has passed.
 /// `LuaOutbox` is drained inline after the resume pass since
 /// resumed bodies may emit `actor:send` / `room.send` lines.
+///
+/// After the resume pass we drain `DeferredRoomTriggerFires` —
+/// any `run_room_trigger(zone, id)` calls made from triggers
+/// during the tick get fired now, outside any Lua frame.
 pub fn lua_coroutine_tick(world: &mut World) {
     let tick = world.resource::<crate::TickCount>().0;
     let (resumed, parked) = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
@@ -653,4 +743,5 @@ pub fn lua_coroutine_tick(world: &mut World) {
         crate::commands::drain_lua_outbox(world);
         tracing::info!(resumed, parked, "lua_coroutine_tick resumed parked threads");
     }
+    drain_deferred_room_triggers(world);
 }

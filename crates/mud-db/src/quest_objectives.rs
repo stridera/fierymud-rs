@@ -348,14 +348,25 @@ pub struct ObjectiveListingRow {
     pub phase_id: i32,
     pub phase_name: String,
     pub phase_order: i32,
+    /// Builder-authored phase blurb (Wave 4.8). Rendered after the
+    /// phase header when present, before the objective lines.
+    pub phase_description: Option<String>,
     pub objective_id: i32,
     pub player_description: String,
+    /// Builder-only note (Wave 4.7). Surfaced only to staff viewers.
+    pub internal_note: Option<String>,
     pub required_count: i32,
     pub current_count: i32,
     pub completed: bool,
     pub show_progress: bool,
     pub scope: String,
     pub current_phase_id: Option<i32>,
+    /// Objective type discriminator — needed so `qcheck` /
+    /// `cmd_quests` can distinguish `CUSTOM_LUA` rows from the
+    /// kill/collect/visit/etc paths.
+    pub objective_type: String,
+    /// CUSTOM_LUA expression (Wave 4.5). NULL for other types.
+    pub lua_expression: Option<String>,
 }
 
 /// Per-objective snapshot for one CharacterQuest. Returns rows
@@ -372,14 +383,18 @@ pub async fn list_for_quest(
             qo.phase_id AS "phase_id!: i32",
             qp.name AS "phase_name!: String",
             qp."order" AS "phase_order!: i32",
+            qp.description AS "phase_description: String",
             qo.id AS "objective_id!: i32",
             qo.player_description AS "player_description!: String",
+            qo.internal_note AS "internal_note: String",
             qo.required_count AS "required_count!: i32",
             COALESCE(cqo.current_count, 0) AS "current_count!: i32",
             COALESCE(cqo.completed, false) AS "completed!: bool",
             qo.show_progress AS "show_progress!: bool",
             qo.scope::text AS "scope!: String",
-            cq.current_phase_id AS "current_phase_id: i32"
+            cq.current_phase_id AS "current_phase_id: i32",
+            qo.objective_type::text AS "objective_type!: String",
+            qo.lua_expression AS "lua_expression: String"
         FROM "CharacterQuest" cq
         JOIN "QuestObjective" qo
             ON qo.quest_zone_id = cq.quest_zone_id
@@ -403,21 +418,92 @@ pub async fn list_for_quest(
     .await
 }
 
-/// One reward row joined for the post-completion grant.
+/// CUSTOM_LUA objective row for sweep evaluation (Wave 4.5). One
+/// row per in-progress CUSTOM_LUA objective the character holds.
+/// The sweep evaluates `lua_expression` for each and bumps progress
+/// when it returns truthy.
+#[derive(Debug, Clone)]
+pub struct CustomLuaObjective {
+    pub character_id: String,
+    pub character_quest_id: String,
+    pub quest_zone_id: i32,
+    pub quest_id: i32,
+    pub phase_id: i32,
+    pub objective_id: i32,
+    pub required_count: i32,
+    pub current_count: i32,
+    pub lua_expression: String,
+    pub player_description: String,
+    pub show_progress: bool,
+    pub variables: serde_json::Value,
+}
+
+/// All active `CUSTOM_LUA` objectives across every IN_PROGRESS
+/// CharacterQuest for one character (Wave 4.5).
+pub async fn list_custom_lua_for_character(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Vec<CustomLuaObjective>> {
+    sqlx::query_as!(
+        CustomLuaObjective,
+        r#"
+        SELECT
+            cq.character_id AS "character_id!: String",
+            cq.id AS "character_quest_id!: String",
+            qo.quest_zone_id AS "quest_zone_id!: i32",
+            qo.quest_id AS "quest_id!: i32",
+            qo.phase_id AS "phase_id!: i32",
+            qo.id AS "objective_id!: i32",
+            qo.required_count AS "required_count!: i32",
+            COALESCE(cqo.current_count, 0) AS "current_count!: i32",
+            qo.lua_expression AS "lua_expression!: String",
+            qo.player_description AS "player_description!: String",
+            qo.show_progress AS "show_progress!: bool",
+            cq.variables AS "variables!: serde_json::Value"
+        FROM "CharacterQuest" cq
+        JOIN "QuestObjective" qo
+            ON qo.quest_zone_id = cq.quest_zone_id
+           AND qo.quest_id = cq.quest_id
+        LEFT JOIN "CharacterQuestObjective" cqo
+            ON cqo.character_quest_id = cq.id
+           AND cqo.quest_zone_id = qo.quest_zone_id
+           AND cqo.quest_id = qo.quest_id
+           AND cqo.phase_id = qo.phase_id
+           AND cqo.objective_id = qo.id
+        WHERE cq.character_id = $1
+          AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.objective_type = 'CUSTOM_LUA'::"QuestObjectiveType"
+          AND qo.lua_expression IS NOT NULL
+          AND COALESCE(cqo.completed, false) = false
+        "#,
+        character_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// One reward row joined for the post-completion grant. Wave 4
+/// added the reward `id` (so `qreward` can identify a chosen
+/// option), `choice_group` (Wave 4.6), and `condition` Lua
+/// (Wave 4.9).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuestRewardRow {
+    pub id: i32,
     pub reward_type: String,
     pub amount: Option<i32>,
     pub object_zone_id: Option<i32>,
     pub object_id: Option<i32>,
     pub ability_id: Option<i32>,
     pub quantity: i32,
+    pub choice_group: Option<i32>,
+    pub condition: Option<String>,
 }
 
 /// All non-choice rewards across every phase of a quest. Choice
 /// groups (one-of-N) are filtered out — the runtime grants only
 /// unconditional rewards in the auto-complete path; choice
-/// rewards wait on a `qreward` selection command (future).
+/// rewards are served separately by `list_choice_rewards`
+/// (Wave 4.6).
 pub async fn list_quest_rewards(
     pool: &PgPool,
     quest_zone_id: i32,
@@ -427,12 +513,15 @@ pub async fn list_quest_rewards(
         QuestRewardRow,
         r#"
         SELECT
+            id AS "id!: i32",
             reward_type::text AS "reward_type!: String",
             amount,
             object_zone_id,
             object_id,
             ability_id,
-            quantity AS "quantity!: i32"
+            quantity AS "quantity!: i32",
+            choice_group,
+            condition
         FROM "QuestReward"
         WHERE quest_zone_id = $1
           AND quest_id = $2
@@ -442,6 +531,105 @@ pub async fn list_quest_rewards(
         quest_id,
     )
     .fetch_all(pool)
+    .await
+}
+
+/// Conditional non-choice rewards (Wave 4.10). The async auto-grant
+/// path can't evaluate Lua, so rewards with a non-null/non-empty
+/// `condition` are deferred and surfaced through `qreward`. This
+/// list feeds the `qreward` listing alongside choice groups.
+pub async fn list_conditional_rewards(
+    pool: &PgPool,
+    quest_zone_id: i32,
+    quest_id: i32,
+) -> sqlx::Result<Vec<QuestRewardRow>> {
+    sqlx::query_as!(
+        QuestRewardRow,
+        r#"
+        SELECT
+            id AS "id!: i32",
+            reward_type::text AS "reward_type!: String",
+            amount,
+            object_zone_id,
+            object_id,
+            ability_id,
+            quantity AS "quantity!: i32",
+            choice_group,
+            condition
+        FROM "QuestReward"
+        WHERE quest_zone_id = $1
+          AND quest_id = $2
+          AND choice_group IS NULL
+          AND condition IS NOT NULL
+          AND length(trim(condition)) > 0
+        ORDER BY id
+        "#,
+        quest_zone_id,
+        quest_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// All choice-group rewards for a quest, grouped by `choice_group`
+/// (Wave 4.6). Player picks one per group at completion via
+/// `qreward <group> <choice-id>`.
+pub async fn list_choice_rewards(
+    pool: &PgPool,
+    quest_zone_id: i32,
+    quest_id: i32,
+) -> sqlx::Result<Vec<QuestRewardRow>> {
+    sqlx::query_as!(
+        QuestRewardRow,
+        r#"
+        SELECT
+            id AS "id!: i32",
+            reward_type::text AS "reward_type!: String",
+            amount,
+            object_zone_id,
+            object_id,
+            ability_id,
+            quantity AS "quantity!: i32",
+            choice_group,
+            condition
+        FROM "QuestReward"
+        WHERE quest_zone_id = $1
+          AND quest_id = $2
+          AND choice_group IS NOT NULL
+        ORDER BY choice_group, id
+        "#,
+        quest_zone_id,
+        quest_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Fetch a single reward row by primary key (Wave 4.6). Used by
+/// `qreward` to validate the player-supplied selection.
+pub async fn get_reward(
+    pool: &PgPool,
+    reward_id: i32,
+) -> sqlx::Result<Option<QuestRewardRow>> {
+    sqlx::query_as!(
+        QuestRewardRow,
+        r#"
+        SELECT
+            id AS "id!: i32",
+            reward_type::text AS "reward_type!: String",
+            amount,
+            object_zone_id,
+            object_id,
+            ability_id,
+            quantity AS "quantity!: i32",
+            choice_group,
+            condition
+        FROM "QuestReward"
+        WHERE id = $1
+        "#,
+        reward_id,
+    )
+    .fetch_optional(pool)
     .await
 }
 

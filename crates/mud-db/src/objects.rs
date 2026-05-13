@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::enums::{Alignment, ObjectType, WearFlag};
+use crate::enums::{Alignment, ObjectFlag, ObjectRestriction, ObjectType, WearFlag};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Object {
@@ -32,6 +32,16 @@ pub struct Object {
     /// labels (HUMAN / ELF / ...) for direct comparison against
     /// `Profile.race` which is also kept as a string.
     pub restricted_races: Vec<String>,
+    /// Boolean attribute flags from `Objects.flags` — GLOW / HUM /
+    /// INVISIBLE / MAGIC / etc. Read at spawn time and stamped on
+    /// the entity as an `ObjectFlags` component; consumers gate on
+    /// them via component lookup rather than walking the proto.
+    pub flags: Vec<ObjectFlag>,
+    /// "Can't do that" restrictions from `Objects.restrictions` —
+    /// NO_DROP / NO_TAKE / NO_SELL / etc. Same per-instance
+    /// stamping as `flags`; command handlers consult the component
+    /// before mutating world state.
+    pub restrictions: Vec<ObjectRestriction>,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -53,7 +63,9 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             values AS "values!: serde_json::Value",
             restricted_alignments AS "restricted_alignments!: Vec<Alignment>",
             restricted_class_ids AS "restricted_class_ids!: Vec<i32>",
-            restricted_races::text[] AS "restricted_races!: Vec<String>"
+            restricted_races::text[] AS "restricted_races!: Vec<String>",
+            flags AS "flags!: Vec<ObjectFlag>",
+            restrictions AS "restrictions!: Vec<ObjectRestriction>"
         FROM "Objects"
         ORDER BY zone_id, id
         "#

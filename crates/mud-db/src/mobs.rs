@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::enums::{MobBehavior, MobProfession, MobRole, ProtectedKind};
+use crate::enums::{
+    DamageType, LifeForce, MobBehavior, MobProfession, MobRole, MobTrait, MovementMode, Position,
+    ProtectedKind, Size,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mob {
@@ -24,8 +27,21 @@ pub struct Mob {
     pub damage_dice_num: i32,
     pub damage_dice_size: i32,
     pub damage_dice_bonus: i32,
-    pub hit_roll: i32,
-    pub armor_class: i32,
+    // Combat redesign axes — direct mirror of `Mobs` schema columns.
+    // See `docs/design/combat.md` for the offense/defense split.
+    pub accuracy: i32,
+    pub evasion: i32,
+    pub attack_power: i32,
+    pub spell_power: i32,
+    pub penetration_flat: i32,
+    pub penetration_percent: i32,
+    pub armor_rating: i32,
+    pub damage_reduction_percent: i32,
+    pub soak: i32,
+    pub hardness: i32,
+    pub perception: i32,
+    pub concealment: i32,
+    pub resistances: serde_json::Value,
     /// Magical mitigation percentage from `Mobs.ward_percent`. Engaged
     /// at combat pipeline step 5 when the damage source is magical.
     /// Zero on most mobs; raised on boss content.
@@ -56,6 +72,42 @@ pub struct Mob {
     /// for unspecified mobs. Lua bodies use this for
     /// `actor.race == "elf"`-style gating.
     pub race: String,
+    /// Body / form size class. Drives bash/drag/mount size-disparity
+    /// gates and the player-facing examine summary ("It is a HUGE
+    /// creature."). `MEDIUM` is the schema default.
+    pub size: Size,
+    /// Vitality category — gates holy/unholy interactions, undead
+    /// detection, and certain elemental immunities. `LIFE` is the
+    /// default for organic mobs; UNDEAD/DEMONIC/CELESTIAL drive the
+    /// faction-style ability filters.
+    pub life_force: LifeForce,
+    /// Natural attack flavor for the mob's unarmed swing (claws,
+    /// bites, gores, etc). Drives the combat-narration verb in
+    /// `attack_message`. `HIT` is the generic fallback.
+    pub damage_type: DamageType,
+    /// Movement-point pool size (legacy "move" column — renamed to
+    /// avoid the Rust keyword collision). Mob's stamina equivalent
+    /// for long wanders; consumed by `wander_tick`, restored by
+    /// `regen_tick`. Zero on mobs that don't have a pool.
+    pub move_points: i32,
+    /// Initial posture on spawn. STANDING for the vast majority of
+    /// mobs; SLEEPING for dragons in hoards, SITTING for tavern
+    /// patrons, etc. `respawn::spawn_mob` derives the runtime
+    /// `Posture` component from this.
+    pub default_position: Position,
+    /// Identity-flag list: what the mob IS (illusion / animated /
+    /// mount / aquatic / summoned / pet / ...). Per-spawn instances
+    /// receive a `MobTraits` component carrying the same list.
+    pub traits: Vec<MobTrait>,
+    /// Live movement mode at spawn — usually equals
+    /// `default_movement_mode`. Loaded as a snapshot in case content
+    /// authors want to author a non-default starting mode (e.g.
+    /// flying drake patrolling above the cliffs).
+    pub movement_mode: MovementMode,
+    /// Reset / re-spawn movement mode. Re-applied each time the mob
+    /// respawns from this proto. Tracks "this is how this creature
+    /// fundamentally moves" — flying drakes always come back flying.
+    pub default_movement_mode: MovementMode,
 }
 
 pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
@@ -78,8 +130,19 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             damage_dice_num,
             damage_dice_size,
             damage_dice_bonus,
-            hit_roll,
-            armor_class,
+            accuracy,
+            evasion,
+            attack_power,
+            spell_power,
+            penetration_flat,
+            penetration_percent,
+            armor_rating,
+            damage_reduction_percent,
+            soak,
+            hardness,
+            perception,
+            concealment,
+            resistances AS "resistances!: serde_json::Value",
             ward_percent,
             wealth,
             class_id,
@@ -87,7 +150,15 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             protected_kind AS "protected_kind!: ProtectedKind",
             professions AS "professions!: Vec<MobProfession>",
             gender::text AS "gender!",
-            race::text AS "race!"
+            race::text AS "race!",
+            size AS "size!: Size",
+            "lifeForce" AS "life_force!: LifeForce",
+            "damageType" AS "damage_type!: DamageType",
+            "move" AS "move_points!",
+            "defaultPosition" AS "default_position!: Position",
+            traits AS "traits!: Vec<MobTrait>",
+            movement_mode AS "movement_mode!: MovementMode",
+            default_movement_mode AS "default_movement_mode!: MovementMode"
         FROM "Mobs"
         ORDER BY zone_id, id
         "#

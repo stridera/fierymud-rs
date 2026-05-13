@@ -25,7 +25,7 @@ use mud_net::Outbound;
 use mud_world::{
     AbilityCatalog, Account, AppliedTo, ClassCatalog, CombatStats, Cooldowns, CoreStats,
     Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, Exits, Fighting,
-    Follower, Frozen, Health, Item, Keywords, KnownAbilities, LastInputAt, Located,
+    Follower, Frozen, Ghost, Health, Item, Keywords, KnownAbilities, LastInputAt, Located,
     Mob, MobPrototypes, Named, ObjectPrototypes, Player, PlayerFlags, Posture,
     PostureKind, Profile, Prompt, BankWealth, BoardDraft, MailDraft,
     RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, Wealth,
@@ -258,6 +258,10 @@ inventory::collect!(AsyncCommand);
 // without renaming it to `commands/mod.rs`. Adding a new file
 // here is the only edit needed when migrating an existing command
 // (or shipping a new one) — no central array touch.
+#[path = "commands/account_bank.rs"]
+mod account_bank;
+#[path = "commands/account_chest.rs"]
+mod account_chest;
 #[path = "commands/admin_inspect.rs"]
 mod admin_inspect;
 #[path = "commands/admin_management.rs"]
@@ -282,9 +286,13 @@ mod enter;
 mod feedback;
 #[path = "commands/housing.rs"]
 mod housing;
+#[path = "commands/identity.rs"]
+mod identity;
+#[path = "commands/name_approval.rs"]
+mod name_approval;
 #[path = "commands/info.rs"]
 mod info;
-pub(crate) use info::cmd_look;
+pub(crate) use info::{cmd_look, has_object_flag, has_restriction};
 #[path = "commands/mail.rs"]
 mod mail;
 pub(crate) use mail::{cmd_mail_stub, compose_mail_step};
@@ -813,6 +821,42 @@ thread_local! {
         = std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
+/// Push a `Comm.Channel.Text` GMCP frame to one recipient. Lets
+/// chat commands (gossip, wiznet, tell, ctell, room speech) hand
+/// the client a structured chat feed in addition to the rendered
+/// text — Mudlet and the major web clients use it to route
+/// messages to dedicated tabs without screen-scraping. `channel`
+/// is the routing key carried in the JSON payload (`"gossip"`,
+/// `"wiznet"`, `"tells"`, ...), NOT the GMCP package name (which
+/// is always `Comm.Channel.Text`, per the IRE spec).
+///
+/// `talker` and `text` are color-stripped before serialization so
+/// clients re-style consistently. By convention `text` is the
+/// rendered third-person line (e.g. `"Strider gossips, \"hi\""`)
+/// — the client uses it as the body to display, with `talker` and
+/// `channel` available for filtering and per-channel styling.
+///
+/// No-op when `recipient` has no `Connection` (mob target,
+/// switched puppet without its own session, disconnected player).
+pub(crate) fn send_comm_channel_text(
+    world: &World,
+    recipient: Entity,
+    channel: &str,
+    talker: &str,
+    text: &str,
+) {
+    let Some(conn) = world.get::<Connection>(recipient) else { return };
+    let plain_speaker = render_color_tags(talker, ColorMode::Strip);
+    let plain_text = render_color_tags(text, ColorMode::Strip);
+    let payload = format!(
+        r#"{{"channel":"{}","talker":"{}","text":"{}"}}"#,
+        channel,
+        plain_speaker.replace('\\', "\\\\").replace('"', "\\\""),
+        plain_text.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Comm.Channel.Text", &payload));
+}
+
 /// Drain `LuaOutbox` queued by `room.send(msg)` /
 /// `room.send_except(target, msg)` calls during a Lua trigger fire.
 /// Each `(room, msg, except)` is broadcast to every player whose
@@ -883,6 +927,57 @@ pub(crate) fn flush_prompts(world: &mut World) {
     for entity in recipients {
         if world.get_entity(entity).is_ok() {
             send_prompt(world, entity);
+        }
+    }
+}
+
+/// Pump the real-time syslog WARN+ broadcast queue. Called once per
+/// tick from `main.rs`. Drains every entry the tracing layer has
+/// pushed since the previous tick and fans each one out to every
+/// online player carrying a `WatchingSyslog` whose floor admits it.
+/// Early-outs on either side being empty so the no-subscriber case
+/// is cheap.
+pub(crate) fn drain_syslog_to_watchers(world: &mut World) {
+    let entries = crate::syslog::drain_broadcast();
+    if entries.is_empty() {
+        return;
+    }
+    // Snapshot subscribers up front so we don't reborrow the World
+    // mid-fanout. Tracking the floor per-subscriber lets us skip
+    // formatting work when an ERROR-only watcher won't see a WARN.
+    let watchers: Vec<(Entity, mud_world::SyslogMinLevel)> = {
+        let mut q = world
+            .query_filtered::<(Entity, &mud_world::WatchingSyslog), With<mud_world::Online>>();
+        q.iter(world).map(|(e, w)| (e, w.min_level)).collect()
+    };
+    if watchers.is_empty() {
+        return;
+    }
+    for entry in entries {
+        let admits_warn = matches!(entry.level, tracing::Level::WARN | tracing::Level::ERROR);
+        let admits_error = matches!(entry.level, tracing::Level::ERROR);
+        // Color the level tag by severity so a glance separates
+        // benign WARN noise from an actual ERROR event.
+        let level_tag = match entry.level {
+            tracing::Level::ERROR => "<red>ERROR</>",
+            tracing::Level::WARN => "<yellow>WARN</>",
+            // INFO/DEBUG/TRACE never get pushed (see syslog.rs filter)
+            // but match exhaustively so future filter changes don't
+            // silently drop entries here.
+            _ => continue,
+        };
+        let line = format!(
+            "\r\n<dim>[syslog]</> {level_tag} <cyan>{}</>: {}\r\n",
+            entry.target, entry.message,
+        );
+        for (entity, floor) in &watchers {
+            let admit = match floor {
+                mud_world::SyslogMinLevel::Warn => admits_warn,
+                mud_world::SyslogMinLevel::Error => admits_error,
+            };
+            if admit {
+                send_to(world, *entity, line.clone());
+            }
         }
     }
 }
@@ -1500,6 +1595,29 @@ mod tests {
             assert!(
                 names.contains(&name),
                 "clan-chat `{name}` missing"
+            );
+        }
+        // name_approval.rs — replaces the deleted login_approval.rs
+        // commands. `approve_login` / `deny_login` / `lreqs` are
+        // gone; the new commands operate on the
+        // `Characters.name_approved` column.
+        for name in [
+            "approve_name", "approvename",
+            "reject_name", "rejectname",
+            "name_status", "namestatus",
+        ] {
+            assert!(
+                names.contains(&name),
+                "name-approval `{name}` missing"
+            );
+        }
+        // The retired LoginRequests commands must NOT appear in the
+        // registry — guard against a stale `inventory::submit!` that
+        // a future refactor accidentally re-introduces.
+        for name in ["approve_login", "deny_login", "lreqs"] {
+            assert!(
+                !names.contains(&name),
+                "retired login-approval `{name}` resurfaced in the registry"
             );
         }
         // status_lists.rs (report + socials)
@@ -2996,23 +3114,28 @@ mod tests {
     #[test]
     fn apply_modify_delta_ward_routes_to_ward_pct() {
         // Regression: prior code aliased the "ward" modify stat
-        // onto `cs.ac` (subtracting the buff). Per combat.md the
-        // Ward stat is independent of AC; positive amounts
-        // increment `ward_pct`, and the inverse delta on effect
-        // expiry decrements it back. AC must NOT move.
+        // onto AC (subtracting the buff). Per combat.md the Ward
+        // stat is independent of the armor pipeline; positive
+        // amounts increment `ward_pct`, and the inverse delta on
+        // effect expiry decrements it back. The armor axis must
+        // NOT move under a ward modify (post-AC-pivot the armor
+        // pipeline is `armor_pct` / `armor_flat`).
         use mud_world::CombatStats;
         let mut world = World::new();
         let entity = world.spawn(CombatStats::default()).id();
-        let baseline_ac = world.get::<CombatStats>(entity).unwrap().ac;
+        let baseline_armor_pct = world.get::<CombatStats>(entity).unwrap().armor_pct;
+        let baseline_armor_flat = world.get::<CombatStats>(entity).unwrap().armor_flat;
         super::apply_modify_delta(&mut world, entity, "ward", 25);
         let cs = world.get::<CombatStats>(entity).copied().unwrap();
         assert_eq!(cs.ward_pct, 25, "ward modify routes to ward_pct");
-        assert_eq!(cs.ac, baseline_ac, "ward modify does NOT touch ac");
+        assert_eq!(cs.armor_pct, baseline_armor_pct, "ward modify does NOT touch armor_pct");
+        assert_eq!(cs.armor_flat, baseline_armor_flat, "ward modify does NOT touch armor_flat");
         // Reverse delta (effect expiry) walks it back.
         super::reverse_modify_delta(&mut world, entity, "ward", 25);
         let cs2 = world.get::<CombatStats>(entity).copied().unwrap();
         assert_eq!(cs2.ward_pct, 0, "reverse_modify_delta returns ward_pct to 0");
-        assert_eq!(cs2.ac, baseline_ac, "reverse stays clear of ac");
+        assert_eq!(cs2.armor_pct, baseline_armor_pct, "reverse stays clear of armor_pct");
+        assert_eq!(cs2.armor_flat, baseline_armor_flat, "reverse stays clear of armor_flat");
     }
 
     #[test]
@@ -3677,11 +3800,17 @@ mod tests {
                 max: 100,
             }),
             cs: Some(super::CombatStats {
-                hit_roll: 5,
-                dmg_roll: 8,
-                ac: 12,
+                // Old fixture used hit_roll: 5, dmg_roll: 8, ac: 12.
+                // Migration mapping (combat.md): accuracy = 50 + hit_roll*2,
+                // attack_power = dmg_roll * 5, armor_pct = clamp(0, 80,
+                // (10 - ac) * 5) = clamp(0, 80, -10) = 0. Defaults
+                // for the rest (evasion 0, crit 0, ward 0, etc.) keep
+                // the score smoke output deterministic.
+                accuracy: 60,
+                attack_power: 40,
+                armor_pct: 0,
                 alignment: 250,
-                ward_pct: 0,
+                ..Default::default()
             }),
             core_stats: Some(super::CoreStats {
                 strength: 16,
@@ -4049,6 +4178,194 @@ mod tests {
             &world, player, other_room, Direction::North, &hidden_exit
         ));
     }
+
+    // ---- Liquid drink path ----
+
+    /// Build a minimal world that the drink-path queries can run
+    /// against. Only the resources/components the path actually
+    /// reads are populated; everything else (sessions, prototypes
+    /// for non-fountains, ConsumableEffects) stays empty.
+    fn drink_test_world() -> (World, Entity, Entity) {
+        use mud_world::{
+            ConsumableEffectCatalog, Drunkenness, Hunger, Item, Keywords, LiquidCatalog, LiquidDef,
+            LiquidContainer, LiquidIndex, Located, Named, ObjectPrototypes, Thirst,
+        };
+        let mut world = World::new();
+        // Catalog with three liquids: water (no drunk), wine (alcoholic).
+        let mut cat = LiquidCatalog::default();
+        cat.insert(LiquidDef {
+            id: 1,
+            name: "water".to_string(),
+            alias: "water".to_string(),
+            color_desc: "clear".to_string(),
+            drunk_effect: 0,
+            hunger_effect: 0,
+            thirst_effect: 10,
+            description: Some("Cool and refreshing.".to_string()),
+        });
+        cat.insert(LiquidDef {
+            id: 3,
+            name: "wine".to_string(),
+            alias: "wine".to_string(),
+            color_desc: "ruby".to_string(),
+            drunk_effect: 5,
+            hunger_effect: 2,
+            thirst_effect: 5,
+            description: None,
+        });
+        world.insert_resource(cat);
+        let mut idx = LiquidIndex::default();
+        idx.by_name.insert("water".to_string(), 1);
+        idx.by_name.insert("wine".to_string(), 3);
+        idx.drunk_effect.insert("water".to_string(), 0);
+        idx.drunk_effect.insert("wine".to_string(), 5);
+        world.insert_resource(idx);
+        // Empty resources to satisfy `apply_consumable_liquid_effects`
+        // and the proto-fountain detector.
+        world.insert_resource(ConsumableEffectCatalog::default());
+        world.insert_resource(ObjectPrototypes::default());
+        // Room → player → wineskin (Located on the player).
+        let room = world.spawn(()).id();
+        let player = world
+            .spawn((
+                Located(room),
+                Hunger(30),
+                Thirst(30),
+                Drunkenness(0),
+            ))
+            .id();
+        let item = world
+            .spawn((
+                Item,
+                Located(player),
+                Named { name: "a wineskin".to_string() },
+                Keywords(vec!["wineskin".to_string(), "skin".to_string()]),
+                LiquidContainer {
+                    liquid: "wine".to_string(),
+                    capacity: 20,
+                    remaining: 20,
+                    poisoned: false,
+                },
+            ))
+            .id();
+        (world, player, item)
+    }
+
+    #[test]
+    fn drink_decrements_remaining_and_applies_deltas() {
+        use mud_world::{Drunkenness, Hunger, LiquidContainer, Thirst};
+        let (mut world, player, item) = drink_test_world();
+        super::drink_amount(&mut world, player, "wineskin", 4, "drink");
+        // 4 units consumed.
+        assert_eq!(world.get::<LiquidContainer>(item).unwrap().remaining, 16);
+        // Drunk delta: 5 per unit × 4 = 20.
+        assert_eq!(world.get::<Drunkenness>(player).unwrap().0, 20);
+        // Hunger delta: 2 per unit × 4 = 8, subtracted from 30.
+        assert_eq!(world.get::<Hunger>(player).unwrap().0, 22);
+        // Thirst delta: 5 per unit × 4 = 20, subtracted from 30.
+        assert_eq!(world.get::<Thirst>(player).unwrap().0, 10);
+    }
+
+    #[test]
+    fn drink_clamps_gauges_at_zero() {
+        use mud_world::{Hunger, LiquidContainer, Thirst};
+        let (mut world, player, item) = drink_test_world();
+        // Player starts dehydrated/starving at 2; one big swig should clamp at 0.
+        world.get_mut::<Hunger>(player).unwrap().0 = 2;
+        world.get_mut::<Thirst>(player).unwrap().0 = 2;
+        super::drink_amount(&mut world, player, "wineskin", 4, "drink");
+        assert_eq!(world.get::<Hunger>(player).unwrap().0, 0);
+        assert_eq!(world.get::<Thirst>(player).unwrap().0, 0);
+        assert_eq!(world.get::<LiquidContainer>(item).unwrap().remaining, 16);
+    }
+
+    #[test]
+    fn drink_caps_drank_at_remaining() {
+        use mud_world::{Drunkenness, LiquidContainer};
+        let (mut world, player, item) = drink_test_world();
+        // Set remaining low — only 1 unit left.
+        world.get_mut::<LiquidContainer>(item).unwrap().remaining = 1;
+        super::drink_amount(&mut world, player, "wineskin", 4, "drink");
+        // Only 1 unit was actually drunk; container now empty.
+        assert_eq!(world.get::<LiquidContainer>(item).unwrap().remaining, 0);
+        // Drunkenness = 5 × 1 = 5.
+        assert_eq!(world.get::<Drunkenness>(player).unwrap().0, 5);
+    }
+
+    #[test]
+    fn drink_refuses_empty_container() {
+        use mud_world::{Drunkenness, LiquidContainer};
+        let (mut world, player, item) = drink_test_world();
+        world.get_mut::<LiquidContainer>(item).unwrap().remaining = 0;
+        super::drink_amount(&mut world, player, "wineskin", 4, "drink");
+        // Nothing changed — still empty, still sober.
+        assert_eq!(world.get::<LiquidContainer>(item).unwrap().remaining, 0);
+        assert_eq!(world.get::<Drunkenness>(player).unwrap().0, 0);
+    }
+
+    #[test]
+    fn drink_unknown_alias_uses_fallback() {
+        use mud_world::{Drunkenness, Hunger, LiquidContainer, Thirst};
+        let (mut world, player, item) = drink_test_world();
+        // Swap the alias to something the catalog doesn't know.
+        world.get_mut::<LiquidContainer>(item).unwrap().liquid = "moonshine".to_string();
+        super::drink_amount(&mut world, player, "wineskin", 4, "drink");
+        // Fallback is water-shaped: thirst -= 10*4 = 40, hunger
+        // unchanged, drunkenness unchanged.
+        assert_eq!(world.get::<Hunger>(player).unwrap().0, 30);
+        assert_eq!(world.get::<Thirst>(player).unwrap().0, 0, "30 - 40 clamped at 0");
+        assert_eq!(world.get::<Drunkenness>(player).unwrap().0, 0);
+        // The swig still went through.
+        assert_eq!(world.get::<LiquidContainer>(item).unwrap().remaining, 16);
+    }
+
+    #[test]
+    fn sip_consumes_one_unit() {
+        use mud_world::{Drunkenness, LiquidContainer};
+        let (mut world, player, item) = drink_test_world();
+        super::drink_amount(&mut world, player, "wineskin", 1, "sip");
+        assert_eq!(world.get::<LiquidContainer>(item).unwrap().remaining, 19);
+        // Drunkenness = 5 × 1 = 5.
+        assert_eq!(world.get::<Drunkenness>(player).unwrap().0, 5);
+    }
+
+    /// `name_approval_gate` returns true (refusing the command) when
+    /// `NameApprovalPending` is attached, and false (allowing the
+    /// command) otherwise. The refusal message itself goes through
+    /// `send_to` which writes into the entity's `Connection`
+    /// outbound channel — absent here, so the helper silently no-
+    /// ops and returns the boolean. That's the contract every chat
+    /// command depends on.
+    #[test]
+    fn name_approval_gate_blocks_when_marker_present() {
+        use mud_world::NameApprovalPending;
+        let mut world = World::new();
+        let approved = world.spawn(()).id();
+        let pending = world.spawn(NameApprovalPending).id();
+        assert!(
+            !super::name_approval_gate(&world, approved),
+            "approved player is NOT gated",
+        );
+        assert!(
+            super::name_approval_gate(&world, pending),
+            "pending player IS gated",
+        );
+    }
+
+    /// Round-trip: dropping the marker (the `approve_name` codepath)
+    /// reopens the gate without needing to reconnect.
+    #[test]
+    fn name_approval_gate_clears_when_marker_removed() {
+        use mud_world::NameApprovalPending;
+        let mut world = World::new();
+        let player = world.spawn(NameApprovalPending).id();
+        assert!(super::name_approval_gate(&world, player));
+        world.entity_mut(player).remove::<NameApprovalPending>();
+        assert!(
+            !super::name_approval_gate(&world, player),
+            "gate clears immediately on marker remove",
+        );
+    }
 }
 
 /// Compute the IRE-style "next level" progress (`nl` in
@@ -4076,6 +4393,62 @@ fn compute_level_progress(world: &World, level: i32, xp: i32) -> i32 {
 /// Push a `Char.Items.List` GMCP frame to `viewer`. `location` is
 /// the IRE-convention slot — `"inv"` (carried), `"wear"` (equipped),
 /// `"room"` (on the ground here), or a numeric container id when
+/// Push a `Comm.Channel.List` GMCP frame describing every chat
+/// channel the recipient can hear / use. IRE convention is an
+/// array of `{name, caption, command}` objects — clients (Mudlet
+/// packages, web clients) build their chat-tab list from this
+/// instead of hardcoding a per-MUD map. Sent once per login so
+/// role-gated channels (wiznet) only appear for staff.
+///
+/// `name` matches the `channel` field in `Comm.Channel.Text`
+/// frames (so the client can route by it). `caption` is the
+/// human-readable tab label. `command` is the verb the player
+/// would type to send on that channel — useful for clients that
+/// expose a "click tab → focus input with channel command"
+/// shortcut.
+pub(crate) fn send_comm_channel_list(world: &World, viewer: Entity) {
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let role = world
+        .get::<Account>(viewer)
+        .map_or(mud_db::enums::UserRole::Player, |a| a.role);
+    // Channel directory. Order is the order tabs appear in the
+    // Mudlet package's chat panel by default — gossip-first
+    // matches the existing `consoles` array's tab order.
+    struct Ch {
+        name: &'static str,
+        caption: &'static str,
+        command: &'static str,
+        min_role: mud_db::enums::UserRole,
+    }
+    let dir = [
+        Ch { name: "gossip",  caption: "Gossip",   command: "gossip",  min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "music",   caption: "Music",    command: "music",   min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "shout",   caption: "Shout",    command: "shout",   min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "quest",   caption: "Quest",    command: "qsay",    min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "tells",   caption: "Tells",    command: "tell",    min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "clan",    caption: "Clan",     command: "ctell",   min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "group",   caption: "Group",    command: "gsay",    min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "say",     caption: "Local",    command: "say",     min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "emote",   caption: "Local",    command: "emote",   min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "ask",     caption: "Local",    command: "ask",     min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "whisper", caption: "Local",    command: "whisper", min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "insult",  caption: "Local",    command: "insult",  min_role: mud_db::enums::UserRole::Player },
+        Ch { name: "wiznet",  caption: "Wiznet",   command: "wiznet",  min_role: mud_db::enums::UserRole::Immortal },
+    ];
+    let entries: Vec<String> = dir
+        .iter()
+        .filter(|c| role.at_least(c.min_role))
+        .map(|c| {
+            format!(
+                r#"{{"name":"{}","caption":"{}","command":"{}"}}"#,
+                c.name, c.caption, c.command,
+            )
+        })
+        .collect();
+    let payload = format!("[{}]", entries.join(","));
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Comm.Channel.List", &payload));
+}
+
 /// listing a container's contents. `items` is the entity set to
 /// emit; the helper builds the JSON payload and sends in one
 /// telnet frame. Skips gracefully when `viewer` has no connection
@@ -4104,7 +4477,27 @@ pub(crate) fn send_char_items_list(
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
         let id = item.to_bits();
-        entries.push(format!(r#"{{"id":"{id}","name":"{plain}"}}"#));
+        // Item type label (Weapon / Armor / Drinkcontainer / etc.)
+        // — sourced from the proto. Lets the client pick the right
+        // verb for click-actions (use vs eat vs wear) without
+        // needing a follow-up GMCP roundtrip.
+        let item_type = world
+            .get::<WorldKey>(item)
+            .and_then(|k| {
+                world
+                    .resource::<mud_world::ObjectPrototypes>()
+                    .by_key
+                    .get(&(k.zone, k.id))
+                    .map(|p| p.r#type.label())
+            })
+            .unwrap_or("");
+        // Identified flag — presence of the marker component
+        // means the carrier has cast `identify` on it. Drives
+        // the rich-detail view in the client's item panel.
+        let identified = world.get::<mud_world::Identified>(item).is_some();
+        entries.push(format!(
+            r#"{{"id":"{id}","name":"{plain}","type":"{item_type}","identified":{identified}}}"#
+        ));
     }
     let payload = format!(
         r#"{{"location":"{}","items":[{}]}}"#,
@@ -4998,6 +5391,10 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
     // gated by the SOLO/PARTY scope so a scout in a group brings
     // the rest of the party along on shared visit objectives.
     bump_visit_quest_progress(world, player, key.zone, key.id);
+    // Quest trigger: ROOM (Wave 4.1). Any quest authored with
+    // `triggerType = ROOM` and a matching `triggerRoom*` key is
+    // offered when the player first enters here.
+    crate::quest_triggers::dispatch_room_trigger(world, player, key.zone, key.id);
 }
 
 /// Apply each environmental effect bound to `room` to `player`,
@@ -5125,7 +5522,7 @@ pub(crate) fn bump_visit_quest_progress(
 /// Advance any active `USE_SKILL` objectives matching the just-
 /// invoked ability id. Called from the bottom of
 /// `invoke_ability_with` (post-cooldown), so failed casts don't
-/// credit.
+/// credit. Also fires the SKILL-trigger dispatcher (Wave 4.1).
 pub(crate) fn bump_use_skill_quest_progress(
     world: &mut World,
     caster: Entity,
@@ -5136,6 +5533,7 @@ pub(crate) fn bump_use_skill_quest_progress(
         caster,
         QuestObjectiveBump::UseSkill { ability_id },
     );
+    crate::quest_triggers::dispatch_skill_trigger(world, caster, ability_id);
 }
 
 /// Advance any active `DELIVER_ITEM` objectives matching the
@@ -5164,6 +5562,7 @@ pub(crate) fn bump_deliver_quest_progress(
 /// Advance any active `COLLECT_ITEM` objectives whose target
 /// object matches the just-picked-up item's prototype. Called
 /// from `cmd_get` when an item moves into the player's inventory.
+/// Also fires the ITEM-trigger dispatcher (Wave 4.1).
 pub(crate) fn bump_collect_quest_progress(
     world: &mut World,
     collector: Entity,
@@ -5178,6 +5577,7 @@ pub(crate) fn bump_collect_quest_progress(
             id: object_id,
         },
     );
+    crate::quest_triggers::dispatch_item_trigger(world, collector, object_zone, object_id);
 }
 
 /// Advance any active `TALK_TO_NPC` objectives whose target mob
@@ -5324,13 +5724,38 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                             // points/ability) via DB; announce all
                             // including ITEM/HOUSING which the
                             // questgiver still needs to hand out.
-                            let rewards = mud_db::quest_objectives::list_quest_rewards(
+                            //
+                            // Wave 4.10: conditional rewards
+                            // (`condition` Lua non-null) need a
+                            // `&mut World` to evaluate, which
+                            // isn't reachable from this tokio task.
+                            // Defer them — surface a "claim with
+                            // qreward" hint and let the synchronous
+                            // claim path do the condition check.
+                            let all_rewards = mud_db::quest_objectives::list_quest_rewards(
                                 &pool,
                                 row.quest_zone_id,
                                 row.quest_id,
                             )
                             .await
                             .unwrap_or_default();
+                            let (deferred, rewards): (Vec<_>, Vec<_>) = all_rewards
+                                .into_iter()
+                                .partition(|r| {
+                                    r.condition
+                                        .as_deref()
+                                        .is_some_and(|c| !c.trim().is_empty())
+                                });
+                            if !deferred.is_empty() {
+                                let _ = out.try_send(
+                                    format!(
+                                        "Conditional rewards available — \
+                                         type `qreward {} {}` to view and claim.\r\n",
+                                        row.quest_zone_id, row.quest_id
+                                    )
+                                    .into_bytes(),
+                                );
+                            }
                             if !rewards.is_empty() {
                                 if let Err(e) =
                                     mud_db::quest_objectives::grant_simple_rewards(
@@ -5580,6 +6005,22 @@ pub(crate) fn colorize_default(s: &str, open: &str) -> String {
     } else {
         format!("{open}{s}</>")
     }
+}
+
+/// "The curtain" / "The gate" / "The way" — sentence-leading noun
+/// phrase for an exit, used by closed / locked feedback so a doorway
+/// with a builder-set keyword reads as itself ("The curtain is
+/// closed.") instead of the generic fallback. First keyword wins;
+/// blank / missing keywords fall back to "The way".
+#[must_use]
+pub(crate) fn exit_noun_phrase(ed: &mud_world::ExitData) -> String {
+    for k in &ed.keywords {
+        let trimmed = k.trim();
+        if !trimmed.is_empty() {
+            return format!("The {trimmed}");
+        }
+    }
+    "The way".to_string()
 }
 
 /// XML-Lite open tag matching an exit's state. Open exits read
@@ -6607,19 +7048,40 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some(cs) = d.cs {
         let align_label = mud_db::enums::Alignment::from_score(cs.alignment).label();
+        // Score sheet now reads the docs/design/combat.md model:
+        // Acc / Eva / Atk / Armor / (Ward only when active).
         out.push_str(&format!(
-            "  Hit roll: {}    Damage roll: {}    AC: {}    Alignment: {} ({})\r\n",
-            cs.hit_roll, cs.dmg_roll, cs.ac, align_label, cs.alignment,
+            "  Acc: {}   Eva: {}   Atk: {}{}   Armor: {}%{}   Alignment: {} ({})\r\n",
+            cs.accuracy,
+            cs.evasion,
+            if cs.attack_power >= 0 { "+" } else { "" },
+            cs.attack_power,
+            cs.armor_pct,
+            if cs.armor_flat != 0 {
+                format!(" / {} flat", cs.armor_flat)
+            } else {
+                String::new()
+            },
+            align_label,
+            cs.alignment,
         ));
-        // Ward is independent of AC — surface only when nonzero so
-        // a fresh character with no ward effects doesn't see a
-        // noisy 0% line. Renders as a single dim percent so the
-        // value reads as "magical mitigation" without competing
-        // visually with the primary stat row above.
+        // Ward, hardness, crit_chance — only shown when non-default.
         if cs.ward_pct != 0 {
             out.push_str(&format!(
                 "  Ward: <b:cyan>{}%</> <dim>(magical mitigation)</>\r\n",
                 cs.ward_pct,
+            ));
+        }
+        if cs.hardness != 0 {
+            out.push_str(&format!(
+                "  Hardness: <b:magenta>{}</> <dim>(damage floor)</>\r\n",
+                cs.hardness,
+            ));
+        }
+        if cs.crit_chance != 5 {
+            out.push_str(&format!(
+                "  Crit: <b:yellow>{}%</> <dim>(swing crit chance)</>\r\n",
+                cs.crit_chance,
             ));
         }
     }
@@ -7086,8 +7548,13 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     if let Some(cs) = d.cs {
         let align_label = mud_db::enums::Alignment::from_score(cs.alignment).label();
         row(format!(
-            "Hit: {}   Dmg: {}   AC: {}   Align: {} ({})",
-            cs.hit_roll, cs.dmg_roll, cs.ac, align_label, cs.alignment,
+            "Acc: {}  Eva: {}  Atk: {:+}  Armor: {}%   Align: {} ({})",
+            cs.accuracy,
+            cs.evasion,
+            cs.attack_power,
+            cs.armor_pct,
+            align_label,
+            cs.alignment,
         ));
         if cs.ward_pct != 0 {
             row(format!("Ward: <b:cyan>{}%</> <dim>(magical)</>", cs.ward_pct));
@@ -7247,7 +7714,10 @@ pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
         parts.push(format!("st:{}/{}", s.current, s.max));
     }
     if let Some(cs) = d.cs {
-        parts.push(format!("dmg:{} ac:{}", cs.dmg_roll, cs.ac));
+        parts.push(format!(
+            "atk:{:+} armor:{}%",
+            cs.attack_power, cs.armor_pct
+        ));
         if cs.ward_pct != 0 {
             parts.push(format!("ward:{}%", cs.ward_pct));
         }
@@ -7415,6 +7885,41 @@ pub(crate) fn parse_direction(s: &str) -> Option<Direction> {
         "out" => Some(Direction::Out),
         _ => None,
     }
+}
+
+/// Resolve a door-command argument to a `Direction`. Accepts the
+/// canonical direction names that `parse_direction` does, and also
+/// matches the typed word against the keywords on the player's
+/// current-room exits — so `open curtain` finds the curtain
+/// regardless of which direction it's on. Hidden exits the player
+/// hasn't discovered are skipped, matching the look / move gates,
+/// so puzzle exits can't be probed by guessing keywords.
+pub(crate) fn resolve_exit_arg(
+    world: &World,
+    player: Entity,
+    arg: &str,
+) -> Option<Direction> {
+    let trimmed = arg.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(dir) = parse_direction(trimmed) {
+        return Some(dir);
+    }
+    let needle = trimmed.to_ascii_lowercase();
+    let room = world.get::<Located>(player)?.0;
+    let exits = world.get::<Exits>(room)?;
+    for (dir, ed) in &exits.0 {
+        if exit_is_hidden_to(world, player, room, *dir, ed) {
+            continue;
+        }
+        for kw in &ed.keywords {
+            if kw.to_ascii_lowercase().contains(&needle) {
+                return Some(*dir);
+            }
+        }
+    }
+    None
 }
 
 /// True when the player's room is currently dark enough that
@@ -7742,12 +8247,15 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
     {
         // Yellow when merely closed (push and walk in), red when
         // locked (need a key first) — matches the auto-exit list
-        // colors so the player learns one palette.
+        // colors so the player learns one palette. Builder-set
+        // keyword swaps in for "The way" so a curtain reads as a
+        // curtain.
+        let noun = exit_noun_phrase(&ed);
         let line = match ed.state {
-            mud_db::enums::ExitState::Locked => "<red>The way is locked.</>",
-            _ => "<yellow>The way is closed.</>",
+            mud_db::enums::ExitState::Locked => format!("<red>{noun} is locked.</>"),
+            _ => format!("<yellow>{noun} is closed.</>"),
         };
-        send_to(world, player, format!("{}\r\n", render_color_tags(line, mode_pre)));
+        send_to(world, player, format!("{}\r\n", render_color_tags(&line, mode_pre)));
         return;
     }
     let Some(target_room) = ed.to else {
@@ -8231,7 +8739,25 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
         return;
     }
     let drank = if is_fountain { units } else { state.remaining.min(units) };
-    let liquid_lc = state.liquid.to_ascii_lowercase();
+    // Resolve the rich `LiquidDef` for the container's contents.
+    // Catalog lookup is by alias; fall back to a water-shaped def
+    // for unknown aliases (legacy imports / hand-edited DB rows)
+    // so the swig still completes with sane defaults.
+    let liquid_def = world
+        .resource::<mud_world::LiquidCatalog>()
+        .lookup_alias(&state.liquid)
+        .cloned()
+        .unwrap_or_else(|| world.resource::<mud_world::LiquidCatalog>().fallback());
+    let identified = world.get::<mud_world::Identified>(item).is_some();
+    // Identified container shows the real liquid name; unidentified
+    // shows the color description. Matches legacy CircleMUD's
+    // "you drink some clear liquid" / "you drink some water"
+    // disambiguation.
+    let render_label = if identified {
+        liquid_def.name.to_ascii_lowercase()
+    } else {
+        liquid_def.color_desc.to_ascii_lowercase()
+    };
     if !is_fountain
         && let Some(mut lc) = world.get_mut::<mud_world::LiquidContainer>(item)
     {
@@ -8240,8 +8766,16 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     send_rendered(
         world,
         player,
-        &format!("You {verb} some {liquid_lc} from {item_name}.\r\n"),
+        &format!("You {verb} some {render_label} from {item_name}.\r\n"),
     );
+    // Flavor description on identified containers — short paragraph
+    // attached to the liquid row. Renders once per swig only when
+    // the player knows what they're drinking.
+    if identified
+        && let Some(desc) = &liquid_def.description
+    {
+        send_rendered(world, player, &format!("{desc}\r\n"));
+    }
     if state.poisoned {
         send_to(
             world,
@@ -8254,13 +8788,7 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     // schema's `Liquids.drunk_effect`. 0 for non-alcoholic drinks
     // = no-op. Capped at 100 — anything beyond is "blackout"
     // (future pass: penalize skills + slur speech).
-    let drunk_per_unit = world
-        .resource::<mud_world::LiquidIndex>()
-        .drunk_effect
-        .get(&state.liquid.to_ascii_lowercase())
-        .copied()
-        .unwrap_or(0);
-    let drunk_gain = drunk_per_unit.saturating_mul(drank);
+    let drunk_gain = liquid_def.drunk_effect.saturating_mul(drank);
     if drunk_gain > 0 {
         let new_total = {
             let entry = world
@@ -8280,11 +8808,24 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
             send_to(world, player, "You feel pleasantly buzzed.\r\n");
         }
     }
-    // Reset thirst proportional to swig size — `sip` (1 unit) takes
-    // a small bite out, `drink` (4 units) sates entirely. Clamps at
-    // 0 (never goes negative).
-    if let Some(mut t) = world.get_mut::<mud_world::Thirst>(player) {
-        t.0 = (t.0 - drank.saturating_mul(6)).max(0);
+    // Hunger: per-unit fullness from `Liquids.hunger_effect`.
+    // Subtracts from the hunger gauge (lower = more sated). Clamps
+    // at 0. Negative values (e.g. salt water) push the gauge up.
+    let hunger_delta = liquid_def.hunger_effect.saturating_mul(drank);
+    if hunger_delta != 0
+        && let Some(mut h) = world.get_mut::<mud_world::Hunger>(player)
+    {
+        h.0 = (h.0 - hunger_delta).max(0);
+    }
+    // Thirst: per-unit quench from `Liquids.thirst_effect`. Same
+    // semantics as hunger. Replaces the old hard-coded `drank * 6`
+    // and gives the schema a meaningful field. Negative values
+    // (salt water, blood) intensify thirst by pushing the gauge up.
+    let thirst_delta = liquid_def.thirst_effect.saturating_mul(drank);
+    if thirst_delta != 0
+        && let Some(mut t) = world.get_mut::<mud_world::Thirst>(player)
+    {
+        t.0 = (t.0 - thirst_delta).max(0);
     }
     let was_last = !is_fountain && state.remaining == drank;
     if was_last {
@@ -8593,6 +9134,10 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
     };
 
     try_insert(world, item, EquippedSlot(dest_slot));
+    // Apply gear stat bonuses (ObjectAffects), resistances, and
+    // wear-granted effects (ObjectEffects) to the player. Mirrored
+    // by `cmd_remove`'s unapply path.
+    crate::equip_apply::apply_object_to_wearer(world, item, player);
 
     let verb = match dest_slot {
         Slot::Wield => "wield",
@@ -9241,6 +9786,23 @@ pub(crate) fn invoke_ability_with(
         && effect_prevents(world, player, Prevent::Casting)
     {
         send_to(world, player, "Your magic is suppressed.\r\n");
+        return;
+    }
+    // NoMagicRoom gate — `Room.allows_magic = false` marks dead-
+    // magic / anti-magic rooms where the verbal-magical kinds
+    // (spell/chant/song) fizzle entirely. Checked before mana /
+    // cooldown drain so a player in a sanctuary doesn't lose
+    // resources to a wasted cast. SKILL kind bypasses (pure
+    // physical, same precedent as the silence gate above).
+    if !matches!(kind, mud_db::abilities::AbilityKind::Skill)
+        && let Some(located) = world.get::<Located>(player)
+        && world.get::<mud_world::NoMagicRoom>(located.0).is_some()
+    {
+        send_to(
+            world,
+            player,
+            "Your spell fizzles in this dead-magic room.\r\n",
+        );
         return;
     }
 
@@ -11255,81 +11817,227 @@ pub(crate) fn resolve_effect_conditions(
 /// flipped).
 pub(crate) fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, amount: i32) -> bool {
     match stat {
-        "str" | "strength" => {
+        // `_bonus` aliases (str_bonus, dex_bonus, ...) match the
+        // formula-context naming convention used by `FormulaCtx::lookup`
+        // and the fierylib migrate_object_affects.py target labels.
+        "str" | "strength" | "str_bonus" => {
             if let Some(mut s) = world.get_mut::<CoreStats>(target) {
                 s.strength = s.strength.saturating_add(amount);
             }
             true
         }
-        "dex" | "dexterity" => {
+        "dex" | "dexterity" | "dex_bonus" => {
             if let Some(mut s) = world.get_mut::<CoreStats>(target) {
                 s.dexterity = s.dexterity.saturating_add(amount);
             }
             true
         }
-        "con" | "constitution" => {
+        "con" | "constitution" | "con_bonus" => {
             if let Some(mut s) = world.get_mut::<CoreStats>(target) {
                 s.constitution = s.constitution.saturating_add(amount);
             }
             true
         }
-        "int" | "intelligence" => {
+        "int" | "intelligence" | "int_bonus" => {
             if let Some(mut s) = world.get_mut::<CoreStats>(target) {
                 s.intelligence = s.intelligence.saturating_add(amount);
             }
             true
         }
-        "wis" | "wisdom" => {
+        "wis" | "wisdom" | "wis_bonus" => {
             if let Some(mut s) = world.get_mut::<CoreStats>(target) {
                 s.wisdom = s.wisdom.saturating_add(amount);
             }
             true
         }
-        "cha" | "charisma" => {
+        "cha" | "charisma" | "cha_bonus" => {
             if let Some(mut s) = world.get_mut::<CoreStats>(target) {
                 s.charisma = s.charisma.saturating_add(amount);
             }
             true
         }
-        "hitroll" => {
+        // Legacy `hitroll` / `damroll` aliases route into the new
+        // accuracy / attack_power model (per docs/design/combat.md
+        // migration plan: accuracy = 50 + hit_roll * 2 means each
+        // legacy hitroll point = +2 accuracy). Spell / effect
+        // formulas authored against the old names keep working
+        // without rewrites.
+        "hitroll" | "accuracy" => {
+            let scale = if stat == "hitroll" { 2 } else { 1 };
             if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.hit_roll = cs.hit_roll.saturating_add(amount);
+                cs.accuracy = cs.accuracy.saturating_add(amount * scale);
             }
             true
         }
-        "damroll" => {
+        "damroll" | "attack_power" => {
+            let scale = if stat == "damroll" { 5 } else { 1 };
             if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.dmg_roll = cs.dmg_roll.saturating_add(amount);
+                cs.attack_power = cs.attack_power.saturating_add(amount * scale);
             }
             true
         }
-        // Ward is its own stat (combat pipeline step 5, gated by
-        // `Ability.is_magical`). Positive amounts add magical
-        // mitigation; effects_tick reverses the same delta on
-        // expiry. Independent of `ac`, which keys on the physical
-        // damage-type category instead.
-        "ward" => {
+        "evasion" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.ward_pct = cs.ward_pct.saturating_add(amount);
+                cs.evasion = cs.evasion.saturating_add(amount);
+            }
+            true
+        }
+        "spell_power" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.spell_power = cs.spell_power.saturating_add(amount);
+            }
+            true
+        }
+        "armor_flat" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.armor_flat = cs.armor_flat.saturating_add(amount).max(0);
+            }
+            true
+        }
+        "hardness" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.hardness = cs.hardness.saturating_add(amount).max(0);
+            }
+            true
+        }
+        "pen_flat" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.pen_flat = cs.pen_flat.saturating_add(amount);
+            }
+            true
+        }
+        "pen_pct" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.pen_pct = cs.pen_pct.saturating_add(amount);
+            }
+            true
+        }
+        // Ward stays its own stat (combat pipeline step 5, gated
+        // by `Ability.is_magical`).
+        "ward" | "ward_pct" => {
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.ward_pct = cs.ward_pct.saturating_add(amount).clamp(0, 100);
             }
             true
         }
         "max_hp" => {
             if let Some(mut h) = world.get_mut::<Health>(target) {
-                h.max = h.max.saturating_add(amount);
+                h.max = h.max.saturating_add(amount).max(1);
                 if amount > 0 {
                     h.hp = h.hp.saturating_add(amount);
+                } else if h.hp > h.max {
+                    // Removing a +HP buff/item: clamp current HP
+                    // to the new (smaller) max so a wearer doesn't
+                    // walk around with hp > max.
+                    h.hp = h.max;
                 }
             }
             true
         }
-        "max_move" | "max_stamina" => {
+        "max_move" | "max_stamina" | "stamina_max" => {
             if let Some(mut s) = world.get_mut::<Stamina>(target) {
-                s.max = s.max.saturating_add(amount);
+                s.max = s.max.saturating_add(amount).max(0);
                 if amount > 0 {
                     s.current = s.current.saturating_add(amount);
+                } else if s.current > s.max {
+                    s.current = s.max;
                 }
             }
+            true
+        }
+        // Legacy `ac` alias routes into `armor_pct`. The migration
+        // ratio is 5% per legacy AC point (per combat.md plan).
+        // ObjectAffects.AC values translate cleanly: a +10 AC
+        // legacy item becomes +50% armor_pct (clamped to 100).
+        "ac" | "armor_pct" => {
+            let scale = if stat == "ac" { 5 } else { 1 };
+            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                cs.armor_pct = cs
+                    .armor_pct
+                    .saturating_add(amount * scale)
+                    .clamp(0, 100);
+            }
+            true
+        }
+        "max_mana" => {
+            // Lazy-init Mana when gear/effects bump max on a wearer
+            // without an existing pool. Score sheet hides the line
+            // when max == 0 elsewhere; lifting max here is the
+            // entry point for casters.
+            if world.get::<mud_world::Mana>(target).is_none() {
+                try_insert(world, target, mud_world::Mana::default());
+            }
+            if let Some(mut m) = world.get_mut::<mud_world::Mana>(target) {
+                m.max = m.max.saturating_add(amount);
+                if amount > 0 {
+                    m.current = m.current.saturating_add(amount);
+                }
+                if m.max < 0 {
+                    m.max = 0;
+                }
+                if m.current > m.max {
+                    m.current = m.max;
+                }
+            }
+            true
+        }
+        "saving_para" | "saving_rod" | "saving_petri" | "saving_breath" | "saving_spell" => {
+            if world.get::<mud_world::SavingThrows>(target).is_none() {
+                try_insert(world, target, mud_world::SavingThrows::default());
+            }
+            if let Some(mut s) = world.get_mut::<mud_world::SavingThrows>(target) {
+                let field = match stat {
+                    "saving_para" => &mut s.para,
+                    "saving_rod" => &mut s.rod,
+                    "saving_petri" => &mut s.petri,
+                    "saving_breath" => &mut s.breath,
+                    "saving_spell" => &mut s.spell,
+                    _ => unreachable!(),
+                };
+                *field = field.saturating_add(amount);
+            }
+            true
+        }
+        "focus" => {
+            if world.get::<mud_world::Focus>(target).is_none() {
+                try_insert(world, target, mud_world::Focus::default());
+            }
+            if let Some(mut f) = world.get_mut::<mud_world::Focus>(target) {
+                f.0 = f.0.saturating_add(amount);
+            }
+            true
+        }
+        "perception" => {
+            if world.get::<mud_world::Perception>(target).is_none() {
+                try_insert(world, target, mud_world::Perception::default());
+            }
+            if let Some(mut p) = world.get_mut::<mud_world::Perception>(target) {
+                p.0 = p.0.saturating_add(amount);
+            }
+            true
+        }
+        "hit_regen" => {
+            if world.get::<mud_world::RegenBonus>(target).is_none() {
+                try_insert(world, target, mud_world::RegenBonus::default());
+            }
+            if let Some(mut r) = world.get_mut::<mud_world::RegenBonus>(target) {
+                r.hp = r.hp.saturating_add(amount);
+            }
+            true
+        }
+        "hiddenness" => {
+            // Stealth bonus from gear (e.g. Amulet of True Shadows).
+            // Existing `Stealth` is a marker component; extend it
+            // lazily into a magnitude. For now stash under a stub
+            // RegenBonus.stamina-like channel — the visibility tick
+            // can read it once stealth scoring is wired (Q6 in
+            // combat-rebalance.md). Logged-only for now to avoid
+            // silently dropping the modifier.
+            tracing::debug!(
+                target = ?target,
+                amount,
+                "APPLY_HIDDENNESS recorded but no consumer wired yet"
+            );
             true
         }
         _ => false,
@@ -11471,6 +12179,35 @@ pub(crate) fn remove_effect_named(world: &mut World, target: Entity, name: &str)
         }
     }
     count
+}
+
+/// Name-approval gate for social commands. Returns `true` (and
+/// sends a refusal line) when `player` carries the
+/// `NameApprovalPending` marker — every chat command (`tell`,
+/// `say`, `gossip`, `gsay`, clan chat, `invite`, …) calls this
+/// first and bails on a true return. Returns `false` (no message)
+/// when the gate is open so the command proceeds normally.
+///
+/// The marker is set at spawn time when `Characters.name_approved =
+/// false` and removed by `approve_name` (or by `reject_name`'s
+/// auto-rename + reconnect). Player-facing message includes
+/// `name_status` as the diagnostic command so the player can
+/// confirm the gate is the cause rather than an effect / freeze.
+pub(crate) fn name_approval_gate(world: &World, player: Entity) -> bool {
+    if world
+        .get::<mud_world::NameApprovalPending>(player)
+        .is_some()
+    {
+        send_to(
+            world,
+            player,
+            "You can't use that until your name is approved by staff. \
+             Run `name_status` for details.\r\n",
+        );
+        true
+    } else {
+        false
+    }
 }
 
 /// Despawn every `EffectInstance` on `target`, regardless of name.
@@ -12789,7 +13526,12 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         return;
     }
     if exit.state != ExitState::Open {
-        send_to(world, player, "The way is closed.\r\n");
+        let noun = exit_noun_phrase(&exit);
+        let verb = match exit.state {
+            ExitState::Locked => "locked",
+            _ => "closed",
+        };
+        send_to(world, player, format!("{noun} is {verb}.\r\n"));
         return;
     }
     let Some(target) = exit.to else {
@@ -12891,15 +13633,21 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 
     // Notify the source room of each mover departing (in chain order).
     // Use the sender-aware broadcast so wiz-invised admins stay
-    // hidden to lower-level observers.
+    // hidden to lower-level observers. Per-mover verb overrides
+    // come from `Races.leave_verb` (e.g. "swoops off" for a flying
+    // race) when authored; otherwise the generic "leaves" is used.
     for &mover in &movers {
         let mover_name = name_of(world, mover);
+        let verb = race_movement_verb(world, mover, false);
         broadcast_room_visible(
             world,
             from_room,
             mover,
             &movers,
-            &format!("{} leaves {dir_name}.\r\n", cap_sentence_start(&mover_name)),
+            &format!(
+                "{} {verb} {dir_name}.\r\n",
+                cap_sentence_start(&mover_name),
+            ),
         );
     }
 
@@ -12974,8 +13722,41 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             target,
             mover,
             &movers,
-            &format!("{} arrives from {arrival_dir}.\r\n", cap_sentence_start(&mover_name)),
+            &format!(
+                "{} {} {arrival_dir}.\r\n",
+                cap_sentence_start(&mover_name),
+                race_arrival_phrase(world, mover),
+            ),
         );
+    }
+
+    // DeathTrap gate — `Room.is_death_trap = true` kills every
+    // mortal player on entry. Staff (Builder+) bypass so a builder
+    // can `goto` into a DT to audit / fix it without dying. Mobs
+    // bypass too — DTs are designed for player progression
+    // gating, and a mob wandering in just despawning silently
+    // would confuse builders. Pre-look so the player sees the
+    // death message instead of a room they never really stood in.
+    let dt_victims: Vec<Entity> = movers
+        .iter()
+        .copied()
+        .filter(|&m| {
+            world.get::<Player>(m).is_some()
+                && !world
+                    .get::<Account>(m)
+                    .is_some_and(|a| a.role.rank() > UserRole::Player.rank())
+        })
+        .collect();
+    if !dt_victims.is_empty() && world.get::<mud_world::DeathTrap>(target).is_some() {
+        for victim in dt_victims {
+            send_to(
+                world,
+                victim,
+                "<b:red>Your soul is torn from your body as you cross the threshold!</>\r\n",
+            );
+            let victim_name = name_of(world, victim);
+            crate::combat::handle_death(world, victim, &victim_name, target);
+        }
     }
 
     // Each mover sees the new room. Followers also get a "You follow." line
@@ -12984,7 +13765,13 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         if i > 0 {
             send_to(world, mover, "You follow.\r\n");
         }
-        cmd_look(world, mover, "");
+        // Ghost movers from the DT branch above don't see a look —
+        // they're already dead. handle_death applied Ghost; skip the
+        // per-mover render for any Ghost so the death message
+        // isn't immediately drowned by a room description.
+        if world.get::<Ghost>(mover).is_none() {
+            cmd_look(world, mover, "");
+        }
         // Hide-on-move semantics: footsteps break `hide` but not
         // `sneak`. If a mover has a `hidden` EffectInstance and
         // no `sneak` effect, drop the hidden effect; effects_tick
@@ -13176,6 +13963,52 @@ pub(crate) fn sector_movement_cost(s: Sector) -> i32 {
         Sector::Water => 4,
         Sector::Underwater => 6,
     }
+}
+
+/// Pick the movement verb for a mover's room broadcast. The
+/// `is_arrival = false` form returns the departure verb
+/// (`Races.leave_verb`, default `"leaves"`); `true` returns the
+/// arrival verb (`Races.enter_verb`, default `"arrives"`). The
+/// verb is composed with the directional phrase at the call site
+/// — so "leaves north" / "arrives from the south" are the
+/// composed forms. Mover without a `Profile.race`, race not in
+/// the catalog, or empty override falls back to the generic verb.
+///
+/// Returns an owned `String` because the override comes from the
+/// catalog (`Option<String>`) and the caller needs the result by
+/// value anyway.
+pub(crate) fn race_movement_verb(
+    world: &World,
+    mover: Entity,
+    is_arrival: bool,
+) -> String {
+    let default: &str = if is_arrival { "arrives" } else { "leaves" };
+    let Some(prof) = world.get::<mud_world::Profile>(mover) else {
+        return default.to_string();
+    };
+    let Some(def) = world
+        .resource::<mud_world::RaceCatalog>()
+        .get(&prof.race)
+    else {
+        return default.to_string();
+    };
+    let verb = if is_arrival {
+        def.enter_verb.as_deref()
+    } else {
+        def.leave_verb.as_deref()
+    };
+    match verb {
+        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => default.to_string(),
+    }
+}
+
+/// Composed arrival phrase — "<verb> from" — for the destination
+/// room's broadcast string. Defaults to `"arrives from"`; a race
+/// with `enter_verb = "swoops down"` yields `"swoops down from"`.
+pub(crate) fn race_arrival_phrase(world: &World, mover: Entity) -> String {
+    let verb = race_movement_verb(world, mover, true);
+    format!("{verb} from")
 }
 
 pub(crate) fn direction_name(d: Direction) -> &'static str {
