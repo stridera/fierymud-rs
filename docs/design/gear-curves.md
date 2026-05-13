@@ -355,6 +355,50 @@ Same warrior profile (leather jerkin AC 13 → 65% armor, no `attack_power` inje
 
 So **don't lower the scaler.** The over-tuning §3e described is mostly an artifact of stacking 4-6 pieces; a player wearing one good body piece per tier is appropriately tanky. The real lever for L20+ is the weapon-damage curve, *not* the armor curve. Recommendation #3 in §7 is withdrawn.
 
+## 6c. Per-class gear distribution
+
+Class-restricted weapons (items where `Objects.restricted_class_ids` includes a specific class). Median = "typical drop a player of that class can wear"; P90 = "best gear they can realistically chase":
+
+| Class | Class-only weapons | Med max dmg | P90 max dmg | Top |
+|---|---|---|---|---|
+| Warrior | 82 | 20 (e.g., 4d5 or 2d10) | 36 | 40 |
+| Paladin | 86 | 20 | 36 | 40 |
+| Anti-Paladin | 84 | 20 | 36 | 40 |
+| Ranger | 83 | 20 | 36 | 40 |
+| Berserker | 77 | 20 | 36 | 40 |
+| Mercenary | 80 | 20 | 36 | 40 |
+| Thief | 90 | 20 | 36 | 40 |
+| Assassin | 92 | 20 | 36 | 40 |
+| Shaman | 124 | 16 (e.g., 2d8 or 4d4) | 36 | 40 |
+| Druid | 169 | 15 | 32 | 40 |
+| Cleric | 171 | 12 (e.g., 2d6) | 32 | 40 |
+| Conjurer | 152 | 10 (e.g., 2d5) | 30 | 40 |
+| Sorcerer | 166 | 10 | 30 | 40 |
+| Necromancer | 156 | 10 | 30 | 40 |
+
+**Class-restricted item counts** (all slots/types): Sorcerer 699, Necromancer 733, Conjurer 722, Druid 632, Assassin 588, Thief 585, Cleric 546, Shaman 519, Mercenary 514, Ranger 485, Warrior 478, Paladin 474, Anti-Paladin 464, Berserker 457. Caster classes have *more* class-restricted items overall but those items have *weaker* weapon dice — they make up for it with class-only spell-power gear.
+
+### Implications for the sweep
+
+The 2d8 scimitar (max 16) I used in §5a-bis is **below the warrior class median** (max 20). A warrior wielding their tier-typical 4d5 or 2d10 weapon would deal ~28% more damage than my sweep showed. Re-running the math with the warrior class-median weapon (avg 11.5 dmg):
+
+| Level | Class-median weapon | Notes |
+|---|---|---|
+| L30 guard | rounds-to-kill ~184 vs rounds-to-die ~190 | WIN by ~6 rounds — within variance |
+| L40 shade | rounds-to-kill ~200 vs rounds-to-die ~262 | WIN by ~62 rounds — comfortable |
+| L50 bungle | rounds-to-kill ~464 vs rounds-to-die ~247 | LOSS by ~217 rounds — needs help |
+
+So the *real* solo breakpoint with class-median gear is **L30-L40** (variance-zone) for warriors. L50+ definitely needs a group. That nearly perfectly matches the design intent in CLAUDE.md: "around level 1-20-ish, a player should be able to solo everything. As they rise above that, they might need additional help."
+
+### Mage/cleric classes have a different challenge
+
+A cleric with their class-median weapon (max 12, avg 6.5 per swing) at L25 deals ~3.25 dmg/round at 50% hit. Vs the L25 postmaster (678 HP, 6.14 dmg/round to player), warrior-style solo:
+- rounds-to-kill = 678 / 3.25 = 209 rounds
+- rounds-to-die = 1300 / 6.14 = 212 rounds
+- WIN by 3 rounds — knife-edge
+
+So casters can't melee-solo at the same pace as warriors. They need spell damage to make up the gap. (Spell-power scaling is the §7 #4 follow-on — out of scope for this gear curve audit but flagged for whoever implements it.)
+
 ## 7. Recommendations
 
 Roughly ordered by impact:
