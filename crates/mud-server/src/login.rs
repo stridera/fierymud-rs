@@ -2439,6 +2439,19 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         if c.position == mud_db::enums::Position::Ghost {
             e.insert(mud_world::Ghost);
         }
+        // Monks fight unarmed by design. Stamp NaturalDamage so the
+        // combat-pipeline unarmed branch uses real dice instead of
+        // the `unarmed floor = 1` fallback (combat.rs:677). Other
+        // classes stay weapon-dependent on purpose — a Brawling
+        // skill (or similar buff) is the right place to grant
+        // temporary unarmed dice to non-monks. Monk class_id = 14
+        // in the seeded Class table; if that ID shifts, this
+        // check needs updating.
+        if c.class_id == Some(14) {
+            let num = (c.level / 10).max(1);
+            let bonus = c.level / 5;
+            e.insert(mud_world::NaturalDamage { num, size: 6, bonus });
+        }
     }
     // Body metrics — height (inches) + weight (lbs). Rolled fresh
     // from `RaceCatalog::random_{height,weight}` for any character
