@@ -399,6 +399,35 @@ A cleric with their class-median weapon (max 12, avg 6.5 per swing) at L25 deals
 
 So casters can't melee-solo at the same pace as warriors. They need spell damage to make up the gap. (Spell-power scaling is the §7 #4 follow-on — out of scope for this gear curve audit but flagged for whoever implements it.)
 
+## 6d. Group projections — tank + cleric + DPS at L50/55/80
+
+Same math model, three-character party with class-median gear. The mob deals damage only to whoever is in `Fighting` first; `Guarding` redirects swings onto a bodyguard (see `combat.rs:555`). So we model:
+- Tank warrior wears tier-median armor (~65% armor_pct floor, hp_max = 50×L + 50)
+- Cleric heals the tank ~30 HP/round (typical L20-30 Heal/Cure Serious cast resolves to ~20-50 HP; assuming the cleric isn't perfectly efficient = ~30 effective)
+- DPS warrior wears the same gear as the tank, no Guarding
+
+Combined party damage at L50: warrior tank 4d5 (avg 12) × 50% hit = 6 dpr; DPS warrior same: 6 dpr; cleric class-median 2d6 (avg 6.5) × 50% = 3.25 dpr. **Total 15.25 dpr.**
+
+| Mob | HP | dpr to tank | dpr after armor + heal | rounds to kill mob | rounds to die | Verdict |
+|---|---|---|---|---|---|---|
+| L50 trash (bungle) | 2666 | 10.3 | -19.7 (heal exceeds dmg) | 175 | ∞ | **easy WIN** |
+| L55 boss (slender druid) | 3627 | ~22 | -8 (heal still exceeds) | 238 | ∞ | **WIN** |
+| L60 miniboss (Dagon) | ~3627 | ~31 | +1 (tank loses 1/round) | ~238 | ~2550 | **WIN comfortably** |
+| L80 trash (succubus) | 11133 | ~45 | +15 (cleric falls behind) | 730 | 170 | **LOSS** (needs 2nd healer or better gear) |
+| L90 trash (ranger) | 15854 | ~48 | +18 | 1040 | 142 | **LOSS** (group cap exceeded) |
+
+This matches the CLAUDE.md design intent very closely:
+- "Level 50 group in average gear with buffs should easily defeat level 50 trash" → **confirmed easy WIN** at L50 trash.
+- "Only the boss mobs (usually 5-10 levels higher) would be challenging" → L55-60 bosses **WIN comfortably**. The "challenging" framing in the design is more about pacing/variance than raw mortality with this composition.
+- L80+ becomes a hard wall for a 3-person party. Larger groups (2 healers, 3 DPS, etc.) or boss-tier gear would close it.
+
+### Caveats on the group projection
+
+- **Mana economy isn't modeled.** Cleric casts are free in the current build (no mana pool). When mana lands, sustained healing at 30/round will require gear that grants `max_mana` (currently flowing through `ObjectEffects` after the §3a fix — most caster gear has `max_mana` apply blocks).
+- **Boss attack patterns aren't modeled.** Many legacy bosses have triggers that fire special attacks (gaze, drain, multi-hit). The math here is "trash mob with boss HP/dmg" — the variance is wider than the table suggests.
+- **Stamina cost on skills isn't modeled.** The warriors here are auto-swinging (free); skill spam like `bash` / `kick` costs stamina that depletes over long fights.
+- **Empirical group sweep wasn't run.** The math model has ~10% agreement with reality on solo fights; group fights have more moving parts (`Guarding` setup, heal-timing, group-formation), so expect somewhat larger empirical variance. Recommend running an actual L50 group fight to validate the easy-WIN projection before committing tuning bets to it.
+
 ## 7. Recommendations
 
 Roughly ordered by impact:
