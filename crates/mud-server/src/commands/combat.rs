@@ -886,7 +886,13 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     let player_name = name_of(world, player);
 
     try_insert(world, player, Fighting(target));
-    if world.get::<CombatStats>(target).is_some()
+    // First-attacker priority: don't steal aggro from whoever's
+    // already engaged with this target. Players joining a tanked
+    // fight push to the hate list (via apply_swing) but the active
+    // Fighting target stays the original puller. `rescue` is the
+    // explicit aggro-redirect path.
+    if world.get::<Fighting>(target).is_none()
+        && world.get::<CombatStats>(target).is_some()
         && let Ok(mut e) = world.get_entity_mut(target)
     {
         e.insert(Fighting(player));
@@ -1849,7 +1855,10 @@ pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
     // a leap kick".
     if world.get_entity(target).is_ok() {
         try_insert(world, player, Fighting(target));
-        if world.get::<CombatStats>(target).is_some()
+        // First-attacker priority: don't steal aggro (see cmd_attack
+        // for full reasoning). `rescue` is the explicit redirect.
+        if world.get::<Fighting>(target).is_none()
+            && world.get::<CombatStats>(target).is_some()
             && let Ok(mut e) = world.get_entity_mut(target)
         {
             e.insert(Fighting(player));
@@ -1899,7 +1908,10 @@ pub(crate) fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
     );
     if world.get_entity(target).is_ok() {
         try_insert(world, player, Fighting(target));
-        if world.get::<CombatStats>(target).is_some()
+        // First-attacker priority: don't steal aggro (see cmd_attack
+        // for full reasoning). `rescue` is the explicit redirect.
+        if world.get::<Fighting>(target).is_none()
+            && world.get::<CombatStats>(target).is_some()
             && let Ok(mut e) = world.get_entity_mut(target)
         {
             e.insert(Fighting(player));
@@ -1950,7 +1962,10 @@ pub(crate) fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
     );
     if world.get_entity(target).is_ok() {
         try_insert(world, player, Fighting(target));
-        if world.get::<CombatStats>(target).is_some()
+        // First-attacker priority: don't steal aggro (see cmd_attack
+        // for full reasoning). `rescue` is the explicit redirect.
+        if world.get::<Fighting>(target).is_none()
+            && world.get::<CombatStats>(target).is_some()
             && let Ok(mut e) = world.get_entity_mut(target)
         {
             e.insert(Fighting(player));
@@ -2007,7 +2022,9 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
         && let Some(first) = first_alive
     {
         try_insert(world, player, Fighting(first));
-        if world.get::<CombatStats>(first).is_some()
+        // First-attacker priority (see cmd_attack).
+        if world.get::<Fighting>(first).is_none()
+            && world.get::<CombatStats>(first).is_some()
             && let Ok(mut e) = world.get_entity_mut(first)
         {
             e.insert(Fighting(player));
@@ -2521,7 +2538,9 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     {
         e.insert(Fighting(target));
     }
-    if world.get::<CombatStats>(target).is_some()
+    // First-attacker priority (see cmd_attack).
+    if world.get::<Fighting>(target).is_none()
+        && world.get::<CombatStats>(target).is_some()
         && let Ok(mut e) = world.get_entity_mut(target)
     {
         e.insert(Fighting(player));
