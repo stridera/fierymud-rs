@@ -2014,9 +2014,6 @@ fn parse_weapon_dice(values: &serde_json::Value) -> (i32, i32, i32) {
     )
 }
 
-/// Pull `Destination` from a Portal's `values` JSONB. Stored either
-/// as a number or a string in the legacy data; `0` (or missing /
-/// non-portal) is treated as "no destination".
 /// Extract the base armor value from an `Armor` object's `values`
 /// JSONB (`Objects.values.AC`). Legacy CircleMUD stored this as a
 /// positive integer where higher = stronger armor (the schema-import
@@ -2034,6 +2031,9 @@ fn parse_armor_ac(values: &serde_json::Value) -> i32 {
     }
 }
 
+/// Pull `Destination` from a Portal's `values` JSONB. Stored either
+/// as a number or a string in the legacy data; `0` (or missing /
+/// non-portal) is treated as "no destination".
 fn parse_portal_destination(values: &serde_json::Value) -> Option<i32> {
     let v = values.get("Destination")?;
     let raw = match v {
