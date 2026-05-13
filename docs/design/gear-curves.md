@@ -309,6 +309,34 @@ Again, an RP zone — minor flavor bonuses, no combat-grade gear. Zone author in
 
 This is why even with armor mitigation now working, L20+ trash still wins the HP race: mob hit rate is 70% vs player 50%, and player damage is constrained by the weapon-dice curve while mob damage is content-authored to scale.
 
+## 6b. Math model: weapon-damage threshold per level
+
+Same warrior profile (leather jerkin AC 13 → 65% armor, no `attack_power` injection), varying weapon dice. "kill" = rounds to reduce mob HP to 0; "die" = rounds for mob to reduce warrior HP to 0. Per-round damage uses formula averages — actual fights have ±25% variance plus 5% crit chance, so margins under ~30 rounds are noise.
+
+| Mob | 1d7 longsword (avg 4) | 2d8 scimitar (T3 drop, avg 9) | 8d4 weapon (avg 18) | 4d11 elite (avg 22) |
+|---|---|---|---|---|
+| **L20 bat** (437 HP, 21.5 dmg) | LOSS by 23 rnd | **WIN** by 105 rnd | WIN by 161 | WIN by 169 |
+| **L25 postmaster** (678 HP, 26 dmg) | LOSS by 145 | **WIN** by 53 | WIN by 141 | WIN by 153 |
+| **L30 guard** (1058 HP, 34.5 dmg) | LOSS by 367 | LOSS by 57 | **WIN** by 79 | WIN by 97 |
+| **L40 shade** (1150 HP, 47 dmg) | LOSS by 377 | LOSS by 22 (marginal) | **WIN** by 134 | WIN by 156 |
+| **L50 bungle** (2666 HP, 62 dmg) | LOSS by 1156 | LOSS by 377 | LOSS by 34 (marginal) | **WIN** by 13 (very marginal) |
+
+### What this tells us
+
+- **L20-L25** is reachable with the T3-grade weapon a mob in that tier drops (2d8 scimitar). The 65% armor floor from the §3d fix carries the survival side; the upgraded weapon flips kill-time below die-time. Confirms the design intent: "solo through L20, with effort".
+- **L30** needs an 8d4-class weapon (an L1 unique like *a TALKING steel longsword* or *Nightbringer*). T4-tier zone drops (3d5+ longswords, dagger of shadows 5d5) would also work. The drop-curve survey (§1 P90 column) shows T4 P90 is 25 damage — there's gear there.
+- **L40** is the *break point* for solo-with-realistic-gear. T5 P90 is 12 damage; 8d4 (avg 18) is more than that. The warrior would need either a *boss-drop unique* at this tier, or a different class with a damage-amplifying buff (a Mage with their own damage scaling, a Cleric self-buffing then nuking). This matches the design intent "L20+ needs help, L40+ needs serious help".
+- **L50+** is essentially un-soloable with current curves. Even the elite 4d11 knuckles win by only 13 rounds — well inside random variance. This is correct for a group-tier zone.
+
+### The "armor scaler ×5" finding revisited (vs §3e)
+
+§3e flagged the ×5 ac→armor_pct scaler as "too generous", but with the math model in front of us, **the 65% mitigation from a mid-tier armor piece is exactly what makes L1-L15 viable**. Lowering the scaler to ×2 would:
+- Reduce L15 warrior armor from 65% → 26%
+- Push L15 dmg-in from 5 dmg/round back to 11 dmg/round
+- Warrior dies in 73 rounds vs killing stallion in ~63 — back to LOSS
+
+So **don't lower the scaler.** The over-tuning §3e described is mostly an artifact of stacking 4-6 pieces; a player wearing one good body piece per tier is appropriately tanky. The real lever for L20+ is the weapon-damage curve, *not* the armor curve. Recommendation #3 in §7 is withdrawn.
+
 ## 7. Recommendations
 
 Roughly ordered by impact:
