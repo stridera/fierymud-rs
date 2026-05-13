@@ -426,7 +426,42 @@ This matches the CLAUDE.md design intent very closely:
 - **Mana economy isn't modeled.** Cleric casts are free in the current build (no mana pool). When mana lands, sustained healing at 30/round will require gear that grants `max_mana` (currently flowing through `ObjectEffects` after the §3a fix — most caster gear has `max_mana` apply blocks).
 - **Boss attack patterns aren't modeled.** Many legacy bosses have triggers that fire special attacks (gaze, drain, multi-hit). The math here is "trash mob with boss HP/dmg" — the variance is wider than the table suggests.
 - **Stamina cost on skills isn't modeled.** The warriors here are auto-swinging (free); skill spam like `bash` / `kick` costs stamina that depletes over long fights.
-- **Empirical group sweep wasn't run.** The math model has ~10% agreement with reality on solo fights; group fights have more moving parts (`Guarding` setup, heal-timing, group-formation), so expect somewhat larger empirical variance. Recommend running an actual L50 group fight to validate the easy-WIN projection before committing tuning bets to it.
+
+### 6e. Empirical L50 group fight — reveals two design gaps
+
+Ran an empirical fight: TestWarrior (tank, L50, 2555 HP, AC 13 jerkin + 2d8 scimitar) + TestCleric (heal-bot, casting `'heal' TestWarrior` every burst) + AdminChar (DPS, same loadout). Vs Bungle, L50 trash, 2666 HP, 62 avg dmg.
+
+The fight surfaced two findings the math model missed:
+
+**1. Mob aggro targets the most-recent attacker, not the first.** Tank issued `kill bungle` first; DPS attacked second. Result: **mob attacked DPS for the next 240 rounds while tank stood at full HP**. This is the inverse of typical tank-pull MMO convention. Per the explorer's earlier read of `combat.rs:386`: mob hate list is sorted with the *most recent* attacker as the active target; once the active target dies, the next-most-recent is picked. So in a 3-person group, the *cleric* (last to engage, via heal-casting which counts) gets aggro unless they don't engage at all. The implications:
+- DPS should engage *first*, tank should engage *last* (opposite of MMO convention)
+- Or tanks need a `taunt`-style skill that re-pushes them to the top of hate
+- `Guarding` exists but only redirects swings between two same-room players; can't pull a mob's primary target
+
+**2. Cleric heal targeting is naive in a scripted loop.** My script blindly cast `'heal' TestWarrior` every burst — TestWarrior was at full HP the whole time, so every cast was wasted. The DPS taking real damage got zero heals and died. A real player would heal the lowest-HP party member. Without that intelligence, a 3-person group is effectively a 2-person group + heal sink.
+
+**Actual fight trajectory:**
+| Round | Tank HP | Cleric HP | DPS HP | Mob notes |
+|---|---|---|---|---|
+| 5 | 2555 | 2555 | 2441 | mob targets DPS |
+| 50 | 2555 | 2555 | 1887 | DPS down 30% |
+| 150 | 2555 | 2555 | 906 | DPS down 65% |
+| 240 | 2500 | 2555 | **0** | DPS dies; mob switches to tank |
+| 300 | 1683 | 2555 | 0 | TIMEOUT (mob ~91% killed, tank ~34% HP lost) |
+
+Mob would die in ~50 more rounds; tank would die in ~115 more rounds. **Projected WIN at very low HP if the fight had budget for ~50 more rounds.** Practically — given the cleric did *nothing* useful — this was a 2-character grind: tank + DPS landing 4.5 dmg/round each (alternating who's alive) for ~350 rounds total to drop the mob.
+
+**Revised group projection** with the empirical aggro/heal insights baked in:
+
+| Scenario | Math model said | Reality says |
+|---|---|---|
+| L50 trash (cleric heals optimally) | Easy WIN ~175 rnd | Likely WIN ~200-250 rnd |
+| L50 trash (cleric heals tank but tank not hit) | n/a | Slow grind WIN ~350+ rnd |
+| L50 trash (DPS dies, no heal redirect) | n/a | TIMEOUT / WIN at low HP |
+| L55-60 boss (cleric heals correctly) | Comfortable WIN | Likely WIN with care |
+| L80+ trash | LOSS | LOSS — confirmed by extrapolation |
+
+The math model's "30 HP/round sustained heal exceeds incoming damage" assumed the cleric heals the *correct* target. With naive scripting that targets a non-damaged player, the heal effectively never lands. This is a teaching moment for the design: combat balance depends on *play patterns*, not just stat math.
 
 ## 7. Recommendations
 
