@@ -266,6 +266,47 @@ The divergence is **not in the data** — it's in the *formula* applied to that 
 
 So the level-baseline accuracy/evasion scaling is symmetric (both sides get +2×level), but **mob hit_roll on the proto is a structural advantage** that players have no class-progression equivalent for. Legacy class tables gave warriors a falling-THAC0 curve; modern has no equivalent.
 
+### 6a.i Legacy gear samples by tier
+
+Sampling representative weapons + armor straight out of `~/Code/mud/lib/world/obj/*.obj`:
+
+**T1 — newbie zone 10 (crude weapons & cloth armor):**
+- WEAPON #1010 *a crude club* — 2d2 crush (avg 3), no apply blocks
+- WEAPON #1011 *a crude mace* — 1d5 crush (avg 3), no apply blocks
+- WEAPON #1012 *a thin dagger* — 1d3 pierce (avg 2), no apply blocks
+- ARMOR #1002 *a flowing crimson robe* — AC 1, no apply blocks
+- ARMOR #1016 *a small crude shield* — AC 1, no apply blocks
+
+Newbie gear has zero magical bonuses. Modern import preserves the dice and AC exactly. **Carry-over: bit-perfect.**
+
+**T2 — zone 100 (Ironforest civilian, fur clothing):**
+- ARMOR #10033 *a fine fur-lined leather jacket* — AC 2, no apply blocks
+- ARMOR #10034 *a fur belt* — AC 2, no apply blocks
+
+This zone is civilian-flavored — modest gear, no enchantments. Author intent was probably "RP/flavor zone", not endgame loot. The mob-drop survey shows T2 as a thin tier overall (213 weapons, 195 armor — a lot of which are this kind of "fur and leather" cosmetic gear).
+
+**T4 — zone 40 (angel zone, real combat content):**
+- WEAPON #4006 *a dagger of shadows* — 5d5 pierce (avg 15), applies: DEX+2 / CON+1 / DAMROLL+2 / AGE+8
+- WEAPON #4007 *a blade of Chaos* — 3d7 (avg 12), applies: DEX+1 / DAMROLL+2 / CON-2 / FOCUS+2
+- ARMOR #4001 *a breastplate of shadows* — **AC 24**, applies: DEX+2 / CON-1 / FOCUS+2
+
+T4 has rich items. Note the **AC 24** breastplate — that's massive in modern terms (24 × 5 = 120 armor_pct, clamped to the cap). A single piece of T4 body armor puts the wearer at full mitigation. In legacy CircleMUD this was AC -24 effectively (lower=better; subtracted from THAC0 calc); it gave a sweeping damage reduction but not literal invulnerability. The modern conversion respects the magnitude but the % cap turns it into a hard "0 damage from physical" — which legacy did *not* do.
+
+**T5 — zone 62 (Mage Tower, scholarly/social):**
+- ARMOR #6201 *a sea-blue silk gown* — AC 2, applies: CHA+2
+- ARMOR #6203 *a red silk shirt* — AC 1, applies: STR+1
+
+Again, an RP zone — minor flavor bonuses, no combat-grade gear. Zone author intent is clear: this isn't where you go to gear up.
+
+**T7 — zone 102**: no T7 weapons/armor in the first 3 of each type from this zone file (file might be sparse, or items are deeper in the file). Skipping for now — can re-sample with a broader script if needed.
+
+### 6a.ii What this tells us about the divergence
+
+- **Dice & AC values came across perfectly.** No data was lost; the bit-for-bit comparison on T1 confirmed it.
+- **The author intent is preserved at the *item* level.** A T4 *breastplate of shadows* was "elite mid-tier armor" in legacy; it's still elite in modern data.
+- **The combat formula amplifies that elite tier into invulnerability** (because of the ×5 ac→armor_pct scaler + the 100% cap). Legacy was forgiving of high-AC items because AC fed into a d20-vs-THAC0 calculation where extreme values still translated to "rare miss" not "guaranteed miss". Modern's percentage-based damage reduction with a hard cap makes extreme AC into a different kind of cliff.
+- **The mob proto's hit_roll has no player-class counterpart**, which is the bigger empirical gap. Legacy class progression tables gave warriors a falling-THAC0 curve that modern hasn't replicated. This is the design feature we should restore.
+
 This is why even with armor mitigation now working, L20+ trash still wins the HP race: mob hit rate is 70% vs player 50%, and player damage is constrained by the weapon-dice curve while mob damage is content-authored to scale.
 
 ## 7. Recommendations
