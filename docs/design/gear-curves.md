@@ -165,15 +165,32 @@ After the full reset+reimport with the patched importer:
 - Server starts clean: **0 `unsupported target` warnings** — every target the importer now writes is supported by `apply_modify_delta`.
 - Smoke test: TestWarrior (L25, 250 HP) wore the L12 "leather jerkin of the 3rd Black Legion" (`(zone 55, id 27)`, +5 max_hp + +2 con_bonus per apply blocks). HP went 250 → **255** immediately. Wiring is alive end-to-end.
 
-### 3d. 🚨 Still broken: `Objects.values.AC` (base armor type AC) is never read
+### 3d. ✅ Fixed (this session): `Objects.values.AC` now flows into `armor_pct`
 
-Grep confirms it — `Objects.values->>"AC"` is *only* referenced inside test assertions in `equip_apply.rs:465` and a migration comment in `commands.rs:11950`. No production read path. So:
+Commit `9aa29af` in `fierymud-rs`: adds `armor_ac: i32` to `ObjectProto`, loader populates it from `Objects.values.AC` for `ARMOR`-type items, `apply_object_to_wearer` calls `apply_modify_delta(wearer, "ac", proto.armor_ac)` before iterating apply-block effects, and records the delta in `applied_deltas` so unequip reverses it.
 
-- A leather jerkin imported as `Objects.values = {"AC": 4}` has AC 4 sitting in the row.
-- Only the *apply-block* effects (the things now landing in `ObjectEffects`) feed into the wearer's stats.
-- For an item whose entire armor value lives in `values.AC` (no apply blocks), wearing it gives the player nothing armor-side.
+Verified end-to-end:
+- TestWarrior naked → `score` reports `Armor: 0%`
+- Wear leather jerkin (`zone 55, id 27`, `values.AC = 13`) → `Armor: 65%` (13 × 5 = 65, matches the ×5 ac legacy-alias scaler in `apply_modify_delta`)
+- Remove jerkin → `Armor: 0%` (reversal works)
+- Apply-block bonuses (`+5 max_hp`, `+2 con_bonus`) also fire on the same wear.
 
-The runtime needs an analogue of weapon-dice loading: when wearing an item, read `Objects.values.AC` (legacy semantic) and contribute it to `CombatStats.armor_pct` (probably via the existing `ac → armor_pct ×5` legacy alias in `apply_modify_delta`). Recommended pattern: spawn a synthetic `ObjectEffects(modify, target=ac, amount=values.AC)` at item-load time inside `equip_apply::apply_object_to_wearer`, or just inline a single `apply_modify_delta(world, wearer, "ac", values.AC)` call before iterating the rest of the effects rows. Either is a small contained change.
+### 3e. ⚠️ Side effect: the ×5 ac-scaler is now too generous
+
+With `Objects.values.AC` consumed, a single mid-tier armor piece can grant **65% armor_pct**. The schema caps `armor_pct` at 100. A four-piece kit (head/body/legs/feet, each ~AC 8-13) puts a player at the cap with room to spare. At 100% armor_pct the wearer takes zero physical damage; combat against any pure-physical mob is then unloseable regardless of HP.
+
+Real-world distribution (post-fix) for `Objects.values.AC` across all armor-typed items reachable via mob drops:
+- T1 (L1-10) median AC: 1, P75: 2, P90: 4, best: 10 → median armor_pct contribution per slot **5%**, BIS 50%
+- T2 (L11-20) median AC: 4, P75: 5.5, P90: 7, best: 8 → median per slot **20%**, BIS 40%
+- T3 (L21-30) median AC: 5, P75: 10, P90: 11, best: 15 → median per slot **25%**, BIS 75%
+- T4 (L31-40) median AC: 7, P75: 8, P90: 8, best: 18 → median per slot **35%**, BIS 90%
+- T6 (L51-70) median AC: 7, P75: 19, P90: 20, best: 24 → median per slot **35%**, BIS 100% (capped)
+
+Stacking 4-6 median pieces: T1 player ≈ 25% armor, T2 ≈ 100% (cap), T3+ ≈ 100% (cap). The cap kicks in by L11-20 with median gear — players become *physically invulnerable* shortly after newbie zones. That's likely not the design intent.
+
+**Recommended fix**: lower the `ac → armor_pct` scale factor in `commands.rs::apply_modify_delta` from ×5 to ×2 or ×3, **or** lower the `armor_pct.clamp(0, 100)` to `clamp(0, 75)` so even capped players take some damage. The ×5 dates from the migration plan in `combat-rebalance.md:184-208` and was calibrated for a different drop distribution; with the §3a/§3d fixes both lit, it now over-shoots.
+
+A scaler of ×2 would put T2 median per-slot armor at 8%, full T2 kit at 32% armor (modest mitigation, fights still progress), T6 median per-slot at 14%, full T6 kit at 56% (substantial late-game mitigation). That feels like a more designed curve.
 
 ## 4. Realistic "fully-geared player" profile per tier (post-fix)
 
@@ -217,15 +234,63 @@ Pulling all of this together as a designer:
 3. **Armor mitigation is effectively zero** (§3d bug + apply-block direction). At every level, players take full damage. The mob damage curve at L20 (22 per hit), L40 (47), L50 (62) is unmitigated.
 4. **The `level*2` baseline scaling in accuracy/evasion is symmetric** between player and mob, so it doesn't shift the balance — but it doesn't *fix* anything either. The asymmetry comes from mob hit_roll + weapon damage scaling.
 
+### 5a. Sweep results — pre-fix vs post-fix
+
+Same harness, same mob list, same TestWarrior (level-bumped via `set_player_field`, dex_score scaled by seeder formula). Pre-fix: only `set_player_field` injection for stats. Post-fix: actual leather jerkin (`zone 55, id 27`) + crude longsword (`zone 10, id 14`) equipped via `wear`/`wield`.
+
+| Level | Mob | Pre-fix outcome | Post-fix outcome | Δ |
+|---|---|---|---|---|
+| L1 | dwarf | WIN (100/100) | WIN (105/105) | — |
+| L5 | dragon | WIN (280/300) | WIN (289/300) | — |
+| L10 | guard | WIN (333/550) | WIN (487/550) | +154 HP retained |
+| L15 | stallion | **LOSS** (0/800 at rnd 60) | **WIN** (220/800 at rnd 140) | **flipped** |
+| L20 | bat | **LOSS** (0/1050 at rnd 90) | TIMEOUT (335/1050 at rnd 150) | warrior alive |
+| L25 | postmaster | **LOSS** (0/1300 at rnd 55) | TIMEOUT (139/1300 at rnd 150) | warrior alive |
+
+L15 flipping LOSS→WIN at the same gear level is the headline. L20+ moves from "warrior dies" to "fight is grinding" — within reach of a real WIN if the player had a level-appropriate *weapon* (currently still 1d7 longsword across all levels).
+
+## 6a. Legacy comparison — where did we diverge?
+
+I sampled the legacy `~/Code/mud/lib/world/obj/10.obj` weapons and compared to the modern import:
+- Legacy "crude club" (vnum 1010): type 5, dice 2d2, damage type 6 (CRUSH) → modern `(zone 10, id 10)` "a crude club": `values = {"Hit Dice": {"num": 2, "size": 2}, "Damage Type": "CRUSH"}`. **Bit-perfect carry-over.**
+- Legacy "leather jerkin" with `A 17 -4` apply (legacy AC -4 = +4 modern via flip) and base type-AC: modern `(zone 55, id 27)` shows `values.AC = 13` and the apply block landed as ObjectEffects. **Carry-over working.**
+
+The divergence is **not in the data** — it's in the *formula* applied to that data:
+
+| | Legacy CircleMUD | Modern fierymud-rs |
+|---|---|---|
+| Hit-roll math | `d20 + hit_bonus − target_AC ≥ THAC0` (lower THAC0 = better) | `50 + (accuracy − evasion) / 2` clamped [1,99] (higher = better, derived from hit_roll × 2 + level × 2) |
+| Player accuracy ramp | THAC0 falls 20 → 0 across L1-99 from class progression tables | Player accuracy = 50 + 2×level + gear deltas. Gear hit_roll is ~0 (see §1), so all scaling is the +2×level baseline. |
+| Mob accuracy ramp | Mob THAC0 also falls with level (per zone-author authored tables) | Mob accuracy = 50 + 2×hit_roll + 2×level. Mob hit_roll is content-authored on the mob proto (often 20+ on trash, 30+ on bosses). |
+| Net at L20 vs equal-level trash | Player ~95% hit, mob ~45% hit | Player ~50% hit, mob ~70% hit |
+
+So the level-baseline accuracy/evasion scaling is symmetric (both sides get +2×level), but **mob hit_roll on the proto is a structural advantage** that players have no class-progression equivalent for. Legacy class tables gave warriors a falling-THAC0 curve; modern has no equivalent.
+
+This is why even with armor mitigation now working, L20+ trash still wins the HP race: mob hit rate is 70% vs player 50%, and player damage is constrained by the weapon-dice curve while mob damage is content-authored to scale.
+
 ## 7. Recommendations
 
 Roughly ordered by impact:
 
-1. **Fix §3d** (Objects.values.AC consumption). Single contained edit to `equip_apply.rs`. Restores armor mitigation immediately — expect L1-L20 solo to be reachable just from this fix once players have 4-6 armor pieces.
-2. **Audit the apply-block AC direction.** Half the negative `target=ac` rows look like they came from items the legacy parser stored as positive values for *better* armor. If the sign-flip in the importer is double-flipping (or the original parser was inverting), fix that. After this fix the apply-block AC bonuses should also be positive on real armor.
-3. **Class-based hit_roll scaling.** Add a per-level hit_roll progression to the `Class` table (`hit_roll_per_level`) and have `spawn_player` initialize accuracy as `50 + class.hit_roll_per_level × level × 2` plus gear deltas. This closes the structural hit-rate gap vs mobs.
-4. **Weapon damage curve.** Tier T2 median damage of 5 isn't enough vs 400 HP mobs. Either (a) re-author the weapon drops to scale damage more aggressively per tier, or (b) introduce a stronger `attack_power` floor per class/level (warriors should land ~50% damage bonus from class alone at L20). (b) is less invasive.
-5. **Re-survey after the fixes.** Once §1 lands, the curve table will reflect what gear actually contributes, and we can re-validate the L1-L20 solo target with a fresh sweep.
+1. ✅ **DONE: §3a** — `ObjectEffects(modify)` import (fierylib commit `edcb3ea`).
+2. ✅ **DONE: §3d** — `Objects.values.AC` consumption (fierymud-rs commit `9aa29af`). L1-L15 solo target now reachable; L20+ trash still grinds out a loss because of the hit-rate gap.
+3. ⚠️ **NEXT: lower the `ac → armor_pct` scale factor**. See §3e. Today's ×5 makes 2-3 armor pieces enough to hit the cap; ×2 or ×3 gives a real curve that still benefits high-tier gear. Single-line edit in `commands.rs::apply_modify_delta`.
+4. **Class-based hit_roll scaling.** This is the legacy/modern divergence in §6a. Add a per-level hit_roll progression to the `Class` table (`hit_roll_per_level`) and have `spawn_player` initialize accuracy as `50 + (class.hit_roll_per_level × level × 2) + gear`. Warrior +1/level, Mage +0.5/level, etc. Closes the structural hit-rate gap vs mobs and restores the legacy "warriors get better at hitting as they level" curve.
+5. **Weapon damage progression by tier.** Median T2 weapon is 1d6 (avg 5 dmg). Vs an L20 trash mob with ~437 HP, that's ~175 swings to kill. Either re-author the drops to scale weapon dice more aggressively per tier (T2 median target 1d8, T5 target 2d6+2, T7 target 3d8+5), or add a class+level `attack_power` floor at character spawn (warrior gets +5×level attack_power baseline → +100% damage at L20).
+6. **Audit apply-block AC sign-flip direction.** Most `target=ac` rows in `ObjectEffects` are negative (after my flip in fierylib). If that's because legacy items typically had positive AC apply blocks for *bad* armor (cursed/worn), the flip is correct. If they were positive *good*-armor enchantments and the flip is double-inverting, fix the flip. A spot-check of 5 mid-tier rings/amulets vs their legacy `.obj` files would confirm.
+7. **Re-survey after #3 and #4 land.** Curve table in §1 should then reflect realistic gear math, and L20-L30 sweep should resolve in WINs with HP margin, matching the design.
+
+## 8. Open question for the user (game-design call)
+
+§3e and the post-fix sweep both point at the same trade-off: the armor scaler is now too generous, but lowering it (rec #3) reverts L15 toward LOSS territory unless rec #4 (player hit-roll scaling) lands at the same time.
+
+The two are coupled. Two design philosophies to choose from:
+- **High-armor, low-hit-rate game**: leave the ×5 ac scaler, players reach 100% mitigation by mid-tier, but mobs miss often. Combat feels like "tank everything, slowly grind down". Closest to legacy CircleMUD's "AC matters more than THAC0 at L20+".
+- **Moderate-armor, balanced-hit-rate game**: lower the ×5 to ×2 *and* add class-based hit_roll scaling. Players hit harder per swing as they level (closer to legacy intent), armor is meaningful but not invincibility. Combat feels like "pick your moments, gear matters but so does class progression".
+
+The empirical sweep can't pick between these — both work for "solo to L20" given the right calibration. Worth a design conversation.
+
+## 9. Process notes
 
 This bug **dominates everything else** in the combat-balance picture:
 - AC values are unused → players take full uncut damage at every level
