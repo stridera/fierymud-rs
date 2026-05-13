@@ -234,6 +234,24 @@ Pulling all of this together as a designer:
 3. **Armor mitigation is effectively zero** (§3d bug + apply-block direction). At every level, players take full damage. The mob damage curve at L20 (22 per hit), L40 (47), L50 (62) is unmitigated.
 4. **The `level*2` baseline scaling in accuracy/evasion is symmetric** between player and mob, so it doesn't shift the balance — but it doesn't *fix* anything either. The asymmetry comes from mob hit_roll + weapon damage scaling.
 
+### 5a-bis. Sweep results with tier-appropriate weapon (2d8 scimitar from L20-30 drops + leather jerkin AC 13)
+
+Empirical confirmation of the math model in §6b. Same harness, same mob list, same warrior baseline — only the weapon upgraded from 1d7 → 2d8 (a scimitar that mobs in the L20-30 tier actually drop, `zone 162, id 2`):
+
+| Level | Mob | Outcome | HP after | Rounds | Math prediction |
+|---|---|---|---|---|---|
+| L15 | stallion | **WIN** | 572/800 | 50 | WIN ✓ (model says WIN by 161 rnd margin) |
+| L20 | bat | **WIN** | 604/1050 | 90 | WIN ✓ (model says WIN by 105 rnd margin) |
+| L25 | postmaster | **WIN** | 241/1300 | 145 | WIN ✓ (model says WIN by 53 rnd margin) |
+| L30 | guard | **LOSS** | 0/1550 | 165 | LOSS ✓ (model: LOSS by 57 rnd) |
+| L40 | shade | **WIN** | 195/2050 | 235 | LOSS predicted (22 rnd margin — within variance window; flipped favorably) |
+
+**Empirical ± Model agreement: ~10% on solid outcomes; the L40 case shows the variance band is real.** The model is *load-bearing* for design conversations — we can predict outcomes without running each sweep, and the variance band tells us how far we are from a tier breakpoint.
+
+The L25 fight ended at 241/1300 HP (warrior just barely won at ~18% HP) — that's exactly the "solo with effort, gear matters" feel the design intends. L30 dies at the round count the model projected.
+
+**Content-authoring inconsistency surfaced:** L30 burly guard is *harder* than L40 frozen shade despite being 10 levels lower. The guard has `hit_roll=20` (accuracy 150 post-import), the shade has `hit_roll=0` (accuracy 130). At equal player evasion (~140 at L30, ~140 at L40), that's 75% vs 45% hit rate against the player — a 67% increase in damage-in. The guard's HP (1058) is also nearly identical to the shade's (1150) despite the L40 mob being designed as harder content. Looks like the guard's stats were authored from a "city guard" lens (active hit_roll, fighter type) while the shade was authored as "ghostly attacker" (no hit_roll, drift attack). Worth a pass through the bigger mob authoring data later — this kind of inversion-by-archetype could pepper the curve.
+
 ### 5a. Sweep results — pre-fix vs post-fix
 
 Same harness, same mob list, same TestWarrior (level-bumped via `set_player_field`, dex_score scaled by seeder formula). Pre-fix: only `set_player_field` injection for stats. Post-fix: actual leather jerkin (`zone 55, id 27`) + crude longsword (`zone 10, id 14`) equipped via `wear`/`wield`.
