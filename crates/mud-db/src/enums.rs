@@ -344,6 +344,23 @@ pub enum MobProfession {
     Trainer,
 }
 
+impl MobProfession {
+    /// Lowercase service tag for client-facing surfaces (GMCP
+    /// `Room.Services.services`, `Room.Mobs[i].professions`).
+    /// Stable strings — renaming breaks client routing.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Banker => "bank",
+            Self::Shopkeeper => "shop",
+            Self::Receptionist => "inn",
+            Self::Postmaster => "mail",
+            Self::Guildmaster => "guild",
+            Self::Trainer => "trainer",
+        }
+    }
+}
+
 /// Three-bucket alignment used for item restrictions. The
 /// schema's `Objects.restricted_alignments` column is an array
 /// of these. The runtime compares against the killer's i32

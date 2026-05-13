@@ -680,7 +680,7 @@ impl ConnRouter {
 
     /// Push the `External.Discord.Info` rich-presence pairing
     /// frame. Safe to re-emit: Mudlet's Discord SDK uses the
-    /// applicationid to identify the right app config and treats
+    /// application_id to identify the right app config and treats
     /// repeats as idempotent. This is the frame the client asks for
     /// when it sends `External.Discord.Hello` (and `Get`) to start
     /// rich presence.
@@ -693,7 +693,7 @@ impl ConnRouter {
         let invite_url = cfg.get_string("gmcp", "discord_invite_url", "");
         if !app_id.is_empty() {
             let payload = format!(
-                r#"{{"applicationid":"{}","inviteurl":"{}"}}"#,
+                r#"{{"application_id":"{}","invite_url":"{}"}}"#,
                 json_escape(app_id),
                 json_escape(invite_url),
             );
@@ -817,6 +817,15 @@ impl ConnRouter {
             "Char.Items.Inv" | "Char.Items.Worn" => {
                 if let Some(&entity) = self.playing.get(&conn_id) {
                     commands::refresh_player_items_gmcp(world, entity);
+                }
+            }
+            // Room.Mob.Get — click-to-detail on a mob in the
+            // current room. Payload `{"id":"<entity_bits>"}`; the
+            // handler enforces same-room scope and silently no-ops
+            // on mismatch.
+            "Room.Mob.Get" => {
+                if let Some(&entity) = self.playing.get(&conn_id) {
+                    commands::handle_room_mob_get(world, entity, payload);
                 }
             }
             other => {

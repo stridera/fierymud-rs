@@ -1135,6 +1135,17 @@ pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
     out
 }
 
+/// Render a string for embedding inside a GMCP JSON payload: strip
+/// color tags, then escape `\` and `"`. The combination every named-
+/// entity GMCP emit site needs. Keeps the wire payload plain so the
+/// client can re-style without re-parsing color tags.
+#[must_use]
+pub(crate) fn plain_for_gmcp(s: &str) -> String {
+    render_color_tags(s, ColorMode::Strip)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 /// True if `<tag>` looks like an XML-Lite color/style tag — i.e. its
 /// contents only contain characters the spec uses (alphanumerics, `:`
 /// for modifier separators, `#` for RGB, `-` and `_` for `bg-NAME`-
@@ -4368,13 +4379,12 @@ mod tests {
     }
 }
 
-/// Compute the IRE-style "next level" progress (`nl` in
+/// Compute the "next level" progress (`next_level_pct` in
 /// `Char.Vitals`). Returns the integer percentage `[0, 100]` of the
-/// way from this level's XP threshold toward the next level's,
-/// matching what Mudlet's stock gauge bindings expect. Returns 0
-/// for the immortal levels (no "next") and 0 when the level table
-/// hasn't loaded yet — calling code treats either as "no progress
-/// bar to draw" rather than as a real measurement.
+/// way from this level's XP threshold toward the next level's.
+/// Returns 0 for the immortal levels (no "next") and 0 when the
+/// level table hasn't loaded yet — calling code treats either as
+/// "no progress bar to draw" rather than as a real measurement.
 fn compute_level_progress(world: &World, level: i32, xp: i32) -> i32 {
     let Some(table) = world.get_resource::<mud_world::LevelTable>() else {
         return 0;
@@ -4495,8 +4505,20 @@ pub(crate) fn send_char_items_list(
         // means the carrier has cast `identify` on it. Drives
         // the rich-detail view in the client's item panel.
         let identified = world.get::<mud_world::Identified>(item).is_some();
+        // Per-item slot string, only for items in the `wear`
+        // bucket. Empty for inventory items / containers. Lets
+        // the equipment panel render "head: a golden circlet"
+        // without a second lookup.
+        let slot_field = if location == "wear" {
+            world
+                .get::<EquippedSlot>(item)
+                .map(|eq| format!(r#","location":"{}""#, eq.0.label()))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         entries.push(format!(
-            r#"{{"id":"{id}","name":"{plain}","type":"{item_type}","identified":{identified}}}"#
+            r#"{{"id":"{id}","name":"{plain}","type":"{item_type}","identified":{identified}{slot_field}}}"#
         ));
     }
     let payload = format!(
@@ -4590,7 +4612,7 @@ pub(crate) fn send_room_players_snapshot(world: &mut World, viewer: Entity) {
                 let plain = render_color_tags(&named.name, ColorMode::Strip)
                     .replace('\\', "\\\\")
                     .replace('"', "\\\"");
-                entries.push(format!(r#"{{"name":"{plain}","fullname":"{plain}"}}"#));
+                entries.push(format!(r#"{{"name":"{plain}","full_name":"{plain}"}}"#));
             }
         }
     }
@@ -4617,7 +4639,7 @@ pub(crate) fn broadcast_room_player_diff(
     let plain = render_color_tags(raw_name, ColorMode::Strip)
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
-    let payload = format!(r#"{{"name":"{plain}","fullname":"{plain}"}}"#);
+    let payload = format!(r#"{{"name":"{plain}","full_name":"{plain}"}}"#);
     let frame = mud_net::gmcp_packet(&format!("Room.{verb}"), &payload);
 
     let recipients: Vec<Entity> = {
@@ -4663,12 +4685,64 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
     let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills.List", &payload));
 }
 
+/// Push a `Char.Skills` GMCP frame to `viewer`. Drives the future
+/// skill-bar widget: one entry per known ability with the cooldown
+/// timer and an `available` boolean (true when off cooldown). Shape:
+///
+///   { skills: [ {name, cooldown, available} ] }
+///
+/// `mp_cost` is omitted today — ability mana cost is computed at
+/// cast time from spell-circle + class focus rate, not stored as a
+/// stable per-ability value. Reserved in the spec for when the
+/// runtime caches a per-class cost lookup.
+pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(known) = world.get::<KnownAbilities>(viewer) else {
+        let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills", r#"{"skills":[]}"#));
+        return;
+    };
+    let catalog = match world.get_resource::<AbilityCatalog>() {
+        Some(c) => c,
+        None => {
+            let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills", r#"{"skills":[]}"#));
+            return;
+        }
+    };
+    let now = std::time::Instant::now();
+    let cooldowns = world.get::<Cooldowns>(viewer);
+    // AbilityCatalog is keyed by name; reverse-lookup by id would
+    // scan the full catalog (~400 entries) per known ability per
+    // prompt. Snapshot a by_id view once. Mirrors Char.Effects.
+    let by_id: std::collections::HashMap<i32, &mud_world::AbilityDef> =
+        catalog.by_name.values().map(|d| (d.id, d)).collect();
+    let mut entries: Vec<String> = Vec::with_capacity(known.entries.len());
+    for &(ability_id, _, known_flag) in &known.entries {
+        if !known_flag {
+            continue;
+        }
+        let Some(def) = by_id.get(&ability_id) else { continue };
+        let plain = plain_for_gmcp(&def.plain_name);
+        // Seconds remaining on this ability's cooldown, or 0 if
+        // it's ready (no entry, or `ready_at` already passed).
+        let cooldown_secs = cooldowns
+            .and_then(|cd| cd.ready_at.get(&ability_id))
+            .map(|when| when.saturating_duration_since(now).as_secs())
+            .unwrap_or(0);
+        let available = cooldown_secs == 0;
+        entries.push(format!(
+            r#"{{"name":"{plain}","cooldown":{cooldown_secs},"available":{available}}}"#,
+        ));
+    }
+    let payload = format!(r#"{{"skills":[{}]}}"#, entries.join(","));
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills", &payload));
+}
+
 /// Push a `Group` GMCP frame to `viewer`. The frame describes the
 /// whole party rooted at `viewer`'s leader: name, count, and a
 /// member array. Each member entry carries name, level, race,
 /// class, current room (true if same as `viewer`'s room — the
 /// `with_leader` IRE convention), and a `stats` block with
-/// hp/maxhp/mv/maxmv. Mudlet's party panel renders directly off
+/// hp/max_hp/mv/max_mv. The party panel renders directly off
 /// this shape.
 ///
 /// Empty / solo case: no Group frame is emitted (the player isn't
@@ -4724,28 +4798,365 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
         let (hp, max_hp) = world
             .get::<Health>(m)
             .map_or((0, 0), |h| (h.hp, h.max));
+        let (mp, max_mp) = world
+            .get::<mud_world::Mana>(m)
+            .map_or((0, 0), |mana| (mana.current, mana.max));
         let (mv, max_mv) = world
             .get::<Stamina>(m)
             .map_or((0, 0), |s| (s.current, s.max));
         entries.push(format!(
-            r#"{{"name":"{plain}","with_leader":{with},"level":{level},"race":"{race}","class":"{class}","stats":{{"hp":{hp},"maxhp":{maxhp},"mp":0,"maxmp":0,"mv":{mv},"maxmv":{maxmv}}}}}"#,
+            r#"{{"name":"{plain}","with_leader":{with},"level":{level},"race":"{race}","class":"{class}","stats":{{"hp":{hp},"max_hp":{max_hp},"mp":{mp},"max_mp":{max_mp},"mv":{mv},"max_mv":{max_mv}}}}}"#,
             plain = plain,
             with = with_leader,
             level = level,
             race = race.replace('"', "\\\""),
             class = class.replace('"', "\\\""),
             hp = hp,
-            maxhp = max_hp,
+            max_hp = max_hp,
+            mp = mp,
+            max_mp = max_mp,
             mv = mv,
-            maxmv = max_mv,
+            max_mv = max_mv,
         ));
     }
     let payload = format!(
-        r#"{{"groupname":"{leader_plain}'s group","leader":"{leader_plain}","count":{count},"members":[{members}]}}"#,
+        r#"{{"group_name":"{leader_plain}'s group","leader":"{leader_plain}","count":{count},"members":[{members}]}}"#,
         count = members.len(),
         members = entries.join(","),
     );
     let _ = conn.0.try_send(mud_net::gmcp_packet("Group", &payload));
+}
+
+/// Push a `Char.Combat` GMCP frame to `viewer`. Drives the bottom-left
+/// TARGET panel: tank + opponent + (optional) the viewer's current
+/// target when it differs from the group's opponent.
+///
+/// Field-name quirk: the spec uses `tank.max_hp` (underscore) but
+/// `opponent.hp_percent` and Char.Vitals' `max_hp`. All snake_case
+/// — the client does no normalization, so the names below match the
+/// wire contract exactly.
+///
+/// Shape:
+///   {} (cleared)                          — no Fighting; client hides
+///   { tank: {name, hp, max_hp},
+///     opponent: {name, hp_percent},
+///     target?:  {name, hp_percent} }
+///
+/// `opponent` and `target` are the same mob today (the viewer's
+/// `Fighting`); `target` is included as the explicit "my current
+/// swing" mob so the client can stack `Opponent: X` / `Target: Y`
+/// when a group-main concept lands later. `tank` is whoever the
+/// target mob is fighting back — usually the viewer (solo) or a
+/// groupmate holding aggro. Falls back to the viewer when the mob
+/// isn't swinging at anyone yet.
+pub(crate) fn send_char_combat(world: &World, viewer: Entity) {
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let fighting = world.get::<Fighting>(viewer).map(|f| f.0);
+    let Some(mob) = fighting else {
+        // Cleared frame — client uses empty {} as a hide signal.
+        let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Combat", "{}"));
+        return;
+    };
+    // Mob may have despawned mid-round (death cleanup races prompt
+    // dispatch). Treat a stale Fighting like "no combat" — the next
+    // tick will clear the component too.
+    if world.get_entity(mob).is_err() {
+        let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Combat", "{}"));
+        return;
+    }
+    let mob_plain = world
+        .get::<Named>(mob)
+        .map(|n| plain_for_gmcp(&n.name))
+        .unwrap_or_default();
+    let (mob_hp, mob_max) = world
+        .get::<Health>(mob)
+        .map_or((0, 0), |h| (h.hp, h.max));
+    let mob_pct = if mob_max > 0 {
+        ((mob_hp.max(0) * 100) / mob_max).clamp(0, 100)
+    } else {
+        0
+    };
+
+    // Tank defaults to the viewer when the mob hasn't swung back
+    // yet — the .unwrap_or(viewer) below.
+    let tank = world
+        .get::<Fighting>(mob)
+        .map(|f| f.0)
+        .filter(|t| world.get_entity(*t).is_ok())
+        .unwrap_or(viewer);
+    let tank_plain = world
+        .get::<Named>(tank)
+        .map(|n| plain_for_gmcp(&n.name))
+        .unwrap_or_default();
+    let (tank_hp, tank_max) = world
+        .get::<Health>(tank)
+        .map_or((0, 0), |h| (h.hp, h.max));
+
+    let payload = format!(
+        r#"{{"tank":{{"name":"{tank_plain}","hp":{tank_hp},"max_hp":{tank_max}}},"opponent":{{"name":"{mob_plain}","hp_percent":{mob_pct}}},"target":{{"name":"{mob_plain}","hp_percent":{mob_pct}}}}}"#,
+    );
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Combat", &payload));
+}
+
+/// Returns true when `mob` should appear with `hostile: true` in the
+/// `Room.Mobs` frame from `viewer`'s perspective. Hostility means
+/// any of:
+///   - currently fighting someone (engaged)
+///   - has the viewer on its HateList (actively chasing)
+///   - remembers the viewer (MobMemory — lingering grudge)
+///   - alignment is at or below the aggro threshold (auto-attacks
+///     on arrival), per the same check `try_engage_aggressive_mob`
+///     uses
+fn mob_is_hostile_to(world: &World, mob: Entity, viewer: Entity) -> bool {
+    if world.get::<Fighting>(mob).is_some() {
+        return true;
+    }
+    if world
+        .get::<crate::combat::HateList>(mob)
+        .is_some_and(|h| h.0.contains(&viewer))
+    {
+        return true;
+    }
+    if world
+        .get::<crate::combat::MobMemory>(mob)
+        .is_some_and(|m| m.0.contains(&viewer))
+    {
+        return true;
+    }
+    let threshold = aggro_alignment(world);
+    world
+        .get::<CombatStats>(mob)
+        .is_some_and(|cs| cs.alignment <= threshold)
+}
+
+/// Push a `Room.Mobs` GMCP frame to `viewer`. One entry per mob in
+/// the room, with a `hostile` flag and (when applicable) a list of
+/// service `professions`. Drives both the threat panel (filter by
+/// `hostile`) and the friendly-NPC panel (filter by `!hostile`).
+///
+/// Shape:
+///   Array<{
+///     id:           string,    // runtime entity id (for Room.Mob.Get)
+///     name:         string,
+///     hostile:      boolean,
+///     hp_percent:   number,    // 0..100
+///     targeting:    string|null, // null when the mob isn't swinging
+///     status?:      string,    // "stunned" (more later: casting / fleeing)
+///     professions?: string[],  // ["shop","bank",...] from the mob's proto
+///   }>
+///
+/// `hp_percent` is emitted for every mob (not just hostile ones) —
+/// it doubles as a liveness indicator for a passing client that
+/// wants to render a thin bar under friendly NPCs too. Clients can
+/// drop the bar for `hostile:false` rows.
+///
+/// Empty array clears the panel.
+///
+/// Takes `&mut World` because the mob/player queries each need
+/// their own state cache.
+///
+/// Also emits the derived `Room.Services` frame in the same pass —
+/// the service set is the union of per-mob `professions` and would
+/// otherwise require a second room walk. Insertion-stable order so
+/// the client gets a predictable display order on multi-service
+/// rooms.
+pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
+    let Some(room) = world.get::<Located>(viewer).map(|l| l.0) else { return };
+    // Snapshot mob entities in the room so the inner loop can
+    // re-borrow World freely (per-mob Fighting/Named/proto lookups).
+    let candidates: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
+        q.iter(world)
+            .filter(|(_, l)| l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let mut entries: Vec<String> = Vec::with_capacity(candidates.len());
+    let mut services: Vec<&'static str> = Vec::new();
+    for mob in candidates {
+        let mob_plain = world
+            .get::<Named>(mob)
+            .map(|n| plain_for_gmcp(&n.name))
+            .unwrap_or_default();
+        let (hp, max) = world
+            .get::<Health>(mob)
+            .map_or((0, 0), |h| (h.hp, h.max));
+        let hp_pct = if max > 0 {
+            ((hp.max(0) * 100) / max).clamp(0, 100)
+        } else {
+            0
+        };
+        let hostile = mob_is_hostile_to(world, mob, viewer);
+        let targeting_json = world
+            .get::<Fighting>(mob)
+            .map(|f| f.0)
+            .and_then(|t| world.get::<Named>(t))
+            .map(|n| format!("\"{}\"", plain_for_gmcp(&n.name)))
+            .unwrap_or_else(|| "null".to_string());
+        let status_field = if world.get::<Stunned>(mob).is_some() {
+            r#","status":"stunned""#
+        } else {
+            ""
+        };
+        // Professions come off the proto, not the spawned entity.
+        // We emit `professions:[]` (always present, even when empty)
+        // so the client doesn't need a presence check.
+        let professions: Vec<&'static str> = world
+            .get::<WorldKey>(mob)
+            .and_then(|k| {
+                world
+                    .get_resource::<MobPrototypes>()
+                    .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+            })
+            .map(|proto| proto.professions.iter().copied().map(mud_db::enums::MobProfession::label).collect())
+            .unwrap_or_default();
+        for &tag in &professions {
+            if !services.contains(&tag) {
+                services.push(tag);
+            }
+        }
+        let prof_json = if professions.is_empty() {
+            "[]".to_string()
+        } else {
+            let inner = professions
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{inner}]")
+        };
+        let id_bits = mob.to_bits();
+        entries.push(format!(
+            r#"{{"id":"{id_bits}","name":"{mob_plain}","hostile":{hostile},"hp_percent":{hp_pct},"targeting":{targeting_json}{status_field},"professions":{prof_json}}}"#,
+        ));
+    }
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let mobs_payload = format!("[{}]", entries.join(","));
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Room.Mobs", &mobs_payload));
+    let services_inner = services
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let services_payload = format!(r#"{{"services":[{services_inner}]}}"#);
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Room.Services", &services_payload));
+}
+
+/// Handle inbound `Room.Mob.Get { id: "<entity_bits>" }`. Resolves
+/// the id back to an Entity, verifies it's a mob in the requesting
+/// player's room (anti-snooping; can't query mobs across the world),
+/// then pushes a `Room.Mob.Info` frame describing the mob.
+///
+/// Shape of the response:
+///   {
+///     id, name, description, professions:[],
+///     shop?: { items:[{id,name,price,stock}], accepts:[type1,...] }
+///   }
+///
+/// Silently no-ops on bad id, off-world mob, wrong room, or missing
+/// player Connection — request fishing should fail silent, not leak
+/// the difference between "no such mob" and "wrong room".
+pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) {
+    // Accept either `{"id":"123"}` (string form, matching what
+    // Room.Mobs emits) or `{"id":123}` (numeric) — the client
+    // shouldn't fail-route if it forgets the quotes.
+    let value: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let bits: u64 = match value.get("id") {
+        Some(serde_json::Value::String(s)) => match s.parse() {
+            Ok(n) => n,
+            Err(_) => return,
+        },
+        Some(serde_json::Value::Number(n)) => match n.as_u64() {
+            Some(n) => n,
+            None => return,
+        },
+        _ => return,
+    };
+    let Some(target) = Entity::try_from_bits(bits) else { return };
+    if world.get_entity(target).is_err() { return }
+    if world.get::<Mob>(target).is_none() { return }
+    let viewer_room = world.get::<Located>(viewer).map(|l| l.0);
+    let target_room = world.get::<Located>(target).map(|l| l.0);
+    if viewer_room != target_room || viewer_room.is_none() { return }
+    let Some(conn) = world.get::<Connection>(viewer) else { return };
+
+    let plain_name = world
+        .get::<Named>(target)
+        .map(|n| plain_for_gmcp(&n.name))
+        .unwrap_or_default();
+    let plain_desc = world
+        .get::<Description>(target)
+        .map(|d| plain_for_gmcp(&d.0))
+        .unwrap_or_default();
+
+    let proto = world
+        .get::<WorldKey>(target)
+        .and_then(|k| {
+            world
+                .get_resource::<MobPrototypes>()
+                .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+        });
+    let professions: Vec<&'static str> = proto
+        .map(|p| p.professions.iter().copied().map(mud_db::enums::MobProfession::label).collect())
+        .unwrap_or_default();
+    let prof_json = professions
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Shop block — populated only when the mob is a registered
+    // keeper. `ShopCatalog.keeper_index` maps (zone, id) → the
+    // shop's (zone, id), then `by_key` carries the offerings + accept
+    // rules. Item names come from `ObjectPrototypes`.
+    let shop_json: String = (|| {
+        let key = world.get::<WorldKey>(target)?;
+        let catalog = world.get_resource::<mud_world::ShopCatalog>()?;
+        let shop_key = catalog.keeper_index.get(&(key.zone, key.id))?;
+        let shop = catalog.by_key.get(shop_key)?;
+        let obj_protos = world.get_resource::<ObjectPrototypes>();
+        let items_json: Vec<String> = shop
+            .items
+            .iter()
+            .map(|o| {
+                let name_plain = obj_protos
+                    .and_then(|op| op.by_key.get(&(o.object_zone_id, o.object_id)))
+                    .map(|p| plain_for_gmcp(&p.name))
+                    .unwrap_or_default();
+                let item_id = format!("{}:{}", o.object_zone_id, o.object_id);
+                // Stock semantics: -1 = unlimited (per
+                // ShopOffering.amount); surface verbatim so the
+                // client can render "∞".
+                format!(
+                    r#"{{"id":"{item_id}","name":"{name_plain}","price":{price},"stock":{stock}}}"#,
+                    price = o.price,
+                    stock = o.amount,
+                )
+            })
+            .collect();
+        let accepts_json: Vec<String> = shop
+            .accepts
+            .iter()
+            .map(|a| {
+                let safe = a.object_type.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("\"{safe}\"")
+            })
+            .collect();
+        Some(format!(
+            r#","shop":{{"items":[{items}],"accepts":[{accepts}]}}"#,
+            items = items_json.join(","),
+            accepts = accepts_json.join(",")
+        ))
+    })()
+    .unwrap_or_default();
+
+    let payload = format!(
+        r#"{{"id":"{bits}","name":"{plain_name}","description":"{plain_desc}","professions":[{prof_json}]{shop_json}}}"#,
+    );
+    let _ = conn.0.try_send(mud_net::gmcp_packet("Room.Mob.Info", &payload));
 }
 
 /// Send `Core.Goodbye` immediately before closing the connection.
@@ -4798,6 +5209,10 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         .unwrap_or("<%h/%H> ");
     let hp = world.get::<Health>(target).copied();
     let stamina = world.get::<Stamina>(target).copied();
+    // Mana: optional component (non-casters never gain a pool).
+    // Missing = report 0/0 so the client's bar treats it as a
+    // hide-the-gauge signal.
+    let mana = world.get::<mud_world::Mana>(target).copied();
     let name = world.get::<Named>(target).map(|n| n.name.as_str());
     let room = world
         .get::<Located>(target)
@@ -4841,29 +5256,30 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // so we skip the cap lookup.
     let _ = conn.try_send(mud_net::iac_eor());
 
-    // Char.Vitals — IRE-shaped per-prompt vitals frame. Field
-    // names match what Mudlet's stock gauge bindings expect:
-    // hp/maxhp/mp/maxmp/mv/maxmv plus `nl` (% to next level) and
-    // a compact `string` form ("H:312/450 M:0/0 V:95/120"). This
-    // package has no mana, so mp/maxmp report zero; clients that
-    // don't draw a 0/0 gauge skip rendering the bar. The `nl`
-    // value comes from the LevelTable: relative position between
-    // the current level's threshold and the next level's
-    // threshold, capped at 100. Plain telnet clients see the IAC
-    // bytes as garbage which most terminal emulators strip
+    // Char.Vitals — per-prompt vitals frame. snake_case keys
+    // (hp/max_hp/mp/max_mp/mv/max_mv + next_level_pct + string).
+    // mp/max_mp come from the Mana component when present; non-
+    // casters report 0/0 so the client hides the gauge. The
+    // `next_level_pct` value comes from the LevelTable: relative
+    // position between the current level's threshold and the next
+    // level's threshold, capped at 100. Plain telnet clients see
+    // the IAC bytes as garbage which most terminal emulators strip
     // (they're outside the ASCII range).
     if let (Some(h), Some(s)) = (hp, stamina) {
         let (level, xp) = world
             .get::<Profile>(target)
             .map_or((0, 0), |p| (p.level, p.experience));
-        let nl = compute_level_progress(world, level, xp);
+        let next_level_pct = compute_level_progress(world, level, xp);
+        let (mp, max_mp) = mana.map_or((0, 0), |m| (m.current, m.max));
         let payload = format!(
-            "{{\"hp\":{hp},\"maxhp\":{maxhp},\"mp\":0,\"maxmp\":0,\"mv\":{mv},\"maxmv\":{maxmv},\"nl\":{nl},\"string\":\"H:{hp}/{maxhp} M:0/0 V:{mv}/{maxmv}\"}}",
+            "{{\"hp\":{hp},\"max_hp\":{max_hp},\"mp\":{mp},\"max_mp\":{max_mp},\"mv\":{mv},\"max_mv\":{max_mv},\"next_level_pct\":{nlp},\"string\":\"H:{hp}/{max_hp} M:{mp}/{max_mp} V:{mv}/{max_mv}\"}}",
             hp = h.hp,
-            maxhp = h.max,
+            max_hp = h.max,
+            mp = mp,
+            max_mp = max_mp,
             mv = s.current,
-            maxmv = s.max,
-            nl = nl,
+            max_mv = s.max,
+            nlp = next_level_pct,
         );
         let _ = conn.try_send(mud_net::gmcp_packet("Char.Vitals", &payload));
     }
@@ -4876,7 +5292,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
         let payload = format!(
-            "{{\"name\":\"{plain}\",\"fullname\":\"{plain}\"}}"
+            "{{\"name\":\"{plain}\",\"full_name\":\"{plain}\"}}"
         );
         let _ = conn.try_send(mud_net::gmcp_packet("Char.Name", &payload));
     }
@@ -4886,7 +5302,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // ideal but emitting per prompt is cheap (~120 bytes) and
     // sidesteps the "did the client miss the first push?" race.
     {
-        let payload = "{\"name\":\"Name\",\"fullname\":\"Full Name\",\"level\":\"Level\",\"class\":\"Class\",\"race\":\"Race\",\"xp\":\"Experience\",\"wealth\":\"Wealth\"}";
+        let payload = "{\"name\":\"Name\",\"full_name\":\"Full Name\",\"level\":\"Level\",\"class\":\"Class\",\"race\":\"Race\",\"xp\":\"Experience\",\"wealth\":\"Wealth\"}";
         let _ = conn.try_send(mud_net::gmcp_packet("Char.StatusVars", payload));
     }
     // Char.Status: longer-lived character metadata (level / xp /
@@ -4919,8 +5335,8 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // External.Discord.Status — Discord rich-presence frame.
     // Drives the "Playing fierymud-rs — Lvl X Class" overlay
     // through Mudlet's Discord SDK integration. Server icon /
-    // assets keyed by `applicationid` from External.Discord.Info
-    // (sent at GMCP-confirm time). `starttime` is wall-clock
+    // assets keyed by `application_id` from External.Discord.Info
+    // (sent at GMCP-confirm time). `start_time` is wall-clock
     // epoch seconds from when the player logged in.
     //
     // Gated on `discord_application_id` being set — without an
@@ -4946,7 +5362,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
                         .replace('"', "\\\"")
                 })
                 .unwrap_or_default();
-            let starttime = compute_login_unix_ts(world, target);
+            let start_time = compute_login_unix_ts(world, target);
             let game = cfg.get_string("gmcp", "discord_game_name", "fierymud-rs");
             let state = cfg.get_string("gmcp", "discord_state", "");
             let small_image = cfg.get_string("gmcp", "discord_small_image", "");
@@ -4958,7 +5374,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
                 lvl = prof.level,
             );
             let payload = format!(
-                "{{\"state\":\"{state}\",\"details\":\"{details}\",\"game\":\"{game}\",\"smallimage\":[\"{small_image}\"],\"smallimagetext\":\"{small_image_text}\",\"starttime\":{starttime}}}",
+                "{{\"state\":\"{state}\",\"details\":\"{details}\",\"game\":\"{game}\",\"small_image\":[\"{small_image}\"],\"small_image_text\":\"{small_image_text}\",\"start_time\":{start_time}}}",
                 state = state.replace('"', "\\\""),
                 game = game.replace('"', "\\\""),
                 small_image = small_image.replace('"', "\\\""),
@@ -5018,6 +5434,12 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // the top of this function — it stays valid across the
     // helper's `&mut World` since it's owned.
     send_group_state(world, target);
+
+    // Combat / room / skill panels. `send_room_mobs` also emits
+    // the derived `Room.Services` frame in the same pass.
+    send_char_combat(world, target);
+    send_room_mobs(world, target);
+    send_char_skills(world, target);
 
     // Char.Effects: array of `{name, ability, duration, source,
     // strength}` for every active effect on the player. Drives
