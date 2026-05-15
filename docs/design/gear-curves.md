@@ -717,10 +717,15 @@ post-Step3-pre-Path-C (under-HP, under-damage).
 
 ### 7.8 Open follow-ups
 
-1. **Mob `hit_roll` normalization** — content-authoring pass to put
-   trash mobs at consistent `hit_roll` per tier (e.g. ≤5 for L1-30,
-   ≤10 for L31-60, ≤15 elite). Today's L25 postmaster (20) and L30
-   burly guard (20) are over-authored vs neighbors.
+1. ✅ **Mob `hit_roll` normalization** — DONE 2026-05-15.
+   Audit showed bimodal distribution (~46% at hit_roll=0, ~48% at
+   hit_roll=20) — the 20 was a "default max" pattern, not
+   intentional authoring. Surgical replacement: leave 0-19 values
+   intact, replace hit_roll==20 with tier-appropriate value
+   (L1-30 → 3, L31-70 → 6, L71+ → 10). 1040 mobs normalized; 18
+   intentional mid-range outliers (15-19) preserved. Persisted via
+   `combat_formulas.normalize_mob_hit_roll` so re-imports apply
+   the cap automatically.
 2. **L15 variance** — re-run the L15 stallion fight 5-10 times to
    characterize the win rate; if <40%, bump `LevelDef.hp_gain` from
    8 to 10 or push class AP scaling slightly.
