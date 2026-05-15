@@ -155,8 +155,9 @@ inherits the inverse for free.
 * Posture modifier sign flipped to match its doc string (non-standing
   defender is easier to hit, not harder).
 * `MAX_DAMAGE = 1000` cap applied per legacy `defines.hpp:349`.
-* Combat period unchanged (still `COMBAT_PERIOD_TICKS = 10` = 1s/swing).
-  See [Open question Q3](#q3-combat-cadence).
+* Combat period set to `COMBAT_PERIOD_TICKS = 40` = 4s/swing — matches
+  legacy `PULSE_VIOLENCE` so the DB-authored damage values stay calibrated.
+  See [Q3 — Combat cadence (resolved)](#q3-combat-cadence).
 
 ### 5. Existing behavior preserved
 * Crit on natural roll (currently d100 = 100 → ×1.5; legacy is d20 = 20 → ×2).
@@ -169,6 +170,27 @@ inherits the inverse for free.
 
 The decisions below need user input before I keep going. Each one has my
 recommendation but I'm not confident enough to pick unilaterally.
+
+### §8 (gear-curves) — Armor / hit-rate philosophy — RESOLVED
+
+User pick (2026-05-14): **Moderate-armor, balanced-hit**. Both pieces shipped:
+
+* `ac → armor_pct` scaler in `mud-server/src/commands.rs::apply_modify_delta`
+  reduced **×5 → ×2**. T2 median per-slot now ~8% (full kit ~32%), T6 ~14%
+  (full kit ~56%) instead of capping by mid-tier.
+* Per-class accuracy progression added in
+  `fierylib/src/fierylib/combat_formulas.py::CLASS_ACCURACY_PER_LEVEL`,
+  derived from legacy `class.cpp` THAC0 (`(25 - class_thac0) / 10`).
+  Warriors 2.7/lvl, Clerics 2.1/lvl, Sorcerers/Mages 1.8-1.9/lvl.
+  Closes the §6a structural gap where mob authored `hit_roll` outpaced
+  players. Live in `derive_hit_roll_baseline(class_name=...)`; both
+  user_seeder and player_importer pass class through.
+
+**Open follow-up**: in-game level-up (`combat.rs::level_up`) doesn't bump
+accuracy. Per-class rate is correctly baked at character creation /
+import, but a character who levels up *in-game* keeps their L1
+accuracy. Adding `Class.accuracy_per_level` to the schema + a
+level-up consumer is the durable fix; not in scope for the §8 lock.
 
 ### Q1 — Formula shape (THACO vs accuracy/evasion vs current) — RESOLVED
 
@@ -254,21 +276,16 @@ has ~120 HP. That dramatic spread is what makes tank/DPS roles meaningful.
 
 **I deferred this** — needs user input. **Recommendation: (A).**
 
-### Q3 — Combat cadence
+### Q3 — Combat cadence — RESOLVED
 
-* **Legacy:** 1 swing per 4 real seconds (`PULSE_VIOLENCE = 4 RL_SEC`).
-  Combat is slow and tactical — there's time for the healer to react.
-* **Current Rust:** 1 swing per 1 real second (`COMBAT_PERIOD_TICKS = 10`
-  at 10 Hz tick). 4× faster than legacy. With current damage values
-  this is partly why fights end in seconds.
-* **Question:** keep 1-second cadence (and lower per-swing damage to
-  compensate) or restore 4-second legacy cadence (and keep per-swing
-  damage where it is)?
+User pick (2026-05-14): **restore 4-second legacy cadence**. Implemented:
+`COMBAT_PERIOD_TICKS = 40` at 10 Hz tick = one swing every 4 real seconds.
 
-**Recommendation:** restore 4-second cadence to match the 20-year
-balance, since per-swing damage values in the DB are already calibrated
-for a 4-second tick. **I have not changed the cadence yet** — flagging
-it for your call.
+Rationale: matches legacy `PULSE_VIOLENCE = 4 RL_SEC`, which the
+DB-authored damage values were calibrated against — zero content rework
+required. Combat is slower and more tactical, leaving time for the
+healer to react. Rejected the 1s alternative because it would have
+required scaling all DB damage values down ~4× (large content sweep).
 
 ### Q4 — Mitigation pipeline order
 

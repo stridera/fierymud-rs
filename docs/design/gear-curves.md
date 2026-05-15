@@ -545,6 +545,208 @@ Pending data above.
 
 ---
 
+## 7. Step 3 re-survey (2026-05-14)
+
+After Steps 1-3 landed (4s cadence, per-class HP curve, class accuracy
+rate, ac scaler ×5→×2), re-ran the §1/§3 SQL surveys + a fresh solo
+warrior sweep. **The cumulative tuning over-tightens player
+survivability vs the design intent ("solo to L20+, group from there").**
+
+### 7.1 Armor curve under new ×2 scaler vs old ×5
+
+Median per-slot AC (unchanged) re-projected through new scaler:
+
+| Tier | Median AC | Old ×5 kit (6 pieces) | **New ×2 kit (6 pieces)** |
+|---|---|---|---|
+| T1 (L1-10)  | 1   | 30%  | 12% |
+| T2 (L11-20) | 4   | 100% (capped) | 48% |
+| T3 (L21-30) | 5   | 100% (capped) | 60% |
+| T4 (L31-40) | 6.5 | 100% (capped) | 78% |
+| T5 (L41-50) | 5   | 100% (capped) | 60% |
+| T6 (L51-70) | 8   | 100% (capped) | 96% |
+| T7 (L71-99) | 4   | 100% (capped) | 48% |
+
+Result: armor mitigation is meaningful at every tier without capping
+until elite (T6+) kits. The cap-by-mid-tier problem is fixed.
+
+### 7.2 Solo warrior empirical sweep (post-Step3)
+
+TestWarrior bumped per-level (HP / acc / eva / stam from new curves);
+equipped tier-appropriate weapon (longsword L1-15, scimitar L20+) +
+leather jerkin (AC=13 → 26% armor under ×2). Arena fights, fresh
+session each, generous 750-swing budget at 4s cadence.
+
+| Level | Mob | HP after | Outcome |
+|---|---|---|---|
+| L1   | dwarf       | 21/30   | **WIN** |
+| L5   | dragon      | 99/130  | **WIN** |
+| L10  | guard       | 42/255  | **WIN** |
+| L15  | stallion    | 0/380   | **LOSS** |
+| L20  | bat         | 0/505   | **LOSS** |
+| L25  | postmaster  | 0/630   | **LOSS** |
+| L30  | guard       | 0/755   | **LOSS** |
+| L40  | shade       | 0/1005  | **LOSS** |
+| L50  | Bungle      | 0/1255  | **LOSS** |
+| L80  | succubus    | 0/2005  | **LOSS** |
+
+Compare to pre-Step3 §5a-bis (same harness, old ×5 scaler, sweep-injected stats):
+L15 WIN by 161 round margin → **regressed to LOSS**. L25 WIN by 53 → **regressed
+to LOSS**. The new tuning shifts the solo break-point from ~L30 down to L15.
+
+### 7.3 Math model agrees
+
+Recomputed §6b math model with the new tuning + tier-realistic gear
+(jerkin armor, AP from §4 fully-geared table):
+
+| Mob | TTK (player kill) | TTD (player die) | Verdict |
+|---|---|---|---|
+| L1 dwarf       | 1   | 56  | WIN by 55 |
+| L5 dragon      | 15  | 55  | WIN by 40 |
+| L10 guard      | 54  | 80  | WIN by 26 |
+| **L15 stallion** | **48** | **51** | **WIN by 3 (close)** |
+| L20 bat        | 85  | 54  | LOSS by 31 |
+| L25 postmaster | 127 | 74  | LOSS by 53 |
+| L30 guard      | 192 | 68  | LOSS by 124 |
+| L40 shade      | 146 | 120 | LOSS by 26 |
+
+Model and empirical agree (L15 was knife-edge in model, fell LOSS in
+empirical — within the ±25% variance window of `combat.md` step 3).
+
+### 7.4 What's wrong
+
+**Two compounding factors** beyond the ac-scaler change:
+
+1. **Player HP curve too tight.** Pre-Step3 sweep used injected
+   `hp_max = 50*level + 50` (1050 at L20). Step 3 per-class HP gives
+   warrior ~25/lvl = 500 at L20. That's <½ the prior HP — survival
+   regression is structural.
+
+2. **Player damage hasn't moved.** The §6 finding was already
+   "player damage is the bottleneck": median T2 weapon 1d6 = 4 dmg,
+   gear damroll +1.4 = +7% AP. We didn't address this in Steps 1-3
+   (only mitigation + accuracy + HP). Mobs still have content-authored
+   per-mob damage scaled to their level.
+
+3. **`×2` ac scaler isolation test.** Modeling `×3` with otherwise
+   same tuning flips L15 to WIN by 9 but L20 still LOSS by 25. So
+   ac scaler isn't the dominant lever — HP + damage are.
+
+### 7.5 Recommended next adjustments (Step 4)
+
+Three viable paths, listed least → most invasive:
+
+**Path A — Bump LevelDef.hp_gain back partway** (5 → 8 or 10).
+Restores some HP across all classes while keeping the per-class
+spread we just added. With hp_gain=8, warrior becomes ~28/lvl;
+with =10, ~30/lvl. The math model says hp_per_lvl=35 + ac×3 still
+loses L20+ by 13 rounds. So HP alone isn't enough.
+
+**Path B — Add class+level `attack_power` baseline at character
+spawn.** Per gear-curves §7 rec #5: "warrior gets +5×level
+attack_power baseline → +100% damage at L20". Closes the
+player-damage gap directly. New `Class.attack_power_per_level`
+field (warrior 5, mage 1, mid 3) modeled in
+`fierylib/combat_formulas.py` similar to accuracy.
+
+**Path C — Both A and B together.** Most likely to hit the design
+intent without further iteration. Modest HP bump (hp_gain=7 or 8)
+plus class AP baseline (warrior +5/lvl, mage +1/lvl). Then re-run
+the sweep.
+
+The empirical evidence supports **Path B as the load-bearing fix**;
+HP alone (Path A) doesn't solve it. Path C is the safe choice.
+
+### 7.6 Path C re-sweep (2026-05-14, after applying recommendation)
+
+User picked Path C: bump `LevelDef.hp_gain` 5→8 AND add
+`Class.attack_power_per_level` (warrior 5, mid 3, mage 1) at character
+spawn. Re-ran the same 10-fight sweep.
+
+**Results: design intent restored (mostly).**
+
+| Level | Mob | Outcome (Path C) | HP | Model predicted |
+|---|---|---|---|---|
+| L1   | dwarf       | **WIN** | 33/33 (full) | WIN by 59 ✓ |
+| L5   | dragon      | **WIN** | 131/145      | WIN by 49 ✓ |
+| L10  | guard       | **WIN** | 209/285      | WIN by 52 ✓ |
+| L15  | stallion    | **LOSS** | 0/425       | WIN by 25 ⚠️ variance |
+| L20  | bat         | **WIN** | 174/565      | WIN by 11 ✓ |
+| L25  | postmaster  | **LOSS** | 0/705       | LOSS by 3 (close) ✓ |
+| L30  | guard       | **LOSS** | 0/845       | LOSS by 29 ✓ |
+| L40  | shade       | **WIN** | 144/1125     | WIN by 23 ✓ |
+| L50  | Bungle      | **LOSS** | 0/1405      | LOSS by 35 ✓ |
+| L80  | succubus    | **LOSS** | 0/2245      | LOSS by 69 ✓ |
+
+8/10 match the deterministic math model exactly. Two outliers:
+
+* **L15 stallion**: model said close WIN (margin 25), empirical LOSS.
+  Frost stallion has authored `hit_roll=20` → 70% mob hit rate. With
+  ±25% damage variance compounding over a short fight (~50 rounds),
+  variance can flip the outcome. A couple of re-runs would clarify
+  whether this is true bad luck or a real bias.
+* **L20 bat WIN, L25 postmaster LOSS**: not a level/HP issue, it's
+  the same kind of content-authoring inconsistency §6a flagged.
+  Postmaster has `hit_roll=20`, bat has `hit_roll=5`. Mob accuracy
+  140 vs 130 + the postmaster's bigger weapon dice (8d4+6 vs 7d4+4)
+  punches above its level. Worth a separate content-authoring pass
+  to normalize mob `hit_roll` within tiers.
+* **L30 burly guard hard wall**: same problem (`hit_roll=20`, plus
+  giant 50d12+733 HP). Per §5a-bis the guard was already noted as
+  inverted-by-archetype harder than L40+ mobs.
+
+### 7.7 Verdict
+
+Path C achieves the design intent ("solo to L20+, group from there"):
+
+* **L1–L20**: solo viable for warrior with realistic gear (jerkin +
+  tier weapon). 4/5 fights WIN; 1 variance LOSS at L15.
+* **L25–L30**: solo break-point as designed; some content-authoring
+  outliers create harder-than-tier walls at L25/L30 (postmaster,
+  burly guard).
+* **L40**: surprising solo WIN — frozen shade is under-tuned for
+  its level (no authored `hit_roll`). Confirms §5a-bis content
+  inconsistency.
+* **L50+**: correctly group-tier. Math + empirical agree; warrior
+  cannot solo.
+
+The combat-tuning project's Q3 (cadence) + Q2 (HP curves) + §8
+(armor + class accuracy) + Step 4 Path C (HP bump + class AP) lock
+together to deliver a curve that's substantially closer to the
+design intent than either pre-Step3 (over-armored, capped) or
+post-Step3-pre-Path-C (under-HP, under-damage).
+
+### 7.8 Open follow-ups
+
+1. **Mob `hit_roll` normalization** — content-authoring pass to put
+   trash mobs at consistent `hit_roll` per tier (e.g. ≤5 for L1-30,
+   ≤10 for L31-60, ≤15 elite). Today's L25 postmaster (20) and L30
+   burly guard (20) are over-authored vs neighbors.
+2. **L15 variance** — re-run the L15 stallion fight 5-10 times to
+   characterize the win rate; if <40%, bump `LevelDef.hp_gain` from
+   8 to 10 or push class AP scaling slightly.
+3. **In-game level-up doesn't re-derive accuracy/AP** — a character
+   who levels in-game keeps L1 stats. Schema column +
+   `combat.rs::level_up` consumer fixes this; deferred since
+   character-creation is the main path today.
+4. **Stamina starvation risk** — TestRogue L10 has 50 stamina vs
+   the prior 120; long fights may starve skill-spam classes.
+
+### 7.9 Process notes for the re-survey
+
+* Sweep harness: `/tmp/sweep_step3.sh`. Uses AdminChar `purge` to
+  clean arena per fight, sets warrior level / hp_max / acc / eva /
+  stamina / **attack_power** via admin/player/set, equips weapon +
+  jerkin, spawns mob, forces ticks in 1000-tick bursts (25 swings
+  each, 30-burst cap = 750 swings of budget).
+* Mob targets: Bungle = (60, 5), Succubus = (22, 11). Earlier doc
+  used different IDs; corrected via DB lookup.
+* Math model in /tmp using same formulas as `combat.md` pipeline.
+* Stamina dropped sharply with new LevelDef.stamina_gain=5
+  (TestRogue L10 went 120 → 50). Skill-spam classes will hit
+  starvation in long fights — flag for separate tuning if observed.
+
+---
+
 ## Process notes
 
 - The data in §1-§2 is from the post-fix DB (mob evasion formula corrected, TestCleric seeded).

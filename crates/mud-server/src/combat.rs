@@ -14,13 +14,39 @@ use crate::commands::{
     opposite, send_to, try_insert, try_remove,
 };
 
-const COMBAT_PERIOD_TICKS: u64 = 10;
+const COMBAT_PERIOD_TICKS: u64 = 40;
 
 /// Maximum per-swing damage. Mirrors legacy `defines.hpp:349`'s
 /// `MAX_DAMAGE = 1000`. Caps even the wildest crits/burst boss
 /// damage so a player can't get one-shot from full HP by a stray
 /// rogue-tier outlier item.
 pub const MAX_DAMAGE_PER_SWING: i32 = 1000;
+
+/// Parse a `NdM[+B]` / `NdM[-B]` / bare-int dice string into
+/// `(num, sides, bonus)`. Returns `(0, 0, 0)` on parse failure so
+/// the caller's `roll_dice(0, 0, 0)` degenerates to 0 — i.e. an
+/// empty / malformed `Class.hit_dice` contributes nothing rather
+/// than panicking. A bare integer parses as `(0, 0, n)` (constant).
+#[must_use]
+pub fn parse_hit_dice(s: &str) -> (i32, i32, i32) {
+    let s = s.trim();
+    if s.is_empty() {
+        return (0, 0, 0);
+    }
+    if let Ok(n) = s.parse::<i32>() {
+        return (0, 0, n);
+    }
+    let (dice, bonus) = match s.find(['+', '-']) {
+        Some(i) => (&s[..i], s[i..].parse::<i32>().unwrap_or(0)),
+        None => (s, 0),
+    };
+    let Some((n, m)) = dice.split_once('d') else {
+        return (0, 0, 0);
+    };
+    let n = n.trim().parse::<i32>().unwrap_or(0);
+    let m = m.trim().parse::<i32>().unwrap_or(0);
+    (n, m, bonus)
+}
 
 /// Roll `num`d`sides` and add `bonus`. Returns `bonus` when the
 /// dice expression is degenerate (zero dice / zero sides). Used by
@@ -113,7 +139,8 @@ pub fn seed_test_items(world: &mut World) {
 
 /// Exclusive system: every `COMBAT_PERIOD_TICKS` world ticks, every entity with
 /// Fighting takes a swing at its target.
-/// One real-time second per tick fire (10 ticks at 10Hz). Decrements
+/// Four real-time seconds per swing (40 ticks at 10Hz) — matches legacy
+/// PULSE_VIOLENCE so the DB-authored damage values stay calibrated. Decrements
 /// every `CorpseDecay.remaining_secs`; on hitting 0 re-Locates any
 /// items inside the corpse to the corpse's room, broadcasts a decay
 /// line, and despawns the corpse entity. Ephemeral — corpses don't
@@ -1767,29 +1794,34 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
         let race = world
             .get::<Profile>(entity)
             .map(|p| (p.race.clone(), p.class_id));
-        let (hp_factor, class_hp_per_level) = race
+        let (hp_factor, class_hp_per_level, class_hit_dice_roll) = race
             .as_ref()
             .map(|(r, cid)| {
                 let race_factor = world
                     .get_resource::<mud_world::RaceCatalog>()
                     .and_then(|c| c.get(r))
                     .map_or(100, |def| def.hp_factor);
-                let class_hp = cid
+                let (class_hp, hit_dice_roll) = cid
                     .and_then(|c| {
                         world
                             .get_resource::<mud_world::ClassCatalog>()
                             .and_then(|cat| cat.by_id.get(&c))
                     })
-                    .map_or(0, |c| c.hp_per_level);
-                (race_factor, class_hp)
+                    .map_or((0, 0), |c| {
+                        let (n, m, b) = parse_hit_dice(&c.hit_dice);
+                        (c.hp_per_level, roll_dice(n, m, b))
+                    });
+                (race_factor, class_hp, hit_dice_roll)
             })
-            .unwrap_or((100, 0));
+            .unwrap_or((100, 0, 0));
         let race_scaled = next_row
             .hp_gain
             .saturating_mul(hp_factor)
             .saturating_div(100)
             .max(1);
-        let total_hp_gain = race_scaled.saturating_add(class_hp_per_level);
+        let total_hp_gain = race_scaled
+            .saturating_add(class_hp_per_level)
+            .saturating_add(class_hit_dice_roll);
         if let Some(mut h) = world.get_mut::<mud_world::Health>(entity) {
             h.max = h.max.saturating_add(total_hp_gain);
             h.hp = h.max; // full heal on level-up
@@ -1846,6 +1878,18 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_hit_dice_handles_common_shapes() {
+        assert_eq!(parse_hit_dice("1d6"), (1, 6, 0));
+        assert_eq!(parse_hit_dice("8d13"), (8, 13, 0));
+        assert_eq!(parse_hit_dice("1d6+2"), (1, 6, 2));
+        assert_eq!(parse_hit_dice("2d4-1"), (2, 4, -1));
+        assert_eq!(parse_hit_dice("  1d8 "), (1, 8, 0));
+        assert_eq!(parse_hit_dice("5"), (0, 0, 5)); // bare constant
+        assert_eq!(parse_hit_dice(""), (0, 0, 0));
+        assert_eq!(parse_hit_dice("garbage"), (0, 0, 0));
+    }
 
     /// Spawn a minimal "room" (just an Entity with no components — combat
     /// only needs an Entity handle for Located references; nothing reads
@@ -1905,7 +1949,7 @@ mod tests {
     }
 
     fn run_combat_tick(world: &mut World) {
-        // combat_tick fires only on multiples of COMBAT_PERIOD_TICKS (10).
+        // combat_tick fires only on multiples of COMBAT_PERIOD_TICKS (40).
         world.insert_resource(TickCount(COMBAT_PERIOD_TICKS));
         combat_tick(world);
     }

@@ -12386,12 +12386,18 @@ pub(crate) fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, 
             }
             true
         }
-        // Legacy `ac` alias routes into `armor_pct`. The migration
-        // ratio is 5% per legacy AC point (per combat.md plan).
-        // ObjectAffects.AC values translate cleanly: a +10 AC
-        // legacy item becomes +50% armor_pct (clamped to 100).
+        // Legacy `ac` alias routes into `armor_pct`. Ratio reduced
+        // from 5% to 2% per legacy AC point (gear-curves §3e/§7 rec
+        // #3 + Step 3 §8 lock 2026-05-14): the original ×5 let one
+        // mid-tier piece grant 65% mitigation and stacking 4 pieces
+        // hit the 100% cap, making physical damage trivially capped
+        // by mid-tier. ×2 puts T2 median per-slot at 8% (full kit
+        // ~32%) and T6 at 14% (full kit ~56%), pairing with the
+        // class hit_roll scaling in derive_hit_roll_baseline.
+        // (To be removed entirely in Step-1 typed-column migration:
+        // fierylib will write `target=armor_pct` pre-scaled.)
         "ac" | "armor_pct" => {
-            let scale = if stat == "ac" { 5 } else { 1 };
+            let scale = if stat == "ac" { 2 } else { 1 };
             if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
                 cs.armor_pct = cs
                     .armor_pct
