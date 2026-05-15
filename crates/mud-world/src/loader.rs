@@ -365,13 +365,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     let mut object_prototypes = ObjectPrototypes::default();
     for row in object_rows {
-        let (weapon_dice_num, weapon_dice_size, weapon_dice_bonus) =
-            parse_weapon_dice(&row.values);
-        let weapon_damage_type = if matches!(row.r#type, mud_db::enums::ObjectType::Weapon) {
-            parse_weapon_damage_type(&row.values)
-        } else {
-            None
-        };
+        // Combat-critical fields come from typed columns now —
+        // armor_pct, weapon_dice_*, weapon_damage_type. fierylib
+        // pre-scales legacy values at import time so the loader has
+        // no JSONB extraction or sign-flip on the hot path.
+        let weapon_damage_type = row.weapon_damage_type.as_ref().map(|d| d.label().to_string());
         let portal_destination_vnum = if matches!(row.r#type, mud_db::enums::ObjectType::Portal) {
             parse_portal_destination(&row.values)
         } else {
@@ -395,11 +393,6 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         } else {
             None
         };
-        let armor_ac = if matches!(row.r#type, mud_db::enums::ObjectType::Armor) {
-            parse_armor_ac(&row.values)
-        } else {
-            0
-        };
         object_prototypes.by_key.insert(
             (row.zone_id, row.id),
             ObjectProto {
@@ -413,11 +406,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 weight: row.weight,
                 level: row.level,
                 wear_flags: row.wear_flags,
-                weapon_dice_num,
-                weapon_dice_size,
-                weapon_dice_bonus,
+                weapon_dice_num: row.weapon_dice_num,
+                weapon_dice_size: row.weapon_dice_size,
+                weapon_dice_bonus: row.weapon_dice_bonus,
                 weapon_damage_type,
-                armor_ac,
+                armor_pct: row.armor_pct,
                 cost: row.cost,
                 portal_destination_vnum,
                 board_id,
@@ -1978,57 +1971,6 @@ pub fn wear_flags_primary_slot(flags: &[mud_db::enums::WearFlag]) -> Option<crat
         }
     }
     None
-}
-
-/// Pull weapon dice out of an Object's `values` JSONB blob. Schema
-/// Pull `Damage Type` from a weapon's `values` JSONB
-/// (`SLASH` / `PIERCE` / `CRUSH` / `BLUDGEON` / etc.).
-/// Lowercased for display; `None` when the field is absent.
-fn parse_weapon_damage_type(values: &serde_json::Value) -> Option<String> {
-    values
-        .get("Damage Type")?
-        .as_str()
-        .map(str::to_ascii_lowercase)
-}
-
-/// shape: `{"Hit Dice": {"num": "N", "size": "M", "bonus": B}, ...}`
-/// where num/size are typed as strings (not numbers) in the legacy
-/// data — we accept either form. Returns `(num, size, bonus)` zeros
-/// for non-weapons or malformed rows so the formula evaluator falls
-/// through cleanly.
-fn parse_weapon_dice(values: &serde_json::Value) -> (i32, i32, i32) {
-    let Some(dice) = values.get("Hit Dice") else {
-        return (0, 0, 0);
-    };
-    let parse = |v: Option<&serde_json::Value>| -> i32 {
-        match v {
-            Some(serde_json::Value::Number(n)) => i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0),
-            Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
-            _ => 0,
-        }
-    };
-    (
-        parse(dice.get("num")),
-        parse(dice.get("size")),
-        parse(dice.get("bonus")),
-    )
-}
-
-/// Extract the base armor value from an `Armor` object's `values`
-/// JSONB (`Objects.values.AC`). Legacy CircleMUD stored this as a
-/// positive integer where higher = stronger armor (the schema-import
-/// already flipped CircleMUD's "lower-is-better" AC convention). The
-/// equip path passes this through `apply_modify_delta(wearer, "ac",
-/// n)`, which scales ×5 into `CombatStats.armor_pct` per the legacy
-/// alias in `commands.rs::apply_modify_delta`. Returns 0 for missing
-/// or malformed values.
-fn parse_armor_ac(values: &serde_json::Value) -> i32 {
-    let Some(v) = values.get("AC") else { return 0 };
-    match v {
-        serde_json::Value::Number(n) => i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0),
-        serde_json::Value::String(s) => s.parse().unwrap_or(0),
-        _ => 0,
-    }
 }
 
 /// Pull `Destination` from a Portal's `values` JSONB. Stored either

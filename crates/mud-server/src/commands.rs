@@ -12297,23 +12297,15 @@ pub(crate) fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, 
             }
             true
         }
-        // Legacy `hitroll` / `damroll` aliases route into the new
-        // accuracy / attack_power model (per docs/design/combat.md
-        // migration plan: accuracy = 50 + hit_roll * 2 means each
-        // legacy hitroll point = +2 accuracy). Spell / effect
-        // formulas authored against the old names keep working
-        // without rewrites.
-        "hitroll" | "accuracy" => {
-            let scale = if stat == "hitroll" { 2 } else { 1 };
+        "accuracy" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.accuracy = cs.accuracy.saturating_add(amount * scale);
+                cs.accuracy = cs.accuracy.saturating_add(amount);
             }
             true
         }
-        "damroll" | "attack_power" => {
-            let scale = if stat == "damroll" { 5 } else { 1 };
+        "attack_power" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.attack_power = cs.attack_power.saturating_add(amount * scale);
+                cs.attack_power = cs.attack_power.saturating_add(amount);
             }
             true
         }
@@ -12386,22 +12378,11 @@ pub(crate) fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, 
             }
             true
         }
-        // Legacy `ac` alias routes into `armor_pct`. Ratio reduced
-        // from 5% to 2% per legacy AC point (gear-curves §3e/§7 rec
-        // #3 + Step 3 §8 lock 2026-05-14): the original ×5 let one
-        // mid-tier piece grant 65% mitigation and stacking 4 pieces
-        // hit the 100% cap, making physical damage trivially capped
-        // by mid-tier. ×2 puts T2 median per-slot at 8% (full kit
-        // ~32%) and T6 at 14% (full kit ~56%), pairing with the
-        // class hit_roll scaling in derive_hit_roll_baseline.
-        // (To be removed entirely in Step-1 typed-column migration:
-        // fierylib will write `target=armor_pct` pre-scaled.)
-        "ac" | "armor_pct" => {
-            let scale = if stat == "ac" { 2 } else { 1 };
+        "armor_pct" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
                 cs.armor_pct = cs
                     .armor_pct
-                    .saturating_add(amount * scale)
+                    .saturating_add(amount)
                     .clamp(0, 100);
             }
             true

@@ -963,32 +963,25 @@ pub struct ObjectProto {
     /// primary `WearableIn` from the first relevant flag (see
     /// `wear_flags_to_slot`).
     pub wear_flags: Vec<mud_db::enums::WearFlag>,
-    /// Weapon damage dice extracted from `Objects.values`'s
-    /// `Hit Dice` field (`{"num": "N", "size": "M", "bonus": B}`).
-    /// Zeros for non-weapons (or weapons with malformed values).
-    /// `avg_damage()` uses these to resolve the formula evaluator's
-    /// `weapon_damage` symbol when this proto is the caster's
-    /// wielded item.
+    /// Weapon dice expression `NdM+B`. Read directly from typed
+    /// `Objects.weapon_dice_*` columns at load time — no JSONB
+    /// extraction. Zero for non-weapons. `avg_damage()` uses these
+    /// to resolve the formula evaluator's `weapon_damage` symbol
+    /// when this proto is the caster's wielded item.
     pub weapon_dice_num: i32,
     pub weapon_dice_size: i32,
     pub weapon_dice_bonus: i32,
-    /// Weapon `Damage Type` from `Objects.values` — `SLASH` /
-    /// `PIERCE` / `CRUSH` / `BLUDGEON` / etc. Lowercased for
-    /// display. `None` for non-weapons or weapons whose row
-    /// doesn't carry the field. Surfaces on `identify` so a
-    /// player can tell the attack family at a glance without
-    /// knowing the proto's keyword.
+    /// Weapon damage type label (`Slash` / `Pierce` / `Crush` / ...)
+    /// from `Objects.weapon_damage_type` typed column. `None` for
+    /// non-weapons or weapons without an authored type.
     pub weapon_damage_type: Option<String>,
-    /// `Armor`-typed objects only: base armor value from
-    /// `Objects.values.AC`. This is the per-slot armor that the
-    /// item type itself provides (e.g. a leather body 4, a
-    /// chainmail body 8) — independent of any apply-block
-    /// enchantments which flow through `ObjectEffects(modify)`.
-    /// `apply_object_to_wearer` calls `apply_modify_delta(wearer,
-    /// "ac", armor_ac)` at wear time so the legacy ×5 scaler
-    /// (per combat-rebalance.md) folds it into `CombatStats.armor_pct`.
-    /// Zero for non-armor and for armor with missing/zero AC.
-    pub armor_ac: i32,
+    /// Armor mitigation percent (already pre-scaled at fierylib
+    /// import time via legacy `Objects.values.AC` × 2). Read
+    /// directly from the typed `Objects.armor_pct` column.
+    /// `apply_object_to_wearer` folds this into the wearer's
+    /// `CombatStats.armor_pct` via `apply_modify_delta(wearer,
+    /// "armor_pct", armor_pct)`. Zero for non-armor protos.
+    pub armor_pct: i32,
     /// Base value in copper (the schema's `Objects.cost`). Shops will
     /// pay some fraction of this on sell; appraisal commands surface
     /// the raw number split into denominations.

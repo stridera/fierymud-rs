@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::enums::{Alignment, ObjectFlag, ObjectRestriction, ObjectType, WearFlag};
+use crate::enums::{Alignment, DamageType, ObjectFlag, ObjectRestriction, ObjectType, WearFlag};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Object {
@@ -16,12 +16,25 @@ pub struct Object {
     pub weight: f64,
     pub cost: i32,
     pub wear_flags: Vec<WearFlag>,
-    /// Schema's free-form `values` JSONB. Per-type interpretation:
-    /// weapons carry `{"Hit Dice": {"num": "N", "size": "M",
-    /// "bonus": B}, "Damage Type": "...", "Average": ...}`; lights
-    /// carry hours; potions carry levels and spell ids; etc. The
-    /// runtime reads only what each consumer needs.
+    /// Schema's free-form `values` JSONB — type-specific niche fields
+    /// (portal destination, light fuel, food values, spell values,
+    /// liquid container info). Combat-critical fields (armor_pct,
+    /// weapon dice, weapon damage type) live as typed columns below
+    /// — fierylib pre-scales them at import time so the runtime
+    /// never sees legacy values.
     pub values: serde_json::Value,
+    /// Pre-scaled armor mitigation percent (legacy `Objects.values.AC`
+    /// × 2). Positive = better mitigation. Zero for non-armor protos
+    /// and for armor with no AC. fierylib does the conversion at
+    /// import time so the runtime side has no legacy alias path.
+    pub armor_pct: i32,
+    /// Weapon dice expression (`NdM+B`). Zeros for non-weapons.
+    pub weapon_dice_num: i32,
+    pub weapon_dice_size: i32,
+    pub weapon_dice_bonus: i32,
+    /// Weapon damage type (SLASH / PIERCE / CRUSH / etc.). `None`
+    /// for non-weapons or weapons without an authored damage type.
+    pub weapon_damage_type: Option<DamageType>,
     /// Alignments that CANNOT use this item. Empty for
     /// unrestricted gear. Mirrors `Objects.restricted_alignments`.
     pub restricted_alignments: Vec<Alignment>,
@@ -61,6 +74,11 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             cost,
             "wearFlags" AS "wear_flags!: Vec<WearFlag>",
             values AS "values!: serde_json::Value",
+            armor_pct,
+            weapon_dice_num,
+            weapon_dice_size,
+            weapon_dice_bonus,
+            weapon_damage_type AS "weapon_damage_type: DamageType",
             restricted_alignments AS "restricted_alignments!: Vec<Alignment>",
             restricted_class_ids AS "restricted_class_ids!: Vec<i32>",
             restricted_races::text[] AS "restricted_races!: Vec<String>",
