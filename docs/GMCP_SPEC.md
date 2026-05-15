@@ -332,6 +332,10 @@ Array<{
 are the routing keys for service-related UI affordances (a shop
 icon, a bank button, etc.).
 
+**Visibility:** Mobs whose `WizInvis` level is above the viewer's
+level are filtered out server-side and never appear in the array.
+The frame is what the viewer *can see*, not the full room census.
+
 **Cadence:** Every prompt. Empty array clears the panels.
 
 **Consumer:** Threat panel + friendly-NPC panel (to be wired).
@@ -364,8 +368,13 @@ Service tag mapping (server-side, from `MobProfession`):
 
 Click-to-detail request/response. Client sends `Room.Mob.Get` with
 an id from `Room.Mobs[i].id`; server replies with `Room.Mob.Info`.
-Server-side validates the mob is in the requesting player's room
-(silent no-op on mismatch — request fishing fails silent).
+
+**Server-side gates** (all enforced; mismatch → silent no-op so a
+client brute-forcing entity ids can't distinguish failure modes):
+- mob entity must still exist (handles despawn-mid-frame)
+- mob must be in the requesting player's room (no cross-map snoop)
+- mob must be visible to the viewer (`WizInvis` above viewer's
+  level → no info leak, even with a valid id from a prior frame)
 
 **Outbound** (client → server):
 ```ts
@@ -382,7 +391,8 @@ Server-side validates the mob is in the requesting player's room
   shop?: {
     items: Array<{
       id: string,          // "<zone>:<id>" of the object proto — stable across restarts (content key)
-      name: string,
+      name: string,        // display name with article ("a glittering ruby ring")
+      keyword: string,     // canonical noun for command targeting (`buy <keyword>`); empty when proto has no keywords
       price: number,       // copper; 0 means "use proto base × buy_profit"
       stock: number,       // -1 = unlimited
     }>,

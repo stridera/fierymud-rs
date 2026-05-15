@@ -4962,8 +4962,10 @@ fn mob_is_hostile_to(world: &World, mob: Entity, viewer: Entity) -> bool {
 /// rooms.
 pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
     let Some(room) = world.get::<Located>(viewer).map(|l| l.0) else { return };
-    // Snapshot mob entities in the room so the inner loop can
-    // re-borrow World freely (per-mob Fighting/Named/proto lookups).
+    // Snapshot mob entities in the room, dropping any the viewer
+    // can't see (WizInvis level above viewer's). The visibility
+    // filter happens here rather than per-mob below so professions
+    // and hostility on hidden mobs never leak into the frame.
     let candidates: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
         q.iter(world)
@@ -4971,6 +4973,10 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
             .map(|(e, _)| e)
             .collect()
     };
+    let candidates: Vec<Entity> = candidates
+        .into_iter()
+        .filter(|&mob| can_see_player(world, viewer, mob))
+        .collect();
     let mut entries: Vec<String> = Vec::with_capacity(candidates.len());
     let mut services: Vec<&'static str> = Vec::new();
     for mob in candidates {
@@ -5081,6 +5087,11 @@ pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) 
     let viewer_room = world.get::<Located>(viewer).map(|l| l.0);
     let target_room = world.get::<Located>(target).map(|l| l.0);
     if viewer_room != target_room || viewer_room.is_none() { return }
+    // Anti-snoop: don't surface info about a mob the viewer can't
+    // see (WizInvis above their level). Silent no-op so a viewer
+    // brute-forcing entity ids can't tell "invisible" from "no
+    // such mob".
+    if !can_see_player(world, viewer, target) { return }
     let Some(conn) = world.get::<Connection>(viewer) else { return };
 
     let plain_name = world
@@ -5122,16 +5133,24 @@ pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) 
             .items
             .iter()
             .map(|o| {
-                let name_plain = obj_protos
-                    .and_then(|op| op.by_key.get(&(o.object_zone_id, o.object_id)))
+                let proto = obj_protos
+                    .and_then(|op| op.by_key.get(&(o.object_zone_id, o.object_id)));
+                let name_plain = proto
                     .map(|p| plain_for_gmcp(&p.name))
+                    .unwrap_or_default();
+                // First keyword is the canonical noun for `buy <kw>`.
+                // Empty string when the proto has no keywords (loader
+                // gap) — client falls back to deriving from name.
+                let keyword = proto
+                    .and_then(|p| p.keywords.first())
+                    .map(|s| plain_for_gmcp(s))
                     .unwrap_or_default();
                 let item_id = format!("{}:{}", o.object_zone_id, o.object_id);
                 // Stock semantics: -1 = unlimited (per
                 // ShopOffering.amount); surface verbatim so the
                 // client can render "∞".
                 format!(
-                    r#"{{"id":"{item_id}","name":"{name_plain}","price":{price},"stock":{stock}}}"#,
+                    r#"{{"id":"{item_id}","name":"{name_plain}","keyword":"{keyword}","price":{price},"stock":{stock}}}"#,
                     price = o.price,
                     stock = o.amount,
                 )
