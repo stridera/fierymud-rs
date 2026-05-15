@@ -952,8 +952,16 @@ fn apply_swing(world: &mut World, s: &Swing) {
         .get::<CombatStats>(s.attacker)
         .map_or((0, 0), |cs| (cs.pen_pct, cs.pen_flat));
     // Step 4: armor mitigation (PHYSICAL gate; weapons are PHYSICAL today).
-    let effective_armor_pct = (def_armor_pct - atk_pen_pct).clamp(0, 100);
-    damage = (damage.saturating_mul(100 - effective_armor_pct)) / 100;
+    // Diminishing-returns formula: damage_taken = damage * K / (armor + K)
+    // where K=100. Asymptotic to 0 but never reaches it, so every armor
+    // piece always reduces incoming damage — no "cap reached, additional
+    // pieces wasted" cliff. At armor=100 → 50% mitigation (matches the
+    // prior linear "clamp(0,100)" feel mid-tier); at armor=200 → 67%; at
+    // armor=400 → 80%. Penetration subtracts from armor before the
+    // formula. See gear-curves §7 + post-real-loadout audit (May 2026).
+    const ARMOR_K: i32 = 100;
+    let effective_armor_pct = (def_armor_pct - atk_pen_pct).max(0);
+    damage = damage.saturating_mul(ARMOR_K) / (effective_armor_pct + ARMOR_K);
     let effective_armor_flat = (def_armor_flat - atk_pen_flat).max(0);
     damage = damage.saturating_sub(effective_armor_flat).max(0);
     // Step 5: ward — skipped for mundane weapon swings (caller
