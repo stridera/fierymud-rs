@@ -2237,6 +2237,21 @@ mod tests {
     }
 
     #[test]
+    fn capitalize_title_cases_single_and_underscored_words() {
+        use super::capitalize;
+        assert_eq!(capitalize("HUMAN"), "Human");
+        assert_eq!(capitalize("elf"), "Elf");
+        assert_eq!(capitalize(""), "");
+        // Underscore-separated enums split into hyphen-joined
+        // title-case ("HALF_ELF" → "Half-Elf"). Catches the prior
+        // bug where score showed "Half_elf".
+        assert_eq!(capitalize("HALF_ELF"), "Half-Elf");
+        assert_eq!(capitalize("HALF_ORC"), "Half-Orc");
+        // Single-segment, single-char, all preserved.
+        assert_eq!(capitalize("A"), "A");
+    }
+
+    #[test]
     fn format_idle_picks_a_unit() {
         assert_eq!(format_idle(0), "0s");
         assert_eq!(format_idle(45), "45s");
@@ -13629,10 +13644,30 @@ pub(crate) fn capitalize(s: &str) -> String {
     // Title-case: first character uppercase, rest lowercase. Race
     // and gender values arrive from the DB ALL CAPS (`HUMAN` /
     // `MALE`), and the score / examine readouts shouldn't show
-    // them that way. Verb-style usage ("eat what?") still works
-    // because the lowercase rest is a no-op when the input is
+    // them that way. Underscored multi-word enums (`HALF_ELF`,
+    // `HALF_ORC`) get split into hyphen-joined title-case segments
+    // ("Half-Elf") rather than the awkward "Half_elf" the simple
+    // case used to produce. Verb-style usage ("eat what?") still
+    // works because lowercase rest is a no-op when the input is
     // already lowercase. Single-char inputs collapse to just
     // uppercase as before.
+    if s.contains('_') {
+        return s
+            .split('_')
+            .map(|segment| {
+                let mut chars = segment.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(c) => {
+                        let head = c.to_ascii_uppercase().to_string();
+                        let tail: String = chars.as_str().to_ascii_lowercase();
+                        head + &tail
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("-");
+    }
     let mut chars = s.chars();
     match chars.next() {
         None => String::new(),
