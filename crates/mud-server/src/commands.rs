@@ -584,7 +584,18 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         }
     }
 
-    let Some((cmd, n_consumed)) = longest_prefix_match(&tokens) else {
+    let cmd_n_consumed = longest_prefix_match(&tokens).or_else(|| {
+        // No exact name match. Try resolving the first token as a
+        // prefix abbreviation against commands the player can see
+        // (G1.6). When unique + not on the destructive denylist,
+        // dispatch as if the player had typed the canonical name.
+        let (role, perms) = world.get::<Account>(player).map_or_else(
+            || (UserRole::Player, Vec::new()),
+            |a| (a.role, a.perms.clone()),
+        );
+        resolve_by_prefix(tokens[0], role, &perms).map(|cmd| (cmd, 1usize))
+    });
+    let Some((cmd, n_consumed)) = cmd_n_consumed else {
         // Fall through to socials before declaring unknown.
         if try_dispatch_social(world, player, tokens[0], skip_n_tokens(trimmed, 1)) {
             return;
@@ -746,6 +757,69 @@ pub(crate) fn longest_prefix_match(tokens: &[&str]) -> Option<(&'static Command,
         }
     }
     None
+}
+
+/// Commands a player has to type in full — auto-abbreviation never
+/// resolves to these. Picked for blast radius: an inadvertently
+/// abbreviated `q` should not log the player out, `del` should not
+/// delete account data, etc. Mortal-visible verbs first; admin
+/// verbs follow. Aliases (`quit` covers `quit`; the abbrev path
+/// queries canonical `names[0]`) — adding the canonical name here
+/// blocks every alias as well.
+const ABBREV_DENYLIST: &[&str] = &[
+    // Mortal
+    "quit", "delete", "release", "drop", "junk", "give", "remove",
+    // Combat lifecycle
+    "flee", "wimpy",
+    // Admin / staff
+    "shutdown", "reboot", "purge", "ban", "unban", "kick", "freeze",
+    "force", "transfer", "wizlock", "demote", "promote", "wipe",
+    "deletechar", "deleteobj", "rdelete", "mdelete", "odelete", "zdelete",
+];
+
+/// Resolve a typed verb by unique prefix among commands the player
+/// can see. Returns `Some(&Command)` only when exactly one canonical
+/// command matches and that command isn't on the destructive
+/// denylist. Multiple matches, zero matches, or a denylisted target
+/// all return `None` so the caller falls through to the
+/// social-dispatch / unknown-command path.
+///
+/// Tokens 1–2 chars are too aggressive to auto-resolve safely
+/// (a stray `n` would expand to `north` even when the player meant
+/// to type a single letter into a draft); minimum is 3.
+pub(crate) fn resolve_by_prefix(
+    typed: &str,
+    role: UserRole,
+    perms: &[Permission],
+) -> Option<&'static Command> {
+    if typed.len() < 3 {
+        return None;
+    }
+    let needle = typed; // already lowercased at call site
+    // Walk every visible command; collect unique canonical names whose
+    // primary name begins with `needle`. Aliases that match are noise
+    // here — they'd resolve to the same canonical and produce false
+    // collisions in the unique-match check. Only `names[0]` counts.
+    let mut hit: Option<&'static Command> = None;
+    for cmd in all_commands() {
+        if !visible(cmd, role, perms) {
+            continue;
+        }
+        if !cmd.names[0].starts_with(needle) {
+            continue;
+        }
+        if ABBREV_DENYLIST.contains(&cmd.names[0]) {
+            // Denylisted: even if it's the only prefix match, refuse.
+            // Player has to type the full verb to fire it.
+            return None;
+        }
+        match hit {
+            None => hit = Some(cmd),
+            Some(prev) if std::ptr::eq(prev, cmd) => {}
+            Some(_) => return None, // ambiguous
+        }
+    }
+    hit
 }
 
 pub(crate) fn skip_n_tokens(s: &str, n: usize) -> &str {
@@ -2093,6 +2167,8 @@ mod tests {
             hour: Some(7),
             season: Some("Winter"),
             day_night: Some("day"),
+            enemy_name: None,
+            enemy_hp: None,
         };
         assert_eq!(render_prompt("<%h/%H>", ctx), "<80/100> ");
         assert_eq!(render_prompt("<%v/%V mv>", ctx), "<40/50 mv> ");
@@ -2146,6 +2222,18 @@ mod tests {
         );
         // Empty template still gets a trailing space.
         assert_eq!(render_prompt("", ctx), " ");
+        // Combat codes render `-` out of combat.
+        assert_eq!(render_prompt("%N %e/%E %p%%", ctx), "- -/- -% ");
+        // In combat: enemy fields populated.
+        let combat_ctx = PromptCtx {
+            enemy_name: Some("an orc"),
+            enemy_hp: Some(Health { hp: 75, max: 100 }),
+            ..ctx
+        };
+        assert_eq!(
+            render_prompt("%N %e/%E %p%%", combat_ctx),
+            "an orc 75/100 75% ",
+        );
     }
 
     #[test]
@@ -3808,7 +3896,6 @@ mod tests {
 
     fn build_smoke_score_data<'a>(
         name: &'a str,
-        slots: &'a [(i32, i32, i32)],
         effects: &'a [String],
     ) -> super::ScoreData<'a> {
         super::ScoreData {
@@ -3850,7 +3937,6 @@ mod tests {
             drunkenness: 50,
             kill_total: 42,
             clan: Some(("Test Clan", "TC", "Member")),
-            slots,
             active_effects: effects,
             group_status: super::GroupStatus::default(),
             level_progress: super::level_progress_for(25, 1234),
@@ -3881,9 +3967,8 @@ mod tests {
 
     #[test]
     fn score_minimal_includes_core_fields() {
-        let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = vec!["bless".to_string()];
-        let data = build_smoke_score_data("Strider", &slots, &effects);
+        let data = build_smoke_score_data("Strider", &effects);
         let out = super::render_score_minimal(&data);
         assert!(out.contains("Strider"), "name: {out}");
         assert!(out.contains("L25"), "level: {out}");
@@ -3898,13 +3983,11 @@ mod tests {
 
     #[test]
     fn score_standard_includes_section_headings() {
-        let slots: Vec<(i32, i32, i32)> = vec![(1, 2, 3)];
         let effects: Vec<String> = vec!["bless".to_string(), "haste".to_string()];
-        let data = build_smoke_score_data("Strider", &slots, &effects);
+        let data = build_smoke_score_data("Strider", &effects);
         let out = super::render_score_standard(&data);
         assert!(out.contains("Strider"), "name: {out}");
         assert!(out.contains("HP: 95 / 100"), "hp line: {out}");
-        assert!(out.contains("Slots:"), "slots line: {out}");
         assert!(out.contains("bless, haste"), "effects line: {out}");
         // Equipment block was moved out of score (it lives on the
         // `equipment` command). Score must NOT include it now.
@@ -3948,10 +4031,9 @@ mod tests {
 
     #[test]
     fn score_board_draft_line_only_when_in_flight() {
-        let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &slots, &effects);
+            build_smoke_score_data("Strider", &effects);
         let off = super::render_score_standard(&data);
         assert!(!off.contains("Board draft:"), "no board row: {off}");
         data.board_draft = Some(("mortal", 5));
@@ -3964,10 +4046,9 @@ mod tests {
 
     #[test]
     fn score_mail_draft_line_only_when_in_flight() {
-        let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &slots, &effects);
+            build_smoke_score_data("Strider", &effects);
         let off = super::render_score_standard(&data);
         assert!(!off.contains("Mail draft:"), "no draft row: {off}");
         data.mail_draft = Some(("Samui", 3));
@@ -3980,10 +4061,9 @@ mod tests {
 
     #[test]
     fn score_guarding_line_only_when_set() {
-        let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &slots, &effects);
+            build_smoke_score_data("Strider", &effects);
         let off = super::render_score_standard(&data);
         assert!(!off.contains("Guarding:"), "no guarding row: {off}");
         data.guarding_name = Some("Samui");
@@ -3993,10 +4073,9 @@ mod tests {
 
     #[test]
     fn score_motion_state_lines_only_when_active() {
-        let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &slots, &effects);
+            build_smoke_score_data("Strider", &effects);
         // Default fixture: on foot, walking → no rows.
         let grounded = super::render_score_standard(&data);
         assert!(!grounded.contains("Flying:"), "no fly row: {grounded}");
@@ -4014,10 +4093,9 @@ mod tests {
 
     #[test]
     fn score_stealth_line_only_when_hidden() {
-        let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
         let mut data =
-            build_smoke_score_data("Strider", &slots, &effects);
+            build_smoke_score_data("Strider", &effects);
         // Default fixture: no stealth → no line.
         let visible = super::render_score_standard(&data);
         assert!(
@@ -4035,9 +4113,8 @@ mod tests {
 
     #[test]
     fn score_level_title_appended_for_staff() {
-        let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let mut data = build_smoke_score_data("Strider", &slots, &effects);
+        let mut data = build_smoke_score_data("Strider", &effects);
         data.level_title = Some("Implementer");
         let out = super::render_score_standard(&data);
         // Title sits between the level number and gender/race.
@@ -4049,9 +4126,8 @@ mod tests {
 
     #[test]
     fn score_level_title_omitted_when_none() {
-        let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let data = build_smoke_score_data("Strider", &slots, &effects);
+        let data = build_smoke_score_data("Strider", &effects);
         let out = super::render_score_standard(&data);
         // Mortal rendering keeps the original "Level N <gender>"
         // shape with no extra spaces — guard against a regression
@@ -4064,9 +4140,8 @@ mod tests {
 
     #[test]
     fn score_fancy_box_borders_render() {
-        let slots: Vec<(i32, i32, i32)> = Vec::new();
         let effects: Vec<String> = Vec::new();
-        let data = build_smoke_score_data("Strider", &slots, &effects);
+        let data = build_smoke_score_data("Strider", &effects);
         let out = super::render_score_fancy(&data);
         // Fancy renderer wraps in a box; both top + bottom borders
         // start with '+' and end with '+'.
@@ -5250,6 +5325,16 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     let hour = clock.map(|c| c.hour);
     let season = clock.map(|c| c.season().label());
     let day_night = hour.map(|h| if matches!(h, 0..=4 | 22..=23) { "night" } else { "day" });
+    // Opponent info for the combat-style prompts. `Fighting` points
+    // at the live target Entity; resolve to its name + HP. Out of
+    // combat both fields stay None and the `%e`/`%N`/etc. codes
+    // render `-`.
+    let enemy = world
+        .get::<Fighting>(target)
+        .map(|f| f.0)
+        .filter(|e| world.get_entity(*e).is_ok());
+    let enemy_name = enemy.and_then(|e| world.get::<Named>(e)).map(|n| n.name.as_str());
+    let enemy_hp = enemy.and_then(|e| world.get::<Health>(e)).copied();
     let rendered = render_prompt(
         template,
         PromptCtx {
@@ -5261,6 +5346,8 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             hour,
             season,
             day_night,
+            enemy_name,
+            enemy_hp,
         },
     );
     // Prompts can carry color tags both directly in the template
@@ -6661,6 +6748,14 @@ pub(crate) struct PromptCtx<'a> {
     /// "day" or "night" — surfaces as `%d`. Matches `room_is_dark`'s
     /// 22..=05 window so players can theme prompts by daylight.
     pub day_night: Option<&'a str>,
+    /// Current opponent's display name. `Some` only while the
+    /// player has a live `Fighting` link; surfaces as `%N`.
+    pub enemy_name: Option<&'a str>,
+    /// Current opponent's vitals. Drives `%e` (current HP),
+    /// `%E` (max), `%p` (percent), `%K` (10-cell HP bar). All
+    /// suppress (render `-`) when out of combat so the combat
+    /// preset stays readable.
+    pub enemy_hp: Option<Health>,
 }
 
 /// Repair `%%X` patterns where X is a recognized prompt variable.
@@ -6686,6 +6781,7 @@ pub(crate) struct PromptCtx<'a> {
 pub(crate) fn sanitize_prompt_template(template: &str) -> String {
     const KNOWN: &[char] = &[
         'h', 'H', 'v', 'V', 'B', 'M', 'n', 'r', 'g', 't', 's', 'd',
+        'N', 'e', 'E', 'p', 'K',
     ];
     let chars: Vec<char> = template.chars().collect();
     let mut out = String::with_capacity(template.len());
@@ -6795,6 +6891,40 @@ pub(crate) fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
                 Some('d') => match ctx.day_night {
                     Some(d) => out.push_str(d),
                     None => out.push('?'),
+                },
+                // %N = enemy name; renders `-` out of combat.
+                Some('N') => out.push_str(ctx.enemy_name.unwrap_or("-")),
+                // %e = enemy current HP, color-graded like %h.
+                Some('e') => match ctx.enemy_hp {
+                    Some(hp) => {
+                        let tag = vital_color_tag(hp.hp, hp.max);
+                        if let Some(open) = tag {
+                            out.push_str(open);
+                            out.push_str(&hp.hp.to_string());
+                            out.push_str("</>");
+                        } else {
+                            out.push_str(&hp.hp.to_string());
+                        }
+                    }
+                    None => out.push('-'),
+                },
+                // %E = enemy max HP.
+                Some('E') => match ctx.enemy_hp {
+                    Some(hp) => out.push_str(&hp.max.to_string()),
+                    None => out.push('-'),
+                },
+                // %p = enemy HP percent (no decimals).
+                Some('p') => match ctx.enemy_hp {
+                    Some(hp) if hp.max > 0 => {
+                        let pct = (hp.hp.max(0) * 100) / hp.max;
+                        out.push_str(&pct.to_string());
+                    }
+                    _ => out.push('-'),
+                },
+                // %K = 10-cell enemy HP bar, color-graded.
+                Some('K') => match ctx.enemy_hp {
+                    Some(hp) => out.push_str(&render_vital_bar(hp.hp, hp.max)),
+                    None => out.push_str("[----------]"),
                 },
                 Some('%') | None => out.push('%'),
                 Some(other) => {
@@ -7302,11 +7432,6 @@ pub(crate) struct ScoreData<'a> {
     kill_total: i32,
     /// `(name, abbrev, rank)` from `ClanMembership` when present.
     clan: Option<(&'a str, &'a str, &'a str)>,
-    /// Per-circle spell slot summary as `(circle, free, max)`. Empty
-    /// for non-spellcasters and for spellcasters who haven't reached
-    /// circle 1 yet. Score sheet renders one compact line; the full
-    /// per-cooldown breakdown lives in `cmd_slots`.
-    slots: &'a [(i32, i32, i32)],
     /// Names of active `EffectInstance` rows on the player. Empty
     /// when none are applied. Score sheet renders a comma-joined
     /// one-line summary; full duration / source detail stays in
@@ -7453,12 +7578,12 @@ pub(crate) struct GroupStatus<'a> {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     let mut out = format!("\r\n{}\r\n", d.name);
-    if let Some((level, class, race, gender, xp)) = d.profile {
+    if let Some((level, class, race, gender, _xp)) = d.profile {
         let gender_label = capitalize(gender);
         let race_label = capitalize(race);
         let rank = d.level_title.map_or(String::new(), |t| format!(" {t}"));
         out.push_str(&format!(
-            "  Level {level}{rank} {gender_label} {race_label} ({class})    XP: {xp}\r\n",
+            "  Level {level}{rank} {gender_label} {race_label} ({class})\r\n",
         ));
     }
     if let Some(t) = d.title {
@@ -7601,15 +7726,6 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if let Some((name, abbrev, rank)) = d.clan {
         out.push_str(&format!("  Clan:   {name} [{abbrev}] ({rank})\r\n"));
-    }
-    if !d.slots.is_empty() {
-        let summary = d
-            .slots
-            .iter()
-            .map(|(circle, free, max)| format!("{circle}:{free}/{max}"))
-            .collect::<Vec<_>>()
-            .join("  ");
-        out.push_str(&format!("  Slots:  {summary}    (`slots` for prep details)\r\n"));
     }
     if !d.active_effects.is_empty() {
         out.push_str(&format!(
@@ -7948,14 +8064,13 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         // width matches byte width.
         out.push_str(&format!("| {} |\r\n", pad_visible(&s, W - 2)));
     };
-    if let Some((level, class, race, gender, xp)) = d.profile {
+    if let Some((level, class, race, gender, _xp)) = d.profile {
         let rank = d.level_title.map_or(String::new(), |t| format!(" {t}"));
         row(format!(
             "Level:     {level}{rank} {} {} ({class})",
             capitalize(gender),
             capitalize(race),
         ));
-        row(format!("XP:        {xp}"));
     }
     if let Some(t) = d.title {
         row(format!("Title:     {t}"));
@@ -8074,15 +8189,6 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some((name, abbrev, rank)) = d.clan {
         row(format!("Clan:      {name} [{abbrev}] ({rank})"));
-    }
-    if !d.slots.is_empty() {
-        let summary = d
-            .slots
-            .iter()
-            .map(|(circle, free, max)| format!("{circle}:{free}/{max}"))
-            .collect::<Vec<_>>()
-            .join("  ");
-        row(format!("Slots:     {summary}"));
     }
     if !d.active_effects.is_empty() {
         // Effects can be many; the fancy box's fixed-width row

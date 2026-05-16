@@ -1423,16 +1423,16 @@ inventory::submit! {
         required_perm: None,
         category: Category::Magic,
         help: Help {
-            usage: "spells [all] [filter]",
-            summary: "List the abilities you know (or the full catalog).",
-            long: "By default shows only abilities you've actually \
-                   learned, grouped by kind (Spells / Chants / Songs / \
-                   Skills). Add `all` to dump the full catalog (handy \
-                   for builders / curiosity). The filter substring \
-                   matches both the ability name AND its sphere — \
-                   `spells fire` lands Fireball (name) plus every \
-                   fire-sphere spell. Try also: `spells all healing` \
-                   for the full healing-sphere catalog.",
+            usage: "spells [<circle>|<lo>-<hi>] [filter] | spells all [filter]",
+            summary: "List spells you know, grouped by circle.",
+            long: "By default shows the spells you've learned grouped \
+                   by your class's spell circle (1 = lowest). Numeric \
+                   args filter by circle: `spells 3` shows circle 3, \
+                   `spells 1-2` shows circles 1 through 2. A trailing \
+                   word filters by name, sphere, or damage type — \
+                   `spells 2-3 fire` or `spells dam`. Add `all` to \
+                   dump the full spell catalog (handy for builders); \
+                   the cross-class catalog has no circle grouping.",
         },
         run: cmd_spells,
     }
@@ -4305,17 +4305,8 @@ pub(crate) fn cmd_practice(world: &mut World, player: Entity, args: &str) {
     rows.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     let mut out = format!("\r\nKnown abilities ({}):\r\n", rows.len());
     for (name, kind, prof, learned, cap) in &rows {
-        // Proficiency 0-1000 in schema; render as 0-100% with a tier
-        // label that legacy MUDs use.
-        let pct = (*prof / 10).clamp(0, 100);
-        let tier = match pct {
-            0 => "untrained",
-            1..=25 => "novice",
-            26..=50 => "apprentice",
-            51..=75 => "skilled",
-            76..=99 => "expert",
-            _ => "master",
-        };
+        let pct = proficiency_percent(*prof);
+        let tier = proficiency_tier_label(pct);
         let learn_mark = if *learned { " " } else { "*" };
         let cap_label = cap.map_or(String::new(), |c| format!(" / {c}"));
         out.push_str(&format!(
@@ -6238,31 +6229,6 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     let board_draft_owned: Option<(String, usize)> = world
         .get::<BoardDraft>(player)
         .map(|d| (d.board_alias.clone(), d.body.len()));
-    // Per-circle slot summary for spellcasters. Reads
-    // SpellSlotData (level + class → slot caps) and the player's
-    // SpellSlots (in-flight cooldowns). Empty for classless / non-
-    // spellcaster characters; the score renderer skips the line.
-    // Tuple shape: (circle, free, max) — score renderer shows
-    // free/max so the player knows how many casts are available.
-    let slots: Vec<(i32, i32, i32)> = (|| {
-        let prof = world.get::<Profile>(player)?;
-        let class_id = prof.class_id?;
-        let level = prof.level;
-        let pool = world
-            .get::<mud_world::SpellSlots>(player)
-            .cloned()
-            .unwrap_or_default();
-        let caps = world
-            .resource::<mud_world::SpellSlotData>()
-            .slots_for(class_id, level);
-        Some(
-            caps.into_iter()
-                .map(|(circle, max)| (circle, max - pool.used_in_circle(circle), max))
-                .collect(),
-        )
-    })()
-    .unwrap_or_default();
-
     let wealth = world.get::<Wealth>(player).map_or(0, |w| w.0);
     let bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
     let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
@@ -6345,7 +6311,6 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         clan: clan_owned
             .as_ref()
             .map(|(n, a, r)| (n.as_str(), a.as_str(), r.as_str())),
-        slots: &slots,
         active_effects: &active_effects,
         group_status: GroupStatus {
             leader: leader_name.as_deref(),
@@ -6624,6 +6589,10 @@ const PROMPT_TEMPLATES: &[(&str, &str)] = &[
     ("verbose", "<%n %h/%H hp %v/%V mv %g cp @ %r> "),
     ("location", "[%r] <%h/%H hp> "),
     ("worldclock", "<%h/%H %v/%V — %s %t %d> "),
+    // Combat preset: same vitals as `classic` plus the opponent's
+    // name + HP bar + percent. Out of combat the enemy codes render
+    // `-` / "[----------]" so the line stays readable.
+    ("combat", "<%h/%H hp %v/%V mv | %N %K %p%%> "),
     ("minimal", "> "),
 ];
 
@@ -6683,6 +6652,8 @@ pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
                  Identity:  %n character name   %r room name\r\n\
                  Wealth:    %g on-hand copper\r\n\
                  Calendar:  %t hour (00-23)   %s season   %d day/night\r\n\
+                 Combat:    %N enemy name   %e/%E enemy HP   %p enemy HP%%   \
+                 %K 10-cell enemy HP bar\r\n\
                  Literal:   %% emits a single `%`.\r\n"
             ),
         );
@@ -10275,19 +10246,26 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
 
     let mode = color_mode_for(world, player);
     // Argument shape:
-    //   `spells`               → known abilities only
-    //   `spells all`           → full catalog (builders / curiosity)
-    //   `spells <substring>`   → filter known by substring
-    //   `spells all <substr>`  → filter full catalog by substring
-    let raw = args.trim().to_ascii_lowercase();
-    let (show_all, filter) = if let Some(rest) = raw.strip_prefix("all") {
-        (true, rest.trim().to_string())
-    } else {
-        (false, raw)
+    //   `spells`               → known spells, grouped by circle
+    //   `spells <N>`           → known, circle N only
+    //   `spells <N>-<M>`       → known, circles N..=M
+    //   `spells <kw>`          → known + keyword filter
+    //   `spells <range> <kw>`  → known + circle range + keyword
+    //   `spells all [<kw>]`    → full catalog (no circle grouping)
+    let raw = args.trim();
+    let (show_all, rest) = match raw.strip_prefix("all") {
+        Some(r) if r.is_empty() || r.starts_with(char::is_whitespace) => (true, r.trim()),
+        _ => (false, raw),
+    };
+    let mut tokens = rest.split_whitespace();
+    let (circle_range, filter) = match tokens.next() {
+        Some(first) => match parse_circle_range(first) {
+            Some(rng) => (Some(rng), tokens.collect::<Vec<_>>().join(" ").to_ascii_lowercase()),
+            None => (None, std::iter::once(first).chain(tokens).collect::<Vec<_>>().join(" ").to_ascii_lowercase()),
+        },
+        None => (None, String::new()),
     };
 
-    // Known set is the default scope. `spells all` overrides to the
-    // full catalog regardless of what the player has trained.
     let known: Option<std::collections::HashSet<i32>> = if show_all {
         None
     } else {
@@ -10300,105 +10278,171 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
         )
     };
 
-    let mut buckets: std::collections::BTreeMap<&'static str, Vec<String>> =
+    // Resolve the caster's class so we can look up per-circle assignments.
+    // Used only when we group by circle; `spells all` ignores it.
+    let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    let slot_data = world.resource::<mud_world::SpellSlotData>();
+
+    let matches_filter = |def: &mud_world::AbilityDef| -> bool {
+        if filter.is_empty() {
+            return true;
+        }
+        let pn = def.plain_name.to_ascii_lowercase();
+        if pn.contains(&filter) {
+            return true;
+        }
+        if def.sphere.as_deref().is_some_and(|s| s.to_ascii_lowercase().contains(&filter)) {
+            return true;
+        }
+        if def.damage_type.as_deref().is_some_and(|d| d.to_ascii_lowercase().contains(&filter)) {
+            return true;
+        }
+        false
+    };
+
+    if show_all {
+        // Flat catalog dump — no circle grouping (cross-class).
+        let mut entries: Vec<String> = world
+            .resource::<AbilityCatalog>()
+            .by_name
+            .values()
+            .filter(|d| d.kind == AbilityKind::Spell && matches_filter(d))
+            .map(format_ability_with_sphere)
+            .collect();
+        if entries.is_empty() {
+            let msg = if filter.is_empty() {
+                "\r\nNo spells loaded.\r\n".to_string()
+            } else {
+                format!("\r\nNo spells matching '{filter}' in the catalog.\r\n")
+            };
+            send_rendered(world, player, &msg);
+            return;
+        }
+        entries.sort_unstable();
+        let mut out = format!(
+            "\r\n<b:cyan>All loaded spells</> <dim>({})</>:\r\n",
+            entries.len(),
+        );
+        let column_width = name_column_width(&entries);
+        for chunk in entries.chunks(3) {
+            out.push_str("  ");
+            for n in chunk {
+                let padded = pad_visible(n, column_width);
+                out.push_str(&render_color_tags(&padded, mode));
+            }
+            out.push_str("\r\n");
+        }
+        send_to(world, player, out);
+        return;
+    }
+
+    // Known-spells path: group by circle for the caller's class.
+    // Circle 0 catches spells the player knows but their class has
+    // no circle assignment for (cross-class scrolls etc.).
+    let mut by_circle: std::collections::BTreeMap<i32, Vec<String>> =
         std::collections::BTreeMap::new();
     for def in world.resource::<AbilityCatalog>().by_name.values() {
+        if def.kind != AbilityKind::Spell {
+            continue;
+        }
         if let Some(set) = &known
             && !set.contains(&def.id)
         {
             continue;
         }
-        // Filter matches if the substring lands on either the
-        // ability name OR its sphere — so `spells fire` shows
-        // both Fireball (name match) and Burning Hands (sphere
-        // match), letting players cluster by elemental theme
-        // without learning a separate keyword.
-        if !filter.is_empty()
-            && !def.plain_name.to_ascii_lowercase().contains(&filter)
-            && def.sphere.as_deref().is_none_or(|s| s != filter)
-        {
+        if !matches_filter(def) {
             continue;
         }
-        let bucket = match def.kind {
-            AbilityKind::Spell => "Spells",
-            AbilityKind::Chant => "Chants",
-            AbilityKind::Song => "Songs",
-            AbilityKind::Skill => "Skills",
-        };
-        // Append the sphere as a dim parenthetical so the listing
-        // doubles as an elemental-affinity scan. Skipped when the
-        // ability has no sphere assigned (most SKILLs).
-        let entry = format_ability_with_sphere(def);
-        buckets.entry(bucket).or_default().push(entry);
-    }
-    if buckets.is_empty() {
-        if show_all {
-            // Catalog dump explicitly requested but produced
-            // nothing — likely a substring filter that matched
-            // zero rows.
-            if filter.is_empty() {
-                send_to(world, player, "\r\nNo abilities loaded.\r\n");
-            } else {
-                send_rendered(
-                    world,
-                    player,
-                    &format!(
-                        "\r\nNo abilities matching '{filter}' loaded.\r\n"
-                    ),
-                );
+        let circle = class_id
+            .and_then(|cid| slot_data.ability_circle.get(&(cid, def.id)).copied())
+            .unwrap_or(0);
+        if let Some((lo, hi)) = circle_range {
+            if circle < lo || circle > hi {
+                continue;
             }
-        } else if filter.is_empty() {
-            send_to(
-                world,
-                player,
-                "\r\n<dim>You haven't learned any abilities yet.</> \
-                 Type `spells all` to browse the catalog.\r\n",
-            );
-        } else {
-            send_rendered(
-                world,
-                player,
-                &format!(
-                    "\r\nNo abilities matching '{filter}' in your known list. \
-                     Try `spells all {filter}`.\r\n"
-                ),
-            );
         }
+        by_circle
+            .entry(circle)
+            .or_default()
+            .push(format_ability_with_sphere(def));
+    }
+
+    if by_circle.is_empty() {
+        let msg = match (circle_range, filter.is_empty()) {
+            (Some((lo, hi)), true) if lo == hi => {
+                format!("\r\nYou know no circle-{lo} spells.\r\n")
+            }
+            (Some((lo, hi)), true) => {
+                format!("\r\nYou know no spells in circles {lo}-{hi}.\r\n")
+            }
+            (Some((lo, hi)), false) if lo == hi => {
+                format!("\r\nNo circle-{lo} spells matching '{filter}'.\r\n")
+            }
+            (Some((lo, hi)), false) => {
+                format!("\r\nNo spells matching '{filter}' in circles {lo}-{hi}.\r\n")
+            }
+            (None, true) => "\r\n<dim>You haven't learned any spells yet.</> \
+                             Try `spells all` to browse the catalog.\r\n"
+                .to_string(),
+            (None, false) => format!(
+                "\r\nNo known spells matching '{filter}'. \
+                 Try `spells all {filter}`.\r\n"
+            ),
+        };
+        send_rendered(world, player, &msg);
         return;
     }
 
-    let header = if show_all {
-        "<b:cyan>All loaded abilities</>"
-    } else {
-        "<b:cyan>Abilities you know</>"
-    };
-    let mut out = format!("\r\n{header}:\r\n");
-    for (bucket, names) in &mut buckets {
+    let total: usize = by_circle.values().map(Vec::len).sum();
+    let mut out = format!(
+        "\r\n<b:cyan>Spells you know</> <dim>({total})</>:\r\n"
+    );
+    for (circle, names) in &mut by_circle {
         names.sort_unstable();
+        let header = if *circle == 0 {
+            String::from("(no circle for your class)")
+        } else {
+            format!("Circle {circle}")
+        };
         out.push_str(&format!(
             "<b:yellow>{}</> <dim>({})</>:\r\n",
-            bucket,
-            names.len()
+            header,
+            names.len(),
         ));
         let column_width = name_column_width(names);
         for chunk in names.chunks(3) {
             out.push_str("  ");
             for n in chunk {
-                // Pad in XML-Lite space first (visible_width
-                // understands `<tag>` markers), THEN render. If
-                // we render first, the resulting ANSI escapes
-                // confuse visible_width and the padding under-
-                // counts — the entry that follows ends up
-                // touching the previous one for any name with
-                // a colored sphere parenthetical.
                 let padded = pad_visible(n, column_width);
-                let rendered = render_color_tags(&padded, mode);
-                out.push_str(&rendered);
+                out.push_str(&render_color_tags(&padded, mode));
             }
             out.push_str("\r\n");
         }
     }
     send_to(world, player, out);
+}
+
+/// Parse a circle filter token: `"3"` → `(3, 3)`; `"1-5"` → `(1, 5)`.
+/// Returns `None` when the token isn't a numeric range, so the caller
+/// can fall through to treating it as a keyword. Bounds are clamped
+/// to 1..=14 (the legacy circle ceiling) and swapped if reversed so
+/// `spells 5-1` still does the obvious thing.
+fn parse_circle_range(tok: &str) -> Option<(i32, i32)> {
+    let parse_one = |s: &str| -> Option<i32> {
+        let n: i32 = s.parse().ok()?;
+        if (1..=14).contains(&n) { Some(n) } else { None }
+    };
+    match tok.split_once('-') {
+        None => {
+            let n = parse_one(tok)?;
+            Some((n, n))
+        }
+        Some((lo, hi)) => {
+            let lo = parse_one(lo)?;
+            let hi = parse_one(hi)?;
+            if lo <= hi { Some((lo, hi)) } else { Some((hi, lo)) }
+        }
+    }
 }
 
 /// Render an ability's display name plus a colored parenthetical
@@ -11708,6 +11752,29 @@ pub(crate) fn cmd_house_guest(
 /// the ability catalog like `cmd_spells` but restricts to a single
 /// `AbilityKind`. Honors `KnownAbilities` gating and the optional
 /// substring filter (passed as `args`).
+/// Schema stores proficiency 0..=1000+; surface it as a 0..=100 percent
+/// for readouts. Used by `practice`, `skills`, etc. so they all bucket
+/// the same way.
+#[must_use]
+pub(crate) fn proficiency_percent(raw: i32) -> i32 {
+    (raw / 10).clamp(0, 100)
+}
+
+/// Legacy-style tier label for a 0..=100 proficiency percent. Shared
+/// between `practice` (which lists with caps + kind columns) and the
+/// kind-filtered `skills` / `songs` / `chants` listings.
+#[must_use]
+pub(crate) fn proficiency_tier_label(pct: i32) -> &'static str {
+    match pct {
+        0 => "untrained",
+        1..=25 => "novice",
+        26..=50 => "apprentice",
+        51..=75 => "skilled",
+        76..=99 => "expert",
+        _ => "master",
+    }
+}
+
 pub(crate) fn cmd_abilities_kind(
     world: &mut World,
     player: Entity,
@@ -11724,16 +11791,22 @@ pub(crate) fn cmd_abilities_kind(
     } else {
         (false, raw)
     };
+    // Proficiency map drives the per-entry suffix in the known-list
+    // view. Empty for `show_all` (no per-player data in the catalog
+    // dump). Keyed by ability_id.
+    let prof_by_id: std::collections::HashMap<i32, i32> = if show_all {
+        std::collections::HashMap::new()
+    } else {
+        world
+            .get::<KnownAbilities>(player)
+            .map_or_else(std::collections::HashMap::new, |k| {
+                k.entries.iter().map(|(id, p, _)| (*id, *p)).collect()
+            })
+    };
     let known: Option<std::collections::HashSet<i32>> = if show_all {
         None
     } else {
-        Some(
-            world
-                .get::<KnownAbilities>(player)
-                .map_or_else(std::collections::HashSet::new, |k| {
-                    k.entries.iter().map(|(id, _, _)| *id).collect()
-                }),
-        )
+        Some(prof_by_id.keys().copied().collect())
     };
     let mut names: Vec<String> = Vec::new();
     for def in world.resource::<AbilityCatalog>().by_name.values() {
@@ -11756,7 +11829,19 @@ pub(crate) fn cmd_abilities_kind(
         {
             continue;
         }
-        names.push(format_ability_with_sphere(def));
+        let base = format_ability_with_sphere(def);
+        let entry = if show_all {
+            base
+        } else {
+            // Append proficiency for the known-list view. `<dim>` so
+            // the percent + tier sit visually behind the spell name;
+            // matches the sphere parenthetical style.
+            let raw_prof = prof_by_id.get(&def.id).copied().unwrap_or(0);
+            let pct = proficiency_percent(raw_prof);
+            let tier = proficiency_tier_label(pct);
+            format!("{base} <dim>{pct}% ({tier})</>")
+        };
+        names.push(entry);
     }
     if names.is_empty() {
         if show_all {

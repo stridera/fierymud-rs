@@ -3535,6 +3535,7 @@ mod tests {
             spell_power: 0,
             penetration_flat: 0,
             penetration_percent: 0,
+            crit_chance: 5,
             evasion: 0,
             armor_rating: 0,
             damage_reduction_percent: 0,
