@@ -11347,6 +11347,38 @@ pub(crate) fn render_identify_block(
             ));
         }
     }
+    // B6 surfacing: inclusive allow-list + size band. Separate
+    // header from the deny-list because the semantic is opposite
+    // (a content creator can author one or the other, or both).
+    let mut requirements: Vec<(&'static str, String)> = Vec::new();
+    if !p.allowed_races.is_empty() {
+        let names: Vec<String> = p
+            .allowed_races
+            .iter()
+            .map(|r| {
+                let mut chars: Vec<char> = r.to_lowercase().chars().collect();
+                if let Some(c) = chars.first_mut() {
+                    *c = c.to_ascii_uppercase();
+                }
+                chars.into_iter().collect()
+            })
+            .collect();
+        requirements.push(("Races", names.join(", ")));
+    }
+    if let Some(min) = p.min_size.as_deref() {
+        requirements.push(("Min size", min.to_string()));
+    }
+    if let Some(max) = p.max_size.as_deref() {
+        requirements.push(("Max size", max.to_string()));
+    }
+    if !requirements.is_empty() {
+        out.push_str("\r\n  <b:green>Requirements</> <dim>(must match to equip)</>\r\n");
+        for (label, body) in requirements {
+            out.push_str(&format!(
+                "    <green>·</> <cyan>{label}:</> <dim>{body}</>\r\n"
+            ));
+        }
+    }
 
     // Per-instance attribute flags from `ObjectFlags` and
     // `ObjectRestrictions`. These flow from the proto and aren't
