@@ -606,9 +606,17 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     // by `order <mob> <cmd>` and by `actor:command()` queued from Lua
     // triggers running on a mob. Admin commands always require an
     // account at the right role + perms.
+    //
+    // DevMode short-circuit: open-playtest servers grant every command
+    // (regardless of min_role / required_perm) to every player. Mobs
+    // still get Player-level only — DevMode is for human playtesters,
+    // not Lua trigger sandboxing. See ``DevMode`` in main.rs.
+    let dev_mode_on = world.get_resource::<crate::DevMode>().is_some_and(|d| d.0);
     let allowed = if let Some(a) = world.get::<Account>(player) {
-        a.role.at_least(cmd.min_role)
-            && cmd.required_perm.is_none_or(|p| a.perms.contains(&p))
+        dev_mode_on || (
+            a.role.at_least(cmd.min_role)
+                && cmd.required_perm.is_none_or(|p| a.perms.contains(&p))
+        )
     } else if world.get::<Mob>(player).is_some() {
         cmd.min_role == UserRole::Player && cmd.required_perm.is_none()
     } else {

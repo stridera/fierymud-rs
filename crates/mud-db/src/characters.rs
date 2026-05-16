@@ -23,6 +23,10 @@ pub struct CharacterRow {
     pub spell_power: i32,
     pub penetration_flat: i32,
     pub penetration_percent: i32,
+    /// Per-character crit chance percent (1-100). Seeded from
+    /// ``Class.baseCritChance`` at character create / import time;
+    /// gear/buffs stack via ``apply_modify_delta``.
+    pub crit_chance: i32,
     pub evasion: i32,
     pub armor_rating: i32,
     pub damage_reduction_percent: i32,
@@ -806,6 +810,7 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             id, name, user_id, level, hit_points, hit_points_max, stamina, stamina_max,
             alignment,
             accuracy, attack_power, spell_power, penetration_flat, penetration_percent,
+            crit_chance,
             evasion, armor_rating, damage_reduction_percent, soak, hardness,
             ward_percent, perception, concealment,
             resistances AS "resistances!: serde_json::Value",
@@ -832,6 +837,47 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
     .await
 }
 
+/// Read the per-character `password_hash` column. Imported legacy
+/// CircleMUD characters land in the DB with no `user_id` and their
+/// original Unix `crypt(3)` hash stored here; the login flow uses
+/// this to authenticate the player exactly once, then provisions a
+/// real `Users` row + bcrypt hash and links the character. After
+/// migration this column stays as the legacy value (vestigial — see
+/// the `create` doc), but the live verification path goes through
+/// `Users.password_hash` instead. Returns an empty string for
+/// post-creation rows that wrote `''` at INSERT time.
+pub async fn load_legacy_password_hash(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<String> {
+    let row = sqlx::query!(
+        r#"SELECT password_hash FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.password_hash)
+}
+
+/// Set `Characters.user_id` after legacy-login auto-migration. Pairs
+/// with `users::create` in the same transaction so the new `Users`
+/// row and the FK update are atomic — a crash mid-way would otherwise
+/// orphan the user row or leave the character pointed at a dead id.
+pub async fn link_to_user<'e, E: PgExecutor<'e>>(
+    executor: E,
+    character_id: &str,
+    user_id: &str,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET user_id = $1, updated_at = NOW() WHERE id = $2"#,
+        user_id,
+        character_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<CharacterRow>> {
     sqlx::query_as!(
         CharacterRow,
@@ -851,6 +897,7 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             spell_power,
             penetration_flat,
             penetration_percent,
+            crit_chance,
             evasion,
             armor_rating,
             damage_reduction_percent,

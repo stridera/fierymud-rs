@@ -82,6 +82,43 @@ fn login_message_bytes(world: &World, stage: &str, fallback: &str) -> Vec<u8> {
         .map_or(fallback, |m| m.get_or(stage, "default", fallback));
     crate::commands::render_color_tags(raw, crate::commands::ColorMode::Ansi).into_bytes()
 }
+/// Verify a plaintext password against a stored hash, transparently
+/// handling both bcrypt (new accounts + migrated legacy accounts) and
+/// the original FieryMUD CircleMUD `crypt(3)` hash format (legacy
+/// imported characters that haven't logged in yet).
+///
+/// Bcrypt hashes always start with `$2` (variants `$2a$` / `$2b$` /
+/// `$2y$`); the legacy hash is a bare 10-character truncation of a
+/// DES `crypt(3)` output with the salt as the first 2 chars. The
+/// branch is by prefix so a malformed bcrypt-shaped hash doesn't
+/// silently fall through to the legacy path.
+///
+/// The legacy path mirrors `interpreter.cpp:2502` in the C++ server:
+/// `strncasecmp(CRYPT(arg, stored), stored, MAX_PWD_LENGTH)` where
+/// `MAX_PWD_LENGTH = 10`. The stored hash's first two characters
+/// double as the salt — the C++ creation code seeds `crypt()` with
+/// the character name, but the resulting hash embeds those two name
+/// chars at its head, so the verify side doesn't need the name.
+///
+/// On success the caller is expected to re-hash with bcrypt and
+/// migrate the stored value so subsequent logins go through the
+/// modern path.
+fn verify_password_any(plaintext: &str, hash: &str) -> bool {
+    if hash.starts_with("$2") {
+        return bcrypt::verify(plaintext, hash).unwrap_or(false);
+    }
+    if hash.len() < 2 {
+        return false;
+    }
+    let salt = &hash[..2];
+    #[allow(deprecated)]
+    let Ok(full) = pwhash::unix_crypt::hash_with(salt, plaintext) else {
+        return false;
+    };
+    let cmp_len = hash.len().min(full.len());
+    hash.as_bytes()[..cmp_len].eq_ignore_ascii_case(&full.as_bytes()[..cmp_len])
+}
+
 /// Inclusive length window for a new character name. Lower bound
 /// keeps single-letter ambiguity out of `who`-style listings;
 /// upper bound matches the existing `Characters.name` column
@@ -948,8 +985,30 @@ impl ConnRouter {
                                 },
                                 None => None,
                             };
+                            // Legacy-orphan path: imported CircleMUD
+                            // characters land with no `user_id` and
+                            // their original Unix crypt(3) hash on
+                            // the `Characters.password_hash` column.
+                            // Fold that hash onto a sentinel user so
+                            // `verify_password_any` can authenticate
+                            // them once; `AwaitingPassword` then
+                            // detects the empty `user.id` and runs
+                            // the bcrypt + `Users`-row migration in
+                            // place before completing the login.
+                            let user = match user_lookup {
+                                Some(u) => u,
+                                None => {
+                                    let mut u = sentinel_user();
+                                    if let Ok(h) = characters::load_legacy_password_hash(pool, &c.id).await {
+                                        if !h.is_empty() {
+                                            u.password_hash = Some(h);
+                                        }
+                                    }
+                                    u
+                                }
+                            };
                             ctx.stage = Stage::AwaitingPassword {
-                                user: user_lookup.unwrap_or_else(sentinel_user),
+                                user,
                                 preselected: Some(Box::new(c)),
                             };
                             routed_to_password = true;
@@ -1495,7 +1554,7 @@ impl ConnRouter {
                 self.complete_login(conn_id, world, pool, new_user, new_char).await;
             }
 
-            Stage::AwaitingPassword { user, preselected } => {
+            Stage::AwaitingPassword { mut user, preselected } => {
                 // Lockout pre-check: if `locked_until` is set and in
                 // the future, refuse before bcrypt — both to save the
                 // CPU cost and to keep the lock effective even when
@@ -1525,7 +1584,7 @@ impl ConnRouter {
                 let ok = user
                     .password_hash
                     .as_ref()
-                    .is_some_and(|h| bcrypt::verify(trimmed, h).unwrap_or(false));
+                    .is_some_and(|h| verify_password_any(trimmed, h));
                 if !ok {
                     // Throttle: bump the failed-login counter and lock
                     // the account once it crosses
@@ -1563,6 +1622,79 @@ impl ConnRouter {
                     ctx.stage = Stage::AwaitingIdentifier;
                     let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
                     return;
+                }
+                // Legacy-orphan migration: the player auth'd against
+                // a `Characters.password_hash` (imported Unix crypt(3)
+                // value) with no `Users` row backing them. Provision a
+                // fresh `Users` row with a bcrypt re-hash of the
+                // password they just typed, link the character to it,
+                // and swap the in-memory sentinel for the real row so
+                // the rest of the login pipeline (failed-login reset,
+                // ban check, account-wealth, complete_login) has a
+                // valid id to work with. Wrapped in a transaction so
+                // a mid-way crash doesn't leave an orphan `Users` row
+                // or a dangling `user_id` FK.
+                if user.id.is_empty() {
+                    let Some(char_row) = preselected.as_deref() else {
+                        // Defensive: sentinel only happens on the
+                        // character-name path, which always preselects.
+                        warn!(conn_id, "legacy migration: missing preselected character");
+                        let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
+                        ctx.stage = Stage::AwaitingIdentifier;
+                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                        return;
+                    };
+                    let new_hash = match bcrypt::hash(trimmed, bcrypt::DEFAULT_COST) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            warn!(conn_id, error = %e, "legacy migration: bcrypt hash failed");
+                            let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
+                            ctx.stage = Stage::AwaitingIdentifier;
+                            let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                            return;
+                        }
+                    };
+                    // Synthetic placeholder email — character names are
+                    // unique so this collision-free by construction. The
+                    // player can change it later via a `setemail`-style
+                    // command (TODO) without affecting the auth path,
+                    // which keys on `Users.id` once linked.
+                    let synth_email = format!("{}@legacy.fierymud.local", char_row.name.to_ascii_lowercase());
+                    let display_name = char_row.name.clone();
+                    let migrate = async {
+                        let mut tx = pool.begin().await?;
+                        let new_id = mud_db::users::create(
+                            &mut *tx,
+                            &synth_email,
+                            &display_name,
+                            &new_hash,
+                        )
+                        .await?;
+                        mud_db::characters::link_to_user(&mut *tx, &char_row.id, &new_id).await?;
+                        tx.commit().await?;
+                        Ok::<String, mud_db::sqlx::Error>(new_id)
+                    };
+                    match migrate.await {
+                        Ok(new_id) => {
+                            info!(
+                                conn_id,
+                                user_id = %new_id,
+                                character = %char_row.name,
+                                "legacy login migrated to bcrypt"
+                            );
+                            user.id = new_id;
+                            user.email = synth_email;
+                            user.display_name = display_name;
+                            user.password_hash = Some(new_hash);
+                        }
+                        Err(e) => {
+                            warn!(conn_id, error = %e, "legacy migration db error");
+                            let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
+                            ctx.stage = Stage::AwaitingIdentifier;
+                            let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                            return;
+                        }
+                    }
                 }
                 // Auth succeeded — reset the failed-login counter so
                 // a previously-throttled account doesn't carry a
@@ -2319,7 +2451,10 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         evasion: c.evasion,
         attack_power: c.attack_power,
         spell_power: c.spell_power,
-        crit_chance: 5,
+        // Per-character crit chance, seeded from Class.baseCritChance
+        // at character creation / import time. Defaults to 5% (combat-tier)
+        // for schema rows imported before the column landed.
+        crit_chance: c.crit_chance,
         pen_pct: c.penetration_percent,
         pen_flat: c.penetration_flat,
         armor_pct,
@@ -3443,6 +3578,32 @@ mod tests {
             position: mud_db::enums::Position::Standing,
             name_approved: true,
         }
+    }
+
+    #[test]
+    fn verify_password_any_handles_bcrypt() {
+        let h = bcrypt::hash("hunter2", 4).unwrap();
+        assert!(verify_password_any("hunter2", &h));
+        assert!(!verify_password_any("wrong", &h));
+    }
+
+    #[test]
+    fn verify_password_any_handles_legacy_truncated_crypt() {
+        // Mirror the FieryMUD C++ creation path: crypt(password, name)
+        // truncated to MAX_PWD_LENGTH (10). The first 2 chars of the
+        // name become the salt embedded at the head of the hash.
+        let plaintext = "hunter2";
+        #[allow(deprecated)]
+        let full = pwhash::unix_crypt::hash_with("St", plaintext).unwrap();
+        let stored = &full[..10];
+        assert!(verify_password_any(plaintext, stored));
+        assert!(!verify_password_any("wrong", stored));
+    }
+
+    #[test]
+    fn verify_password_any_rejects_empty_and_short() {
+        assert!(!verify_password_any("anything", ""));
+        assert!(!verify_password_any("anything", "x"));
     }
 
     #[test]

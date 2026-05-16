@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 bcrypt = "0.19.0"
+pwhash = "1.0"
 bevy_ecs = "0.18.1"
 chrono = "0.4.44"
 dotenvy = "0.15.7"
