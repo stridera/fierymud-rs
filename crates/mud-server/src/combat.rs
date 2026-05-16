@@ -255,6 +255,14 @@ pub fn hit_chance_pct(accuracy: i32, evasion: i32) -> i32 {
 /// auto-hit at the call site, so the `Sleeping` arm is included
 /// only for symmetry.
 #[must_use]
+/// Penalty subtracted from `CombatStats.evasion` while the defender
+/// is in a non-alert posture. Values are tuned for the d100
+/// accuracy-vs-evasion contest where 1 point = 1% swing in hit
+/// chance — Standing=0 is the baseline, Sleeping=30 means a
+/// sleeping defender is 30% easier to hit. Locked here so the
+/// contract is greppable; A4 in remaining-work.md gates further
+/// playtest adjustments.
+#[must_use]
 pub fn posture_evasion_penalty(p: PostureKind) -> i32 {
     match p {
         PostureKind::Standing => 0,
@@ -1073,6 +1081,32 @@ fn apply_swing(world: &mut World, s: &Swing) {
         }
     }
 
+    // A6 (perception / stealth bonus): an attacker with the
+    // Stealth marker gets an opening-strike accuracy + damage
+    // bonus on this swing, then loses Stealth. The defender's
+    // `Perception` softens the bonus — high-perception
+    // characters spot the attacker mid-swing and partially
+    // deflect. Quantitative shape (kept simple for v1; tune
+    // alongside the rogue toolkit):
+    //   - stealth_accuracy_bonus = 25 - defender.perception/4 (floor 0)
+    //   - stealth_damage_mult_pct = 50 - defender.perception/2 (floor 0)
+    // Stealth is cleared after this swing whether or not the
+    // attacker saw a bonus, mirroring how a real opening attack
+    // breaks concealment regardless of outcome.
+    let attacker_hidden = world.get::<mud_world::Stealth>(s.attacker).is_some();
+    let defender_perception = world
+        .get::<mud_world::Perception>(s.target)
+        .map_or(0, |p| p.0);
+    let (stealth_acc_bonus, stealth_dmg_bonus_pct) = if attacker_hidden {
+        let acc = (25 - defender_perception / 4).max(0);
+        let dmg = (50 - defender_perception / 2).max(0);
+        (acc, dmg)
+    } else {
+        (0, 0)
+    };
+    if attacker_hidden {
+        try_remove::<mud_world::Stealth>(world, s.attacker);
+    }
     // Hit / miss / crit per docs/design/combat.md step 1.
     // Sleeping defenders auto-hit (can't dodge unconscious).
     // Otherwise: attacker.accuracy + d100 vs defender.evasion + d100,
@@ -1081,7 +1115,8 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // separate d100 vs the attacker's `crit_chance`.
     let attacker_accuracy = world
         .get::<CombatStats>(s.attacker)
-        .map_or(50, |cs| cs.accuracy);
+        .map_or(50, |cs| cs.accuracy)
+        + stealth_acc_bonus;
     let attacker_crit_chance = world
         .get::<CombatStats>(s.attacker)
         .map_or(5, |cs| cs.crit_chance);
@@ -1187,6 +1222,12 @@ fn apply_swing(world: &mut World, s: &Swing) {
     } else {
         s.damage
     };
+    // A6: stealth opening-swing damage bonus. Applied AFTER the
+    // crit promotion so a stealth-crit gets both multipliers.
+    if stealth_dmg_bonus_pct > 0 && outcome != SwingOutcome::Miss {
+        damage = damage.saturating_mul(100 + stealth_dmg_bonus_pct) / 100;
+        damage = damage.max(1);
+    }
     mit.after_crit = damage;
     // Per-attacker race scaling from `Races.hit_damage_factor`
     // (percent). 100 = unchanged; a race authored at 120 hits
@@ -2287,6 +2328,59 @@ mod tests {
         // combat_tick fires only on multiples of COMBAT_PERIOD_TICKS (40).
         world.insert_resource(TickCount(COMBAT_PERIOD_TICKS));
         combat_tick(world);
+    }
+
+    /// A6: a hidden attacker's swing applies an opening-strike
+    /// bonus and Stealth is cleared after — verify the marker
+    /// is gone after one apply_swing. Damage delta is hard to
+    /// assert deterministically with variance / armor in play,
+    /// so the test only confirms the marker drop.
+    #[test]
+    fn stealth_clears_after_first_swing() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 100);
+        let attacker = make_attacker(&mut world, room, target, 5);
+        world
+            .get_entity_mut(attacker)
+            .unwrap()
+            .insert(mud_world::Stealth);
+        assert!(world.get::<mud_world::Stealth>(attacker).is_some());
+        run_combat_tick(&mut world);
+        assert!(
+            world.get::<mud_world::Stealth>(attacker).is_none(),
+            "Stealth marker dropped after first swing",
+        );
+    }
+
+    /// A4: lock the posture penalty ladder so a casual edit
+    /// doesn't quietly halve / double the values without a
+    /// matching design review. Anyone changing this table is
+    /// also updating `posture-and-lifestate.md`.
+    #[test]
+    fn posture_evasion_penalty_table() {
+        assert_eq!(posture_evasion_penalty(PostureKind::Standing), 0);
+        assert_eq!(posture_evasion_penalty(PostureKind::Kneeling), 10);
+        assert_eq!(posture_evasion_penalty(PostureKind::Sitting), 20);
+        assert_eq!(posture_evasion_penalty(PostureKind::Resting), 25);
+        assert_eq!(posture_evasion_penalty(PostureKind::Sleeping), 30);
+        // Ladder is monotonically non-decreasing — protects
+        // against an off-by-one swap that puts Resting below
+        // Sitting.
+        let ladder = [
+            posture_evasion_penalty(PostureKind::Standing),
+            posture_evasion_penalty(PostureKind::Kneeling),
+            posture_evasion_penalty(PostureKind::Sitting),
+            posture_evasion_penalty(PostureKind::Resting),
+            posture_evasion_penalty(PostureKind::Sleeping),
+        ];
+        for w in ladder.windows(2) {
+            assert!(
+                w[0] <= w[1],
+                "posture penalty ladder must be non-decreasing, got {:?}",
+                ladder,
+            );
+        }
     }
 
     #[test]
