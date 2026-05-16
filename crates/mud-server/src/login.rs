@@ -467,7 +467,10 @@ impl ConnCapabilities {
     /// Effective column count for layout — 80 if NAWS hasn't
     /// landed yet, otherwise whatever the client reported. Width
     /// 0 from a misbehaving client also collapses to the default.
+    /// Currently unused (no width-aware renderers); kept public
+    /// for when the score sheet / box renderers learn to adapt.
     #[must_use]
+    #[allow(dead_code)]
     pub fn effective_cols(&self) -> u16 {
         if self.cols == 0 {
             80
@@ -493,8 +496,10 @@ impl ConnRouter {
     /// Read the current capability snapshot for a connection.
     /// Returns `None` when the connection isn't tracked (already
     /// disconnected, or the negotiation events arrived before
-    /// `Connected` — shouldn't happen in practice).
+    /// `Connected` — shouldn't happen in practice). Currently
+    /// unused — admin-status tooling will read this.
     #[must_use]
+    #[allow(dead_code)]
     pub fn caps(&self, conn_id: ConnId) -> Option<&ConnCapabilities> {
         self.caps.get(&conn_id)
     }

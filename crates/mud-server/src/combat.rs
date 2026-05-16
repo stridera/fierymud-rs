@@ -262,7 +262,6 @@ pub fn hit_chance_pct(accuracy: i32, evasion: i32) -> i32 {
 /// sleeping defender is 30% easier to hit. Locked here so the
 /// contract is greppable; A4 in remaining-work.md gates further
 /// playtest adjustments.
-#[must_use]
 pub fn posture_evasion_penalty(p: PostureKind) -> i32 {
     match p {
         PostureKind::Standing => 0,
@@ -408,18 +407,6 @@ pub(crate) enum SwingOutcome {
     Crit,
     Hit,
     Miss,
-}
-
-/// Roll d100 against the computed hit chance. Natural-100 promotes
-/// to a critical; everything else resolves normally against the
-/// chance band. A 100% `hit_chance` attacker therefore lands 99% as
-/// regular hits and 1% as crits — never misses. Sleeping defenders
-/// bypass this at the call site (auto-hit).
-fn resolve_swing(hit_roll: i32, target_ac: i32) -> SwingDetail {
-    // Legacy compatibility shim — kept around for tests until they're
-    // converted to the acc/ev model. Treats `hit_roll` as accuracy
-    // and `target_ac` as evasion.
-    resolve_swing_acc_ev(hit_roll, target_ac, 5)
 }
 
 /// Resolve one swing under the accuracy/evasion d100 contest from

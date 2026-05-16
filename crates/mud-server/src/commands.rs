@@ -4725,6 +4725,7 @@ pub(crate) fn refresh_player_items_gmcp(world: &mut World, player: Entity) {
 /// per the Mudlet event handler convention. `Remove` only needs
 /// the id but emits the full record for symmetry; clients ignore
 /// extra fields.
+#[allow(dead_code)]
 pub(crate) fn send_char_items_diff(
     world: &World,
     viewer: Entity,
