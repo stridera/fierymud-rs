@@ -752,6 +752,74 @@ post-Step3-pre-Path-C (under-HP, under-damage).
 
 ---
 
+## 8. Real-player sweep (2026-05-16) — post crit/typed-columns/wear-loc
+
+Real warriors loaded from the imported player DB (not seeded test chars), fought
+solo against a tier-typical mob with all post-2026-05-15 changes live:
+mob `hit_roll` cap normalization, typed weapon columns, K=100 diminishing-
+returns armor, class-aware crit chance, and wear-location fix.
+
+| L | Warrior        | Weapon              | Mob (zone:id)            | P hit DC | M hit DC | Outcome | Notes |
+|---|----------------|---------------------|--------------------------|----------|----------|---------|-------|
+| 5 | Lilysalt       | 1d5 dagger          | dark dwarf (9:47)        | 87 (13%) | 76 (24%) | **WIN** | dwarf dies, Lilysalt 78% HP |
+| 15| Kiaran         | 2d4 scimitar        | frost stallion (100:6)   | —        | —        | grinding (49% HP @ 4min) |
+| 25| Tepp           | 2d4 scimitar        | postmaster (300:43)      | n/a      | n/a      | inconclusive (mob wanders away) |
+| 40| Ehmissa        | 2d6 shortsword      | Frozen Shade (40:14)     | 74 (27%) | 80 (21%) | grinding (54% HP @ 4min) |
+| 62| Bugbotbooty    | 1d11 greatsword     | myst guardian (117:99)   | 66 (35%) | 86 (15%) | **LOSS** dead at ~4min |
+
+DC convention: roll-over (`d100 X ≥ DC = HIT`); shown hit-rate = `100 - DC + 1`.
+
+### 8.1 Verdict
+The post-changes curve still tracks §7.6 design intent:
+
+- **T1 (L5)**: solo viable — quick decisive WIN, dwarf at 30 HP dies in ~2 minutes.
+- **T2-T4 (L15-40)**: degenerates into 5-15 min grindfests rather than clean wins.
+  Mob HP curves (`50d12+825` for a tier-typical L40 mob = ~1150 HP) ÷ player DPS
+  (2d6 × 27% hit × 0.25 swings/s ≈ 0.47 dmg/s) = ~40 min to kill. Player loses
+  by attrition first, but it's a slow grind not a sharp cliff.
+- **T5+ (L60+)**: group-tier as designed — Bugbotbooty L62 with 1d11 greatsword
+  vs same-tier mob died at 4 minutes. Confirms intent.
+
+### 8.2 Findings vs §7.6 (TestWarrior baseline)
+Same shape of curve, two notable shifts:
+
+1. **Class-aware crit (warrior=5% vs previous flat 5%)** is a no-op for warriors
+   themselves but a meaningful tax on caster melee (3%) and a real boost for
+   stealth (12%). Confirmed live: TestRogue dice display shows DC=89 = 12% crit;
+   the dark dwarf (mob default) shows DC=96 = 5%.
+2. **Wear-location fix** put correct items in correct slots for the imported
+   players (notably the L15+ warriors all now have armor totals 12-126, no longer
+   all zero). Lilysalt has 16 armor_pct = 14% damage reduction confirmed in the
+   dice display (`armor×K100/(16+100)`).
+
+### 8.3 Mid-tier grind problem
+The L15-40 fights all degenerate into multi-minute grinds. Root cause:
+
+- Player melee DPS ≈ 0.4-0.6 dmg/s with realistic gear
+- Mob HP ≈ 400-1500 at these tiers
+- → 10-40 minute fights per encounter, no decisive break
+
+This isn't a balance bug per se (eventually a winner emerges, usually the mob),
+but operationally it makes solo play tedious. Two levers worth considering:
+
+- **Lower mob HP curves** for trash mobs (boss mobs can stay) — current
+  `Nd12+const` formulas were authored against legacy combat with much higher
+  hit rates.
+- **Per-class DPS boost** via `Class.attackPowerPerLevel` — warriors already
+  at 2.0, could push to 3.0-4.0 for the combat tier specifically.
+
+Both are data changes, not code. Defer until next playtest pass with real
+players reports tedium directly.
+
+### 8.4 Content-authoring outlier
+Postmaster (zone 300, id 43) has `WANDER` flag → in zone 100 it kept walking
+north out of Tepp's room before the kill command could connect. Three retries
+all failed the same way. Either flag for content-author review (a "boss" mob
+with wander makes for bad solo encounters) or use a fixed-position mob as the
+T3 representative going forward.
+
+---
+
 ## Process notes
 
 - The data in §1-§2 is from the post-fix DB (mob evasion formula corrected, TestCleric seeded).
