@@ -143,6 +143,30 @@ Captured during a hands-on session. Grouped by area.
 
   Today step 4 fires when 2 and 3 should have caught it.
 
+### H — Playtest pass (2026-05-16, post-G2/G4/G5)
+
+Hands-on at L15 with one representative per class. All G2 regression
+checks pass; nothing critical found. Open observations / design
+calls for the user:
+
+- **Cleric L15 harm refused — circle-5 slot is 0.** Adohi (L15 Cleric)
+  knows `harm` but the slot system says "Your circle 5 slots are
+  spent (0/0)". Intentional? If so the spell shouldn't appear on
+  `practice`; if not, SpellSlotData needs an L15+ entry for
+  circle 5.
+- **Cure Light at full HP shows "(heal (+0 HP))" silently.** No
+  "you don't need healing" message. Trivial polish — invoke_ability
+  could short-circuit when target HP == max for heal-typed
+  abilities.
+- **Burning Hands 366 dmg vs warthog (30 HP).** Math is fine vs
+  tier-appropriate mobs (L15 trash sits at 200-700 HP) but the
+  one-shot feel against weakest mobs is jarring. May be acceptable
+  flavor — flagging for review.
+- **Rogue hide before backstab didn't appear to trigger the hidden
+  bonus.** Toogy backstabbed for 12 dmg right after `hide`; need to
+  verify `bonusIfHidden` resolution path against Stealth marker
+  timing (hide may finalize on next tick after the backstab fires).
+
 ### G2.x decisions deferred to user
 - **Burning Hands cone vs single (G2.5).** Description says "cone before you"; data has `isArea=false` and notes "touch range". Targeting now defaults to current opponent (G2.1) so single-target works fine. Deciding whether to upgrade to a real cone (data fix + cone implementation) vs trim the description to match the touch-attack reality is a content-author call. No code change pending.
 
