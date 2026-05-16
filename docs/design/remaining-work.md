@@ -97,10 +97,11 @@ Things blocked on a design call.
 Open items surfaced during hands-on play. Lower priority than A-B but worth resolving.
 
 - **H.G2.5 (Burning Hands cone vs single).** Description says "cone before you"; data has `isArea=false` and notes "touch range". Targeting now defaults to current opponent so single-target works fine. Deciding whether to upgrade to a real cone (data fix + cone implementation) vs trim the description to match the touch-attack reality is a content-author call.
-- **H.1 Cleric L15 harm refused — circle-5 slot is 0.** Adohi (L15 Cleric) knows `harm` but the slot system says "Your circle 5 slots are spent (0/0)". Intentional? If so the spell shouldn't appear on `practice`; if not, SpellSlotData needs an L15+ entry for circle 5.
-- **H.2 Cure Light at full HP shows "(heal (+0 HP))" silently.** No "you don't need healing" message. Trivial polish — invoke_ability could short-circuit when target HP == max for heal-typed abilities.
+- **H.1 Cleric L15 harm refused — circle-5 slot is 0.** ✅ Resolved (data + dev-mode interaction, not a bug). Cleric HARM is a circle-5 spell that unlocks at L33 per SpellSlotProgression. Adohi (L15 Cleric) does NOT know HARM in her CharacterAbilities — the earlier "refused" line surfaced only because dev-mode bypassed the KnownAbilities gate but not the slot gate. Mortal play would refuse at the knowledge gate first.
+- **H.2 Cure Light at full HP shows "(heal (+0 HP))" silently.** ✅ Resolved — invoke_ability heal arm now prints "Your health is already full." (or target equivalent) and skips the no-op message.
 - **H.3 Burning Hands 366 dmg vs warthog (30 HP).** Math is fine vs tier-appropriate mobs (L15 trash sits at 200-700 HP) but the one-shot feel against weakest mobs is jarring. May be acceptable flavor.
-- **H.4 Rogue hide before backstab didn't appear to trigger the hidden bonus.** Toogy backstabbed for 12 dmg right after `hide`; need to verify `bonusIfHidden` resolution path against Stealth marker timing.
+- **H.4 Rogue hide before backstab didn't appear to trigger the hidden bonus.** ✅ Resolved (data fix). BACKSTAB's `bonusIfHidden` formula was `"hidden * 0.5"` — the evaluator is integer-only outside `pow()` so it returned None and the bonus silently dropped. Rewrote as `(weapon_damage * (2 + skill / 25)) / 2 * hidden` — gives +50% damage when hidden, 0 otherwise.
+- **H.5 Alignment-keyed spells silently use 1d6.** DIVINE_BOLT / DIVINE_RAY / HELL_BOLT / etc. have `amount` formulas of shape `"<expr>, then *= (caster_align * 0.001 + ...)"`. The pseudo-code `, then *=` syntax was never implemented in the evaluator. These spells fall through to the default `1d6` from spec.default_params. Needs either a multi-step formula evaluator extension OR rewritten formulas that fold the alignment term inline. Defer until the alignment combat-pipeline step lands.
 
 ---
 
