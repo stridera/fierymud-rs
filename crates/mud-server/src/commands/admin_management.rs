@@ -23,12 +23,13 @@ inventory::submit! {
             summary: "Toggle server-wide dev mode (open playtest).",
             long: "Implementor-only. With no argument, prints current \
                    state. With `on` or `off`, flips the server-wide \
-                   ``DevMode`` resource. When ON, every connected player \
+                   ``DevMode`` resource AND persists the new state to \
+                   the ``GameConfig`` row ``server.dev_mode`` so it \
+                   survives restarts. When ON, every connected player \
                    is treated as Implementor for permission checks AND \
                    dice rolls are visible regardless of the per-player \
                    SHOW_DICE_ROLLS flag. NEVER leave this on in prod. \
-                   Each toggle logs a loud syslog warning. Also \
-                   settable via the ``MUD_DEV_MODE`` env var at boot.",
+                   Each toggle logs a loud syslog warning.",
         },
         run: cmd_devmode,
     }
@@ -206,39 +207,68 @@ inventory::submit! {
 
 /// to find the owning `Users.id`, then inserts a `BanRecords` row.
 /// Server-wide DevMode toggle. Loud syslog warning on every flip
-/// so a forgotten "on" leaves a paper trail. Setting the flag uses
-/// ``world.insert_resource`` (cheap; resource always present).
+/// so a forgotten "on" leaves a paper trail. Also persists to
+/// `GameConfig.server.dev_mode` so the choice survives a restart.
 pub(crate) fn cmd_devmode(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "devmode", args);
     let player_name = name_of(world, player);
     let arg = args.trim().to_ascii_lowercase();
     let current = world.get_resource::<crate::DevMode>().is_some_and(|d| d.0);
-    match arg.as_str() {
+    let new_state = match arg.as_str() {
         "" | "status" => {
             let state = if current { "<b:red>ON</>" } else { "<dim>off</>" };
             send_to(world, player, format!("DevMode is {state}.\r\n"));
+            return;
         }
         "on" | "true" | "1" | "enable" => {
             if current {
                 send_to(world, player, "DevMode is already on.\r\n");
                 return;
             }
-            world.insert_resource(crate::DevMode(true));
-            tracing::warn!(by = %player_name, "DevMode ENABLED — all players treated as Implementor + dice rolls visible");
-            send_to(world, player, "<b:red>DevMode ENABLED</> — all players treated as Implementor.\r\n");
+            true
         }
         "off" | "false" | "0" | "disable" => {
             if !current {
                 send_to(world, player, "DevMode is already off.\r\n");
                 return;
             }
-            world.insert_resource(crate::DevMode(false));
-            tracing::warn!(by = %player_name, "DevMode disabled — back to normal role gating");
-            send_to(world, player, "<dim>DevMode disabled.</>\r\n");
+            false
         }
         _ => {
             send_to(world, player, "Usage: devmode [on|off]\r\n");
+            return;
         }
+    };
+    world.insert_resource(crate::DevMode(new_state));
+    if let Some(rt) = world.get_resource_mut::<mud_world::RuntimeConfig>() {
+        rt.into_inner().by_key.insert(
+            ("server".into(), "dev_mode".into()),
+            mud_world::ConfigValue::Bool(new_state),
+        );
+    }
+    if new_state {
+        tracing::warn!(by = %player_name, "DevMode ENABLED — all players treated as Implementor + dice rolls visible");
+        send_to(world, player, "<b:red>DevMode ENABLED</> — all players treated as Implementor.\r\n");
+    } else {
+        tracing::warn!(by = %player_name, "DevMode disabled — back to normal role gating");
+        send_to(world, player, "<dim>DevMode disabled.</>\r\n");
+    }
+    if let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) {
+        tokio::spawn(async move {
+            let value = if new_state { "true" } else { "false" };
+            let res = mud_db::sqlx::query(
+                r#"INSERT INTO "GameConfig" (category, key, value, value_type, description, updated_at)
+                   VALUES ('server', 'dev_mode', $1, 'BOOL', 'Implementor-toggled open-playtest mode', NOW())
+                   ON CONFLICT (category, key) DO UPDATE
+                     SET value = EXCLUDED.value, updated_at = NOW()"#,
+            )
+            .bind(value)
+            .execute(&pool)
+            .await;
+            if let Err(e) = res {
+                tracing::warn!(error = %e, "failed to persist devmode toggle to GameConfig");
+            }
+        });
     }
 }
 

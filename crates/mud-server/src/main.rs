@@ -130,20 +130,10 @@ async fn main() {
     let mut world = World::new();
     world.insert_resource(TickCount::default());
     world.insert_resource(ServerStart(Instant::now()));
-    // Server-wide dev-mode toggle (env var only on boot; runtime
-    // toggle lives on the ``devmode`` admin command). Loud WARN
-    // banner when enabled — never leave this on in prod.
-    let dev_mode = std::env::var("MUD_DEV_MODE")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"));
-    if dev_mode {
-        tracing::warn!("┌─────────────────────────────────────────────────────────┐");
-        tracing::warn!("│ MUD_DEV_MODE=on — ALL players are Implementor!         │");
-        tracing::warn!("│ Admin commands open to anyone. Dice rolls visible.     │");
-        tracing::warn!("│ DO NOT RUN THIS IN PRODUCTION.                         │");
-        tracing::warn!("└─────────────────────────────────────────────────────────┘");
-    }
-    world.insert_resource(DevMode(dev_mode));
+    // DevMode lives in the GameConfig `server.dev_mode` row so the
+    // toggle persists across restarts. Boot initial value is `false`;
+    // resolved against the DB once world load completes below.
+    world.insert_resource(DevMode(false));
     world.insert_resource(mud_world::MudClock::default());
     world.insert_resource(mud_world::HousingIndex::default());
     world.insert_resource(mud_script::LuaHost::default());
@@ -217,6 +207,21 @@ async fn main() {
         info!("MUD_SEED_TEST_CONTENT=true — seeding training dummy + test items");
         combat::seed_test_mobs(&mut world);
         combat::seed_test_items(&mut world);
+    }
+    // Resolve persistent DevMode from GameConfig (`server.dev_mode`).
+    // Loud WARN banner when on so a forgotten flag leaves a paper
+    // trail in syslog at every boot. Set on this host by inserting
+    // the row; absent row = default off everywhere else.
+    let dev_mode_db = world
+        .resource::<mud_world::RuntimeConfig>()
+        .get_bool("server", "dev_mode", false);
+    if dev_mode_db {
+        tracing::warn!("┌─────────────────────────────────────────────────────────┐");
+        tracing::warn!("│ GameConfig server.dev_mode=ON — players are Implementor│");
+        tracing::warn!("│ Admin commands open to anyone. Dice rolls visible.     │");
+        tracing::warn!("│ DO NOT RUN THIS IN PRODUCTION.                         │");
+        tracing::warn!("└─────────────────────────────────────────────────────────┘");
+        world.insert_resource(DevMode(true));
     }
     commands::validate_registry();
     // Fire LOAD-flagged triggers for every spawned mob now that the
