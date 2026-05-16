@@ -420,8 +420,13 @@ inventory::submit! {
         help: Help {
             usage: "score",
             summary: "Display your character's stats.",
-            long: "Shows HP, combat stats (hit/damage roll, AC, alignment), \
-                   and your current combat target if any.",
+            long: "Shows HP, stamina, six core attributes, the modern \
+                   combat triple (Acc / Eva / Atk / Armor%), \
+                   alignment, posture, location, recall point, and \
+                   your current combat target when fighting. \
+                   Spell-circle slots are surfaced separately via \
+                   `slots`; full effect durations via `effects`; \
+                   XP / next-level gains via `level`.",
         },
         run: cmd_score,
     }

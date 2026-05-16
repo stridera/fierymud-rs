@@ -46,9 +46,10 @@ inventory::submit! {
     help: Help {
         usage: "consider <target>",
         summary: "Size up a potential opponent.",
-        long: "Compares the target's max HP and damage roll to yours \
-               and reports a rough difficulty band. Doesn't engage \
-               the target — just a flavor read.",
+        long: "Sizes up the target — compares their HP, accuracy, \
+               evasion, and attack power against yours and reports \
+               a rough difficulty band. Doesn't engage the target; \
+               purely informational.",
     },
     run: cmd_consider,
     }

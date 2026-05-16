@@ -92,6 +92,33 @@ Things blocked on a design call.
 - **F2. Liquid table seeded?** Catalog wires up at boot, but only 30 rows imported (legacy types). If you want more (player-craftable, magical liquids), it's a content question.
 - **F3. Combat balance items in section A** — all need playtesting + design calls.
 
+## I — Playtest pass 2 (2026-05-16, post-A5/A6/A7/B1/B5)
+
+Live verification confirmed:
+
+- **A6 stealth bonus** fires correctly. `hide` then `kill X` drops
+  the player's attack DC from 78 → 65 (the +25 acc bonus minus
+  defender's 0 perception/4 ≈ +13 hit% delta). Score showed the
+  marker cleared after the first swing. ✓
+- **A5 burning hands** now lands clean damage (335 dmg vs L15
+  stallion's ~237 HP) — was 5661 before the 0..=1000 → 0..=100
+  skill normalization. ✓
+- **B5** unit-tested via the existing combat suite. Live test
+  defers until a player actually levels up in play.
+- **B1** unit-coverage; live verification deferred until a
+  proto with `timer > 0` spawns. No timed protos in the seeded
+  trash mobs we've used so far.
+
+Follow-ups surfaced this pass:
+
+- **I.1** `consider` and `score` help text still mentioned
+  legacy "hit/damage roll, AC" — refreshed.
+- **I.2** Cast descriptor box (gated on dev mode) still says
+  "single-target / not area" for Burning Hands. Schema's
+  isArea=false is the source of truth; the description
+  ("scorching everything in a cone") is the disagreement. Same
+  decision as G2.5 — content-author call, deferred.
+
 ## H — Playtest follow-ups (2026-05-16)
 
 Open items surfaced during hands-on play. Lower priority than A-B but worth resolving.
