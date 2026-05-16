@@ -143,6 +143,9 @@ Captured during a hands-on session. Grouped by area.
 
   Today step 4 fires when 2 and 3 should have caught it.
 
+### G2.x decisions deferred to user
+- **Burning Hands cone vs single (G2.5).** Description says "cone before you"; data has `isArea=false` and notes "touch range". Targeting now defaults to current opponent (G2.1) so single-target works fine. Deciding whether to upgrade to a real cone (data fix + cone implementation) vs trim the description to match the touch-attack reality is a content-author call. No code change pending.
+
 ### G5. Mudlet package
 - **Bar overflow.** If we send `health=100/1` (max < current), the visual bar grows past 100% and obscures most of the screen. Clamp render to `min(current/max, 1.0)` and treat `max <= 0` as a sentinel "unknown — don't draw".
 
