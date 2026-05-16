@@ -20,7 +20,7 @@ pub use components::{
     MovementPoints, NameApprovalPending, Named, NaturalAttackType, NaturalDamage, Online, Player, PlayerFlags, Posture,
     Sized,
     PostureKind, Profile, Prompt, Poofs, RecallPoint, RiddenBy, Room, RoomLayout, RoomSector, ScriptVars, Shopkeeper, SkillPoints, Snooping, SnoopedBy, SwitchedFrom, SwitchedInto, Trophy, TrophyEntry, TrophyKind, WizInvis,
-    ArenaRoom, BaseLightLevel, DeathTrap, Focus, GrantedByItem, GuildhallRoom, IndoorRoom, Mana,
+    ArenaRoom, BaseLightLevel, DeathTrap, Focus, GrantedByItem, GuildhallRoom, IndoorRoom,
     NoMagicRoom, NoMobsRoom, NoPortalsRoom, NoRecallRoom, NoScanningRoom, NoSummonRoom,
     NoTeleportRoom, NoTrackingRoom, PeacefulRoom, Perception, RegenBonus, Resistances, RevealedExits, RoomExtras, SavingThrows, Slot, SoundproofRoom, Stamina, Stealth, Stunned, SyslogMinLevel, TellLog, Thirst, TimePlayed, Title, UiStyle, WatchingSyslog, Wealth, WearableIn,
     WimpyThreshold,

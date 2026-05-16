@@ -4774,10 +4774,10 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
 ///
 ///   { skills: [ {name, cooldown, available} ] }
 ///
-/// `mp_cost` is omitted today — ability mana cost is computed at
-/// cast time from spell-circle + class focus rate, not stored as a
-/// stable per-ability value. Reserved in the spec for when the
-/// runtime caches a per-class cost lookup.
+/// Casting costs are paid in stamina, not mana — this game has no
+/// mana pool. The shape stays MUD-client-standard (no `mp_cost`
+/// alongside skills) so generic GMCP clients render fine without
+/// special-casing FieryMUD.
 pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
     let Some(conn) = world.get::<Connection>(viewer) else { return };
     let Some(known) = world.get::<KnownAbilities>(viewer) else {
@@ -5306,10 +5306,6 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         .unwrap_or("<%h/%H> ");
     let hp = world.get::<Health>(target).copied();
     let stamina = world.get::<Stamina>(target).copied();
-    // Mana: optional component (non-casters never gain a pool).
-    // Missing = report 0/0 so the client's bar treats it as a
-    // hide-the-gauge signal.
-    let mana = world.get::<mud_world::Mana>(target).copied();
     let name = world.get::<Named>(target).map(|n| n.name.as_str());
     let room = world
         .get::<Located>(target)
@@ -10319,7 +10315,7 @@ pub(crate) fn invoke_ability_with(
     }
     // NoMagicRoom gate — `Room.allows_magic = false` marks dead-
     // magic / anti-magic rooms where the verbal-magical kinds
-    // (spell/chant/song) fizzle entirely. Checked before mana /
+    // (spell/chant/song) fizzle entirely. Checked before stamina /
     // cooldown drain so a player in a sanctuary doesn't lose
     // resources to a wasted cast. SKILL kind bypasses (pure
     // physical, same precedent as the silence gate above).
@@ -12475,28 +12471,6 @@ pub(crate) fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, 
             }
             true
         }
-        "max_mana" => {
-            // Lazy-init Mana when gear/effects bump max on a wearer
-            // without an existing pool. Score sheet hides the line
-            // when max == 0 elsewhere; lifting max here is the
-            // entry point for casters.
-            if world.get::<mud_world::Mana>(target).is_none() {
-                try_insert(world, target, mud_world::Mana::default());
-            }
-            if let Some(mut m) = world.get_mut::<mud_world::Mana>(target) {
-                m.max = m.max.saturating_add(amount);
-                if amount > 0 {
-                    m.current = m.current.saturating_add(amount);
-                }
-                if m.max < 0 {
-                    m.max = 0;
-                }
-                if m.current > m.max {
-                    m.current = m.max;
-                }
-            }
-            true
-        }
         "saving_para" | "saving_rod" | "saving_petri" | "saving_breath" | "saving_spell" => {
             if world.get::<mud_world::SavingThrows>(target).is_none() {
                 try_insert(world, target, mud_world::SavingThrows::default());
@@ -13652,7 +13626,7 @@ pub(crate) fn apply_ward(amount: i32, ward_pct: i32, is_magical: bool) -> i32 {
 /// Most-severe-wins: a single hit that crosses several thresholds emits only
 /// the lowest-band message.
 /// Push a `Char.Vitals` GMCP frame to `target` immediately, using
-/// the current Health / Stamina / Mana / Profile state. Called both
+/// the current Health / Stamina / Profile state. Called both
 /// at end-of-tick (from `send_prompt`) and mid-tick from
 /// `apply_damage` so the client's HP gauge tracks the visible
 /// damage text without a one-round lag (G3.3). No-op when the

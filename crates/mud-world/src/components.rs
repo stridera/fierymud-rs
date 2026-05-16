@@ -494,17 +494,6 @@ pub struct Stamina {
     pub max: i32,
 }
 
-/// Mana pool. Spell costs deduct from `current`; regen is wired to
-/// `regen.rs` at the same cadence as `Health`. `max` grows on
-/// level-up and from gear that grants `MANA` `ObjectAffects` rows.
-/// `current = max = 0` is fine — score sheet hides the line for
-/// non-casters.
-#[derive(Component, Debug, Clone, Copy, Default)]
-pub struct Mana {
-    pub current: i32,
-    pub max: i32,
-}
-
 /// Five-axis saving throws (legacy `SAVING_PARA` / `_ROD` / `_PETRI`
 /// / `_BREATH` / `_SPELL`). Lower is better — saves are rolled
 /// against and a *lower* `save` makes the wearer more resistant
@@ -538,7 +527,6 @@ pub struct Perception(pub i32);
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct RegenBonus {
     pub hp: i32,
-    pub mana: i32,
     pub stamina: i32,
 }
 
@@ -769,7 +757,7 @@ pub struct RevealedExits {
 pub struct PeacefulRoom;
 
 /// Marker on rooms with `Room.allows_magic = false`. Cast / chant
-/// / perform are refused with a fizzle message before mana or
+/// / perform are refused with a fizzle message before stamina or
 /// cooldown consumption. Skill kind (purely physical) bypasses.
 #[derive(Component, Default, Debug, Clone, Copy)]
 pub struct NoMagicRoom;
