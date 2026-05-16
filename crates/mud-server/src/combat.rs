@@ -849,8 +849,10 @@ fn apply_swing(world: &mut World, s: &Swing) {
         roll_evasion(world, s.target)
     };
     let dice_on = show_dice_for(world, s.attacker);
+    let target_dice_on = show_dice_for(world, s.target);
     if let Some(via) = evaded_via {
         let tail = if dice_on { show_dice_evade(via) } else { String::new() };
+        let target_tail = if target_dice_on { show_dice_evade(via) } else { String::new() };
         send_to(
             world,
             s.attacker,
@@ -859,7 +861,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         send_to(
             world,
             s.target,
-            format!("You {via} {}'s attack!\r\n", s.attacker_name),
+            format!("You {via} {}'s attack!\r\n{target_tail}", s.attacker_name),
         );
         broadcast_room_except_rendered(
             world,
@@ -875,6 +877,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
     if outcome == SwingOutcome::Miss {
         let tail = if dice_on { show_dice_swing(detail, s.damage, 0) } else { String::new() };
+        let target_tail = if target_dice_on { show_dice_swing(detail, s.damage, 0) } else { String::new() };
         // Misses dim slightly — visible but recedes vs the hit
         // lines below, which carry the actual gameplay info.
         send_to(
@@ -885,7 +888,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         send_to(
             world,
             s.target,
-            format!("<dim>{} swings at you but misses.</>\r\n", s.attacker_name),
+            format!("<dim>{} swings at you but misses.</>\r\n{target_tail}", s.attacker_name),
         );
         broadcast_room_except_rendered(
             world,
@@ -999,6 +1002,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         None => damage.to_string(),
     };
     let tail = if dice_on { show_dice_swing(detail, damage_pre_variance, damage) } else { String::new() };
+    let target_tail = if target_dice_on { show_dice_swing(detail, damage_pre_variance, damage) } else { String::new() };
     // Mob-natural-attack flavor: when the attacker carries a
     // `NaturalAttackType` (i.e. unarmed mob swing), pull the verb
     // from the proto's `DamageType::verb()` so a wolf bites and an
@@ -1024,7 +1028,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         world,
         s.target,
         format!(
-            "{} {attacker_verb_third} you for {damage_label} damage{crit_tag}.\r\n",
+            "{} {attacker_verb_third} you for {damage_label} damage{crit_tag}.\r\n{target_tail}",
             s.attacker_name
         ),
     );
