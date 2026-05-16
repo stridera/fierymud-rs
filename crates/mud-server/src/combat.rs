@@ -1259,7 +1259,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
     // Snapshot the post-crit, pre-variance value so showdice can
     // render the "× 1.5 ±var = N" math without re-deriving it.
-    let damage_pre_variance = damage;
+    let _damage_pre_variance = damage;
     // Per-swing damage variance: ±25% of the post-crit base, integer
     // floor. Bigger swings get a wider band; sub-4 damage swings
     // pin at variance=0. Floor at 1 so a low roll never zeroes out
