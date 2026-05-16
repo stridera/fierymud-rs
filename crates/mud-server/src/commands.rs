@@ -13364,6 +13364,12 @@ pub(crate) fn name_or(world: &World, e: Entity, fallback: &str) -> String {
 /// re-deriving the role check.
 #[must_use]
 pub(crate) fn is_staff(world: &World, entity: Entity) -> bool {
+    // DevMode short-circuit: open-playtest servers treat every player
+    // as staff so testers can spawn / heal / inspect without an admin
+    // claim. See ``DevMode`` in ``main.rs`` for the loud warning banner.
+    if world.get_resource::<crate::DevMode>().is_some_and(|d| d.0) {
+        return true;
+    }
     world
         .get::<Account>(entity)
         .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder))

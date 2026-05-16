@@ -45,6 +45,17 @@ pub(crate) struct TickCount(pub(crate) u64);
 #[derive(Resource)]
 pub(crate) struct ServerStart(pub(crate) Instant);
 
+/// Server-wide "dev mode" toggle for open playtest servers.
+/// When ON:
+///   - Every connected player is treated as Implementor for permission
+///     checks (``is_staff`` returns true regardless of account role).
+///   - ``show_dice_for`` returns true regardless of the per-player
+///     SHOW_DICE_ROLLS flag — every swing surfaces its dice tail.
+/// Enabled at boot via env var ``MUD_DEV_MODE=1``; flipped at runtime
+/// via the ``devmode`` admin command. NEVER ship to prod with this on.
+#[derive(Resource, Default)]
+pub(crate) struct DevMode(pub(crate) bool);
+
 // Bevy systems take their resources by value (Res<T> is a smart-pointer
 // wrapper); clippy::needless_pass_by_value doesn't know the API.
 #[allow(clippy::needless_pass_by_value)]
@@ -119,6 +130,20 @@ async fn main() {
     let mut world = World::new();
     world.insert_resource(TickCount::default());
     world.insert_resource(ServerStart(Instant::now()));
+    // Server-wide dev-mode toggle (env var only on boot; runtime
+    // toggle lives on the ``devmode`` admin command). Loud WARN
+    // banner when enabled — never leave this on in prod.
+    let dev_mode = std::env::var("MUD_DEV_MODE")
+        .ok()
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"));
+    if dev_mode {
+        tracing::warn!("┌─────────────────────────────────────────────────────────┐");
+        tracing::warn!("│ MUD_DEV_MODE=on — ALL players are Implementor!         │");
+        tracing::warn!("│ Admin commands open to anyone. Dice rolls visible.     │");
+        tracing::warn!("│ DO NOT RUN THIS IN PRODUCTION.                         │");
+        tracing::warn!("└─────────────────────────────────────────────────────────┘");
+    }
+    world.insert_resource(DevMode(dev_mode));
     world.insert_resource(mud_world::MudClock::default());
     world.insert_resource(mud_world::HousingIndex::default());
     world.insert_resource(mud_script::LuaHost::default());

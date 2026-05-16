@@ -14,6 +14,28 @@ use crate::commands::{
 
 inventory::submit! {
     Command {
+        names: &["devmode"],
+        min_role: UserRole::Implementor,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "devmode [on|off]",
+            summary: "Toggle server-wide dev mode (open playtest).",
+            long: "Implementor-only. With no argument, prints current \
+                   state. With `on` or `off`, flips the server-wide \
+                   ``DevMode`` resource. When ON, every connected player \
+                   is treated as Implementor for permission checks AND \
+                   dice rolls are visible regardless of the per-player \
+                   SHOW_DICE_ROLLS flag. NEVER leave this on in prod. \
+                   Each toggle logs a loud syslog warning. Also \
+                   settable via the ``MUD_DEV_MODE`` env var at boot.",
+        },
+        run: cmd_devmode,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["ban"],
         min_role: UserRole::Implementor,
         required_perm: None,
@@ -183,6 +205,43 @@ inventory::submit! {
 // ---- handler bodies ----
 
 /// to find the owning `Users.id`, then inserts a `BanRecords` row.
+/// Server-wide DevMode toggle. Loud syslog warning on every flip
+/// so a forgotten "on" leaves a paper trail. Setting the flag uses
+/// ``world.insert_resource`` (cheap; resource always present).
+pub(crate) fn cmd_devmode(world: &mut World, player: Entity, args: &str) {
+    record_admin_action(world, player, "devmode", args);
+    let player_name = name_of(world, player);
+    let arg = args.trim().to_ascii_lowercase();
+    let current = world.get_resource::<crate::DevMode>().is_some_and(|d| d.0);
+    match arg.as_str() {
+        "" | "status" => {
+            let state = if current { "<b:red>ON</>" } else { "<dim>off</>" };
+            send_to(world, player, format!("DevMode is {state}.\r\n"));
+        }
+        "on" | "true" | "1" | "enable" => {
+            if current {
+                send_to(world, player, "DevMode is already on.\r\n");
+                return;
+            }
+            world.insert_resource(crate::DevMode(true));
+            tracing::warn!(by = %player_name, "DevMode ENABLED — all players treated as Implementor + dice rolls visible");
+            send_to(world, player, "<b:red>DevMode ENABLED</> — all players treated as Implementor.\r\n");
+        }
+        "off" | "false" | "0" | "disable" => {
+            if !current {
+                send_to(world, player, "DevMode is already off.\r\n");
+                return;
+            }
+            world.insert_resource(crate::DevMode(false));
+            tracing::warn!(by = %player_name, "DevMode disabled — back to normal role gating");
+            send_to(world, player, "<dim>DevMode disabled.</>\r\n");
+        }
+        _ => {
+            send_to(world, player, "Usage: devmode [on|off]\r\n");
+        }
+    }
+}
+
 /// Permanent ban (no duration today; a `[Nh|Nd]` argument can
 /// land later).
 pub(crate) fn cmd_ban(world: &mut World, player: Entity, args: &str) {

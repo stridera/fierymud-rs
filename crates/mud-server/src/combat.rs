@@ -437,6 +437,12 @@ pub(crate) struct SwingDetail {
 /// Cheap (component lookup); call sites guard their detail-line
 /// construction on this rather than always formatting the string.
 fn show_dice_for(world: &World, attacker: Entity) -> bool {
+    // DevMode forces dice visibility for everyone — open playtest
+    // servers want every swing to show its roll regardless of the
+    // per-player SHOW_DICE_ROLLS flag.
+    if world.get_resource::<crate::DevMode>().is_some_and(|d| d.0) {
+        return true;
+    }
     world
         .get::<PlayerFlags>(attacker)
         .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::ShowDiceRolls))
