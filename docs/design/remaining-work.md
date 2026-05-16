@@ -106,6 +106,48 @@ Order if you want to maximize player-visible parity in the shortest path:
 5. **E** — improvements; pick whichever the player base would notice.
 6. **F decisions** — answer when convenient; none are blocking.
 
+## G — Playtest bugs (2026-05-16)
+
+Captured during a hands-on session. Grouped by area.
+
+### G1. UI / display
+- **Combat prompt missing from `prompt list`.** Combat prompts (enemy HP bar etc.) aren't surfaced as a selectable preset.
+- **`score` shows equipment slots.** At high level the slot block dominates the screen. Remove it from `score`; the standalone `slots` command already covers it.
+- **`score` shows XP twice.** Dedupe. Also audit whether we have multiple score variants (compact / normal / fancy) and document which is the default.
+- **`spells` should group by spell level**, not flat alphabetical. Useful for "what's my highest-circle spell".
+- **`skills` should display proficiency.** Today it lists names only.
+- **`eff` should auto-resolve to `effects`.** Default to prefix-matching; only ambiguity prompts on destructive commands. Apply broadly — most commands should abbreviate.
+
+### G2. Effects + spells
+- **`web` spell does not actually root the target.** Webbed character can still move freely. Spell duration is also 7576 seconds — implausibly long; needs design review.
+- **No way to see what a spell does in-game.** `astat` shows the affect block but not the spell's text/effect description. Add a spell help or extend `astat` to render the spell catalog entry.
+- **`help web`** (and likely most spells) returns nothing — wire spell help entries.
+- **Combat-targeted spells default to the caster.** Casting `burning hands` while fighting a mob hits the caster instead of the enemy.
+- **Cast output includes the full spell help block.** Should only print the spell's combat message ("Flames shoot from your fingertips…"), not the help card.
+- **Burning Hands tag says "single-target / not area"** but the description says cone — declared targeting doesn't match the design. Likely a converter / catalog mismatch.
+- **L21 sorc cast Burning Hands → 5661 self-damage**, instantly dying. Caster-as-target + uncapped damage = self-kill. Multiple bugs compounding (see above).
+
+### G3. Combat flow
+- **First swing delay.** `kill X` prints "You attack…" but no actual swing fires until the next combat tick. Fire one swing immediately on initiate.
+- **You can keep attacking *after* death.** Dead player gets the death banner, then proceeds to `You swing at the Illithid but miss.` Need to gate the swing system on `posture != Dying|Dead`.
+- **GMCP `Char.Vitals` is one round late.** Currently sent at start-of-tick (pre-damage); should send post-resolution / at the prompt.
+- **Mobs appear to instantly respawn after kill.** Reset cadence is too aggressive; needs a per-mob respawn delay (legacy was ~zone repop interval).
+
+### G4. Death / corpse / respawn
+- **Corpse decay = 10 min is wrong for players.** Mob corpses fine at 10 min; player corpses should last days so the player has time to retrieve gear.
+- **Release sends to The Void.** Spawn precedence should be:
+  1. Save_location (only if rented/camped)
+  2. Last touchstone
+  3. Race home room (character-creation spawn)
+  4. The Void — only if all above are missing (should never happen in practice)
+
+  Today step 4 fires when 2 and 3 should have caught it.
+
+### G5. Mudlet package
+- **Bar overflow.** If we send `health=100/1` (max < current), the visual bar grows past 100% and obscures most of the screen. Clamp render to `min(current/max, 1.0)` and treat `max <= 0` as a sentinel "unknown — don't draw".
+
+---
+
 ## How to use this doc
 
 When something here ships, **delete** the bullet. This doc should always reflect "what's still pending." If something gets dropped (decided not worth doing), move it to a "Cancelled" section so the history survives.
