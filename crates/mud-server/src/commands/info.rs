@@ -4377,7 +4377,12 @@ pub(crate) fn cmd_practice(world: &mut World, player: Entity, args: &str) {
     let mut rows: Vec<(String, String, i32, bool, Option<i32>)> = Vec::with_capacity(known.len());
     for (id, prof, learned) in &known {
         let def = catalog.by_name.values().find(|d| d.id == *id);
-        let name = def.map_or_else(|| format!("ability #{id}"), |d| d.plain_name.clone());
+        // Use `name` (Title Case display name) rather than the raw
+        // SCREAMING_SNAKE_CASE `plain_name` — "Two-Handed
+        // Bludgeoning" beats "TWO_HAND_BLUDGEONING" on the practice
+        // sheet. Fall through to a "#id" stub when the catalog
+        // lookup somehow misses (defensive — shouldn't happen).
+        let name = def.map_or_else(|| format!("ability #{id}"), |d| d.name.clone());
         let kind = def.map_or("?", |d| match d.kind {
             mud_db::abilities::AbilityKind::Skill => "skill",
             mud_db::abilities::AbilityKind::Spell => "spell",
