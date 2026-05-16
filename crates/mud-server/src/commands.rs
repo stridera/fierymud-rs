@@ -11361,9 +11361,10 @@ pub(crate) fn invoke_ability_with(
                 // H.2: nothing to heal (target already at max).
                 // Print a friendlier line than the silent "(+0)"
                 // so the caster knows they're not just whiffing
-                // dice. Caster heals don't waste stamina either —
-                // skip the applied_msgs push so the wrapping
-                // descriptor box doesn't list the no-op effect.
+                // dice. We still push a placeholder onto
+                // applied_msgs so the outer "no effects defined"
+                // fallback doesn't fire — the spell *did* resolve,
+                // it just had no work to do.
                 if healed == 0 && amount > 0 {
                     let resource_word = if resource == "move" || resource == "stamina" {
                         "stamina"
@@ -11377,6 +11378,7 @@ pub(crate) fn invoke_ability_with(
                         format!("<dim>{n}'s {resource_word} is already full.</>\r\n")
                     };
                     send_to(world, player, msg);
+                    applied_msgs.push(format!("{} (no-op)", spec.name));
                     continue;
                 }
                 applied_msgs.push(format!("{} (+{healed} {resource_label})", spec.name));
