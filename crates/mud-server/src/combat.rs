@@ -433,6 +433,30 @@ pub(crate) struct SwingDetail {
     pub chance: i32,  // need <= this to land a regular hit
 }
 
+/// Pipeline intermediates for a hit/crit swing, surfaced through
+/// ``show_dice_swing`` when the dice toggle is on. Collects each
+/// mitigation step so debugging "why did that crit only do 6 damage"
+/// shows the full math. Filled in as the damage pipeline runs in
+/// ``combat_tick``; ignored for misses.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SwingMitigation {
+    pub weapon_roll: i32,     // raw dice (weapon or natural attack)
+    pub attack_power: i32,    // attacker's CombatStats.attack_power (%)
+    pub base_pre_crit: i32,   // weapon × (1 + AP/100) — the snapshot value
+    pub after_crit: i32,      // × 1.5 if crit, else unchanged
+    pub variance_delta: i32,  // signed delta applied (-band..=+band)
+    pub after_variance: i32,
+    pub armor_pct: i32,       // effective_armor_pct (after pen)
+    pub armor_k: i32,         // ARMOR_K constant
+    pub after_armor_pct: i32,
+    pub armor_flat: i32,      // effective_armor_flat (after pen)
+    pub after_armor_flat: i32,
+    pub resist_pct: i32,
+    pub after_resist: i32,
+    pub hardness: i32,
+    pub final_dmg: i32,
+}
+
 /// True iff the attacker has the `SHOW_DICE_ROLLS` `PlayerFlag` set.
 /// Cheap (component lookup); call sites guard their detail-line
 /// construction on this rather than always formatting the string.
@@ -460,31 +484,67 @@ fn show_dice_for(world: &World, attacker: Entity) -> bool {
 ///   (d100 100 — CRIT — dmg 8 × 1.5 ±var = 14)   // crit
 ///   (auto-hit on sleeping target — dmg 6 ±var = 7)
 ///   (defender evaded via parry)                 // evade
-fn show_dice_swing(detail: SwingDetail, base_damage: i32, final_damage: i32) -> String {
-    match detail.outcome {
+fn show_dice_swing(detail: SwingDetail, mit: SwingMitigation) -> String {
+    let header = match detail.outcome {
         SwingOutcome::Miss => {
-            format!("  (d100 {} > {} — miss)\r\n", detail.roll, detail.chance)
+            return format!("  (d100 {} > {} — miss)\r\n", detail.roll, detail.chance);
         }
-        SwingOutcome::Hit if detail.roll == 0 => {
-            // Sleeping defender: auto-hit, no roll happened.
-            format!("  (auto-hit on sleeping target — dmg {base_damage} ±var = {final_damage})\r\n")
-        }
-        SwingOutcome::Hit => {
-            format!(
-                "  (d100 {} ≤ {} — dmg {base_damage} ±var = {final_damage})\r\n",
-                detail.roll, detail.chance,
-            )
-        }
-        SwingOutcome::Crit => {
-            // Crit promotes pre-variance damage by 1.5×. base_damage is
-            // post-promotion; show the math anyway for clarity.
-            let pre_promote = (base_damage * 2) / 3;
-            format!(
-                "  (d100 {} — CRIT — dmg {pre_promote} × 1.5 ±var = {final_damage})\r\n",
-                detail.roll,
-            )
-        }
-    }
+        SwingOutcome::Hit if detail.roll == 0 => "auto-hit (sleeping target)".to_string(),
+        SwingOutcome::Hit => format!("d100 {} ≤ {} — HIT", detail.roll, detail.chance),
+        SwingOutcome::Crit => format!("d100 {} ≤ {} — CRIT ×1.5", detail.roll, detail.chance),
+    };
+    // Show "wpn 18 ×AP+5%=19" so the raw dice roll + AP step are visible.
+    // For crits, append the ×1.5 promotion.
+    let ap_step = if mit.attack_power == 0 {
+        format!("  wpn={} ", mit.weapon_roll)
+    } else if mit.attack_power > 0 {
+        format!(
+            "  wpn={} ×AP+{}%={} ",
+            mit.weapon_roll, mit.attack_power, mit.base_pre_crit
+        )
+    } else {
+        format!(
+            "  wpn={} ×AP{}%={} ",
+            mit.weapon_roll, mit.attack_power, mit.base_pre_crit
+        )
+    };
+    let crit_step = if matches!(detail.outcome, SwingOutcome::Crit) {
+        format!("×1.5crit={} ", mit.after_crit)
+    } else {
+        String::new()
+    };
+    let variance_step = if mit.variance_delta == 0 {
+        format!("±var(0) ={} ", mit.after_variance)
+    } else if mit.variance_delta > 0 {
+        format!("±var(+{}) ={} ", mit.variance_delta, mit.after_variance)
+    } else {
+        format!("±var({}) ={} ", mit.variance_delta, mit.after_variance)
+    };
+    let armor_pct_step = format!(
+        "armor×K{}/({}+{})={} ",
+        mit.armor_k, mit.armor_pct, mit.armor_k, mit.after_armor_pct
+    );
+    let armor_flat_step = if mit.armor_flat > 0 {
+        format!("flat-{} ={} ", mit.armor_flat, mit.after_armor_flat)
+    } else {
+        String::new()
+    };
+    let resist_step = if mit.resist_pct != 0 {
+        format!("resist {}% ={} ", mit.resist_pct, mit.after_resist)
+    } else {
+        String::new()
+    };
+    let hardness_step = if mit.hardness > 0 && mit.final_dmg == 0 {
+        format!("hardness {} ZEROED ", mit.hardness)
+    } else if mit.hardness > 0 {
+        format!("hardness {} ", mit.hardness)
+    } else {
+        String::new()
+    };
+    format!(
+        "  ({header})\r\n{ap_step}{crit_step}{variance_step}{armor_pct_step}{armor_flat_step}{resist_step}{hardness_step}→ final {}\r\n",
+        mit.final_dmg
+    )
 }
 
 /// Showdice tail when the defender evaded — no damage roll
@@ -674,22 +734,22 @@ pub fn combat_tick(world: &mut World) {
             .map(|(attacker, fighting, cs, name, _, _)| {
                 // Damage pipeline per docs/design/combat.md step 3:
                 //   base = weapon_dice * (1 + attack_power/100)
+                // attack_power applies as an additive % multiplier on
+                // the rolled base.
+                //
                 // Where the dice come from:
-                //  1. Wielded weapon dice (player or armed mob)
-                //  2. NaturalDamage dice (mob's claws/teeth/fists)
-                //  3. zero (no weapon, no natural attack — typical
-                //     for an unarmed player; legacy fallback was
-                //     1 damage to keep something happening)
-                // attack_power applies as an additive % multiplier
-                // on the rolled base.
-                let weapon_roll = if let Some(&(num, sides, bonus)) = weapon_dice.get(&attacker) {
-                    roll_dice(num, sides, bonus)
-                } else if let Some(&(num, sides, bonus)) = natural_damage.get(&attacker) {
-                    // Natural-attack damage scales by the attacker's
-                    // `Races.damage_dice_factor` (percent). 100 =
-                    // unchanged. Wielded-weapon damage is unaffected
-                    // — the factor models race-shaped claws / teeth,
-                    // not steel.
+                //   - Player: wielded weapon if present, else NaturalDamage,
+                //     else 1 (unarmed floor).
+                //   - Mob: max(wielded weapon roll, natural attack roll).
+                //     Mobs sometimes get auto-assigned flavor weapons
+                //     (a "monk guard" with a tiny maul) that gimp their
+                //     real combat profile if treated as authoritative.
+                //     Picking the higher of the two respects authorial
+                //     intent: weak weapon stays for inventory/loot flavor,
+                //     but natural attack drives the actual hit.
+                let is_mob = world.get::<mud_world::Mob>(attacker).is_some();
+                let roll_natural = || -> Option<i32> {
+                    let &(num, sides, bonus) = natural_damage.get(&attacker)?;
                     let raw = roll_dice(num, sides, bonus);
                     let race_factor = world
                         .get::<mud_world::Profile>(attacker)
@@ -699,13 +759,28 @@ pub fn combat_tick(world: &mut World) {
                                 .and_then(|c| c.get(&p.race))
                         })
                         .map_or(100, |def| def.damage_dice_factor);
-                    if race_factor == 100 {
+                    Some(if race_factor == 100 {
                         raw
                     } else {
                         raw.saturating_mul(race_factor)
                             .saturating_div(100)
                             .max(1)
-                    }
+                    })
+                };
+                let roll_weapon = || -> Option<i32> {
+                    weapon_dice
+                        .get(&attacker)
+                        .map(|&(n, s, b)| roll_dice(n, s, b))
+                };
+                let weapon_roll = if is_mob {
+                    // Mob: pick whichever dice rolled higher this swing.
+                    let w = roll_weapon().unwrap_or(0);
+                    let n = roll_natural().unwrap_or(0);
+                    w.max(n).max(1)
+                } else if let Some(w) = roll_weapon() {
+                    w
+                } else if let Some(n) = roll_natural() {
+                    n
                 } else {
                     1 // unarmed floor — keeps swings non-zero
                 };
@@ -728,6 +803,7 @@ pub fn combat_tick(world: &mut World) {
                     attacker,
                     target,
                     damage,
+                    weapon_roll,
                     attacker_name: name.name.clone(),
                 }
             })
@@ -760,7 +836,8 @@ pub fn combat_tick(world: &mut World) {
 struct Swing {
     attacker: Entity,
     target: Entity,
-    damage: i32,
+    damage: i32,            // post-AP, pre-crit base damage
+    weapon_roll: i32,       // raw dice roll (pre-AP) — surfaced by show_dice
     attacker_name: String,
 }
 
@@ -882,8 +959,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
         return;
     }
     if outcome == SwingOutcome::Miss {
-        let tail = if dice_on { show_dice_swing(detail, s.damage, 0) } else { String::new() };
-        let target_tail = if target_dice_on { show_dice_swing(detail, s.damage, 0) } else { String::new() };
+        // Misses skip the damage pipeline entirely; the formatter
+        // only reads the d100/threshold for the miss branch.
+        let miss_mit = SwingMitigation::default();
+        let tail = if dice_on { show_dice_swing(detail, miss_mit) } else { String::new() };
+        let target_tail = if target_dice_on { show_dice_swing(detail, miss_mit) } else { String::new() };
         // Misses dim slightly — visible but recedes vs the hit
         // lines below, which carry the actual gameplay info.
         send_to(
@@ -910,6 +990,17 @@ fn apply_swing(world: &mut World, s: &Swing) {
         return;
     }
 
+    // Build a SwingMitigation as we go — surfaces the full damage
+    // pipeline through the show_dice tail when the toggle is on.
+    let attacker_ap = world
+        .get::<CombatStats>(s.attacker)
+        .map_or(0, |cs| cs.attack_power);
+    let mut mit = SwingMitigation {
+        weapon_roll: s.weapon_roll,
+        attack_power: attacker_ap,
+        base_pre_crit: s.damage,
+        ..Default::default()
+    };
     // Crit promotes the swing's already-resolved damage by 1.5x.
     // Stacks multiplicatively with the berserk +50% computed in
     // the swing-snapshot phase: a critical berserk swing lands at
@@ -919,6 +1010,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     } else {
         s.damage
     };
+    mit.after_crit = damage;
     // Per-attacker race scaling from `Races.hit_damage_factor`
     // (percent). 100 = unchanged; a race authored at 120 hits
     // 20% harder. Applies before mitigation so the percent reads
@@ -947,7 +1039,9 @@ fn apply_swing(world: &mut World, s: &Swing) {
     if variance_band > 0 {
         let delta = rand::random_range(-variance_band..=variance_band);
         damage = damage.saturating_add(delta).max(1);
+        mit.variance_delta = delta;
     }
+    mit.after_variance = damage;
     // Mitigation pipeline per docs/design/combat.md steps 4-7.
     // Today every weapon swing is treated as PHYSICAL (engages
     // armor) and `is_magical = false` (skips ward). Type
@@ -970,9 +1064,14 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // formula. See gear-curves §7 + post-real-loadout audit (May 2026).
     const ARMOR_K: i32 = 100;
     let effective_armor_pct = (def_armor_pct - atk_pen_pct).max(0);
+    mit.armor_pct = effective_armor_pct;
+    mit.armor_k = ARMOR_K;
     damage = damage.saturating_mul(ARMOR_K) / (effective_armor_pct + ARMOR_K);
+    mit.after_armor_pct = damage;
     let effective_armor_flat = (def_armor_flat - atk_pen_flat).max(0);
+    mit.armor_flat = effective_armor_flat;
     damage = damage.saturating_sub(effective_armor_flat).max(0);
+    mit.after_armor_flat = damage;
     // Step 5: ward — skipped for mundane weapon swings (caller
     // routes magical abilities through a separate path that
     // engages it).
@@ -981,16 +1080,20 @@ fn apply_swing(world: &mut World, s: &Swing) {
         let pct = res.0.get(&mud_db::enums::ElementType::Physical).copied().unwrap_or(0);
         // capped at +100 immunity; negative is unbounded vulnerability per docs.
         let pct = pct.min(100);
+        mit.resist_pct = pct;
         damage = (damage.saturating_mul(100 - pct)) / 100;
         damage = damage.max(0);
     }
+    mit.after_resist = damage;
     // Step 7: hardness floor — damage below this zeroes out.
+    mit.hardness = def_hardness;
     if damage < def_hardness {
         damage = 0;
     }
     // Final cap per legacy MAX_DAMAGE so even a god-tier crit
     // can't one-shot a fully-buffed player from full HP.
     damage = damage.min(MAX_DAMAGE_PER_SWING);
+    mit.final_dmg = damage;
     let (dead, threshold_msg) = apply_damage(world, s.target, damage);
 
     // Names may carry XML-Lite tags; send_to renders per-recipient so each
@@ -1007,8 +1110,8 @@ fn apply_swing(world: &mut World, s: &Swing) {
         Some(open) => format!("{open}{damage}</>"),
         None => damage.to_string(),
     };
-    let tail = if dice_on { show_dice_swing(detail, damage_pre_variance, damage) } else { String::new() };
-    let target_tail = if target_dice_on { show_dice_swing(detail, damage_pre_variance, damage) } else { String::new() };
+    let tail = if dice_on { show_dice_swing(detail, mit) } else { String::new() };
+    let target_tail = if target_dice_on { show_dice_swing(detail, mit) } else { String::new() };
     // Mob-natural-attack flavor: when the attacker carries a
     // `NaturalAttackType` (i.e. unarmed mob swing), pull the verb
     // from the proto's `DamageType::verb()` so a wolf bites and an
