@@ -5370,33 +5370,12 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // so we skip the cap lookup.
     let _ = conn.try_send(mud_net::iac_eor());
 
-    // Char.Vitals — per-prompt vitals frame. snake_case keys
-    // (hp/max_hp/mp/max_mp/mv/max_mv + next_level_pct + string).
-    // mp/max_mp come from the Mana component when present; non-
-    // casters report 0/0 so the client hides the gauge. The
-    // `next_level_pct` value comes from the LevelTable: relative
-    // position between the current level's threshold and the next
-    // level's threshold, capped at 100. Plain telnet clients see
+    // Char.Vitals — per-prompt vitals frame. Reuses the same helper
+    // `send_char_vitals` uses for combat-driven mid-tick pushes so
+    // both paths emit identical payloads. Plain telnet clients see
     // the IAC bytes as garbage which most terminal emulators strip
     // (they're outside the ASCII range).
-    if let (Some(h), Some(s)) = (hp, stamina) {
-        let (level, xp) = world
-            .get::<Profile>(target)
-            .map_or((0, 0), |p| (p.level, p.experience));
-        let next_level_pct = compute_level_progress(world, level, xp);
-        let (mp, max_mp) = mana.map_or((0, 0), |m| (m.current, m.max));
-        let payload = format!(
-            "{{\"hp\":{hp},\"max_hp\":{max_hp},\"mp\":{mp},\"max_mp\":{max_mp},\"mv\":{mv},\"max_mv\":{max_mv},\"next_level_pct\":{nlp},\"string\":\"H:{hp}/{max_hp} M:{mp}/{max_mp} V:{mv}/{max_mv}\"}}",
-            hp = h.hp,
-            max_hp = h.max,
-            mp = mp,
-            max_mp = max_mp,
-            mv = s.current,
-            max_mv = s.max,
-            nlp = next_level_pct,
-        );
-        let _ = conn.try_send(mud_net::gmcp_packet("Char.Vitals", &payload));
-    }
+    send_char_vitals(world, target);
     // Char.Name — IRE-style identity frame. Sent every prompt for
     // simplicity; the payload is small and idempotent on the
     // client side. Mudlet binds `gmcp.Char.Name.name` for profile
@@ -13677,6 +13656,42 @@ pub(crate) fn apply_ward(amount: i32, ward_pct: i32, is_magical: bool) -> i32 {
 /// target lacks Health, or when the blow was lethal (death message takes over).
 /// Most-severe-wins: a single hit that crosses several thresholds emits only
 /// the lowest-band message.
+/// Push a `Char.Vitals` GMCP frame to `target` immediately, using
+/// the current Health / Stamina / Mana / Profile state. Called both
+/// at end-of-tick (from `send_prompt`) and mid-tick from
+/// `apply_damage` so the client's HP gauge tracks the visible
+/// damage text without a one-round lag (G3.3). No-op when the
+/// entity has no Connection (mob, switched puppet, etc.).
+pub(crate) fn send_char_vitals(world: &World, target: Entity) {
+    let Some(conn) = world.get::<Connection>(target).map(|c| c.0.clone()) else {
+        return;
+    };
+    let (Some(h), Some(s)) = (
+        world.get::<Health>(target).copied(),
+        world.get::<Stamina>(target).copied(),
+    ) else {
+        return;
+    };
+    let (mp, max_mp) = world
+        .get::<mud_world::Mana>(target)
+        .map_or((0, 0), |m| (m.current, m.max));
+    let (level, xp) = world
+        .get::<Profile>(target)
+        .map_or((0, 0), |p| (p.level, p.experience));
+    let next_level_pct = compute_level_progress(world, level, xp);
+    let payload = format!(
+        "{{\"hp\":{hp},\"max_hp\":{max_hp},\"mp\":{mp},\"max_mp\":{max_mp},\"mv\":{mv},\"max_mv\":{max_mv},\"next_level_pct\":{nlp},\"string\":\"H:{hp}/{max_hp} M:{mp}/{max_mp} V:{mv}/{max_mv}\"}}",
+        hp = h.hp,
+        max_hp = h.max,
+        mp = mp,
+        max_mp = max_mp,
+        mv = s.current,
+        max_mv = s.max,
+        nlp = next_level_pct,
+    );
+    let _ = conn.try_send(mud_net::gmcp_packet("Char.Vitals", &payload));
+}
+
 pub(crate) fn apply_damage(
     world: &mut World,
     target: Entity,
@@ -13697,6 +13712,12 @@ pub(crate) fn apply_damage(
     if let Some(mut h) = world.get_mut::<Health>(target) {
         h.hp = new_value;
     }
+    // G3.3: push a Char.Vitals frame mid-tick. The end-of-tick
+    // prompt flush also sends Char.Vitals, but doing it here keeps
+    // the client's HP gauge in lock-step with the damage line that
+    // immediately follows in the same buffer flush. Without this
+    // the gauge always read one round behind the visible text.
+    send_char_vitals(world, target);
     if new_value <= 0 {
         return (true, None);
     }

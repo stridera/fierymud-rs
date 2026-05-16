@@ -25,10 +25,27 @@ use crate::TickCount;
 use crate::commands::broadcast_room_except_players_rendered;
 
 /// One refill cycle every 60 game ticks (= 6 seconds at 10 Hz).
-/// Plenty often for testing; players' perception of "respawn" is
-/// minutes anyway, but the actual cap on refills is `max_instances`
-/// per reset so the cadence just controls how snappy a kill feels.
+/// Plenty often to keep checks cheap; the actual respawn timing
+/// is gated by per-row death timestamps + `MOB_RESPAWN_DELAY_TICKS`,
+/// so this just controls the polling rate.
 const RESPAWN_PERIOD_TICKS: u64 = 60;
+
+/// Minimum gap (in 10 Hz ticks) between a mob's death and its
+/// respawn through the same `MobResets` row (G3.4). Defaults to
+/// 1800 ticks = 180 s = 3 min so trash mobs don't pop the moment
+/// the player turns around. Overridable at runtime via
+/// `world.mob_respawn_delay_seconds` GameConfig. Boss-tier delays
+/// could later be authored per-row; for now this is a global floor.
+const MOB_RESPAWN_DELAY_TICKS_DEFAULT: u64 = 1800;
+
+/// Per-reset death timestamps for the respawn cooldown. Stamped by
+/// `combat::handle_death` when the dying mob carries a
+/// `FromMobReset`; consulted by `respawn_tick` to gate refills.
+#[derive(Resource, Default, Debug)]
+pub struct MobRespawnTimers {
+    /// `reset_id` → `TickCount` at death.
+    pub last_death_tick: HashMap<i32, u64>,
+}
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn respawn_tick(world: &mut World) {
@@ -77,8 +94,33 @@ pub fn respawn_tick(world: &mut World) {
     // does so look / consider / spawn-engage all flip together.
     let mut aggro_queue: Vec<(Entity, Entity)> = Vec::new();
     let aggro_threshold = crate::commands::aggro_alignment(world);
+    // Read the configurable per-row respawn delay once. Negative or
+    // zero means "no delay" — useful for tests and for staff-tuned
+    // dungeons that need snappy refills.
+    let delay_ticks: u64 = {
+        let cfg = world.resource::<mud_world::RuntimeConfig>();
+        let raw = cfg.get_i32(
+            "world",
+            "mob_respawn_delay_seconds",
+            (MOB_RESPAWN_DELAY_TICKS_DEFAULT / 10) as i32,
+        );
+        u64::try_from(raw.max(0)).unwrap_or(0).saturating_mul(10)
+    };
+    let timers_snapshot: HashMap<i32, u64> = world
+        .get_resource::<MobRespawnTimers>()
+        .map_or_else(HashMap::new, |t| t.last_death_tick.clone());
     for entry in &entries {
         if reset_id_alive.contains(&entry.reset_id) {
+            continue;
+        }
+        // G3.4: per-row respawn cooldown. A freshly-killed mob waits
+        // `delay_ticks` before the row eligible-fires again. Resets
+        // we've never seen die (just loaded, or were killed before
+        // the runtime started tracking) bypass the gate.
+        if delay_ticks > 0
+            && let Some(&death_tick) = timers_snapshot.get(&entry.reset_id)
+            && tick.saturating_sub(death_tick) < delay_ticks
+        {
             continue;
         }
         let proto_key = (entry.mob_zone_id, entry.mob_id);

@@ -927,6 +927,17 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         player,
         mud_world::TriggerEvent::Attack,
     );
+
+    // G3.1: fire the player's first swing right here so they don't
+    // sit through "You attack X!" with no follow-up until the next
+    // combat tick (up to ~4s). Subsequent swings come from the
+    // regular `combat_tick` cadence. ATTACK trigger above may have
+    // killed / moved the target — verify the engagement still holds.
+    if world.get_entity(target).is_ok()
+        && world.get::<Fighting>(player).is_some_and(|f| f.0 == target)
+    {
+        crate::combat::engage_swing_now(world, player, target);
+    }
 }
 pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
     let target_word = target_word.trim();

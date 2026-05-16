@@ -136,6 +136,7 @@ async fn main() {
     world.insert_resource(DevMode(false));
     world.insert_resource(mud_world::MudClock::default());
     world.insert_resource(mud_world::HousingIndex::default());
+    world.insert_resource(respawn::MobRespawnTimers::default());
     world.insert_resource(mud_script::LuaHost::default());
     // Install the skill-dispatch shim. The Lua corpus calls
     // `skills.execute(actor, "kick", target)` from combat AI; the

@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AppliedTo, CombatStats, Corpse, CorpseDecay, Description, EffectInstance, EquippedSlot, Exits,
-    Fighting, Ghost, Guarding, Health, Item, Keywords, KnownAbilities, Located, Mob,
+    Fighting, FromMobReset, Ghost, Guarding, Health, Item, Keywords, KnownAbilities, Located, Mob,
     MobPrototypes, Named, NaturalDamage, ObjectPrototypes, Player, PlayerFlags, Posture,
     PostureKind, Slot, Stunned, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
@@ -866,10 +866,153 @@ struct Swing {
     attacker_name: String,
 }
 
+/// Build + apply one swing for a freshly-engaged attacker (G3.1).
+///
+/// `cmd_attack` calls this at the end of the engage path so the
+/// player doesn't sit through "You attack the orc!" with no visible
+/// damage until the next combat tick (up to ~4s away). Mirrors the
+/// per-attacker math in [`combat_tick`] but does per-entity lookups
+/// instead of using snapshot maps — fine for one swing.
+///
+/// Skips the FIGHT trigger fire (combat_tick will fire it on the
+/// next regular cadence; firing twice on engage would be a behavior
+/// change).
+pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Entity) {
+    // Defenders that combat_tick refuses to swing on — same gates so
+    // engage doesn't bypass them.
+    if world.get::<Ghost>(attacker).is_some()
+        || world.get::<mud_world::Frozen>(attacker).is_some()
+        || world.get::<Stunned>(attacker).is_some()
+    {
+        return;
+    }
+    // Non-alert posture skip mirrors combat_tick's filter.
+    if !matches!(
+        world.get::<Posture>(attacker).map(|p| p.0),
+        None | Some(PostureKind::Standing),
+    ) {
+        return;
+    }
+    let Some(cs) = world.get::<CombatStats>(attacker).copied() else {
+        return;
+    };
+    let Some(name) = world.get::<Named>(attacker).map(|n| n.name.clone()) else {
+        return;
+    };
+
+    // Per-attacker weapon roll: wielded weapon if any, else
+    // NaturalDamage, else 1. Mob branch picks max(weapon, natural)
+    // for the same authorial-intent reason combat_tick does.
+    let is_mob = world.get::<mud_world::Mob>(attacker).is_some();
+    // Lift the wielded-weapon's world key out so the prototype
+    // lookup doesn't hold a borrow while we touch resources.
+    let wielded_key: Option<(i32, i32)> = {
+        let mut q = world.query::<(&Located, &EquippedSlot, &WorldKey)>();
+        q.iter(world).find_map(|(loc, eq, key)| {
+            if loc.0 == attacker && eq.0 == Slot::Wield {
+                Some((key.zone, key.id))
+            } else {
+                None
+            }
+        })
+    };
+    let weapon_dice: Option<(i32, i32, i32)> = wielded_key.and_then(|key| {
+        let protos = world.get_resource::<ObjectPrototypes>()?;
+        let p = protos.by_key.get(&key)?;
+        if p.weapon_dice_num <= 0 || p.weapon_dice_size <= 0 {
+            return None;
+        }
+        Some((p.weapon_dice_num, p.weapon_dice_size, p.weapon_dice_bonus))
+    });
+    let natural: Option<(i32, i32, i32)> = world
+        .get::<NaturalDamage>(attacker)
+        .map(|n| (n.num, n.size, n.bonus));
+    let roll_natural = || -> Option<i32> {
+        let (num, sides, bonus) = natural?;
+        let raw = roll_dice(num, sides, bonus);
+        let race_factor = world
+            .get::<mud_world::Profile>(attacker)
+            .and_then(|p| {
+                world
+                    .get_resource::<mud_world::RaceCatalog>()
+                    .and_then(|c| c.get(&p.race))
+            })
+            .map_or(100, |def| def.damage_dice_factor);
+        Some(if race_factor == 100 {
+            raw
+        } else {
+            raw.saturating_mul(race_factor)
+                .saturating_div(100)
+                .max(1)
+        })
+    };
+    let roll_weapon =
+        || -> Option<i32> { weapon_dice.map(|(n, s, b)| roll_dice(n, s, b)) };
+    let weapon_roll = if is_mob {
+        let w = roll_weapon().unwrap_or(0);
+        let n = roll_natural().unwrap_or(0);
+        w.max(n).max(1)
+    } else if let Some(w) = roll_weapon() {
+        w
+    } else if let Some(n) = roll_natural() {
+        n
+    } else {
+        1
+    };
+    let scaled = (weapon_roll.saturating_mul(100 + cs.attack_power)) / 100;
+    let base = scaled.max(1);
+    // Berserk multiplier — single-attacker scan is fine on engage.
+    let berserk = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .any(|(eff, a)| a.0 == attacker && eff.name.eq_ignore_ascii_case("berserk"))
+    };
+    let damage = if berserk { (base * 3) / 2 } else { base };
+
+    // Guard redirect: same lookup combat_tick does, single-pair scope.
+    let redirected = {
+        let mut q = world.query::<(Entity, &Guarding, &Located)>();
+        q.iter(world)
+            .find_map(|(g, guarded, loc)| {
+                let tloc = world.get::<Located>(guarded.0).map(|l| l.0)?;
+                if tloc != loc.0 || guarded.0 != target || g == target || g == attacker
+                {
+                    None
+                } else {
+                    Some(g)
+                }
+            })
+            .unwrap_or(target)
+    };
+    apply_swing(
+        world,
+        &Swing {
+            attacker,
+            target: redirected,
+            damage,
+            weapon_roll,
+            attacker_name: name,
+        },
+    );
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply_swing(world: &mut World, s: &Swing) {
     // Target may have been despawned earlier in this same tick.
     if world.get_entity(s.target).is_err() {
+        try_remove::<Fighting>(world, s.attacker);
+        return;
+    }
+    // G3.2: the attacker may have died (gained Ghost) between the
+    // snapshot pass and this apply call — e.g. the Illithid's swing
+    // earlier in this same tick killed them. A snapshotted dead
+    // attacker would otherwise still swing once after the death
+    // banner fires. Same gate for fresh Frozen/Stunned applied
+    // intra-tick.
+    if world.get::<Ghost>(s.attacker).is_some()
+        || world.get::<mud_world::Frozen>(s.attacker).is_some()
+        || world.get::<Stunned>(s.attacker).is_some()
+    {
         try_remove::<Fighting>(world, s.attacker);
         return;
     }
@@ -1577,6 +1720,17 @@ pub(crate) fn handle_death(
             }
         }
         disengage_attackers_of(world, victim);
+        // G3.4: stamp the death tick on this MobReset row's timer
+        // so the respawn loop honors the per-row cooldown. Read
+        // BEFORE despawn or the FromMobReset component vanishes.
+        if let Some(reset_id) = world.get::<FromMobReset>(victim).map(|f| f.0) {
+            let now = world.resource::<TickCount>().0;
+            if let Some(mut timers) =
+                world.get_resource_mut::<crate::respawn::MobRespawnTimers>()
+            {
+                timers.last_death_tick.insert(reset_id, now);
+            }
+        }
         if let Ok(e) = world.get_entity_mut(victim) {
             e.despawn();
         }
