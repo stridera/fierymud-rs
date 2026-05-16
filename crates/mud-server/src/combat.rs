@@ -464,6 +464,7 @@ pub(crate) struct SwingMitigation {
     pub attack_power: i32,    // attacker's CombatStats.attack_power (%)
     pub base_pre_crit: i32,   // weapon × (1 + AP/100) — the snapshot value
     pub after_crit: i32,      // × 1.5 if crit, else unchanged
+    pub stealth_bonus_pct: i32, // A6 hidden-attacker damage % bonus (0 if not hidden)
     pub variance_delta: i32,  // signed delta applied (-band..=+band)
     pub after_variance: i32,
     pub armor_pct: i32,       // effective_armor_pct (after pen)
@@ -555,6 +556,16 @@ fn show_dice_swing(detail: SwingDetail, mit: SwingMitigation) -> String {
     } else {
         String::new()
     };
+    // A6 stealth opening-strike — surface the % bonus on the
+    // same line so a rogue can see why their backstab hit
+    // harder than expected.
+    let stealth_step = if mit.stealth_bonus_pct > 0
+        && !matches!(detail.outcome, SwingOutcome::Miss)
+    {
+        format!("×stealth+{}%={} ", mit.stealth_bonus_pct, mit.after_crit)
+    } else {
+        String::new()
+    };
     let variance_step = if mit.variance_delta == 0 {
         format!("±var(0) ={} ", mit.after_variance)
     } else if mit.variance_delta > 0 {
@@ -584,7 +595,7 @@ fn show_dice_swing(detail: SwingDetail, mit: SwingMitigation) -> String {
         String::new()
     };
     format!(
-        "  ({header})\r\n{ap_step}{crit_step}{variance_step}{armor_pct_step}{armor_flat_step}{resist_step}{hardness_step}→ final {}\r\n",
+        "  ({header})\r\n{ap_step}{crit_step}{stealth_step}{variance_step}{armor_pct_step}{armor_flat_step}{resist_step}{hardness_step}→ final {}\r\n",
         mit.final_dmg
     )
 }
@@ -1211,6 +1222,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         weapon_roll: s.weapon_roll,
         attack_power: attacker_ap,
         base_pre_crit: s.damage,
+        stealth_bonus_pct: stealth_dmg_bonus_pct,
         ..Default::default()
     };
     // Crit promotes the swing's already-resolved damage by 1.5x.
