@@ -2,7 +2,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Ghost, Health, Located, RecallPoint, WorldKeyIndex};
+use mud_world::{Ghost, Health, Located, Profile, RaceDefaults, RecallPoint, WorldKeyIndex};
 
 use crate::commands::{
     Category, Command, Help, cmd_look, send_to, try_insert, try_remove,
@@ -42,16 +42,33 @@ fn cmd_release(world: &mut World, player: Entity, _args: &str) {
         hp.hp = hp.max;
     }
     try_remove::<Ghost>(world, player);
-    let target = world
-        .get::<RecallPoint>(player)
-        .map(|r| r.0)
-        .or_else(|| {
-            world
-                .resource::<WorldKeyIndex>()
-                .rooms
-                .get(&(0, 0))
-                .copied()
-        });
+    // Respawn precedence (G4.2). Save_location (rented/camped) is
+    // not modeled yet — when it lands, prepend it to this chain.
+    //   1. Last touchstone (RecallPoint)
+    //   2. Race home room (Races.start_room_*)
+    //   3. The Void — last-resort fallback, should never fire in
+    //      practice if races have start_room rows authored.
+    let target = world.get::<RecallPoint>(player).map(|r| r.0);
+    let target = target.or_else(|| {
+        let race = world.get::<Profile>(player).map(|p| p.race.clone())?;
+        let (zone, id) = world
+            .get_resource::<RaceDefaults>()?
+            .start_room_by_race
+            .get(&race)
+            .copied()?;
+        world
+            .resource::<WorldKeyIndex>()
+            .rooms
+            .get(&(zone, id))
+            .copied()
+    });
+    let target = target.or_else(|| {
+        world
+            .resource::<WorldKeyIndex>()
+            .rooms
+            .get(&(0, 0))
+            .copied()
+    });
     let Some(target) = target else {
         send_to(
             world,

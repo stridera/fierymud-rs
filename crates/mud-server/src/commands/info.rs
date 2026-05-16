@@ -2516,6 +2516,64 @@ fn render_help_entry(world: &mut World, player: Entity, entry: &mud_world::HelpE
     send_to(world, player, out);
 }
 
+/// Render an `AbilityDef` as a help card. Pulled into a helper so
+/// `help <spell>` (G2.6) and the eventual `spellinfo <spell>` (G2.7)
+/// can share output. Shows the description text, cast time / area
+/// flag, posture requirement, and AbilityMessages.successToCaster
+/// so the player can see what the spell *says* when it lands without
+/// casting it first.
+fn render_ability_help(world: &mut World, player: Entity, def: &mud_world::AbilityDef) {
+    let mode = color_mode_for(world, player);
+    let mut out = format!(
+        "\r\n<b:cyan>{}</> <dim>({})</>\r\n",
+        render_color_tags(&def.name, mode),
+        def.kind.label(),
+    );
+    if let Some(desc) = &def.description {
+        out.push_str(&format!("\r\n{}\r\n", render_color_tags(desc.trim(), mode)));
+    }
+    out.push_str(&format!(
+        "\r\n  <cyan>Cast time:</> {} round(s)   <cyan>Cooldown:</> {}ms\r\n",
+        def.cast_time_rounds, def.cooldown_ms,
+    ));
+    out.push_str(&format!(
+        "  <cyan>Posture:</> {}   <cyan>Area:</> {}\r\n",
+        def.min_position_label,
+        if def.is_area { "yes" } else { "no" },
+    ));
+    if let Some(sphere) = def.sphere.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("  <cyan>Sphere:</> {sphere}\r\n"));
+    }
+    if let Some(dt) = def.damage_type.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("  <cyan>Damage type:</> {dt}\r\n"));
+    }
+    out.push_str(&format!(
+        "  <cyan>Flags:</> {}{}{}{}\r\n",
+        if def.violent { "violent " } else { "" },
+        if def.in_combat_only { "combat-only " } else { "" },
+        if !def.combat_ok { "out-of-combat-only " } else { "" },
+        if def.is_magical { "magical" } else { "physical" },
+    ));
+    // Lookup the messages.successToCaster line so the player can
+    // preview the cast flavor. Missing rows fall through cleanly.
+    if let Some(msgs) = world
+        .resource::<AbilityCatalog>()
+        .messages
+        .get(&def.id)
+        .and_then(|m| m.success_to_caster.clone())
+    {
+        let line = msgs.replace("{target.him}", "your foe")
+            .replace("{target.name}", "your foe")
+            .replace("{target.her}", "your foe")
+            .replace("{actor.name}", "you");
+        out.push_str(&format!(
+            "\r\n  <cyan>On success:</> {}\r\n",
+            render_color_tags(&line, mode),
+        ));
+    }
+    send_to(world, player, out);
+}
+
 /// Player-side help: every category except Admin.
 pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
     run_help(world, player, args, HelpScope::Player);
@@ -2716,6 +2774,23 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
             return;
         }
         HelpLookup::NotFound => {}
+    }
+
+    // Spell / chant / song / skill fallback (G2.6 + G2.7). The
+    // HelpEntry table is sparsely authored — most ability rows have
+    // no help article — so `help web` returns nothing. Render the
+    // AbilityCatalog entry directly when the topic matches a
+    // plain_name (case-insensitive, also tolerant of "burning_hands"
+    // vs "burning hands" by underscore normalization).
+    let ability_key = topic.to_ascii_lowercase().replace(' ', "_");
+    let ability_def = world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .get(&ability_key)
+        .cloned();
+    if let Some(def) = ability_def {
+        render_ability_help(world, player, &def);
+        return;
     }
 
     // No exact match — surface visible commands and socials whose

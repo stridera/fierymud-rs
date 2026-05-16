@@ -10615,7 +10615,15 @@ pub(crate) fn invoke_ability_with(
 
     let mode = color_mode_for(world, player);
     let mut out = String::from("\r\n");
-    if !aoe_repeat {
+    // Cast descriptor box (G2.3): the per-ability name + cast-time +
+    // posture readout used to render unconditionally on every cast,
+    // which felt like reading a help card every time you swung. Gate
+    // it behind the same staff/dev-mode flag the combat dice display
+    // uses so players see just the spell message + result. Help text
+    // is still reachable on demand via `help <spell>`.
+    let show_descriptor = !aoe_repeat
+        && crate::combat::show_dice_for(world, player);
+    if show_descriptor {
         out.push_str(&format!(
             "  {} ({})\r\n",
             render_color_tags(&def.name, mode),
@@ -10662,9 +10670,20 @@ pub(crate) fn invoke_ability_with(
     // in PeacefulRoom — same contract cmd_attack and engage_combat
     // honor. Beneficial casts (FRIEND_PC / SELF / etc.) still work
     // so a healer can patch up a party in a sanctuary.
-    let is_hostile_ability = valid_targets
-        .iter()
-        .any(|t| t.starts_with("ENEMY") || t == "AREA_FOES" || t == "AREA_HOSTILE");
+    //
+    // Only 9/408 abilities currently carry an AbilityTargeting row,
+    // so when valid_targets is empty we fall back to `def.violent`
+    // as the signal. Without this fallback, an unattributed violent
+    // spell (Burning Hands, Web, Fireball) reads as non-hostile and
+    // the no-target gate below silently routes the cast onto the
+    // caster — instant suicide. See G2.1 / G2.2 in remaining-work.md.
+    let is_hostile_ability = if valid_targets.is_empty() {
+        def.violent
+    } else {
+        valid_targets
+            .iter()
+            .any(|t| t.starts_with("ENEMY") || t == "AREA_FOES" || t == "AREA_HOSTILE")
+    };
     if is_hostile_ability
         && let Some(located) = world.get::<Located>(player)
         && world.get::<mud_world::PeacefulRoom>(located.0).is_some()
@@ -10682,23 +10701,38 @@ pub(crate) fn invoke_ability_with(
     // the caster's own display name as the target word — match
     // that to self alongside the literal "me" / "self" strings.
     let caster_self_name = name_of(world, player);
-    // Hostile abilities with no target word: don't silently fall
-    // through to self-target (which trips the type gate with a
-    // confusing "this isn't a valid target" line). Refuse early
-    // with a hint that points at the right shape.
-    if is_hostile_ability && target_word.is_none() {
-        let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
-        send_to(
-            world,
-            player,
-            format!(
-                "{} needs a target. Try: {verb} '{display}' <target>.\r\n",
-                def.name
-            ),
-        );
-        return;
-    }
-    let target_entity = if let Some(word) = target_word
+    // Hostile abilities with no target word: auto-target the
+    // caster's current Fighting opponent when one exists (a sorc
+    // in melee with an orc who casts `burning hands` clearly means
+    // "at the orc"), and refuse with a hint otherwise. Without the
+    // Fighting fallback, the type gate below routes the cast onto
+    // the caster — see the G2.1 / G2.2 bug report.
+    let default_combat_target: Option<Entity> = if is_hostile_ability
+        && target_word.is_none()
+    {
+        let opponent = world.get::<Fighting>(player).map(|f| f.0);
+        if let Some(opp) = opponent
+            && world.get_entity(opp).is_ok()
+        {
+            Some(opp)
+        } else {
+            let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
+            send_to(
+                world,
+                player,
+                format!(
+                    "{} needs a target. Try: {verb} '{display}' <target>.\r\n",
+                    def.name
+                ),
+            );
+            return;
+        }
+    } else {
+        None
+    };
+    let target_entity = if let Some(opp) = default_combat_target {
+        opp
+    } else if let Some(word) = target_word
         && !word.eq_ignore_ascii_case("me")
         && !word.eq_ignore_ascii_case("self")
         && !word.eq_ignore_ascii_case(&caster_self_name)
@@ -10733,9 +10767,9 @@ pub(crate) fn invoke_ability_with(
     } else {
         player
     };
-    if target_entity == player {
+    if show_descriptor && target_entity == player {
         out.push_str("    target: yourself\r\n");
-    } else {
+    } else if show_descriptor {
         let target_name = name_or(world, target_entity, "(unknown)");
         out.push_str(&format!(
             "    target: {}\r\n",
@@ -10852,9 +10886,15 @@ pub(crate) fn invoke_ability_with(
     // duration the effect/regen ticks decrement.
     let caster_level = world.get::<Profile>(player).map_or(1, |p| p.level.max(1));
     let known_entries: Option<usize> = world.get::<KnownAbilities>(player).map(|k| k.entries.len());
+    // Schema stores proficiency in 0..=1000; spell formulas
+    // (`pow(skill, 1.25)`, `(skill*skill)/Y`) were authored against
+    // a 0..=100 scale — the same scale `practice` displays. Without
+    // this division a L21 sorc's `burning hands` resolved to
+    // `4d19 + pow(1000, 1.25)` ≈ 5660 damage. G2.2.
     let caster_skill = world
         .get::<KnownAbilities>(player)
         .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).map(|(_, p, _)| *p))
+        .map(|raw| (raw / 10).clamp(0, 100))
         .unwrap_or(0);
     tracing::debug!(
         ability_id = def.id,
@@ -12624,28 +12664,60 @@ pub(crate) enum Prevent {
 
 /// True iff any active `EffectInstance` on `target` was sourced
 /// from an `EffectDef` whose corresponding `prevents_*` flag is
-/// set. Looks up each effect's catalog row by `EffectInstance.kind`
-/// — admin-spawned effects without a real catalog mapping fall
-/// through cleanly.
+/// set, OR if any active status flag is in the hard-coded
+/// immobilizing-flag table. The schema only carries `prevents_*`
+/// on the EFFECT TYPE (status/damage/heal/…), not on the per-flag
+/// row (webbed/held/sleeping/…) — so the type-level check alone
+/// misses status-flag immobilizers like WEB. Until per-flag rows
+/// exist, the secondary name table below catches them. G2.4.
 pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) -> bool {
-    let active_kinds: Vec<i32> = {
+    let active: Vec<(i32, String)> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         q.iter(world)
             .filter(|(_, a)| a.0 == target)
-            .map(|(eff, _)| eff.kind)
+            .map(|(eff, _)| (eff.kind, eff.name.clone()))
             .collect()
     };
-    if active_kinds.is_empty() {
+    if active.is_empty() {
         return false;
     }
     let catalog = world.resource::<EffectCatalog>();
-    active_kinds.iter().any(|id| {
+    let type_blocks = active.iter().any(|(id, _)| {
         catalog.by_id.get(id).is_some_and(|def| match kind {
             Prevent::Speaking => def.prevents_speaking,
             Prevent::Casting => def.prevents_casting,
             Prevent::Movement => def.prevents_movement,
         })
-    })
+    });
+    if type_blocks {
+        return true;
+    }
+    active
+        .iter()
+        .any(|(_, name)| flag_prevents(name.as_str(), kind))
+}
+
+/// Per-flag immobilizing / silencing list. Lives next to
+/// `effect_prevents` so the policy is one place. Once the schema
+/// carries `prevents_*` per status flag (and the importer fills
+/// it), this table is the place to delete.
+fn flag_prevents(flag: &str, kind: Prevent) -> bool {
+    let f = flag.to_ascii_lowercase();
+    match kind {
+        Prevent::Movement => matches!(
+            f.as_str(),
+            "webbed" | "held" | "hold_person" | "paralyzed" | "asleep" | "sleeping" | "rooted"
+                | "entangled" | "stunned" | "stun"
+        ),
+        Prevent::Casting => matches!(
+            f.as_str(),
+            "silenced" | "silence" | "stunned" | "stun" | "asleep" | "sleeping" | "paralyzed"
+        ),
+        Prevent::Speaking => matches!(
+            f.as_str(),
+            "silenced" | "silence" | "stunned" | "stun" | "asleep" | "sleeping"
+        ),
+    }
 }
 
 /// Despawn every `EffectInstance` on `target` whose name matches

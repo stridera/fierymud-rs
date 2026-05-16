@@ -2308,14 +2308,22 @@ pub(crate) fn cmd_astat(world: &mut World, player: Entity, args: &str) {
     }
     let catalog = world.resource::<AbilityCatalog>();
     for (name, remaining, strength, source, ability_id) in active {
-        let from = ability_id.and_then(|id| {
+        // Look up the source spell once; we want both its plain
+        // name (for the existing "from X" suffix) and its
+        // description text (G2.7 — a player who can't tell what
+        // `webbed` does should see "Creates sticky webs that
+        // immobilize..." right under the affect line).
+        let ability = ability_id.and_then(|id| {
             catalog
                 .by_name
                 .values()
                 .find(|d| d.id == id)
-                .map(|d| d.plain_name.clone())
+                .cloned()
         });
-        let from_str = from.as_deref().map_or(String::new(), |n| format!(" from {n}"));
+        let from_str = ability
+            .as_ref()
+            .map(|d| format!(" from {}", d.plain_name))
+            .unwrap_or_default();
         let dur = if remaining < 0 {
             "permanent".to_string()
         } else {
@@ -2324,6 +2332,11 @@ pub(crate) fn cmd_astat(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!(
             "  {name:<20} strength={strength:<3} {dur} source={source:?}{from_str}\r\n"
         ));
+        if let Some(desc) = ability.as_ref().and_then(|d| d.description.clone())
+            && !desc.is_empty()
+        {
+            out.push_str(&format!("      {}\r\n", desc.trim()));
+        }
     }
     send_to(world, player, out);
 }

@@ -8,6 +8,15 @@ use mud_world::{
 use tracing::info;
 
 use crate::TickCount;
+
+/// Player corpse decay (G4.1). Set high enough that a player can log
+/// back in days later and still recover their gear; matches legacy
+/// MUD norms where a dead character's body lingered until the next
+/// reboot or a manual purge. 7 days at 1-tick = 1 s resolution.
+const PLAYER_CORPSE_DECAY_SECS: i32 = 7 * 24 * 60 * 60;
+/// Mob corpse decay — quick cleanup so loot routes through the
+/// claim window rather than piling up. 10 minutes.
+const MOB_CORPSE_DECAY_SECS: i32 = 600;
 use crate::commands::{
     apply_damage, broadcast_room_except_players_rendered, broadcast_room_except_rendered,
     cmd_flee, damage_color_tag, direction_name, disengage_attackers_of, drain_stamina, name_of,
@@ -463,7 +472,7 @@ pub(crate) struct SwingMitigation {
 /// True iff the attacker has the `SHOW_DICE_ROLLS` `PlayerFlag` set.
 /// Cheap (component lookup); call sites guard their detail-line
 /// construction on this rather than always formatting the string.
-fn show_dice_for(world: &World, attacker: Entity) -> bool {
+pub(crate) fn show_dice_for(world: &World, attacker: Entity) -> bool {
     // DevMode forces dice visibility for everyone — open playtest
     // servers want every swing to show its roll regardless of the
     // per-player SHOW_DICE_ROLLS flag.
@@ -1491,7 +1500,7 @@ pub(crate) fn handle_death(
                     victim_name.to_ascii_lowercase(),
                 ]),
                 Located(room),
-                CorpseDecay { remaining_secs: 600 },
+                CorpseDecay { remaining_secs: PLAYER_CORPSE_DECAY_SECS },
             ))
             .id();
         for (it, bound) in owned_items {
@@ -1585,11 +1594,10 @@ pub(crate) fn handle_death(
         }
 
         // Death recovery hint: name the room the corpse landed in so
-        // the player knows where to return for their gear. The corpse
-        // decays after 10 minutes (CorpseDecay { remaining_secs: 600 }
-        // above), so include the timer in the hint — players who get
-        // released without seeing this can run `corpse` once back
-        // alive for the same info.
+        // the player knows where to return for their gear. Player
+        // corpses last `PLAYER_CORPSE_DECAY_SECS` (currently 7d) so
+        // a player can come back, get their bearings, and recover
+        // gear without a 10-minute panic timer.
         let death_room_name = name_of(world, room);
         send_to(
             world,
@@ -1597,7 +1605,7 @@ pub(crate) fn handle_death(
             format!(
                 "You collapse, your spirit drifting free of your dying body.\r\n\
                  Your corpse lies in <b:yellow>{death_room_name}</> — it will \
-                 decay in about 10 minutes.\r\n\
+                 keep for several days.\r\n\
                  Type <b:cyan>release</> to return to your recall point, then \
                  head back for your gear.\r\n"
             ),
@@ -1666,7 +1674,7 @@ pub(crate) fn handle_death(
                     victim_name.to_ascii_lowercase(),
                 ]),
                 Located(room),
-                CorpseDecay { remaining_secs: 600 },
+                CorpseDecay { remaining_secs: MOB_CORPSE_DECAY_SECS },
             ))
             .id();
         // Loot-claim window: 5 minutes for the killer. Player-only
