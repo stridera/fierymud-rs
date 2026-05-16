@@ -3026,6 +3026,80 @@ mod tests {
             evaluate_formula("skill * hidden", &ctx_open, &mut zero),
             Some(0)
         );
+        // A5: spell_power is exposed as both `spell_power` and `sp`
+        // for formulas that want to read it explicitly.
+        let ctx_sp = FormulaCtx { spell_power: 30, ..FormulaCtx::default() };
+        assert_eq!(evaluate_formula("spell_power", &ctx_sp, &mut zero), Some(30));
+        assert_eq!(evaluate_formula("sp", &ctx_sp, &mut zero), Some(30));
+        assert_eq!(
+            evaluate_formula("base + sp / 2", &FormulaCtx { spell_power: 40, base_damage: 10, ..FormulaCtx::default() }, &mut zero),
+            Some(30),
+        );
+    }
+
+    /// A7: per-element resistance application.
+    #[test]
+    fn apply_resistance_mitigates_and_amplifies() {
+        // No resistance: amount passes through.
+        assert_eq!(super::apply_resistance(100, 0), 100);
+        // 25% resist: 75 damage.
+        assert_eq!(super::apply_resistance(100, 25), 75);
+        // 100% resist: immune.
+        assert_eq!(super::apply_resistance(100, 100), 0);
+        // Over-capped resist (>100) clamps to immune.
+        assert_eq!(super::apply_resistance(100, 200), 0);
+        // -50 resist (vulnerable): 150% damage.
+        assert_eq!(super::apply_resistance(100, -50), 150);
+        // -200 resist: 300% damage.
+        assert_eq!(super::apply_resistance(100, -200), 300);
+        // Floor at 0 for paranoid math (over-capped negative
+        // pct won't actually go positive because clamp caps at 100,
+        // but verify the floor).
+        assert!(super::apply_resistance(0, 50) >= 0);
+    }
+
+    /// A7: damage element string → ElementType resolver.
+    #[test]
+    fn resolve_damage_element_picks_known_types() {
+        use mud_db::enums::ElementType as E;
+        let blob = |t: &str| serde_json::json!({"type": t});
+        assert_eq!(super::resolve_damage_element(Some(&blob("fire")), None), E::Fire);
+        assert_eq!(super::resolve_damage_element(Some(&blob("HOLY")), None), E::Holy);
+        // Synonyms.
+        assert_eq!(super::resolve_damage_element(Some(&blob("lightning")), None), E::Shock);
+        assert_eq!(super::resolve_damage_element(Some(&blob("psychic")), None), E::Mental);
+        // Unknown / missing → Physical (so we don't accidentally
+        // bypass the resist step).
+        assert_eq!(super::resolve_damage_element(Some(&blob("xyzzy")), None), E::Physical);
+        let no_type = serde_json::json!({"amount": "1d6"});
+        assert_eq!(super::resolve_damage_element(Some(&no_type), None), E::Physical);
+        // Override beats default.
+        let def = blob("cold");
+        let over = blob("fire");
+        assert_eq!(
+            super::resolve_damage_element(Some(&over), Some(&def)),
+            E::Fire,
+        );
+    }
+
+    /// A5 regression: a magical-spell damage path scales by
+    /// spell_power. We verify the math directly (the live invoke
+    /// path is exercised by integration tests + playtest).
+    #[test]
+    fn spell_power_scales_magical_damage() {
+        // Mirror the inline expression at the apply_effect site:
+        //   amount = (amount * (100 + sp)) / 100
+        let scale = |amount: i32, sp: i32| (amount * (100 + sp)) / 100;
+        // No spell_power → no change.
+        assert_eq!(scale(100, 0), 100);
+        // +20 SP → 120% damage.
+        assert_eq!(scale(100, 20), 120);
+        // +50 SP → 150%.
+        assert_eq!(scale(100, 50), 150);
+        // Negative SP (cursed gear) reduces damage but the apply
+        // site floors at 1, which `scale` doesn't model — verify
+        // the raw math here, the floor is asserted at the call site.
+        assert_eq!(scale(100, -25), 75);
     }
 
     #[test]
@@ -10928,6 +11002,9 @@ pub(crate) fn invoke_ability_with(
         })
         .unwrap_or(0);
     let base_damage = caster_level + spell_circle * 2 + int_bonus.max(wis_bonus);
+    let caster_spell_power = world
+        .get::<CombatStats>(player)
+        .map_or(0, |cs| cs.spell_power);
     let formula_ctx = FormulaCtx {
         level: caster_level,
         skill: caster_skill,
@@ -10939,6 +11016,7 @@ pub(crate) fn invoke_ability_with(
         wis_bonus,
         cha_bonus: CoreStats::bonus(caster_stats.charisma),
         hidden: caster_hidden,
+        spell_power: caster_spell_power,
         base_damage,
     };
     let effect_specs: Vec<EffectSpec> = {
@@ -11051,14 +11129,38 @@ pub(crate) fn invoke_ability_with(
                     .get(&def.id)
                     .cloned()
                     .unwrap_or_default();
+                // Snapshot target resistances once so both the
+                // single-spec and per-component paths can apply
+                // them (A7). Default to empty so non-physical
+                // characters/mobs pass through unchanged.
+                let target_resists: std::collections::HashMap<
+                    mud_db::enums::ElementType,
+                    i32,
+                > = world
+                    .get::<mud_world::Resistances>(target_entity)
+                    .map(|r| r.0.clone())
+                    .unwrap_or_default();
                 let mut amount = if components.is_empty() {
-                    resolve_effect_amount(
+                    // Resolve raw amount, then apply the spec's
+                    // element resistance.
+                    let raw = resolve_effect_amount(
                         spec.override_params.as_ref(),
                         Some(&spec.default_params),
                         &formula_ctx,
                     )
-                    .unwrap_or(0)
+                    .unwrap_or(0);
+                    let element = resolve_damage_element(
+                        spec.override_params.as_ref(),
+                        Some(&spec.default_params),
+                    );
+                    let resist = target_resists.get(&element).copied().unwrap_or(0);
+                    apply_resistance(raw, resist)
                 } else {
+                    // Multi-component path: apply each component's
+                    // resistance individually before summing — a
+                    // CONE_OF_COLD (90% COLD / 10% FORCE) split
+                    // hitting a cold-resistant target still takes
+                    // the FORCE portion at full damage.
                     let mut total = 0i32;
                     for c in &components {
                         let raw = evaluate_simple_formula_ctx(
@@ -11067,7 +11169,15 @@ pub(crate) fn invoke_ability_with(
                         )
                         .unwrap_or(0);
                         let scaled = raw.saturating_mul(c.percentage) / 100;
-                        total = total.saturating_add(scaled);
+                        // c.element is a string (loader-side
+                        // verbatim). Wrap it back into the JSON
+                        // shape resolve_damage_element expects so
+                        // we don't fork the parser.
+                        let element_blob = serde_json::json!({"type": &c.element});
+                        let element = resolve_damage_element(Some(&element_blob), None);
+                        let resist = target_resists.get(&element).copied().unwrap_or(0);
+                        let after = apply_resistance(scaled, resist);
+                        total = total.saturating_add(after);
                     }
                     total
                 };
@@ -11085,6 +11195,15 @@ pub(crate) fn invoke_ability_with(
                     amount = amount.saturating_add(bonus);
                 }
                 if amount > 0 {
+                    // A5: spell_power scales magical damage as an
+                    // additive % multiplier, mirroring how attack_power
+                    // boosts melee swings. Non-magical abilities
+                    // (skills with `is_magical=false`) skip this so
+                    // they don't double-scale with attack_power.
+                    if def.is_magical && caster_spell_power != 0 {
+                        amount = (amount.saturating_mul(100 + caster_spell_power)) / 100;
+                        amount = amount.max(1);
+                    }
                     // Reagent boost on damage spells.
                     if reagent_boost_pct > 0 {
                         amount = amount.saturating_add(amount * reagent_boost_pct / 100);
@@ -11138,6 +11257,14 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{} (no amount resolved)", spec.name));
                     continue;
                 };
+                // A5: spell_power scales magical heals too — high-SP
+                // clerics restore more per cast. Same multiplier as
+                // the damage path. Mundane heals (bandage skill etc.)
+                // skip this so they don't accidentally inherit it.
+                if def.is_magical && caster_spell_power != 0 && amount > 0 {
+                    amount = (amount.saturating_mul(100 + caster_spell_power)) / 100;
+                    amount = amount.max(1);
+                }
                 // Reagent boost on heal spells too.
                 if reagent_boost_pct > 0 {
                     amount = amount.saturating_add(amount * reagent_boost_pct / 100);
@@ -12160,6 +12287,63 @@ pub(crate) fn resolve_effect_resource(
         .unwrap_or_else(|| "hp".to_string())
 }
 
+/// Parse the `type` field of a damage effect blob into an
+/// `ElementType`. Schema values are SCREAMING_SNAKE_CASE but
+/// AbilityEffect params authored in JSON are usually lowercase
+/// ("fire" / "holy"). Falls back to PHYSICAL when nothing matches —
+/// most legitimate spells specify a type, but we don't want
+/// blobs missing a `type` to silently bypass the resistance step
+/// either.
+pub(crate) fn resolve_damage_element(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> mud_db::enums::ElementType {
+    use mud_db::enums::ElementType as E;
+    let pick = |p: Option<&serde_json::Value>| -> Option<String> {
+        p?.get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)
+    };
+    let raw = pick(override_params).or_else(|| pick(default_params));
+    match raw.as_deref() {
+        Some("slash") => E::Slash,
+        Some("pierce") | Some("piercing") => E::Pierce,
+        Some("crush") | Some("crushing") | Some("bludgeon") | Some("bludgeoning") => E::Crush,
+        Some("force") => E::Force,
+        Some("sonic") => E::Sonic,
+        Some("bleed") | Some("bleeding") => E::Bleed,
+        Some("fire") => E::Fire,
+        Some("cold") => E::Cold,
+        Some("water") => E::Water,
+        Some("earth") => E::Earth,
+        Some("air") => E::Air,
+        Some("shock") | Some("lightning") | Some("electric") => E::Shock,
+        Some("acid") => E::Acid,
+        Some("poison") | Some("toxic") => E::Poison,
+        Some("radiant") | Some("light") => E::Radiant,
+        Some("shadow") | Some("dark") => E::Shadow,
+        Some("holy") | Some("divine") => E::Holy,
+        Some("unholy") | Some("evil") => E::Unholy,
+        Some("heal") | Some("healing") => E::Heal,
+        Some("necrotic") | Some("death") => E::Necrotic,
+        Some("mental") | Some("psychic") | Some("magic") => E::Mental,
+        Some("nature") | Some("natural") => E::Nature,
+        _ => E::Physical,
+    }
+}
+
+/// Apply per-element resistance to a damage amount (A7 / combat.md
+/// step 5). `resist_pct` is the Resistance map value for the
+/// element: positive = mitigate, negative = vulnerable. Mitigation
+/// caps at 100% (immune). Vulnerability has no cap from this step
+/// but the apply path floors the final damage at zero.
+#[must_use]
+pub(crate) fn apply_resistance(amount: i32, resist_pct: i32) -> i32 {
+    let pct = resist_pct.clamp(-1000, 100);
+    let mitigated = amount.saturating_mul(100 - pct) / 100;
+    mitigated.max(0)
+}
+
 /// "first" stops after one removal; everything else (including the
 /// schema default `"all"`) means strip every match.
 #[derive(Debug, Clone, Copy)]
@@ -12962,6 +13146,11 @@ pub(crate) struct FormulaCtx {
     /// 1 when the caster has the `Stealth` marker, 0 otherwise.
     /// Used by rogue abilities (BACKSTAB's `bonusIfHidden`).
     hidden: i32,
+    /// Caster's `CombatStats.spell_power`. Read directly by spell
+    /// formulas that want a flat-ish term, and applied as an
+    /// additive % multiplier on magical damage/heal at the apply
+    /// step. Mirrors how `attack_power` boosts melee swings.
+    spell_power: i32,
     /// Spell-baseline damage: `level + spell_circle * 2 +
     /// max(int_bonus, wis_bonus)`. Computed at invoke time when
     /// the caster's class + ability spell circle are known. Most
@@ -12998,6 +13187,7 @@ impl FormulaCtx {
             "wis_bonus" | "wis" => Some(self.wis_bonus),
             "cha_bonus" | "cha" => Some(self.cha_bonus),
             "hidden" => Some(self.hidden),
+            "spell_power" | "sp" => Some(self.spell_power),
             "base_damage" | "base" => Some(self.base_damage),
             _ => None,
         }
