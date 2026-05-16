@@ -1286,6 +1286,9 @@ pub struct LevelRow {
     pub hp_gain: i32,
     pub stamina_gain: i32,
     pub is_immortal: bool,
+    /// Permissions granted on reaching this level (B5). Unioned
+    /// into the character's `Account.perms` on level-up.
+    pub permissions: Vec<mud_db::enums::Permission>,
 }
 
 impl LevelTable {

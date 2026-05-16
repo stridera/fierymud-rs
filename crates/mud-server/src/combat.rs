@@ -2167,6 +2167,33 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
                     .map_or_else(String::new, |n| format!(" ({n})"))
             ),
         );
+        // B5: union the level row's permissions into the
+        // character's Account.perms. Mortal levels carry empty
+        // permission lists; staff tiers (Builder/Coder/Admin/God)
+        // grant their associated flags here. Persistence happens
+        // on save like any other Account change.
+        if !next_row.permissions.is_empty()
+            && let Some(mut acct) = world.get_mut::<mud_world::Account>(entity)
+        {
+            let mut granted_new: Vec<mud_db::enums::Permission> = Vec::new();
+            for p in &next_row.permissions {
+                if !acct.perms.contains(p) {
+                    acct.perms.push(*p);
+                    granted_new.push(*p);
+                }
+            }
+            if !granted_new.is_empty() {
+                let labels: Vec<&str> = granted_new.iter().map(|p| p.label()).collect();
+                send_to(
+                    world,
+                    entity,
+                    format!(
+                        "<b:cyan>New permissions granted:</> {}\r\n",
+                        labels.join(", "),
+                    ),
+                );
+            }
+        }
         // Milestone achievement hooks. Codes are stable strings the
         // catalog references; if a row is missing, grant_achievement
         // no-ops cleanly.

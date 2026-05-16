@@ -704,6 +704,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             hp_gain: r.hp_gain,
             stamina_gain: r.stamina_gain,
             is_immortal: r.is_immortal,
+            permissions: r.permissions,
         });
     }
     world.insert_resource(level_table);
