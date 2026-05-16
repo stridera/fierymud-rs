@@ -411,16 +411,17 @@ fn resolve_swing(hit_roll: i32, target_ac: i32) -> SwingDetail {
 fn resolve_swing_acc_ev(accuracy: i32, evasion: i32, crit_chance: i32) -> SwingDetail {
     let chance = hit_chance_pct(accuracy, evasion);
     let roll = rand::random_range(1..=100);
-    let outcome = if roll <= chance {
-        if rand::random_range(1..=100) <= crit_chance {
-            SwingOutcome::Crit
+    let (outcome, crit_roll) = if roll <= chance {
+        let cr = rand::random_range(1..=100);
+        if cr <= crit_chance {
+            (SwingOutcome::Crit, cr)
         } else {
-            SwingOutcome::Hit
+            (SwingOutcome::Hit, cr)
         }
     } else {
-        SwingOutcome::Miss
+        (SwingOutcome::Miss, 0)
     };
-    SwingDetail { outcome, roll, chance }
+    SwingDetail { outcome, roll, chance, crit_roll, crit_chance }
 }
 
 /// Roll details surfaced by `resolve_swing` so the showdice toggle
@@ -429,8 +430,10 @@ fn resolve_swing_acc_ev(accuracy: i32, evasion: i32, crit_chance: i32) -> SwingD
 #[derive(Clone, Copy)]
 pub(crate) struct SwingDetail {
     pub outcome: SwingOutcome,
-    pub roll: i32,    // d100 result
-    pub chance: i32,  // need <= this to land a regular hit
+    pub roll: i32,        // d100 hit roll
+    pub chance: i32,      // need <= this to land a regular hit
+    pub crit_roll: i32,   // 0 if the hit didn't land; else d100 vs crit_chance
+    pub crit_chance: i32, // attacker's CombatStats.crit_chance (default 5)
 }
 
 /// Pipeline intermediates for a hit/crit swing, surfaced through
@@ -485,13 +488,35 @@ fn show_dice_for(world: &World, attacker: Entity) -> bool {
 ///   (auto-hit on sleeping target — dmg 6 ±var = 7)
 ///   (defender evaded via parry)                 // evade
 fn show_dice_swing(detail: SwingDetail, mit: SwingMitigation) -> String {
+    // Display uses the "roll over" convention — higher roll = better,
+    // matching modern player intuition. Internal math is still roll
+    // under (resolve_swing rolls d100 and hits when roll <= chance);
+    // we flip the displayed numbers via (101 - roll) and DC = (101 -
+    // chance) so the math is preserved. Equivalent: roll' >= DC iff
+    // original_roll <= chance.
+    let display_roll = 101 - detail.roll;
+    let display_dc = 101 - detail.chance;
     let header = match detail.outcome {
         SwingOutcome::Miss => {
-            return format!("  (d100 {} > {} — miss)\r\n", detail.roll, detail.chance);
+            return format!("  (d100 {display_roll} < {display_dc} — miss)\r\n");
         }
         SwingOutcome::Hit if detail.roll == 0 => "auto-hit (sleeping target)".to_string(),
-        SwingOutcome::Hit => format!("d100 {} ≤ {} — HIT", detail.roll, detail.chance),
-        SwingOutcome::Crit => format!("d100 {} ≤ {} — CRIT ×1.5", detail.roll, detail.chance),
+        SwingOutcome::Hit => {
+            // Show the crit-roll attempt too — players want to see how
+            // close they came (or that crit_chance is just 5%).
+            let crit_disp = 101 - detail.crit_roll;
+            let crit_dc = 101 - detail.crit_chance;
+            format!(
+                "d100 {display_roll} ≥ {display_dc} — HIT  (crit d100 {crit_disp} < {crit_dc} — no crit)"
+            )
+        }
+        SwingOutcome::Crit => {
+            let crit_disp = 101 - detail.crit_roll;
+            let crit_dc = 101 - detail.crit_chance;
+            format!(
+                "d100 {display_roll} ≥ {display_dc} — HIT  (crit d100 {crit_disp} ≥ {crit_dc} — CRIT ×1.5)"
+            )
+        }
     };
     // Show "wpn 18 ×AP+5%=19" so the raw dice roll + AP step are visible.
     // For crits, append the ×1.5 promotion.
@@ -916,7 +941,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         .map_or(0, |p| posture_evasion_penalty(p.0));
     let target_evasion = base_evasion - posture_evasion_penalty;
     let detail = if was_sleeping {
-        SwingDetail { outcome: SwingOutcome::Hit, roll: 0, chance: 100 }
+        SwingDetail { outcome: SwingOutcome::Hit, roll: 0, chance: 100, crit_roll: 0, crit_chance: 0 }
     } else {
         resolve_swing_acc_ev(attacker_accuracy, target_evasion, attacker_crit_chance)
     };
