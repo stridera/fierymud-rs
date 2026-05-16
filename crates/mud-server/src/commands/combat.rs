@@ -11,7 +11,8 @@ use mud_world::{
 use crate::commands::{
     ATTACK_COST, AoeScope, BACKSTAB_COST, BANDAGE_COST, BASH_COST, BERSERK_COST, Category, Command,
     DISARM_COST, DOORBASH_COST, GOUGE_COST, HITALL_COST, Help, KICK_COST, LAYHANDS_COST, REND_COST,
-    RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST, THROATCUT_COST,
+    RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST, TAUNT_COST,
+    THROATCUT_COST,
     TRIPUP_COST, aggro_alignment, apply_damage, auto_assist_followers_of, skill_stamina_cost,
     broadcast_room_except_players_rendered, broadcast_room_except_rendered, check_stamina,
     cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
@@ -756,6 +757,27 @@ inventory::submit! {
                take the damage.",
     },
     run: cmd_bash,
+    }
+}
+
+inventory::submit! {
+    Command {
+    names: &["taunt", "provoke"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Combat,
+    help: Help {
+        usage: "taunt <target>",
+        summary: "Pull a mob's aggro onto yourself (tank tool).",
+        long: "Forces the target to focus its attacks on you, \
+               regardless of who else it was engaging. Also pushes \
+               you to the front of the target's grudge list so it \
+               re-engages you first when its current target falls. \
+               Costs stamina but no damage — paired with a healer, \
+               this lets a tank hold the front line while the dps \
+               works behind them.",
+    },
+    run: cmd_taunt,
     }
 }
 
@@ -2593,6 +2615,110 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         crate::combat::handle_death(world, target, &target_name, located.0);
     }
 }
+/// `taunt <target>`: redirect the target mob's aggro onto the
+/// caster. Sets target.Fighting = caster (overriding whoever
+/// they were on), moves caster to the front of the HateList so
+/// the re-engage pre-pass picks them. The legacy semantic is
+/// "tank pulls heat off the squishies" — making this a real
+/// skill closes Q6 from combat-rebalance.md.
+///
+/// Players can be tauntd by other players in PK contexts (mirrors
+/// bash). Non-mob, non-player targets refuse. Peaceful mob gate
+/// applies (a peaceful shopkeeper won't attack you back even if
+/// you taunt them — the gate stays consistent with cmd_attack).
+pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
+    if !require_alert_posture(world, player, "taunt") {
+        return;
+    }
+    let cost = skill_stamina_cost(world, "taunt", TAUNT_COST);
+    if !check_stamina(world, player, cost, "taunt") {
+        return;
+    }
+    let target_word = target_word.trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Taunt whom?\r\n");
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
+        send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
+        return;
+    };
+    if target == player {
+        send_to(world, player, "Taunting yourself accomplishes little.\r\n");
+        return;
+    }
+    if world.get::<CombatStats>(target).is_none() {
+        send_to(world, player, "Nothing about that target responds to provocation.\r\n");
+        return;
+    }
+    if world.get::<mud_world::PeacefulRoom>(located.0).is_some() {
+        send_to(
+            world,
+            player,
+            "A peaceful aura keeps violence — and your taunt — at bay here.\r\n",
+        );
+        return;
+    }
+    if world
+        .get::<mud_world::MobBehaviors>(target)
+        .is_some_and(|b| b.has(mud_db::enums::MobBehavior::Peaceful))
+    {
+        let n = name_of(world, target);
+        send_to(
+            world,
+            player,
+            format!("{n} simply ignores your provocation.\r\n"),
+        );
+        return;
+    }
+    drain_stamina(world, player, cost);
+
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
+
+    // Engage the caster on the target — and force the target's
+    // Fighting onto the caster regardless of who they were
+    // previously engaged with. That's the whole point of taunt.
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(Fighting(target));
+    }
+    if let Ok(mut e) = world.get_entity_mut(target) {
+        e.insert(Fighting(player));
+    }
+    // Push caster to the FRONT of the HateList so the combat
+    // tick's re-engage pre-pass picks them when the current
+    // Fighting clears (e.g. caster dies mid-combat). HateList::push
+    // appends to the tail; we want the opposite for taunt, so
+    // walk through and rotate.
+    let already = world.get::<crate::combat::HateList>(target).is_some();
+    if already {
+        if let Some(mut h) = world.get_mut::<crate::combat::HateList>(target) {
+            h.0.retain(|e| *e != player);
+            h.0.push(player);
+        }
+    } else {
+        let mut list = crate::combat::HateList::default();
+        list.0.push(player);
+        try_insert(world, target, list);
+    }
+
+    send_to(world, player, format!("You taunt {target_name} into focusing on you!\r\n"));
+    send_rendered(
+        world,
+        target,
+        &format!("{player_name} taunts you into focusing on them!\r\n"),
+    );
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{player_name} taunts {target_name} into focusing the attack.\r\n"),
+    );
+}
+
 pub(crate) fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Fighting>(player).is_none() {
         send_to(world, player, "You aren't fighting anyone.\r\n");

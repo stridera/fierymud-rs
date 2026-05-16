@@ -13940,6 +13940,7 @@ pub(crate) const SWEEP_COST: i32 = 12;
 pub(crate) const ROUNDHOUSE_COST: i32 = 7;
 pub(crate) const THROATCUT_COST: i32 = 8;
 pub(crate) const BERSERK_COST: i32 = 8;
+pub(crate) const TAUNT_COST: i32 = 4;
 
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
