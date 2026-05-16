@@ -3257,6 +3257,7 @@ pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[Charact
                 bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
             }
             let item_entity = bundle.id();
+            crate::item_decay::attach_timer_if_decaying(world, item_entity, &proto);
             // Stamp the row's id so save_inventory_diff knows to UPDATE
             // this row instead of issuing a delete-and-reinsert that
             // would clobber DB columns the runtime doesn't own

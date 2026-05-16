@@ -1045,6 +1045,17 @@ pub struct ObjectProto {
     /// mutating world state so a quest item never lands on the
     /// floor by accident.
     pub restrictions: Vec<mud_db::enums::ObjectRestriction>,
+    /// Lifetime ticker (B1). Positive = item decays after this many
+    /// game-hours; spawn-time wiring converts to seconds (×75) and
+    /// attaches an `ItemTimer` component. PERMANENT flag bypasses
+    /// the wire so eternal-flame fixtures don't pop.
+    pub timer_hours: i32,
+    /// Post-timer decompose window. Non-zero = the item gets the
+    /// DECOMPOSING semantic after `timer_hours` expires (a second
+    /// countdown before destruction). Unused today — the runtime
+    /// just destroys when timer hits zero. Kept on the proto so a
+    /// later two-phase decay can read it without a schema bump.
+    pub decompose_timer: i32,
 }
 
 /// One `ObjectEffects` row, denormalized into the proto.

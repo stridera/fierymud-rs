@@ -427,6 +427,8 @@ mod tests {
                 granted_effects,
                 flags: vec![],
                 restrictions: vec![],
+                timer_hours: 0,
+                decompose_timer: 0,
             },
         );
         world.insert_resource(protos);
@@ -535,6 +537,8 @@ mod tests {
                 }],
                 flags: vec![],
                 restrictions: vec![],
+                timer_hours: 0,
+                decompose_timer: 0,
             },
         );
         world.insert_resource(protos);

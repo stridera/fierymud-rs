@@ -55,6 +55,15 @@ pub struct Object {
     /// stamping as `flags`; command handlers consult the component
     /// before mutating world state.
     pub restrictions: Vec<ObjectRestriction>,
+    /// Lifetime ticker in legacy `MUD hours`. >0 means the item
+    /// decays after this many ticks of game time; the runtime
+    /// converts to seconds at instance-spawn time. Zero = no
+    /// lifetime (lasts until destroyed by other means).
+    pub timer: i32,
+    /// Decompose-after-timer mode. >0 puts the item into a
+    /// post-timer destruction window (legacy ITEM_DECOMPOSING
+    /// flag behavior). Read alongside `timer` at spawn time.
+    pub decompose_timer: i32,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -83,7 +92,9 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             restricted_class_ids AS "restricted_class_ids!: Vec<i32>",
             restricted_races::text[] AS "restricted_races!: Vec<String>",
             flags AS "flags!: Vec<ObjectFlag>",
-            restrictions AS "restrictions!: Vec<ObjectRestriction>"
+            restrictions AS "restrictions!: Vec<ObjectRestriction>",
+            timer,
+            decompose_timer
         FROM "Objects"
         ORDER BY zone_id, id
         "#

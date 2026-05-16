@@ -9,6 +9,7 @@ mod entity_vars;
 mod equip_apply;
 mod events;
 mod idle;
+mod item_decay;
 mod login;
 mod memorize;
 mod regen;
@@ -378,6 +379,7 @@ async fn main() {
                 mud_clock_tick,
                 combat::combat_tick,
                 combat::corpse_decay_tick,
+                item_decay::item_decay_tick,
                 effects::effects_tick,
                 regen::regen_tick,
                 regen::hunger_thirst_tick,

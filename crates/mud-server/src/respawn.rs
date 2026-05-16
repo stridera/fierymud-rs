@@ -348,6 +348,8 @@ pub fn respawn_tick(world: &mut World) {
         if let Some(keys) = trigger_keys {
             bundle.insert(AttachedTriggers(keys));
         }
+        let spawned = bundle.id();
+        crate::item_decay::attach_timer_if_decaying(world, spawned, &proto);
         reset_id_alive.insert(entry.reset_id);
         *object_world_counts.entry(proto_key).or_insert(0) += 1;
         object_refilled += 1;

@@ -1265,6 +1265,7 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
         bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
     }
     let item = bundle.id();
+    crate::item_decay::attach_timer_if_decaying(world, item, &proto);
     // Populate Charges from the first ObjectAbilities binding
     // (wands and staves carry finite-use charges in the schema's
     // `charges` column). Items without a binding or without

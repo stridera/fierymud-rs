@@ -233,6 +233,9 @@ fn spawn_item_into(world: &mut World, proto_zone: i32, proto_id: i32, parent: En
     if !proto.restrictions.is_empty() {
         bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
     }
+    let item_entity = bundle.id();
+    drop(bundle);
+    crate::item_decay::attach_timer_if_decaying(world, item_entity, &proto);
     true
 }
 

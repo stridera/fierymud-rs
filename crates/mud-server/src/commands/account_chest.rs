@@ -415,6 +415,7 @@ pub(crate) fn spawn_withdrawn_item(
         }
         bundle.id()
     };
+    crate::item_decay::attach_timer_if_decaying(world, item_entity, &proto);
     if let Some(c) = state.charges
         && let Ok(mut em) = world.get_entity_mut(item_entity)
     {

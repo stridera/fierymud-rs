@@ -718,6 +718,19 @@ pub struct CorpseDecay {
     pub remaining_secs: i32,
 }
 
+/// Generic-item lifetime timer (B1, parity with legacy
+/// `Object.timer`). Decrements one second per game-second; at 0
+/// the item is destroyed (or, when `decompose_window_secs > 0`,
+/// enters the decompose state for an additional countdown — that
+/// path is wired but unused today). PERMANENT-flagged items never
+/// receive an `ItemTimer` at spawn, so this component's presence
+/// is itself the "this thing has a clock" signal.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ItemTimer {
+    pub remaining_secs: i32,
+    pub decompose_window_secs: i32,
+}
+
 /// Coin amount (in copper) lying on a container. Today it's only
 /// attached to corpses by the mob-death path when the killer
 /// doesn't have `AutoGold`; `get all from <corpse>` drains it onto

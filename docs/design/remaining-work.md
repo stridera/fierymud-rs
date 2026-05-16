@@ -102,6 +102,139 @@ Open items surfaced during hands-on play. Lower priority than A-B but worth reso
 - **H.3 Burning Hands 366 dmg vs warthog (30 HP).** Math is fine vs tier-appropriate mobs (L15 trash sits at 200-700 HP) but the one-shot feel against weakest mobs is jarring. May be acceptable flavor.
 - **H.4 Rogue hide before backstab didn't appear to trigger the hidden bonus.** ✅ Resolved (data fix). BACKSTAB's `bonusIfHidden` formula was `"hidden * 0.5"` — the evaluator is integer-only outside `pow()` so it returned None and the bonus silently dropped. Rewrote as `(weapon_damage * (2 + skill / 25)) / 2 * hidden` — gives +50% damage when hidden, 0 otherwise.
 - **H.5 Alignment-keyed spells silently use 1d6.** DIVINE_BOLT / DIVINE_RAY / HELL_BOLT / etc. have `amount` formulas of shape `"<expr>, then *= (caster_align * 0.001 + ...)"`. The pseudo-code `, then *=` syntax was never implemented in the evaluator. These spells fall through to the default `1d6` from spec.default_params. Needs either a multi-step formula evaluator extension OR rewritten formulas that fold the alignment term inline. Defer until the alignment combat-pipeline step lands.
+  - **2026-05-16 update:** the broken formulas (DIVINE_BOLT, DIVINE_RAY, HELL_BOLT, EXORCISM, LESSER_EXORCISM, HELLFIRE_BRIMSTONE, STYGIAN_ERUPTION, FLAMESTRIKE, COLOR_SPRAY, MOONBEAM, ENERGY_DRAIN, SEED_OF_DESTRUCTION, VAMPIRIC_BREATH) were rewritten in `fierylib/data/abilities.json` to use the modern tier ladder (`NdM + pow(skill, K)`) and now resolve correctly through the evaluator instead of falling through to `1d6`. Original legacy intent preserved in each ability's `notes` field. The engine asks needed to fully re-faithfulise these spells are in section I below.
+
+---
+
+## I — Ability formula engine extensions (2026-05-16)
+
+Content-side audit of `fierylib/data/abilities.json` repaired 13 damage
+formulas that contained syntax the current evaluator rejects (embedded
+English `, then *= ...`, `random_number(...)` typo, unknown symbols
+`caster_align` / `victim_align` / `caster_INT` / `max_hp` / `level_drain`).
+Each rewritten formula drops the unsupported terms and substitutes a
+circle-appropriate tier formula. The original legacy intent is preserved
+in each ability's `notes` field so this work can be re-faithfulised once
+the engine grows the required surface.
+
+Pick up the items in this section in roughly the order listed — the
+symbols (I1) unblock the most reverts, the grammar work (I2) lets you
+fold in the dynamic-exponent legacy scaling.
+
+- **I1. Add caster/target symbols to `FormulaCtx`** (`mud-server/src/commands.rs::FormulaCtx`).
+  - `caster_align` — caster `Alignment.alignment` value, -1000..1000. Read
+    via `world.get::<Alignment>(player).map(|a| a.alignment).unwrap_or(0)`
+    at the invoke site in `invoke_ability` (already has the lookup
+    plumbing alongside `caster_stats`).
+  - `victim_align` — same column on the resolved target entity.
+    `world.get::<Alignment>(target).map(|a| a.alignment).unwrap_or(0)`.
+  - `target_max_hp` — target's `Health.max`.
+  - `target_min_level` — for spells that mention a target threshold
+    (Exorcism's "skill - GET_LEVEL(victim) > 30" branch).
+    Read `world.get::<Profile>(target).map(|p| p.level).unwrap_or(1)`.
+  - `caster_int_raw` / `caster_wis_raw` — raw `CoreStats.intelligence`
+    / `.wisdom` (3..=25 D&D-style) so spells can scale on raw score
+    instead of the bonus we already expose as `int_bonus` / `wis_bonus`.
+    Legacy Flamestrike used `dam *= (caster_INT * 0.007 + 0.8)`.
+  - `min_level` — the spell's authored minimum level (lowest level the
+    spell can be cast at across all classes). Needed for the legacy
+    dynamic-exponent formula
+    `exponent = 1.2 + 0.3*min_level/100 + (skill - min_level) * (0.004*min_level - 0.2) / 100`
+    which keeps low-circle spells from blowing up at high skill.
+    Source: take `min` over `ClassAbilities.circle` for the ability +
+    a circle→level mapping; cache on the AbilityCatalog load path.
+
+  All wire into `formula_ctx` construction around `commands.rs:10931`.
+
+- **I2. Extend formula grammar.** Current limits in `commands.rs::evaluate_formula`:
+  - **pow exponent should accept an expression**, not just a `Float` /
+    `Num` literal (see `parse_factor`'s `pow` branch). Legacy
+    `sorcerer_single_target` exponent is itself a function of
+    `skill` and `min_level`; without expression-exponent the dynamic
+    taper has to live in code rather than data.
+  - **Add `min(a, b)` and `max(a, b)` builtins** so legacy bonus caps
+    like `dam += std::min<int>(SD_BONUS(spellnum), skill / 4)` can be
+    expressed inline rather than reshaped into divisions.
+  - **Add a conditional builtin**, either `if(cond, a, b)` (ternary)
+    or `gate(threshold_var, threshold_val, bonus)`. Vampiric Breath
+    legacy adds `random(0, 70)` only when `skill >= 95`; Exorcism's
+    instant-kill branch fires only when
+    `align >= 990 && skill - victim_level > 30`. Without a
+    conditional, these effects either drop or move into Lua.
+  - **Allow float literals outside `pow`** so multipliers like
+    `* 0.0007` survive translation. Today only the `pow` exponent
+    slot accepts floats; the rest of the grammar is integer-only,
+    forcing every multiplier to be encoded as `* 7 / 10000`.
+
+- **I3. Per-target multiplicative conditions in ability data.** The
+  divine/unholy line (`DIVINE_BOLT`, `DIVINE_RAY`, `HELL_BOLT`,
+  `HELLFIRE_BRIMSTONE`, `LESSER_EXORCISM`, `EXORCISM`,
+  `STYGIAN_ERUPTION`) all scale by an alignment multiplier *after* the
+  base damage roll. Even with I1 + I2 the cleanest representation is
+  probably a separate `params.multipliers` list in `AbilityEffect`
+  that the runtime walks post-roll, rather than baking the multiplier
+  into the damage formula. Suggested shape:
+  ```json
+  "multipliers": [
+    { "expr": "(victim_align * -7 + 8000) / 10000", "min": 0.1, "max": 1.5 }
+  ]
+  ```
+  Bounded multipliers also cleanly express class affinity
+  (Priest +25% on `Destroy Undead`, Cryomancer +25% on `Ice Storm`,
+  etc.) which currently live as hardcoded class-specific clauses in
+  `magic.cpp` and would otherwise pollute the damage formula.
+
+- **I4. `xp_drain` / `level_drain` effect type.** `Energy Drain` is
+  authored as a damage spell but legacy primary effect is "victim
+  loses up to 40,000 XP on save fail, caster gains a quarter". JSON
+  currently substitutes a small necrotic damage roll (`4d12 + pow(skill, 1.20)`)
+  and notes the drain ask. To re-faithfulise: add an `xp_drain`
+  (preferred) or `level_drain` (legacy-named) effect type to
+  `mud-world/src/components.rs` + `EffectCatalog`, handle in
+  `invoke_ability`. Pair with the `lifesteal` flag on Vampiric Breath,
+  which still routes through `damage` + post-damage `heal`.
+
+- **I5. `target_max_hp`-keyed damage for percent-HP attacks.** Monk
+  chant `SEED_OF_DESTRUCTION` was authored as `max_hp * 0.05` per
+  tick. With I1's `target_max_hp` symbol the formula reverts to
+  `target_max_hp / 20` per tick. Currently slotted as a flat
+  level-scaled formula until then.
+
+- **I6. Damage curve coherence sweep.** Independent of the formula
+  engine, the existing per-spell damage at modern (0..=100) skill
+  scale is broadly under-tuned for circles 7+ because the legacy
+  `pow(skill, 2) / Y` shapes were authored for the 0..=1000 skill
+  range. Examples at skill=100:
+  - C8 `Chain Lightning` / `Circle of Death` — 140 dmg.
+  - C11 `Creeping Doom` / `Degeneration` — 100 dmg (literally `skill`).
+  - C7 `Call Lightning` — 175 dmg.
+  All below C1 `Burning Hands` (356 dmg). After I1+I2 land, sweep
+  the catalog and convert `pow(skill, 2) / Y` shapes either to the
+  modern tier ladder (`NdM + pow(skill, K)`, K by circle) or to the
+  legacy dynamic-exponent formula. The 13 spells repaired in this
+  pass were slotted into the tier ladder as a first pass; everything
+  else still uses the under-tuned legacy shape.
+
+  Per-spell notes describing the original (pre-conversion) legacy
+  formula live in each ability's `notes` field in `abilities.json`
+  so a future pass has the source intent.
+
+- **I7. Burning Hands description was rewritten** to match the
+  touch-range reality (closing G2.5 / G2.6 from the playtest list).
+  If the upgrade path is "give Burning Hands a real cone target"
+  instead, expect to flip `isArea` true + add `AbilityTargeting.scope =
+  ROOM_ENEMIES` and walk the description back to a cone. The
+  breath-spell descriptions (`ACID_BREATH`, `FIRE_BREATH`,
+  `FROST_BREATH`, `GAS_BREATH`, `LIGHTNING_BREATH`, `VAMPIRIC_BREATH`)
+  and `CONE_OF_COLD` were rewritten the same direction (single-target
+  flavor) — flip those too if the cone path is preferred.
+
+- **I8. `HELLFIRE_BRIMSTONE` was flipped to `isArea: true`** in this
+  pass to match its description (it's the area sibling of
+  `STYGIAN_ERUPTION`). Add an `AbilityTargeting.scope = ROOM_ENEMIES`
+  row on import so the dispatcher reads "ROOM_ENEMIES" through the
+  `valid_targets` path instead of falling back to the `def.violent`
+  no-target gate.
 
 ---
 

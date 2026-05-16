@@ -9,7 +9,7 @@ pub use components::{
     Drunkenness, EffectInstance, EffectSource, EquippedSlot, ExamineText, ExitData, Exits, Fighting, Flying, Follower,
     FromMobReset, FromObjectReset, Frozen, Ghost,
     GroupInvite, Guarding, Health, HouseExitEntry, HouseGuestEntry, HouseItem, HouseItemEntry,
-    HouseRoom, HouseRoomEntry, HouseSummary, Hunger, Identified, IgnoreList, Item, Keywords, KillStats,
+    HouseRoom, HouseRoomEntry, HouseSummary, Hunger, Identified, IgnoreList, Item, ItemTimer, Keywords, KillStats,
     KnownAbilities, LastInputAt, LastPersistedAt,
     LastTeller, LightFuel, LiquidContainer, Lit, Located, LoggedInAt, LootClaim, MailDraft,
     ObjectFlags, ObjectRestrictions,
