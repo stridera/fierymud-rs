@@ -4881,14 +4881,11 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
         let (hp, max_hp) = world
             .get::<Health>(m)
             .map_or((0, 0), |h| (h.hp, h.max));
-        let (mp, max_mp) = world
-            .get::<mud_world::Mana>(m)
-            .map_or((0, 0), |mana| (mana.current, mana.max));
         let (mv, max_mv) = world
             .get::<Stamina>(m)
             .map_or((0, 0), |s| (s.current, s.max));
         entries.push(format!(
-            r#"{{"name":"{plain}","with_leader":{with},"level":{level},"race":"{race}","class":"{class}","stats":{{"hp":{hp},"max_hp":{max_hp},"mp":{mp},"max_mp":{max_mp},"mv":{mv},"max_mv":{max_mv}}}}}"#,
+            r#"{{"name":"{plain}","with_leader":{with},"level":{level},"race":"{race}","class":"{class}","stats":{{"hp":{hp},"max_hp":{max_hp},"mv":{mv},"max_mv":{max_mv}}}}}"#,
             plain = plain,
             with = with_leader,
             level = level,
@@ -4896,8 +4893,6 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
             class = class.replace('"', "\\\""),
             hp = hp,
             max_hp = max_hp,
-            mp = mp,
-            max_mp = max_mp,
             mv = mv,
             max_mv = max_mv,
         ));
@@ -13672,19 +13667,14 @@ pub(crate) fn send_char_vitals(world: &World, target: Entity) {
     ) else {
         return;
     };
-    let (mp, max_mp) = world
-        .get::<mud_world::Mana>(target)
-        .map_or((0, 0), |m| (m.current, m.max));
     let (level, xp) = world
         .get::<Profile>(target)
         .map_or((0, 0), |p| (p.level, p.experience));
     let next_level_pct = compute_level_progress(world, level, xp);
     let payload = format!(
-        "{{\"hp\":{hp},\"max_hp\":{max_hp},\"mp\":{mp},\"max_mp\":{max_mp},\"mv\":{mv},\"max_mv\":{max_mv},\"next_level_pct\":{nlp},\"string\":\"H:{hp}/{max_hp} M:{mp}/{max_mp} V:{mv}/{max_mv}\"}}",
+        "{{\"hp\":{hp},\"max_hp\":{max_hp},\"mv\":{mv},\"max_mv\":{max_mv},\"next_level_pct\":{nlp},\"string\":\"H:{hp}/{max_hp} V:{mv}/{max_mv}\"}}",
         hp = h.hp,
         max_hp = h.max,
-        mp = mp,
-        max_mp = max_mp,
         mv = s.current,
         max_mv = s.max,
         nlp = next_level_pct,
