@@ -984,13 +984,13 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     // attack_power feeds the consider verdict in place of the
     // legacy dmg_roll. Same intent: "how hard does this side hit?"
     let self_dmg = self_stats.map_or(0, |c| c.attack_power);
-    let self_hit_roll = self_stats.map_or(0, |c| c.accuracy);
+    let self_accuracy = self_stats.map_or(0, |c| c.accuracy);
+    let self_evasion = self_stats.map_or(0, |c| c.evasion);
     let target_max_hp = world.get::<Health>(target).map_or(0, |h| h.max);
     let target_stats = world.get::<CombatStats>(target).copied();
     let target_dmg = target_stats.map_or(0, |c| c.attack_power);
-    let target_hit_roll = target_stats.map_or(0, |c| c.accuracy);
-    let self_ac = self_stats.map_or(0, |c| c.armor_pct);
-    let target_ac = target_stats.map_or(0, |c| c.armor_pct);
+    let target_accuracy = target_stats.map_or(0, |c| c.accuracy);
+    let target_evasion = target_stats.map_or(0, |c| c.evasion);
 
     if target_max_hp == 0 {
         send_rendered(world, player, &format!("{target_name} doesn't look like a fighter at all.\r\n"),
@@ -1028,8 +1028,8 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     // so what `consider` predicts matches what swings actually land.
     // Each percentage is graded green→red so a player can compare
     // their swing chance vs the target's at a glance.
-    let your_chance = crate::combat::hit_chance_pct(self_hit_roll, target_ac);
-    let their_chance = crate::combat::hit_chance_pct(target_hit_roll, self_ac);
+    let your_chance = crate::combat::hit_chance_pct(self_accuracy, target_evasion);
+    let their_chance = crate::combat::hit_chance_pct(target_accuracy, self_evasion);
     let your_pct_text =
         hit_chance_color(your_chance).map_or(format!("{your_chance}%"), |open| {
             format!("{open}{your_chance}%</>")
@@ -1047,6 +1047,17 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     };
     out.push_str(&format!(
         "Your strikes would land about {your_pct_text}; theirs about {their_pct_text}.\r\n",
+    ));
+    // Surface the target's actual current HP so the player can
+    // judge "is this thing already wounded?" before engaging.
+    let target_hp = world.get::<Health>(target).map_or(0, |h| h.hp).max(0);
+    let target_pct = if target_max_hp > 0 {
+        (target_hp * 100) / target_max_hp
+    } else {
+        0
+    };
+    out.push_str(&format!(
+        "Their condition: <b:yellow>{target_hp}/{target_max_hp} HP</> ({target_pct}%).\r\n",
     ));
     // Aggro hint: same threshold the room-entry check uses, so
     // `consider` matches the auto-engage rule. Players passing
