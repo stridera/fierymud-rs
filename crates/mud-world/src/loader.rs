@@ -432,6 +432,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 restrictions: row.restrictions,
                 timer_hours: row.timer,
                 decompose_timer: row.decompose_timer,
+                allowed_races: row.allowed_races,
+                min_size: row.min_size,
+                max_size: row.max_size,
             },
         );
     }

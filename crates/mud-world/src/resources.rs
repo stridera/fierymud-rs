@@ -1056,6 +1056,14 @@ pub struct ObjectProto {
     /// just destroys when timer hits zero. Kept on the proto so a
     /// later two-phase decay can read it without a schema bump.
     pub decompose_timer: i32,
+    /// Inclusive race allow-list (B6). Empty = anyone, non-empty =
+    /// only listed races may wear. Independent of
+    /// `restricted_races` (deny-list) — both can be set.
+    pub allowed_races: Vec<String>,
+    /// Minimum body size to wear (B6). `None` = no floor.
+    pub min_size: Option<String>,
+    /// Maximum body size to wear (B6). `None` = no ceiling.
+    pub max_size: Option<String>,
 }
 
 /// One `ObjectEffects` row, denormalized into the proto.

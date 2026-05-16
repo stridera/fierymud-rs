@@ -9621,6 +9621,19 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
             })
             .unwrap_or_default()
     };
+    // B6: inclusive allow-list + size band. Loaded separately so
+    // the existing tuple doesn't grow further.
+    let (allowed_races, min_size, max_size): (Vec<String>, Option<String>, Option<String>) =
+        world
+            .get::<WorldKey>(item)
+            .and_then(|k| {
+                world
+                    .resource::<ObjectPrototypes>()
+                    .by_key
+                    .get(&(k.zone, k.id))
+                    .map(|p| (p.allowed_races.clone(), p.min_size.clone(), p.max_size.clone()))
+            })
+            .unwrap_or_default();
     if !alignment_restriction.is_empty() {
         let player_align = world
             .get::<CombatStats>(player)
@@ -9665,6 +9678,68 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
             &format!("{item_name} wasn't made for your kind.\r\n"),
         );
         return;
+    }
+    // Schema's `Size` enum ordered TINY → GIGANTIC. Local helper
+    // so the B6 size band can compare via ordinal rather than
+    // string equality. Unknown / mob-latent labels rank as
+    // MEDIUM so nothing freaks out about a missing row.
+    let size_rank = |label: &str| -> i32 {
+        match label.to_ascii_uppercase().as_str() {
+            "FINE" | "DIMINUTIVE" => 0,
+            "TINY" => 1,
+            "SMALL" => 2,
+            "MEDIUM" => 3,
+            "LARGE" => 4,
+            "HUGE" => 5,
+            "GIGANTIC" | "GARGANTUAN" => 6,
+            "COLOSSAL" => 7,
+            _ => 3,
+        }
+    };
+    // B6: inclusive race allow-list. Empty = no opinion;
+    // non-empty = wearer must be one of these.
+    if !allowed_races.is_empty()
+        && let Some(race) = world.get::<Profile>(player).map(|p| p.race.clone())
+        && !allowed_races
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(&race))
+    {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} was crafted for other hands.\r\n"),
+        );
+        return;
+    }
+    // B6: size band — `min_size <= wearer.size <= max_size`. The
+    // wearer's effective size lives on the `Sized` component
+    // (assigned at character/mob spawn from RaceDefaults).
+    // Compare via the ordinal helper so the band is monotonic
+    // (TINY < SMALL < MEDIUM < LARGE < HUGE < GIGANTIC).
+    let wearer_size = world.get::<mud_world::Sized>(player).map(|s| s.0);
+    if let Some(wsize) = wearer_size {
+        let wsize_str = format!("{wsize:?}").to_ascii_uppercase();
+        let wsize_rank = size_rank(&wsize_str);
+        if let Some(min) = min_size.as_deref()
+            && wsize_rank < size_rank(min)
+        {
+            send_rendered(
+                world,
+                player,
+                &format!("{item_name} is far too big for your body.\r\n"),
+            );
+            return;
+        }
+        if let Some(max) = max_size.as_deref()
+            && wsize_rank > size_rank(max)
+        {
+            send_rendered(
+                world,
+                player,
+                &format!("{item_name} is far too small for your body.\r\n"),
+            );
+            return;
+        }
     }
 
     // Resolve to the actual destination slot. Paired slots (today

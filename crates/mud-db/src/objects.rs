@@ -64,6 +64,20 @@ pub struct Object {
     /// post-timer destruction window (legacy ITEM_DECOMPOSING
     /// flag behavior). Read alongside `timer` at spawn time.
     pub decompose_timer: i32,
+    /// Inclusive race allow-list (B6). Empty = any race may
+    /// wear; non-empty = only the listed races may. Stored as
+    /// raw race-enum labels for direct comparison with
+    /// `Profile.race`. Independent of `restricted_races` which
+    /// is the deny-list — a content author can use either or
+    /// both for "elves only", "everyone but trolls" etc.
+    pub allowed_races: Vec<String>,
+    /// Minimum body size required to wear (B6). `None` = no
+    /// floor. Schema's `Size` enum values: TINY/SMALL/MEDIUM/
+    /// LARGE/HUGE/GIGANTIC.
+    pub min_size: Option<String>,
+    /// Maximum body size allowed to wear (B6). `None` = no
+    /// ceiling.
+    pub max_size: Option<String>,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -94,7 +108,10 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             flags AS "flags!: Vec<ObjectFlag>",
             restrictions AS "restrictions!: Vec<ObjectRestriction>",
             timer,
-            decompose_timer
+            decompose_timer,
+            allowed_races::text[] AS "allowed_races!: Vec<String>",
+            min_size::text AS "min_size?: String",
+            max_size::text AS "max_size?: String"
         FROM "Objects"
         ORDER BY zone_id, id
         "#

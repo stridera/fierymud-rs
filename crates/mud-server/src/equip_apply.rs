@@ -429,6 +429,9 @@ mod tests {
                 restrictions: vec![],
                 timer_hours: 0,
                 decompose_timer: 0,
+                allowed_races: vec![],
+                min_size: None,
+                max_size: None,
             },
         );
         world.insert_resource(protos);
@@ -539,6 +542,9 @@ mod tests {
                 restrictions: vec![],
                 timer_hours: 0,
                 decompose_timer: 0,
+                allowed_races: vec![],
+                min_size: None,
+                max_size: None,
             },
         );
         world.insert_resource(protos);
