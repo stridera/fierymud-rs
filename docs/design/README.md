@@ -33,6 +33,9 @@ ships.
 
 ## Documents
 
+**Active design specs.** Locked once the system shipped; edits are
+behavior-changing, not exploratory.
+
 | Doc | What it covers | Status |
 |---|---|---|
 | [combat.md](combat.md) | Accuracy/evasion swing resolution, damage pipeline, crit/variance | **locked** (review pass 2 — ward gating) |
@@ -42,6 +45,27 @@ ships.
 | [objects.md](objects.md) | Typed columns replacing `Object.values` JSON, weapon shape, on-hit ability wiring | **locked** (review pass 1) |
 | [posture-and-lifestate.md](posture-and-lifestate.md) | Splitting voluntary posture from incapacitation | **locked** (review pass 1) |
 | [schema-reconciliation.md](schema-reconciliation.md) | Dead duplicates and legacy columns to delete | **locked** (review pass 1) |
+
+**Live work trackers.** Updated as items ship; consult before
+starting new work.
+
+| Doc | Purpose |
+|---|---|
+| [remaining-work.md](remaining-work.md) | Outstanding tasks across all systems, with status per item |
+| [parking-lot.md](parking-lot.md) | Open decisions awaiting user input; resolved entries kept for context |
+| [combat-rebalance.md](combat-rebalance.md) | Live balance-tuning conversation, including decided sweeps |
+| [gear-curves.md](gear-curves.md) | Per-tier gear / mob / encounter sweep data |
+| [schema-cleanup-plan.md](schema-cleanup-plan.md) | In-flight legacy-removal pass (Mana drop shipped; rest pending) |
+
+**Historical reference.** Frozen snapshots — don't edit; mine for
+context only.
+
+| Doc | Snapshot |
+|---|---|
+| [migration-plan.md](migration-plan.md) | Wave-by-wave schema + loader migration completion record |
+| [database-audit.md](database-audit.md) | Per-field schema audit from May 2026 (point-in-time inventory) |
+| [schema-design-review.md](schema-design-review.md) | Macro-shape review proposing the schema-cleanup-plan |
+| [fiery-2-sketch.md](fiery-2-sketch.md) | Exploratory rewrite sketch — not adopted; kept to document the alternative |
 
 ## How to review
 
