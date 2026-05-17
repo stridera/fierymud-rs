@@ -275,30 +275,20 @@ Pick up the items in this section in roughly the order listed — the
 symbols (I1) unblock the most reverts, the grammar work (I2) lets you
 fold in the dynamic-exponent legacy scaling.
 
-- **I1. Add caster/target symbols to `FormulaCtx`** (`mud-server/src/commands.rs::FormulaCtx`).
-  - `caster_align` — caster `Alignment.alignment` value, -1000..1000. Read
-    via `world.get::<Alignment>(player).map(|a| a.alignment).unwrap_or(0)`
-    at the invoke site in `invoke_ability` (already has the lookup
-    plumbing alongside `caster_stats`).
-  - `victim_align` — same column on the resolved target entity.
-    `world.get::<Alignment>(target).map(|a| a.alignment).unwrap_or(0)`.
-  - `target_max_hp` — target's `Health.max`.
-  - `target_min_level` — for spells that mention a target threshold
-    (Exorcism's "skill - GET_LEVEL(victim) > 30" branch).
-    Read `world.get::<Profile>(target).map(|p| p.level).unwrap_or(1)`.
-  - `caster_int_raw` / `caster_wis_raw` — raw `CoreStats.intelligence`
-    / `.wisdom` (3..=25 D&D-style) so spells can scale on raw score
-    instead of the bonus we already expose as `int_bonus` / `wis_bonus`.
-    Legacy Flamestrike used `dam *= (caster_INT * 0.007 + 0.8)`.
-  - `min_level` — the spell's authored minimum level (lowest level the
-    spell can be cast at across all classes). Needed for the legacy
-    dynamic-exponent formula
-    `exponent = 1.2 + 0.3*min_level/100 + (skill - min_level) * (0.004*min_level - 0.2) / 100`
-    which keeps low-circle spells from blowing up at high skill.
-    Source: take `min` over `ClassAbilities.circle` for the ability +
-    a circle→level mapping; cache on the AbilityCatalog load path.
-
-  All wire into `formula_ctx` construction around `commands.rs:10931`.
+- **I1. Add caster/target symbols to `FormulaCtx`** ✅ Closed
+  (2026-05-16). All six landed:
+  - `caster_align`, `victim_align` (H.5 work).
+  - `target_max_hp` / `victim_max_hp` — target's `Health.max`,
+    populated in the per-target ctx alongside `victim_align`.
+  - `target_level` / `victim_level` — target's `Profile.level`.
+  - `caster_int_raw` / `caster_int` (alias), `caster_wis_raw` /
+    `caster_wis` — raw `CoreStats.intelligence`/`.wisdom` for
+    spells that scale on raw score rather than bonus.
+  - `min_level` — approximate spell entry level computed as
+    `circle * 2 + 1`. Full per-ability `MIN(level)` over
+    `SpellSlotProgression` is a deferred refinement; the cheap
+    proxy is enough to express the dynamic-exponent shape
+    `pow(skill, 1 + min_level / N)`.
 
 - **I2. Extend formula grammar.** Current limits in `commands.rs::evaluate_formula`:
   - **pow exponent accepts an expression** ✅ Closed (2026-05-16).

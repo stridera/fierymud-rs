@@ -3124,6 +3124,44 @@ mod tests {
         );
     }
 
+    /// I.1: target_max_hp / target_level / caster_int_raw /
+    /// caster_wis_raw / min_level symbols land in FormulaCtx so
+    /// percent-HP spells (Seed of Destruction: `target_max_hp /
+    /// 20`), level-gated branches (Exorcism: `skill - target_level
+    /// > 30`), and raw-stat-scaling spells (Flamestrike legacy
+    /// `caster_int * 0.007 + 0.8`) can express directly instead of
+    /// rewriting into approximations.
+    #[test]
+    fn evaluate_formula_target_and_caster_raw_symbols() {
+        let mut zero = |_: &str, _: i32, _: i32| 0i32;
+        let ctx = FormulaCtx {
+            target_max_hp: 200,
+            target_level: 20,
+            caster_int_raw: 90,
+            caster_wis_raw: 75,
+            min_level: 5,
+            level: 25,
+            skill: 80,
+            ..FormulaCtx::default()
+        };
+        // SEED_OF_DESTRUCTION style: 5% target HP per tick.
+        assert_eq!(evaluate_formula("target_max_hp / 20", &ctx, &mut zero), Some(10));
+        // Same value under the victim_ alias for symmetry with
+        // victim_align/victim_alignment shape.
+        assert_eq!(evaluate_formula("victim_max_hp / 20", &ctx, &mut zero), Some(10));
+        // Exorcism-style level differential: skill - target_level.
+        assert_eq!(evaluate_formula("skill - target_level", &ctx, &mut zero), Some(60));
+        assert_eq!(evaluate_formula("skill - victim_level", &ctx, &mut zero), Some(60));
+        // Raw-INT scaling (integer-only restatement of the legacy
+        // `caster_int * 0.007 + 0.8` → `caster_int * 7 / 1000 + 4 / 5`).
+        // Avoid fractional output; just verify the symbol resolves.
+        assert_eq!(evaluate_formula("caster_int", &ctx, &mut zero), Some(90));
+        assert_eq!(evaluate_formula("caster_wis", &ctx, &mut zero), Some(75));
+        // min_level usable as a divisor / exponent term.
+        assert_eq!(evaluate_formula("min_level", &ctx, &mut zero), Some(5));
+        assert_eq!(evaluate_formula("pow(skill, 1 + min_level / 10)", &ctx, &mut zero), Some(80));
+    }
+
     /// I2 partial (b): pow accepts an integer expression as the
     /// exponent so dynamic-taper shapes like `pow(skill, 1 + level / 25)`
     /// resolve at runtime. Float literals still take the precise path.
@@ -11249,6 +11287,14 @@ pub(crate) fn invoke_ability_with(
     let caster_align = world
         .get::<CombatStats>(player)
         .map_or(0, |cs| cs.alignment);
+    // Approximate min_level: at the lowest class-circle the
+    // ability sits in, the rough rule of thumb is `circle * 2 + 1`
+    // (close to the legacy intro level for first-circle spells).
+    // Used by legacy dynamic-exponent formulas like
+    // `pow(skill, 1.2 + 0.3*min_level/100 + ...)`. Spells the
+    // catalog doesn't class-bind report 0, which folds cleanly
+    // into formulas that read it.
+    let min_level = if spell_circle > 0 { spell_circle * 2 + 1 } else { 0 };
     let formula_ctx = FormulaCtx {
         level: caster_level,
         skill: caster_skill,
@@ -11264,6 +11310,14 @@ pub(crate) fn invoke_ability_with(
         caster_align,
         victim_align: 0, // populated per-target at apply time
         base_damage,
+        // Target-side fields default to 0 here — populated per-target
+        // in `per_target_ctx` inside the damage step, mirroring how
+        // victim_align is filled in only once the target resolves.
+        target_max_hp: 0,
+        target_level: 0,
+        caster_int_raw: caster_stats.intelligence,
+        caster_wis_raw: caster_stats.wisdom,
+        min_level,
     };
     let effect_specs: Vec<EffectSpec> = {
         let mappings = world
@@ -11394,8 +11448,16 @@ pub(crate) fn invoke_ability_with(
                 let target_align = world
                     .get::<CombatStats>(target_entity)
                     .map_or(0, |cs| cs.alignment);
+                let target_max_hp = world
+                    .get::<Health>(target_entity)
+                    .map_or(0, |h| h.max);
+                let target_level = world
+                    .get::<Profile>(target_entity)
+                    .map_or(0, |p| p.level);
                 let per_target_ctx = FormulaCtx {
                     victim_align: target_align,
+                    target_max_hp,
+                    target_level,
                     ..formula_ctx
                 };
                 // I.9: `multihit: true` in the effect params signals
@@ -13491,6 +13553,27 @@ pub(crate) struct FormulaCtx {
     /// runtime now supplies the additive term so untrained casters
     /// at high level still get circle/level-baseline damage.
     base_damage: i32,
+    /// Target's `Health.max`. Used by percent-HP spells like the
+    /// modern restatement of `SEED_OF_DESTRUCTION` (legacy
+    /// `max_hp * 0.05` per tick → `target_max_hp / 20`). Defaults
+    /// to 0 when no resolved target (e.g. compute-side queries).
+    target_max_hp: i32,
+    /// Target's level. Read by spells that need a relative-level
+    /// gate — Exorcism's "skill - victim_level > 30 → instant
+    /// kill" branch is the canonical use.
+    target_level: i32,
+    /// Raw `CoreStats.intelligence` (3..=99, FieryMUD's 1-100
+    /// scale). The `int_bonus` field above is the derived modifier;
+    /// some legacy spells scale on the raw score
+    /// (Flamestrike: `dam *= (caster_INT * 0.007 + 0.8)`).
+    caster_int_raw: i32,
+    /// Raw `CoreStats.wisdom`, same scale as `caster_int_raw`.
+    caster_wis_raw: i32,
+    /// The ability's lowest-class minimum level — `min(circle)` over
+    /// `ClassAbilities` for this ability. Used by legacy dynamic-
+    /// exponent formulas: `pow(skill, 1.2 + 0.3*min_level/100 + ...)`.
+    /// 0 when the catalog has no class-circle row for the ability.
+    min_level: i32,
 }
 
 impl FormulaCtx {
@@ -13522,6 +13605,11 @@ impl FormulaCtx {
             "caster_align" | "caster_alignment" => Some(self.caster_align),
             "victim_align" | "victim_alignment" | "target_align" => Some(self.victim_align),
             "base_damage" | "base" => Some(self.base_damage),
+            "target_max_hp" | "victim_max_hp" => Some(self.target_max_hp),
+            "target_level" | "victim_level" => Some(self.target_level),
+            "caster_int_raw" | "caster_int" => Some(self.caster_int_raw),
+            "caster_wis_raw" | "caster_wis" => Some(self.caster_wis_raw),
+            "min_level" => Some(self.min_level),
             _ => None,
         }
     }
