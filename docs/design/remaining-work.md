@@ -131,6 +131,15 @@ Follow-ups surfaced this pass:
   resolved cleanly (hit chances ~28-33%, damage breakdown
   rendered, aggro flipped, peaceful-room gate held, flee moved
   correctly).
+- **I.4 TestMage and BuilderChar were Classless** ✅ Resolved
+  (fierylib commit c5452a3). The seeder requested
+  `class_plain_name="Mage"` but no `Class` row has that
+  plain_name — the actual arcane primary is `Sorcerer`. Both
+  characters silently fell through to NULL class_id, which made
+  them look like Classless adventurers with no spellbook.
+  Updated the seeder + patched the live DB. TestMage now shows
+  `(Sorcerer)` on score and `spells` renders 46 abilities
+  across circles 1-12.
 
 ## H — Playtest follow-ups (2026-05-16)
 
