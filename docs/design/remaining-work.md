@@ -29,6 +29,33 @@ Features the legacy MUD had that we still need.
 - **B5. LevelDefinition.permissions** ✅ Closed — on level-up, the row's permissions union into `Account.perms` with a player-facing notification.
 - **B6. Object equip restrictions** ✅ Closed — `allowed_races` + `min_size` + `max_size` gated in the wear handler; surfaced on `identify` under a "Requirements" section.
 
+## Create / utility spell follow-ups (2026-05-17)
+
+- **Create Food per-class selection.** Legacy `spell_creations`
+  picks a base proto by caster class — Cleric/default → zone 120,
+  Paladin → 110, Priest → 100, Anti-Paladin → 130, Druid → 140 —
+  then adds 0..9 from skill scaling. Today the runtime `create`
+  arm pulls a single hard-coded proto (currently the waybread
+  fallback, zone 185 id 8). Plumb caster.class_id + skill into
+  the create arm so the right per-class roster fires. Zones
+  100/120 are sparsely imported (3-4 protos each) so the content
+  side also needs work.
+- **Minor Creation arg lookup.** Legacy `spell_minor_creation`
+  reads the cast arg ("dagger", "robe", "spellbook", ...) against
+  a 40-entry `minor_creation_items[]` table (constants.cpp:28)
+  and spawns `(zone 10, id i)` for the matching index. All 40
+  protos are imported under zone 10. The runtime would need
+  the cast arg threaded through to the create arm and a copy
+  of the keyword table. Today MINOR_CREATION just spawns the
+  hard-coded mushroom default regardless of arg.
+- **CREATE_WATER / CREATE_SPRING.** No-op until liquid mechanics
+  land. Legacy CREATE_SPRING spawns a fountain proto into the
+  room (vnum 75 — "a clear pool of water"); CREATE_WATER fills
+  the targeted DRINKCONTAINER with water units.
+- **ARMOR_OF_GAIA, FLAME_BLADE.** Druid / fire-aligned magical
+  items the runtime doesn't yet have proto pins for. Need
+  content authoring decisions.
+
 ## C — Builder-authored flavor text catalogs
 
 Schema's there. Each is a small loader + a renderer change in the relevant command.
