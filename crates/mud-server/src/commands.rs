@@ -766,6 +766,31 @@ pub(crate) fn longest_prefix_match(tokens: &[&str]) -> Option<(&'static Command,
 /// verbs follow. Aliases (`quit` covers `quit`; the abbrev path
 /// queries canonical `names[0]`) — adding the canonical name here
 /// blocks every alias as well.
+/// Minor Creation keyword table — index drives the proto id under
+/// zone 10 (`Objects` zone 10 ids 0..39). Mirrors legacy
+/// `minor_creation_items[]` in `fierymud_legacy/src/constants.cpp:28`.
+/// Order matters: the index IS the proto id. Match is abbreviation-
+/// style (`is_abbrev`), so `cast 'minor creation' dag` resolves to
+/// "dagger".
+///
+/// TODO (data-over-code): migrate to a builder-editable
+/// `CreationRecipe` table keyed by `(ability_id, keyword)` →
+/// `(object_zone_id, object_id)` + optional `min_skill` / `class_id`.
+/// See `fierylib/remaining_work.md` "Creation recipes table" and the
+/// data-over-code rule in /home/strider/Code/mud/CLAUDE.md. This
+/// hard-coded array exists only as a bridge so `cast 'minor creation'
+/// dagger` works today.
+const MINOR_CREATION_KEYWORDS: [&str; 40] = [
+    "backpack", "sack", "robe", "hood", "lantern",
+    "torch", "waterskin", "barrel", "rations", "raft",
+    "club", "mace", "dagger", "greatsword", "longsword",
+    "staff", "shield", "shortsword", "jacket", "pants",
+    "leggings", "gauntlets", "sleeves", "gloves", "helmet",
+    "skullcap", "boots", "sandals", "cloak", "book",
+    "quill", "belt", "ring", "bracelet", "bottle",
+    "keg", "mask", "earring", "scarf", "bracer",
+];
+
 const ABBREV_DENYLIST: &[&str] = &[
     // Mortal
     "quit", "delete", "release", "drop", "junk", "give", "remove",
@@ -11832,18 +11857,44 @@ pub(crate) fn invoke_ability_with(
                 // override_params (objectZoneId / objectId); content
                 // without a proto pinned reports a labeled no-op so
                 // the cast still resolves visibly.
-                let proto_zone = spec
+                let default_zone = spec
                     .override_params
                     .as_ref()
                     .and_then(|p| p.get("objectZoneId"))
                     .and_then(serde_json::Value::as_i64)
                     .map(|v| i32::try_from(v).unwrap_or(0));
-                let proto_id = spec
+                let default_id = spec
                     .override_params
                     .as_ref()
                     .and_then(|p| p.get("objectId"))
                     .and_then(serde_json::Value::as_i64)
                     .map(|v| i32::try_from(v).unwrap_or(0));
+                // Minor Creation: cast arg selects from the 40-keyword
+                // table (legacy `minor_creation_items[]` in
+                // constants.cpp). All 40 protos live under zone 10,
+                // ids 0..39. Match the arg as an abbreviation of any
+                // keyword and override the default proto with the
+                // matching index. Skipped when there's no arg or the
+                // arg doesn't match any keyword — falls through to
+                // the (zone, id) default.
+                let (proto_zone, proto_id) = {
+                    let mut z = default_zone;
+                    let mut i = default_id;
+                    if def.plain_name.eq_ignore_ascii_case("MINOR_CREATION")
+                        && let Some(word) = target_word
+                        && !word.trim().is_empty()
+                    {
+                        let lc = word.trim().to_ascii_lowercase();
+                        if let Some(idx) = MINOR_CREATION_KEYWORDS
+                            .iter()
+                            .position(|kw| kw.starts_with(&lc))
+                        {
+                            z = Some(10);
+                            i = Some(i32::try_from(idx).unwrap_or(0));
+                        }
+                    }
+                    (z, i)
+                };
                 let (Some(proto_zone), Some(proto_id)) = (proto_zone, proto_id) else {
                     applied_msgs.push(format!("{} (no object proto specified)", pretty));
                     continue;
