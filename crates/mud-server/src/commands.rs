@@ -11417,6 +11417,11 @@ pub(crate) fn invoke_ability_with(
     let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
     let mut spawn_count: usize = 0;
     for spec in &effect_specs {
+        // Pretty player-facing label for the effect in `applied_msgs`
+        // diagnostic lines ("Detect Magic" rather than the raw flag
+        // "detect_magic"). Matching/dispel paths still want the raw
+        // spec.name so they can compare on the underscored token.
+        let pretty = pretty_effect_label(&spec.name);
         match spec.effect_type.as_str() {
             "damage" => {
                 // Resolve `amount`. If the ability has
@@ -11601,10 +11606,10 @@ pub(crate) fn invoke_ability_with(
                 if bolt_count > 1 {
                     applied_msgs.push(format!(
                         "{} (-{} HP ×{} bolts)",
-                        spec.name, amount, bolt_count
+                        pretty, amount, bolt_count
                     ));
                 } else {
-                    applied_msgs.push(format!("{} (-{} HP)", spec.name, amount));
+                    applied_msgs.push(format!("{} (-{} HP)", pretty, amount));
                 }
             }
             "heal" => {
@@ -11614,7 +11619,7 @@ pub(crate) fn invoke_ability_with(
                     &formula_ctx,
                 );
                 let Some(mut amount) = amount else {
-                    applied_msgs.push(format!("{} (no amount resolved)", spec.name));
+                    applied_msgs.push(format!("{} (no amount resolved)", pretty));
                     continue;
                 };
                 // A5: spell_power scales magical heals too — high-SP
@@ -11662,10 +11667,10 @@ pub(crate) fn invoke_ability_with(
                         format!("<dim>{n}'s {resource_word} is already full.</>\r\n")
                     };
                     send_to(world, player, msg);
-                    applied_msgs.push(format!("{} (no-op)", spec.name));
+                    applied_msgs.push(format!("{} (no-op)", pretty));
                     continue;
                 }
-                applied_msgs.push(format!("{} (+{healed} {resource_label})", spec.name));
+                applied_msgs.push(format!("{} (+{healed} {resource_label})", pretty));
             }
             "cleanse" => {
                 let conditions = resolve_effect_conditions(
@@ -11673,7 +11678,7 @@ pub(crate) fn invoke_ability_with(
                     Some(&spec.default_params),
                 );
                 if conditions.is_empty() {
-                    applied_msgs.push(format!("{} (no condition specified)", spec.name));
+                    applied_msgs.push(format!("{} (no condition specified)", pretty));
                     continue;
                 }
                 let removed: usize = if conditions.iter().any(|c| c == "all") {
@@ -11686,9 +11691,9 @@ pub(crate) fn invoke_ability_with(
                     total
                 };
                 applied_msgs.push(if removed == 0 {
-                    format!("{} (nothing to cleanse)", spec.name)
+                    format!("{} (nothing to cleanse)", pretty)
                 } else {
-                    format!("{} (cleansed {removed} effect(s))", spec.name)
+                    format!("{} (cleansed {removed} effect(s))", pretty)
                 });
             }
             "stun" => {
@@ -11722,7 +11727,7 @@ pub(crate) fn invoke_ability_with(
                     AppliedTo(target_entity),
                 ));
                 spawn_count += 1;
-                applied_msgs.push(format!("{} (stunned)", spec.name));
+                applied_msgs.push(format!("{} (stunned)", pretty));
             }
             "dispel" => {
                 // Remove EffectInstances on the target whose source
@@ -11740,14 +11745,14 @@ pub(crate) fn invoke_ability_with(
                     Some(&spec.default_params),
                 );
                 if filter.is_empty() {
-                    applied_msgs.push(format!("{} (no filter specified)", spec.name));
+                    applied_msgs.push(format!("{} (no filter specified)", pretty));
                     continue;
                 }
                 let removed = remove_effects_by_tag(world, target_entity, &filter, scope);
                 applied_msgs.push(if removed == 0 {
-                    format!("{} (nothing to dispel)", spec.name)
+                    format!("{} (nothing to dispel)", pretty)
                 } else {
-                    format!("{} (dispelled {removed} effect(s))", spec.name)
+                    format!("{} (dispelled {removed} effect(s))", pretty)
                 });
             }
             "redirect" => {
@@ -11764,28 +11769,28 @@ pub(crate) fn invoke_ability_with(
                 if !aggro {
                     applied_msgs.push(format!(
                         "{} (damage-redirect not implemented)",
-                        spec.name
+                        pretty
                     ));
                     continue;
                 }
                 if target_entity == player {
-                    applied_msgs.push(format!("{} (can't rescue yourself)", spec.name));
+                    applied_msgs.push(format!("{} (can't rescue yourself)", pretty));
                     continue;
                 }
                 let Some(Fighting(attacker)) =
                     world.get::<Fighting>(target_entity).copied()
                 else {
-                    applied_msgs.push(format!("{} (target isn't being attacked)", spec.name));
+                    applied_msgs.push(format!("{} (target isn't being attacked)", pretty));
                     continue;
                 };
                 if world.get_entity(attacker).is_err() {
-                    applied_msgs.push(format!("{} (attacker has vanished)", spec.name));
+                    applied_msgs.push(format!("{} (attacker has vanished)", pretty));
                     continue;
                 }
                 crate::commands::try_remove::<Fighting>(world, target_entity);
                 crate::commands::try_insert(world, attacker, Fighting(player));
                 crate::commands::try_insert(world, player, Fighting(attacker));
-                applied_msgs.push(format!("{} (drew attacker's aggro)", spec.name));
+                applied_msgs.push(format!("{} (drew attacker's aggro)", pretty));
             }
             "stop_combat" => {
                 // Remove `Fighting` from the target so it disengages.
@@ -11795,9 +11800,9 @@ pub(crate) fn invoke_ability_with(
                 let was_fighting = world.get::<Fighting>(target_entity).is_some();
                 if was_fighting {
                     crate::commands::try_remove::<Fighting>(world, target_entity);
-                    applied_msgs.push(format!("{} (combat ended)", spec.name));
+                    applied_msgs.push(format!("{} (combat ended)", pretty));
                 } else {
-                    applied_msgs.push(format!("{} (not in combat)", spec.name));
+                    applied_msgs.push(format!("{} (not in combat)", pretty));
                 }
             }
             "portal" => {
@@ -11820,7 +11825,7 @@ pub(crate) fn invoke_ability_with(
                     .and_then(serde_json::Value::as_i64)
                     .map(|v| i32::try_from(v).unwrap_or(0));
                 let (Some(proto_zone), Some(proto_id)) = (proto_zone, proto_id) else {
-                    applied_msgs.push(format!("{} (no object proto specified)", spec.name));
+                    applied_msgs.push(format!("{} (no object proto specified)", pretty));
                     continue;
                 };
                 let proto = world
@@ -11831,12 +11836,12 @@ pub(crate) fn invoke_ability_with(
                 let Some(proto) = proto else {
                     applied_msgs.push(format!(
                         "{} (object proto ({proto_zone}, {proto_id}) not loaded)",
-                        spec.name
+                        pretty
                     ));
                     continue;
                 };
                 let Some(located) = world.get::<Located>(player).copied() else {
-                    applied_msgs.push(format!("{} (caster has no room)", spec.name));
+                    applied_msgs.push(format!("{} (caster has no room)", pretty));
                     continue;
                 };
                 let mut bundle = world.spawn((
@@ -11874,7 +11879,7 @@ pub(crate) fn invoke_ability_with(
                     },
                     AppliedTo(portal_entity),
                 ));
-                applied_msgs.push(format!("{} ({} appears)", spec.name, proto.name));
+                applied_msgs.push(format!("{} ({} appears)", pretty, proto.name));
             }
             "modify" => {
                 // Stat-bonus stacking. Read `target` (which stat) and
@@ -11955,10 +11960,10 @@ pub(crate) fn invoke_ability_with(
                 applied_msgs.push(match (target_stat.as_deref(), applied_amount) {
                     (Some(t), Some(a)) => {
                         let sign = if a >= 0 { "+" } else { "" };
-                        format!("{} ({sign}{a} {t})", spec.name)
+                        format!("{} ({sign}{a} {t})", pretty)
                     }
-                    (Some(t), None) => format!("{} ({t}: unsupported target)", spec.name),
-                    (None, _) => format!("{} (no target specified)", spec.name),
+                    (Some(t), None) => format!("{} ({t}: unsupported target)", pretty),
+                    (None, _) => format!("{} (no target specified)", pretty),
                 });
             }
             "intercept" => {
@@ -11968,15 +11973,15 @@ pub(crate) fn invoke_ability_with(
                 // caster. Refuses self-target — guarding yourself is
                 // a no-op the schema doesn't model.
                 if target_entity == player {
-                    applied_msgs.push(format!("{} (can't guard yourself)", spec.name));
+                    applied_msgs.push(format!("{} (can't guard yourself)", pretty));
                     continue;
                 }
                 if world.get_entity(target_entity).is_err() {
-                    applied_msgs.push(format!("{} (target has vanished)", spec.name));
+                    applied_msgs.push(format!("{} (target has vanished)", pretty));
                     continue;
                 }
                 try_insert(world, player, mud_world::Guarding(target_entity));
-                applied_msgs.push(format!("{} (guarding {})", spec.name, name_of(world, target_entity)));
+                applied_msgs.push(format!("{} (guarding {})", pretty, name_of(world, target_entity)));
             }
             "extract" => {
                 // Remove the target from the world. Used by Banish
@@ -11987,18 +11992,18 @@ pub(crate) fn invoke_ability_with(
                 // outright; their effects, equipment, and triggers
                 // get the same cleanup as mob death.
                 if world.get::<Player>(target_entity).is_some() {
-                    applied_msgs.push(format!("{} (can't extract a player)", spec.name));
+                    applied_msgs.push(format!("{} (can't extract a player)", pretty));
                     continue;
                 }
                 if world.get::<Mob>(target_entity).is_none() {
-                    applied_msgs.push(format!("{} (target isn't a creature)", spec.name));
+                    applied_msgs.push(format!("{} (target isn't a creature)", pretty));
                     continue;
                 }
                 disengage_attackers_of(world, target_entity);
                 if let Ok(e) = world.get_entity_mut(target_entity) {
                     e.despawn();
                 }
-                applied_msgs.push(format!("{} (banished)", spec.name));
+                applied_msgs.push(format!("{} (banished)", pretty));
             }
             "dismount" => {
                 // Force-end the rider/mount relationship on the
@@ -12024,9 +12029,9 @@ pub(crate) fn invoke_ability_with(
                     cleared = true;
                 }
                 applied_msgs.push(if cleared {
-                    format!("{} (dismounted)", spec.name)
+                    format!("{} (dismounted)", pretty)
                 } else {
-                    format!("{} (not mounted)", spec.name)
+                    format!("{} (not mounted)", pretty)
                 });
             }
             "teleport" => {
@@ -12064,19 +12069,19 @@ pub(crate) fn invoke_ability_with(
                 let Some(dest_room) = dest_room else {
                     applied_msgs.push(format!(
                         "{} (destination {:?} not resolvable)",
-                        spec.name, destination
+                        pretty, destination
                     ));
                     continue;
                 };
                 let cur_room = world.get::<Located>(target_entity).map(|l| l.0);
                 if cur_room == Some(dest_room) {
-                    applied_msgs.push(format!("{} (already there)", spec.name));
+                    applied_msgs.push(format!("{} (already there)", pretty));
                     continue;
                 }
                 if let Some(mut l) = world.get_mut::<Located>(target_entity) {
                     l.0 = dest_room;
                 }
-                applied_msgs.push(format!("{} (teleported)", spec.name));
+                applied_msgs.push(format!("{} (teleported)", pretty));
             }
             "knockdown" => {
                 // Knockdown has two parts: an immediate posture
@@ -12114,9 +12119,9 @@ pub(crate) fn invoke_ability_with(
                 ));
                 spawn_count += 1;
                 applied_msgs.push(if toppled {
-                    format!("{} (knocked {})", spec.name, posture.label())
+                    format!("{} (knocked {})", pretty, posture.label())
                 } else {
-                    format!("{} (already {} or lower)", spec.name, posture.label())
+                    format!("{} (already {} or lower)", pretty, posture.label())
                 });
             }
             _ => {
@@ -12153,8 +12158,8 @@ pub(crate) fn invoke_ability_with(
                 // marker is removed in `effects_tick` once the last
                 // backing EffectInstance fades — mirroring the
                 // Stunned tick pattern.
-                if spec.name.eq_ignore_ascii_case("hidden")
-                    || spec.name.eq_ignore_ascii_case("sneak")
+                if pretty.eq_ignore_ascii_case("hidden")
+                    || pretty.eq_ignore_ascii_case("sneak")
                 {
                     try_insert(world, target_entity, mud_world::Stealth);
                 }
@@ -12166,7 +12171,7 @@ pub(crate) fn invoke_ability_with(
                 // through Follower would corrupt their group state.
                 // No auto-remove on expiry — mob charm in legacy
                 // MUDs persists until dismiss / death.
-                if spec.name.eq_ignore_ascii_case("charmed")
+                if pretty.eq_ignore_ascii_case("charmed")
                     && world.get::<Mob>(target_entity).is_some()
                     && world.get::<Player>(target_entity).is_none()
                 {
@@ -12175,7 +12180,7 @@ pub(crate) fn invoke_ability_with(
                     // disconnect-save snapshots it for ≤1h restore.
                     try_insert(world, target_entity, mud_world::PersistentPet);
                 }
-                applied_msgs.push(spec.name.clone());
+                applied_msgs.push(pretty.clone());
             }
         }
     }
@@ -14218,6 +14223,27 @@ pub(crate) fn try_insert<C: bevy_ecs::component::Component>(
     if let Ok(mut em) = world.get_entity_mut(e) {
         em.insert(c);
     }
+}
+
+/// Render an effect identifier ("detect_magic" / "DETECT_MAGIC" /
+/// "stunned") as a player-facing label ("Detect Magic" / "Stunned").
+/// `capitalize` joins on `-` (right for race names like HALF_ELF);
+/// effect labels use spaces.
+pub(crate) fn pretty_effect_label(raw: &str) -> String {
+    raw.split('_')
+        .map(|seg| {
+            let mut chars = seg.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => {
+                    let head = c.to_ascii_uppercase().to_string();
+                    let tail: String = chars.as_str().to_ascii_lowercase();
+                    head + &tail
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Despawn any existing `EffectInstance` children on `target` whose
