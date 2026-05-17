@@ -10966,41 +10966,11 @@ pub(crate) fn invoke_ability_with(
     }
 
     let mode = color_mode_for(world, player);
-    let mut out = String::from("\r\n");
-    // Cast descriptor box (G2.3): the per-ability name + cast-time +
-    // posture readout used to render unconditionally on every cast,
-    // which felt like reading a help card every time you swung. Gate
-    // it behind the same staff/dev-mode flag the combat dice display
-    // uses so players see just the spell message + result. Help text
-    // is still reachable on demand via `help <spell>`.
-    let show_descriptor = !aoe_repeat
-        && crate::combat::show_dice_for(world, player);
-    if show_descriptor {
-        out.push_str(&format!(
-            "  {} ({})\r\n",
-            render_color_tags(&def.name, mode),
-            def.kind.label()
-        ));
-        if let Some(desc) = &def.description {
-            out.push_str(&format!("    {}\r\n", render_color_tags(desc.trim(), mode)));
-        }
-        out.push_str(&format!(
-            "    cast time: {} round(s)   cooldown: {}ms   {}area\r\n",
-            def.cast_time_rounds,
-            def.cooldown_ms,
-            if def.is_area { "" } else { "single-target / not " }
-        ));
-        out.push_str(&format!(
-            "    requires posture: {}\r\n",
-            def.min_position_label,
-        ));
-        out.push_str(&format!(
-            "    {}{}{}\r\n",
-            if def.violent { "violent  " } else { "" },
-            if def.in_combat_only { "combat-only  " } else { "" },
-            if def.combat_ok { "" } else { "non-combat  " },
-        ));
-    }
+    let mut out = String::new();
+    // The on-cast descriptor box (G2.3) was removed: feedback was
+    // that it felt like reading a help card on every swing. The
+    // success message + per-effect line below carry the same payoff
+    // without the noise; details are still reachable via `help <ability>`.
     // Resolve the target. Empty / "me" / "self" → the caster
     // (or the caster's mount when the ability targets RIDER —
     // BUCK is the canonical case: `cast buck` with no arg should
@@ -11119,15 +11089,8 @@ pub(crate) fn invoke_ability_with(
     } else {
         player
     };
-    if show_descriptor && target_entity == player {
-        out.push_str("    target: yourself\r\n");
-    } else if show_descriptor {
-        let target_name = name_or(world, target_entity, "(unknown)");
-        out.push_str(&format!(
-            "    target: {}\r\n",
-            render_color_tags(&target_name, mode),
-        ));
-    }
+    // (The "target: X" line was part of the removed descriptor box —
+    // the success message already names the target.)
     // AbilityTargeting gate: refuse if the resolved target doesn't
     // match the schema's `valid_targets` list. Only enforces the
     // recognized types (ENEMY_PC, ENEMY_NPC); CORPSE / RIDER /
@@ -12146,7 +12109,7 @@ pub(crate) fn invoke_ability_with(
     let target_name_raw = target_name_pre;
     if applied_msgs.is_empty() {
         out.push_str(&format!(
-            "    (no effects defined for this {} — nothing to apply)\r\n",
+            "(no effects defined for this {} — nothing to apply)\r\n",
             kind.label()
         ));
     } else {
@@ -12167,20 +12130,23 @@ pub(crate) fn invoke_ability_with(
                 &target_name_raw,
                 target_entity == player,
             );
-            out.push_str(&format!("    {}\r\n", render_color_tags(&rendered, mode)));
+            out.push_str(&format!("{}\r\n", render_color_tags(&rendered, mode)));
         } else if target_entity == player {
-            out.push_str(&format!("    you {verb} {}\r\n", def.name));
+            out.push_str(&format!("you {verb} {}\r\n", def.name));
         } else {
             out.push_str(&format!(
-                "    you {verb} {} on {}\r\n",
+                "you {verb} {} on {}\r\n",
                 def.name,
                 render_color_tags(&target_name_raw, mode),
             ));
         }
-        // Diagnostic effect summary. Always shown so the player can
-        // see HP/posture/duration outcomes regardless of whether the
-        // template emitted.
-        out.push_str(&format!("    ({})\r\n", applied_msgs.join(", ")));
+        // Per-effect diagnostic line (damage / heal / status). Gate
+        // on show_dice_for so casual players see just the flavor
+        // success message; staff / dev-mode still get the math
+        // breakdown to mirror the per-swing dice tail.
+        if crate::combat::show_dice_for(world, player) {
+            out.push_str(&format!("  <dim>({})</>\r\n", applied_msgs.join(", ")));
+        }
     }
     send_to(world, player, out);
     // Target-side: templated success_to_victim → terse default.

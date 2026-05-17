@@ -24,11 +24,16 @@ use crate::commands::send_to;
 const RECOVER_PERIOD_TICKS: u64 = 10;
 
 fn recover_seconds_per_tick(p: PostureKind) -> i32 {
+    // Standing / kneeling tick at the slowest rate so a default-
+    // posture caster still sees a "wait for it to recover" message
+    // resolve. Resting / sleeping scale up to reward sitting down,
+    // matching the legacy "rest to mem faster" intent. Meditating
+    // (handled in the caller) doubles whichever rate applies.
     match p {
-        PostureKind::Sleeping => 3,
-        PostureKind::Resting => 2,
-        PostureKind::Sitting => 1,
-        PostureKind::Standing | PostureKind::Kneeling => 0,
+        PostureKind::Sleeping => 4,
+        PostureKind::Resting => 3,
+        PostureKind::Sitting => 2,
+        PostureKind::Standing | PostureKind::Kneeling => 1,
     }
 }
 
@@ -51,7 +56,7 @@ pub fn memorize_tick(world: &mut World) {
         >();
         for (entity, posture, mut slots, meditating) in q.iter_mut(world) {
             let mut delta = recover_seconds_per_tick(posture.0);
-            if delta == 0 {
+            if slots.in_flight.is_empty() {
                 continue;
             }
             if meditating.is_some() {
