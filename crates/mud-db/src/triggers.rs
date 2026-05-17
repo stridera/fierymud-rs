@@ -77,6 +77,15 @@ pub struct TriggerRow {
     pub arg_list: Option<Vec<String>>,
     pub commands: String,
     pub flags: Option<Vec<TriggerFlag>>,
+    /// Builder-set flag — Muditor surfaces this in the trigger
+    /// editor when a script needs human review (auto-converted
+    /// from legacy DG, suspect grammar, etc.). The runtime logs
+    /// these on load so operators see them in startup logs.
+    pub needs_review: bool,
+    /// Set by Muditor's validator when the trigger failed Lua
+    /// parse; surfaced on load so operators don't first discover
+    /// it from a fire-time error.
+    pub syntax_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -115,7 +124,9 @@ pub async fn list_triggers(pool: &PgPool) -> sqlx::Result<Vec<TriggerRow>> {
             num_args,
             arg_list AS "arg_list: Vec<String>",
             commands,
-            flags AS "flags: Vec<TriggerFlag>"
+            flags AS "flags: Vec<TriggerFlag>",
+            needs_review,
+            syntax_error
         FROM "Triggers"
         ORDER BY zone_id, id
         "#

@@ -77,7 +77,7 @@ Features that don't exist in legacy. Per user's "wire if it's an improvement" ru
 - **E10. AbilityRestrictions.custom_requirement_lua** — dynamic ability gating.
 - **E11. CharacterAbilities.last_used** — cooldown integration.
 - **E12. Achievement.unlocked_at** ✅ Closed — `CharacterAchievements.unlocked` is now `HashMap<i32, DateTime<Utc>>`; `achievements` listing renders `(unlocked YYYY-MM-DD)` next to unlocked rows. Virtual sessions also hydrate achievements so admin playtests see the same state real-telnet logins do.
-- **E13. Trigger validation metadata** (`needs_review`, `syntax_error`) — Muditor reads these; runtime could log on trigger load.
+- **E13. Trigger validation metadata** ✅ Closed — `TriggerRow` reads `needs_review` + `syntax_error`; loader emits a `warn` for stored syntax errors (fire-time failure expected) and an `info` for needs-review (builder hint). Both boot and the admin reload path go through the same helper. Verified live: 112 needs_review hits logged on boot.
 - **E14. Shop spawn controls** — `spawn_chance`, `visibility_requirement`, `purchase_requirement` on ShopItems / ShopMobs.
 - **E15. Discord bot (Muditor-side)** — consumes `PendingDiscordLinks`, posts to `DiscordConfig` channels. fierymud-rs has the hooks; the bot itself is web/Muditor work.
 - **E16. wait_until minute granularity** ✅ Closed — `MudClock.minute` derived from within-hour tick position (12.5 ticks ≈ 1 game minute). `time.minute` exposed to Lua; `_seconds_until` honors the minute arg (5/4 real seconds per game minute). `time` command and world_status JSON render HH:MM.

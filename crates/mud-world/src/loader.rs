@@ -1232,6 +1232,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let trigger_rows = triggers::list_triggers(pool).await?;
     let mut trigger_catalog = TriggerCatalog::default();
     for row in trigger_rows {
+        log_trigger_validation_metadata(&row);
         let attach = match row.attach_type {
             triggers::ScriptType::Mob => TriggerAttach::Mob,
             triggers::ScriptType::Object => TriggerAttach::Object,
@@ -1819,6 +1820,7 @@ pub async fn load_trigger_catalog(pool: &PgPool) -> sqlx::Result<TriggerCatalog>
     let trigger_rows = triggers::list_triggers(pool).await?;
     let mut catalog = TriggerCatalog::default();
     for row in trigger_rows {
+        log_trigger_validation_metadata(&row);
         let attach = match row.attach_type {
             triggers::ScriptType::Mob => TriggerAttach::Mob,
             triggers::ScriptType::Object => TriggerAttach::Object,
@@ -1866,6 +1868,32 @@ pub async fn load_trigger_catalog(pool: &PgPool) -> sqlx::Result<TriggerCatalog>
             .push((link.trigger_zone_id, link.trigger_id));
     }
     Ok(catalog)
+}
+
+/// Surface Muditor-side validation metadata on trigger load. A
+/// `syntax_error` row will fail at fire-time anyway, but logging at
+/// load gives operators visibility before a player happens to
+/// trip it. `needs_review` is builder-set (auto-converted from
+/// legacy DG, suspect grammar) and is logged at info so it
+/// doesn't drown a clean boot.
+fn log_trigger_validation_metadata(row: &triggers::TriggerRow) {
+    if let Some(err) = row.syntax_error.as_ref() {
+        tracing::warn!(
+            zone = row.zone_id,
+            id = row.id,
+            name = %row.name,
+            error = %err,
+            "trigger has stored syntax_error — fire-time failure expected",
+        );
+    }
+    if row.needs_review {
+        tracing::info!(
+            zone = row.zone_id,
+            id = row.id,
+            name = %row.name,
+            "trigger marked needs_review by Muditor — verify before relying on its behavior",
+        );
+    }
 }
 
 /// Mapping from the DB enum to the runtime enum. Same shape as the
