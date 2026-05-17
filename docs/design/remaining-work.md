@@ -131,6 +131,14 @@ Follow-ups surfaced this pass:
   resolved cleanly (hit chances ~28-33%, damage breakdown
   rendered, aggro flipped, peaceful-room gate held, flee moved
   correctly).
+- **I.5 Seeder wrote proficiency on the wrong scale** ✅ Resolved
+  (fierylib commit, fierymud-rs n/a — runtime is correct). The
+  schema column is 0..=1000 raw practice points and the runtime
+  divides by 10 at formula time. user_seeder.py was writing 100,
+  which gave seeded characters skill=10 downstream and silently
+  collapsed mage damage by ~6×. TestMage Burning Hands went
+  from 70 → 345 (matches H expected ~335) after the live DB
+  was patched alongside the seeder fix.
 - **I.4 TestMage and BuilderChar were Classless** ✅ Resolved
   (fierylib commit c5452a3). The seeder requested
   `class_plain_name="Mage"` but no `Class` row has that
