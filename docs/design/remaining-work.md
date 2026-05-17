@@ -131,6 +131,27 @@ Follow-ups surfaced this pass:
   resolved cleanly (hit chances ~28-33%, damage breakdown
   rendered, aggro flipped, peaceful-room gate held, flee moved
   correctly).
+- **I.10 First spell-catalog balance sweep (2026-05-16).** Per
+  playtest feedback ("Burning Hands one-shots tier-appropriate
+  mobs"), 9 damage formulas in the live DB were retuned to a
+  consistent tier ladder so circle-1 land in the same band:
+  - C1 Burning Hands / Cause Light: ~175 dmg
+    (`4d12 + pow(skill, 1.10)`).
+  - C2 Cause Serious: ~200 (`5d12 + pow(skill, 1.15)`).
+  - C3 Cause Critic: ~291 (`5d15 + pow(skill, 1.20)`).
+  - C5 Harm: ~363 (`5d18 + pow(skill, 1.25)`).
+  - C7 Full Harm / Call Lightning: ~455 (`6d20 + pow(skill, 1.30)`).
+  - C8 Chain Lightning / Circle of Death: ~511 (`6d22 + pow(skill, 1.32)`).
+  Verified live at skill=100: Burning Hands dropped from 333 → 175;
+  Cause Light climbed from 30 → 170. The catalog still has
+  `base_damage + pow(skill, 2) / X` spells (Ice Storm,
+  Meteorswarm, Hellfire Brimstone, etc.) using legacy shapes —
+  those are tier-conservative but already include base_damage so
+  they're less wildly off; a follow-up sweep can convert them on
+  the same ladder. Also unresolved: the alignment-keyed spells
+  (Divine Bolt / Hell Bolt / Exorcism / etc.) keep their H.5
+  multiplier shape since rewriting them needs an align-scale
+  redesign.
 - **I.9 `multihit: true` on ability params** ✅ Resolved
   (2026-05-16). The damage apply path now reads the `multihit`
   flag from `override_params` and scales the bolt count via the
