@@ -2559,6 +2559,53 @@ fn render_ability_help(world: &mut World, player: Entity, def: &mud_world::Abili
         if !def.combat_ok { "out-of-combat-only " } else { "" },
         if def.is_magical { "magical" } else { "physical" },
     ));
+    // Class access: surface every class that can use this ability
+    // and at what circle / introduction level. Walk both junction
+    // catalogs (SpellSlotData.ability_circle for casters,
+    // ClassSkillsData.min_level for skill classes) and group by
+    // class name. A class can appear on both sides for hybrid
+    // abilities; we collapse to one line per class with the union
+    // of qualifiers ("Cleric (C2, L10)").
+    let class_lookup: std::collections::HashMap<i32, String> = world
+        .resource::<mud_world::ClassCatalog>()
+        .by_id
+        .iter()
+        .map(|(id, c)| (*id, c.plain_name.clone()))
+        .collect();
+    let mut by_class: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for ((cid, aid), circle) in &world.resource::<mud_world::SpellSlotData>().ability_circle {
+        if *aid != def.id {
+            continue;
+        }
+        if let Some(name) = class_lookup.get(cid) {
+            by_class
+                .entry(name.clone())
+                .or_default()
+                .push(format!("C{circle}"));
+        }
+    }
+    for ((cid, aid), min_level) in &world.resource::<mud_world::ClassSkillsData>().min_level {
+        if *aid != def.id {
+            continue;
+        }
+        if let Some(name) = class_lookup.get(cid) {
+            by_class
+                .entry(name.clone())
+                .or_default()
+                .push(format!("L{min_level}"));
+        }
+    }
+    if !by_class.is_empty() {
+        let parts: Vec<String> = by_class
+            .iter()
+            .map(|(name, quals)| format!("<b:cyan>{name}</> <dim>({})</>", quals.join(", ")))
+            .collect();
+        out.push_str(&format!(
+            "  <cyan>Available to:</> {}\r\n",
+            parts.join(", "),
+        ));
+    }
     // Lookup the messages.successToCaster line so the player can
     // preview the cast flavor. Missing rows fall through cleanly.
     if let Some(msgs) = world
