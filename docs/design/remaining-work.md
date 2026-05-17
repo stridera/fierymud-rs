@@ -131,6 +131,14 @@ Follow-ups surfaced this pass:
   resolved cleanly (hit chances ~28-33%, damage breakdown
   rendered, aggro flipped, peaceful-room gate held, flee moved
   correctly).
+- **I.6 Seeder skipped ClassSkills** ✅ Resolved (fierylib
+  commit). Warrior + Rogue have 0 entries in `ClassAbilities`
+  (their toolkit lives in `ClassSkills`), so the
+  ability-grant loop in the seeder gave them an empty
+  spellbook. TestRogue's `Char.Skills` GMCP frame after the fix
+  lists BACKSTAB, HIDE, SNEAK, DODGE, PARRY, DOUBLE_ATTACK
+  etc. — 19 entries total. Seeder now unions both junction
+  tables before upserting.
 - **I.5 Seeder wrote proficiency on the wrong scale** ✅ Resolved
   (fierylib commit, fierymud-rs n/a — runtime is correct). The
   schema column is 0..=1000 raw practice points and the runtime
