@@ -23,8 +23,30 @@ User flagged as the next session. Combat data is wired end-to-end and tests pass
 Features the legacy MUD had that we still need.
 
 - **B1. Object decay tick** ✅ Closed — `item_decay_tick` decrements `ItemTimer` and destroys at zero (PERMANENT skipped).
-- **B2. Bashable doors** (`RoomExit.hit_points`). Deferred — needs `ExitData.hit_points` plumbed through the loader before the bash handler can decrement.
-- **B3. Mob.aggressionFormula** (Lua expression for varied aggro). Replaces hardcoded `AGGR_EVIL`/`AGGR_GOOD` etc. flags with per-mob Lua. **Status corrected (2026-05-17):** 597 / 2 139 mobs (28%) actually have an authored Lua expression — the prior "content-blocked" note was wrong. The remaining work is the runtime wire-up: load the column onto Mob, evaluate at the wander/aggro tick site in `mud-server`, engage on truthy result. See `fierylib/remaining_work.md` audit for the full inventory.
+- **B2. Bashable doors** ✅ Closed 2026-05-17. Runtime: schema's
+  `RoomExit.hit_points` + the `BASHABLE` flag flow through the
+  loader onto `ExitData.hit_points` / `.is_bashable`. `cmd_doorbash`
+  consumes stamina, refuses on non-BASHABLE exits, and otherwise
+  rolls `5 + STR_bonus` damage per swing — door HP defaults to 50,
+  splinters on hit-zero. Content side: legacy CircleMUD never had
+  an EX_BASHABLE bit (all IS_DOOR exits were bashable by default),
+  so fierylib's `room_importer.import_exit` now synthesizes the
+  BASHABLE flag for every IS_DOOR exit that isn't MAGICPROOF. Live
+  DB backfilled in one UPDATE — 1214 doors flipped BASHABLE,
+  every closed/locked door is now bash-targetable.
+- **B3. Mob.aggressionFormula** ✅ Closed 2026-05-17. The 20
+  distinct formulas across 597 mobs all share a small grammar
+  (`target.alignment` / `target.race.alignment` compared against
+  `ALIGN.EVIL` / `ALIGN.GOOD` / `'EVIL'` / `'GOOD'`, combined with
+  `and` / `or`). Wrote a focused recursive-descent
+  parser+evaluator in `mud-server/src/aggression.rs` and a
+  `AggressionFormulaCache` resource that parses each distinct
+  string once. `try_engage_aggressive_mob` now does a two-pass
+  check: first the legacy mob-alignment threshold, then per-mob
+  formula eval. Live verified: spawning `(117, 3)` Mud Beast
+  (`formula = 'true'`) at the player's room then walking back in
+  fires "The Mud Beast sees you and attacks!" immediately. 8
+  parser unit tests cover all 20 formula shapes.
 - **B4. RaceSpellSlotBonus** (per-race +N slots for a circle). Loaded via a new module, folded into the spell-slot cap calculation when the slot system tracks circle pools. **Blocker:** 0 rows in DB; defer until content lands.
 - **B5. LevelDefinition.permissions** ✅ Closed — on level-up, the row's permissions union into `Account.perms` with a player-facing notification.
 - **B6. Object equip restrictions** ✅ Closed — `allowed_races` + `min_size` + `max_size` gated in the wear handler; surfaced on `identify` under a "Requirements" section.
@@ -487,25 +509,25 @@ be expressed in the current `ObjectResistance` schema:
 User playtest ask 2026-05-17: "casting time should depend on spell difficulty.
 Look at legacy for an example, but we can improve on that system."
 
-- **K1. Spell cast queue + cast_time_rounds consumer.** The
-  `Ability.cast_time_rounds` column is populated (most spells = 1, big
-  AoEs = 2-3) but the runtime ignores it — every cast resolves the
-  same tick. Add a `CastingState { ability_id, target_entity, args,
-  remaining_ticks, started_at }` component, push the caster's input
-  through it instead of straight to `invoke_ability_with` when
-  `cast_time_rounds > 1`. When the timer expires, run the existing
-  invoke pipeline. Interrupt sources: damage taken (Concentration save
-  against damage / max_hp ratio), `flee`, `cancel`, posture change,
-  movement (already blocked via combat lock but plumb for sleep/stun).
-  Cast-while-busy refusal: surface "You're already casting!" instead
-  of stacking. Legacy reference: `magic.cpp::do_cast` + WAIT_STATE +
-  spell_parser.cpp's queue.
-  - Improvement over legacy: render a live progress bar in the prompt
-    (`[Casting Magic Missile (2/3 rounds)]`) so the player feels the
-    wind-up. Same shape as melee tick countdown.
-  - Cast time defaults: circle 1 = 1 round, circle 5 = 2 rounds,
-    circle 10+ = 3 rounds, with per-ability `cast_time_rounds`
-    override winning when set.
+- **K1. Spell cast queue + cast_time_rounds consumer.** ✅ Shipped
+  2026-05-17. `mud_world::Casting` component installed by
+  `invoke_ability_with`'s queue branch when `cast_time_rounds > 0`
+  and decremented by `casting::casting_tick` (40 ticks per round =
+  4s). Resolution re-enters via `resolve_queued_cast` with a
+  `skip_queue` flag so the loop doesn't re-fire. Interrupts:
+  damage > 30% max HP via `check_concentration_on_damage`;
+  movement via `cmd_move` interrupt; explicit `abort` /
+  `flee` cancel; `cancel` keeps its existing effect-drop scope.
+  Item / AoE-sub-cast paths set `skip_queue=true`. Live verified:
+  TestMage `cast 'magic missile' elspeth` shows "You begin casting
+  Magic Missile… (about 8s)" then resolves with the engage line +
+  damage diagnostic 8s later.
+  - **Follow-ups deferred to a future K1.1:**
+    - Live progress bar in prompt (`[Casting Magic Missile 4/8]`).
+    - "Cancelled by damage" surfaces only as the generic break
+      message; doesn't show the magnitude.
+    - No `still_winding` ECS update (purely diagnostic — the
+      `casting_tick` loop already decrements in place).
 - **K2. Sentence-start capitalization sweep.** Every line that starts
   with "the X / a X / an X dies/leaves/arrives/etc" should run through
   `cap_sentence_start`. Death/leave/arrive messages already do
@@ -528,6 +550,109 @@ Look at legacy for an example, but we can improve on that system."
   warn-level on boot with the list. The content fix lives in fierylib
   (data side); see `fierylib/remaining_work.md` §K4 follow-up.
 
+## L — Summon family (2026-05-17)
+
+User playtest ask 2026-05-17: "for summon, can you look at legacy. I
+think you have to consent someone in order to be summoned. (Prevents
+players from killing others by summoning them into high level zones.)"
+
+**Legacy contract** (`fierymud_legacy/src/spells.cpp:2622-2715`):
+
+The gate is a player preference, not a per-cast consent. Legacy uses
+`PRF_SUMMONABLE` (default *off* → "summon protection on"). Toggled with
+the `nosummon` command (semantically inverted: "nosummon" turns the
+preference ON, allowing inbound summons). Bypasses: `PLR_KILLER` (PKers
+have already opted into being targetable) and the server-wide
+`summon_allowed` global (arena mode).
+
+Gates that fire in order in legacy:
+1. BFS pathfind, max distance = `skill / 5` rooms (fail → "too far away")
+2. Same zone (different zone → same "too far away" fallthrough)
+3. Target level ≤ `min(LVL_IMMORT, skill + 3)` — proficiency cap
+4. Mob `MOB_NOSUMMON` or `MOB_NOCHARM` → "magic probing can't get a grip"
+5. Destination room `ROOM_NOSUMMON` → "negating force blocks your spell"
+6. Arena asymmetry (caster in arena, victim not) → refuse
+7. PC `PRF_SUMMONABLE` gate (skipped if `summon_allowed` or target is PKer)
+8. NPC saving throw vs spell → may fail
+
+On success: dismount victim, "$n disappears suddenly." to old room,
+char_to_room caster, "$n arrives suddenly." new room, "$n has summoned
+you!" to victim, `WAIT_STATE 4 rounds` on caster, **summoned NPC turns
+on caster with set_fighting**.
+
+**Schema status (no new columns needed):**
+- `PlayerFlag::NO_SUMMON` already exists (semantically inverted from
+  legacy `PRF_SUMMONABLE` — `NO_SUMMON` set = summon-protected).
+- `PlayerFlag::PK_ENABLED` is the bypass mirror of `PLR_KILLER`.
+- `Room.allowsSummon` exists for the destination room gate.
+- `MobBehaviors::NO_SUMMON` populated by the mob importer for legacy
+  `MOB_NOSUMMON` (475 / 2139 mobs flagged in live DB 2026-05-17).
+  `NO_CHARM` is NOT a `MobBehavior` value — the schema maps legacy
+  `MOB_NOCHARM` to the per-mob `resistances.charm` JSON entry instead
+  (311 mobs carry the resistance row). Both gates can read from
+  their respective columns.
+- `Permission::SUMMON` is the staff bypass.
+
+**Implementation status (2026-05-17):**
+
+- **L1. SUMMON dispatcher gates.** ✅ Shipped 2026-05-17. The
+  player-target SUMMON spell rides on `effectType=teleport, scope=
+  target, destination=caster` — same teleport machinery, but with
+  a guarded gate set in `commands.rs` `"teleport"` arm that fires
+  only when `def.plain_name == "SUMMON"`. Gates 0-6 wired:
+  self-target refusal, same-zone (proxy for legacy `skill/5` BFS),
+  level cap (`target > caster + 3`), `MobBehavior::NoSummon`,
+  destination `NoSummonRoom`, arena asymmetry, and PC `NoSummon`
+  preference (bypassed by `PkEnabled` or staff `Permission::Summon`).
+  Post-move: depart/arrive `broadcast_room_visual`, "X has summoned
+  you!" private line to victim, NPC retaliation via
+  `engage_combat(victim, caster, dest_room)`, and a 16s (4 combat
+  rounds) cooldown insert on the caster so the spell can't be
+  spammed. Live-verified: AdminChar casts summon on TestRogue
+  (default NoSummon) → caster sees refusal, TestRogue sees
+  hint "Type NOSUMMON to allow other players to summon you." and
+  doesn't move. **Gate 7 (NPC save-vs-spell)** is deferred — save
+  mechanics need a per-spell roll path that doesn't exist yet.
+  **Follow-up L1.1: remote-name resolution.** Today targeting
+  defaults to in-room name lookup; if the target isn't in the
+  caster's room it falls through to self. Legacy uses
+  `find_track_victim` (BFS, max distance = `skill/5`). Without
+  that, SUMMON can't reach someone in another room — defeats the
+  spell's purpose. Add a remote-actor name lookup helper and
+  thread it through targeting for `SUMMON`-class spells.
+- **L2. `nosummon` command + default-protected.** ✅ Shipped
+  2026-05-17. `nosummon` command already existed
+  (`commands/info.rs::cmd_nosummon`); refreshed the help text to
+  describe the gate and the PK bypass. `mud_db::characters::create`
+  now inserts `player_flags = ARRAY['NO_SUMMON']` so new characters
+  are summon-protected by default. fierylib `user_seeder.py` adds
+  the same default to test characters. Live DB backfilled with
+  one UPDATE — all 7 existing characters (AdminChar, BuilderChar,
+  Strider, TestWarrior/Cleric/Mage/Rogue) flipped to NO_SUMMON.
+- **L3. SUMMON_xxx flavor family** (7 spells: SUMMON_DEMON,
+  SUMMON_ELEMENTAL, SUMMON_DRACOLICH, SUMMON_GREATER_DEMON,
+  SUMMON_MOUNT, SUMMON_CORPSE, SPHERE_SUMMON). These use
+  `effectType=summon` and hit the dispatcher catchall today (mob
+  proto spawn not implemented). Plumb a per-class lookup table
+  (similar to CreationRecipe in fierylib doc §8):
+  `SummonRecipe(abilityId, classId, mobZoneId, mobId, minSkill)`.
+  Runtime spawns the mob into the caster's room as a charm
+  follower. Defer.
+- **L4. UX glitch — pre-loop success template fires before gate
+  refusal.** The cast confirmation ("You complete the summoning
+  ritual.") emits unconditionally before the dispatcher arm runs.
+  When gates refuse, the caster sees both lines — confusing.
+  Fix would require either a per-spell suppression flag or a
+  restructure to defer the success emit until the arm decides.
+  Documented; not blocking.
+- **L5. Cast success template confusion.** Originally the SUMMON
+  spell's `success_to_caster` was "You vanish in a flash of light!"
+  — copy-pasted from generic teleport but wrong (the caster
+  doesn't move; the target does). Updated 2026-05-17 to "You
+  complete the summoning ritual." and `success_to_room` to
+  "{actor.name} completes a summoning ritual." Same fix should
+  be reviewed for SUMMON_xxx variants once L3 lands.
+
 ## Sequencing recommendation
 
 Order if you want to maximize player-visible parity in the shortest path:
@@ -539,6 +664,87 @@ Order if you want to maximize player-visible parity in the shortest path:
 5. **D items** ship as their surrounding systems ship (don't force).
 6. **E** — improvements; pick whichever the player base would notice.
 7. **F decisions** — answer when convenient; none are blocking.
+
+## Rest / Repose system (2026-05-17)
+
+New feature. Design doc:
+[`rest-and-repose.md`](rest-and-repose.md). ADR for the four
+surprising-against-MMO-default decisions:
+[`../adr/0001-rest-system-tradeoffs.md`](../adr/0001-rest-system-tradeoffs.md).
+Vocabulary in
+[`/muditor/CONTEXT.md`](../../../muditor/CONTEXT.md) under "Resting
+and Repose": `Repose`, `RestSource`, `Refreshed Effect`, `Wake
+Effect attachment`.
+
+**Sequencing:** RR1-RR2 (schema + migration) is owned by fierylib's
+remaining-work doc and ships first; everything below depends on it.
+
+- **R1. sqlx struct updates.** Update `mud-db` row structs for
+  `Characters` (`repose`, `restSource`, `restTier`), `Rooms`
+  (`isInn`, `innName`, `innTiers`), `Objects` (`campKitTier`).
+  Regenerate `sqlx-data.json` after schema is live.
+- **R2. RestSource acquire commands.**
+  - `cmd_rent` in `mud-server/src/commands/`: gates on
+    current room's `isInn`; with no arg, prints the tier menu
+    from `innTiers`; with `<tier-name>` arg, validates affordability,
+    deducts gold, sets `Characters.restSource=INN`,
+    `Characters.restTier=<chosen>`. Confirm prompt for tier > 1.
+  - Extend `cmd_camp` in `mud-server/src/camp.rs` to accept an
+    optional kit Object name (`camp <kit-name>`). Kit lookup at
+    setup start, **consumed only at camp completion** (not on
+    interrupt). On completion, set `restSource=CAMP` and
+    `restTier=computeCampTier(class, group, kit)`. See design
+    doc §"Camp tier computation" for the formula.
+  - Disconnect / `quit` path: if `restSource == NONE`, stamp
+    `restSource=QUIT, restTier=0`. Do not overwrite if a source
+    is already set (player rented before quitting).
+  - Logout from a HOUSE-owned room: defer until housing schema
+    exists (see design doc "Open / deferred"). For v1, leave as
+    a TODO comment in the disconnect path.
+- **R3. Login fill + relocation flow.** In
+  `mud-server/src/login.rs`:
+  - Compute Repose accrual: `elapsed_hours * ratePerHour(restTier)`,
+    clamped by `capPercent(restTier) * xpForNextLevel(level)`.
+    Add to `Characters.repose`.
+  - Spawn-room decision: if `restSource in {CAMP, INN, HOUSE}`,
+    spawn at `currentRoom`; else if elapsed >= 30 min, spawn at
+    `recallRoom`; else `currentRoom`.
+  - **Do not consume `restSource` yet** — wait for first XP gain.
+- **R4. First-XP-gain wake consumer.** Hook the XP-gain path
+  (combat.rs reward arm + quest reward arm + any other gain
+  sites). When a character with `restSource != NONE` gains XP:
+  1. Spawn `Refreshed` Effect (skip if `QUIT`). Strength = current
+     `restTier`. Duration TUNABLE (default 1800s).
+  2. Apply Wake Effect attachments keyed on source kind:
+     `INN` → `RoomWakeEffects` on the room where logged off,
+     filtered by `minTier <= restTier`.
+     `CAMP` → wake-effect rows captured from the consumed kit
+     at camp completion (stash on a transient component, or
+     re-read from the just-consumed `ObjectWakeEffects`).
+     `HOUSE` → `ObjectWakeEffects` from the bed Object in the room.
+  3. Clear `restSource=NONE, restTier=0`.
+- **R5. Repose XP math.** Implement in the XP-gain pathway:
+  `bonus = base_xp * (REPOSE_MULTIPLIER - 1); drawn = min(bonus,
+  character.repose); character.repose -= drawn; return base_xp +
+  drawn`. `REPOSE_MULTIPLIER` is TUNABLE (default 2.0). Log
+  lifetime repose-XP spent on the character for stats.
+- **R6. Refreshed Effect runtime hooks.** Bind Lua hooks in the
+  scripting layer to read attachment `strength` (1-3), capture
+  base regen rates on apply, add proportional `RegenBonus`
+  per tick, remove on expiry. Use existing `RegenBonus`
+  component (`mud-world/src/components.rs`). See design doc
+  §"Refreshed Effect" for the per-tick formula.
+- **R7. Wake Effect attachment loader.** New module
+  `mud-world/src/wake_effects.rs`. Two query functions:
+  `room_wake_effects(zone, id, restTier) -> Vec<WakeRow>` and
+  `object_wake_effects(zone, id) -> Vec<WakeRow>`. Called by R4.
+- **R8. Follow-up (do NOT block v1): hard-coded class check →
+  data.** Replace `matches!(class, Class::Ranger | Class::Druid)`
+  in camp tier computation with a `CharacterClass.campcraftBonus`
+  column read. Migrate when ranger/druid class rows land in DB.
+
+**Blocker:** fierylib RR1-RR2 (schema + migration). After that,
+R1-R7 can ship together. R8 is a follow-up.
 
 ## How to use this doc
 
