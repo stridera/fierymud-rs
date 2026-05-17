@@ -118,19 +118,16 @@ Follow-ups surfaced this pass:
   isArea=false is the source of truth; the description
   ("scorching everything in a cone") is the disagreement. Same
   decision as G2.5 — content-author call, deferred.
-- **I.3 Seeded test users have no starting gear.**
-  TestWarrior (L25) is spawned bare-handed — `equipment` shows
-  empty, `inventory` empty, so swings render `wpn=1 ×AP+125%=2`
-  and balance evaluation against him is meaningless. Same for
-  TestMage and TestRogue. The fierylib seeder
-  (`src/fierylib/seeders/user_seeder.py`) should grant a small
-  class-appropriate kit at create time — a tier-1 weapon, basic
-  armor, level-appropriate consumables — so admin playtests
-  reflect a real character. Not a runtime bug; recorded so the
-  next content pass picks it up. Combat code path itself
-  resolved cleanly (hit chances ~28-33%, damage breakdown
-  rendered, aggro flipped, peaceful-room gate held, flee moved
-  correctly).
+- **I.3 Seeded test users have no starting gear.** Partially
+  resolved via live-DB hand-patch: TestWarrior now wields a
+  claymore (zone 163, id 0), TestRogue a small silver dagger
+  (zone 557, id 63). Both are tier-appropriate. TestMage stays
+  unarmed (sorcerer kit is a follow-up). Verified live:
+  TestWarrior L25 with claymore lands 57 dmg per hit at ~33% hit
+  rate vs L17 frost stallion — combat math reads off the weapon
+  (wpn=21 ×AP+125%=47 ±var=57). The fierylib seeder
+  (`src/fierylib/seeders/user_seeder.py`) should still grant
+  this at create time so a `seed users` from scratch matches.
 - **I.12 `kill <keyword>` matched corpses sharing the keyword.** ✅
   Resolved. `cmd_attack` walked `(Entity, Located, Named)` and
   picked the first name-match — corpses keep "corpse of a frost
