@@ -118,6 +118,19 @@ Follow-ups surfaced this pass:
   isArea=false is the source of truth; the description
   ("scorching everything in a cone") is the disagreement. Same
   decision as G2.5 — content-author call, deferred.
+- **I.3 Seeded test users have no starting gear.**
+  TestWarrior (L25) is spawned bare-handed — `equipment` shows
+  empty, `inventory` empty, so swings render `wpn=1 ×AP+125%=2`
+  and balance evaluation against him is meaningless. Same for
+  TestMage and TestRogue. The fierylib seeder
+  (`src/fierylib/seeders/user_seeder.py`) should grant a small
+  class-appropriate kit at create time — a tier-1 weapon, basic
+  armor, level-appropriate consumables — so admin playtests
+  reflect a real character. Not a runtime bug; recorded so the
+  next content pass picks it up. Combat code path itself
+  resolved cleanly (hit chances ~28-33%, damage breakdown
+  rendered, aggro flipped, peaceful-room gate held, flee moved
+  correctly).
 
 ## H — Playtest follow-ups (2026-05-16)
 
