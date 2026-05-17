@@ -408,6 +408,37 @@ fold in the dynamic-exponent legacy scaling.
   `valid_targets` path instead of falling back to the `def.violent`
   no-target gate.
 
+## K — Save mechanics (2026-05-17)
+
+Content-side: 126 / 408 abilities now carry an explicit
+`AbilitySavingThrow` row (was 2). Walked the catalog and assigned
+SaveType + uniform DC + onSaveAction per spell flavor (script:
+`fierylib/scripts/author_saving_throws.py`). Open engine asks:
+
+- **K2. `HALF_DAMAGE` on-save action arm.** Today the runtime's
+  save dispatcher (`commands.rs::on_save_action_for(...)`) only
+  understands `NEGATE` (skip effects entirely) and `HALF_DURATION`
+  (halve EffectInstance duration). Unknown actions fall through to
+  `Failed` (effects apply in full). Damage spells in legacy
+  fierymud halved damage on save (`if (mag_savingthrow(...)) dam >>= 1;`
+  in `magic.cpp`). Content authored all damage-spell saves as
+  `NEGATE` for now — engine ask is to add a `HALF_DAMAGE` arm that
+  applies `dam / 2` when present. Once the arm lands, the content
+  side can sweep `data/abilities.json` and re-balance damage saves
+  from `NEGATE` to `HALF_DAMAGE` (one-line change per spell).
+
+  - Scope: extend the SaveOutcome enum + the per-action match arm
+    that wraps the damage-apply call; thread the half flag into
+    `apply_damage` so resistance/penetration math still run on the
+    halved value.
+
+- **K3. Authored saves only — runtime save dispatcher must roll.**
+  Verify the save roll itself runs at cast time before applying
+  effects/damage. If `AbilitySavingThrow` rows aren't consulted in
+  `invoke_ability` today, all 126 newly authored saves are inert.
+  Quick smoke: cast a tagged damage spell at a high-WIS target and
+  watch for "you save" messaging.
+
 ## J — Resistance / protection extensions (2026-05-17)
 
 Content-side: `ObjectResistance` is now populated for the legacy
@@ -450,6 +481,52 @@ be expressed in the current `ObjectResistance` schema:
   write the importer in the same pass as J1/J2.
 
 ---
+
+## K — Cast timing / spellbook polish (2026-05-17)
+
+User playtest ask 2026-05-17: "casting time should depend on spell difficulty.
+Look at legacy for an example, but we can improve on that system."
+
+- **K1. Spell cast queue + cast_time_rounds consumer.** The
+  `Ability.cast_time_rounds` column is populated (most spells = 1, big
+  AoEs = 2-3) but the runtime ignores it — every cast resolves the
+  same tick. Add a `CastingState { ability_id, target_entity, args,
+  remaining_ticks, started_at }` component, push the caster's input
+  through it instead of straight to `invoke_ability_with` when
+  `cast_time_rounds > 1`. When the timer expires, run the existing
+  invoke pipeline. Interrupt sources: damage taken (Concentration save
+  against damage / max_hp ratio), `flee`, `cancel`, posture change,
+  movement (already blocked via combat lock but plumb for sleep/stun).
+  Cast-while-busy refusal: surface "You're already casting!" instead
+  of stacking. Legacy reference: `magic.cpp::do_cast` + WAIT_STATE +
+  spell_parser.cpp's queue.
+  - Improvement over legacy: render a live progress bar in the prompt
+    (`[Casting Magic Missile (2/3 rounds)]`) so the player feels the
+    wind-up. Same shape as melee tick countdown.
+  - Cast time defaults: circle 1 = 1 round, circle 5 = 2 rounds,
+    circle 10+ = 3 rounds, with per-ability `cast_time_rounds`
+    override winning when set.
+- **K2. Sentence-start capitalization sweep.** Every line that starts
+  with "the X / a X / an X dies/leaves/arrives/etc" should run through
+  `cap_sentence_start`. Death/leave/arrive messages already do
+  partially; combat hit-broadcasts and trigger emits don't. Grep
+  `crates/mud-server` for `format!\("(the |a |an )` outside of
+  template renders and route them through.
+- **K3. Info-leak audit (mortal vs god view).** Today consider/score
+  /look/inspect can leak exact HP/level/alignment for mobs to mortal
+  players. Gods (Builder+ role) should still see numbers; mortals get
+  the "impression" form. Plumb a single `viewer_is_staff(world, p)`
+  helper through the renderer for those views, and gate raw integers
+  behind it.
+- **K4. Dead-spell audit.** Walk AbilityCatalog at boot, flag every
+  SPELL whose AbilityEffect list is empty or whose effect_type isn't
+  in the dispatcher's match arms (damage / heal / cleanse / stun /
+  dispel / redirect / stop_combat / create / portal / modify /
+  intercept / extract / dismount / teleport / reveal / knockdown).
+  Today those cast successfully and emit the success line but produce
+  no in-game effect — a content gap that should be visible. Log
+  warn-level on boot with the list. The content fix lives in fierylib
+  (data side); see `fierylib/remaining_work.md` §K4 follow-up.
 
 ## Sequencing recommendation
 
