@@ -339,11 +339,11 @@ fold in the dynamic-exponent legacy scaling.
   `invoke_ability`. Pair with the `lifesteal` flag on Vampiric Breath,
   which still routes through `damage` + post-damage `heal`.
 
-- **I5. `target_max_hp`-keyed damage for percent-HP attacks.** Monk
-  chant `SEED_OF_DESTRUCTION` was authored as `max_hp * 0.05` per
-  tick. With I1's `target_max_hp` symbol the formula reverts to
-  `target_max_hp / 20` per tick. Currently slotted as a flat
-  level-scaled formula until then.
+- **I5. `target_max_hp`-keyed damage for percent-HP attacks.** ✅
+  Closed (2026-05-16). With I1's `target_max_hp` symbol live, the
+  DB row for SEED_OF_DESTRUCTION was reverted to its legacy
+  intent: `target_max_hp / 20` per tick. Subsequent percent-HP
+  spells just need to set the same shape — no further engine work.
 
 - **I6. Damage curve coherence sweep.** Independent of the formula
   engine, the existing per-spell damage at modern (0..=100) skill
