@@ -10061,7 +10061,7 @@ pub(crate) fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
                     .by_name
                     .values()
                     .find(|d| d.id == *id)
-                    .map_or_else(|| format!("ability #{id}"), |d| d.plain_name.clone());
+                    .map_or_else(|| format!("ability #{id}"), |d| d.name.clone());
                 let remaining = ready.saturating_duration_since(now).as_secs_f32();
                 (name, remaining)
             })

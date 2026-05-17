@@ -2322,7 +2322,7 @@ pub(crate) fn cmd_astat(world: &mut World, player: Entity, args: &str) {
         });
         let from_str = ability
             .as_ref()
-            .map(|d| format!(" from {}", d.plain_name))
+            .map(|d| format!(" from {}", d.name))
             .unwrap_or_default();
         let dur = if remaining < 0 {
             "permanent".to_string()
