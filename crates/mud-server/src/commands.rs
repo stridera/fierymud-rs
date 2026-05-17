@@ -3050,6 +3050,31 @@ mod tests {
             evaluate_formula("base + sp / 2", &FormulaCtx { spell_power: 40, base_damage: 10, ..FormulaCtx::default() }, &mut zero),
             Some(30),
         );
+        // H.5 part 1: alignment-keyed spells. caster_align /
+        // victim_align (with the alignment alias) resolve. Used by
+        // DIVINE_RAY / HELL_BOLT / EXORCISM family once their
+        // formulas are rewritten in integer math (follow-up).
+        let ctx_align = FormulaCtx {
+            caster_align: 500,
+            victim_align: -800,
+            ..FormulaCtx::default()
+        };
+        assert_eq!(evaluate_formula("caster_align", &ctx_align, &mut zero), Some(500));
+        assert_eq!(evaluate_formula("caster_alignment", &ctx_align, &mut zero), Some(500));
+        assert_eq!(evaluate_formula("victim_align", &ctx_align, &mut zero), Some(-800));
+        assert_eq!(evaluate_formula("target_align", &ctx_align, &mut zero), Some(-800));
+        // Sample "good caster boost" shape:
+        //   base * (caster_align + 200) / 1000
+        // At base=100, caster_align=500 → 100 * 700 / 1000 = 70
+        let ctx_align_base = FormulaCtx {
+            base_damage: 100,
+            caster_align: 500,
+            ..FormulaCtx::default()
+        };
+        assert_eq!(
+            evaluate_formula("base * (caster_align + 200) / 1000", &ctx_align_base, &mut zero),
+            Some(70),
+        );
     }
 
     /// A7: per-element resistance application.
@@ -11096,6 +11121,9 @@ pub(crate) fn invoke_ability_with(
     let caster_spell_power = world
         .get::<CombatStats>(player)
         .map_or(0, |cs| cs.spell_power);
+    let caster_align = world
+        .get::<CombatStats>(player)
+        .map_or(0, |cs| cs.alignment);
     let formula_ctx = FormulaCtx {
         level: caster_level,
         skill: caster_skill,
@@ -11108,6 +11136,8 @@ pub(crate) fn invoke_ability_with(
         cha_bonus: CoreStats::bonus(caster_stats.charisma),
         hidden: caster_hidden,
         spell_power: caster_spell_power,
+        caster_align,
+        victim_align: 0, // populated per-target at apply time
         base_damage,
     };
     let effect_specs: Vec<EffectSpec> = {
@@ -11231,13 +11261,25 @@ pub(crate) fn invoke_ability_with(
                     .get::<mud_world::Resistances>(target_entity)
                     .map(|r| r.0.clone())
                     .unwrap_or_default();
+                // H.5 part 1: populate victim_align from the
+                // resolved target so alignment-keyed spells
+                // (smite-good / smite-evil shapes) can read it
+                // out of FormulaCtx. Cheap clone — the rest of
+                // the ctx stays shared.
+                let target_align = world
+                    .get::<CombatStats>(target_entity)
+                    .map_or(0, |cs| cs.alignment);
+                let per_target_ctx = FormulaCtx {
+                    victim_align: target_align,
+                    ..formula_ctx
+                };
                 let mut amount = if components.is_empty() {
                     // Resolve raw amount, then apply the spec's
                     // element resistance.
                     let raw = resolve_effect_amount(
                         spec.override_params.as_ref(),
                         Some(&spec.default_params),
-                        &formula_ctx,
+                        &per_target_ctx,
                     )
                     .unwrap_or(0);
                     let element = resolve_damage_element(
@@ -11256,7 +11298,7 @@ pub(crate) fn invoke_ability_with(
                     for c in &components {
                         let raw = evaluate_simple_formula_ctx(
                             &normalize_dice_notation(&c.damage_formula),
-                            &formula_ctx,
+                            &per_target_ctx,
                         )
                         .unwrap_or(0);
                         let scaled = raw.saturating_mul(c.percentage) / 100;
@@ -13265,6 +13307,17 @@ pub(crate) struct FormulaCtx {
     /// additive % multiplier on magical damage/heal at the apply
     /// step. Mirrors how `attack_power` boosts melee swings.
     spell_power: i32,
+    /// Caster's `CombatStats.alignment` (-1000..=+1000). Read by
+    /// alignment-keyed spells (DIVINE_RAY, HELL_BOLT, EXORCISM)
+    /// whose damage multiplier scales with the caster's morality.
+    /// Formulas typically use `(caster_align + 200) / 1000` shape
+    /// for "good casters get a boost"; negative results clamp to
+    /// zero damage at the apply step.
+    caster_align: i32,
+    /// Target's `CombatStats.alignment`. Same range. Read by
+    /// "smite evil" / "smite good" spells where damage scales with
+    /// the victim's morality.
+    victim_align: i32,
     /// Spell-baseline damage: `level + spell_circle * 2 +
     /// max(int_bonus, wis_bonus)`. Computed at invoke time when
     /// the caster's class + ability spell circle are known. Most
@@ -13302,6 +13355,8 @@ impl FormulaCtx {
             "cha_bonus" | "cha" => Some(self.cha_bonus),
             "hidden" => Some(self.hidden),
             "spell_power" | "sp" => Some(self.spell_power),
+            "caster_align" | "caster_alignment" => Some(self.caster_align),
+            "victim_align" | "victim_alignment" | "target_align" => Some(self.victim_align),
             "base_damage" | "base" => Some(self.base_damage),
             _ => None,
         }
