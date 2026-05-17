@@ -131,6 +131,24 @@ Follow-ups surfaced this pass:
   resolved cleanly (hit chances ~28-33%, damage breakdown
   rendered, aggro flipped, peaceful-room gate held, flee moved
   correctly).
+- **I.8 DB drift from `fierylib/data/abilities.json`.** The JSON
+  is the source of truth (see the "ALL conversions happen in
+  fierylib" rule). The H.5 / I-section rewrites updated the
+  JSON but the DB rows for several ability damage formulas
+  still carry the pre-rewrite forms with English-prose
+  trailing fragments that the evaluator silently fails to parse,
+  falling through to default damage. Two surfaced this pass:
+  - `Color Spray`: was `(pow(skill,2)*1)/200, max ~190` →
+    patched to JSON's `4d19 + pow(skill, 1.30)`.
+  - `Vampiric Breath`: was `base_damage + roll_dice(2, skill +
+    10), +random(0,70) if skill>=95` → patched to the now-
+    grammatical `base_damage + roll_dice(2, skill + 10) +
+    if(skill - 94, random(0, 70), 0)` (the I2 `if` builtin
+    lets the gated bonus survive translation).
+  All 13 spells the H/I sections name should be re-synced from
+  JSON via a `fierylib seed abilities` (or equivalent) on the
+  next full-reset import. Until then, hand-patches like the
+  two above keep the live DB consistent with the source.
 - **I.7 Semantic color tags rendered as literal text.** ✅
   Resolved. Content authors write `<healing>...</>`,
   `<fire>...</>`, etc. in ability + object descriptions
