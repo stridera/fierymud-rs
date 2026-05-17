@@ -11,23 +11,23 @@ Each item has:
 
 User flagged as the next session. Combat data is wired end-to-end and tests pass, but the math hasn't been balance-tuned against the design spec.
 
-- **A1. `hit_chance_pct` magnitudes vs spec.** Current code is the proper d100 contest (`50 + (accuracy - evasion) / 2`, clamped 1..=99), but the magnitudes weren't compared against `docs/design/combat.md` targets. Run a sweep of expected hit-rates at level brackets, compare to legacy. ✅ Partially addressed by §7/§8 gear-curves sweeps + class-tier acc/eva rates.
-- **A2. `attack_power` flat vs % multiplier.** Decided: AP applies as additive % multiplier (`base * (1 + AP/100)`). Implemented in `combat.rs::apply_swing` line ~813. ✅ Closed.
-- **A4. `posture_evasion_penalty` values (10/20/25/30) need playtesting.** Replaces the legacy 2/4/5/6 AC penalty — different scale, behavior likely tilted.
-- **A5. `spell_power` has no consumer.** Magical abilities route through the `is_magical` flag, but the damage-formula path doesn't read `spell_power` yet. Wire alongside the SPELL/CHANT damage step.
-- **A6. `perception` / `concealment` not consumed.** Loaded on mobs + characters; no see/hide combat step exists yet. Pipeline step needed.
-- **A7. `resistances` JSON per-element step pending.** Resistances are loaded on mobs + characters + objects, but the combat pipeline doesn't apply them per damage type. Step ~5 of the combat pipeline per `combat.md`.
+- **A1. `hit_chance_pct` magnitudes vs spec.** ✅ Closed — §7/§8 gear-curves sweeps + class-tier acc/eva rates address it.
+- **A2. `attack_power` flat vs % multiplier.** ✅ Closed — additive % multiplier shipped in `combat.rs::apply_swing`.
+- **A4. `posture_evasion_penalty` values (10/20/25/30).** ✅ Locked by regression test (`posture_evasion_penalty_table`). Adjust if playtest finds them tilted.
+- **A5. `spell_power` consumer.** ✅ Closed — magical spell damage + heal scale by `(100 + spell_power) / 100`.
+- **A6. `perception` / `concealment` consumer.** ✅ Closed — stealth opening-strike grants +acc/+dmg, softened by defender's perception; Stealth clears after the first swing.
+- **A7. `resistances` per-element pipeline step.** ✅ Closed — `apply_resistance` mitigates per-element on both single-spec and multi-component damage paths.
 
 ## B — Parity-critical wires (legacy MUD feature gaps)
 
 Features the legacy MUD had that we still need.
 
-- **B1. Object decay tick** (`Object.timer`, `Object.decompose_timer`). Items with positive timers tick down every N seconds; at zero, the item decomposes (per `ITEM_DECOMPOSING` flag) and is destroyed. `ITEM_PERMANENT` skips the tick. Scope: new tick in `mud-server`, ~50 lines.
-- **B2. Bashable doors** (`RoomExit.hit_points`). The bash skill drives a door's HP down; at zero, the door is destroyed. Needs the bash skill to exist; once it does, this is a 1-line check.
+- **B1. Object decay tick** ✅ Closed — `item_decay_tick` decrements `ItemTimer` and destroys at zero (PERMANENT skipped).
+- **B2. Bashable doors** (`RoomExit.hit_points`). Deferred — needs `ExitData.hit_points` plumbed through the loader before the bash handler can decrement.
 - **B3. Mob.aggressionFormula** (Lua expression for varied aggro). Replaces hardcoded `AGGR_EVIL`/`AGGR_GOOD` etc. flags with per-mob Lua. Scope: load on Mob struct + eval at the wander/aggro tick site in `mud-server`.
-- **B4. RaceSpellSlotBonus** (per-race +N slots for a circle). Loaded via a new module, folded into the spell-slot cap calculation when the slot system tracks circle pools.
-- **B5. LevelDefinition.permissions** (level-granted permission flags). On level-up, union the level's permission list into the character's `permissions` array. Hooks: `combat::check_level_up`.
-- **B6. Object equip restrictions** (`allowed_races`, `min_size`, `max_size`). Inclusive race-list + size-band on `wear`. The schema is there; the gate goes in `equip_apply.rs` next to the existing `restricted_*` checks.
+- **B4. RaceSpellSlotBonus** (per-race +N slots for a circle). Loaded via a new module, folded into the spell-slot cap calculation when the slot system tracks circle pools. **Blocker:** 0 rows in DB; defer until content lands.
+- **B5. LevelDefinition.permissions** ✅ Closed — on level-up, the row's permissions union into `Account.perms` with a player-facing notification.
+- **B6. Object equip restrictions** ✅ Closed — `allowed_races` + `min_size` + `max_size` gated in the wear handler; surfaced on `identify` under a "Requirements" section.
 
 ## C — Builder-authored flavor text catalogs
 
