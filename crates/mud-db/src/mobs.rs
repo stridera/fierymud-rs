@@ -108,6 +108,15 @@ pub struct Mob {
     /// respawns from this proto. Tracks "this is how this creature
     /// fundamentally moves" — flying drakes always come back flying.
     pub default_movement_mode: MovementMode,
+    /// Lua expression evaluated against entering players to decide
+    /// whether this mob attacks on sight. None / empty → never
+    /// aggressive. ~28% of mobs author a formula like
+    /// `target.alignment >= ALIGN.GOOD` (alignment-keyed) or
+    /// literal `true` (universally aggressive). The runtime
+    /// consumer (aggression tick) isn't wired yet; this loads
+    /// the column so `inspect mob` can surface it and so a
+    /// future tick has the data ready.
+    pub aggression_formula: Option<String>,
 }
 
 pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
@@ -158,7 +167,8 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             "defaultPosition" AS "default_position!: Position",
             traits AS "traits!: Vec<MobTrait>",
             movement_mode AS "movement_mode!: MovementMode",
-            default_movement_mode AS "default_movement_mode!: MovementMode"
+            default_movement_mode AS "default_movement_mode!: MovementMode",
+            aggression_formula
         FROM "Mobs"
         ORDER BY zone_id, id
         "#

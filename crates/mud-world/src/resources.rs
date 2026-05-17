@@ -2104,6 +2104,12 @@ pub struct MobProto {
     /// Reset / re-spawn movement mode. Re-applied each respawn so
     /// a flying drake always comes back airborne.
     pub default_movement_mode: mud_db::enums::MovementMode,
+    /// Lua expression evaluated against entering players to decide
+    /// whether this mob attacks on sight. `None` / empty → never
+    /// aggressive. See `Mob.aggression_formula` (col on `Mobs`)
+    /// for the source. Tick consumer not yet wired; column is
+    /// loaded so the data is available for inspect + future work.
+    pub aggression_formula: Option<String>,
 }
 
 impl MobProto {

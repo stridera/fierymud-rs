@@ -1951,5 +1951,6 @@ fn inspect_mob(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
         "ward_percent": p.ward_percent,
         "wealth": p.wealth,
         "class_id": p.class_id,
+        "aggression_formula": p.aggression_formula,
     }))
 }

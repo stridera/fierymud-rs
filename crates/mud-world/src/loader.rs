@@ -313,6 +313,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 traits: row.traits,
                 movement_mode: row.movement_mode,
                 default_movement_mode: row.default_movement_mode,
+                aggression_formula: row
+                    .aggression_formula
+                    .filter(|s| !s.trim().is_empty()),
             },
         );
     }
