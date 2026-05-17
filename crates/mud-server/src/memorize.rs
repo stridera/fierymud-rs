@@ -62,15 +62,43 @@ pub fn memorize_tick(world: &mut World) {
             if meditating.is_some() {
                 delta *= 2;
             }
+            // Sequential per-circle recovery: each circle's queue
+            // ticks one entry at a time. Casting seven circle-1
+            // spells now stretches into a 30s + 30s + ... ladder
+            // instead of all seven completing on the same tick;
+            // strategic pacing matters. Different circles regenerate
+            // in parallel — a mage's circle-6 nuke still recovers
+            // while the circle-1 backlog drains. Find the
+            // already-most-recovered entry per circle (smallest
+            // secs_remaining) and only that entry takes the delta.
+            let mut indices_to_tick: std::collections::HashMap<i32, (usize, i32)> =
+                std::collections::HashMap::new();
+            for (i, cd) in slots.in_flight.iter().enumerate() {
+                let entry = indices_to_tick
+                    .entry(cd.circle)
+                    .or_insert((i, cd.secs_remaining));
+                if cd.secs_remaining < entry.1 {
+                    *entry = (i, cd.secs_remaining);
+                }
+            }
+            let tick_indices: std::collections::HashSet<usize> =
+                indices_to_tick.values().map(|(i, _)| *i).collect();
             let mut just_restored: Vec<i32> = Vec::new();
+            let mut idx = 0;
             slots.in_flight.retain_mut(|cd| {
-                cd.secs_remaining -= delta;
-                if cd.secs_remaining <= 0 {
-                    just_restored.push(cd.circle);
-                    false
+                let keep = if tick_indices.contains(&idx) {
+                    cd.secs_remaining -= delta;
+                    if cd.secs_remaining <= 0 {
+                        just_restored.push(cd.circle);
+                        false
+                    } else {
+                        true
+                    }
                 } else {
                     true
-                }
+                };
+                idx += 1;
+                keep
             });
             if !just_restored.is_empty() {
                 restored.push((entity, just_restored));

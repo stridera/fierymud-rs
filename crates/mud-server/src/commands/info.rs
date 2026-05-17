@@ -2579,6 +2579,113 @@ fn render_ability_help(world: &mut World, player: Entity, def: &mud_world::Abili
     send_to(world, player, out);
 }
 
+/// `help <class>` body — surfaces a class's prose description, the
+/// stat identity line (primary stat / hit dice / per-level HP), and
+/// inventories its toolkit. Spells grouped by circle, skills grouped
+/// by introduction level. Lets a player picking a character read the
+/// full kit in one screen instead of cross-referencing `spells` /
+/// `practice` after creation.
+fn render_class_help(world: &mut World, player: Entity, def: &mud_world::ClassDef) {
+    let mode = color_mode_for(world, player);
+    let mut out = format!(
+        "\r\n<b:cyan>{}</> <dim>(class)</>\r\n",
+        render_color_tags(&def.name, mode),
+    );
+    if let Some(d) = def.description.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push_str(&format!("\r\n{}\r\n", render_color_tags(d.trim(), mode)));
+    }
+    out.push_str("\r\n  <cyan>Hit dice:</> ");
+    out.push_str(&def.hit_dice);
+    out.push_str(&format!("   <cyan>HP/level:</> {}", def.hp_per_level));
+    if let Some(p) = def.primary_stat.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("   <cyan>Primary stat:</> {p}"));
+    }
+    if def.is_subclass
+        && let Some(pid) = def.parent_class_id
+        && let Some(parent) = world
+            .resource::<mud_world::ClassCatalog>()
+            .by_id
+            .get(&pid)
+    {
+        out.push_str(&format!("\r\n  <dim>Subclass of {}</>", parent.plain_name));
+    }
+    out.push_str("\r\n");
+    // Per-class ability inventories. Walk catalogs in one pass so a
+    // class with no entries in either table skips the section header.
+    let ability_circles: Vec<(i32, i32)> = world
+        .resource::<mud_world::SpellSlotData>()
+        .ability_circle
+        .iter()
+        .filter(|((cid, _), _)| *cid == def.id)
+        .map(|((_, aid), c)| (*aid, *c))
+        .collect();
+    if !ability_circles.is_empty() {
+        // Group by circle, then sort each circle's name list. Pull
+        // the display name from AbilityCatalog.by_id — we walk by_name
+        // here because that's the existing index keyed by plain_name.
+        let ability_catalog = world.resource::<mud_world::AbilityCatalog>();
+        let by_id: std::collections::HashMap<i32, &mud_world::AbilityDef> = ability_catalog
+            .by_name
+            .values()
+            .map(|d| (d.id, d))
+            .collect();
+        let mut by_circle: std::collections::BTreeMap<i32, Vec<String>> = std::collections::BTreeMap::new();
+        for (aid, circle) in ability_circles {
+            if let Some(a) = by_id.get(&aid) {
+                by_circle.entry(circle).or_default().push(a.name.clone());
+            }
+        }
+        out.push_str("\r\n  <cyan>Spells</> <dim>(by circle):</>\r\n");
+        for (circle, mut names) in by_circle {
+            names.sort_unstable();
+            out.push_str(&format!(
+                "    <b:yellow>Circle {circle:>2}</> <dim>({})</>: {}\r\n",
+                names.len(),
+                names
+                    .iter()
+                    .map(|n| render_color_tags(n, mode))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+    }
+    let skill_entries: Vec<(i32, i32)> = world
+        .resource::<mud_world::ClassSkillsData>()
+        .min_level
+        .iter()
+        .filter(|((cid, _), _)| *cid == def.id)
+        .map(|((_, aid), lvl)| (*aid, *lvl))
+        .collect();
+    if !skill_entries.is_empty() {
+        let ability_catalog = world.resource::<mud_world::AbilityCatalog>();
+        let by_id: std::collections::HashMap<i32, &mud_world::AbilityDef> = ability_catalog
+            .by_name
+            .values()
+            .map(|d| (d.id, d))
+            .collect();
+        let mut by_level: std::collections::BTreeMap<i32, Vec<String>> = std::collections::BTreeMap::new();
+        for (aid, lvl) in skill_entries {
+            if let Some(a) = by_id.get(&aid) {
+                by_level.entry(lvl).or_default().push(a.name.clone());
+            }
+        }
+        out.push_str("\r\n  <cyan>Skills</> <dim>(min level):</>\r\n");
+        for (lvl, mut names) in by_level {
+            names.sort_unstable();
+            out.push_str(&format!(
+                "    <b:yellow>L{lvl:>2}</> <dim>({})</>: {}\r\n",
+                names.len(),
+                names
+                    .iter()
+                    .map(|n| render_color_tags(n, mode))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+    }
+    send_to(world, player, out);
+}
+
 /// Player-side help: every category except Admin.
 pub(crate) fn cmd_help(world: &mut World, player: Entity, args: &str) {
     run_help(world, player, args, HelpScope::Player);
@@ -2810,6 +2917,22 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
         .cloned();
     if let Some(def) = ability_def {
         render_ability_help(world, player, &def);
+        return;
+    }
+
+    // Class-name fallback. `help warrior` / `help sorcerer` etc.
+    // surfaces the class's description, primary stat, hit dice, and
+    // an inventory of its spells (grouped by circle) and skills
+    // (grouped by introduction level). Helps new players pick a
+    // class. Lookup is case-insensitive on `Class.plain_name`.
+    let class_def = world
+        .resource::<mud_world::ClassCatalog>()
+        .by_id
+        .values()
+        .find(|c| c.plain_name.eq_ignore_ascii_case(topic.as_str()))
+        .cloned();
+    if let Some(def) = class_def {
+        render_class_help(world, player, &def);
         return;
     }
 
