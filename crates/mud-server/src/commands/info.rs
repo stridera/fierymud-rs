@@ -10355,21 +10355,45 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     } else {
         format!("\r\n<b:cyan>{} active effect(s):</>\r\n", active.len())
     };
+    // Local prettifier: underscored ability enums ("DETECT_MAGIC",
+    // "detect_magic") render as "Detect Magic" — the existing
+    // `capitalize` helper joins with `-` because it's also used for
+    // race names like HALF_ELF, so we can't share it here.
+    fn pretty_ability(raw: &str) -> String {
+        raw.split('_')
+            .map(|seg| {
+                let mut chars = seg.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(c) => {
+                        let head = c.to_ascii_uppercase().to_string();
+                        let tail: String = chars.as_str().to_ascii_lowercase();
+                        head + &tail
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
     let catalog = world.resource::<AbilityCatalog>();
     for (name, remaining, ability_id, delta_amount) in active {
+        let pretty_name = pretty_ability(&name);
         // Look up the spawning ability's plain_name when known so
-        // players can see "bleed (45s) — from REND" instead of
+        // players can see "Bleed (45s) — from Rend" instead of
         // just the bare effect tag.
         let from = ability_id.and_then(|id| {
             catalog
                 .by_name
                 .values()
                 .find(|d| d.id == id)
-                .map(|d| d.plain_name.clone())
+                .map(|d| pretty_ability(&d.plain_name))
         });
         // Source attribution dimmed — supplemental, not the focus.
+        // Suppress when it'd just echo the effect name (`detect_magic`
+        // from DETECT_MAGIC capitalizes to the same string).
         let suffix = from
             .as_deref()
+            .filter(|n| *n != pretty_name)
             .map_or(String::new(), |n| format!(" <dim>— from {n}</>"));
         // Modifier delta colored by sign — green for buffs, red for
         // debuffs. A bless (+2 STR) reads green; a curse (-3 DEX)
@@ -10387,7 +10411,7 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
             // Permanent effects (innate racials, divine boons, etc.)
             // get a bold-cyan tag — they're not on the clock.
             out.push_str(&format!(
-                "  <b:cyan>{name}</>{delta_label} <b:cyan>(permanent)</>{suffix}\r\n"
+                "  <b:cyan>{pretty_name}</>{delta_label} <b:cyan>(permanent)</>{suffix}\r\n"
             ));
         } else {
             // Render long durations as "37m" / "2h15m" instead of
@@ -10402,7 +10426,7 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
                 None => format_idle(secs),
             };
             out.push_str(&format!(
-                "  <cyan>{name}</>{delta_label} ({dur_label} remaining){suffix}\r\n"
+                "  <cyan>{pretty_name}</>{delta_label} ({dur_label} remaining){suffix}\r\n"
             ));
         }
     }

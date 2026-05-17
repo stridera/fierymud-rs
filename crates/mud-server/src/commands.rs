@@ -11709,6 +11709,7 @@ pub(crate) fn invoke_ability_with(
                 if reagent_boost_pct > 0 {
                     dur_secs = dur_secs.saturating_add(dur_secs * reagent_boost_pct / 100);
                 }
+                refresh_existing_effect(world, target_entity, &spec.name, def.id);
                 world.spawn((
                     EffectInstance {
                         kind: spec.id,
@@ -11924,12 +11925,19 @@ pub(crate) fn invoke_ability_with(
                     }
                     _ => None,
                 };
+                // Refresh-on-recast: reverse any existing delta from
+                // the same ability before stamping the fresh effect,
+                // so Enhance Ability doesn't stack into +28 cha after
+                // two casts (the helper reverse-applies the prior
+                // ModifyDelta before despawning).
+                let display_name = target_stat
+                    .clone()
+                    .unwrap_or_else(|| spec.name.clone());
+                refresh_existing_effect(world, target_entity, &display_name, def.id);
                 let mut bundle = world.spawn((
                     EffectInstance {
                         kind: spec.id,
-                        name: target_stat
-                            .clone()
-                            .unwrap_or_else(|| spec.name.clone()),
+                        name: display_name,
                         strength: applied_amount.unwrap_or(0),
                         remaining_secs: dur_secs,
                         source: EffectSource::Spell,
@@ -12123,6 +12131,10 @@ pub(crate) fn invoke_ability_with(
                 if reagent_boost_pct > 0 {
                     dur_secs = dur_secs.saturating_add(dur_secs * reagent_boost_pct / 100);
                 }
+                // Refresh-on-recast: clear any existing instance from
+                // the same ability so casting Detect Magic / Bless
+                // twice doesn't pile up duplicate effect-list entries.
+                refresh_existing_effect(world, target_entity, &spec.name, def.id);
                 world.spawn((
                     EffectInstance {
                         kind: spec.id,
@@ -14205,6 +14217,47 @@ pub(crate) fn try_insert<C: bevy_ecs::component::Component>(
 ) {
     if let Ok(mut em) = world.get_entity_mut(e) {
         em.insert(c);
+    }
+}
+
+/// Despawn any existing `EffectInstance` children on `target` whose
+/// name matches `name` (case-insensitive) and whose `ability_id`
+/// matches. Reverses each match's `ModifyDelta` first so a re-cast
+/// buff doesn't leave behind double-stacked stat modifiers. Used by
+/// the cast pipeline's effect-spawn arms so re-casting Detect Magic,
+/// Bless, Enhance Ability, etc. refreshes the existing buff rather
+/// than piling up duplicate list entries (or stacked stat deltas).
+pub(crate) fn refresh_existing_effect(
+    world: &mut World,
+    target: Entity,
+    name: &str,
+    ability_id: i32,
+) {
+    let name_lc = name.to_ascii_lowercase();
+    let matches: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, eff, app)| {
+                app.0 == target
+                    && eff.ability_id == Some(ability_id)
+                    && eff.name.eq_ignore_ascii_case(&name_lc)
+            })
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    for matched in matches {
+        // Reverse any stat-delta companion before despawning. The
+        // expiry tick normally handles undo via the same component;
+        // we shortcut here because the despawn skips that path.
+        let delta = world
+            .get::<mud_world::ModifyDelta>(matched)
+            .cloned();
+        if let Some(d) = delta {
+            apply_modify_delta(world, target, &d.target, -d.amount);
+        }
+        if let Ok(em) = world.get_entity_mut(matched) {
+            em.despawn();
+        }
     }
 }
 
