@@ -6468,7 +6468,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 .get::<mud_world::CharacterAchievements>(player)
                 .map_or(0, |a| {
                     a.unlocked
-                        .iter()
+                        .keys()
                         .filter(|id| catalog.by_id.get(id).is_some_and(|d| d.hidden))
                         .count()
                 });
@@ -10182,7 +10182,7 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
 pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
     use mud_db::enums::AchievementCategory;
     let filter = args.trim().to_ascii_lowercase();
-    let unlocked = world
+    let unlocked: std::collections::HashMap<i32, chrono::DateTime<chrono::Utc>> = world
         .get::<mud_world::CharacterAchievements>(player)
         .map(|c| c.unlocked.clone())
         .unwrap_or_default();
@@ -10215,7 +10215,8 @@ pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
         {
             continue;
         }
-        let is_unlocked = unlocked.contains(&def.id);
+        let unlocked_at = unlocked.get(&def.id).copied();
+        let is_unlocked = unlocked_at.is_some();
         if def.hidden && !is_unlocked {
             continue;
         }
@@ -10224,8 +10225,11 @@ pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
             out.push_str(&format!("\r\n  --- {} ---\r\n", def.category.label()));
         }
         let mark = if is_unlocked { "[*]" } else { "[ ]" };
+        let when = unlocked_at
+            .map(|t| format!("  <dim>(unlocked {})</>", t.format("%Y-%m-%d")))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "  {mark} {} — {}\r\n",
+            "  {mark} {} — {}{when}\r\n",
             def.title, def.description,
         ));
         shown += 1;

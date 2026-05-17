@@ -76,7 +76,7 @@ Features that don't exist in legacy. Per user's "wire if it's an improvement" ru
 - **E9. Ability metadata** — `pages` (spellbook), `memorization_time`, `quest_only`, `humanoid_only`, `is_toggle`, `contested_visibility`, `visibility_check`, `notes`, `tags`, `lua_script`, `school_id`. Spellbook system + Lua hooks.
 - **E10. AbilityRestrictions.custom_requirement_lua** — dynamic ability gating.
 - **E11. CharacterAbilities.last_used** — cooldown integration.
-- **E12. Achievement.unlocked_at** — surface in `achievements` listing.
+- **E12. Achievement.unlocked_at** ✅ Closed — `CharacterAchievements.unlocked` is now `HashMap<i32, DateTime<Utc>>`; `achievements` listing renders `(unlocked YYYY-MM-DD)` next to unlocked rows. Virtual sessions also hydrate achievements so admin playtests see the same state real-telnet logins do.
 - **E13. Trigger validation metadata** (`needs_review`, `syntax_error`) — Muditor reads these; runtime could log on trigger load.
 - **E14. Shop spawn controls** — `spawn_chance`, `visibility_requirement`, `purchase_requirement` on ShopItems / ShopMobs.
 - **E15. Discord bot (Muditor-side)** — consumes `PendingDiscordLinks`, posts to `DiscordConfig` channels. fierymud-rs has the hooks; the bot itself is web/Muditor work.

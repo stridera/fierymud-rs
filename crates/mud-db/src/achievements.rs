@@ -26,6 +26,7 @@ pub struct AchievementRow {
 pub struct CharacterAchievementRow {
     pub character_id: String,
     pub achievement_id: i32,
+    pub unlocked_at: chrono::NaiveDateTime,
     pub progress: Option<serde_json::Value>,
 }
 
@@ -56,7 +57,7 @@ pub async fn unlocked_for(
     sqlx::query_as!(
         CharacterAchievementRow,
         r#"
-        SELECT character_id, achievement_id, progress
+        SELECT character_id, achievement_id, unlocked_at, progress
         FROM character_achievement
         WHERE character_id = $1
         "#,

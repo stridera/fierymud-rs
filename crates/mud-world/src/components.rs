@@ -94,13 +94,15 @@ pub struct HouseGuestEntry {
     pub can_place: bool,
 }
 
-/// Set of achievement ids the player has unlocked, loaded once at
-/// login. Mutated in-place when a fresh achievement is granted;
-/// the DB is the source of truth across restart. v1 holds ids
-/// only — the catalog provides title/description for render.
+/// Achievement ids the player has unlocked, mapped to the
+/// `unlocked_at` wall-clock timestamp from the DB. Loaded once at
+/// login; mutated in-place when a fresh achievement is granted
+/// (the runtime stamps `Utc::now()` and fire-and-forget upserts the
+/// row). The DB is the source of truth across restart. The catalog
+/// provides title/description for render.
 #[derive(Component, Debug, Clone, Default)]
 pub struct CharacterAchievements {
-    pub unlocked: std::collections::HashSet<i32>,
+    pub unlocked: std::collections::HashMap<i32, chrono::DateTime<chrono::Utc>>,
 }
 
 /// Per-player set of `(zone_id -> visited room local ids)` used by

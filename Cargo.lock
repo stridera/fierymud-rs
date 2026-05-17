@@ -1638,6 +1638,7 @@ name = "mud-world"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "chrono",
  "mud-db",
  "rand 0.10.1",
  "serde",

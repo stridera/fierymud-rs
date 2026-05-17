@@ -5889,23 +5889,24 @@ pub(crate) fn grant_achievement(world: &mut World, player: Entity, code: &str) {
     // Already-unlocked check via the in-memory component.
     let already = world
         .get::<mud_world::CharacterAchievements>(player)
-        .is_some_and(|c| c.unlocked.contains(&def.id));
+        .is_some_and(|c| c.unlocked.contains_key(&def.id));
     if already {
         return;
     }
     // Update in-memory state immediately so back-to-back grants
     // (same code from two simultaneous events) collapse to one
     // notification + one DB write.
+    let now = chrono::Utc::now();
     let has_component = world
         .get::<mud_world::CharacterAchievements>(player)
         .is_some();
     if has_component {
         if let Some(mut c) = world.get_mut::<mud_world::CharacterAchievements>(player) {
-            c.unlocked.insert(def.id);
+            c.unlocked.insert(def.id, now);
         }
     } else {
         let mut ca = mud_world::CharacterAchievements::default();
-        ca.unlocked.insert(def.id);
+        ca.unlocked.insert(def.id, now);
         try_insert(world, player, ca);
     }
     // Fire-and-forget DB write. The character_id lives on Account.

@@ -2348,7 +2348,7 @@ impl ConnRouter {
 /// Pulls room counts from `WorldKeyIndex` and code lookup from
 /// `AchievementCatalog`; both must already be installed as
 /// resources by the loader.
-fn build_achievement_components(
+pub(crate) fn build_achievement_components(
     world: &World,
     rows: &[mud_db::achievements::CharacterAchievementRow],
 ) -> (mud_world::CharacterAchievements, mud_world::ZoneVisits) {
@@ -2396,13 +2396,13 @@ fn build_achievement_components(
                 .unwrap_or_default();
             let total = zone_room_counts.get(&n).copied().unwrap_or(0);
             if total > 0 && visited.len() >= total {
-                ca.unlocked.insert(row.achievement_id);
+                ca.unlocked.insert(row.achievement_id, row.unlocked_at.and_utc());
             }
             if !visited.is_empty() {
                 zv.by_zone.insert(n, visited);
             }
         } else {
-            ca.unlocked.insert(row.achievement_id);
+            ca.unlocked.insert(row.achievement_id, row.unlocked_at.and_utc());
         }
     }
     (ca, zv)

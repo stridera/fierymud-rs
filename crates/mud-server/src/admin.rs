@@ -96,6 +96,7 @@ pub enum AdminRequest {
         items: Vec<character_items::CharacterItemRow>,
         abilities: Vec<mud_db::character_abilities::CharacterAbilityRow>,
         aliases: Vec<mud_db::character_aliases::CharacterAliasRow>,
+        achievements: Vec<mud_db::achievements::CharacterAchievementRow>,
         script_vars_json: Option<serde_json::Value>,
         trophy_json: Option<serde_json::Value>,
         spell_cooldowns_json: Option<serde_json::Value>,
@@ -382,6 +383,9 @@ async fn handle_session_create(
     let aliases = mud_db::character_aliases::list_for(&state.pool, &character.id)
         .await
         .unwrap_or_default();
+    let achievements = mud_db::achievements::unlocked_for(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
     let script_vars_json = characters::load_script_vars(&state.pool, &character.id)
         .await
         .unwrap_or_default();
@@ -410,6 +414,7 @@ async fn handle_session_create(
                 items,
                 abilities,
                 aliases,
+                achievements,
                 script_vars_json,
                 trophy_json,
                 spell_cooldowns_json,
@@ -821,11 +826,11 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::LookRoom { zone_id, id } => look_room(world, zone_id, id),
         AdminRequest::InspectActor { name } => inspect_actor(world, &name),
         AdminRequest::SessionCreate {
-            player_name, user, character, items, abilities, aliases,
+            player_name, user, character, items, abilities, aliases, achievements,
             script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
             ignore_list_json, effect_instances_json,
         } => session_create(
-            world, &player_name, &user, &character, &items, &abilities, &aliases,
+            world, &player_name, &user, &character, &items, &abilities, &aliases, &achievements,
             script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
             ignore_list_json, effect_instances_json,
         ),
@@ -1439,6 +1444,7 @@ fn session_create(
     items: &[character_items::CharacterItemRow],
     abilities: &[mud_db::character_abilities::CharacterAbilityRow],
     aliases: &[mud_db::character_aliases::CharacterAliasRow],
+    achievements: &[mud_db::achievements::CharacterAchievementRow],
     script_vars_json: Option<serde_json::Value>,
     trophy_json: Option<serde_json::Value>,
     spell_cooldowns_json: Option<serde_json::Value>,
@@ -1493,9 +1499,21 @@ fn session_create(
     let ability_count = known_abilities.entries.len();
     let alias_set = mud_world::Aliases::from_rows(aliases);
     let alias_count = alias_set.entries.len();
+    // Achievements: hydrate via the shared login helper so a
+    // virtual session shows the same `achievements` output a
+    // real-telnet login would (E12 — including the unlocked_at
+    // timestamp the renderer surfaces).
+    let (ca_built, zv_built) = crate::login::build_achievement_components(world, achievements);
+    let achievement_count = ca_built.unlocked.len();
     if let Ok(mut e) = world.get_entity_mut(entity) {
         e.insert(known_abilities);
         e.insert(alias_set);
+        if !ca_built.unlocked.is_empty() {
+            e.insert(ca_built);
+        }
+        if !zv_built.by_zone.is_empty() {
+            e.insert(zv_built);
+        }
         if let Some(t) = character.title.as_deref()
             && !t.trim().is_empty()
         {
@@ -1600,6 +1618,7 @@ fn session_create(
         "items_loaded": item_count,
         "abilities_loaded": ability_count,
         "aliases_loaded": alias_count,
+        "achievements_loaded": achievement_count,
         "note": "virtual session spawned standalone (no telnet required); destroy_session despawns",
     }))
 }
