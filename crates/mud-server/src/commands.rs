@@ -11120,16 +11120,26 @@ pub(crate) fn invoke_ability_with(
         } else {
             None
         };
-        let Some(found) = inv_match.or_else(|| find_actor_in_room(world, word, located.0, player))
-        else {
-            send_to(
-                world,
-                player,
-                format!("You don't see '{word}' here to target.\r\n"),
-            );
-            return;
-        };
-        found
+        match inv_match.or_else(|| find_actor_in_room(world, word, located.0, player)) {
+            Some(found) => found,
+            None if !def.violent => {
+                // Non-violent / utility spell with an unresolved arg
+                // (e.g. `cast 'minor creation' bread` — the arg is
+                // recipe content, not a room target). Fall through
+                // to self-cast rather than refusing. Hostile spells
+                // still error so a misspelled enemy keyword can't
+                // silently hit the caster.
+                player
+            }
+            None => {
+                send_to(
+                    world,
+                    player,
+                    format!("You don't see '{word}' here to target.\r\n"),
+                );
+                return;
+            }
+        }
     } else if prefers_rider_default
         && let Some(mud_world::Mounted(mount)) =
             world.get::<mud_world::Mounted>(player).copied()
