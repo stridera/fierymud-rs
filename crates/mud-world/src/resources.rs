@@ -1953,6 +1953,12 @@ pub struct AbilityDef {
     /// routing (vulnerability / resistance application);
     /// not yet surfaced on player-facing readouts.
     pub damage_type: Option<String>,
+    /// Extra seconds of slot cooldown layered on top of
+    /// `CIRCLE_RECOVER_TIME[circle]`. Builder-authored per-spell tax
+    /// — most spells leave this 0 and let the circle table drive
+    /// recovery; expensive spells (Harm, Meteorswarm) can charge a
+    /// premium. Read by the slot-push site in `commands::invoke_ability`.
+    pub memorization_time: i32,
 }
 
 /// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The

@@ -537,6 +537,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 is_magical: row.is_magical,
                 sphere: row.sphere,
                 damage_type: row.damage_type,
+                memorization_time: row.memorization_time,
             },
         );
     }

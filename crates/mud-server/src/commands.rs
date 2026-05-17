@@ -2418,6 +2418,7 @@ mod tests {
             is_magical: true,
             sphere: Some("fire".to_string()),
             damage_type: Some("fire".to_string()),
+            memorization_time: 0,
         };
         let _ = AbilityCatalog::default();
         // The property under test is a one-line conditional; the
@@ -2590,6 +2591,7 @@ mod tests {
                 is_magical: true,
                 sphere: Some("fire".to_string()),
                 damage_type: Some("fire".to_string()),
+                memorization_time: 0,
             },
         );
         world.insert_resource(catalog);
@@ -10844,9 +10846,10 @@ pub(crate) fn invoke_ability_with(
     // for the circle — fizzles still pay the slot ("burn the prep"),
     // matching legacy `charge_mem` semantics.
     //
-    // TODO: also add per-spell `Ability.memorization_time` to the
-    // recover_time. Today the column isn't loaded into AbilityDef;
-    // wire it through if you want fine-grained per-spell prep tax.
+    // Slot cooldown = per-circle base + per-spell `memorization_time`
+    // tax. The circle table covers the bulk; `memorization_time` lets
+    // a builder make Meteorswarm cost a premium beyond its circle-10
+    // baseline without churning the global table.
     if matches!(def.kind, mud_db::abilities::AbilityKind::Spell) {
         let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
         if let Some(class_id) = class_id {
@@ -10880,7 +10883,8 @@ pub(crate) fn invoke_ability_with(
                 let recover = mud_world::CIRCLE_RECOVER_TIME
                     .get(usize::try_from(circle).unwrap_or(0))
                     .copied()
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                    .saturating_add(def.memorization_time);
                 let cd = mud_world::SpellCooldown {
                     circle,
                     secs_remaining: recover,

@@ -98,6 +98,12 @@ pub struct AbilityRow {
     /// affinity / vulnerability routing; not yet surfaced on
     /// player-facing readouts.
     pub damage_type: Option<String>,
+    /// Extra slot-cooldown seconds layered on top of the per-circle
+    /// `CIRCLE_RECOVER_TIME` base. Lets the catalog tax expensive
+    /// spells (`harm`, `meteorswarm`) more than the circle alone
+    /// would suggest. 0 for the vast majority — the base table
+    /// already does most of the work.
+    pub memorization_time: i32,
 }
 
 pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
@@ -120,7 +126,8 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
             target_scope::text AS "target_scope!: String",
             is_magical,
             LOWER(sphere::text) AS "sphere?: String",
-            LOWER(damage_type::text) AS "damage_type?: String"
+            LOWER(damage_type::text) AS "damage_type?: String",
+            memorization_time
         FROM "Ability"
         ORDER BY id
         "#
