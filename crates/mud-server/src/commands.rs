@@ -11825,6 +11825,60 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{} (not in combat)", pretty));
                 }
             }
+            "create" => {
+                // Spawn an Object proto into the caster's inventory.
+                // Used by Create Food / Minor Creation / similar
+                // utility spells. The proto reference lives in
+                // override_params (objectZoneId / objectId); content
+                // without a proto pinned reports a labeled no-op so
+                // the cast still resolves visibly.
+                let proto_zone = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("objectZoneId"))
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|v| i32::try_from(v).unwrap_or(0));
+                let proto_id = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("objectId"))
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|v| i32::try_from(v).unwrap_or(0));
+                let (Some(proto_zone), Some(proto_id)) = (proto_zone, proto_id) else {
+                    applied_msgs.push(format!("{} (no object proto specified)", pretty));
+                    continue;
+                };
+                let proto = world
+                    .resource::<ObjectPrototypes>()
+                    .by_key
+                    .get(&(proto_zone, proto_id))
+                    .cloned();
+                let Some(proto) = proto else {
+                    applied_msgs.push(format!(
+                        "{} (object proto ({proto_zone}, {proto_id}) not loaded)",
+                        pretty
+                    ));
+                    continue;
+                };
+                // Spawn into the caster's inventory rather than the
+                // room — Create Food / Minor Creation produce a
+                // carried item, not a room fixture (portals use the
+                // room-spawn path below).
+                let mut bundle = world.spawn((
+                    Item,
+                    Named { name: proto.name.clone() },
+                    Keywords(proto.keywords.clone()),
+                    WorldKey {
+                        zone: proto.zone_id,
+                        id: proto.id,
+                    },
+                    Located(player),
+                ));
+                if let Some(desc) = proto.examine_description.clone() {
+                    bundle.insert(Description(desc));
+                }
+                applied_msgs.push(format!("{} ({} appears in your hands)", pretty, proto.name));
+            }
             "portal" => {
                 // Spawn a specific Object proto in the caster's room
                 // (Heavens Gate, Hell's Gate, Moonwell). The schema
