@@ -1,21 +1,25 @@
-//! Spell-slot recovery tick. Decrements `secs_remaining` on every
-//! `SpellSlots.in_flight` cooldown for online players, at a rate
-//! that depends on posture: Sleeping fastest, Resting slower,
-//! Sitting slowest, Standing/Kneeling/Fighting halt.
+//! Spell-slot recovery tick. Decrements `secs_remaining` on the
+//! oldest in-flight cooldown per circle for every online caster.
 //!
-//! When a slot's `secs_remaining` hits zero the cooldown is removed
-//! (slot is free again) and the player gets a "Your circle N slot
-//! is restored." line. `cast` reads the same component to check
-//! `used_in_circle(C) < max_for(class, level, C)`.
+//! Rate model:
+//!   posture base    Standing/Kneeling=1, Sitting=2, Resting=3, Sleeping=4
+//!     × Meditating  ×2 (only valid in Sitting/Resting/Kneeling per `cmd_meditate`)
+//!     × Focus       × (100 + Focus) / 100 — each focus point is +1% recover speed
+//!     ÷ Fighting    halved (rounded up) so a caster in a brawl still
+//!                   trickles back slots; pairs with the user-flagged
+//!                   "you don't become useless in a group" intent.
 //!
-//! Mirrors legacy `charge_mem` + the regen event in `spell_mem.cpp` —
-//! the recover-rate dependence on focus/race/class is approximated
-//! today as a flat per-posture multiplier; the legacy
-//! `get_spellslot_restore_rate` formula can be plumbed in later if
-//! the tuning matters.
+//! Per-circle sequential queueing means casting seven circle-1 spells
+//! at once spreads them into a 30/60/90/... recover ladder rather than
+//! all completing on the same tick — strategy matters.
+//!
+//! Mirrors legacy `charge_mem` + the regen event in `spell_mem.cpp`;
+//! the legacy `get_spellslot_restore_rate` formula's race/class branches
+//! aren't modeled, but the multiplier surface (posture / meditate /
+//! focus / combat) is now richer than the early MVP.
 
 use bevy_ecs::prelude::*;
-use mud_world::{Fighting, Meditating, Online, Posture, PostureKind, SpellSlots};
+use mud_world::{Fighting, Focus, Meditating, Online, Posture, PostureKind, SpellSlots};
 
 use crate::TickCount;
 use crate::commands::send_to;
@@ -24,17 +28,37 @@ use crate::commands::send_to;
 const RECOVER_PERIOD_TICKS: u64 = 10;
 
 fn recover_seconds_per_tick(p: PostureKind) -> i32 {
-    // Standing / kneeling tick at the slowest rate so a default-
-    // posture caster still sees a "wait for it to recover" message
-    // resolve. Resting / sleeping scale up to reward sitting down,
-    // matching the legacy "rest to mem faster" intent. Meditating
-    // (handled in the caller) doubles whichever rate applies.
     match p {
         PostureKind::Sleeping => 4,
         PostureKind::Resting => 3,
         PostureKind::Sitting => 2,
         PostureKind::Standing | PostureKind::Kneeling => 1,
     }
+}
+
+/// Apply the meditate/focus/combat multipliers to the posture base.
+/// Returned delta is the number of cooldown-seconds drained on this
+/// tick. Always ≥ 0; clamped to ≥ 1 for active casters (otherwise
+/// a tiny base with the combat halver would zero out and casters
+/// would have no in-combat trickle at all).
+fn effective_delta(base: i32, meditating: bool, focus_pts: i32, fighting: bool) -> i32 {
+    let mut delta = base;
+    if meditating {
+        delta = delta.saturating_mul(2);
+    }
+    if focus_pts > 0 {
+        // (100 + focus) / 100 with integer math. Truncates fractional
+        // gain; focus=10 → +10%, focus=100 → +100% (≈ meditate).
+        delta = delta
+            .saturating_mul(100i32.saturating_add(focus_pts))
+            .saturating_div(100);
+    }
+    if fighting {
+        // Round up so a base=1 combatant still drains 1 sec/tick
+        // instead of zero. Pairs with the doc-note intent above.
+        delta = (delta + 1) / 2;
+    }
+    delta.max(1)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -45,32 +69,27 @@ pub fn memorize_tick(world: &mut World) {
     }
 
     // Per-entity vec of restored circles so we can emit the
-    // "slot restored" line after the World mutation. The
-    // `Meditating` marker doubles the recover delta — same speed-up
-    // intent as the legacy meditate skill multiplier.
+    // "slot restored" line after the World mutation.
     let mut restored: Vec<(Entity, Vec<i32>)> = Vec::new();
     {
         let mut q = world.query_filtered::<
-            (Entity, &Posture, &mut SpellSlots, Option<&Meditating>),
-            (With<Online>, Without<Fighting>),
+            (Entity, &Posture, &mut SpellSlots, Option<&Meditating>, Option<&Focus>, Option<&Fighting>),
+            With<Online>,
         >();
-        for (entity, posture, mut slots, meditating) in q.iter_mut(world) {
-            let mut delta = recover_seconds_per_tick(posture.0);
+        for (entity, posture, mut slots, meditating, focus, fighting) in q.iter_mut(world) {
             if slots.in_flight.is_empty() {
                 continue;
             }
-            if meditating.is_some() {
-                delta *= 2;
-            }
-            // Sequential per-circle recovery: each circle's queue
-            // ticks one entry at a time. Casting seven circle-1
-            // spells now stretches into a 30s + 30s + ... ladder
-            // instead of all seven completing on the same tick;
-            // strategic pacing matters. Different circles regenerate
-            // in parallel — a mage's circle-6 nuke still recovers
-            // while the circle-1 backlog drains. Find the
-            // already-most-recovered entry per circle (smallest
-            // secs_remaining) and only that entry takes the delta.
+            let base = recover_seconds_per_tick(posture.0);
+            let delta = effective_delta(
+                base,
+                meditating.is_some(),
+                focus.map_or(0, |f| f.0),
+                fighting.is_some(),
+            );
+            // Sequential per-circle recovery — see the head-of-file
+            // doc note. Only the lowest-remaining entry per circle
+            // is ticked; siblings in the same circle wait their turn.
             let mut indices_to_tick: std::collections::HashMap<i32, (usize, i32)> =
                 std::collections::HashMap::new();
             for (i, cd) in slots.in_flight.iter().enumerate() {
@@ -114,5 +133,37 @@ pub fn memorize_tick(world: &mut World) {
                 format!("Your circle {circle} slot is restored.\r\n"),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lock in the multiplier ladder so a tuning tweak doesn't
+    /// silently drop in-combat recovery to zero or invert the
+    /// meditate / focus relationship.
+    #[test]
+    fn effective_delta_multiplier_ladder() {
+        // Standing + nothing → 1 sec/tick.
+        assert_eq!(effective_delta(1, false, 0, false), 1);
+        // Resting (base 3) + meditate → 6.
+        assert_eq!(effective_delta(3, true, 0, false), 6);
+        // Resting + meditate + focus 50 → 6 * 1.5 = 9.
+        assert_eq!(effective_delta(3, true, 50, false), 9);
+        // Standing + fighting → still 1 (rounded up from 0.5).
+        assert_eq!(effective_delta(1, false, 0, true), 1);
+        // Sitting (base 2) + fighting → 1.
+        assert_eq!(effective_delta(2, false, 0, true), 1);
+        // Resting (base 3) + fighting → 2 (rounded up).
+        assert_eq!(effective_delta(3, false, 0, true), 2);
+        // Resting + meditate + fighting → (6+1)/2 = 3. (Meditate
+        // technically refuses while Fighting per cmd_meditate, but the
+        // math should still resolve sensibly if the flags coexist.)
+        assert_eq!(effective_delta(3, true, 0, true), 3);
+        // Focus 100 ≈ meditate (doubles): standing base=1, +100% → 2.
+        assert_eq!(effective_delta(1, false, 100, false), 2);
+        // Always at least 1 when there's any recovery to do.
+        assert_eq!(effective_delta(1, false, -50, true), 1);
     }
 }
