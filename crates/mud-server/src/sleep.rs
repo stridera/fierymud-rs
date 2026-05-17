@@ -179,6 +179,7 @@ mod tests {
             month: 1,
             day: 1,
             hour: 12,
+            minute: 0,
             stamp: 0,
         });
         let room = world.spawn((Room, RoomSector(Sector::Field))).id();
@@ -228,6 +229,7 @@ mod tests {
             month: 1,
             day: 1,
             hour: NIGHT_START_HOUR,
+            minute: 0,
             stamp: 0,
         });
         let room = world.spawn((Room, RoomSector(Sector::Cave))).id();

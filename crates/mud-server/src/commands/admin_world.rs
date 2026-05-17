@@ -940,6 +940,7 @@ pub(crate) fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
             "month": clock.month,
             "day": clock.day,
             "hour": clock.hour,
+            "minute": clock.minute,
             "stamp": clock.stamp,
         },
         "counts": {

@@ -8172,6 +8172,7 @@ pub(crate) fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     // see via time.hour. Single source of truth wins.
     let clock = world.resource::<mud_world::MudClock>();
     let mud_hour = i64::from(clock.hour);
+    let mud_minute = i64::from(clock.minute);
     let mud_day = i64::from(clock.day);
     let mud_year = i64::from(clock.year);
     let month_name = clock.month_name();
@@ -8206,7 +8207,7 @@ pub(crate) fn cmd_time(world: &mut World, player: Entity, _args: &str) {
         "  <cyan>Game time:</>   <b:yellow>The {mud_day}{day_suffix} day of {month_name}, Year {mud_year}.</>\r\n",
     ));
     out.push_str(&format!(
-        "               It is <b:yellow>{mud_hour:02}:00</> <dim>({period})</>; the season is <yellow>{season}</>.\r\n",
+        "               It is <b:yellow>{mud_hour:02}:{mud_minute:02}</> <dim>({period})</>; the season is <yellow>{season}</>.\r\n",
     ));
     send_to(world, player, out);
 }

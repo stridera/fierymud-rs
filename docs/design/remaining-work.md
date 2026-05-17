@@ -80,7 +80,7 @@ Features that don't exist in legacy. Per user's "wire if it's an improvement" ru
 - **E13. Trigger validation metadata** (`needs_review`, `syntax_error`) — Muditor reads these; runtime could log on trigger load.
 - **E14. Shop spawn controls** — `spawn_chance`, `visibility_requirement`, `purchase_requirement` on ShopItems / ShopMobs.
 - **E15. Discord bot (Muditor-side)** — consumes `PendingDiscordLinks`, posts to `DiscordConfig` channels. fierymud-rs has the hooks; the bot itself is web/Muditor work.
-- **E16. wait_until minute granularity** — `MudClock` has no `minute` field; Lua `wait_until` accepts but ignores the minute arg. Add minute to `MudClock` + tick advance + `_seconds_until` math.
+- **E16. wait_until minute granularity** ✅ Closed — `MudClock.minute` derived from within-hour tick position (12.5 ticks ≈ 1 game minute). `time.minute` exposed to Lua; `_seconds_until` honors the minute arg (5/4 real seconds per game minute). `time` command and world_status JSON render HH:MM.
 - **E17. ScriptVars → EntityVariables migration** — per-character ScriptVars JSON could move to the unified `EntityVariables` table. Schema enum already includes a hypothetical CHARACTER variant.
 - **E18. Live playthrough verification** — periodic hands-on play remains valuable; the static tests can't surface what feels right.
 
@@ -269,8 +269,8 @@ fold in the dynamic-exponent legacy scaling.
 
 Order if you want to maximize player-visible parity in the shortest path:
 
-1. **A (combat balance)** — remaining A4/A5/A6/A7. Highest player-impact polish.
-2. **B (parity wires)** — B1 (decay), B3 (aggressionFormula), B5 (level permissions) are the loudest gaps.
+1. **A (combat balance)** — A1/A2/A4/A5/A6/A7 all shipped. Watch for live-play tuning surprises.
+2. **B (parity wires)** — remaining B2 (bashable doors, needs `ExitData.hit_points` plumb), B3 (aggressionFormula). B1/B5/B6 shipped.
 3. **H follow-ups** — quick wins from the last playtest.
 4. **C (flavor text)** — easy wins; one loader + one renderer per item.
 5. **D items** ship as their surrounding systems ship (don't force).

@@ -1921,8 +1921,8 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
             let clock = world.resource::<mud_world::MudClock>().clone();
             out.push_str(&format!("Tick:   {tick}\r\n"));
             out.push_str(&format!(
-                "Clock:  year {}  month {}  day {}  hour {}\r\n",
-                clock.year, clock.month, clock.day, clock.hour
+                "Clock:  year {}  month {}  day {}  {:02}:{:02}\r\n",
+                clock.year, clock.month, clock.day, clock.hour, clock.minute
             ));
             out.push_str(&format!("Stamp:  {} (Unix epoch seconds)\r\n", clock.stamp));
         }

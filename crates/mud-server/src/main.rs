@@ -83,10 +83,17 @@ fn mud_clock_tick(tick: Res<TickCount>, mut clock: ResMut<mud_world::MudClock>) 
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
         .unwrap_or(0);
+    // Minute granularity is derived from the within-hour tick
+    // position so a 75-second game hour resolves into 60 minute
+    // boundaries (12.5 ticks per game minute averaged). The hour
+    // advance below pins this back to 0 at the boundary.
+    let within_hour = (tick.0 % 750) as i64;
+    clock.minute = i32::try_from(within_hour * 60 / 750).unwrap_or(0);
     if !tick.0.is_multiple_of(750) {
         return;
     }
     clock.hour += 1;
+    clock.minute = 0;
     if clock.hour >= 24 {
         clock.hour = 0;
         clock.day += 1;

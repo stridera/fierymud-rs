@@ -612,31 +612,38 @@ impl LuaHost {
             )?;
 
             // `_seconds_until(hour, minute)` — internal helper that
-            // returns seconds until `MudClock.hour` reaches the
-            // target. Minute is accepted for forward-compatibility
-            // with a future minute-granularity clock; today it's
-            // ignored (the clock advances one game hour every 750
-            // real ticks ≈ 75s real). Used by the Lua `wait_until`
-            // wrapper below.
+            // returns real-time seconds until `MudClock` reaches the
+            // target hour:minute. Minute defaults to 0 if omitted.
+            // The clock advances one game hour every 750 real ticks
+            // (~75s real) and we expose minute granularity from the
+            // within-hour tick position, so a game minute is 5/4 of
+            // a real second. Used by the Lua `wait_until` wrapper.
             //
-            // Same-hour returns a full 24-hour wait (matching the
-            // legacy "wait until next occurrence" semantic).
+            // Same minute-of-day returns a full 24-hour wait (matching
+            // the legacy "wait until next occurrence" semantic).
             globals.set(
                 "_seconds_until",
                 self.lua.create_function(
-                    |lua, (h, _m): (i32, i32)| -> mlua::Result<i64> {
-                        const SECS_PER_GAME_HOUR: i64 = 75;
-                        let target = h.rem_euclid(24);
+                    |lua, (h, m): (i32, i32)| -> mlua::Result<i64> {
+                        let target_h = h.rem_euclid(24);
+                        let target_m = m.rem_euclid(60);
+                        let target = i64::from(target_h * 60 + target_m);
                         let current = world_from_lua(lua, |w| {
                             w.get_resource::<mud_world::MudClock>()
-                                .map(|c| c.hour.rem_euclid(24))
+                                .map(|c| {
+                                    i64::from(
+                                        c.hour.rem_euclid(24) * 60 + c.minute.rem_euclid(60),
+                                    )
+                                })
                                 .unwrap_or(0)
                         })?;
-                        let mut delta_hours = i64::from(target - current);
-                        if delta_hours <= 0 {
-                            delta_hours += 24;
+                        let mut delta_minutes = target - current;
+                        if delta_minutes <= 0 {
+                            delta_minutes += 24 * 60;
                         }
-                        Ok(delta_hours.saturating_mul(SECS_PER_GAME_HOUR).max(1))
+                        // 75 real-time seconds per 60 game minutes
+                        // = 5/4 real seconds per game minute.
+                        Ok(delta_minutes.saturating_mul(5).saturating_div(4).max(1))
                     },
                 )?,
             )?;
@@ -647,10 +654,7 @@ impl LuaHost {
             // sugar over `wait(N)` via the internal
             // `_seconds_until` helper, so it parks on the same
             // coroutine-yield mechanism the rest of the host uses.
-            // Minute granularity isn't modeled by `MudClock` today
-            // (one game hour per 750 ticks); the arg is accepted
-            // for forward-compatibility but ignored — wakes on
-            // hour boundary only.
+            // Minute is fully honored (12.5 ticks ≈ 1 game minute).
             globals.set(
                 "wait_until",
                 self.lua
@@ -770,6 +774,7 @@ impl LuaHost {
             let clock = world.get_resource::<mud_world::MudClock>().cloned().unwrap_or_default();
             time_tbl.set("stamp", clock.stamp)?;
             time_tbl.set("hour", i64::from(clock.hour))?;
+            time_tbl.set("minute", i64::from(clock.minute))?;
             time_tbl.set("day", i64::from(clock.day))?;
             time_tbl.set("month", i64::from(clock.month))?;
             time_tbl.set("year", i64::from(clock.year))?;
@@ -1146,19 +1151,24 @@ impl LuaHost {
         globals.set(
             "_seconds_until",
             self.lua.create_function(
-                |lua, (h, _m): (i32, i32)| -> mlua::Result<i64> {
-                    const SECS_PER_GAME_HOUR: i64 = 75;
-                    let target = h.rem_euclid(24);
+                |lua, (h, m): (i32, i32)| -> mlua::Result<i64> {
+                    let target_h = h.rem_euclid(24);
+                    let target_m = m.rem_euclid(60);
+                    let target = i64::from(target_h * 60 + target_m);
                     let current = world_from_lua(lua, |w| {
                         w.get_resource::<mud_world::MudClock>()
-                            .map(|c| c.hour.rem_euclid(24))
+                            .map(|c| {
+                                i64::from(
+                                    c.hour.rem_euclid(24) * 60 + c.minute.rem_euclid(60),
+                                )
+                            })
                             .unwrap_or(0)
                     })?;
-                    let mut delta_hours = i64::from(target - current);
-                    if delta_hours <= 0 {
-                        delta_hours += 24;
+                    let mut delta_minutes = target - current;
+                    if delta_minutes <= 0 {
+                        delta_minutes += 24 * 60;
                     }
-                    Ok(delta_hours.saturating_mul(SECS_PER_GAME_HOUR).max(1))
+                    Ok(delta_minutes.saturating_mul(5).saturating_div(4).max(1))
                 },
             )?,
         )?;

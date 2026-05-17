@@ -1460,6 +1460,13 @@ pub struct MudClock {
     pub month: i32,
     pub day: i32,
     pub hour: i32,
+    /// Minute-of-hour, 0..59. Derived from the within-hour tick
+    /// position (12.5 ticks per game minute at the 10 Hz pulse +
+    /// 750 ticks/hour cadence). Persisted so a reload restores the
+    /// last-observed minute boundary; on a cold boot the snapshot
+    /// field is absent and serde fills with the `Default` of 0.
+    #[serde(default)]
+    pub minute: i32,
     /// Wall-clock seconds since UNIX epoch — refreshed on each
     /// `MudClock` advance so `time.stamp` Lua reads are coherent
     /// with the rest of the system.
@@ -1473,6 +1480,7 @@ impl Default for MudClock {
             month: 1,
             day: 1,
             hour: 12,
+            minute: 0,
             stamp: 0,
         }
     }
@@ -2547,7 +2555,7 @@ mod tests {
     use super::*;
 
     fn clock_for_month(month: i32) -> MudClock {
-        MudClock { year: 1, month, day: 1, hour: 12, stamp: 0 }
+        MudClock { year: 1, month, day: 1, hour: 12, minute: 0, stamp: 0 }
     }
 
     #[test]
@@ -2562,6 +2570,19 @@ mod tests {
         assert_eq!(clock_for_month(0).month_name(), "an unknown month");
         assert_eq!(clock_for_month(17).month_name(), "an unknown month");
         assert_eq!(clock_for_month(-3).month_name(), "an unknown month");
+    }
+
+    #[test]
+    fn clock_snapshot_without_minute_defaults_to_zero() {
+        // Pre-E16 snapshots wrote {year, month, day, hour, stamp}
+        // without a `minute` field. The serde(default) on the new
+        // field has to absorb that or every server with persisted
+        // state breaks on first reboot after the upgrade.
+        let legacy = br#"{"year":2025,"month":3,"day":7,"hour":14,"stamp":1234}"#;
+        let parsed: MudClock = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(parsed.minute, 0);
+        assert_eq!(parsed.hour, 14);
+        assert_eq!(parsed.stamp, 1234);
     }
 
     #[test]
