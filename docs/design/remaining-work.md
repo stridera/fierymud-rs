@@ -174,11 +174,14 @@ fold in the dynamic-exponent legacy scaling.
   All wire into `formula_ctx` construction around `commands.rs:10931`.
 
 - **I2. Extend formula grammar.** Current limits in `commands.rs::evaluate_formula`:
-  - **pow exponent should accept an expression**, not just a `Float` /
-    `Num` literal (see `parse_factor`'s `pow` branch). Legacy
-    `sorcerer_single_target` exponent is itself a function of
-    `skill` and `min_level`; without expression-exponent the dynamic
-    taper has to live in code rather than data.
+  - **pow exponent accepts an expression** ✅ Closed (2026-05-16).
+    The exponent slot now takes either a precise `Float` literal
+    (legacy `pow(skill, 1.44)` round-trips bit-exact) or a full
+    integer expression (`pow(skill, 1 + level / 25)`). Integer
+    expressions naturally lose any fractional component; authors
+    who want a non-integer exponent must use a literal. Sufficient
+    to express most legacy dynamic-taper shapes without baking
+    the exponent into code.
   - **`min(a, b)`, `max(a, b)`, `clamp(v, lo, hi)`, `if(cond, a, b)`** ✅ Closed
     (2026-05-16). Legacy bonus caps like `min(sd_bonus, skill / 4)`
     and gated branches (`if(skill - 94, bonus, 0)` for "fire only at

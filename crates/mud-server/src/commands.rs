@@ -3077,6 +3077,49 @@ mod tests {
         );
     }
 
+    /// I2 partial (b): pow accepts an integer expression as the
+    /// exponent so dynamic-taper shapes like `pow(skill, 1 + level / 25)`
+    /// resolve at runtime. Float literals still take the precise path.
+    #[test]
+    fn evaluate_formula_pow_accepts_integer_expression_exponent() {
+        let mut zero = |_: &str, _: i32, _: i32| 0i32;
+        // Float literal exponent — precise path; preserves the
+        // pre-existing behavior.
+        assert_eq!(
+            evaluate_formula("pow(4, 1.5)", &FormulaCtx::default(), &mut zero),
+            Some(8),
+        );
+        // Integer literal still works.
+        assert_eq!(
+            evaluate_formula("pow(skill, 2)", &FormulaCtx { skill: 7, ..FormulaCtx::default() }, &mut zero),
+            Some(49),
+        );
+        // Integer expression. At skill=100, level=50:
+        //   exponent = 1 + 50 / 25 = 3, so 100^3 = 1_000_000.
+        let ctx = FormulaCtx { skill: 100, level: 50, ..FormulaCtx::default() };
+        assert_eq!(
+            evaluate_formula("pow(skill, 1 + level / 25)", &ctx, &mut zero),
+            Some(1_000_000),
+        );
+        // Exponent expression evaluates integer-only — `level / 100`
+        // for level=50 is 0 (truncating int math), so pow(skill, 0) = 1.
+        let ctx = FormulaCtx { skill: 100, level: 50, ..FormulaCtx::default() };
+        assert_eq!(
+            evaluate_formula("pow(skill, level / 100)", &ctx, &mut zero),
+            Some(1),
+        );
+        // Bonus + exponent expression. base * pow(skill, 1 + (skill > 50 ? 1 : 0))
+        // expressed via the new `if` builtin.
+        assert_eq!(
+            evaluate_formula(
+                "pow(skill, 1 + if(skill - 50, 1, 0))",
+                &FormulaCtx { skill: 60, ..FormulaCtx::default() },
+                &mut zero,
+            ),
+            Some(3_600),
+        );
+    }
+
     /// I2 partial: min/max/if/clamp builtins land in the evaluator.
     /// These unblock formulas that need bounded bonus caps (legacy
     /// `std::min(SD_BONUS, skill/4)` shapes), gated branches
@@ -13653,10 +13696,22 @@ impl FormulaParser<'_> {
                         if !matches!(self.advance(), Some(FormulaToken::Comma)) {
                             return None;
                         }
-                        let exp = match self.advance()? {
-                            FormulaToken::Float(f) => *f,
-                            FormulaToken::Num(i) => f64::from(*i),
-                            _ => return None,
+                        // Exponent: a Float literal stays float-precise
+                        // (legacy `pow(skill, 1.44)` round-trips
+                        // exactly). Anything else parses as an integer
+                        // expression and casts to f64 — lets formulas
+                        // like `pow(skill, 1 + min_level / 100)` taper
+                        // dynamically without baking the exponent into
+                        // code. Integer expressions naturally lose the
+                        // fractional component; authors who want a
+                        // float must use a literal.
+                        let exp = if let Some(FormulaToken::Float(_)) = self.peek() {
+                            match self.advance() {
+                                Some(FormulaToken::Float(f)) => *f,
+                                _ => return None,
+                            }
+                        } else {
+                            f64::from(self.parse_expr(ctx, rng_call)?)
                         };
                         if !matches!(self.advance(), Some(FormulaToken::RParen)) {
                             return None;
