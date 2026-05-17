@@ -408,6 +408,47 @@ fold in the dynamic-exponent legacy scaling.
   `valid_targets` path instead of falling back to the `def.violent`
   no-target gate.
 
+## J — Resistance / protection extensions (2026-05-17)
+
+Content-side: `ObjectResistance` is now populated for the legacy
+single-element protection effects (PROT_FIRE/COLD/AIR/EARTH +
+FIRESHIELD/COLDSHIELD + NEGATE_*). Two legacy protection shapes can't
+be expressed in the current `ObjectResistance` schema:
+
+- **J1. Spell-circle absorb (MINOR_GLOBE / MAJOR_GLOBE).** Legacy:
+  minor globe absorbs spells of circle ≤ 3, major globe ≤ 6 (rough
+  values — check `magic.cpp` for exact thresholds). Equipped items
+  carrying `EFF_MINOR_GLOBE` / `EFF_MAJOR_GLOBE` therefore don't grant
+  a per-element resistance — they short-circuit hostile spell
+  application up to a tier threshold. Options:
+  1. Add `Character.spell_absorb_max_circle: int` column populated as
+     `max(spell_absorb_max_circle across equipped items)`, gate
+     incoming spell damage in `invoke_ability_with` before the resist
+     pipeline runs.
+  2. Push it into `ObjectResistance` as a synthetic element
+     (`ARCANE_ABSORB_MINOR` / `_MAJOR`?) — messier.
+  Option 1 is cleaner. ~10 items in legacy carry these.
+
+- **J2. Alignment-vs-alignment protection (PROTECT_EVIL /
+  PROTECT_GOOD).** Roughly 45 legacy items wear `PROTECT_EVIL` or
+  `PROTECT_GOOD`. Legacy mechanic: 25% damage reduction from incoming
+  attacks by aligned (evil / good) attackers, *regardless* of damage
+  element. This is alignment-keyed, not element-keyed, so it can't
+  ride on `ObjectResistance.element`. Cleanest: an
+  `Object.protect_alignment` column (or a parallel
+  `ObjectAlignmentResistance` table) consumed in the combat pipeline
+  after the per-element step, multiplying by 0.75 when the attacker's
+  alignment matches. Content side will follow whichever schema lands.
+
+- **J3. MobDefaultEffects — runtime consumer missing.** Audit doc §1
+  says "runtime: not loaded". The table is intended for permanent
+  passive auras on mob protos (lich fear, dragon fear, etc.). Schema
+  is there; importer can fill it once the runtime loads + applies the
+  rows. Currently the only mob-side passive on mobs is the
+  `resistances` JSON column on `Mobs` (591/2139 populated). If you'd
+  like MobDefaultEffects as a content surface, ping fierylib and I'll
+  write the importer in the same pass as J1/J2.
+
 ---
 
 ## Sequencing recommendation
