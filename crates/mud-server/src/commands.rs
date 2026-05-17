@@ -3214,6 +3214,30 @@ mod tests {
         assert_eq!(evaluate_formula("clamp(5, 20, 10)", &ctx, &mut zero), None);
     }
 
+    /// I.9: Magic Missile multihit bolt-count formula. The classic
+    /// "1 missile + 1 per 2 caster levels above 1, max 5" curve.
+    /// Inlined where the damage step reads the multihit flag; this
+    /// test pins the curve so a tweak doesn't accidentally drop a
+    /// bolt at L11 or extend past 5.
+    #[test]
+    fn multihit_bolt_count_curve() {
+        let bolts = |level: i32| (1 + (level - 1) / 2).clamp(1, 5);
+        assert_eq!(bolts(1), 1);
+        assert_eq!(bolts(2), 1);
+        assert_eq!(bolts(3), 2);
+        assert_eq!(bolts(5), 3);
+        assert_eq!(bolts(7), 4);
+        assert_eq!(bolts(9), 5);
+        assert_eq!(bolts(15), 5);
+        assert_eq!(bolts(100), 5);
+        // Below-min defends against a malformed character with
+        // level=0 (shouldn't happen, but the apply path treats
+        // 0 bolts as "spell does nothing" which would silently
+        // eat the cast).
+        assert_eq!(bolts(0), 1);
+        assert_eq!(bolts(-5), 1);
+    }
+
     /// A7: per-element resistance application.
     #[test]
     fn apply_resistance_mitigates_and_amplifies() {
@@ -11411,44 +11435,73 @@ pub(crate) fn invoke_ability_with(
                     victim_align: target_align,
                     ..formula_ctx
                 };
+                // I.9: `multihit: true` in the effect params signals
+                // a Magic-Missile-style multi-bolt spell. Bolt count
+                // scales with caster level using the classic
+                // 1 + (level - 1)/2, capped at 5 D&D ladder. Each
+                // bolt rolls the damage formula independently and
+                // contributes its own resisted amount; we sum here
+                // and apply once below so a single apply_damage call
+                // handles the kill + death broadcast. Non-multihit
+                // spells take the bolts=1 path (identical to the
+                // pre-I.9 single-roll behavior).
+                let multihit = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("multihit"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let bolt_count: i32 = if multihit {
+                    (1 + (caster_level - 1) / 2).clamp(1, 5)
+                } else {
+                    1
+                };
                 let mut amount = if components.is_empty() {
                     // Resolve raw amount, then apply the spec's
                     // element resistance.
-                    let raw = resolve_effect_amount(
-                        spec.override_params.as_ref(),
-                        Some(&spec.default_params),
-                        &per_target_ctx,
-                    )
-                    .unwrap_or(0);
                     let element = resolve_damage_element(
                         spec.override_params.as_ref(),
                         Some(&spec.default_params),
                     );
                     let resist = target_resists.get(&element).copied().unwrap_or(0);
-                    apply_resistance(raw, resist)
+                    let mut total = 0i32;
+                    for _ in 0..bolt_count {
+                        let raw = resolve_effect_amount(
+                            spec.override_params.as_ref(),
+                            Some(&spec.default_params),
+                            &per_target_ctx,
+                        )
+                        .unwrap_or(0);
+                        total = total.saturating_add(apply_resistance(raw, resist));
+                    }
+                    total
                 } else {
                     // Multi-component path: apply each component's
                     // resistance individually before summing — a
                     // CONE_OF_COLD (90% COLD / 10% FORCE) split
                     // hitting a cold-resistant target still takes
-                    // the FORCE portion at full damage.
+                    // the FORCE portion at full damage. Outer loop
+                    // covers multihit; per-bolt damage is the same
+                    // component sum.
                     let mut total = 0i32;
-                    for c in &components {
-                        let raw = evaluate_simple_formula_ctx(
-                            &normalize_dice_notation(&c.damage_formula),
-                            &per_target_ctx,
-                        )
-                        .unwrap_or(0);
-                        let scaled = raw.saturating_mul(c.percentage) / 100;
-                        // c.element is a string (loader-side
-                        // verbatim). Wrap it back into the JSON
-                        // shape resolve_damage_element expects so
-                        // we don't fork the parser.
-                        let element_blob = serde_json::json!({"type": &c.element});
-                        let element = resolve_damage_element(Some(&element_blob), None);
-                        let resist = target_resists.get(&element).copied().unwrap_or(0);
-                        let after = apply_resistance(scaled, resist);
-                        total = total.saturating_add(after);
+                    for _ in 0..bolt_count {
+                        for c in &components {
+                            let raw = evaluate_simple_formula_ctx(
+                                &normalize_dice_notation(&c.damage_formula),
+                                &per_target_ctx,
+                            )
+                            .unwrap_or(0);
+                            let scaled = raw.saturating_mul(c.percentage) / 100;
+                            // c.element is a string (loader-side
+                            // verbatim). Wrap it back into the JSON
+                            // shape resolve_damage_element expects so
+                            // we don't fork the parser.
+                            let element_blob = serde_json::json!({"type": &c.element});
+                            let element = resolve_damage_element(Some(&element_blob), None);
+                            let resist = target_resists.get(&element).copied().unwrap_or(0);
+                            let after = apply_resistance(scaled, resist);
+                            total = total.saturating_add(after);
+                        }
                     }
                     total
                 };
@@ -11516,7 +11569,14 @@ pub(crate) fn invoke_ability_with(
                         );
                     }
                 }
-                applied_msgs.push(format!("{} (-{} HP)", spec.name, amount));
+                if bolt_count > 1 {
+                    applied_msgs.push(format!(
+                        "{} (-{} HP ×{} bolts)",
+                        spec.name, amount, bolt_count
+                    ));
+                } else {
+                    applied_msgs.push(format!("{} (-{} HP)", spec.name, amount));
+                }
             }
             "heal" => {
                 let amount = resolve_effect_amount(
