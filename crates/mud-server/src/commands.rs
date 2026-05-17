@@ -3077,6 +3077,53 @@ mod tests {
         );
     }
 
+    /// I2 partial: min/max/if/clamp builtins land in the evaluator.
+    /// These unblock formulas that need bounded bonus caps (legacy
+    /// `std::min(SD_BONUS, skill/4)` shapes), gated branches
+    /// (Vampiric Breath's `skill >= 95` random bonus, Exorcism's
+    /// high-align instant-kill), and explicit clamp expressions.
+    #[test]
+    fn evaluate_formula_min_max_if_clamp_builtins() {
+        let mut zero = |_: &str, _: i32, _: i32| 0i32;
+        let ctx = FormulaCtx { skill: 50, ..FormulaCtx::default() };
+        assert_eq!(evaluate_formula("min(skill, 20)", &ctx, &mut zero), Some(20));
+        assert_eq!(evaluate_formula("max(skill, 20)", &ctx, &mut zero), Some(50));
+        assert_eq!(evaluate_formula("min(skill, 200)", &ctx, &mut zero), Some(50));
+        assert_eq!(evaluate_formula("max(skill, 200)", &ctx, &mut zero), Some(200));
+        // Negative numbers participate naturally.
+        assert_eq!(evaluate_formula("min(-3, -5)", &ctx, &mut zero), Some(-5));
+        assert_eq!(evaluate_formula("max(-3, -5)", &ctx, &mut zero), Some(-3));
+        // `if(cond, a, b)` — non-zero cond → a, zero → b. Used by
+        // gated branches; rewrite `skill >= 95 ? bonus : 0` as
+        // `if(max(skill - 94, 0), bonus, 0)` until comparison
+        // operators land.
+        assert_eq!(evaluate_formula("if(1, 10, 99)", &ctx, &mut zero), Some(10));
+        assert_eq!(evaluate_formula("if(0, 10, 99)", &ctx, &mut zero), Some(99));
+        assert_eq!(evaluate_formula("if(skill - 94, 1, 0)", &ctx, &mut zero), Some(1));
+        assert_eq!(
+            evaluate_formula(
+                "if(skill - 94, 1, 0)",
+                &FormulaCtx { skill: 50, ..FormulaCtx::default() },
+                &mut zero,
+            ),
+            Some(1),
+        );
+        assert_eq!(
+            evaluate_formula(
+                "if(skill - 94, 1, 0)",
+                &FormulaCtx { skill: 94, ..FormulaCtx::default() },
+                &mut zero,
+            ),
+            Some(0),
+        );
+        // clamp — three-arg variant.
+        assert_eq!(evaluate_formula("clamp(skill, 10, 20)", &ctx, &mut zero), Some(20));
+        assert_eq!(evaluate_formula("clamp(5, 10, 20)", &ctx, &mut zero), Some(10));
+        assert_eq!(evaluate_formula("clamp(15, 10, 20)", &ctx, &mut zero), Some(15));
+        // Inverted bounds → None (silent skip; caller falls through).
+        assert_eq!(evaluate_formula("clamp(5, 20, 10)", &ctx, &mut zero), None);
+    }
+
     /// A7: per-element resistance application.
     #[test]
     fn apply_resistance_mitigates_and_amplifies() {
@@ -13645,6 +13692,22 @@ impl FormulaParser<'_> {
                         }
                         ("random", [lo, hi]) if lo <= hi => {
                             Some(rng_call("random", *lo, *hi))
+                        }
+                        // Min / max bounded combinators. Lets legacy
+                        // bonus caps like `min(sd_bonus, skill/4)`
+                        // round-trip without reshaping into divisions.
+                        ("min", [a, b]) => Some((*a).min(*b)),
+                        ("max", [a, b]) => Some((*a).max(*b)),
+                        // Integer-arithmetic conditional. `cond` is
+                        // truthy when non-zero (matches both gates
+                        // like `skill >= 95` rewritten as `(skill - 94)`
+                        // and direct flag symbols like `hidden`).
+                        // Both branches are evaluated — there's no
+                        // side effect to short-circuit and the cost
+                        // is negligible against the parser overhead.
+                        ("if", [cond, a, b]) => Some(if *cond != 0 { *a } else { *b }),
+                        ("clamp", [v, lo, hi]) if lo <= hi => {
+                            Some((*v).clamp(*lo, *hi))
                         }
                         _ => None,
                     }

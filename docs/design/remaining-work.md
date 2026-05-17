@@ -179,15 +179,13 @@ fold in the dynamic-exponent legacy scaling.
     `sorcerer_single_target` exponent is itself a function of
     `skill` and `min_level`; without expression-exponent the dynamic
     taper has to live in code rather than data.
-  - **Add `min(a, b)` and `max(a, b)` builtins** so legacy bonus caps
-    like `dam += std::min<int>(SD_BONUS(spellnum), skill / 4)` can be
-    expressed inline rather than reshaped into divisions.
-  - **Add a conditional builtin**, either `if(cond, a, b)` (ternary)
-    or `gate(threshold_var, threshold_val, bonus)`. Vampiric Breath
-    legacy adds `random(0, 70)` only when `skill >= 95`; Exorcism's
-    instant-kill branch fires only when
-    `align >= 990 && skill - victim_level > 30`. Without a
-    conditional, these effects either drop or move into Lua.
+  - **`min(a, b)`, `max(a, b)`, `clamp(v, lo, hi)`, `if(cond, a, b)`** ✅ Closed
+    (2026-05-16). Legacy bonus caps like `min(sd_bonus, skill / 4)`
+    and gated branches (`if(skill - 94, bonus, 0)` for "fire only at
+    skill ≥ 95") now express inline. `if` is non-zero-truthy and both
+    arms always evaluate (no short-circuit needed in an integer-arith
+    grammar). Inverted clamp bounds silently return None so a bad
+    formula falls through rather than crashing.
   - **Allow float literals outside `pow`** so multipliers like
     `* 0.0007` survive translation. Today only the `pow` exponent
     slot accepts floats; the rest of the grammar is integer-only,
