@@ -11028,7 +11028,17 @@ pub(crate) fn invoke_ability_with(
         .get(&def.id)
         .map(|r| r.valid_targets.iter().map(|s| s.to_uppercase()).collect())
         .unwrap_or_default();
-    let allows_inventory_target = valid_targets.iter().any(|t| t == "OBJECT_INV");
+    // OBJECT_INV explicit-allow OR permissive fallback for non-violent
+    // abilities with no AbilityTargeting row at all. IDENTIFY /
+    // LOCATE_OBJECT / similar utility spells don't carry a targeting
+    // row in the seed data (9/408 abilities do), so the strict
+    // "must be in valid_targets" check would force `cast identify
+    // robe` to fail with "you don't see 'robe' here" even though
+    // the robe is in the caster's inventory. Hostile abilities
+    // never get the fallback — `cast burning hands sword` would be
+    // nonsensical.
+    let allows_inventory_target =
+        valid_targets.iter().any(|t| t == "OBJECT_INV") || (valid_targets.is_empty() && !def.violent);
     let prefers_rider_default = valid_targets.iter().any(|t| t == "RIDER");
     // Hostile abilities (any ENEMY_* / AREA_FOES targeting) refuse
     // in PeacefulRoom — same contract cmd_attack and engage_combat
