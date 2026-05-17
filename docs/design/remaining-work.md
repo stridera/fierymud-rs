@@ -131,6 +131,15 @@ Follow-ups surfaced this pass:
   resolved cleanly (hit chances ~28-33%, damage breakdown
   rendered, aggro flipped, peaceful-room gate held, flee moved
   correctly).
+- **I.12 `kill <keyword>` matched corpses sharing the keyword.** ✅
+  Resolved. `cmd_attack` walked `(Entity, Located, Named)` and
+  picked the first name-match — corpses keep "corpse of a frost
+  stallion" so `kill stallion` would land on the dead one and
+  surface "You attack the corpse" while the live mob sat untouched.
+  Restricted the query to `With<CombatStats>, Without<Corpse>` so
+  only attackable actors qualify. Verified live: `kill stallion`
+  in a room with both corpses and live stallions now engages a
+  live mob.
 - **I.11 Second spell-catalog sweep (2026-05-16).** Followed I.10
   with the `base_damage + pow(skill, 2) / X` family. 15 more
   spells folded into the tier ladder: WRITHING_WEEDS, DISPEL_EVIL,

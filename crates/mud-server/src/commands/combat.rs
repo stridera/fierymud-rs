@@ -857,8 +857,17 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     };
     let target_lower = target_name.to_ascii_lowercase();
 
+    // Filter out corpses up front. A corpse keeps the dead mob's
+    // keywords ("the corpse of a frost stallion" still matches
+    // "stallion"), and was tied with the live stallion via insertion
+    // order — `kill stallion` could land on the corpse and surface
+    // "You attack the corpse" while the live mob sits unaffected.
+    // CombatStats keeps the filter targeted to attackable actors
+    // (mobs/players with the combat package) rather than e.g. items
+    // that happen to share a keyword.
     let target = {
-        let mut q = world.query::<(Entity, &Located, &Named)>();
+        let mut q =
+            world.query_filtered::<(Entity, &Located, &Named), (With<mud_world::CombatStats>, Without<mud_world::Corpse>)>();
         q.iter(world)
             .find(|(e, l, n)| {
                 *e != player
