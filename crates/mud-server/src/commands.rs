@@ -10779,7 +10779,10 @@ pub(crate) fn invoke_ability_with(
         .get::<Account>(player)
         .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder));
     let is_mob_caster = world.get::<Mob>(player).is_some();
-    let bypass_known_check = is_staff_caster || is_mob_caster;
+    // Item-driven casts (scroll/wand/staff/potion) bypass the
+    // KnownAbilities + class-skill gates entirely — the item is the
+    // magic source, the player isn't drawing on their own training.
+    let bypass_known_check = is_staff_caster || is_mob_caster || from_item;
     let needs_explicit_known = !bypass_known_check
         && !matches!(kind, mud_db::abilities::AbilityKind::Skill);
     if needs_explicit_known {
