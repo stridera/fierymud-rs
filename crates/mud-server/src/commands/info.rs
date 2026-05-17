@@ -2626,6 +2626,61 @@ fn render_ability_help(world: &mut World, player: Entity, def: &mud_world::Abili
     send_to(world, player, out);
 }
 
+/// `help classes` body — overview of every class in the catalog,
+/// with subclasses indented under their parent. Each line shows the
+/// short identity (primary stat / HD) so a new player can scan the
+/// whole roster from one screen and dive into `help <class>` for
+/// the full kit. Pure ClassCatalog walk — no DB hits.
+fn render_classes_overview(world: &mut World, player: Entity) {
+    let mode = color_mode_for(world, player);
+    let catalog = world.resource::<mud_world::ClassCatalog>();
+    // Bucket subclasses under their parent. Top-level classes
+    // (no parent / parent_class_id == None) anchor each tree.
+    let mut children: std::collections::HashMap<i32, Vec<&mud_world::ClassDef>> =
+        std::collections::HashMap::new();
+    let mut roots: Vec<&mud_world::ClassDef> = Vec::new();
+    for c in catalog.by_id.values() {
+        if c.is_subclass
+            && let Some(pid) = c.parent_class_id
+        {
+            children.entry(pid).or_default().push(c);
+        } else {
+            roots.push(c);
+        }
+    }
+    roots.sort_by(|a, b| a.plain_name.cmp(&b.plain_name));
+    let mut out = format!(
+        "\r\n<b:cyan>Classes</> <dim>({} total, {} top-level)</>\r\n",
+        catalog.by_id.len(),
+        roots.len(),
+    );
+    let format_line = |c: &mud_world::ClassDef, indent: &str| -> String {
+        let primary = c
+            .primary_stat
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("--");
+        format!(
+            "  {indent}<b:cyan>{}</> <dim>(primary {primary}, HD {}, HP+{}/lvl)</>\r\n",
+            render_color_tags(&c.name, mode),
+            c.hit_dice,
+            c.hp_per_level,
+        )
+    };
+    for parent in roots {
+        out.push_str(&format_line(parent, ""));
+        if let Some(kids) = children.get(&parent.id) {
+            let mut kids_sorted: Vec<&mud_world::ClassDef> = kids.clone();
+            kids_sorted.sort_by(|a, b| a.plain_name.cmp(&b.plain_name));
+            for k in kids_sorted {
+                out.push_str(&format_line(k, "  └─ "));
+            }
+        }
+    }
+    out.push_str("\r\n  <dim>Type `help <class>` to see a class's full toolkit.</>\r\n");
+    send_to(world, player, out);
+}
+
 /// `help <class>` body — surfaces a class's prose description, the
 /// stat identity line (primary stat / hit dice / per-level HP), and
 /// inventories its toolkit. Spells grouped by circle, skills grouped
@@ -2852,6 +2907,15 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
             out.push_str("<dim>Builder+: type `wizhelp` for admin commands.</>\r\n");
         }
         send_to(world, player, out);
+        return;
+    }
+
+    // Special topic: `help classes` (or `help class`) renders the
+    // full class catalog with subclasses grouped under their parent.
+    // Lives ahead of the command-registry lookup so the topic isn't
+    // shadowed by some future builtin named "class".
+    if matches!(topic.as_str(), "classes" | "class") {
+        render_classes_overview(world, player);
         return;
     }
 
