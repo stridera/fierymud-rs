@@ -24,7 +24,7 @@ Features the legacy MUD had that we still need.
 
 - **B1. Object decay tick** ✅ Closed — `item_decay_tick` decrements `ItemTimer` and destroys at zero (PERMANENT skipped).
 - **B2. Bashable doors** (`RoomExit.hit_points`). Deferred — needs `ExitData.hit_points` plumbed through the loader before the bash handler can decrement.
-- **B3. Mob.aggressionFormula** (Lua expression for varied aggro). Replaces hardcoded `AGGR_EVIL`/`AGGR_GOOD` etc. flags with per-mob Lua. Scope: load on Mob struct + eval at the wander/aggro tick site in `mud-server`.
+- **B3. Mob.aggressionFormula** (Lua expression for varied aggro). Replaces hardcoded `AGGR_EVIL`/`AGGR_GOOD` etc. flags with per-mob Lua. **Blocker:** 0 mobs have the column populated AND the legacy AGGRESSIVE behavior flag isn't in the modern `MobBehavior` enum either — wiring the tick site without either signal would be dead code. Needs schema + content authoring first. Scope after that: load on Mob struct + eval at the wander/aggro tick site in `mud-server`.
 - **B4. RaceSpellSlotBonus** (per-race +N slots for a circle). Loaded via a new module, folded into the spell-slot cap calculation when the slot system tracks circle pools. **Blocker:** 0 rows in DB; defer until content lands.
 - **B5. LevelDefinition.permissions** ✅ Closed — on level-up, the row's permissions union into `Account.perms` with a player-facing notification.
 - **B6. Object equip restrictions** ✅ Closed — `allowed_races` + `min_size` + `max_size` gated in the wear handler; surfaced on `identify` under a "Requirements" section.
@@ -68,7 +68,7 @@ Features that don't exist in legacy. Per user's "wire if it's an improvement" ru
 - **E1. Object.fixture_room** — permanent objects pinned to a room (fountains, signs).
 - **E2. Object.passenger_capacity** — multi-rider vehicles. Pairs with VEHICLE flag.
 - **E3. Object.presence_override** — flying-carpet-style position presence override.
-- **E4. Object.notes + tags** — builder search metadata. Cheap to wire (no consumer needed; just persist).
+- ~~**E4. Object.notes + tags**~~ — the Objects model doesn't have these columns. (Mobs may; revisit if a builder workflow ever surfaces.)
 - **E5. Room.entry_restriction (Lua)** — Lua-driven entry gate. Improvement over hardcoded room flags.
 - **E6. Mob.riderPresenceMessage** — mount system "X rides Y" rendering.
 - **E7. Mob.activityRestrictions** — Lua-driven schedule (mob only active at night, etc.).
