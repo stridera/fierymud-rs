@@ -131,6 +131,21 @@ Follow-ups surfaced this pass:
   resolved cleanly (hit chances ~28-33%, damage breakdown
   rendered, aggro flipped, peaceful-room gate held, flee moved
   correctly).
+- **I.7 Semantic color tags rendered as literal text.** ✅
+  Resolved. Content authors write `<healing>...</>`,
+  `<fire>...</>`, etc. in ability + object descriptions
+  (Cure Light's description: `<healing>Cures</> minor
+  <healing>wounds</> and scratches.`). The renderer's
+  `named_color` table didn't know these sphere aliases and
+  the unknown-tag path left them as literal angle-bracket
+  text. Extended `named_color` with the standard sphere /
+  semantic palette (`healing`, `death`, `protection`,
+  `enchantment`, `summoning`, `divination`, `divine`, `holy`,
+  `unholy`, `arcane`, `fire`, `water`, `air`, `earth`).
+  Bold variants of these aliases (`<b:black>death</>`) need
+  the explicit `<b:NAME>` form since `named_color` returns a
+  single ANSI code. Live verification: Cure Light's
+  description now emits `\x1b[32m` around "Cures" and "wounds".
 - **I.6 Seeder skipped ClassSkills** ✅ Resolved (fierylib
   commit). Warrior + Rogue have 0 entries in `ClassAbilities`
   (their toolkit lives in `ClassSkills`), so the

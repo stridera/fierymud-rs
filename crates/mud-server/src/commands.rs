@@ -1485,6 +1485,28 @@ pub(crate) fn named_color(s: &str) -> Option<u8> {
         "white" => 37,
         // Bright variants
         "orange" => 93,
+        // Semantic aliases — content authors write `<healing>...</>`
+        // in ability / object descriptions and expect a flavor
+        // color. Map to the same base colors `sphere_color_tag`
+        // uses for the `spells` / `skills` listings so the in-game
+        // palette stays consistent. Bold variants
+        // (`<b:black>death</>`) aren't expressible through
+        // `named_color` since it returns one ANSI code; authors who
+        // want bold should use the explicit `<b:NAME>` form.
+        "healing" => 32,
+        "death" => 30,
+        "protection" => 37,
+        "enchantment" => 35,
+        "summoning" => 95, // bright magenta
+        "divination" => 93, // bright yellow
+        "divine" => 93,
+        "holy" => 97,      // bright white
+        "unholy" => 90,    // bright black
+        "arcane" => 35,
+        "fire" => 31,
+        "water" => 36,
+        "air" => 96,       // bright cyan
+        "earth" => 33,
         _ => return None,
     })
 }
@@ -1933,6 +1955,31 @@ mod tests {
         assert!(out.starts_with("\x1b[0m\x1b[32m"));
         assert!(out.ends_with("\x1b[0m"));
         assert!(out.contains("grass"));
+    }
+
+    #[test]
+    fn render_color_tags_semantic_aliases_resolve_to_underlying_color() {
+        // Content authors write `<healing>...</>` in ability /
+        // object descriptions (eg. Ability Cure Light's description
+        // is `<healing>Cures</> minor <healing>wounds</> and ...`).
+        // The semantic alias path resolves to the base color so the
+        // text renders flavored rather than as literal angle-bracket
+        // text. Each of these should NOT survive strip mode as
+        // literal markup.
+        for (tag, expected_ansi) in [
+            ("<healing>cures</>", "\x1b[32m"),
+            ("<fire>burns</>", "\x1b[31m"),
+            ("<water>flows</>", "\x1b[36m"),
+            ("<arcane>glows</>", "\x1b[35m"),
+            ("<holy>blesses</>", "\x1b[97m"),
+        ] {
+            let out = ansi(tag);
+            assert!(
+                out.contains(expected_ansi),
+                "expected {expected_ansi:?} in {out:?} (tag {tag:?})"
+            );
+            assert!(!strip(tag).contains('<'), "strip mode kept markup: {tag:?}");
+        }
     }
 
     #[test]
