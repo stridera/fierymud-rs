@@ -9760,7 +9760,45 @@ pub(crate) fn cmd_eat(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_quaff(world: &mut World, player: Entity, args: &str) {
-    consume_item(world, player, args, mud_db::enums::ObjectType::Potion, "quaff");
+    // Route potions through the same item-cast path scrolls/wands use:
+    // the potion's bound abilities fire as full casts (with proper
+    // effect names, durations, override params) and the item despawns
+    // after. Falls back to the legacy consume_item path only if the
+    // potion has zero ObjectAbilities bindings (older content that
+    // hasn't been wired to the spell catalog yet).
+    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+    let item_word = parts.first().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let Some(item_word) = item_word else {
+        send_to(world, player, "Quaff what?\r\n");
+        return;
+    };
+    let item = find_carried_by(world, item_word, player, crate::commands::EquipFilter::Inventory);
+    let has_bindings = item.is_some_and(|e| {
+        world
+            .get::<mud_world::WorldKey>(e)
+            .map(|k| (k.zone, k.id))
+            .and_then(|key| {
+                world
+                    .resource::<mud_world::ObjectAbilityCatalog>()
+                    .by_key
+                    .get(&key)
+                    .map(|v| !v.is_empty())
+            })
+            .unwrap_or(false)
+    });
+    if has_bindings {
+        invoke_object_abilities(
+            world,
+            player,
+            args,
+            mud_db::enums::ObjectType::Potion,
+            "quaff",
+            "You quaff",
+            true,
+        );
+    } else {
+        consume_item(world, player, args, mud_db::enums::ObjectType::Potion, "quaff");
+    }
 }
 
 pub(crate) fn cmd_drink(world: &mut World, player: Entity, args: &str) {

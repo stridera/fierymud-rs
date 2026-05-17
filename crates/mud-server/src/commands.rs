@@ -9797,7 +9797,7 @@ pub(crate) fn invoke_object_abilities(
         } else {
             ability_name
         };
-        invoke_ability(
+        invoke_ability_from_item(
             world,
             player,
             &dispatched,
@@ -10395,7 +10395,21 @@ pub(crate) fn invoke_ability(
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
 ) {
-    invoke_ability_with(world, player, args, kind, verb, false);
+    invoke_ability_with(world, player, args, kind, verb, false, false);
+}
+
+/// Entry point for item-driven casts (scroll/wand/staff). Bypasses
+/// the caster-side gates — slot pool, class circle, KnownAbilities,
+/// posture-only restrictions — because the *item* is the magic
+/// source. Damage / save / target gates still apply.
+pub(crate) fn invoke_ability_from_item(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    kind: mud_db::abilities::AbilityKind,
+    verb: &str,
+) {
+    invoke_ability_with(world, player, args, kind, verb, false, true);
 }
 
 /// Target-set selectors for AOE ability dispatch. Names match the
@@ -10471,6 +10485,7 @@ pub(crate) fn invoke_ability_aoe(
             kind,
             verb,
             true,
+            false,
         );
     }
 }
@@ -10683,6 +10698,7 @@ pub(crate) fn invoke_ability_with(
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
     aoe_repeat: bool,
+    from_item: bool,
 ) {
     // Quoted phrases (`cast 'magic missile' goblin`) collapse to a
     // single token; otherwise behaves like the legacy whitespace
@@ -10875,7 +10891,10 @@ pub(crate) fn invoke_ability_with(
     // tax. The circle table covers the bulk; `memorization_time` lets
     // a builder make Meteorswarm cost a premium beyond its circle-10
     // baseline without churning the global table.
-    if matches!(def.kind, mud_db::abilities::AbilityKind::Spell) {
+    // Slot gate is skipped when the cast is item-driven (scroll/wand/
+    // staff/potion). The *item* is the magic source — the player isn't
+    // burning a memorized slot — so the gate is irrelevant.
+    if matches!(def.kind, mud_db::abilities::AbilityKind::Spell) && !from_item {
         let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
         if let Some(class_id) = class_id {
             let circle = world
