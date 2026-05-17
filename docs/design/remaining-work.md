@@ -131,6 +131,17 @@ Follow-ups surfaced this pass:
   resolved cleanly (hit chances ~28-33%, damage breakdown
   rendered, aggro flipped, peaceful-room gate held, flee moved
   correctly).
+- **I.9 `multihit: true` on ability params is unwired.** Magic
+  Missile's effect params carry `"multihit": true`, intending the
+  classic D&D "1 missile + 1 per 2 caster levels above 1, max 5"
+  bolt count. The runtime ignores the flag — MM at any caster
+  level fires exactly once and rolls `roll_dice(4, 21)` for ~50
+  avg damage. Either drop the flag in JSON (and bake the bolt
+  count into the formula, which loses level scaling) or wire a
+  `multihit` consumer in the apply path that loops the damage
+  rolls and emits per-bolt lines. Modest scope: a per-spell
+  `bolts = 1 + (level-1)/2, capped` resolver beside the existing
+  damage step. Surfaced 2026-05-16 during a TestMage playtest.
 - **I.8 DB drift from `fierylib/data/abilities.json`.** The JSON
   is the source of truth (see the "ALL conversions happen in
   fierylib" rule). H.5 / I-section rewrites updated the JSON but
