@@ -12197,7 +12197,22 @@ pub(crate) fn invoke_ability_with(
                 );
                 let dest_room: Option<Entity> = match destination.as_deref() {
                     Some("recall" | "home") => {
-                        world.get::<RecallPoint>(target_entity).map(|r| r.0)
+                        // Explicit recall point wins; fall back to the
+                        // race's start room so a new player without a
+                        // bound touchstone still has somewhere to land.
+                        world.get::<RecallPoint>(target_entity).map(|r| r.0).or_else(|| {
+                            let race = world.get::<Profile>(target_entity).map(|p| p.race.clone());
+                            let start = race.and_then(|r| {
+                                world
+                                    .resource::<mud_world::RaceDefaults>()
+                                    .start_room_by_race
+                                    .get(&r)
+                                    .copied()
+                            });
+                            start.and_then(|(z, i)| {
+                                world.resource::<WorldKeyIndex>().rooms.get(&(z, i)).copied()
+                            })
+                        })
                     }
                     Some("caster") => world.get::<Located>(player).map(|l| l.0),
                     Some("target") => {
@@ -12211,6 +12226,38 @@ pub(crate) fn invoke_ability_with(
                             world.get::<Located>(target_entity).map(|l| l.0)
                         }
                     }
+                    Some("random") => {
+                        // Pick a random loaded non-peaceful room, distinct
+                        // from the caster's current room. Bounded retries
+                        // so a world that's mostly peaceful (sanctuaries,
+                        // arenas) doesn't loop forever — after 16 tries,
+                        // give up and let the destination-not-resolvable
+                        // path fire.
+                        let cur = world.get::<Located>(target_entity).map(|l| l.0);
+                        let candidates: Vec<Entity> = world
+                            .resource::<WorldKeyIndex>()
+                            .rooms
+                            .values()
+                            .copied()
+                            .collect();
+                        let mut pick: Option<Entity> = None;
+                        for _ in 0..16 {
+                            if candidates.is_empty() {
+                                break;
+                            }
+                            let idx = rand::random_range(0..candidates.len());
+                            let e = candidates[idx];
+                            if Some(e) == cur {
+                                continue;
+                            }
+                            if world.get::<mud_world::PeacefulRoom>(e).is_some() {
+                                continue;
+                            }
+                            pick = Some(e);
+                            break;
+                        }
+                        pick
+                    }
                     _ => None,
                 };
                 let Some(dest_room) = dest_room else {
@@ -12222,12 +12269,24 @@ pub(crate) fn invoke_ability_with(
                 };
                 let cur_room = world.get::<Located>(target_entity).map(|l| l.0);
                 if cur_room == Some(dest_room) {
+                    // Surface a player-facing line — the bare success
+                    // template ("You vanish in a flash of light!")
+                    // is misleading when nothing actually moved.
+                    send_to(
+                        world,
+                        target_entity,
+                        "You are already there.\r\n",
+                    );
                     applied_msgs.push(format!("{} (already there)", pretty));
                     continue;
                 }
                 if let Some(mut l) = world.get_mut::<Located>(target_entity) {
                     l.0 = dest_room;
                 }
+                // Auto-look at the new room so the player sees where
+                // they landed without needing to follow up with a
+                // separate `look` command.
+                crate::commands::cmd_look(world, target_entity, "");
                 applied_msgs.push(format!("{} (teleported)", pretty));
             }
             "knockdown" => {
