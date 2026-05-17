@@ -131,6 +131,18 @@ Follow-ups surfaced this pass:
   resolved cleanly (hit chances ~28-33%, damage breakdown
   rendered, aggro flipped, peaceful-room gate held, flee moved
   correctly).
+- **I.11 Second spell-catalog sweep (2026-05-16).** Followed I.10
+  with the `base_damage + pow(skill, 2) / X` family. 15 more
+  spells folded into the tier ladder: WRITHING_WEEDS, DISPEL_EVIL,
+  DISPEL_GOOD, FREEZING_WIND, DESTROY_UNDEAD, FIRESTORM, ICE_STORM,
+  HOLY_WORD, UNHOLY_WORD, METEORSWARM, SEVERANCE, FLOOD,
+  ICE_SHARDS, SOUL_REAVER, SUPERNOVA. Each keeps `base_damage` for
+  caster-level scaling and adds a dice roll + `pow(skill, K)` term
+  tuned per circle. Live spot-check at TestMage L15 sorcerer skill=100:
+  Magic Missile 214 dmg (5 bolts) → stallion at 9% HP, then
+  Burning Hands 190 dmg finishes the kill. Two-cast solo kill on a
+  tier-appropriate L17 stallion (237 HP) matches the user's
+  "mages burn them down" intent without one-shot abuse.
 - **I.10 First spell-catalog balance sweep (2026-05-16).** Per
   playtest feedback ("Burning Hands one-shots tier-appropriate
   mobs"), 9 damage formulas in the live DB were retuned to a
