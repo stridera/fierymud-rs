@@ -530,7 +530,25 @@ async fn handle_connection<S>(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                warn!(conn_id, error = %e, "read error");
+                // A client dropping its socket abruptly (closed
+                // laptop, network blip, killed client) surfaces as
+                // ConnectionReset / BrokenPipe / ConnectionAborted /
+                // UnexpectedEof — normal disconnect noise, not
+                // operator-actionable. Log those at debug; keep WARN
+                // for genuinely unexpected I/O errors that might
+                // signal a real problem.
+                use std::io::ErrorKind;
+                if matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionReset
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::UnexpectedEof
+                ) {
+                    debug!(conn_id, error = %e, "client disconnected (read)");
+                } else {
+                    warn!(conn_id, error = %e, "read error");
+                }
                 break;
             }
         };
