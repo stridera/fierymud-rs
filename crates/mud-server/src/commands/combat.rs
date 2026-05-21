@@ -2795,6 +2795,15 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     if !dead && let Ok(mut e) = world.get_entity_mut(target) {
         e.insert(Posture(PostureKind::Sitting));
     }
+    // Concentration break — a bash that knocks a caster on their
+    // back shatters any spell they were winding up. This is the
+    // tactical point of BASH against a mage (the ability carries
+    // an `interrupt` effect intent the inline bash path otherwise
+    // never realized). `interrupt_cast` no-ops cleanly when the
+    // target wasn't casting, so the call is unconditional.
+    if !dead {
+        crate::casting::interrupt_cast(world, target, "the bash knocks you flat");
+    }
 
     send_rendered(world, player, &format!("You bash {target_name} for {damage} damage, knocking them down!\r\n"),
     );
