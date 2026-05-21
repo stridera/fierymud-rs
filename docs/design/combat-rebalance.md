@@ -457,6 +457,17 @@ its job. No further tuning needed at this tier; L100+ god
 characters are excluded from balance analysis (legacy:
 uncombatable, all-crit).
 
+**L15 TestMage (Sorcerer, 218 HP) vs L14 tribesman (198 HP, 5d4+3)**
+
+A single Magic Missile (circle 1, 5 bolts) killed the tribesman
+outright before it landed a swing — mage took 0 damage. Confirms
+the glass-cannon shape: high burst, but the 218-HP pool (vs the
+warrior's 712) and the 8s cast wind-up are the tradeoff — if the
+first cast doesn't kill, the mob closes and a 218-HP caster is in
+real danger. Slot gating verified too: the Fireball follow-up
+refused ("circle 6 slots spent 0/0") since L15 has no high-circle
+slots. Both melee and caster tiers play as designed.
+
 ## Action items (post-rebuild)
 
 * Restart the running server (the binary on disk is the new build;
