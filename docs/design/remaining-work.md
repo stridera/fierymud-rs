@@ -676,6 +676,19 @@ Look at legacy for an example, but we can improve on that system."
   SIMULACRUM, SUMMON_DEMON, SUMMON_DRACOLICH, SUMMON_ELEMENTAL,
   SUMMON_GREATER_DEMON. Closes the audit ask; the L3 entry tracks
   the actual `summon` arm implementation.
+  - **2026-05-21 effect-type coverage re-audit.** Walked every
+    distinct `effectType` in use vs the dispatcher arms. Three
+    types lack a generic-loop arm: `drag` (handled via the
+    `has_effect_named` command path — works), `interrupt`
+    (BASH — now wired, see below), and `conceal_item` (PALM —
+    the rogue skill isn't a registered command yet, so it's
+    unreachable; a feature gap in the rogue tree, not a live
+    bug). **BASH interrupt fixed:** `cmd_bash` now calls
+    `casting::interrupt_cast` on the bashed target after the
+    knockdown, so a bash shatters a mid-cast mage's spell —
+    realizing the BASH ability's `interrupt` effect intent that
+    the inline bash path previously ignored. PALM/rogue-skill
+    wiring remains a feature follow-up.
 
 ## N — Weather spells (2026-05-17)
 
