@@ -110,6 +110,24 @@ Items where the schema → ECS pipe is wired but the consuming gameplay system d
   - `MovementPoints` → uncosted wander today
   - `MovementModeTag::Flying` aerial combat
 
+- **D6. Unwired active player skills (2026-05-21 audit).** Cross-
+  checked every `abilityType = SKILL` row against registered
+  command names. Seven active skills have *no* command and aren't
+  passive procs — casting/invoking them is currently impossible:
+  - `bind` — bind wounds (a heal/staunch; overlaps bandage /
+    first_aid / lay_hands — decide whether it's a distinct tier
+    or a redundant import).
+  - `cartwheel`, `circle`, `palm` — rogue moves needing mechanics
+    design (evasive tumble / circle-stab reposition / item-conceal).
+  - `ground_shaker` — AoE knockdown (needs scope + save design).
+  - `scribe` — scroll authoring; needs a whole creation pipeline.
+  - `shapechange` — druid transform; large feature.
+  Passive procs that correctly need no command: `sneak_attack`,
+  `vampiric_touch`, `instant_kill`. Alias-resolved (not gaps):
+  `pick_lock`→`pick`, `eye_gouge`→`gouge`, `lay_hands`→`layhands`,
+  `trip_up`→`trip`, `first_aid`→`firstaid`. Each gap is a feature
+  with a design call attached — not a quick wire.
+
 ## E — Improvements (not parity, may be cut)
 
 Features that don't exist in legacy. Per user's "wire if it's an improvement" rule these were marked for eventual wiring, but they're optional.
