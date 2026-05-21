@@ -429,6 +429,34 @@ path. Mob hits for ~30/swing on a 250-HP player. Same issue — at
 *every* level the lack of class HP/damroll scaling makes solo PvE
 unwinnable.
 
+### Retest 2026-05-20 (post Q2 HP curves + starter gear) — RESOLVED
+
+The solo-PvE asymmetry above is **fixed**. Q2's per-class
+`LevelDefinition` HP curves landed and the fierylib seeder now
+grants starter gear (TestWarrior wields a claymore at creation).
+Fresh virtual playtest:
+
+**L25 TestWarrior (712 HP, claymore) vs L23 soldier (550 HP, 8d4+5)**
+
+```
+You hit a soldier for 28 damage.
+You hit a soldier for 44 damage.
+You hit a soldier for 30 damage.
+You hit a soldier for 26 damage.
+You swing at a soldier but miss.
+a soldier swings at you but misses.
+```
+
+Warrior swings now land 11–44 (claymore dice, ~28 avg) instead of
+the 1-damage barehand path. The fight is a real contest: TestWarrior
+**won, ending at 349/712 (≈49% HP)**. A solo fight against a
+tier-appropriate mob now costs meaningful HP but is decisively
+winnable — exactly the shape the action items below called for. The
+712-HP L25 warrior (vs the old ~250) is the per-class curve doing
+its job. No further tuning needed at this tier; L100+ god
+characters are excluded from balance analysis (legacy:
+uncombatable, all-crit).
+
 ## Action items (post-rebuild)
 
 * Restart the running server (the binary on disk is the new build;
