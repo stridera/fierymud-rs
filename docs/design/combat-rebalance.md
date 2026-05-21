@@ -466,7 +466,22 @@ warrior's 712) and the 8s cast wind-up are the tradeoff — if the
 first cast doesn't kill, the mob closes and a 218-HP caster is in
 real danger. Slot gating verified too: the Fireball follow-up
 refused ("circle 6 slots spent 0/0") since L15 has no high-circle
-slots. Both melee and caster tiers play as designed.
+slots.
+
+**L10 TestRogue (Halfling, 220 HP, small dagger) vs L9 pack slave (88 HP)**
+
+`hide` then `backstab slave` lands "You skillfully backstab a
+human pack slave!" and engages. The opener + follow-up swings
+killed the slave with TestRogue **ending at 216/220 (lost ~4 HP)**.
+Confirms the A6 / H.4 stealth-opener: backstab's `bonusIfHidden`
+fires for the +50% opening strike, letting the rogue burst a
+tier mob before it meaningfully retaliates. (Test friction: the
+pack-slave proto wanders, so the mob must be backstabbed
+promptly after spawn before its AI relocates it.)
+
+All three playable archetypes — bruiser (warrior), glass-cannon
+caster (mage), and stealth-opener (rogue) — play as designed at
+their tier. The Q2 solo-PvE asymmetry is closed across the board.
 
 ## Action items (post-rebuild)
 
