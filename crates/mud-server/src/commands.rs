@@ -140,7 +140,13 @@ pub fn drain_player_updates(world: &mut World) {
         };
         match msg {
             PendingPlayerUpdate::ExperienceDelta { amount, .. } => {
-                if let Some(mut p) = world.get_mut::<Profile>(entity) {
+                // Rest / repose R4 + R5: quest / DB-driven XP gains
+                // also route through the wake + Repose chokepoint.
+                // Negative deltas (death penalties, refunds) bypass —
+                // those should never trigger wake nor be doubled.
+                if amount > 0 {
+                    crate::rest::award_experience(world, entity, amount);
+                } else if let Some(mut p) = world.get_mut::<Profile>(entity) {
                     p.experience = p.experience.saturating_add(amount);
                 }
             }
@@ -284,6 +290,8 @@ pub(crate) use combat_commands::cmd_flee;
 mod enter;
 #[path = "commands/feedback.rs"]
 mod feedback;
+#[path = "commands/game.rs"]
+mod game;
 #[path = "commands/housing.rs"]
 mod housing;
 #[path = "commands/identity.rs"]
@@ -291,7 +299,7 @@ mod identity;
 #[path = "commands/name_approval.rs"]
 mod name_approval;
 #[path = "commands/info.rs"]
-mod info;
+pub(crate) mod info;
 pub(crate) use info::{cmd_look, has_object_flag, has_restriction};
 #[path = "commands/mail.rs"]
 mod mail;
@@ -302,6 +310,9 @@ mod movement_directions;
 mod quests;
 #[path = "commands/recall.rs"]
 mod recall;
+#[path = "commands/rent.rs"]
+mod rent;
+pub(crate) use rent::{PendingRentConfirm, finalize_rent};
 #[path = "commands/room_chat.rs"]
 mod room_chat;
 #[path = "commands/release.rs"]
@@ -544,6 +555,34 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     let tokens: Vec<&str> = lower.split_whitespace().collect();
     if tokens.is_empty() {
         return;
+    }
+
+    // Rest / repose: when a `rent <tier-name>` for tier > 1 has
+    // primed a `PendingRentConfirm` component, the next line is
+    // interpreted as the y/n response. Anything other than the
+    // canonical yes/no tokens leaves the confirm intact and falls
+    // through (player can keep typing other commands; the prompt is
+    // sticky until they answer). Y/N consumes the component.
+    if let Some(pending) = world.get::<PendingRentConfirm>(player).cloned() {
+        match tokens[0] {
+            "y" | "yes" => {
+                if let Ok(mut em) = world.get_entity_mut(player) {
+                    em.remove::<PendingRentConfirm>();
+                }
+                finalize_rent(world, player, &pending.tier_name, pending.tier, pending.fee_gp);
+                return;
+            }
+            "n" | "no" => {
+                if let Ok(mut em) = world.get_entity_mut(player) {
+                    em.remove::<PendingRentConfirm>();
+                }
+                send_to(world, player, "Rental cancelled.\r\n");
+                return;
+            }
+            _ => {
+                // Fall through — let the player chat / look / etc.
+            }
+        }
     }
 
     // Frozen players: refuse anything except `quit` (always-allowed escape
@@ -1838,10 +1877,13 @@ mod tests {
                 "combat `{name}` missing"
             );
         }
-        // spells.rs
+        // spells.rs — `skill` / `use` removed 2026-05-17 (they
+        // were a backdoor for invoking passive defensives and
+        // weapon proficiencies; every active skill has its own
+        // dedicated command).
         for name in [
             "pick", "study", "memorize", "mem", "pray", "forget",
-            "cast", "c", "chant", "perform", "skill", "use",
+            "cast", "c", "chant", "perform",
             "abort", "cancel",
         ] {
             assert!(
@@ -3028,8 +3070,38 @@ mod tests {
         let blob = serde_json::json!({"amount": "roll_dice(8, 25) + pow(skill, 1.44)"});
         let v = amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0)).expect("formula resolves");
         assert!((8..=200).contains(&v), "8d25 result {v} in range");
-        // Float literal outside pow → unsupported, returns None.
+        // Float literal outside pow as a Plus operand → still
+        // unsupported (parse_factor rejects Float in additive
+        // position). Only the multiplicative path opens up.
         assert_eq!(evaluate_formula("1.5 + skill", &super::FormulaCtx::base(0, 5), &mut det), None);
+        // I2: float multipliers on the RHS of `*` and `/` are now
+        // accepted. `skill * 0.5` with skill=10 rounds to 5;
+        // `level / 0.5` with level=10 yields 20. Anything outside
+        // i32 range or NaN/inf still falls through to None.
+        assert_eq!(
+            evaluate_formula("skill * 0.5", &super::FormulaCtx::base(0, 10), &mut det),
+            Some(5)
+        );
+        assert_eq!(
+            evaluate_formula("level / 0.5", &super::FormulaCtx { level: 10, ..super::FormulaCtx::base(0, 0) }, &mut det),
+            Some(20)
+        );
+        // Mixed integer + float multipliers in a chain — legacy
+        // `dmg * 0.0007 * level` shape — should resolve cleanly.
+        assert_eq!(
+            evaluate_formula(
+                "10000 * 0.0007 * level",
+                &super::FormulaCtx { level: 5, ..super::FormulaCtx::base(0, 0) },
+                &mut det
+            ),
+            // (10000 * 0.0007).round() = 7, then 7 * 5 = 35.
+            Some(35)
+        );
+        // Divide-by-zero float → None.
+        assert_eq!(
+            evaluate_formula("skill / 0.0", &super::FormulaCtx::base(0, 10), &mut det),
+            None
+        );
         // Malformed pow (missing exp) → None.
         assert_eq!(evaluate_formula("pow(skill,)", &super::FormulaCtx::base(0, 5), &mut det), None);
         assert_eq!(evaluate_formula("pow(skill", &super::FormulaCtx::base(0, 5), &mut det), None);
@@ -3189,6 +3261,44 @@ mod tests {
         assert_eq!(evaluate_formula("pow(skill, 1 + min_level / 10)", &ctx, &mut zero), Some(80));
     }
 
+    /// Wave 2 of the per-target lifeform symbols. Used by smite-type
+    /// spells: DESTROY_UNDEAD reads `victim_is_undead`; HOLY_WORD reads
+    /// the demonic + celestial pair to boost vs unholy / soften vs
+    /// holy. Each symbol is a 0/1 flag — easy to combine into the
+    /// `1000 + victim_is_X * N` multiplier shape.
+    #[test]
+    fn evaluate_formula_lifeform_symbols() {
+        let mut zero = |_: &str, _: i32, _: i32| 0i32;
+        // All flags default 0 — non-tagged targets carry the
+        // baseline multiplier (×1 when divided by 1000).
+        let neutral = FormulaCtx::default();
+        assert_eq!(evaluate_formula("victim_is_undead", &neutral, &mut zero), Some(0));
+        assert_eq!(evaluate_formula("victim_is_demonic", &neutral, &mut zero), Some(0));
+        assert_eq!(evaluate_formula("victim_is_celestial", &neutral, &mut zero), Some(0));
+        assert_eq!(evaluate_formula("victim_is_elemental", &neutral, &mut zero), Some(0));
+        // Aliases.
+        let undead = FormulaCtx { victim_is_undead: 1, ..FormulaCtx::default() };
+        assert_eq!(evaluate_formula("victim_undead", &undead, &mut zero), Some(1));
+        assert_eq!(evaluate_formula("target_is_undead", &undead, &mut zero), Some(1));
+        // DESTROY_UNDEAD shape: 2× vs undead, 1× otherwise.
+        assert_eq!(
+            evaluate_formula("1000 + victim_is_undead * 1000", &undead, &mut zero),
+            Some(2000),
+        );
+        assert_eq!(
+            evaluate_formula("1000 + victim_is_undead * 1000", &neutral, &mut zero),
+            Some(1000),
+        );
+        // HOLY_WORD shape: +0.5x vs demonic+undead, -0.5x vs celestial.
+        let demon = FormulaCtx { victim_is_demonic: 1, ..FormulaCtx::default() };
+        let angel = FormulaCtx { victim_is_celestial: 1, ..FormulaCtx::default() };
+        let holy_expr = "1000 + (victim_is_demonic + victim_is_undead) * 500 - victim_is_celestial * 500";
+        assert_eq!(evaluate_formula(holy_expr, &demon, &mut zero), Some(1500));
+        assert_eq!(evaluate_formula(holy_expr, &undead, &mut zero), Some(1500));
+        assert_eq!(evaluate_formula(holy_expr, &angel, &mut zero), Some(500));
+        assert_eq!(evaluate_formula(holy_expr, &neutral, &mut zero), Some(1000));
+    }
+
     /// I2 partial (b): pow accepts an integer expression as the
     /// exponent so dynamic-taper shapes like `pow(skill, 1 + level / 25)`
     /// resolve at runtime. Float literals still take the precise path.
@@ -3303,6 +3413,60 @@ mod tests {
         assert_eq!(bolts(-5), 1);
     }
 
+    /// J2: PROT_FROM_EVIL / PROT_FROM_GOOD damage factor returns
+    /// 0.8 only when alignments are mutually opposed AND the
+    /// matching marker is present on the victim.
+    #[test]
+    fn alignment_protection_factor_gate_logic() {
+        use bevy_ecs::prelude::*;
+        use super::alignment_protection_factor;
+        let mut w = World::new();
+        let make = |w: &mut World, align: i32, marker_evil: bool, marker_good: bool| {
+            let mut e = w.spawn(mud_world::CombatStats {
+                alignment: align,
+                ..Default::default()
+            });
+            if marker_evil {
+                e.insert(mud_world::ProtectFromEvil);
+            }
+            if marker_good {
+                e.insert(mud_world::ProtectFromGood);
+            }
+            e.id()
+        };
+
+        // Strong-evil attacker vs strong-good victim WITH ProtectFromEvil → 0.8.
+        let attacker = make(&mut w, -800, false, false);
+        let victim = make(&mut w, 800, true, false);
+        assert!((alignment_protection_factor(&w, attacker, victim) - 0.8).abs() < 1e-6);
+
+        // Same alignments, NO marker → 1.0.
+        let attacker2 = make(&mut w, -800, false, false);
+        let victim2 = make(&mut w, 800, false, false);
+        assert!((alignment_protection_factor(&w, attacker2, victim2) - 1.0).abs() < 1e-6);
+
+        // Marker present but neutral victim (< +500) → 1.0.
+        let attacker3 = make(&mut w, -800, false, false);
+        let victim3 = make(&mut w, 100, true, false);
+        assert!((alignment_protection_factor(&w, attacker3, victim3) - 1.0).abs() < 1e-6);
+
+        // Marker present but neutral attacker (> -500) → 1.0.
+        let attacker4 = make(&mut w, -100, false, false);
+        let victim4 = make(&mut w, 800, true, false);
+        assert!((alignment_protection_factor(&w, attacker4, victim4) - 1.0).abs() < 1e-6);
+
+        // Mirror: strong-good attacker vs strong-evil victim WITH
+        // ProtectFromGood → 0.8.
+        let attacker5 = make(&mut w, 800, false, false);
+        let victim5 = make(&mut w, -800, false, true);
+        assert!((alignment_protection_factor(&w, attacker5, victim5) - 0.8).abs() < 1e-6);
+
+        // Wrong marker (ProtectFromGood when attacker is evil) → 1.0.
+        let attacker6 = make(&mut w, -800, false, false);
+        let victim6 = make(&mut w, 800, false, true);
+        assert!((alignment_protection_factor(&w, attacker6, victim6) - 1.0).abs() < 1e-6);
+    }
+
     /// A7: per-element resistance application.
     #[test]
     fn apply_resistance_mitigates_and_amplifies() {
@@ -3369,17 +3533,30 @@ mod tests {
     }
 
     #[test]
-    fn core_stats_bonus_d_n_d_style() {
+    fn core_stats_bonus_0_to_100_scale() {
         use mud_world::CoreStats;
-        // Standard D&D bonuses: (score - 10) / 2 with truncation toward 0.
-        assert_eq!(CoreStats::bonus(10), 0);
-        assert_eq!(CoreStats::bonus(11), 0);
-        assert_eq!(CoreStats::bonus(12), 1);
-        assert_eq!(CoreStats::bonus(13), 1);
-        assert_eq!(CoreStats::bonus(18), 4);
-        assert_eq!(CoreStats::bonus(20), 5);
-        assert_eq!(CoreStats::bonus(8), -1);
-        assert_eq!(CoreStats::bonus(3), -3);
+        // 0..100 schema scale: 50 is average (0 bonus), each 5
+        // points yields ±1, clamped to ±10.
+        assert_eq!(CoreStats::bonus(50), 0);
+        assert_eq!(CoreStats::bonus(55), 1);
+        assert_eq!(CoreStats::bonus(45), -1);
+        assert_eq!(CoreStats::bonus(100), 10);
+        assert_eq!(CoreStats::bonus(0), -10);
+        assert_eq!(CoreStats::bonus(150), 10); // clamp
+        assert_eq!(CoreStats::bonus(-50), -10); // clamp
+    }
+
+    #[test]
+    fn core_stats_grade_buckets() {
+        use mud_world::CoreStats;
+        assert_eq!(CoreStats::grade(50), "average");
+        assert_eq!(CoreStats::grade(13), "abysmal");
+        assert_eq!(CoreStats::grade(20), "feeble");
+        assert_eq!(CoreStats::grade(35), "poor");
+        assert_eq!(CoreStats::grade(60), "good");
+        assert_eq!(CoreStats::grade(75), "great");
+        assert_eq!(CoreStats::grade(90), "excellent");
+        assert_eq!(CoreStats::grade(100), "legendary");
     }
 
     #[test]
@@ -4302,6 +4479,7 @@ mod tests {
             is_ghost: false,
             is_stunned: false,
             is_frozen: false,
+            rest: None,
         }
     }
 
@@ -4319,6 +4497,48 @@ mod tests {
         assert!(out.contains("prac:3"), "practice points: {out}");
         assert!(out.contains("kills:42"), "kill total: {out}");
         assert!(out.contains("clan:TC"), "clan abbrev: {out}");
+    }
+
+    #[test]
+    fn format_rest_line_renders_each_source() {
+        use super::{RestStateDisplay, format_rest_line};
+        use mud_db::enums::RestSource;
+        // Inn with tier + pool: combined "source; pool" form.
+        let rest = RestStateDisplay {
+            source: RestSource::Inn,
+            tier: 2,
+            repose: 1234,
+        };
+        assert_eq!(
+            format_rest_line(rest),
+            "Rented Inn tier 2 (resting); 1,234 XP banked",
+        );
+        // Camp tier 1 with no pool yet — source only.
+        let rest = RestStateDisplay {
+            source: RestSource::Camp,
+            tier: 1,
+            repose: 0,
+        };
+        assert_eq!(format_rest_line(rest), "Camped tier 1 (resting)");
+        // Quit source — no tier in the phrase since tiers don't
+        // apply.
+        let rest = RestStateDisplay {
+            source: RestSource::Quit,
+            tier: 0,
+            repose: 500,
+        };
+        assert_eq!(
+            format_rest_line(rest),
+            "Logged out (no pool yet); 500 XP banked",
+        );
+        // No source but residual pool — common after consuming a
+        // rest source via XP gain.
+        let rest = RestStateDisplay {
+            source: RestSource::None,
+            tier: 0,
+            repose: 87,
+        };
+        assert_eq!(format_rest_line(rest), "87 XP banked");
     }
 
     #[test]
@@ -4571,6 +4791,8 @@ mod tests {
             keywords: Vec::new(),
             is_hidden: false,
             is_pickproof: false,
+            is_bashable: false,
+            hit_points: None,
         };
         let hidden_exit = ExitData {
             to: None,
@@ -4580,6 +4802,8 @@ mod tests {
             keywords: Vec::new(),
             is_hidden: true,
             is_pickproof: false,
+            is_bashable: false,
+            hit_points: None,
         };
 
         // Non-hidden exit is visible regardless of reveal state.
@@ -5426,15 +5650,30 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
         // Professions come off the proto, not the spawned entity.
         // We emit `professions:[]` (always present, even when empty)
         // so the client doesn't need a presence check.
-        let professions: Vec<&'static str> = world
-            .get::<WorldKey>(mob)
+        let mob_key = world.get::<WorldKey>(mob).map(|k| (k.zone, k.id));
+        let mut professions: Vec<&'static str> = mob_key
             .and_then(|k| {
                 world
                     .get_resource::<MobPrototypes>()
-                    .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+                    .and_then(|p| p.by_key.get(&k))
             })
             .map(|proto| proto.professions.iter().copied().map(mud_db::enums::MobProfession::label).collect())
             .unwrap_or_default();
+        // Shopkeeper derivation: if this mob is keeper of any Shops
+        // row (per ShopCatalog.keeper_index), add "shop" implicitly
+        // even when the Mobs.professions column hasn't been updated
+        // to include SHOPKEEPER. Most legacy bakery/blacksmith
+        // keepers have empty `professions` but a Shops row exists
+        // for them — without this, the Room.Services frame
+        // silently omits them.
+        if let Some(k) = mob_key
+            && world
+                .get_resource::<mud_world::ShopCatalog>()
+                .is_some_and(|sc| sc.keeper_index.contains_key(&k))
+            && !professions.contains(&"shop")
+        {
+            professions.push("shop");
+        }
         for &tag in &professions {
             if !services.contains(&tag) {
                 services.push(tag);
@@ -5682,13 +5921,28 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             enemy_hp,
         },
     );
+    // K1.1: if the player is mid-cast, prefix the prompt with a
+    // small `[Casting Spell N/M] ` countdown so the wind-up is
+    // visible without having to chant under one's breath. Ticks
+    // shown count UP (1/M, 2/M, …) so progress reads naturally.
+    let cast_prefix = world.get::<mud_world::Casting>(target).map(|c| {
+        let elapsed = (c.ticks_total - c.ticks_remaining).max(0);
+        format!(
+            "<dim>[</><cyan>Casting {}</> <dim>{}/{}]</> ",
+            c.ability_name, elapsed, c.ticks_total,
+        )
+    });
+    let final_prompt = match cast_prefix {
+        Some(prefix) => format!("{prefix}{rendered}"),
+        None => rendered,
+    };
     // Prompts can carry color tags both directly in the template
     // (`prompt <red>%h</>`) and indirectly via %r / %n (room and player
     // names that may have embedded tags). render_color_tags handles
     // both — and is_tag_shaped lets the default `<%h/%H>` survive
     // since `<42/100>` isn't tag-shaped after %-substitution.
     let mode = color_mode_for(world, target);
-    let _ = conn.try_send(render_color_tags(&rendered, mode).into_bytes());
+    let _ = conn.try_send(render_color_tags(&final_prompt, mode).into_bytes());
 
     // IAC EOR — end-of-record marker so MUD clients can split the
     // prompt from the preceding output (Mudlet uses it to anchor
@@ -6164,6 +6418,27 @@ pub(crate) fn grant_achievement(world: &mut World, player: Entity, code: &str) {
             mode,
         ),
     );
+    // Room broadcast — allies see "X earns the achievement
+    // 'Z'." (description omitted to keep the room line short;
+    // the full prose is the player's own reward). Skipped for
+    // hidden achievements — those are secrets, the holder
+    // doesn't want them announced.
+    if !def.hidden
+        && let Some(located) = world.get::<Located>(player).copied()
+    {
+        let actor_name = name_of(world, player);
+        let line = format!(
+            "<yellow>{actor_name} earns the achievement '{}'.</>\r\n",
+            def.title,
+        );
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&line),
+        );
+    }
     tracing::info!(
         player = ?player,
         code = %def.code,
@@ -7872,12 +8147,30 @@ pub(crate) struct ScoreData<'a> {
     is_ghost: bool,
     is_stunned: bool,
     is_frozen: bool,
+    /// Rest / repose state — surfaces the player's pending rest
+    /// source (Inn / Camp / House / Quit), its tier when meaningful
+    /// (Inn 1..3, Camp 1..3), and the banked Repose XP pool that
+    /// XP gains draw from for the next-cast multiplier. `None`
+    /// suppresses the line entirely when there's nothing to say
+    /// (no source pending AND no Repose banked).
+    rest: Option<RestStateDisplay>,
+}
+
+/// Score-sheet-side view of `mud_world::RestState`. Holding it as
+/// a separate struct keeps the renderer signature stable when the
+/// runtime component grows new fields.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RestStateDisplay {
+    pub source: mud_db::enums::RestSource,
+    pub tier: i32,
+    pub repose: i32,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct LevelProgress {
     pub current_xp: i64,
     pub next_level_xp: i64,
+    pub level_floor_xp: i64,
     pub percent: i32,
 }
 
@@ -7922,14 +8215,20 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!("  Stamina: {cur} / {}\r\n", s.max));
     }
     if let Some(stats) = d.core_stats {
+        // Show stat score + verbal grade (legendary / excellent /
+        // great / good / average / poor / feeble / abysmal). The
+        // grade replaces the signed bonus integer because the
+        // underlying scale is 0..100, not D&D 3..25 — a signed
+        // delta from "average=50" reads less intuitively than the
+        // word.
         out.push_str(&format!(
-            "  STR {}({:+})  DEX {}({:+})  CON {}({:+})  INT {}({:+})  WIS {}({:+})  CHA {}({:+})\r\n",
-            stats.strength, CoreStats::bonus(stats.strength),
-            stats.dexterity, CoreStats::bonus(stats.dexterity),
-            stats.constitution, CoreStats::bonus(stats.constitution),
-            stats.intelligence, CoreStats::bonus(stats.intelligence),
-            stats.wisdom, CoreStats::bonus(stats.wisdom),
-            stats.charisma, CoreStats::bonus(stats.charisma),
+            "  STR {} ({})  DEX {} ({})  CON {} ({})\r\n  INT {} ({})  WIS {} ({})  CHA {} ({})\r\n",
+            stats.strength, CoreStats::grade(stats.strength),
+            stats.dexterity, CoreStats::grade(stats.dexterity),
+            stats.constitution, CoreStats::grade(stats.constitution),
+            stats.intelligence, CoreStats::grade(stats.intelligence),
+            stats.wisdom, CoreStats::grade(stats.wisdom),
+            stats.charisma, CoreStats::grade(stats.charisma),
         ));
     }
     if let Some(cs) = d.cs {
@@ -8070,12 +8369,21 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!("  {line}\r\n"));
     }
     if let Some(p) = d.level_progress {
+        // Show progress *within* the current level — earned-this-
+        // level / needed-this-level — so the percent matches what
+        // the bar actually visualizes. Totals are parenthetical for
+        // anyone tracking absolute XP.
+        let into_bracket = (p.current_xp - p.level_floor_xp).max(0);
+        let bracket = (p.next_level_xp - p.level_floor_xp).max(1);
+        let to_go = (bracket - into_bracket).max(0);
         out.push_str(&format!(
-            "  Exp: {} / {}  {} {}%\r\n",
-            p.current_xp,
-            p.next_level_xp,
+            "  Exp: {} / {}  {} {}%  ({} to go; total {})\r\n",
+            into_bracket,
+            bracket,
             progress_bar(p.percent),
             p.percent,
+            to_go,
+            p.current_xp,
         ));
     }
     if let Some((next, hp_gain, st_gain)) = d.next_level_gains {
@@ -8095,6 +8403,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             "  House:    {rooms} room{suffix} at [{zone}:{id}]\r\n",
         ));
     }
+    if let Some(rest) = d.rest {
+        out.push_str(&format!("  Rest:     {}\r\n", format_rest_line(rest)));
+    }
     if d.practice_points > 0 {
         let pts = d.practice_points;
         let suffix = if pts == 1 { "" } else { "s" };
@@ -8109,6 +8420,56 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         ));
     }
     out
+}
+
+/// Render the rest-state line for the score sheet. Returns the body
+/// text only (no leading label) so each renderer can apply its own
+/// label / box framing. Examples:
+///   `"Rented Inn tier 2 (resting); 1,200 XP banked"`
+///   `"Camped tier 1; 320 XP banked"`
+///   `"Logged out (no pool yet); 480 XP banked"`
+///   `"320 XP banked"` (no pending source, just accrued pool)
+/// The pool number stays the source of truth; sources are
+/// human-rendered through their `label()` shape.
+pub(crate) fn format_rest_line(rest: RestStateDisplay) -> String {
+    use mud_db::enums::RestSource;
+    let source_phrase = match rest.source {
+        RestSource::None => None,
+        RestSource::Inn => Some(format!("Rented Inn tier {} (resting)", rest.tier.max(1))),
+        RestSource::Camp => Some(format!("Camped tier {} (resting)", rest.tier.max(1))),
+        RestSource::House => Some("At home (resting)".to_string()),
+        RestSource::Quit => Some("Logged out (no pool yet)".to_string()),
+    };
+    // `1,234 XP banked` — thousands separator for legibility on
+    // long-running characters. `0 XP` collapses to nothing so
+    // brand-new sources don't read "tier 1; 0 XP banked".
+    let pool_phrase = if rest.repose > 0 {
+        Some(format!("{} XP banked", format_thousands(rest.repose)))
+    } else {
+        None
+    };
+    match (source_phrase, pool_phrase) {
+        (Some(s), Some(p)) => format!("{s}; {p}"),
+        (Some(s), None) => s,
+        (None, Some(p)) => p,
+        (None, None) => String::new(),
+    }
+}
+
+/// Comma-separate thousands in a positive integer. Returns "0" for
+/// non-positive inputs; the score renderer suppresses the line when
+/// the number is zero, so this is mostly cosmetic for the > 0 case.
+fn format_thousands(n: i32) -> String {
+    let n = n.max(0);
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.chars().rev().collect()
 }
 
 /// One-line group/follow summary for the score sheet, or `None`
@@ -8166,6 +8527,7 @@ pub(crate) fn level_progress_for(level: i32, current_xp: i32) -> Option<LevelPro
     Some(LevelProgress {
         current_xp,
         next_level_xp: ceiling,
+        level_floor_xp: floor,
         percent: i32::try_from(percent).unwrap_or(0),
     })
 }
@@ -8409,16 +8771,16 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     }
     if let Some(stats) = d.core_stats {
         row(format!(
-            "STR {}({:+})  DEX {}({:+})  CON {}({:+})",
-            stats.strength, CoreStats::bonus(stats.strength),
-            stats.dexterity, CoreStats::bonus(stats.dexterity),
-            stats.constitution, CoreStats::bonus(stats.constitution),
+            "STR {} ({})  DEX {} ({})  CON {} ({})",
+            stats.strength, CoreStats::grade(stats.strength),
+            stats.dexterity, CoreStats::grade(stats.dexterity),
+            stats.constitution, CoreStats::grade(stats.constitution),
         ));
         row(format!(
-            "INT {}({:+})  WIS {}({:+})  CHA {}({:+})",
-            stats.intelligence, CoreStats::bonus(stats.intelligence),
-            stats.wisdom, CoreStats::bonus(stats.wisdom),
-            stats.charisma, CoreStats::bonus(stats.charisma),
+            "INT {} ({})  WIS {} ({})  CHA {} ({})",
+            stats.intelligence, CoreStats::grade(stats.intelligence),
+            stats.wisdom, CoreStats::grade(stats.wisdom),
+            stats.charisma, CoreStats::grade(stats.charisma),
         ));
     }
     if let Some(cs) = d.cs {
@@ -8525,12 +8887,17 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         row(line);
     }
     if let Some(p) = d.level_progress {
+        let into_bracket = (p.current_xp - p.level_floor_xp).max(0);
+        let bracket = (p.next_level_xp - p.level_floor_xp).max(1);
+        let to_go = (bracket - into_bracket).max(0);
         row(format!(
-            "Exp:       {} / {}  {} {}%",
-            p.current_xp,
-            p.next_level_xp,
+            "Exp:       {} / {}  {} {}%  ({} to go; total {})",
+            into_bracket,
+            bracket,
             progress_bar(p.percent),
             p.percent,
+            to_go,
+            p.current_xp,
         ));
     }
     if let Some((next, hp_gain, st_gain)) = d.next_level_gains {
@@ -8547,6 +8914,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     if let Some((rooms, zone, id)) = d.house {
         let suffix = if rooms == 1 { "" } else { "s" };
         row(format!("House:     {rooms} room{suffix} at [{zone}:{id}]"));
+    }
+    if let Some(rest) = d.rest {
+        row(format!("Rest:      {}", format_rest_line(rest)));
     }
     if d.practice_points > 0 {
         let pts = d.practice_points;
@@ -8624,6 +8994,23 @@ pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
     }
     if d.practice_points > 0 {
         parts.push(format!("prac:{}", d.practice_points));
+    }
+    if let Some(rest) = d.rest {
+        // Compact form: `rest:inn(2)` / `rest:camp(1)` /
+        // `rest:home` / `rest:quit`. Repose pool only when nonzero.
+        let src = match rest.source {
+            mud_db::enums::RestSource::Inn => format!("inn({})", rest.tier.max(1)),
+            mud_db::enums::RestSource::Camp => format!("camp({})", rest.tier.max(1)),
+            mud_db::enums::RestSource::House => "home".to_string(),
+            mud_db::enums::RestSource::Quit => "quit".to_string(),
+            mud_db::enums::RestSource::None => String::new(),
+        };
+        if !src.is_empty() {
+            parts.push(format!("rest:{src}"));
+        }
+        if rest.repose > 0 {
+            parts.push(format!("repose:{}", rest.repose));
+        }
     }
     format!("{}\r\n", parts.join("  "))
 }
@@ -8736,6 +9123,31 @@ const RESERVED_ALIAS_NAMES: &[&str] = &["quit", "alias", "unalias"];
 
 /// Parse a direction word or its short alias to a Direction enum.
 /// Returns None for anything that doesn't match a movement direction.
+/// Lowercase human label for a direction ("north", "northeast",
+/// "in", ...). Used by user-facing refusal strings ("There's no
+/// exit north here."). Mirrors what `parse_direction` accepts in
+/// reverse so the produced label round-trips back through the
+/// parser.
+#[must_use]
+pub(crate) fn direction_label(d: Direction) -> &'static str {
+    match d {
+        Direction::North => "north",
+        Direction::South => "south",
+        Direction::East => "east",
+        Direction::West => "west",
+        Direction::Up => "up",
+        Direction::Down => "down",
+        Direction::Northeast => "northeast",
+        Direction::Northwest => "northwest",
+        Direction::Southeast => "southeast",
+        Direction::Southwest => "southwest",
+        Direction::In => "in",
+        Direction::Out => "out",
+        Direction::Portal => "through the portal",
+        Direction::None => "nowhere",
+    }
+}
+
 pub(crate) fn parse_direction(s: &str) -> Option<Direction> {
     match s.to_ascii_lowercase().as_str() {
         "north" | "n" => Some(Direction::North),
@@ -8797,6 +9209,18 @@ pub(crate) fn resolve_exit_arg(
 /// (player or mob) before declaring the player blind — torches /
 /// lanterns / luminous-glow items still work.
 pub(crate) fn room_is_dark(world: &World, room: Entity) -> bool {
+    // Magical DARKNESS overrides everything else — even base-lit
+    // rooms read pitch-black under the spell. Magical
+    // ILLUMINATION is the opposite. Both markers are mutually
+    // exclusive by intent (a second cast of the opposite type
+    // would just stack EffectInstances; first marker installed
+    // wins until its backing instances fade).
+    if world.get::<mud_world::RoomMagicalDarkness>(room).is_some() {
+        return true;
+    }
+    if world.get::<mud_world::RoomMagicalLight>(room).is_some() {
+        return false;
+    }
     // `Room.base_light_level` overrides the sector/clock check at
     // both ends — positive means "always lit" (skylights, magical
     // glow), negative means "always dark" (magical voids,
@@ -8852,6 +9276,18 @@ pub(crate) fn player_can_see_in_dark(world: &World, entity: Entity) -> bool {
 /// to a player so a wiz-invised admin actually disappears.
 #[must_use]
 pub(crate) fn can_see_player(world: &World, viewer: Entity, target: Entity) -> bool {
+    // Magical invisibility (INVISIBLE / MASS_INVIS): the target
+    // disappears unless the viewer carries `DetectInvis` (spell)
+    // or `HOLY_LIGHT` (admin bypass). Sits before the wizinvis
+    // check because spell-invis is the more common gate; either
+    // failing hides the target.
+    if world.get::<mud_world::Invisible>(target).is_some() {
+        let can_pierce = world.get::<mud_world::DetectInvis>(viewer).is_some()
+            || has_flag(world, viewer, PlayerFlag::HolyLight);
+        if !can_pierce {
+            return false;
+        }
+    }
     let Some(invis) = world.get::<mud_world::WizInvis>(target).map(|w| w.0) else {
         return true;
     };
@@ -8864,6 +9300,12 @@ pub(crate) fn can_see_player(world: &World, viewer: Entity, target: Entity) -> b
 /// a `Lit` marker. Used to override `room_is_dark` for rooms with
 /// active light sources.
 pub(crate) fn room_has_light(world: &mut World, room: Entity) -> bool {
+    // Magical ILLUMINATION counts as a light source for the
+    // room-light check — the room glows on its own, no torch
+    // required.
+    if world.get::<mud_world::RoomMagicalLight>(room).is_some() {
+        return true;
+    }
     // 1. Loose lit items on the floor.
     let any_floor = world
         .query_filtered::<&Located, (With<Item>, With<mud_world::Lit>)>()
@@ -9124,6 +9566,34 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
         };
         send_to(world, player, format!("{}\r\n", render_color_tags(&line, mode_pre)));
         return;
+    }
+    // Wall gate. A solid wall (block) hides the destination room
+    // entirely — the player sees the barrier instead. Fog and
+    // illusion let the destination peek through (you can see the
+    // shape of the next room past the swirling mist; the illusion
+    // doesn't actually obscure anything), so we don't short-circuit
+    // for those — but we still note the barrier first.
+    if let Some(wall) = world
+        .get::<mud_world::RoomBlockedExits>(located.0)
+        .and_then(|b| b.by_direction.get(&dir).cloned())
+    {
+        let color = match wall.traversal {
+            mud_world::WallTraversal::Block => "<red>",
+            mud_world::WallTraversal::Slow => "<yellow>",
+            mud_world::WallTraversal::Passable => "<cyan>",
+        };
+        let blurb = match wall.traversal {
+            mud_world::WallTraversal::Block => "blocks your view",
+            mud_world::WallTraversal::Slow => "swirls thickly across the path",
+            mud_world::WallTraversal::Passable => "shimmers across the path, oddly transparent",
+        };
+        let line = format!("{color}A {} {blurb}.</>", wall.kind_label);
+        send_to(world, player, format!("\r\n{}\r\n", render_color_tags(&line, mode_pre)));
+        if matches!(wall.traversal, mud_world::WallTraversal::Block) {
+            return;
+        }
+        // Fall through for fog / illusion — destination peek still
+        // renders below.
     }
     let Some(target_room) = ed.to else {
         send_to(world, player, "The way fades into the unknown.\r\n");
@@ -9461,6 +9931,26 @@ pub(crate) fn consume_item(world: &mut World, player: Entity, args: &str, expect
         return false;
     }
     send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
+    // Room broadcast — bystanders should see someone eat / quaff
+    // a potion next to them. Otherwise a party-mate drinking a
+    // healing potion mid-fight goes unnoticed by their tank.
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let actor_name = name_of(world, player);
+        let third_verb = match verb {
+            "eat" => "eats".to_string(),
+            "quaff" => "quaffs".to_string(),
+            other => format!("{other}s"),
+        };
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&format!(
+                "{actor_name} {third_verb} {item_name}.\r\n"
+            )),
+        );
+    }
     // Apply ConsumableEffects bound to this object proto. Per-row
     // chance gate, EffectInstance spawned with the row's duration
     // (or the EffectDef's default_params.duration when null).
@@ -9635,6 +10125,26 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
         player,
         &format!("You {verb} some {render_label} from {item_name}.\r\n"),
     );
+    // Room broadcast — drink / sip from a fountain or skin
+    // shouldn't be invisible to the rest of the room. Mirror the
+    // shape used by eat / quaff above.
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let actor_name = name_of(world, player);
+        let third_verb = match verb {
+            "drink" => "drinks".to_string(),
+            "sip" => "sips".to_string(),
+            other => format!("{other}s"),
+        };
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&format!(
+                "{actor_name} {third_verb} from {item_name}.\r\n"
+            )),
+        );
+    }
     // Flavor description on identified containers — short paragraph
     // attached to the liquid row. Renders once per swig only when
     // the player knows what they're drinking.
@@ -9779,6 +10289,32 @@ pub(crate) fn invoke_object_abilities(
         return;
     }
     send_rendered(world, player, &format!("{intro_phrase} {item_name}.\r\n"));
+    // Room broadcast — bystanders should see the gesture
+    // (waving a wand, tapping a staff, reciting from a scroll)
+    // even before the spell effects fire. Spell-specific
+    // `success_to_room` lines will follow but they describe the
+    // spell, not the source action. `verb` is the present-tense
+    // gerund stem ("wave"/"tap"/"recite"/"quaff") — add an `s`
+    // for the third-person form, matching the eat/quaff pattern.
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let actor_name = name_of(world, player);
+        let third_verb = match verb {
+            "recite" => "recites from".to_string(),
+            "wave" => "waves".to_string(),
+            "tap" => "taps".to_string(),
+            "quaff" => "quaffs".to_string(),
+            other => format!("{other}s"),
+        };
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&format!(
+                "{actor_name} {third_verb} {item_name}.\r\n"
+            )),
+        );
+    }
     // Fire USE on the item before spell dispatch — bodies may
     // gate (return false) or emit additional flavor.
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Use);
@@ -9825,6 +10361,30 @@ pub(crate) fn invoke_object_abilities(
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: Option<Slot>) {
+    wear_into_inner(world, player, target_word, force_slot, false);
+}
+
+/// `wear_into` plus a `silent_room` flag. `cmd_wear`'s `wear all`
+/// loop calls this with `silent_room=true` and emits a single
+/// consolidated room broadcast at the end of the loop instead of
+/// the per-item line wear_into normally fires. Matches the shape
+/// `cmd_drop all` uses to avoid spamming bystanders.
+pub(crate) fn wear_into_silent(
+    world: &mut World,
+    player: Entity,
+    target_word: &str,
+    force_slot: Option<Slot>,
+) {
+    wear_into_inner(world, player, target_word, force_slot, true);
+}
+
+fn wear_into_inner(
+    world: &mut World,
+    player: Entity,
+    target_word: &str,
+    force_slot: Option<Slot>,
+    silent_room: bool,
+) {
     if target_word.is_empty() {
         send_to(world, player, "Wear what?\r\n");
         return;
@@ -10095,6 +10655,30 @@ pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, fo
         msg.push_str(&line);
     }
     send_rendered(world, player, &msg);
+    // Room broadcast — bystanders should see what someone wears,
+    // wields, or holds. Without this, a party-mate picking up a
+    // glowing sword goes unnoticed until they actually swing it.
+    // Skipped under `silent_room` so `wear all` can emit one
+    // consolidated bystander line rather than N spammy ones.
+    if !silent_room
+        && let Some(located) = world.get::<Located>(player).copied()
+    {
+        let actor_name = name_of(world, player);
+        let third_verb = match dest_slot {
+            Slot::Wield => "wields",
+            Slot::Hold => "holds",
+            _ => "wears",
+        };
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&format!(
+                "{actor_name} {third_verb} {item_name}.\r\n"
+            )),
+        );
+    }
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
 }
 
@@ -10230,6 +10814,40 @@ pub(crate) fn find_actor_in_room(
         .map(|(e, _, _, _, _)| e)
 }
 
+/// Locate any online player by name across the whole world. Returns
+/// the entity if exactly one match is found; otherwise None (no
+/// matches, or ambiguous match — caller may want a different message
+/// for ambiguity, so we surface None rather than a magic value). Used
+/// by the SUMMON spell where the gates already enforce a same-zone
+/// check — the room-bound `find_actor_in_room` would miss every
+/// non-co-located target. Match semantics: case-insensitive substring
+/// against the displayed `Named.name`. We *don't* honor `Keywords`
+/// here — a SUMMON target is a specific player, not a generic
+/// keyword match.
+pub(crate) fn find_online_player_anywhere(
+    world: &mut World,
+    needle: &str,
+    exclude: Entity,
+) -> Option<Entity> {
+    let needle = needle.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    let mut q = world
+        .query_filtered::<(Entity, &Named), (With<Player>, With<mud_world::Online>)>();
+    let mut hits = q.iter(world).filter(|(e, n)| {
+        *e != exclude && n.name.to_ascii_lowercase().contains(&needle)
+    });
+    let first = hits.next()?;
+    // Ambiguity check — if a second match exists, refuse so the
+    // caster can disambiguate by typing the full name. Cheap: stops
+    // at the second hit.
+    if hits.next().is_some() {
+        return None;
+    }
+    Some(first.0)
+}
+
 
 /// Spawn ECS Room entities for every `PlayerHouseRoom` in the
 /// summary, wire their exits, drop placed items into them, and
@@ -10291,6 +10909,8 @@ pub(crate) fn synthesize_house_rooms(world: &mut World, summary: &mud_world::Hou
                     keywords: Vec::new(),
                     is_hidden: false,
                     is_pickproof: false,
+                    is_bashable: false,
+                    hit_points: None,
                 },
             );
         }
@@ -10395,7 +11015,20 @@ pub(crate) fn invoke_ability(
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
 ) {
-    invoke_ability_with(world, player, args, kind, verb, false, false);
+    invoke_ability_with(world, player, args, kind, verb, false, false, false);
+}
+
+/// Resolution entry called by `casting_tick` when a queued cast
+/// finishes its wind-up. Passes `skip_queue = true` so the queue
+/// branch doesn't re-fire.
+pub(crate) fn resolve_queued_cast(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    kind: mud_db::abilities::AbilityKind,
+    verb: &str,
+) {
+    invoke_ability_with(world, player, args, kind, verb, false, false, true);
 }
 
 /// Entry point for item-driven casts (scroll/wand/staff). Bypasses
@@ -10409,7 +11042,7 @@ pub(crate) fn invoke_ability_from_item(
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
 ) {
-    invoke_ability_with(world, player, args, kind, verb, false, true);
+    invoke_ability_with(world, player, args, kind, verb, false, true, true);
 }
 
 /// Target-set selectors for AOE ability dispatch. Names match the
@@ -10486,6 +11119,7 @@ pub(crate) fn invoke_ability_aoe(
             verb,
             true,
             false,
+            true,
         );
     }
 }
@@ -10699,6 +11333,7 @@ pub(crate) fn invoke_ability_with(
     verb: &str,
     aoe_repeat: bool,
     from_item: bool,
+    skip_queue: bool,
 ) {
     // Quoted phrases (`cast 'magic missile' goblin`) collapse to a
     // single token; otherwise behaves like the legacy whitespace
@@ -10744,6 +11379,25 @@ pub(crate) fn invoke_ability_with(
         && effect_prevents(world, player, Prevent::Casting)
     {
         send_to(world, player, "Your magic is suppressed.\r\n");
+        return;
+    }
+    // Already-casting refusal stays at this point in the pipeline so
+    // a player who's currently winding up can't kick off a parallel
+    // cast even if everything else would pass — the *full* queue
+    // branch lives later, after the slot / posture / cooldown gates
+    // have all paid out, but the busy-check has to come up front.
+    if !skip_queue
+        && !from_item
+        && !aoe_repeat
+        && !matches!(kind, mud_db::abilities::AbilityKind::Skill)
+        && def.cast_time_rounds > 0
+        && world.get::<mud_world::Casting>(player).is_some()
+    {
+        send_to(
+            world,
+            player,
+            "You're already casting something — finish or `cancel` first.\r\n",
+        );
         return;
     }
     // NoMagicRoom gate — `Room.allows_magic = false` marks dead-
@@ -10897,7 +11551,11 @@ pub(crate) fn invoke_ability_with(
     // Slot gate is skipped when the cast is item-driven (scroll/wand/
     // staff/potion). The *item* is the magic source — the player isn't
     // burning a memorized slot — so the gate is irrelevant.
-    if matches!(def.kind, mud_db::abilities::AbilityKind::Spell) && !from_item {
+    // Also skipped on the resolution path of a queued cast — the slot
+    // was already consumed at queue-start time and pushed into
+    // `SpellSlots.in_flight`, so re-checking now would refuse the
+    // resolution of a cast the player legitimately paid for.
+    if matches!(def.kind, mud_db::abilities::AbilityKind::Spell) && !from_item && !skip_queue {
         let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
         if let Some(class_id) = class_id {
             let circle = world
@@ -10982,18 +11640,24 @@ pub(crate) fn invoke_ability_with(
         return;
     }
 
-    // Cooldown gate (Ability.cooldown_ms). Only abilities with
-    // cooldown_ms > 0 are enforced; the per-character `Cooldowns`
-    // component carries an Instant per ability.id at which the cooldown
-    // expires. Stale entries (in the past) are silently treated as
-    // expired and overwritten on next successful cast.
+    // Cooldown gate. The per-character `Cooldowns` component carries
+    // an Instant per ability.id at which the cooldown expires; an
+    // absent entry means "ready now." Stale entries (in the past)
+    // are silently treated as expired and overwritten on next
+    // successful cast. Two write paths populate it:
+    // 1. `Ability.cooldown_ms > 0` → installed at the end of every
+    //    successful cast (around L13596).
+    // 2. Per-success runtime inserts — e.g. `cmd_accept`'s 16s
+    //    post-summon cooldown. These fire even when `cooldown_ms`
+    //    is 0 on the ability row, so the gate intentionally does
+    //    NOT short-circuit on `cooldown_ms == 0`; it always
+    //    consults the ECS map.
     //
     // Skip when called as an AOE repeat — the AOE shim's first call
     // already passed the gate; subsequent per-target dispatches must
     // not be blocked by the cooldown that this very batch is about
     // to set.
     if !aoe_repeat
-        && def.cooldown_ms > 0
         && let Some(cd) = world.get::<Cooldowns>(player)
         && let Some(ready_at) = cd.ready_at.get(&def.id).copied()
     {
@@ -11011,6 +11675,94 @@ pub(crate) fn invoke_ability_with(
             );
             return;
         }
+    }
+
+    // SUMMON-specific early gates. The dispatcher arm catches these
+    // again as a safety net, but that fires *after* the 8s wind-up
+    // + slot deduction — an expensive penalty for what's usually a
+    // typo. Pre-queue checks:
+    //
+    //   * No target word → "Summon who?" — actionable hint.
+    //   * Explicit self target ("me" / "self" / caster's name) →
+    //     refuse. The prompt-based bookmark hack (cast on yourself,
+    //     walk somewhere risky, accept) isn't worth supporting —
+    //     legitimate recall is a separate spell.
+    //   * Named target who isn't online anywhere → refuse with the
+    //     "no one named X online" line. The global-online lookup
+    //     here is cheap (n ≤ a few dozen) and only fires for
+    //     SUMMON's pre-queue path, so it's not a hot-path concern.
+    //
+    // Cross-room name resolution that happens to land on the caster
+    // (partial-name collision) still trips Gate 0 in the dispatcher
+    // arm.
+    if !skip_queue && def.plain_name.eq_ignore_ascii_case("SUMMON") {
+        match target_word.map(str::trim).filter(|w| !w.is_empty()) {
+            None => {
+                send_to(world, player, "Summon who?\r\n");
+                return;
+            }
+            Some(w)
+                if w.eq_ignore_ascii_case("me")
+                    || w.eq_ignore_ascii_case("self")
+                    || w.eq_ignore_ascii_case(&name_of(world, player)) =>
+            {
+                send_to(world, player, "But you're already here!\r\n");
+                return;
+            }
+            Some(w) => {
+                // Cheap "is this name even online?" pre-check.
+                // Mirrors the resolution path the dispatcher uses
+                // later. Skips the in-room half (find_actor_in_room)
+                // since the global lookup is a strict superset for
+                // SUMMON's purposes — if the in-room match exists,
+                // the global one will too.
+                if find_online_player_anywhere(world, w, player).is_none() {
+                    send_to(
+                        world,
+                        player,
+                        format!("There's no one named '{w}' online to summon.\r\n"),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    // Cast queue install. All the pay-up-front gates (anti-magic /
+    // dead-magic / known / slot / combat / posture / cooldown) have
+    // passed, so the slot is already in flight. From here we either
+    // queue the wind-up and bail (player-typed spell with
+    // `cast_time_rounds > 0`), or fall through to the resolution
+    // body. The resolution path (`skip_queue = true`) bypasses both
+    // this branch and the earlier slot-consumption block, since
+    // `casting_tick` is calling us *because* the slot was already
+    // paid. SKILL kind and item / AOE-sub casts always skip too.
+    if !skip_queue
+        && !from_item
+        && !aoe_repeat
+        && !matches!(kind, mud_db::abilities::AbilityKind::Skill)
+        && def.cast_time_rounds > 0
+    {
+        let total_ticks = def.cast_time_rounds * crate::casting::COMBAT_ROUND_TICKS;
+        world.entity_mut(player).insert(mud_world::Casting {
+            ability_id: def.id,
+            ability_name: def.name.clone(),
+            args: args.to_string(),
+            kind_label: kind.label().to_string(),
+            verb: verb.to_string(),
+            ticks_remaining: total_ticks,
+            ticks_total: total_ticks,
+        });
+        let secs = (def.cast_time_rounds * 4).max(1);
+        send_to(
+            world,
+            player,
+            format!(
+                "You begin {verb}ing {}...  (about {secs}s)\r\n",
+                def.name,
+            ),
+        );
+        return;
     }
 
     // AOE fan-out. `Ability.target_scope` carries the locked
@@ -11167,8 +11919,36 @@ pub(crate) fn invoke_ability_with(
         } else {
             None
         };
-        match inv_match.or_else(|| find_actor_in_room(world, word, located.0, player)) {
+        let in_room = inv_match.or_else(|| find_actor_in_room(world, word, located.0, player));
+        // SUMMON-class spells need to reach players in *other* rooms
+        // (that's literally the point). When the in-room lookup
+        // misses, fall back to a global online-player search before
+        // the non-violent default-to-self branch fires — otherwise
+        // every cross-room summon collapses to a self-target and
+        // L1.2's self-gate refuses. The summon gate set still
+        // enforces same-zone, mob-NoSummon, etc. once we have a
+        // candidate target.
+        let summon_remote = if in_room.is_none()
+            && def.plain_name.eq_ignore_ascii_case("SUMMON")
+        {
+            find_online_player_anywhere(world, word, player)
+        } else {
+            None
+        };
+        match in_room.or(summon_remote) {
             Some(found) => found,
+            None if def.plain_name.eq_ignore_ascii_case("SUMMON") => {
+                // SUMMON specifically — surface a clearer message
+                // since the global lookup failed too. "You don't see
+                // X here" would be misleading; the right answer is
+                // "no online player by that name."
+                send_to(
+                    world,
+                    player,
+                    format!("There's no one named '{word}' online to summon.\r\n"),
+                );
+                return;
+            }
             None if !def.violent => {
                 // Non-violent / utility spell with an unresolved arg
                 // (e.g. `cast 'minor creation' bread` — the arg is
@@ -11389,6 +12169,11 @@ pub(crate) fn invoke_ability_with(
         caster_int_raw: caster_stats.intelligence,
         caster_wis_raw: caster_stats.wisdom,
         min_level,
+        // Lifeform flags default 0; populated per-target at apply time.
+        victim_is_undead: 0,
+        victim_is_demonic: 0,
+        victim_is_celestial: 0,
+        victim_is_elemental: 0,
     };
     let effect_specs: Vec<EffectSpec> = {
         let mappings = world
@@ -11466,7 +12251,11 @@ pub(crate) fn invoke_ability_with(
         send_to(
             world,
             player,
-            format!("{target_name} resists your {}.\r\n", def.name),
+            format!(
+                "{} resists your {}.\r\n",
+                cap_sentence_start(&target_name),
+                def.name,
+            ),
         );
         if target_entity != player {
             send_rendered(
@@ -11481,8 +12270,94 @@ pub(crate) fn invoke_ability_with(
         return;
     }
     let halve_duration = matches!(save_action, SaveOutcome::HalfDuration);
+    let halve_damage = matches!(save_action, SaveOutcome::HalfDamage);
     let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
     let mut spawn_count: usize = 0;
+    // Set by the teleport arm so the auto-look fires AFTER the cast
+    // confirmation message rather than before it — otherwise the
+    // arrival-room description splits "You read aloud from {scroll}"
+    // from "you cast Recall (Blue)" in the output stream.
+    let mut auto_look_after_cast = false;
+    // L4/L5: success-template ordering policy.
+    //
+    // Damage spells must emit `success_to_caster` BEFORE the effect
+    // loop so the cast confirmation precedes the death broadcasts
+    // / XP-grant lines that handle_death emits inline (otherwise
+    // the player sees "the mob dies. ...You cast Fireball." in the
+    // wrong order — user-reported playtest gripe).
+    //
+    // Non-damage spells defer the same template to POST-loop and
+    // only render it when at least one effect actually applied —
+    // so a refused SUMMON ("X is not accepting summons") or
+    // ENERGY_DRAIN on undead doesn't read "You complete the
+    // summoning ritual. / TestRogue is not accepting summons."
+    // The decision key is whether the spell carries any "damage"
+    // effect_type in its mapping.
+    let has_damage_effect = effect_specs
+        .iter()
+        .any(|s| s.effect_type.as_str() == "damage");
+    let render_header = || {
+        let caster_template = messages_pre.as_ref().and_then(|m| {
+            if target_entity == player {
+                m.success_to_self.as_deref().or(m.success_to_caster.as_deref())
+            } else {
+                m.success_to_caster.as_deref()
+            }
+        });
+        if let Some(t) = caster_template {
+            let rendered = render_ability_template(
+                t,
+                &actor_name_pre,
+                &target_name_pre,
+                target_entity == player,
+            );
+            format!("{}\r\n", render_color_tags(&rendered, mode))
+        } else if target_entity == player {
+            format!("You {verb} {}.\r\n", def.name)
+        } else {
+            format!(
+                "You {verb} {} on {}.\r\n",
+                def.name,
+                render_color_tags(&target_name_pre, mode),
+            )
+        }
+    };
+    // L4 caveat for J1: if the target's globe will absorb every
+    // damage effect this cast emits, the pre-loop "You complete the
+    // ritual" header crashes into the in-loop "the globe flares"
+    // line and reads contradictory. Detect that case ahead of time
+    // and defer the header into `pending_header` — post-loop logic
+    // suppresses it when `applied_msgs` only contains absorbs.
+    // Non-absorb cases keep the pre-loop emit so death broadcasts
+    // still slot in after the cast confirmation.
+    let absorb_threshold = if target_entity != player {
+        world.get::<mud_world::MaxAbsorbCircle>(target_entity).map(|m| m.0)
+    } else {
+        None
+    };
+    let damage_will_be_absorbed = has_damage_effect && {
+        if let Some(threshold) = absorb_threshold {
+            let spell_circle = world
+                .resource::<mud_world::SpellSlotData>()
+                .min_circle_for_ability(def.id);
+            spell_circle.is_some_and(|c| c <= threshold)
+        } else {
+            false
+        }
+    };
+    let emit_header_now = has_damage_effect && !damage_will_be_absorbed;
+    if emit_header_now {
+        out.push_str(&render_header());
+        send_to(world, player, std::mem::take(&mut out));
+    }
+    // For non-damage spells (and absorbed-damage casts) the header
+    // is queued into `pending_header` and conditionally emitted
+    // after the loop.
+    let pending_header: Option<String> = if emit_header_now {
+        None
+    } else {
+        Some(render_header())
+    };
     for spec in &effect_specs {
         // Pretty player-facing label for the effect in `applied_msgs`
         // diagnostic lines ("Detect Magic" rather than the raw flag
@@ -11491,6 +12366,82 @@ pub(crate) fn invoke_ability_with(
         let pretty = pretty_effect_label(&spec.name);
         match spec.effect_type.as_str() {
             "damage" => {
+                // J1 spell-circle absorb. If the target carries
+                // `MaxAbsorbCircle` (MINOR/MAJOR_GLOBE) and this
+                // hostile spell's minimum circle is ≤ that
+                // threshold, the cast is consumed without effect.
+                // Mirrors legacy `magic.cpp:82` — the absorb gate
+                // runs before damage / save / resistance pipelines
+                // so a globe doesn't merely soak the damage but
+                // negates the spell entirely. Self-cast is exempt
+                // (a caster's own AoE shouldn't be absorbed by
+                // their own globe).
+                if target_entity != player
+                    && let Some(threshold) =
+                        world.get::<mud_world::MaxAbsorbCircle>(target_entity).map(|m| m.0)
+                    && let Some(spell_circle) = world
+                        .resource::<mud_world::SpellSlotData>()
+                        .min_circle_for_ability(def.id)
+                    && spell_circle <= threshold
+                {
+                    let caster_name = actor_name_pre.clone();
+                    let target_name = name_or(world, target_entity, "the target");
+                    send_to(
+                        world,
+                        player,
+                        format!(
+                            "The shimmering globe around {target_name} flares as your spell flows around it.\r\n"
+                        ),
+                    );
+                    send_to(
+                        world,
+                        target_entity,
+                        format!(
+                            "The shimmering globe around your body flares as {caster_name}'s spell flows around it.\r\n"
+                        ),
+                    );
+                    applied_msgs.push(format!("{pretty} (absorbed by globe ≤ {threshold})"));
+                    continue;
+                }
+
+                // Lifesteal-flagged spell (ENERGY_DRAIN /
+                // VAMPIRIC_BREATH): refuse on UNDEAD targets (no
+                // life to drain) and on self-target. Real heal-the-
+                // caster step fires after apply_damage so we can
+                // use the *actual* HP delta (matters when the
+                // victim is near death and absorbs less than the
+                // rolled amount).
+                let lifesteal = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("lifesteal"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if lifesteal {
+                    if target_entity == player {
+                        send_to(
+                            world,
+                            player,
+                            "Draining yourself? My, aren't we funny today...\r\n",
+                        );
+                        applied_msgs.push(format!("{pretty} (self-drain refused)"));
+                        continue;
+                    }
+                    let undead = world
+                        .get::<mud_world::LifeForceTag>(target_entity)
+                        .is_some_and(|l| l.0 == mud_db::enums::LifeForce::Undead);
+                    if undead {
+                        let tname = name_or(world, target_entity, "the creature");
+                        send_to(
+                            world,
+                            player,
+                            format!("{tname} seems far too lifeless to drain any energy from.\r\n"),
+                        );
+                        applied_msgs.push(format!("{pretty} (undead — no life to drain)"));
+                        continue;
+                    }
+                }
+
                 // Resolve `amount`. If the ability has
                 // AbilityDamageComponent rows, sum each component's
                 // formula scaled by its percentage — that's the
@@ -11530,10 +12481,20 @@ pub(crate) fn invoke_ability_with(
                 let target_level = world
                     .get::<Profile>(target_entity)
                     .map_or(0, |p| p.level);
+                let target_life_force = world
+                    .get::<mud_world::LifeForceTag>(target_entity)
+                    .map(|l| l.0);
+                let lf = |kind: mud_db::enums::LifeForce| -> i32 {
+                    i32::from(target_life_force == Some(kind))
+                };
                 let per_target_ctx = FormulaCtx {
                     victim_align: target_align,
                     target_max_hp,
                     target_level,
+                    victim_is_undead: lf(mud_db::enums::LifeForce::Undead),
+                    victim_is_demonic: lf(mud_db::enums::LifeForce::Demonic),
+                    victim_is_celestial: lf(mud_db::enums::LifeForce::Celestial),
+                    victim_is_elemental: lf(mud_db::enums::LifeForce::Elemental),
                     ..formula_ctx
                 };
                 // I.9: `multihit: true` in the effect params signals
@@ -11619,6 +12580,103 @@ pub(crate) fn invoke_ability_with(
                 {
                     amount = amount.saturating_add(bonus);
                 }
+                // Empowered (HARNESS): one-shot +50% on the next
+                // damage spell. Consumed up front so a Magic Missile
+                // multi-bolt or any subsequent component pays only
+                // once. Also despawns the backing "empowered"
+                // EffectInstance(s) so the `effects` list stays
+                // accurate.
+                let mut empowered_consumed = false;
+                if amount > 0 && world.get::<mud_world::Empowered>(player).is_some() {
+                    amount = (amount.saturating_mul(150) / 100).max(1);
+                    try_remove::<mud_world::Empowered>(world, player);
+                    let to_despawn: Vec<Entity> = {
+                        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+                        q.iter(world)
+                            .filter(|(_, inst, applied)| {
+                                applied.0 == player
+                                    && inst.name.eq_ignore_ascii_case("empowered")
+                            })
+                            .map(|(e, _, _)| e)
+                            .collect()
+                    };
+                    for e in to_despawn {
+                        if let Ok(em) = world.get_entity_mut(e) {
+                            em.despawn();
+                        }
+                    }
+                    empowered_consumed = true;
+                }
+                let _ = empowered_consumed; // future: surface in dice tail
+                // I3: per-target multiplicative conditions. Authored
+                // as a `multipliers` array in override_params:
+                //   "multipliers": [
+                //     { "expr": "(victim_align * -7 + 8000) / 10000",
+                //       "min": 0.1, "max": 1.5 }
+                //   ]
+                // Each entry's expr is evaluated against the per-target
+                // FormulaCtx (so victim_align / target_max_hp / etc.
+                // resolve), divided by 1000 to recover the float
+                // coefficient (the expr stays integer-only — multiply
+                // through by 1000 in the formula), clamped to
+                // [min, max], then multiplied into amount. Both min
+                // and max default to "no clamp on that side" when
+                // missing; expr is required. Lets the divine/unholy
+                // line, class-affinity bonuses, etc. land without
+                // baking the multiplier into the base damage formula.
+                if let Some(multipliers) = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|v| v.get("multipliers"))
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for m in multipliers {
+                        let Some(expr) = m.get("expr").and_then(serde_json::Value::as_str)
+                        else {
+                            continue;
+                        };
+                        let Some(scaled_int) = evaluate_simple_formula_ctx(
+                            &normalize_dice_notation(expr),
+                            &per_target_ctx,
+                        ) else {
+                            continue;
+                        };
+                        // Expr is integer (× 1000 convention) → recover the
+                        // float coefficient. Authors who want a literal
+                        // 0.8 multiplier write `800` in the expr.
+                        let mut factor = f64::from(scaled_int) / 1000.0;
+                        if let Some(min) = m
+                            .get("min")
+                            .and_then(serde_json::Value::as_f64)
+                        {
+                            factor = factor.max(min);
+                        }
+                        if let Some(max) = m
+                            .get("max")
+                            .and_then(serde_json::Value::as_f64)
+                        {
+                            factor = factor.min(max);
+                        }
+                        if !factor.is_finite() {
+                            continue;
+                        }
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let scaled = ((f64::from(amount) * factor).round() as i64)
+                            .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+                            as i32;
+                        // Clamp to 0 floor — a destructive multiplier
+                        // shouldn't let a negative roll heal the target.
+                        // Above-amount multipliers ARE allowed (a fire
+                        // mage's fire affinity could legitimately
+                        // multiply damage > 1.0).
+                        amount = scaled.max(0);
+                    }
+                }
+                let raw_amount = amount;
+                let mut post_sp = amount;
+                let mut post_reagent = amount;
+                let mut sp_applied: i32 = 0;
+                let mut ward_pct: i32 = 0;
                 if amount > 0 {
                     // A5: spell_power scales magical damage as an
                     // additive % multiplier, mirroring how attack_power
@@ -11628,11 +12686,14 @@ pub(crate) fn invoke_ability_with(
                     if def.is_magical && caster_spell_power != 0 {
                         amount = (amount.saturating_mul(100 + caster_spell_power)) / 100;
                         amount = amount.max(1);
+                        sp_applied = caster_spell_power;
                     }
+                    post_sp = amount;
                     // Reagent boost on damage spells.
                     if reagent_boost_pct > 0 {
                         amount = amount.saturating_add(amount * reagent_boost_pct / 100);
                     }
+                    post_reagent = amount;
                     // Ward (combat pipeline step 5): magical sources
                     // route through the target's `ward_pct`. Mundane
                     // on-hit abilities (`is_magical = false`) skip
@@ -11641,12 +12702,112 @@ pub(crate) fn invoke_ability_with(
                     // can't generate negative damage; floor at 0 so
                     // negative ward (vulnerability) stays
                     // armor-side, not ward-side.
-                    let ward_pct = world
+                    ward_pct = world
                         .get::<CombatStats>(target_entity)
                         .map_or(0, |c| c.ward_pct);
                     amount = apply_ward(amount, ward_pct, def.is_magical);
+                    // J2 alignment protection — PROT_FROM_EVIL /
+                    // PROT_FROM_GOOD trims 20% when alignments are
+                    // mutually opposed. Runs after ward / resist so
+                    // it stacks on the magical pipeline rather than
+                    // replacing it.
+                    let align_mult =
+                        alignment_protection_factor(world, player, target_entity);
+                    if (align_mult - 1.0).abs() > f32::EPSILON {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        {
+                            amount = ((amount as f32) * align_mult) as i32;
+                        }
+                        amount = amount.max(1);
+                    }
+                    // K2: HALF_DAMAGE on-save action. Mirrors legacy
+                    // `dam >>= 1` — halves the FINAL post-mitigation
+                    // damage so the saved spell still scrapes the
+                    // target but doesn't blast through the way a
+                    // failed save would. Surface a "partially resists"
+                    // line so the target knows their save mattered.
+                    if halve_damage && amount > 0 {
+                        amount = (amount / 2).max(1);
+                        let caster_name = actor_name_pre.clone();
+                        let target_name = name_or(world, target_entity, "the target");
+                        send_to(
+                            world,
+                            player,
+                            format!(
+                                "{} partially resists your {}.\r\n",
+                                cap_sentence_start(&target_name),
+                                def.name,
+                            ),
+                        );
+                        if target_entity != player {
+                            send_rendered(
+                                world,
+                                target_entity,
+                                &format!(
+                                    "You partially resist {}'s {}.\r\n",
+                                    caster_name, def.name,
+                                ),
+                            );
+                        }
+                    }
+                    // Snapshot victim HP for lifesteal — apply_damage
+                    // can clamp at 0, so the *actual* damage dealt
+                    // can be smaller than `amount`. Caster heal uses
+                    // the real delta.
+                    let pre_hp = world.get::<Health>(target_entity).map_or(0, |h| h.hp);
                     let (dead, threshold_msg) =
                         crate::commands::apply_damage(world, target_entity, amount);
+                    // Lifesteal: heal the caster by the actual damage
+                    // dealt. At max HP, legacy spills excess into
+                    // overheal via a polynomial that approaches zero
+                    // at hp/max ≈ 5. We mirror that, clamped to a
+                    // 5-10 floor when the polynomial yields under 10.
+                    if lifesteal {
+                        let actual_dmg = (pre_hp
+                            - world.get::<Health>(target_entity).map_or(0, |h| h.hp))
+                            .max(0);
+                        if actual_dmg > 0
+                            && let Some(mut h) = world.get_mut::<Health>(player)
+                        {
+                            if h.hp < h.max {
+                                let new_hp = (h.hp + actual_dmg).min(h.max);
+                                let real_heal = new_hp - h.hp;
+                                h.hp = new_hp;
+                                send_to(
+                                    world,
+                                    player,
+                                    format!("You drain {real_heal} life force from your victim.\r\n"),
+                                );
+                            } else {
+                                // Above-max spillover per legacy
+                                // polynomial: hp += dam * (-0.0457r²
+                                // - 0.0171r + 1.066) where r = hp/max,
+                                // clamped 5..10 floor.
+                                #[allow(
+                                    clippy::cast_precision_loss,
+                                    clippy::cast_possible_truncation,
+                                    clippy::cast_sign_loss
+                                )]
+                                let bonus = {
+                                    let ratio = h.hp as f32 / h.max.max(1) as f32;
+                                    let poly =
+                                        -0.0457 * ratio * ratio - 0.0171 * ratio + 1.066;
+                                    let raw = ((actual_dmg as f32) * poly) as i32;
+                                    if raw > 10 {
+                                        raw
+                                    } else {
+                                        rand::random_range(5..=10)
+                                    }
+                                };
+                                h.hp = h.hp.saturating_add(bonus);
+                                send_to(
+                                    world,
+                                    player,
+                                    format!("You overflow with stolen vitality (+{bonus}).\r\n"),
+                                );
+                            }
+                        }
+                    }
                     // Surface the apply_damage threshold message
                     // ("You are hurt." / "...badly hurt!" / "...near
                     // death!") to the target so they get the same
@@ -11657,6 +12818,20 @@ pub(crate) fn invoke_ability_with(
                         && let Some(line) = threshold_msg
                     {
                         send_to(world, target_entity, line.to_string());
+                    }
+                    // Engage combat. Without this a sorc lobbing
+                    // burning hands at an orc deals the damage but
+                    // neither side ends up `Fighting` — the orc
+                    // never retaliates, the player keeps casting
+                    // free shots. Mirrors what cmd_attack /
+                    // melee-swing pipelines do. Skipped on self-
+                    // cast (target == caster) and on kill (target
+                    // is being despawned by handle_death below).
+                    if !dead
+                        && target_entity != player
+                        && let Some(room) = world.get::<Located>(target_entity).map(|l| l.0)
+                    {
+                        engage_combat(world, player, target_entity, room);
                     }
                     if dead
                         && let Some(located) = world.get::<Located>(target_entity).copied()
@@ -11670,7 +12845,37 @@ pub(crate) fn invoke_ability_with(
                         );
                     }
                 }
-                if bolt_count > 1 {
+                if crate::combat::show_dice_for(world, player) {
+                    let formula_txt = amount_formula_text(
+                        spec.override_params.as_ref(),
+                        Some(&spec.default_params),
+                    )
+                    .unwrap_or_else(|| "(literal)".into());
+                    let mut detail = String::new();
+                    detail.push_str(&format!("formula={formula_txt}"));
+                    if bolt_count > 1 {
+                        detail.push_str(&format!(" ×{bolt_count} bolts"));
+                    }
+                    detail.push_str(&format!(" raw={raw_amount}"));
+                    if sp_applied != 0 {
+                        let sign = if sp_applied >= 0 { "+" } else { "" };
+                        detail.push_str(&format!(" SP{sign}{sp_applied}%={post_sp}"));
+                    }
+                    if reagent_boost_pct > 0 {
+                        detail.push_str(&format!(" reagent+{reagent_boost_pct}%={post_reagent}"));
+                    }
+                    if ward_pct != 0 && def.is_magical {
+                        detail.push_str(&format!(" ward-{ward_pct}%={amount}"));
+                    }
+                    if bolt_count > 1 {
+                        applied_msgs.push(format!(
+                            "{} {detail} → -{} HP ×{} bolts",
+                            pretty, amount, bolt_count
+                        ));
+                    } else {
+                        applied_msgs.push(format!("{} {detail} → -{} HP", pretty, amount));
+                    }
+                } else if bolt_count > 1 {
                     applied_msgs.push(format!(
                         "{} (-{} HP ×{} bolts)",
                         pretty, amount, bolt_count
@@ -11899,6 +13104,17 @@ pub(crate) fn invoke_ability_with(
                 // matching index. Skipped when there's no arg or the
                 // arg doesn't match any keyword — falls through to
                 // the (zone, id) default.
+                //
+                // Create Food: legacy `spell_creations` picks a base
+                // zone by caster class (Cleric/default → 120,
+                // Paladin → 110, Priest → 100, Anti-Paladin → 130,
+                // Druid → 140), then id 0..9 with `zplus = skill/16
+                // + small random`. Falls back to waybread (185, 8)
+                // when the per-class zone proto isn't loaded — keeps
+                // CREATE_FOOD playable even on a partial-content DB
+                // where zones 100/110/130/140 are sparse. Future
+                // cleanup migrates this table into `CreationRecipe`
+                // (fierylib doc §8 already drafted the schema).
                 let (proto_zone, proto_id) = {
                     let mut z = default_zone;
                     let mut i = default_id;
@@ -11913,6 +13129,57 @@ pub(crate) fn invoke_ability_with(
                         {
                             z = Some(10);
                             i = Some(i32::try_from(idx).unwrap_or(0));
+                        }
+                    }
+                    if def.plain_name.eq_ignore_ascii_case("CREATE_FOOD") {
+                        let base_zone = match caster_class_id {
+                            Some(5) => 110,  // Paladin
+                            Some(16) => 100, // Priest
+                            Some(6) => 130,  // Anti-Paladin
+                            Some(8) => 140,  // Druid
+                            _ => 120,        // Cleric / default
+                        };
+                        // Filter to FOOD protos in the class's zone —
+                        // legacy assumed `zplus 0..9` always landed on
+                        // food, but the imported zones mix in other
+                        // proto types (armor, fountains) so the strict
+                        // index dance would conjure absurd gear.
+                        // Walk the zone for typed FOOD entries; pick
+                        // one weighted toward higher levels by caster
+                        // skill, then plus a small jitter so back-to-
+                        // back casts don't duplicate.
+                        let mut foods: Vec<(i32, i32)> = world
+                            .resource::<ObjectPrototypes>()
+                            .by_key
+                            .iter()
+                            .filter(|((zid, _), p)| {
+                                *zid == base_zone
+                                    && p.r#type == mud_db::enums::ObjectType::Food
+                            })
+                            .map(|((zid, iid), _)| (*zid, *iid))
+                            .collect();
+                        foods.sort_by_key(|(_, iid)| *iid);
+                        if foods.is_empty() {
+                            // Fallback: waybread (185, 8). Sparse
+                            // per-class food zones in the dev DB
+                            // shouldn't drop the cast entirely.
+                            z = Some(185);
+                            i = Some(8);
+                        } else {
+                            // Pick deterministically by skill then
+                            // jitter into adjacent indices. Caster
+                            // skill 0..100 maps to the lower vs upper
+                            // half of the foods list; a small random
+                            // shift keeps repeated casts varied.
+                            let n = foods.len();
+                            let base_idx = (caster_skill as usize)
+                                .saturating_mul(n)
+                                / 101; // 0..n-1
+                            let jitter = rand::random_range(0..=2);
+                            let idx = (base_idx + jitter).min(n - 1);
+                            let (fz, fi) = foods[idx];
+                            z = Some(fz);
+                            i = Some(fi);
                         }
                     }
                     (z, i)
@@ -12103,6 +13370,24 @@ pub(crate) fn invoke_ability_with(
                         amount: a,
                     });
                 }
+                // INVISIBLE / MASS_INVIS: the spell is content-modeled
+                // as a +40 evasion buff (modify arm), but a player who
+                // casts it expects to actually disappear. Tag the
+                // EffectInstance with `InvisibleSource` so the
+                // teardown can decide when to drop the marker, and
+                // install Invisible on the target now.
+                let plain = def.plain_name.to_ascii_uppercase();
+                let is_invisibility_source =
+                    plain == "INVISIBLE" || plain == "MASS_INVIS" || plain == "MASS_INVISIBILITY";
+                if is_invisibility_source {
+                    bundle.insert(mud_world::InvisibleSource);
+                }
+                // Drop the bundle borrow before reaching back into the
+                // world for the target-side marker insert.
+                let _ = bundle;
+                if is_invisibility_source {
+                    try_insert(world, target_entity, mud_world::Invisible);
+                }
                 spawn_count += 1;
                 applied_msgs.push(match (target_stat.as_deref(), applied_amount) {
                     (Some(t), Some(a)) => {
@@ -12146,11 +13431,29 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{} (target isn't a creature)", pretty));
                     continue;
                 }
+                // Snapshot target name + room BEFORE the despawn
+                // so the broadcast has data to render.
+                let banished_name = name_or(world, target_entity, "the creature");
+                let target_room = world.get::<Located>(target_entity).map(|l| l.0);
                 disengage_attackers_of(world, target_entity);
                 if let Ok(e) = world.get_entity_mut(target_entity) {
                     e.despawn();
                 }
-                applied_msgs.push(format!("{} (banished)", pretty));
+                // Room broadcast — banishment is a high-impact
+                // moment; bystanders see the creature evicted
+                // rather than just blinking out without
+                // explanation. Includes the caster's name for
+                // attribution.
+                if let Some(room) = target_room {
+                    let caster_name = actor_name_pre.clone();
+                    let line = format!(
+                        "<b:magenta>{} banishes {} back to the realm whence it came!</>\r\n",
+                        cap_sentence_start(&caster_name),
+                        banished_name,
+                    );
+                    broadcast_room_visual(world, room, player, &[player], &line);
+                }
+                applied_msgs.push(format!("{} (banished {banished_name})", pretty));
             }
             "dismount" => {
                 // Force-end the rider/mount relationship on the
@@ -12191,6 +13494,224 @@ pub(crate) fn invoke_ability_with(
                 //                         caller passes another entity)
                 // Other destinations ("random", "object") fall through
                 // to a log message — nothing teleports.
+
+                // SUMMON-specific gates. The player-target summon
+                // spell rides on `effectType=teleport, scope=target,
+                // destination=caster` — same teleport machinery, but
+                // it has to pass an additional eight-gate refusal set
+                // before the move. Mirrors legacy spells.cpp:2622
+                // (spell_summon). All other teleport variants (recall
+                // scrolls, word-of-recall, summon-corpse) skip these
+                // gates entirely.
+                let is_summon_spell = def.plain_name.eq_ignore_ascii_case("SUMMON");
+                if is_summon_spell {
+                    let caster_room_opt = world.get::<Located>(player).map(|l| l.0);
+                    let target_room_opt = world.get::<Located>(target_entity).map(|l| l.0);
+                    let (Some(caster_room), Some(target_room)) =
+                        (caster_room_opt, target_room_opt)
+                    else {
+                        applied_msgs.push(format!("{pretty} (no room)"));
+                        continue;
+                    };
+
+                    // Gate 0: refuse self-summon. Pre-queue early
+                    // gate catches the typical typo / explicit self
+                    // forms; this is the safety net for the case
+                    // where remote-name resolution finds a player
+                    // who happens to be the caster (e.g. shared
+                    // partial-name match).
+                    if target_entity == player {
+                        send_to(world, player, "But you're already here!\r\n");
+                        applied_msgs.push(format!("{pretty} (self target)"));
+                        continue;
+                    }
+
+                    // Gate 1: same zone. Legacy uses BFS with
+                    // max-distance = skill/5; same-zone is a strict
+                    // superset of that test in practice (zones are
+                    // small enough), so we use it as the cheap
+                    // single-check proxy. BFS proper is a follow-up.
+                    let caster_zone =
+                        world.get::<WorldKey>(caster_room).map(|w| w.zone);
+                    let target_zone =
+                        world.get::<WorldKey>(target_room).map(|w| w.zone);
+                    if caster_zone != target_zone {
+                        send_to(world, player, "That person is too far away.\r\n");
+                        applied_msgs.push(format!("{pretty} (different zone)"));
+                        continue;
+                    }
+
+                    // Gate 2: proficiency cap. Caster skill is
+                    // approximated by caster level here (the
+                    // formula_ctx already evaluates skill scaling
+                    // elsewhere; a per-spell skill lookup is a
+                    // follow-up). Legacy: target_level > skill + 3.
+                    let target_level = world
+                        .get::<Profile>(target_entity)
+                        .map_or(1, |p| p.level);
+                    let caster_level = world
+                        .get::<Profile>(player)
+                        .map_or(1, |p| p.level);
+                    if target_level > caster_level + 3 {
+                        send_to(
+                            world,
+                            player,
+                            "You aren't proficient enough to summon such a powerful being.\r\n",
+                        );
+                        applied_msgs
+                            .push(format!("{pretty} (level cap {target_level}>{caster_level}+3)"));
+                        continue;
+                    }
+
+                    // Gate 3: mob NoSummon. Legacy also rejects on
+                    // MOB_NOCHARM; modern schema has no NoCharm
+                    // mob-behavior, so NoSummon is the sole flag.
+                    if let Some(behaviors) =
+                        world.get::<mud_world::MobBehaviors>(target_entity)
+                        && behaviors.has(mud_db::enums::MobBehavior::NoSummon)
+                    {
+                        let tname = world
+                            .get::<Named>(target_entity)
+                            .map_or("the creature".to_string(), |n| n.name.clone());
+                        send_to(
+                            world,
+                            player,
+                            format!(
+                                "You feel your magic probing {tname}, but it can't seem to get a grip.\r\n"
+                            ),
+                        );
+                        applied_msgs.push(format!("{pretty} (mob NoSummon)"));
+                        continue;
+                    }
+
+                    // Gate 4: destination room blocks summons.
+                    if world.get::<mud_world::NoSummonRoom>(caster_room).is_some() {
+                        send_to(
+                            world,
+                            player,
+                            "A negating force blocks your spell.\r\n",
+                        );
+                        applied_msgs.push(format!("{pretty} (room NoSummon)"));
+                        continue;
+                    }
+
+                    // Gate 5: arena asymmetry. Don't drag
+                    // non-combatants into a PK arena; arena-to-arena
+                    // is fine, non-arena-to-non-arena is fine.
+                    if world.get::<mud_world::ArenaRoom>(caster_room).is_some()
+                        && world.get::<mud_world::ArenaRoom>(target_room).is_none()
+                    {
+                        send_to(
+                            world,
+                            player,
+                            "You can't summon someone into an arena room.\r\n",
+                        );
+                        applied_msgs.push(format!("{pretty} (arena asymmetry)"));
+                        continue;
+                    }
+
+                    // Gate 6: PC summon path. Three sub-cases:
+                    //   * `NoSummon` flag set → silent auto-decline.
+                    //     Caster gets a refusal; the target — who
+                    //     opted out of even getting prompts — sees
+                    //     nothing.
+                    //   * `PkEnabled` (target signed up for hostile
+                    //     actions) OR caster carries staff `Summon`
+                    //     permission → instant move, no prompt.
+                    //   * Otherwise → install a `PendingSummon`
+                    //     marker and bail. The target has 30s to
+                    //     `accept` (cmd_accept performs the move +
+                    //     broadcasts + retaliation + cooldown) or
+                    //     `decline`. Improves on legacy, which had no
+                    //     prompt — just the up-front PRF_SUMMONABLE
+                    //     toggle.
+                    if world.get::<Player>(target_entity).is_some() {
+                        let pf = world.get::<PlayerFlags>(target_entity);
+                        let opted_out = pf.is_some_and(|pf| {
+                            pf.has(mud_db::enums::PlayerFlag::NoSummon)
+                        });
+                        let pker = pf.is_some_and(|pf| {
+                            pf.has(mud_db::enums::PlayerFlag::PkEnabled)
+                        });
+                        let staff_bypass = world
+                            .get::<Account>(player)
+                            .is_some_and(|a| {
+                                a.perms.contains(&mud_db::enums::Permission::Summon)
+                            });
+
+                        if opted_out && !pker && !staff_bypass {
+                            let tname = world
+                                .get::<Named>(target_entity)
+                                .map_or("they".to_string(), |n| n.name.clone());
+                            send_to(
+                                world,
+                                player,
+                                format!("{tname} is not accepting summons.\r\n"),
+                            );
+                            applied_msgs.push(format!("{pretty} (target NoSummon)"));
+                            continue;
+                        }
+
+                        if !pker && !staff_bypass {
+                            if world.get::<mud_world::PendingSummon>(target_entity).is_some() {
+                                send_to(
+                                    world,
+                                    player,
+                                    "That person already has a pending summons offer.\r\n",
+                                );
+                                applied_msgs.push(format!("{pretty} (target busy)"));
+                                continue;
+                            }
+                            let tname = world
+                                .get::<Named>(target_entity)
+                                .map_or("they".to_string(), |n| n.name.clone());
+                            let cname = world
+                                .get::<Named>(player)
+                                .map_or("Someone".to_string(), |n| n.name.clone());
+                            let dest_room_name = world
+                                .get::<Named>(caster_room)
+                                .map_or("an unfamiliar place".to_string(), |n| n.name.clone());
+                            try_insert(
+                                world,
+                                target_entity,
+                                mud_world::PendingSummon {
+                                    from: player,
+                                    from_name: cname.clone(),
+                                    dest_room: caster_room,
+                                    dest_room_name: dest_room_name.clone(),
+                                    at: std::time::Instant::now(),
+                                },
+                            );
+                            send_to(
+                                world,
+                                player,
+                                format!(
+                                    "You send a summons to {tname}. \
+                                     They have 30 seconds to accept.\r\n"
+                                ),
+                            );
+                            send_to(
+                                world,
+                                target_entity,
+                                format!(
+                                    "{cname} is attempting to summon you to {dest_room_name}. \
+                                     Type ACCEPT to teleport, or DECLINE to refuse. \
+                                     (Auto-declines in 30 seconds.)\r\n"
+                                ),
+                            );
+                            applied_msgs.push(format!("{pretty} (summons pending)"));
+                            continue;
+                        }
+                        // PK or staff bypass — fall through to instant
+                        // move below.
+                    }
+
+                    // Mobs and PK/staff-bypassed PCs: all gates
+                    // passed; fall through to the existing teleport
+                    // move logic. Post-move broadcasts + retaliation
+                    // fire below.
+                }
+
                 let destination = resolve_teleport_destination(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
@@ -12224,6 +13745,23 @@ pub(crate) fn invoke_ability_with(
                             None
                         } else {
                             world.get::<Located>(target_entity).map(|l| l.0)
+                        }
+                    }
+                    Some("room" | "fixed") => {
+                        // Builder-pinned destination: read
+                        // `destination_zone` + `destination_id` from the
+                        // same params blob and look it up in the world
+                        // index. Lets a per-color recall scroll point at
+                        // its own temple without spinning up a new
+                        // teleport effect kind per destination.
+                        let (z, i) = resolve_fixed_room(
+                            spec.override_params.as_ref(),
+                            Some(&spec.default_params),
+                        );
+                        if let (Some(z), Some(i)) = (z, i) {
+                            world.resource::<WorldKeyIndex>().rooms.get(&(z, i)).copied()
+                        } else {
+                            None
                         }
                     }
                     Some("random") => {
@@ -12283,11 +13821,1043 @@ pub(crate) fn invoke_ability_with(
                 if let Some(mut l) = world.get_mut::<Located>(target_entity) {
                     l.0 = dest_room;
                 }
-                // Auto-look at the new room so the player sees where
-                // they landed without needing to follow up with a
-                // separate `look` command.
-                crate::commands::cmd_look(world, target_entity, "");
+                // Defer the auto-look until after the cast
+                // confirmation prints — otherwise the room description
+                // appears mid-cast between "You read aloud from
+                // {scroll}" and "you cast Recall (Blue)", which reads
+                // out of order.
+                auto_look_after_cast = true;
                 applied_msgs.push(format!("{} (teleported)", pretty));
+
+                // Summon-specific aftermath: depart/arrive broadcasts,
+                // a private "X has summoned you!" line to the target,
+                // and — if the summoned target is a mob — an immediate
+                // retaliation against the caster, just like legacy
+                // (set_fighting at spells.cpp:2711). Cooldown is set
+                // here (16s = 4 combat rounds) so a successful summon
+                // can't be spammed; cleaner than bumping cooldown_ms
+                // on the ability row since only the *successful* path
+                // pays the wait.
+                if is_summon_spell && cur_room.is_some() {
+                    let old_room = cur_room.unwrap();
+                    let tname = world
+                        .get::<Named>(target_entity)
+                        .map_or("Someone".to_string(), |n| n.name.clone());
+                    let cname = world
+                        .get::<Named>(player)
+                        .map_or("Someone".to_string(), |n| n.name.clone());
+                    broadcast_room_visual(
+                        world,
+                        old_room,
+                        target_entity,
+                        &[target_entity],
+                        &cap_sentence_start(&format!("{tname} disappears suddenly.\r\n")),
+                    );
+                    broadcast_room_visual(
+                        world,
+                        dest_room,
+                        target_entity,
+                        &[target_entity],
+                        &cap_sentence_start(&format!("{tname} arrives suddenly.\r\n")),
+                    );
+                    send_to(
+                        world,
+                        target_entity,
+                        format!("{cname} has summoned you!\r\n"),
+                    );
+                    if world.get::<Mob>(target_entity).is_some() {
+                        send_to(
+                            world,
+                            player,
+                            "Magical bindings crumble and the creature turns on you!\r\n",
+                        );
+                        engage_combat(world, target_entity, player, dest_room);
+                    }
+                    // 4 combat rounds = 16 s post-summon cooldown.
+                    let ready_at = std::time::Instant::now()
+                        + std::time::Duration::from_secs(16);
+                    let mut cd = world
+                        .get_mut::<Cooldowns>(player)
+                        .map(|mut c| std::mem::take(&mut *c))
+                        .unwrap_or_default();
+                    cd.ready_at.insert(def.id, ready_at);
+                    try_insert(world, player, cd);
+                }
+            }
+            "room" => {
+                // ROOM-effect spells (DARKNESS / ILLUMINATION /
+                // MAGIC_TORCH / CIRCLE_OF_FIRE / etc.). We currently
+                // handle the light/dark family — barrier types
+                // (walls, fog) need exit-blocking machinery and
+                // remain in the catchall arm as a duration-only
+                // marker. The marker (RoomMagicalLight /
+                // RoomMagicalDarkness) attaches to the caster's
+                // room entity, and the duration-tracked
+                // EffectInstance gets AppliedTo(room) so
+                // effects_tick can find and tear it down.
+                let type_str = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|v| v.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| {
+                        spec.default_params
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let Some(caster_room) = world.get::<Located>(player).map(|l| l.0) else {
+                    applied_msgs.push(format!("{} (no room)", pretty));
+                    continue;
+                };
+                let mut dur_secs = resolve_effect_duration(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    &formula_ctx,
+                );
+                if halve_duration {
+                    dur_secs = (dur_secs / 2).max(1);
+                }
+                if reagent_boost_pct > 0 {
+                    dur_secs = dur_secs.saturating_add(dur_secs * reagent_boost_pct / 100);
+                }
+                // Effect name is the type ("light" / "darkness") so
+                // teardown can re-walk by name. The duration-
+                // tracked EffectInstance lands on the room entity
+                // via AppliedTo(caster_room).
+                // CIRCLE_OF_FIRE etc. — hazard installs a
+                // RoomBurningEffect carrying per-move damage. The
+                // spell params name it `damageOnMovement`.
+                if type_str == "burning" {
+                    let dmg_per_move = spec
+                        .override_params
+                        .as_ref()
+                        .and_then(|v| v.get("damageOnMovement"))
+                        .and_then(|v| {
+                            if let Some(n) = v.as_i64() {
+                                i32::try_from(n).ok()
+                            } else if let Some(s) = v.as_str() {
+                                evaluate_simple_formula_ctx(
+                                    &normalize_dice_notation(s),
+                                    &formula_ctx,
+                                )
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(10)
+                        .max(1);
+                    try_insert(
+                        world,
+                        caster_room,
+                        mud_world::RoomBurningEffect { damage_per_move: dmg_per_move },
+                    );
+                }
+                // Zone weather override (CONTROL_WEATHER / RAIN):
+                // both spells carry effectType=room and live in the
+                // weather subsystem rather than the room-marker
+                // pattern. Read either an explicit `setPrecip`
+                // override_param (RAIN seeds this) or, for
+                // CONTROL_WEATHER, parse the cast arg as a precip
+                // word (clear / cloudy / rain / storm / snow);
+                // default to clear. The override is one-shot — we
+                // mutate the zone's WeatherCatalog entry directly,
+                // and the natural drift tick will start moving it
+                // back toward climate-normal over subsequent ticks.
+                // Suppressing drift for the full spell duration is
+                // a later refinement.
+                let set_precip = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|v| v.get("setPrecip"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_ascii_lowercase)
+                    .or_else(|| {
+                        if def.plain_name.eq_ignore_ascii_case("CONTROL_WEATHER") {
+                            target_word
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_ascii_lowercase)
+                                .or_else(|| Some("clear".to_string()))
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(precip_str) = set_precip {
+                    let precip = match precip_str.as_str() {
+                        "clear" | "sunny" | "fair" => mud_world::PrecipKind::Clear,
+                        "cloudy" | "overcast" => mud_world::PrecipKind::Cloudy,
+                        "drizzle" | "drizzling" => mud_world::PrecipKind::Drizzle,
+                        "rain" | "rainy" | "raining" => mud_world::PrecipKind::Rain,
+                        "storm" | "stormy" => mud_world::PrecipKind::Storm,
+                        "snow" | "snowing" => mud_world::PrecipKind::Snow,
+                        "blizzard" | "blizzarding" => mud_world::PrecipKind::Blizzard,
+                        other => {
+                            send_to(
+                                world,
+                                player,
+                                format!("Unknown weather '{other}' — try clear / rain / storm / snow.\r\n"),
+                            );
+                            applied_msgs.push(format!("{pretty} (unknown weather '{other}')"));
+                            continue;
+                        }
+                    };
+                    let Some(zone) =
+                        world.get::<mud_world::WorldKey>(caster_room).map(|w| w.zone)
+                    else {
+                        applied_msgs.push(format!("{pretty} (room not in a weather-tracked zone)"));
+                        continue;
+                    };
+                    let mut catalog = world.resource_mut::<mud_world::WeatherCatalog>();
+                    if let Some(entry) = catalog.by_zone.get_mut(&zone) {
+                        entry.precip = precip;
+                    } else {
+                        // Climate::None zones (Void, planes) have no
+                        // WeatherCatalog entry. Don't force-insert —
+                        // the spell legitimately can't do anything
+                        // in metaphysical rooms.
+                        applied_msgs.push(format!(
+                            "{pretty} (no weather here to control)"
+                        ));
+                        continue;
+                    }
+                    drop(catalog);
+                    // Hold the override for the cast's full duration —
+                    // weather_tick consults WeatherDriftLocks and
+                    // skips the drift step for any zone whose lock is
+                    // still live. Without this the very next drift
+                    // tick would erase the player's "storm" pick.
+                    if dur_secs > 0 {
+                        let expiry = std::time::Instant::now()
+                            + std::time::Duration::from_secs(u64::from(dur_secs.max(0) as u32));
+                        world
+                            .resource_mut::<mud_world::WeatherDriftLocks>()
+                            .by_zone
+                            .insert(zone, expiry);
+                    }
+                    // Spawn a duration-tracked instance so the spell
+                    // shows up in `effects` for the caster. On expiry
+                    // the lock has already elapsed; drift naturally
+                    // resumes.
+                    world.spawn((
+                        EffectInstance {
+                            kind: spec.id,
+                            name: format!("weather-{precip_str}"),
+                            strength: 1,
+                            remaining_secs: dur_secs,
+                            source: EffectSource::Spell,
+                            ability_id: Some(def.id),
+                        },
+                        AppliedTo(caster_room),
+                    ));
+                    spawn_count += 1;
+                    applied_msgs.push(format!(
+                        "{pretty} (zone {zone} weather → {precip_str})"
+                    ));
+                    continue;
+                }
+
+                // Walls (ice / stone): solid barriers that block a
+                // single exit from the caster's room. Parse the cast
+                // arg as a direction; refuse if it doesn't resolve or
+                // the room has no exit there. On success, install a
+                // RoomBlockedExits entry pointing at the freshly-
+                // spawned EffectInstance so the teardown removes
+                // exactly the expiring wall. ILLUSORY_WALL ("passable")
+                // and WALL_OF_FOG ("slow") still fall through to the
+                // decorative path — pass/slow semantics are a later
+                // pass once movement-cost machinery lands.
+                let traversal_str = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|v| v.get("traversalRules"))
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| {
+                        spec.default_params
+                            .get("traversalRules")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let wall_traversal = match traversal_str.as_str() {
+                    "block" if matches!(type_str.as_str(), "ice" | "stone") => {
+                        Some(mud_world::WallTraversal::Block)
+                    }
+                    "slow" if type_str == "fog" => Some(mud_world::WallTraversal::Slow),
+                    "passable" if type_str == "illusion" => {
+                        Some(mud_world::WallTraversal::Passable)
+                    }
+                    _ => None,
+                };
+                if let Some(traversal) = wall_traversal {
+                    let arg = target_word.map(str::trim).unwrap_or("");
+                    let Some(dir) = parse_direction(arg) else {
+                        send_to(
+                            world,
+                            player,
+                            format!(
+                                "{} needs a direction (e.g. `cast '{}' north`).\r\n",
+                                def.name, def.plain_name.to_ascii_lowercase().replace('_', " ")
+                            ),
+                        );
+                        applied_msgs.push(format!("{pretty} (no direction)"));
+                        continue;
+                    };
+                    let has_exit = world
+                        .get::<mud_world::Exits>(caster_room)
+                        .is_some_and(|e| e.0.contains_key(&dir));
+                    if !has_exit {
+                        send_to(
+                            world,
+                            player,
+                            format!("There's no exit {} here.\r\n", direction_label(dir)),
+                        );
+                        applied_msgs.push(format!("{pretty} (no exit {dir:?})"));
+                        continue;
+                    }
+                    let kind_label = format!("wall of {type_str}");
+                    // Wall HP for bash mechanics: ice walls default
+                    // 100, stone walls default 200. Authors can
+                    // override per-cast via `override_params.hp`
+                    // (e.g. a scaled spell variant). Fog and
+                    // illusion walls have no HP gate — they expire
+                    // by duration or (illusion) on first traversal.
+                    let wall_hp = match traversal {
+                        mud_world::WallTraversal::Block => spec
+                            .override_params
+                            .as_ref()
+                            .and_then(|v| v.get("hp"))
+                            .and_then(serde_json::Value::as_i64)
+                            .map(|n| n as i32)
+                            .unwrap_or_else(|| match type_str.as_str() {
+                                "stone" => 200,
+                                _ => 100,
+                            })
+                            .max(1),
+                        // Sentinel — `cmd_doorbash` skips the bash
+                        // path for non-Block walls, so this value
+                        // is never consulted in practice.
+                        _ => 0,
+                    };
+                    let eff_entity = world
+                        .spawn((
+                            EffectInstance {
+                                kind: spec.id,
+                                name: format!("wall-{type_str}"),
+                                strength: 1,
+                                remaining_secs: dur_secs,
+                                source: EffectSource::Spell,
+                                ability_id: Some(def.id),
+                            },
+                            AppliedTo(caster_room),
+                        ))
+                        .id();
+                    spawn_count += 1;
+                    // Install / overwrite the per-direction entry on
+                    // the room. Overwrite (not stack) so a second
+                    // wall cast on the same direction extends the
+                    // wall by despawning the older instance — keeps
+                    // the model "one wall per direction" and avoids
+                    // teardown ambiguity.
+                    let mut blocked = world
+                        .get_mut::<mud_world::RoomBlockedExits>(caster_room)
+                        .map(|mut b| std::mem::take(&mut *b))
+                        .unwrap_or_default();
+                    if let Some(prev) = blocked.by_direction.insert(
+                        dir,
+                        mud_world::RoomBlockedExit {
+                            kind_label: kind_label.clone(),
+                            backed_by: eff_entity,
+                            hp: wall_hp,
+                            traversal,
+                        },
+                    ) {
+                        // Despawn the previous wall's backing
+                        // EffectInstance so `effects` reads cleanly
+                        // and a teardown for the old entity doesn't
+                        // later wipe our new entry.
+                        if let Ok(em) = world.get_entity_mut(prev.backed_by) {
+                            em.despawn();
+                        }
+                    }
+                    try_insert(world, caster_room, blocked);
+                    // Broadcast the wall's formation to everyone in
+                    // the room (except the caster, who already gets
+                    // the spell's own success_to_caster). Without
+                    // this, bystanders see "X waves their hands"
+                    // from the success template but no indication
+                    // that a wall just materialized.
+                    let caster_name = actor_name_pre.clone();
+                    let dir_name = direction_name(dir);
+                    let verb = match traversal {
+                        mud_world::WallTraversal::Block => "rises, blocking",
+                        mud_world::WallTraversal::Slow => "rolls in, choking",
+                        mud_world::WallTraversal::Passable => "shimmers into being across",
+                    };
+                    broadcast_room_visual(
+                        world,
+                        caster_room,
+                        player,
+                        &[player],
+                        &cap_sentence_start(&format!(
+                            "{caster_name} gestures and a {kind_label} {verb} the way {dir_name}.\r\n"
+                        )),
+                    );
+                    applied_msgs.push(format!(
+                        "{pretty} ({kind_label} blocks {})",
+                        direction_label(dir)
+                    ));
+                    continue;
+                }
+                let effect_name = match type_str.as_str() {
+                    "light" => "light",
+                    "darkness" => "darkness",
+                    "burning" => "burning",
+                    other => {
+                        // Non-light room effects (fog, burning,
+                        // illusion barriers, wall types) currently
+                        // fall through as decorative — no marker,
+                        // no consumer yet. Land a duration-only
+                        // EffectInstance so `effects` lists it and
+                        // future consumers can hang gates on the
+                        // backing instance.
+                        applied_msgs.push(format!("{} (room effect '{other}' not yet consumed)", pretty));
+                        world.spawn((
+                            EffectInstance {
+                                kind: spec.id,
+                                name: other.to_string(),
+                                strength: 1,
+                                remaining_secs: dur_secs,
+                                source: EffectSource::Spell,
+                                ability_id: Some(def.id),
+                            },
+                            AppliedTo(caster_room),
+                        ));
+                        spawn_count += 1;
+                        continue;
+                    }
+                };
+                world.spawn((
+                    EffectInstance {
+                        kind: spec.id,
+                        name: effect_name.to_string(),
+                        strength: 1,
+                        remaining_secs: dur_secs,
+                        source: EffectSource::Spell,
+                        ability_id: Some(def.id),
+                    },
+                    AppliedTo(caster_room),
+                ));
+                spawn_count += 1;
+                match type_str.as_str() {
+                    "light" => {
+                        try_insert(world, caster_room, mud_world::RoomMagicalLight);
+                    }
+                    "darkness" => {
+                        try_insert(world, caster_room, mud_world::RoomMagicalDarkness);
+                    }
+                    _ => {}
+                }
+                applied_msgs.push(format!("{pretty} (room {type_str})"));
+            }
+            "resurrect" => {
+                // Revive a Ghost player. Target must be a Player with
+                // the Ghost component (post-death, awaiting `release`
+                // or rez). Restores HP to 50% max, removes Ghost,
+                // moves them to the caster's room, and transfers any
+                // gear from the player's corpses back into their
+                // inventory. Equipment is dumped into inventory (not
+                // re-equipped) — the player chooses what to re-wear,
+                // matching the legacy `corpse → inv` flow.
+                if world.get::<mud_world::Ghost>(target_entity).is_none() {
+                    let target_name = name_or(world, target_entity, "(unknown)");
+                    send_to(
+                        world,
+                        player,
+                        format!("{} isn't a wandering spirit.\r\n",
+                            cap_sentence_start(&target_name)),
+                    );
+                    applied_msgs.push(format!("{} (target not dead)", pretty));
+                    continue;
+                }
+                let target_max = world.get::<Health>(target_entity).map_or(1, |h| h.max).max(1);
+                let new_hp = (target_max / 2).max(1);
+                if let Some(mut h) = world.get_mut::<Health>(target_entity) {
+                    h.hp = new_hp;
+                }
+                try_remove::<mud_world::Ghost>(world, target_entity);
+                // Drop the ghost in the caster's room.
+                if let Some(caster_room) = world.get::<Located>(player).map(|l| l.0) {
+                    if let Some(mut l) = world.get_mut::<Located>(target_entity) {
+                        l.0 = caster_room;
+                    }
+                }
+                let target_name = name_or(world, target_entity, "(unknown)");
+                // Corpse-equipment transfer. Walk every Item-Corpse
+                // entity whose Named ends with the target's name
+                // (corpses are named "the corpse of {victim_name}"),
+                // pull each item Located in that corpse onto the
+                // revived player as inventory, strip EquippedSlot,
+                // then despawn the (now-empty) corpse.
+                let target_name_lower = target_name.to_ascii_lowercase();
+                let corpses: Vec<Entity> = {
+                    let mut q = world
+                        .query_filtered::<(Entity, &Named), With<mud_world::Corpse>>();
+                    q.iter(world)
+                        .filter(|(_, n)| {
+                            n.name.to_ascii_lowercase().contains(&target_name_lower)
+                        })
+                        .map(|(e, _)| e)
+                        .collect()
+                };
+                let mut items_returned = 0;
+                for corpse_e in corpses {
+                    let items_in_corpse: Vec<Entity> = {
+                        let mut q = world
+                            .query_filtered::<(Entity, &Located), With<Item>>();
+                        q.iter(world)
+                            .filter(|(_, l)| l.0 == corpse_e)
+                            .map(|(e, _)| e)
+                            .collect()
+                    };
+                    for it in items_in_corpse {
+                        if let Some(mut l) = world.get_mut::<Located>(it) {
+                            l.0 = target_entity;
+                        }
+                        try_remove::<mud_world::EquippedSlot>(world, it);
+                        items_returned += 1;
+                    }
+                    // Despawn the empty corpse.
+                    if let Ok(em) = world.get_entity_mut(corpse_e) {
+                        em.despawn();
+                    }
+                }
+                send_to(
+                    world,
+                    target_entity,
+                    "Your spirit is yanked back into your body!\r\n",
+                );
+                if items_returned > 0 {
+                    let plural = if items_returned == 1 { "item" } else { "items" };
+                    send_to(
+                        world,
+                        target_entity,
+                        format!(
+                            "Your earthly possessions ({items_returned} {plural}) \
+                             rematerialize around you.\r\n"
+                        ),
+                    );
+                }
+                send_to(
+                    world,
+                    player,
+                    format!("{}'s spirit returns to flesh.\r\n",
+                        cap_sentence_start(&target_name)),
+                );
+                // Room broadcast — resurrection is a high-impact
+                // moment; bystanders see the spirit return rather
+                // than a player suddenly materializing without
+                // explanation. Skips caster + revived target (both
+                // got personalized lines).
+                if let Some(caster_room) = world.get::<Located>(player).map(|l| l.0) {
+                    let caster_name = actor_name_pre.clone();
+                    let line = format!(
+                        "<b:cyan>{}'s spirit is yanked back from the void by {}.</>\r\n",
+                        cap_sentence_start(&target_name),
+                        caster_name,
+                    );
+                    broadcast_room_visual(
+                        world,
+                        caster_room,
+                        player,
+                        &[player, target_entity],
+                        &line,
+                    );
+                }
+                applied_msgs.push(format!(
+                    "{} ({new_hp}/{target_max} HP restored, {items_returned} items returned)",
+                    pretty
+                ));
+            }
+            "inspect" => {
+                // IDENTIFY-family: route straight into the existing
+                // `cmd_identify` body, using the player's target_word
+                // as the item keyword. Skips the duration/marker
+                // path entirely — the spell IS the identify action,
+                // no buff to track. Sole effect_type in the catalog
+                // using this arm today.
+                let item_word = target_word
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("");
+                if item_word.is_empty() {
+                    send_to(world, player, "Identify what?\r\n");
+                    applied_msgs.push(format!("{} (no target)", pretty));
+                    continue;
+                }
+                crate::commands::info::cmd_identify(world, player, item_word);
+                applied_msgs.push(format!("{} (identified)", pretty));
+            }
+            "reveal" => {
+                // Utility scry / locate. params shape:
+                // `{"type": "object", "depth": "world"}` for
+                // LOCATE_OBJECT. We treat the cast's *second* token
+                // (target_word) as the search keyword and walk every
+                // Item entity for a match, then resolve where it
+                // lives. NOLOCATE-restricted items are skipped per
+                // legacy. Result is rendered straight into
+                // applied_msgs so the cast confirmation footer
+                // doubles as the output.
+                let keyword = target_word
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
+                if keyword.is_empty() {
+                    send_to(world, player, "Locate what?\r\n");
+                    applied_msgs.push(format!("{} (no keyword)", pretty));
+                    continue;
+                }
+                // Cap at 8 matches; the legacy used a skill-scaled
+                // cap up to MAX_LOCATE_ITEMS (also small). 8 is
+                // enough to be useful, low enough to keep the
+                // output legible.
+                let max_results: usize = 8;
+                let hits: Vec<(Entity, String, Entity)> = {
+                    let mut q = world.query_filtered::<
+                        (Entity, &Located, &Named, Option<&Keywords>, Option<&mud_world::ObjectRestrictions>),
+                        With<Item>,
+                    >();
+                    q.iter(world)
+                        .filter(|(_, _, n, kw, restr)| {
+                            let nolocate = restr
+                                .is_some_and(|r| r.has(mud_db::enums::ObjectRestriction::NoLocate));
+                            !nolocate && matches(&keyword, n, *kw)
+                        })
+                        .take(max_results)
+                        .map(|(e, l, n, _, _)| (e, n.name.clone(), l.0))
+                        .collect()
+                };
+                if hits.is_empty() {
+                    send_to(world, player, "You sense nothing.\r\n");
+                    applied_msgs.push(format!("{} (no matches for '{keyword}')", pretty));
+                    continue;
+                }
+                let mut buf = String::new();
+                for (_item, item_name, host) in &hits {
+                    // Walk container chains: if host is itself an
+                    // Item, follow its Located up; cap depth to
+                    // avoid pathological cycles (shouldn't happen,
+                    // but the data is builder-authored).
+                    let mut cur = *host;
+                    let mut inside: Option<String> = None;
+                    for _ in 0..8 {
+                        if world.get::<mud_world::Item>(cur).is_some() {
+                            // The item's host is another item — the
+                            // first such hop is what the legacy
+                            // labels as "in {container short_desc}".
+                            // Capture the immediate container's
+                            // name once, then keep walking up to
+                            // find the real root holder/room.
+                            if inside.is_none() {
+                                inside = Some(name_of(world, cur));
+                            }
+                            cur = match world.get::<Located>(cur) {
+                                Some(l) => l.0,
+                                None => break,
+                            };
+                            continue;
+                        }
+                        break;
+                    }
+                    let cap = cap_sentence_start(item_name);
+                    // Resolve root holder/room and render. Check
+                    // Player/Mob *before* WorldKey because mobs also
+                    // carry a WorldKey (their proto key) and would
+                    // otherwise be mis-rendered as rooms.
+                    if world.get::<mud_world::Player>(cur).is_some()
+                        || world.get::<mud_world::Mob>(cur).is_some()
+                    {
+                        // Cur is an actor: carried or worn. The
+                        // Item entity's EquippedSlot determines
+                        // which; check it on the originally-located
+                        // item, not on the root walk.
+                        let actor_name = name_of(world, cur);
+                        let item_e = hits.iter().find(|h| h.1 == *item_name).map(|h| h.0);
+                        let worn = item_e
+                            .is_some_and(|e| world.get::<EquippedSlot>(e).is_some());
+                        let verb = if worn { "being worn by" } else { "being carried by" };
+                        if let Some(container) = inside {
+                            buf.push_str(&format!(
+                                "{cap} is in {container} (carried by {actor_name}).\r\n",
+                            ));
+                        } else {
+                            buf.push_str(&format!("{cap} is {verb} {actor_name}.\r\n"));
+                        }
+                    } else if world.get::<mud_world::WorldKey>(cur).is_some() {
+                        // Cur is a Room (it has a WorldKey but
+                        // isn't an actor or item).
+                        let room_name = name_or(world, cur, "(somewhere)");
+                        if let Some(container) = inside {
+                            buf.push_str(&format!(
+                                "{cap} is in {container} (in {room_name}).\r\n",
+                            ));
+                        } else {
+                            buf.push_str(&format!("{cap} is in {room_name}.\r\n"));
+                        }
+                    } else {
+                        buf.push_str(&format!("{cap}'s location is uncertain.\r\n"));
+                    }
+                }
+                send_to(world, player, buf);
+                applied_msgs.push(format!("{} ({} match(es))", pretty, hits.len()));
+            }
+            "globe" => {
+                // MINOR_GLOBE (maxCircle=3) / MAJOR_GLOBE
+                // (maxCircle=6) — installs a `MaxAbsorbCircle`
+                // marker on the target. Hostile spell damage with
+                // min_circle ≤ marker is consumed without effect
+                // (gate fires in the "damage" arm). Stacking is
+                // max-wins: re-casting MINOR over an existing
+                // MAJOR doesn't downgrade the threshold.
+                let max_circle = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|v| v.get("maxCircle"))
+                    .and_then(serde_json::Value::as_i64)
+                    .or_else(|| {
+                        spec.default_params
+                            .get("maxCircle")
+                            .and_then(serde_json::Value::as_i64)
+                    })
+                    .and_then(|n| i32::try_from(n).ok())
+                    .unwrap_or(3)
+                    .max(1);
+                let mut dur_secs = resolve_effect_duration(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    &formula_ctx,
+                );
+                if halve_duration {
+                    dur_secs = (dur_secs / 2).max(1);
+                }
+                if reagent_boost_pct > 0 {
+                    dur_secs = dur_secs.saturating_add(dur_secs * reagent_boost_pct / 100);
+                }
+                let existing = world
+                    .get::<mud_world::MaxAbsorbCircle>(target_entity)
+                    .map_or(0, |m| m.0);
+                let effective = existing.max(max_circle);
+                try_insert(world, target_entity, mud_world::MaxAbsorbCircle(effective));
+                refresh_existing_effect(world, target_entity, &spec.name, def.id);
+                world.spawn((
+                    EffectInstance {
+                        kind: spec.id,
+                        name: spec.name.clone(),
+                        strength: max_circle,
+                        remaining_secs: dur_secs,
+                        source: EffectSource::Spell,
+                        ability_id: Some(def.id),
+                    },
+                    AppliedTo(target_entity),
+                ));
+                spawn_count += 1;
+                applied_msgs.push(format!("{pretty} (globe ≤ circle {max_circle})"));
+            }
+            "summon" => {
+                // L3 v1: conjuration spells (SUMMON_DEMON,
+                // SUMMON_ELEMENTAL, SPHERE_SUMMON, etc.). Read
+                // `mobType` from override_params, look it up in a
+                // hardcoded mob-proto table, spawn the mob into the
+                // caster's room as a Follower(caster) so it tags
+                // along, and spawn a duration-tracked EffectInstance
+                // pointing at the new mob so the teardown despawns
+                // it on expiry.
+                //
+                // Future cleanup: migrate the table to a
+                // `SummonRecipe` DB row keyed on (ability_id,
+                // class_id, min_skill, mob_zone, mob_id) — see
+                // fierylib doc §8. Today's hardcoded fallback ships
+                // playable conjurations without blocking on schema
+                // work.
+                let mob_type = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|v| v.get("mobType"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let proto_key: Option<(i32, i32)> = match mob_type.as_str() {
+                    "mount" => Some((324, 21)),         // a well trained horse
+                    "elemental" => Some((52, 12)),      // the flame elemental
+                    "demon" => Some((510, 24)),         // an Astral Demon
+                    "greater_demon" => Some((160, 11)), // the Demon Lord
+                    "dracolich" => Some((533, 11)),     // a dragon cult guardian
+                    "simulacrum" => Some((163, 8)),     // the Knight Errant
+                    // ANIMATE_DEAD / CLONE: no mobType in override_params,
+                    // but they share the "summon" effect_type and need a
+                    // default mob proto. Disambiguate by ability name.
+                    "" => match def.plain_name.to_ascii_uppercase().as_str() {
+                        "ANIMATE_DEAD" => Some((54, 20)),  // the Large Skeleton
+                        "CLONE" => Some((163, 8)),         // the Knight Errant (placeholder)
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(key) = proto_key else {
+                    send_to(
+                        world,
+                        player,
+                        format!(
+                            "The summoning fails — no mob type registered for '{mob_type}'.\r\n"
+                        ),
+                    );
+                    applied_msgs.push(format!("{pretty} (unknown mobType '{mob_type}')"));
+                    continue;
+                };
+                let caster_room = match world.get::<Located>(player).map(|l| l.0) {
+                    Some(r) => r,
+                    None => {
+                        applied_msgs.push(format!("{pretty} (caster has no room)"));
+                        continue;
+                    }
+                };
+                // ANIMATE_DEAD: if the caster named a corpse target,
+                // find and consume it. The corpse must be a Corpse
+                // Item in the caster's room whose Keywords contain
+                // the target word. Optional — bare `cast 'animate
+                // dead'` still spawns the default skeleton without
+                // a corpse, useful for testing.
+                // `consumed_corpse_level` records the dead actor's
+                // level when a corpse is consumed; the spawn block
+                // below reads it to scale the spawned skeleton's HP.
+                let mut consumed_corpse_level: Option<i32> = None;
+                if def.plain_name.eq_ignore_ascii_case("ANIMATE_DEAD")
+                    && let Some(word) = target_word.map(str::trim).filter(|w| !w.is_empty())
+                {
+                    let lc = word.to_ascii_lowercase();
+                    // Collect ALL matching corpses first so we can
+                    // distinguish "no corpse at all" from "only a
+                    // player corpse" — the second case warrants a
+                    // pointed refusal rather than the generic "no
+                    // corpse here" line.
+                    let matches: Vec<(Entity, bool)> = {
+                        let mut q = world.query_filtered::<(Entity, &Located, Option<&Keywords>, &Named, Option<&mud_world::PlayerCorpse>), With<mud_world::Corpse>>();
+                        q.iter(world)
+                            .filter(|(_, l, kw, n, _)| {
+                                l.0 == caster_room
+                                    && (kw.is_some_and(|k| {
+                                        k.0.iter().any(|s| s.to_ascii_lowercase().contains(&lc))
+                                    }) || n.name.to_ascii_lowercase().contains(&lc))
+                            })
+                            .map(|(e, _, _, _, pc)| (e, pc.is_some()))
+                            .collect()
+                    };
+                    // Player corpses are off-limits — raising another
+                    // adventurer as your undead servant is forbidden
+                    // regardless of necromancer class. If the only
+                    // match IS a player corpse, give an explicit
+                    // refusal so the caster knows it's not a parse
+                    // failure.
+                    let first_mob_corpse = matches.iter().find(|(_, is_player)| !is_player);
+                    let Some(&(corpse_e, _)) = first_mob_corpse else {
+                        if matches.iter().any(|(_, is_player)| *is_player) {
+                            send_to(
+                                world,
+                                player,
+                                "Necromancy on a fellow adventurer's remains? Some lines aren't crossed.\r\n",
+                            );
+                            applied_msgs.push(format!("{pretty} (refused: player corpse)"));
+                        } else {
+                            send_to(
+                                world,
+                                player,
+                                format!("There's no corpse of '{word}' here to animate.\r\n"),
+                            );
+                            applied_msgs.push(format!("{pretty} (no corpse '{word}')"));
+                        }
+                        continue;
+                    };
+                    let corpse_name = name_or(world, corpse_e, "the corpse");
+                    consumed_corpse_level = world
+                        .get::<mud_world::CorpseOriginLevel>(corpse_e)
+                        .map(|o| o.0);
+                    if let Ok(em) = world.get_entity_mut(corpse_e) {
+                        em.despawn();
+                    }
+                    send_to(
+                        world,
+                        player,
+                        format!("You weave necromantic energy into {corpse_name}, raising it as your servant.\r\n"),
+                    );
+                }
+                let proto = world
+                    .resource::<mud_world::MobPrototypes>()
+                    .by_key
+                    .get(&key)
+                    .cloned();
+                let Some(proto) = proto else {
+                    applied_msgs.push(format!("{pretty} (proto {key:?} not loaded)"));
+                    continue;
+                };
+                let base_hp = proto.rolled_hp();
+                // ANIMATE_DEAD: scale the spawned skeleton's HP by
+                // `max(1, corpse_level / 5)` so animating a high-
+                // tier corpse yields a beefier undead. Clamped at
+                // 5× to keep edge-case L100+ corpses from spawning
+                // game-breaking servants. Other summon types
+                // (mount/demon/etc.) use base HP unchanged.
+                let mut hp = if let Some(level) = consumed_corpse_level {
+                    let mult = ((level.max(1)) / 5).clamp(1, 5);
+                    (base_hp.saturating_mul(mult)).max(1)
+                } else {
+                    base_hp
+                };
+                // CLONE / SIMULACRUM actor-mirror: replace the
+                // placeholder Knight Errant identity with a real
+                // reflection of the caster (CLONE) or the named
+                // remote target (SIMULACRUM). Mirror HP from the
+                // mirrored actor (caster's max for CLONE, target's
+                // current for SIMULACRUM) and keep the proto's
+                // combat stats / natural damage so the spawn
+                // isn't an instant top-tier replacement of the
+                // mirrored actor's full damage profile but holds
+                // up as a meaningful ally.
+                let is_clone = def.plain_name.eq_ignore_ascii_case("CLONE");
+                let is_simulacrum = def.plain_name.eq_ignore_ascii_case("SIMULACRUM");
+                let mob_name;
+                let mob_keywords: Vec<String>;
+                let mob_description;
+                if is_clone {
+                    let caster_display = actor_name_pre.clone();
+                    let caster_max_hp = world
+                        .get::<Health>(player)
+                        .map(|h| h.max)
+                        .unwrap_or(base_hp);
+                    hp = caster_max_hp.max(1);
+                    mob_name = format!("a clone of {caster_display}");
+                    mob_keywords = vec![
+                        "clone".to_string(),
+                        caster_display.to_ascii_lowercase(),
+                    ];
+                    mob_description =
+                        format!("A flickering clone of {caster_display} stands here.");
+                } else if is_simulacrum {
+                    // SIMULACRUM (TAR_CHAR_WORLD): try to resolve
+                    // `target_word` against any online player. On a
+                    // unique match, mirror their display name; on
+                    // miss / ambiguity, fall back to mirroring the
+                    // caster so the cast still produces something
+                    // recognizable rather than the Knight Errant
+                    // placeholder. Mob target lookup is a follow-up
+                    // — for now SIMULACRUM is player-only on the
+                    // remote-mirror path.
+                    let mirrored_name = target_word
+                        .map(str::trim)
+                        .filter(|w| !w.is_empty())
+                        .and_then(|w| find_online_player_anywhere(world, w, player))
+                        .map(|e| name_of(world, e))
+                        .unwrap_or_else(|| actor_name_pre.clone());
+                    mob_name = format!("a simulacrum of {mirrored_name}");
+                    mob_keywords = vec![
+                        "simulacrum".to_string(),
+                        mirrored_name.to_ascii_lowercase(),
+                    ];
+                    mob_description =
+                        format!("A wavering simulacrum of {mirrored_name} stands here, eyes vacant.");
+                } else {
+                    mob_name = proto.name.clone();
+                    mob_keywords = proto.keywords.clone();
+                    mob_description = proto.room_description.clone();
+                }
+                let spawn_posture =
+                    Posture::from_default_position(proto.default_position);
+                let mob = world
+                    .spawn((
+                        Mob,
+                        Named { name: mob_name.clone() },
+                        Keywords(mob_keywords),
+                        Description(mob_description),
+                        WorldKey {
+                            zone: proto.zone_id,
+                            id: proto.id,
+                        },
+                        Located(caster_room),
+                        Health { hp, max: hp },
+                        proto.derived_combat_stats(),
+                        Posture(spawn_posture),
+                        mud_world::NaturalDamage {
+                            num: proto.damage_dice_num,
+                            size: proto.damage_dice_size,
+                            bonus: proto.damage_dice_bonus,
+                        },
+                        Follower(player),
+                    ))
+                    .id();
+                // Mob latent parity — same set the loader / cmd_summon
+                // path attaches. Without this, latent gates that look
+                // for these components silently disable.
+                if let Ok(mut em) = world.get_entity_mut(mob) {
+                    em.insert((
+                        mud_world::Sized(proto.size),
+                        mud_world::LifeForceTag(proto.life_force),
+                        mud_world::NaturalAttackType(proto.damage_type),
+                        mud_world::MobTraits(proto.traits.clone()),
+                        mud_world::MovementModeTag(proto.default_movement_mode),
+                    ));
+                }
+                let mut dur_secs = resolve_effect_duration(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    &formula_ctx,
+                );
+                if halve_duration {
+                    dur_secs = (dur_secs / 2).max(1);
+                }
+                if reagent_boost_pct > 0 {
+                    dur_secs = dur_secs.saturating_add(dur_secs * reagent_boost_pct / 100);
+                }
+                // Spawn a duration-tracked EffectInstance pointing at
+                // the new mob via AppliedTo(mob). The teardown in
+                // effects_tick despawns the mob when the instance
+                // expires.
+                world.spawn((
+                    EffectInstance {
+                        kind: spec.id,
+                        name: format!("summoned-{mob_type}"),
+                        strength: 1,
+                        remaining_secs: dur_secs,
+                        source: EffectSource::Spell,
+                        ability_id: Some(def.id),
+                    },
+                    AppliedTo(mob),
+                ));
+                spawn_count += 1;
+                // `mob_name` was decided earlier (CLONE overrides
+                // it to "a clone of <caster>"; everything else uses
+                // the proto's display name). The visible broadcasts
+                // and the diagnostic line share the same string so
+                // a clone reads "A clone of AdminChar materializes
+                // from a flash of arcane energy!" without leaking
+                // the placeholder Knight Errant name.
+                broadcast_room_visual(
+                    world,
+                    caster_room,
+                    player,
+                    &[player],
+                    &cap_sentence_start(&format!(
+                        "{mob_name} materializes from a flash of arcane energy!\r\n"
+                    )),
+                );
+                send_to(
+                    world,
+                    player,
+                    format!(
+                        "You summon {mob_name} to your side — it will follow you for {dur_secs}s.\r\n"
+                    ),
+                );
+                applied_msgs.push(format!("{pretty} (summoned {mob_name}, {dur_secs}s)"));
             }
             "knockdown" => {
                 // Knockdown has two parts: an immediate posture
@@ -12358,6 +14928,24 @@ pub(crate) fn invoke_ability_with(
                     AppliedTo(target_entity),
                 ));
                 spawn_count += 1;
+                // Read the effect's `flag` field — that's the schema
+                // field most status-type abilities use to declare
+                // which marker / mechanical hook the runtime should
+                // attach (e.g. `flag: "fly"`, `flag: "hidden"`). Some
+                // spells include override-only flags; others sit on
+                // the effect default. Override wins.
+                let flag = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|v| v.get("flag"))
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| {
+                        spec.default_params
+                            .get("flag")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
                 // Stealth-flag status effects (HIDE, SNEAK, CONCEAL,
                 // and a few buff spells) install the `Stealth` marker
                 // on the target so existing visibility gates fire. The
@@ -12366,8 +14954,205 @@ pub(crate) fn invoke_ability_with(
                 // Stunned tick pattern.
                 if pretty.eq_ignore_ascii_case("hidden")
                     || pretty.eq_ignore_ascii_case("sneak")
+                    || flag == "hidden"
+                    || flag == "sneak"
+                    || flag == "concealment"
                 {
                     try_insert(world, target_entity, mud_world::Stealth);
+                }
+                // Flying-flag status effects (FLY, WINGS_OF_HEAVEN,
+                // WINGS_OF_HELL) install the `Flying` marker so the
+                // movement-cost + drowning gates see the target as
+                // airborne. Removed by effects_tick when the last
+                // backing instance fades.
+                if flag == "fly" {
+                    try_insert(world, target_entity, mud_world::Flying);
+                }
+                // Bless-flag status effects (BLESS family) install
+                // the `Bless` marker so the combat hit_chance_pct
+                // reads it and adds +5 accuracy. Auto-removed by
+                // effects_tick when the last "bless" instance fades.
+                if flag == "bless" {
+                    try_insert(world, target_entity, mud_world::Bless);
+                }
+                // Sanctuary-flag status effects (SANCTUARY,
+                // SOULSHIELD) install the `Sanctuary` marker so
+                // apply_damage halves incoming damage. Auto-removed
+                // by effects_tick when the last "sanctuary"
+                // instance fades.
+                if flag == "sanctuary" {
+                    try_insert(world, target_entity, mud_world::Sanctuary);
+                }
+                // Detect-invisible-flag status effects (DETECT_INVIS,
+                // FARSEE family) install the `DetectInvis` marker so
+                // can_see_player lets the bearer perceive Invisible
+                // targets. Removed by effects_tick when the last
+                // backing instance fades.
+                if flag == "detect_invisible" {
+                    try_insert(world, target_entity, mud_world::DetectInvis);
+                }
+                // Haste-flag status effects (HASTE family) install the
+                // `Haste` marker so combat_tick runs the attacker for
+                // a second swing per round. Removed by effects_tick
+                // when the last backing "haste" instance fades.
+                if flag == "haste" {
+                    try_insert(world, target_entity, mud_world::Haste);
+                }
+                // Empowered-flag status effects (HARNESS) install
+                // the `Empowered` marker. The damage arm in
+                // `invoke_ability_with` checks this on the caster
+                // and bumps the rolled amount by +50%, then removes
+                // the marker (consumeOnCast). The backing
+                // EffectInstance also gets despawned at consumption
+                // so the `effects` list reads cleanly.
+                if flag == "empowered" {
+                    try_insert(world, target_entity, mud_world::Empowered);
+                }
+                // Resistance-flag status effects (PROT_FROM_FIRE/COLD/
+                // AIR/EARTH/SHOCK/ACID, STONE_SKIN, NEGATE_*). Reads
+                // `type` (element name) and `amount` (percent) from
+                // params; bumps the target's `Resistances` map and
+                // tags the EffectInstance with `SpellResistanceDelta`
+                // so the teardown can reverse the bump. Unknown
+                // element types (e.g. "evil" / "good" — alignment-
+                // keyed protections) are skipped here; engine §J2
+                // covers them.
+                if flag == "resistance" {
+                    let type_str = spec
+                        .override_params
+                        .as_ref()
+                        .and_then(|v| v.get("type"))
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| {
+                            spec.default_params
+                                .get("type")
+                                .and_then(serde_json::Value::as_str)
+                        })
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    let amount_int = spec
+                        .override_params
+                        .as_ref()
+                        .and_then(|v| v.get("amount"))
+                        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                        .or_else(|| {
+                            spec.default_params
+                                .get("amount")
+                                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                        })
+                        .unwrap_or(0);
+                    // J2 alignment-keyed protection (PROT_FROM_EVIL /
+                    // PROT_FROM_GOOD). The schema uses the same
+                    // "resistance" flag wrapper as element-resistance
+                    // spells, distinguished only by `type=evil|good`.
+                    // Install the marker on the target + tag the
+                    // freshly-spawned EffectInstance with an
+                    // `AlignmentProtectionTag` so the teardown path can
+                    // recompute the marker from any remaining
+                    // alignment-protect instances. Combat-side hook
+                    // applies a 20% damage reduction when alignments
+                    // are mutually opposed (≥500 / ≤-500), matching
+                    // legacy `fight.cpp:1639`.
+                    if type_str == "evil" || type_str == "good" {
+                        let against = if type_str == "evil" {
+                            mud_world::AlignmentProtectionTag::Evil
+                        } else {
+                            mud_world::AlignmentProtectionTag::Good
+                        };
+                        match against {
+                            mud_world::AlignmentProtectionTag::Evil => {
+                                try_insert(world, target_entity, mud_world::ProtectFromEvil);
+                            }
+                            mud_world::AlignmentProtectionTag::Good => {
+                                try_insert(world, target_entity, mud_world::ProtectFromGood);
+                            }
+                        }
+                        let last = {
+                            let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+                            q.iter(world)
+                                .filter(|(_, inst, applied)| {
+                                    applied.0 == target_entity
+                                        && inst.kind == spec.id
+                                        && inst.ability_id == Some(def.id)
+                                })
+                                .map(|(e, _, _)| e)
+                                .last()
+                        };
+                        if let Some(eff_e) = last
+                            && let Ok(mut em) = world.get_entity_mut(eff_e)
+                        {
+                            em.insert(against);
+                        }
+                        // Skip the element-map path below — alignment
+                        // protections don't ride on Resistances.
+                        applied_msgs.push(pretty.clone());
+                        continue;
+                    }
+                    let element = match type_str.as_str() {
+                        "physical" => Some(mud_db::enums::ElementType::Physical),
+                        "slash" => Some(mud_db::enums::ElementType::Slash),
+                        "pierce" => Some(mud_db::enums::ElementType::Pierce),
+                        "crush" => Some(mud_db::enums::ElementType::Crush),
+                        "force" => Some(mud_db::enums::ElementType::Force),
+                        "sonic" => Some(mud_db::enums::ElementType::Sonic),
+                        "bleed" => Some(mud_db::enums::ElementType::Bleed),
+                        "fire" => Some(mud_db::enums::ElementType::Fire),
+                        "cold" => Some(mud_db::enums::ElementType::Cold),
+                        "water" => Some(mud_db::enums::ElementType::Water),
+                        "earth" => Some(mud_db::enums::ElementType::Earth),
+                        "air" => Some(mud_db::enums::ElementType::Air),
+                        "shock" | "lightning" => Some(mud_db::enums::ElementType::Shock),
+                        "acid" => Some(mud_db::enums::ElementType::Acid),
+                        "poison" => Some(mud_db::enums::ElementType::Poison),
+                        "radiant" => Some(mud_db::enums::ElementType::Radiant),
+                        "shadow" => Some(mud_db::enums::ElementType::Shadow),
+                        "holy" => Some(mud_db::enums::ElementType::Holy),
+                        "unholy" => Some(mud_db::enums::ElementType::Unholy),
+                        "necrotic" => Some(mud_db::enums::ElementType::Necrotic),
+                        "mental" => Some(mud_db::enums::ElementType::Mental),
+                        "nature" => Some(mud_db::enums::ElementType::Nature),
+                        _ => None,
+                    };
+                    if let (Some(elem), amt) = (element, i32::try_from(amount_int).unwrap_or(0))
+                        && amt != 0
+                    {
+                        // Apply the bump to the target's Resistances
+                        // map (auto-create the component if needed).
+                        if let Some(mut r) = world.get_mut::<mud_world::Resistances>(target_entity) {
+                            let entry = r.0.entry(elem).or_insert(0);
+                            *entry = entry.saturating_add(amt);
+                        } else {
+                            let mut h = std::collections::HashMap::new();
+                            h.insert(elem, amt);
+                            world
+                                .entity_mut(target_entity)
+                                .insert(mud_world::Resistances(h));
+                        }
+                        // Tag the EffectInstance so teardown can
+                        // reverse exactly this delta. `spawn_count`
+                        // already advanced; we re-borrow by querying
+                        // for the freshly-spawned instance below via
+                        // its AppliedTo + matching name.
+                        let last = {
+                            let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+                            q.iter(world)
+                                .filter(|(_, inst, applied)| {
+                                    applied.0 == target_entity
+                                        && inst.kind == spec.id
+                                        && inst.ability_id == Some(def.id)
+                                })
+                                .map(|(e, _, _)| e)
+                                .last()
+                        };
+                        if let Some(eff_e) = last
+                            && let Ok(mut em) = world.get_entity_mut(eff_e)
+                        {
+                            em.insert(mud_world::SpellResistanceDelta {
+                                element: elem,
+                                percent: amt,
+                            });
+                        }
+                    }
                 }
                 // Charmed-flag status effects (TAME, CHARM-PERSON,
                 // SUMMON-FAMILIAR, etc.) install `Follower(caster)`
@@ -12396,48 +15181,71 @@ pub(crate) fn invoke_ability_with(
     let messages = messages_pre;
     let actor_name = actor_name_pre;
     let target_name_raw = target_name_pre;
+    // L4/L5: emit the deferred success header (non-damage spells)
+    // ONLY when at least one effect actually applied. Refusal arms
+    // (NoSummon, lifesteal-undead, etc.) push a "(refused)"-style
+    // applied_msg with no real effect. To distinguish, we check
+    // whether ANY entry in applied_msgs lacks the "(refused)" /
+    // "(no ...)"/"(unknown ...)" parenthetical signature. If
+    // every entry is a refusal, suppress the header.
+    let any_non_refusal = applied_msgs.iter().any(|m| {
+        // A genuine effect's applied_msg is typically the pretty
+        // name alone or with a positive parenthetical
+        // ("Bless (added)"); refusals are uniformly of the form
+        // "Pretty (refused / target NoSummon / undead / ...)".
+        let lower = m.to_ascii_lowercase();
+        !(lower.contains("(refused")
+            || lower.contains("not accepting")
+            || lower.contains("undead")
+            || lower.contains("no life")
+            || lower.contains("self target")
+            || lower.contains("self-drain")
+            || lower.contains("(no ")
+            || lower.contains("(unknown")
+            || lower.contains("(absorbed")
+            || lower.contains("(already there")
+            || lower.contains("(no direction")
+            || lower.contains("(target busy")
+            || lower.contains("(target nosummon")
+            || lower.contains("(different zone")
+            || lower.contains("(level cap")
+            || lower.contains("(mob nosummon")
+            || lower.contains("(room nosummon")
+            || lower.contains("(arena asymmetry")
+            || lower.contains("(target not dead"))
+    });
+    if let Some(h) = pending_header
+        && (any_non_refusal || applied_msgs.is_empty())
+    {
+        out.insert_str(0, &h);
+    }
     if applied_msgs.is_empty() {
+        // No effect arms wrote anything — either the ability has
+        // zero AbilityEffect rows (content gap) or every spec
+        // bailed (no_op / saves succeeded / etc.). Surface a
+        // trailing line so the caster sees that nothing happened,
+        // instead of just the bare "you cast X" header.
         out.push_str(&format!(
-            "(no effects defined for this {} — nothing to apply)\r\n",
+            "(But nothing happens — no {} effects to apply.)\r\n",
             kind.label()
         ));
-    } else {
-        // Caster line: templated success_to_self (when self-targeted)
-        // → success_to_caster → fall through to the dispatcher's
-        // terse "you {verb} X" form.
-        let caster_template = messages.as_ref().and_then(|m| {
-            if target_entity == player {
-                m.success_to_self.as_deref().or(m.success_to_caster.as_deref())
-            } else {
-                m.success_to_caster.as_deref()
-            }
-        });
-        if let Some(t) = caster_template {
-            let rendered = render_ability_template(
-                t,
-                &actor_name,
-                &target_name_raw,
-                target_entity == player,
-            );
-            out.push_str(&format!("{}\r\n", render_color_tags(&rendered, mode)));
-        } else if target_entity == player {
-            out.push_str(&format!("you {verb} {}\r\n", def.name));
-        } else {
-            out.push_str(&format!(
-                "you {verb} {} on {}\r\n",
-                def.name,
-                render_color_tags(&target_name_raw, mode),
-            ));
-        }
-        // Per-effect diagnostic line (damage / heal / status). Gate
-        // on show_dice_for so casual players see just the flavor
-        // success message; staff / dev-mode still get the math
-        // breakdown to mirror the per-swing dice tail.
-        if crate::combat::show_dice_for(world, player) {
-            out.push_str(&format!("  <dim>({})</>\r\n", applied_msgs.join(", ")));
-        }
+    } else if crate::combat::show_dice_for(world, player) {
+        // Diagnostic tail (damage / heal / status math). Gated on
+        // show_dice_for so casual players see just the flavor; staff
+        // / dev-mode still get the breakdown to mirror per-swing
+        // dice tails.
+        out.push_str(&format!("  <dim>({})</>\r\n", applied_msgs.join(", ")));
     }
-    send_to(world, player, out);
+    if !out.is_empty() {
+        send_to(world, player, out);
+    }
+    // Auto-look fires after the cast line so the new room renders
+    // last, in the natural reading order. Gated by the teleport arm
+    // (only set on actual successful moves) so non-teleport casts
+    // don't get a phantom re-look.
+    if auto_look_after_cast {
+        crate::commands::cmd_look(world, target_entity, "");
+    }
     // Target-side: templated success_to_victim → terse default.
     if target_entity != player && !applied_msgs.is_empty() {
         let target_template = messages.as_ref().and_then(|m| m.success_to_victim.as_deref());
@@ -12447,7 +15255,8 @@ pub(crate) fn invoke_ability_with(
             render_ability_template(t, &actor_name, &target_name_raw, false)
         } else {
             format!(
-                "{actor_name} {verb}s {} on you. ({} effect(s))",
+                "{} {verb}s {} on you. ({} effect(s))",
+                cap_sentence_start(&actor_name),
                 def.name,
                 applied_msgs.len()
             )
@@ -12551,6 +15360,12 @@ pub(crate) enum SaveOutcome {
     /// effects still apply but spawn with half their normal
     /// duration.
     HalfDuration,
+    /// Target made the save and the action is `HALF_DAMAGE` —
+    /// damage effects deal half their post-mitigation amount.
+    /// Non-damage effects in the same cast apply normally.
+    /// Mirrors legacy `magic.cpp`'s `dam >>= 1` after the saving
+    /// throw.
+    HalfDamage,
 }
 
 /// Roll a saving throw against an ability's `AbilitySavingThrow`
@@ -12593,6 +15408,7 @@ pub(crate) fn save_action_for(
     match action.as_str() {
         "NEGATE" => SaveOutcome::Negated,
         "HALF_DURATION" => SaveOutcome::HalfDuration,
+        "HALF_DAMAGE" => SaveOutcome::HalfDamage,
         // Unknown / unsupported action: effects apply at full
         // strength as if the save failed. The runtime grows
         // interpretation incrementally.
@@ -12993,6 +15809,28 @@ pub(crate) fn resolve_teleport_destination(
             .map(str::to_ascii_lowercase)
     };
     pick(override_params).or_else(|| pick(default_params))
+}
+
+/// Read `destination_zone` + `destination_id` from a teleport effect's
+/// params (used by `destination: "room"` / `"fixed"`). Both fall
+/// back to defaults when missing on the override side. Builders set
+/// these on per-color recall abilities so each scroll variant lands
+/// at its bound temple.
+pub(crate) fn resolve_fixed_room(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> (Option<i32>, Option<i32>) {
+    let pick_int = |p: Option<&serde_json::Value>, k: &str| -> Option<i32> {
+        let v = p?.get(k)?;
+        v.as_i64()
+            .and_then(|n| i32::try_from(n).ok())
+            .or_else(|| v.as_str().and_then(|s| s.parse::<i32>().ok()))
+    };
+    let zone = pick_int(override_params, "destination_zone")
+        .or_else(|| pick_int(default_params, "destination_zone"));
+    let id = pick_int(override_params, "destination_id")
+        .or_else(|| pick_int(default_params, "destination_id"));
+    (zone, id)
 }
 
 /// Read `scope` ("first" or "all") from a dispel effect's params.
@@ -13625,6 +16463,27 @@ pub(crate) fn amount_from_blob(params: Option<&serde_json::Value>, ctx: &Formula
     numeric_or_formula(v, ctx)
 }
 
+/// Render the raw `amount` field from a params blob as a human
+/// string for the show-dice diagnostic tail — preserves the
+/// formula text ("`4d12 + pow(skill,1.10)`") even after the
+/// numeric evaluation collapses it to a single int. Falls back
+/// through override → default; returns None when neither carries
+/// an amount.
+pub(crate) fn amount_formula_text(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> Option<String> {
+    let pick = |p: Option<&serde_json::Value>| -> Option<String> {
+        let v = p?.get("amount")?;
+        match v {
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::String(s) => Some(s.clone()),
+            _ => None,
+        }
+    };
+    pick(override_params).or_else(|| pick(default_params))
+}
+
 /// Pull a `bonusIfHidden` field — schema convention for "extra damage
 /// when the caster has the Stealth marker". Same numeric/formula
 /// shape as `amount`. Returns None when the field is absent.
@@ -13801,6 +16660,21 @@ pub(crate) struct FormulaCtx {
     /// exponent formulas: `pow(skill, 1.2 + 0.3*min_level/100 + ...)`.
     /// 0 when the catalog has no class-circle row for the ability.
     min_level: i32,
+    /// 1 when the target carries `LifeForceTag(Undead)`, 0 otherwise.
+    /// Used by "smite undead" / "destroy undead" multipliers
+    /// (`1000 + victim_is_undead * 1000` doubles damage vs undead).
+    /// Populated per-target at apply time alongside `victim_align`;
+    /// defaults to 0 elsewhere.
+    victim_is_undead: i32,
+    /// 1 when the target carries `LifeForceTag(Demonic)`. Used by
+    /// holy / banish / demon-bane spells (HOLY_WORD, BANISH).
+    victim_is_demonic: i32,
+    /// 1 when the target carries `LifeForceTag(Celestial)`. Used
+    /// by unholy / smite-good spells (UNHOLY_WORD).
+    victim_is_celestial: i32,
+    /// 1 when the target carries `LifeForceTag(Elemental)`. Used
+    /// by abjuration / dispel-elemental spells.
+    victim_is_elemental: i32,
 }
 
 impl FormulaCtx {
@@ -13837,6 +16711,18 @@ impl FormulaCtx {
             "caster_int_raw" | "caster_int" => Some(self.caster_int_raw),
             "caster_wis_raw" | "caster_wis" => Some(self.caster_wis_raw),
             "min_level" => Some(self.min_level),
+            "victim_is_undead" | "victim_undead" | "target_is_undead" => {
+                Some(self.victim_is_undead)
+            }
+            "victim_is_demonic" | "victim_demonic" | "target_is_demonic" => {
+                Some(self.victim_is_demonic)
+            }
+            "victim_is_celestial" | "victim_celestial" | "target_is_celestial" => {
+                Some(self.victim_is_celestial)
+            }
+            "victim_is_elemental" | "victim_elemental" | "target_is_elemental" => {
+                Some(self.victim_is_elemental)
+            }
             _ => None,
         }
     }
@@ -13875,6 +16761,24 @@ pub(crate) fn roll_dice(num: i32, sides: i32) -> i32 {
 
 /// Same grammar as `evaluate_simple_formula`, but the dice-roll
 /// callback is injectable so tests can pass a deterministic stub.
+/// Multiply an integer by a floating-point coefficient and round
+/// back to i32. Returns None when the product would overflow or
+/// when the float resolves to NaN / inf — caller falls through.
+/// Used by `parse_term` for the I2 "float multiplier outside pow"
+/// path. Kept as a standalone helper so the overflow + finite
+/// checks live in one place.
+fn scale_by_float(lhs: i32, f: f64) -> Option<i32> {
+    let scaled = (f64::from(lhs) * f).round();
+    if !scaled.is_finite()
+        || scaled > f64::from(i32::MAX)
+        || scaled < f64::from(i32::MIN)
+    {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Some(scaled as i32)
+}
+
 pub(crate) fn evaluate_formula(
     expr: &str,
     ctx: &FormulaCtx,
@@ -14038,16 +16942,47 @@ impl FormulaParser<'_> {
             match self.peek() {
                 Some(FormulaToken::Star) => {
                     self.advance();
-                    let rhs = self.parse_factor(ctx, rng_call)?;
-                    lhs = lhs.saturating_mul(rhs);
+                    // I2: a Float literal on the RHS of `*` scales
+                    // the integer LHS and rounds back to i32. Lets
+                    // legacy multipliers like `dmg * 0.0007 * level`
+                    // survive translation without forcing the
+                    // author to refactor into `... * 7 / 10000`.
+                    // The rest of the grammar stays integer.
+                    if let Some(FormulaToken::Float(f)) = self.peek() {
+                        let f = *f;
+                        self.advance();
+                        lhs = scale_by_float(lhs, f)?;
+                    } else {
+                        let rhs = self.parse_factor(ctx, rng_call)?;
+                        lhs = lhs.saturating_mul(rhs);
+                    }
                 }
                 Some(FormulaToken::Slash) => {
                     self.advance();
-                    let rhs = self.parse_factor(ctx, rng_call)?;
-                    if rhs == 0 {
-                        return None;
+                    if let Some(FormulaToken::Float(f)) = self.peek() {
+                        let f = *f;
+                        self.advance();
+                        if f == 0.0 {
+                            return None;
+                        }
+                        let scaled = (f64::from(lhs) / f).round();
+                        if !scaled.is_finite()
+                            || scaled > f64::from(i32::MAX)
+                            || scaled < f64::from(i32::MIN)
+                        {
+                            return None;
+                        }
+                        #[allow(clippy::cast_possible_truncation)]
+                        {
+                            lhs = scaled as i32;
+                        }
+                    } else {
+                        let rhs = self.parse_factor(ctx, rng_call)?;
+                        if rhs == 0 {
+                            return None;
+                        }
+                        lhs /= rhs;
                     }
-                    lhs /= rhs;
                 }
                 _ => break,
             }
@@ -14382,6 +17317,108 @@ pub(crate) fn name_or(world: &World, e: Entity, fallback: &str) -> String {
 /// (combat re-aggro skip, casting bypasses); collected in one
 /// helper so adding a new bypass is a single call rather than
 /// re-deriving the role check.
+/// Set of effect_type strings the dispatcher has explicit arms for.
+/// Anything outside this list ends up in the `_` catchall, which
+/// only handles flag-driven status effects — other types
+/// (transform / drag / enchant / etc.) silently no-op even though
+/// the cast fires. K4 audit: surface them at boot so the content gap
+/// is visible. Kept in lockstep with the `match` arms in
+/// `invoke_ability_with`'s effect loop; bump this when adding a new
+/// arm there.
+pub(crate) const KNOWN_EFFECT_TYPE_ARMS: &[&str] = &[
+    "damage",
+    "heal",
+    "cleanse",
+    "stun",
+    "dispel",
+    "redirect",
+    "stop_combat",
+    "create",
+    "portal",
+    "modify",
+    "intercept",
+    "extract",
+    "dismount",
+    "teleport",
+    "room",
+    "reveal",
+    "inspect",
+    "resurrect",
+    "knockdown",
+    "globe",
+    "summon",
+    // `status` lands in the catchall but is *intentionally* handled
+    // there by the flag-dispatch table (Bless / Sanctuary / Stealth
+    // / etc.) — counts as covered.
+    "status",
+];
+
+/// Walk the loaded ability catalog and warn-log every SPELL with a
+/// known content gap: either zero AbilityEffect rows (cast emits the
+/// success line but applies nothing) or at least one effect whose
+/// effect_type isn't in `KNOWN_EFFECT_TYPE_ARMS`. Runs once at boot,
+/// after all catalogs are populated. The output is grouped so the
+/// content owner can scan the list at a glance.
+pub fn audit_dead_spells(world: &World) {
+    let catalog = world.resource::<AbilityCatalog>();
+    let effects = world.resource::<mud_world::EffectCatalog>();
+    let known: std::collections::HashSet<&str> =
+        KNOWN_EFFECT_TYPE_ARMS.iter().copied().collect();
+    let mut no_effects: Vec<String> = Vec::new();
+    let mut dead_arms: Vec<(String, Vec<String>)> = Vec::new();
+    let mut sorted_defs: Vec<&mud_world::AbilityDef> = catalog
+        .by_name
+        .values()
+        .filter(|d| matches!(d.kind, mud_db::abilities::AbilityKind::Spell))
+        .collect();
+    sorted_defs.sort_by(|a, b| a.plain_name.cmp(&b.plain_name));
+    for def in sorted_defs {
+        let mappings = catalog.effects_for.get(&def.id);
+        let Some(mappings) = mappings else {
+            no_effects.push(def.plain_name.clone());
+            continue;
+        };
+        if mappings.is_empty() {
+            no_effects.push(def.plain_name.clone());
+            continue;
+        }
+        let unknown: Vec<String> = mappings
+            .iter()
+            .filter_map(|(eid, _)| effects.by_id.get(eid))
+            .map(|e| e.effect_type.clone())
+            .filter(|t| !known.contains(t.as_str()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if !unknown.is_empty() {
+            dead_arms.push((def.plain_name.clone(), unknown));
+        }
+    }
+    if !no_effects.is_empty() {
+        tracing::warn!(
+            count = no_effects.len(),
+            "dead-spell audit: {} SPELL(s) have NO AbilityEffect rows — cast will succeed but apply nothing: {}",
+            no_effects.len(),
+            no_effects.join(", ")
+        );
+    }
+    if !dead_arms.is_empty() {
+        let summary: Vec<String> = dead_arms
+            .iter()
+            .map(|(name, types)| format!("{} → [{}]", name, types.join(", ")))
+            .collect();
+        tracing::warn!(
+            count = dead_arms.len(),
+            "dead-spell audit: {} SPELL(s) reference effect_types with no dispatcher arm: {}",
+            dead_arms.len(),
+            summary.join("; ")
+        );
+    }
+    if no_effects.is_empty() && dead_arms.is_empty() {
+        tracing::info!("dead-spell audit: clean — every SPELL has authored effects and a dispatcher arm");
+    }
+}
+
 #[must_use]
 pub(crate) fn is_staff(world: &World, entity: Entity) -> bool {
     // DevMode short-circuit: open-playtest servers treat every player
@@ -14577,6 +17614,41 @@ pub(crate) fn broadcast_room_visible(
     }
 }
 
+/// Like [`broadcast_room_visible`] but skips observers who can't
+/// see in the current light. Use for purely *visual* events —
+/// movement, gestures, things you'd need eyes to perceive — so a
+/// player standing in pitch-black with no light or dark-vision
+/// doesn't get "A drow priestess leaves south." leaked at them.
+/// Voice events (say, shout, tell) keep using
+/// [`broadcast_room_visible`] — sound carries through darkness.
+pub(crate) fn broadcast_room_visual(
+    world: &mut World,
+    room: Entity,
+    sender: Entity,
+    except: &[Entity],
+    raw_msg: &str,
+) {
+    // Light precondition for the source room is the same for every
+    // observer in it — compute it once.
+    let visible_here = !room_is_dark(world, room) || room_has_light(world, room);
+    let targets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(e, l)| {
+                l.0 == room
+                    && !except.contains(e)
+                    && can_see_player(world, *e, sender)
+            })
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        if visible_here || player_can_see_in_dark(world, t) {
+            send_to(world, t, raw_msg);
+        }
+    }
+}
+
 /// Combat-action stamina costs (one stop in scope so a balance pass can
 /// retune them in one place).
 pub(crate) const ATTACK_COST: i32 = 2;
@@ -14677,6 +17749,39 @@ pub(crate) fn send_char_vitals(world: &World, target: Entity) {
     let _ = conn.try_send(mud_net::gmcp_packet("Char.Vitals", &payload));
 }
 
+/// Mitigation multiplier for the alignment-protect family
+/// (PROT_FROM_EVIL / PROT_FROM_GOOD). Returns 0.8 when the attacker
+/// matches the protected-against alignment AND the victim itself
+/// is strongly aligned in the opposed direction — mirrors legacy
+/// `fight.cpp:1639`. Both conditions are required so a neutral
+/// victim wearing protect-from-evil doesn't get a free discount.
+/// Returns 1.0 for anything else; caller multiplies the raw damage
+/// before dispatch.
+#[must_use]
+pub(crate) fn alignment_protection_factor(
+    world: &World,
+    attacker: Entity,
+    victim: Entity,
+) -> f32 {
+    let attacker_align = world
+        .get::<CombatStats>(attacker)
+        .map_or(0, |c| c.alignment);
+    let victim_align = world.get::<CombatStats>(victim).map_or(0, |c| c.alignment);
+    if world.get::<mud_world::ProtectFromEvil>(victim).is_some()
+        && attacker_align <= -500
+        && victim_align >= 500
+    {
+        return 0.8;
+    }
+    if world.get::<mud_world::ProtectFromGood>(victim).is_some()
+        && attacker_align >= 500
+        && victim_align <= -500
+    {
+        return 0.8;
+    }
+    1.0
+}
+
 pub(crate) fn apply_damage(
     world: &mut World,
     target: Entity,
@@ -14693,6 +17798,18 @@ pub(crate) fn apply_damage(
     let Some((old, max)) = world.get::<Health>(target).map(|h| (h.hp, h.max)) else {
         return (false, None);
     };
+    // Sanctuary halves incoming positive damage. Mirrors the legacy
+    // EFF_SANCTUARY contract — purely defensive, never amplifies
+    // negative numbers (healing routed through apply_damage with
+    // negative amount would otherwise weirdly become half a heal).
+    // Round down so a 1-damage tick still has a chance of doing
+    // nothing through Sanctuary, matching the "barely scratches"
+    // feel of the legacy mechanic.
+    let amount = if amount > 0 && world.get::<mud_world::Sanctuary>(target).is_some() {
+        amount / 2
+    } else {
+        amount
+    };
     let new_value = old - amount;
     if let Some(mut h) = world.get_mut::<Health>(target) {
         h.hp = new_value;
@@ -14703,6 +17820,12 @@ pub(crate) fn apply_damage(
     // immediately follows in the same buffer flush. Without this
     // the gauge always read one round behind the visible text.
     send_char_vitals(world, target);
+    // K1: damage taken during a cast can break concentration. The
+    // helper short-circuits when the target isn't currently casting,
+    // so this is cheap on every other apply_damage call.
+    if amount > 0 {
+        crate::casting::check_concentration_on_damage(world, target, amount);
+    }
     if new_value <= 0 {
         return (true, None);
     }
@@ -15060,10 +18183,135 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "You can't move right now.\r\n");
         return;
     }
+    // Combat lock: walking out of a fight is cheating. Players must
+    // disengage explicitly — `flee` for the panic exit, or one of
+    // the per-class movement skills (retreat / disengage /
+    // springleap) for a controlled break. Without this gate a
+    // melee'd player can just step away with full HP intact.
+    if world.get::<mud_world::Fighting>(player).is_some() {
+        send_to(
+            world,
+            player,
+            "No way!  You're fighting for your life!\r\n",
+        );
+        return;
+    }
+    // Casting lock: walking breaks concentration. The cast is
+    // interrupted with a flavor line; movement still happens this
+    // tick.
+    if world.get::<mud_world::Casting>(player).is_some() {
+        crate::casting::interrupt_cast(world, player, "you start walking");
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
     let from_room = located.0;
+    // Wall traversal gate. WALL_OF_STONE / WALL_OF_ICE install a
+    // hard block; WALL_OF_FOG passes through with extra stamina
+    // cost; ILLUSORY_WALL passes silently AND consumes itself on
+    // first traversal (mirrors legacy: stepping through dispels the
+    // illusion for everyone). Barriers are opaque to staff too —
+    // admins can `cancel` / `purge` the effect to clear them.
+    if let Some(block) = world
+        .get::<mud_world::RoomBlockedExits>(from_room)
+        .and_then(|b| b.by_direction.get(&dir).cloned())
+    {
+        match block.traversal {
+            mud_world::WallTraversal::Block => {
+                send_to(
+                    world,
+                    player,
+                    format!("A {} blocks your path.\r\n", block.kind_label),
+                );
+                return;
+            }
+            mud_world::WallTraversal::Slow => {
+                // Fog: pay an extra stamina toll and shove through.
+                // Refuse if the player can't afford the toll — the
+                // fog literally drains them faster than they can
+                // push. The base cmd_move stamina cost still drains
+                // on the actual move below; this is the additional
+                // fog drag.
+                const FOG_DRAG: i32 = 5;
+                let stamina = world
+                    .get::<Stamina>(player)
+                    .map(|s| s.current)
+                    .unwrap_or(0);
+                if stamina < FOG_DRAG {
+                    send_to(
+                        world,
+                        player,
+                        format!(
+                            "The {} drains you faster than you can push through. You're too exhausted.\r\n",
+                            block.kind_label
+                        ),
+                    );
+                    return;
+                }
+                if let Some(mut s) = world.get_mut::<Stamina>(player) {
+                    s.current = (s.current - FOG_DRAG).max(0);
+                }
+                send_to(
+                    world,
+                    player,
+                    format!("You push through the {}, gasping in its choking mist.\r\n", block.kind_label),
+                );
+                // Fall through to normal movement.
+            }
+            mud_world::WallTraversal::Passable => {
+                // Illusory: silent pass, dispel the wall in place.
+                // Despawn the backing instance and remove the entry
+                // so subsequent traversals (and the look line) read
+                // clean immediately.
+                if let Ok(em) = world.get_entity_mut(block.backed_by) {
+                    em.despawn();
+                }
+                if let Some(mut b) = world.get_mut::<mud_world::RoomBlockedExits>(from_room) {
+                    b.by_direction.remove(&dir);
+                }
+                send_to(
+                    world,
+                    player,
+                    format!("You step through the {} — it ripples and dissolves into nothing.\r\n", block.kind_label),
+                );
+                let player_name = name_of(world, player);
+                broadcast_room_visual(
+                    world,
+                    from_room,
+                    player,
+                    &[player],
+                    &format!("The {} ripples and dissolves as {player_name} steps through.\r\n", block.kind_label),
+                );
+                // Fall through to normal movement.
+            }
+        }
+    }
+    // Burning-room hazard (CIRCLE_OF_FIRE): every move through the
+    // affected room deals `damage_per_move` HP to the mover, before
+    // the actual room change. Fires regardless of direction —
+    // entering OR leaving touches the flames. Skipped for staff so
+    // builders walking through a hazard zone don't get pelted.
+    if !is_staff(world, player)
+        && let Some(burn) = world.get::<mud_world::RoomBurningEffect>(from_room).copied()
+    {
+        send_to(
+            world,
+            player,
+            format!("Flames lash you as you push through! ({} dmg)\r\n", burn.damage_per_move),
+        );
+        let (dead, _) = apply_damage(world, player, burn.damage_per_move);
+        if dead {
+            // Death broadcast handled by handle_death; bail before
+            // attempting the actual move.
+            crate::combat::handle_death(
+                world,
+                player,
+                &name_of(world, player),
+                from_room,
+            );
+            return;
+        }
+    }
 
     let exit = world
         .get::<Exits>(from_room)
@@ -15193,7 +18441,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     for &mover in &movers {
         let mover_name = name_of(world, mover);
         let verb = race_movement_verb(world, mover, false);
-        broadcast_room_visible(
+        broadcast_room_visual(
             world,
             from_room,
             mover,
@@ -15271,7 +18519,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // arrival also stays hidden.
     for &mover in &movers {
         let mover_name = name_of(world, mover);
-        broadcast_room_visible(
+        broadcast_room_visual(
             world,
             target,
             mover,
@@ -15460,31 +18708,93 @@ pub(crate) fn engage_combat(
     let defender_name = name_of(world, defender);
     try_insert(world, attacker, Fighting(defender));
     try_insert(world, defender, Fighting(attacker));
+    let attacker_cap = cap_sentence_start(&attacker_name);
     send_to(
         world,
         defender,
-        format!("{attacker_name} sees you and attacks!\r\n"),
+        format!("{attacker_cap} sees you and attacks!\r\n"),
     );
     broadcast_room_except_rendered(
         world,
         room,
         &[defender],
-        &format!("{attacker_name} sees {defender_name} and attacks!\r\n"),
+        &format!("{attacker_cap} sees {defender_name} and attacks!\r\n"),
     );
 }
 
 pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room: Entity) {
     let threshold = aggro_alignment(world);
-    let aggro: Option<Entity> = {
+    // Snapshot of the player's view that the per-mob aggression
+    // formula reads against. Race default-alignment falls back to
+    // Neutral when the player's race isn't in the catalog (mostly
+    // pre-import test characters).
+    let player_align = world.get::<CombatStats>(player).map_or(0, |c| c.alignment);
+    let race_label = world.get::<Profile>(player).map(|p| p.race.clone());
+    let race_align_score = race_label
+        .as_deref()
+        .and_then(|r| {
+            world
+                .get_resource::<mud_world::RaceCatalog>()
+                .and_then(|c| c.get(r))
+                .map(|def| def.default_alignment)
+        })
+        .unwrap_or(0);
+    let race_alignment_bucket = mud_db::enums::Alignment::from_score(race_align_score);
+    let eval_ctx = crate::aggression::EvalCtx {
+        alignment: player_align,
+        race_alignment: race_alignment_bucket,
+    };
+    // Two-pass aggro check: first the cheap mob-alignment threshold
+    // (legacy behavior — evil mobs auto-attack), then the per-mob
+    // aggression_formula (engine §B3). Either match engages.
+    let candidates: Vec<(Entity, i32, Option<(i32, i32)>)> = {
         let mut q = world.query_filtered::<
-            (Entity, &Located, &CombatStats),
+            (Entity, &Located, &CombatStats, Option<&WorldKey>),
             (With<Mob>, Without<Fighting>),
         >();
         q.iter(world)
-            .find(|(_, l, cs)| l.0 == room && cs.alignment <= threshold)
-            .map(|(e, _, _)| e)
+            .filter(|(_, l, _, _)| l.0 == room)
+            .map(|(e, _, cs, wk)| (e, cs.alignment, wk.map(|k| (k.zone, k.id))))
+            .collect()
     };
-    let Some(mob) = aggro else { return };
+    if candidates.is_empty() {
+        return;
+    }
+    // Step 1: alignment-threshold (legacy).
+    let mut chosen: Option<Entity> = candidates
+        .iter()
+        .find(|(_, align, _)| *align <= threshold)
+        .map(|(e, _, _)| *e);
+    // Step 2: aggression_formula. Resolve via the proto store —
+    // only mobs with a `WorldKey` link and a non-None
+    // aggression_formula on the proto are considered. We deliberately
+    // do this even when the threshold path already found a target so
+    // a *closer* hate-match wins over a generic-evil mob.
+    if chosen.is_none() {
+        let formulas: Vec<(Entity, String)> = candidates
+            .iter()
+            .filter_map(|(e, _, wk)| {
+                let key = wk.as_ref()?;
+                let proto = world
+                    .resource::<mud_world::MobPrototypes>()
+                    .by_key
+                    .get(key)?;
+                let formula = proto.aggression_formula.as_ref()?.clone();
+                Some((*e, formula))
+            })
+            .collect();
+        if !formulas.is_empty() {
+            let cache = world.resource_mut::<crate::aggression::AggressionFormulaCache>();
+            let cache = cache.into_inner();
+            for (mob_e, formula) in formulas {
+                if cache.eval(&formula, eval_ctx) {
+                    chosen = Some(mob_e);
+                    break;
+                }
+            }
+        }
+    }
+    let Some(mob) = chosen else { return };
     engage_combat(world, mob, player, room);
 }
 

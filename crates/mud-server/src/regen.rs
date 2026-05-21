@@ -54,16 +54,23 @@ pub fn regen_tick(world: &mut World) {
     // mechanically (`release` becomes pointless) and thematically.
     let updates: Vec<(Entity, Option<i32>, Option<i32>)> = {
         let mut q = world.query_filtered::<
-            (Entity, Option<&Stamina>, Option<&Health>, &Posture),
+            (Entity, Option<&Stamina>, Option<&Health>, &Posture, Option<&mud_world::RegenBonus>),
             (With<Online>, Without<Fighting>, Without<Ghost>),
         >();
         q.iter(world)
-            .map(|(e, stamina, hp, posture)| {
+            .map(|(e, stamina, hp, posture, bonus)| {
+                // Rest / repose R6: flat RegenBonus (from the
+                // Refreshed Effect or gear-granted regen) layers on
+                // top of the posture-derived base rate. Negative
+                // bonus is allowed (cursed gear); the per-tick gain
+                // saturates at 0 so cursed regen doesn't drain HP.
+                let bonus_hp = bonus.map_or(0, |b| b.hp);
+                let bonus_st = bonus.map_or(0, |b| b.stamina);
                 let new_stamina = stamina.and_then(|s| {
                     if s.current >= s.max {
                         None
                     } else {
-                        let regen = stamina_per_tick(posture.0);
+                        let regen = stamina_per_tick(posture.0).saturating_add(bonus_st).max(0);
                         if regen == 0 {
                             None
                         } else {
@@ -75,7 +82,7 @@ pub fn regen_tick(world: &mut World) {
                     if h.hp >= h.max {
                         None
                     } else {
-                        let regen = health_per_tick(posture.0);
+                        let regen = health_per_tick(posture.0).saturating_add(bonus_hp).max(0);
                         if regen == 0 {
                             None
                         } else {

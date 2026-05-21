@@ -99,6 +99,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .insert(z.id, default_weather_for_climate(z.climate));
     }
     world.insert_resource(weather);
+    world.insert_resource(crate::resources::WeatherDriftLocks::default());
     stats.zones = zone_index.len();
 
     // Pass 2: rooms.
@@ -195,6 +196,48 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 z: r.layout_z.unwrap_or(0),
             });
         }
+        // Rest / repose: parse the inn config when this room is
+        // flagged `is_inn`. Tier rows that fail to parse are skipped
+        // with a warn so a single bad authored row doesn't break the
+        // whole inn. Empty tier list after filtering = no rentable
+        // rooms; we still attach the marker so `rent` can render the
+        // inn name in an "out of rooms" message.
+        if r.is_inn {
+            let tiers = r
+                .inn_tiers
+                .as_ref()
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|entry| {
+                            let name = entry.get("name").and_then(|v| v.as_str())?;
+                            let tier = entry.get("tier").and_then(serde_json::Value::as_i64)?;
+                            let fee = entry.get("fee").and_then(serde_json::Value::as_i64)?;
+                            let tier_i32 = i32::try_from(tier).ok()?;
+                            let fee_i32 = i32::try_from(fee).ok()?;
+                            if !(1..=3).contains(&tier_i32) {
+                                warn!(
+                                    zone = r.zone_id,
+                                    id = r.id,
+                                    tier_value = tier_i32,
+                                    "InnRoom tier out of 1..=3 range; skipping entry",
+                                );
+                                return None;
+                            }
+                            Some(crate::InnTier {
+                                name: name.to_string(),
+                                tier: tier_i32,
+                                fee_gp: fee_i32,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            world.entity_mut(entity).insert(crate::InnRoom {
+                inn_name: r.inn_name.clone().unwrap_or_else(|| "the inn".to_string()),
+                tiers,
+            });
+        }
         room_index.insert((r.zone_id, r.id), entity);
     }
     stats.rooms = room_index.len();
@@ -223,6 +266,15 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         };
         let is_hidden = e.flags.contains(&mud_db::enums::ExitFlag::Hidden);
         let is_pickproof = e.flags.contains(&mud_db::enums::ExitFlag::Pickproof);
+        let is_bashable = e.flags.contains(&mud_db::enums::ExitFlag::Bashable);
+        // Bashable exits use the seeded HP if present, otherwise
+        // the engine default (50). Non-bashable exits leave the
+        // field None so doorbash refuses outright.
+        let hit_points = if is_bashable {
+            Some(e.hit_points.unwrap_or(50))
+        } else {
+            None
+        };
         if let Some(mut exits) = world.get_mut::<Exits>(source) {
             exits.0.insert(
                 e.direction,
@@ -234,6 +286,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                     keywords: e.keywords,
                     is_hidden,
                     is_pickproof,
+                    is_bashable,
+                    hit_points,
                 },
             );
         }
@@ -438,6 +492,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 allowed_races: row.allowed_races,
                 min_size: row.min_size,
                 max_size: row.max_size,
+                camp_kit_tier: row.camp_kit_tier,
             },
         );
     }

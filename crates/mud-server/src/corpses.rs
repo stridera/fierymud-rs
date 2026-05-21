@@ -38,6 +38,22 @@ struct CorpseSnapshot {
     /// was inside the corpse. `EquippedSlot` is dropped on death
     /// already, so only the proto identity matters here.
     contents: Vec<ContentSnapshot>,
+    /// True for player corpses (the ones carrying a `PlayerCorpse`
+    /// marker). Saved/restored so the consent gates on looting and
+    /// ANIMATE_DEAD survive a restart. Defaults to false for
+    /// backward-compat with pre-marker snapshots.
+    #[serde(default)]
+    is_player: bool,
+    /// Dead actor's level at spawn time — read by ANIMATE_DEAD's
+    /// HP-scaling pass. Defaults to 1 on legacy snapshots (matches
+    /// the lowest spawn tier, so old corpses still raise a basic
+    /// skeleton without crashing).
+    #[serde(default = "default_origin_level")]
+    origin_level: i32,
+}
+
+fn default_origin_level() -> i32 {
+    1
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -57,14 +73,24 @@ pub fn save_snapshot(world: &mut World) {
     let mut snapshots: Vec<CorpseSnapshot> = Vec::new();
     // Snapshot corpses first, holding their entity IDs so we can
     // do the contents lookup outside the borrow.
-    let corpses: Vec<(Entity, String, Vec<String>, Entity, i32)> = {
+    let corpses: Vec<(Entity, String, Vec<String>, Entity, i32, bool, i32)> = {
         let mut q = world
-            .query_filtered::<(Entity, &Named, &Keywords, &Located, &CorpseDecay), With<Corpse>>();
+            .query_filtered::<(Entity, &Named, &Keywords, &Located, &CorpseDecay, Option<&mud_world::PlayerCorpse>, Option<&mud_world::CorpseOriginLevel>), With<Corpse>>();
         q.iter(world)
-            .map(|(e, n, k, l, d)| (e, n.name.clone(), k.0.clone(), l.0, d.remaining_secs))
+            .map(|(e, n, k, l, d, pc, ol)| {
+                (
+                    e,
+                    n.name.clone(),
+                    k.0.clone(),
+                    l.0,
+                    d.remaining_secs,
+                    pc.is_some(),
+                    ol.map_or(1, |o| o.0),
+                )
+            })
             .collect()
     };
-    for (corpse, name, keywords, room, decay_secs) in corpses {
+    for (corpse, name, keywords, room, decay_secs, is_player, origin_level) in corpses {
         let Some(room_key) = world.get::<WorldKey>(room).copied() else {
             // Unkeyed room (synthetic / housing) — can't round-trip.
             continue;
@@ -83,6 +109,8 @@ pub fn save_snapshot(world: &mut World) {
             room_id: room_key.id,
             decay_secs,
             contents,
+            is_player,
+            origin_level,
         });
     }
     if snapshots.is_empty() {
@@ -154,6 +182,12 @@ pub fn load_snapshot(world: &mut World) {
                 CorpseDecay { remaining_secs: snap.decay_secs.max(1) },
             ))
             .id();
+        if let Ok(mut em) = world.get_entity_mut(corpse) {
+            if snap.is_player {
+                em.insert(mud_world::PlayerCorpse);
+            }
+            em.insert(mud_world::CorpseOriginLevel(snap.origin_level.max(1)));
+        }
         for c in snap.contents {
             if !spawn_item_into(world, c.proto_zone, c.proto_id, corpse) {
                 skipped_protos += 1;
@@ -256,6 +290,8 @@ mod tests {
                     ContentSnapshot { proto_zone: 12, proto_id: 7 },
                     ContentSnapshot { proto_zone: 12, proto_id: 8 },
                 ],
+                is_player: true,
+                origin_level: 47,
             }],
         };
         let bytes = serde_json::to_vec_pretty(&original).expect("serialize");

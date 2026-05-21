@@ -29,6 +29,11 @@ pub struct RoomExit {
     /// only consults `Hidden`; the rest (`IsDoor` / `Pickproof` /
     /// `Bashable` / `Magicproof`) are loaded for future use.
     pub flags: Vec<ExitFlag>,
+    /// Door HP for the `Bashable` flag — how many doorbash swings
+    /// it takes to splinter. NULL means the legacy default
+    /// (50 HP) applies. Once the row is published from Muditor a
+    /// builder can author per-exit toughness.
+    pub hit_points: Option<i32>,
 }
 
 pub async fn list_exits(pool: &PgPool) -> sqlx::Result<Vec<RoomExit>> {
@@ -47,7 +52,8 @@ pub async fn list_exits(pool: &PgPool) -> sqlx::Result<Vec<RoomExit>> {
             key_id,
             description,
             keywords AS "keywords!: Vec<String>",
-            flags AS "flags!: Vec<ExitFlag>"
+            flags AS "flags!: Vec<ExitFlag>",
+            hit_points
         FROM "RoomExit"
         ORDER BY room_zone_id, room_id, direction
         "#

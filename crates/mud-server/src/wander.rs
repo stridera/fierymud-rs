@@ -250,6 +250,8 @@ mod tests {
                 keywords: Vec::new(),
                 is_hidden: false,
                 is_pickproof: false,
+                is_bashable: false,
+                hit_points: None,
             },
         );
         world.entity_mut(from).insert(exits);

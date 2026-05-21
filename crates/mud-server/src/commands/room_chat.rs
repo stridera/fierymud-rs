@@ -360,7 +360,13 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
     let actor_name = name_of(world, player);
     let target_name = name_of(world, target);
     send_to(world, player, format!("You insult {target_name}: {line}\r\n"));
-    send_to(world, target, format!("{actor_name} insults you: {line}\r\n"));
+    send_to(
+        world,
+        target,
+        crate::commands::cap_sentence_start(&format!(
+            "{actor_name} insults you: {line}\r\n"
+        )),
+    );
     let bystanders: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
@@ -368,7 +374,9 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _)| e)
             .collect()
     };
-    let line_room = format!("{actor_name} insults {target_name}.\r\n");
+    let line_room = crate::commands::cap_sentence_start(&format!(
+        "{actor_name} insults {target_name}.\r\n"
+    ));
     for e in bystanders {
         send_to(world, e, line_room.clone());
     }

@@ -53,23 +53,23 @@ Features the legacy MUD had that we still need.
 
 ## Create / utility spell follow-ups (2026-05-17)
 
-- **Create Food per-class selection.** Legacy `spell_creations`
-  picks a base proto by caster class — Cleric/default → zone 120,
-  Paladin → 110, Priest → 100, Anti-Paladin → 130, Druid → 140 —
-  then adds 0..9 from skill scaling. Today the runtime `create`
-  arm pulls a single hard-coded proto (currently the waybread
-  fallback, zone 185 id 8). Plumb caster.class_id + skill into
-  the create arm so the right per-class roster fires. Zones
-  100/120 are sparsely imported (3-4 protos each) so the content
-  side also needs work.
-- **Minor Creation arg lookup.** Legacy `spell_minor_creation`
-  reads the cast arg ("dagger", "robe", "spellbook", ...) against
-  a 40-entry `minor_creation_items[]` table (constants.cpp:28)
-  and spawns `(zone 10, id i)` for the matching index. All 40
-  protos are imported under zone 10. The runtime would need
-  the cast arg threaded through to the create arm and a copy
-  of the keyword table. Today MINOR_CREATION just spawns the
-  hard-coded mushroom default regardless of arg.
+- **Create Food per-class selection.** ✅ Shipped 2026-05-17.
+  Engine picks base zone by caster class (Cleric/default=120,
+  Paladin=110, Priest=100, Anti-Paladin=130, Druid=140) and walks
+  the resource for FOOD-typed protos in that zone — legacy's
+  `zplus 0..9` strict-index dance assumed every id 0..9 was food,
+  but the imported zones mix in armor/fountains/treasure so the
+  strict index would conjure absurd gear. Skill-weighted pick
+  into the FOOD-only sublist + small jitter so back-to-back casts
+  don't duplicate; falls back to waybread (185, 8) when the
+  class's zone has zero FOOD entries. Live-verified TestCleric
+  L20 → "a sugar cookie" (zone 120 FOOD). Migrating to a
+  `CreationRecipe` table (fierylib doc §8) is still the proper
+  long-term home but the current scaffold ships food cleanly.
+- **Minor Creation arg lookup.** ✅ Shipped (verified 2026-05-17;
+  found already in place under `MINOR_CREATION_KEYWORDS` const +
+  `create` arm dispatch). Cast arg matched as abbreviation against
+  the 40-keyword table, picks `(10, idx)`.
 - **CREATE_WATER / CREATE_SPRING.** No-op until liquid mechanics
   land. Legacy CREATE_SPRING spawns a fountain proto into the
   room (vnum 75 — "a clear pool of water"); CREATE_WATER fills
@@ -167,16 +167,15 @@ Follow-ups surfaced this pass:
   isArea=false is the source of truth; the description
   ("scorching everything in a cone") is the disagreement. Same
   decision as G2.5 — content-author call, deferred.
-- **I.3 Seeded test users have no starting gear.** Partially
-  resolved via live-DB hand-patch: TestWarrior now wields a
-  claymore (zone 163, id 0), TestRogue a small silver dagger
-  (zone 557, id 63). Both are tier-appropriate. TestMage stays
-  unarmed (sorcerer kit is a follow-up). Verified live:
-  TestWarrior L25 with claymore lands 57 dmg per hit at ~33% hit
-  rate vs L17 frost stallion — combat math reads off the weapon
-  (wpn=21 ×AP+125%=47 ±var=57). The fierylib seeder
-  (`src/fierylib/seeders/user_seeder.py`) should still grant
-  this at create time so a `seed users` from scratch matches.
+- **I.3 Seeded test users starting gear.** ✅ Closed 2026-05-17.
+  `user_seeder.py` now carries a `STARTER_GEAR` table and grants
+  loadouts at character creation: TestWarrior claymore (163,0),
+  TestCleric mace of the grave (2,142), TestMage yew staff
+  (163,2) wield + spellbook (10,29) inventory, TestRogue small
+  silver dagger (557,63). Idempotent (skips when the same
+  (zone,id,slot) is already present), survives full re-imports.
+  Live verified: TestMage's session spawns with the staff wielded
+  and the spellbook in inventory.
 - **I.12 `kill <keyword>` matched corpses sharing the keyword.** ✅
   Resolved. `cmd_attack` walked `(Entity, Located, Named)` and
   picked the first name-match — corpses keep "corpse of a frost
@@ -299,7 +298,7 @@ Follow-ups surfaced this pass:
 
 Open items surfaced during hands-on play. Lower priority than A-B but worth resolving.
 
-- **H.G2.5 (Burning Hands cone vs single).** Description says "cone before you"; data has `isArea=false` and notes "touch range". Targeting now defaults to current opponent so single-target works fine. Deciding whether to upgrade to a real cone (data fix + cone implementation) vs trim the description to match the touch-attack reality is a content-author call.
+- **H.G2.5 (Burning Hands cone vs single).** ✅ Closed 2026-05-17. Per user call: it's a touch attack. DB description already reads "Flames wreathe your hands as you grasp the target, searing flesh with magical fire. A foundational touch-range spell..." and notes say "touch range" — single-target intent is consistent across description + notes + isArea=false. No mechanical change needed.
 - **H.1 Cleric L15 harm refused — circle-5 slot is 0.** ✅ Resolved (data + dev-mode interaction, not a bug). Cleric HARM is a circle-5 spell that unlocks at L33 per SpellSlotProgression. Adohi (L15 Cleric) does NOT know HARM in her CharacterAbilities — the earlier "refused" line surfaced only because dev-mode bypassed the KnownAbilities gate but not the slot gate. Mortal play would refuse at the knowledge gate first.
 - **H.2 Cure Light at full HP shows "(heal (+0 HP))" silently.** ✅ Resolved — invoke_ability heal arm now prints "Your health is already full." (or target equivalent) and skips the no-op message.
 - **H.3 Burning Hands 366 dmg vs warthog (30 HP).** Math is fine vs tier-appropriate mobs (L15 trash sits at 200-700 HP) but the one-shot feel against weakest mobs is jarring. May be acceptable flavor.
@@ -355,38 +354,70 @@ fold in the dynamic-exponent legacy scaling.
     arms always evaluate (no short-circuit needed in an integer-arith
     grammar). Inverted clamp bounds silently return None so a bad
     formula falls through rather than crashing.
-  - **Allow float literals outside `pow`** so multipliers like
-    `* 0.0007` survive translation. Today only the `pow` exponent
-    slot accepts floats; the rest of the grammar is integer-only,
-    forcing every multiplier to be encoded as `* 7 / 10000`.
+  - **Allow float literals outside `pow`** ✅ Shipped 2026-05-18.
+    Limited but practical: a `Float` token on the RHS of `*` or
+    `/` now scales the integer LHS through `scale_by_float` and
+    rounds back to i32. Legacy multipliers like `dmg * 0.0007 *
+    level` translate verbatim. Overflow / NaN / inf still fall
+    through to None. Addition / subtraction / float-as-first-
+    factor remain unsupported — covers the common multiplier
+    case without an enum-Number refactor. Unit-tested with
+    `skill * 0.5`, `level / 0.5`, the chained
+    `10000 * 0.0007 * level` shape, and `skill / 0.0` (returns
+    None).
 
-- **I3. Per-target multiplicative conditions in ability data.** The
-  divine/unholy line (`DIVINE_BOLT`, `DIVINE_RAY`, `HELL_BOLT`,
-  `HELLFIRE_BRIMSTONE`, `LESSER_EXORCISM`, `EXORCISM`,
-  `STYGIAN_ERUPTION`) all scale by an alignment multiplier *after* the
-  base damage roll. Even with I1 + I2 the cleanest representation is
-  probably a separate `params.multipliers` list in `AbilityEffect`
-  that the runtime walks post-roll, rather than baking the multiplier
-  into the damage formula. Suggested shape:
+- **I3. Per-target multiplicative conditions in ability data.** ✅
+  Engine arm shipped 2026-05-18. The damage arm now walks
+  `override_params.multipliers` post-roll (between empowered and
+  spell_power so multipliers operate on the rolled value but
+  caster-side scaling still amplifies). Each entry shape:
   ```json
-  "multipliers": [
-    { "expr": "(victim_align * -7 + 8000) / 10000", "min": 0.1, "max": 1.5 }
-  ]
+  { "expr": "(victim_align * -7 + 8000) / 10000", "min": 0.1, "max": 1.5 }
   ```
-  Bounded multipliers also cleanly express class affinity
-  (Priest +25% on `Destroy Undead`, Cryomancer +25% on `Ice Storm`,
-  etc.) which currently live as hardcoded class-specific clauses in
-  `magic.cpp` and would otherwise pollute the damage formula.
+  The expr is evaluated against the per-target `FormulaCtx` (so
+  `victim_align` / `target_max_hp` / `target_level` resolve), and
+  the integer result is divided by 1000 to recover the float
+  coefficient — authors who want a literal 0.8 multiplier write
+  `800` in the expr. The factor is clamped to `[min, max]` (both
+  optional) and multiplied into `amount`. Floor of 0 so a
+  destructive expression can't heal the target.
+  - **Content sweep wave 1 (2026-05-18).** ✅ Converted all
+    seven alignment-keyed spells from baked-in multipliers to
+    declarative `multipliers` arrays: DIVINE_BOLT, DIVINE_RAY,
+    HELL_BOLT, HELLFIRE_BRIMSTONE, EXORCISM, LESSER_EXORCISM,
+    STYGIAN_ERUPTION. Each base `amount` is now just the raw
+    damage shape (e.g. `base_damage + (pow(skill, 2) * 53) / 10000`),
+    and the alignment scaling lives in a `multipliers` entry
+    clamped to `[0.1, 1.5]`. JSON + DB both updated. Class
+    affinity bonuses (Priest +25% Destroy Undead, Cryomancer
+    +25% Ice Storm, etc.) remain content-follow-up — engine
+    work is done so they're pure JSON authoring + DB updates.
+  - **Wave 2: lifeform multipliers (2026-05-18).** ✅ Added
+    `victim_is_undead`, `victim_is_demonic`, `victim_is_celestial`,
+    and `victim_is_elemental` symbols to `FormulaCtx` (0/1 from
+    the target's `LifeForceTag`), populated per-target alongside
+    `victim_align`. DESTROY_UNDEAD carries `multipliers: [{"expr":
+    "1000 + victim_is_undead * 1000", "min": 1.0, "max": 2.0}]`
+    so it deals 2× damage to undead. HOLY_WORD and UNHOLY_WORD
+    use mirrored expressions (boost vs demonic+undead / vs
+    celestial respectively, clamped to `[0.5, 1.5]`). Future
+    smite-type spells get the same one-line treatment.
 
-- **I4. `xp_drain` / `level_drain` effect type.** `Energy Drain` is
-  authored as a damage spell but legacy primary effect is "victim
-  loses up to 40,000 XP on save fail, caster gains a quarter". JSON
-  currently substitutes a small necrotic damage roll (`4d12 + pow(skill, 1.20)`)
-  and notes the drain ask. To re-faithfulise: add an `xp_drain`
-  (preferred) or `level_drain` (legacy-named) effect type to
-  `mud-world/src/components.rs` + `EffectCatalog`, handle in
-  `invoke_ability`. Pair with the `lifesteal` flag on Vampiric Breath,
-  which still routes through `damage` + post-damage `heal`.
+- **I4. Vampiric `lifesteal` flag.** ✅ Shipped 2026-05-17. Doc
+  originally framed this as "xp_drain / level_drain" per a misread
+  of legacy — `spell_energy_drain` (legacy `spells.cpp:693`) is
+  actually pure HP vampirism, not XP drain. Implemented as a
+  `lifesteal: true` override_param consumed at the end of the
+  damage arm: refuses self-target ("Draining yourself? My, aren't
+  we funny today...") and refuses UNDEAD targets (LifeForceTag),
+  then captures victim HP pre/post apply_damage to compute actual
+  delta and heals the caster by that amount. At max HP the legacy
+  polynomial spillover kicks in (`bonus = dmg * (-0.0457r² -
+  0.0171r + 1.066)` with a 5..10 floor) so overdrain isn't wasted.
+  Wired on both ENERGY_DRAIN (newly flagged) and VAMPIRIC_BREATH
+  (already had the param). Live verified: AdminChar at full HP
+  drains TestRogue → AdminChar 3244/3244 → 3523/3244 (+279 spillover
+  past max).
 
 - **I5. `target_max_hp`-keyed damage for percent-HP attacks.** ✅
   Closed (2026-05-16). With I1's `target_max_hp` symbol live, the
@@ -437,29 +468,37 @@ Content-side: 126 / 408 abilities now carry an explicit
 SaveType + uniform DC + onSaveAction per spell flavor (script:
 `fierylib/scripts/author_saving_throws.py`). Open engine asks:
 
-- **K2. `HALF_DAMAGE` on-save action arm.** Today the runtime's
-  save dispatcher (`commands.rs::on_save_action_for(...)`) only
-  understands `NEGATE` (skip effects entirely) and `HALF_DURATION`
-  (halve EffectInstance duration). Unknown actions fall through to
-  `Failed` (effects apply in full). Damage spells in legacy
-  fierymud halved damage on save (`if (mag_savingthrow(...)) dam >>= 1;`
-  in `magic.cpp`). Content authored all damage-spell saves as
-  `NEGATE` for now — engine ask is to add a `HALF_DAMAGE` arm that
-  applies `dam / 2` when present. Once the arm lands, the content
-  side can sweep `data/abilities.json` and re-balance damage saves
-  from `NEGATE` to `HALF_DAMAGE` (one-line change per spell).
-
-  - Scope: extend the SaveOutcome enum + the per-action match arm
-    that wraps the damage-apply call; thread the half flag into
-    `apply_damage` so resistance/penetration math still run on the
-    halved value.
+- **K2. `HALF_DAMAGE` on-save action arm.** ✅ Shipped 2026-05-18.
+  Added `SaveOutcome::HalfDamage` and recognized `"HALF_DAMAGE"` in
+  `save_action_for`. In the damage-arm pipeline the new
+  `halve_damage` flag halves `amount` after ward / alignment
+  trims but before `apply_damage`, so resistance/penetration math
+  still runs on the halved value (mirrors legacy `dam >>= 1`).
+  Caster sees `"X partially resists your <Spell>."` and target
+  sees `"You partially resist X's <Spell>."`. Live verified with
+  TestMage L15 casting BURNING_HANDS at TestRogue L10 (DC lowered
+  to 5 temporarily so the save reliably succeeded): 220 → 41 HP
+  (179 dmg, half of the ~358 full hit) with the partial-resist
+  line on both sides. Reverted DC after verification.
+  - **Content sweep (2026-05-18).** Walked
+    `fierylib/data/abilities.json` and flipped every spell whose
+    effects list is ALL `damage` (no status / charm / poison
+    follow-ons) from `NEGATE` to `HALF_DAMAGE`: 85 spells total
+    (BURNING_HANDS + 84 swept via Python). Live DB mirrored with
+    a single matching UPDATE. Mixed-payload spells (damage +
+    status) keep `NEGATE` since flipping them would let the
+    status apply on save while halving the damage — the status
+    payload often matters as much as the damage, and the design
+    call should be per-spell.
 
 - **K3. Authored saves only — runtime save dispatcher must roll.**
-  Verify the save roll itself runs at cast time before applying
-  effects/damage. If `AbilitySavingThrow` rows aren't consulted in
-  `invoke_ability` today, all 126 newly authored saves are inert.
-  Quick smoke: cast a tagged damage spell at a high-WIS target and
-  watch for "you save" messaging.
+  ✅ Closed 2026-05-18 — audit confirms `save_action_for` is
+  called at `commands.rs::invoke_ability_with` (line ~11874)
+  before any effect application, with target's d20 + level
+  versus the formula-evaluated DC. Self-target auto-fails so
+  buffs land on the caster. All three branches (Negated,
+  HalfDuration, HalfDamage) now have live runtime arms. The 126
+  authored saves are not inert.
 
 ## J — Resistance / protection extensions (2026-05-17)
 
@@ -468,30 +507,90 @@ single-element protection effects (PROT_FIRE/COLD/AIR/EARTH +
 FIRESHIELD/COLDSHIELD + NEGATE_*). Two legacy protection shapes can't
 be expressed in the current `ObjectResistance` schema:
 
-- **J1. Spell-circle absorb (MINOR_GLOBE / MAJOR_GLOBE).** Legacy:
-  minor globe absorbs spells of circle ≤ 3, major globe ≤ 6 (rough
-  values — check `magic.cpp` for exact thresholds). Equipped items
-  carrying `EFF_MINOR_GLOBE` / `EFF_MAJOR_GLOBE` therefore don't grant
-  a per-element resistance — they short-circuit hostile spell
-  application up to a tier threshold. Options:
-  1. Add `Character.spell_absorb_max_circle: int` column populated as
-     `max(spell_absorb_max_circle across equipped items)`, gate
-     incoming spell damage in `invoke_ability_with` before the resist
-     pipeline runs.
-  2. Push it into `ObjectResistance` as a synthetic element
-     (`ARCANE_ABSORB_MINOR` / `_MAJOR`?) — messier.
-  Option 1 is cleaner. ~10 items in legacy carry these.
+- **J1. Spell-circle absorb (MINOR_GLOBE / MAJOR_GLOBE).** ✅
+  Shipped 2026-05-17. Implemented via ECS marker
+  (`MaxAbsorbCircle(i32)`) rather than a DB column — same end-state
+  but no schema change. Wired:
+  1. `mud-server/src/commands.rs` `"globe"` dispatcher arm reads
+     `override_params.maxCircle` from the `globe` effect's
+     AbilityEffect row, installs `MaxAbsorbCircle` taking the max
+     of any pre-existing threshold (so MINOR over MAJOR doesn't
+     downgrade), and spawns a duration-tracked `EffectInstance`.
+  2. `SpellSlotData::min_circle_for_ability` (in
+     `mud-world/src/resources.rs`) returns the smallest circle the
+     ability appears at across every class — mirrors legacy
+     `SINFO.lowest_level`. O(n) scan over ~1000 ability_circle
+     entries; only called on absorb-marked targets, so not hot.
+  3. Damage arm gate at the top of `"damage"`: when the target
+     has a `MaxAbsorbCircle` marker, the spell's
+     `min_circle_for_ability` ≤ marker, and caster ≠ target → emit
+     the flare messages and `continue`. Self-cast exempt so a
+     mage's own AoE doesn't burn through their own globe.
+  4. `effects.rs` teardown: on the `"globe"` effect's expiry,
+     recompute the marker from any remaining instances (highest
+     strength wins) — stacking MAJOR + MINOR keeps coverage when
+     only one expires.
+  Live-verified end-to-end: AdminChar casts MINOR_GLOBE
+  (maxCircle=3) on TestRogue → BURNING_HANDS (circle 1) absorbed
+  with flare message + 0 HP loss → FIREBALL (circle 4) bypasses
+  threshold and drops TestRogue to 0 HP.
+  - **Follow-up:** the ~10 equipped items that legacy carries with
+    `EFF_MINOR_GLOBE` / `EFF_MAJOR_GLOBE` need ObjectEffects rows
+    to route through the same arm. Schema's `ObjectEffects` →
+    `Effect.name = "globe"` mapping already wires the runtime path;
+    fierylib needs to translate the legacy bits. Logged as a
+    content task in fierylib's remaining_work.md.
+  - **L4 caveat closed 2026-05-18.** The pre-loop success-template
+    emit now peeks at the target's `MaxAbsorbCircle` and the
+    spell's `min_circle_for_ability`. When the damage spell will
+    be absorbed in full, the header is deferred into
+    `pending_header` (matching the non-damage path) and the
+    post-loop refusal-substring suppression — which already
+    includes `"(absorbed"` — drops it. Non-absorbed casts still
+    take the pre-loop emit so death broadcasts slot in after the
+    cast confirmation. Live verified: AdminChar wraps TestRogue in
+    MINOR_GLOBE → casts BURNING_HANDS → output is just "The
+    shimmering globe around TestRogue flares as your spell flows
+    around it.", no leading "You burn TestRogue".
 
-- **J2. Alignment-vs-alignment protection (PROTECT_EVIL /
-  PROTECT_GOOD).** Roughly 45 legacy items wear `PROTECT_EVIL` or
-  `PROTECT_GOOD`. Legacy mechanic: 25% damage reduction from incoming
-  attacks by aligned (evil / good) attackers, *regardless* of damage
-  element. This is alignment-keyed, not element-keyed, so it can't
-  ride on `ObjectResistance.element`. Cleanest: an
-  `Object.protect_alignment` column (or a parallel
-  `ObjectAlignmentResistance` table) consumed in the combat pipeline
-  after the per-element step, multiplying by 0.75 when the attacker's
-  alignment matches. Content side will follow whichever schema lands.
+- **J2. Alignment-vs-alignment protection (PROT_FROM_EVIL /
+  PROT_FROM_GOOD).** ✅ Shipped 2026-05-17. Implemented via the
+  same ECS-marker pattern as J1 — no schema change. Components:
+  `ProtectFromEvil` + `ProtectFromGood` (unit markers) plus an
+  `AlignmentProtectionTag(Evil|Good)` companion on the backing
+  `EffectInstance` so the teardown can distinguish multiple
+  resistance-flag instances on the same target. Wired:
+  1. The catchall `"resistance"` flag arm checks `type_str` for
+     `"evil"` / `"good"` before the element match table. On hit:
+     installs the marker on the target, tags the freshly-spawned
+     EffectInstance, skips the Resistances-map path.
+  2. `alignment_protection_factor(world, attacker, victim) → f32`
+     returns 0.8 when the marker matches the attacker's alignment
+     (≤-500 vs ProtectFromEvil, ≥+500 vs ProtectFromGood) AND the
+     victim's own alignment is opposed (≥+500 / ≤-500). Mirrors
+     legacy `fight.cpp:1639` exactly — including the requirement
+     that the victim themselves be aligned, so a neutral player
+     wearing protect-from-evil doesn't get a free discount.
+  3. Two hook sites: `combat::apply_swing` for melee (after resist
+     / hardness, before MAX_DAMAGE cap) and the `"damage"`
+     dispatcher arm for spells (after ward / resist).
+  4. Teardown in `effects.rs` queries for any remaining tagged
+     instance on the target sharing the same alignment; drops the
+     marker only when no backing instance remains. Mirrors the
+     bless/sanctuary refcount pattern.
+  - Unit test (`alignment_protection_factor_gate_logic`) covers
+    all four legitimate cases (matched + opposed alignments) plus
+    the three rejection cases (no marker, neutral victim, neutral
+    attacker, wrong marker). 284/284 tests pass.
+  - Live verified end-to-end via MCP: AdminChar (alignment -800)
+    casts PROT_FROM_EVIL on TestRogue (alignment +800) → effect
+    installed with name="resistance", remaining_secs=1492; followup
+    spells continue to land but reduced.
+  - **Content follow-up:** ~45 legacy items wear PROTECT_EVIL /
+    PROTECT_GOOD bits. fierylib needs to add `ObjectEffects` rows
+    pointing at `Effect.name = "resistance"` with
+    `override_params = {"flag": "resistance", "type": "evil"/"good",
+    "amount": 1}` so the runtime path picks them up on equip.
 
 - **J3. MobDefaultEffects — runtime consumer missing.** Audit doc §1
   says "runtime: not loaded". The table is intended for permanent
@@ -528,27 +627,349 @@ Look at legacy for an example, but we can improve on that system."
       message; doesn't show the magnitude.
     - No `still_winding` ECS update (purely diagnostic — the
       `casting_tick` loop already decrements in place).
-- **K2. Sentence-start capitalization sweep.** Every line that starts
-  with "the X / a X / an X dies/leaves/arrives/etc" should run through
-  `cap_sentence_start`. Death/leave/arrive messages already do
-  partially; combat hit-broadcasts and trigger emits don't. Grep
-  `crates/mud-server` for `format!\("(the |a |an )` outside of
-  template renders and route them through.
-- **K3. Info-leak audit (mortal vs god view).** Today consider/score
-  /look/inspect can leak exact HP/level/alignment for mobs to mortal
-  players. Gods (Builder+ role) should still see numbers; mortals get
-  the "impression" form. Plumb a single `viewer_is_staff(world, p)`
-  helper through the renderer for those views, and gate raw integers
-  behind it.
-- **K4. Dead-spell audit.** Walk AbilityCatalog at boot, flag every
-  SPELL whose AbilityEffect list is empty or whose effect_type isn't
-  in the dispatcher's match arms (damage / heal / cleanse / stun /
-  dispel / redirect / stop_combat / create / portal / modify /
-  intercept / extract / dismount / teleport / reveal / knockdown).
-  Today those cast successfully and emit the success line but produce
-  no in-game effect — a content gap that should be visible. Log
-  warn-level on boot with the list. The content fix lives in fierylib
-  (data side); see `fierylib/remaining_work.md` §K4 follow-up.
+- **K2. Sentence-start capitalization sweep.** ✅ First pass shipped
+  2026-05-17. Wrapped the high-impact user-facing sentence-start
+  sites where a mob/player name leads:
+  * `sleep.rs` — "X settles down to sleep." / "X wakes and stretches."
+  * `info.rs cmd_examine` — profession line, "X hovers in mid-air.",
+    Mounted "X is riding Y.", RiddenBy "Y is riding X."
+  * `commands/combat.rs` — Sanctuary refusal ("X radiates a calm
+    that turns your blow aside."), consider non-fighter
+  * `room_chat.rs` — insult ("X insults you: ...", "X insults Y.")
+  Combat death/leave/arrive broadcasts and consider were already
+  capped in earlier passes.
+  - **Second pass (2026-05-18).** Wrapped the remaining
+    name-led refusal lines across admin/combat/info modules:
+    `admin_inspect.rs` script-var lines (has no, had no, has no var,
+    has no component for), `admin_world.rs` (target is in,
+    has no active effects), `combat.rs` (steal coin, steal item
+    not on target, disarm not wielding), `info.rs` (wake already
+    awake, give too laden). 9 sites total. Mob targets now read
+    "The lion has no var named X" instead of "the lion has no var
+    named X".
+- **K3. Info-leak audit (mortal vs god view).** ✅ Closed 2026-05-17.
+  Full surface coverage verified:
+  * `cmd_consider` — already gated; mortals see verbal impression
+    ("looks badly hurt" / "is bleeding heavily"), staff see exact
+    HP and hit-chance %.
+  * `cmd_examine` — gated 2026-05-17 with `is_staff()`; mortals
+    examining a target ≥5 levels higher see a verbal stature tier
+    ("of considerable skill" / "of formidable power" / "of
+    legendary stature") with correct a/an article picking. Equal-
+    or-weaker targets keep the level for prey-gauging.
+  * `look <mob>` — routes through `cmd_examine`, so the same gate
+    applies (verified at `cmd_look:5437`).
+  * `cmd_score` — shows the *player's own* stats, not a leak.
+  * `stat` — already Builder+ only.
+  * MCP `inspect_actor` — admin tool, always staff-only.
+  Live verified: TestRogue L10 → AdminChar L105 reads "of legendary
+  stature"; TestRogue L10 → TestMage L15 reads "of considerable
+  skill"; AdminChar (staff) → TestRogue reads "is a level 10
+  Halfling Rogue".
+- **K4. Dead-spell audit.** ✅ Shipped 2026-05-17.
+  `commands::audit_dead_spells(&world)` runs once at boot after the
+  catalog loads; walks every SPELL kind and warns on either zero
+  AbilityEffect rows or an effect_type outside
+  `KNOWN_EFFECT_TYPE_ARMS` (kept in lockstep with the dispatcher's
+  `match` arms). First run output: zero spells with no effects,
+  7 spells reference `summon` (no arm yet): ANIMATE_DEAD, CLONE,
+  SIMULACRUM, SUMMON_DEMON, SUMMON_DRACOLICH, SUMMON_ELEMENTAL,
+  SUMMON_GREATER_DEMON. Closes the audit ask; the L3 entry tracks
+  the actual `summon` arm implementation.
+
+## N — Weather spells (2026-05-17)
+
+- **CONTROL_WEATHER / RAIN** ✅ Shipped 2026-05-17. Room-arm
+  recognizes a `setPrecip` override_param (RAIN seeds this as
+  `"rain"`) and, for CONTROL_WEATHER, parses the cast arg
+  (clear / cloudy / drizzle / rain / storm / snow / blizzard)
+  with "clear" as the no-arg default. On a successful cast we
+  mutate the zone's WeatherCatalog entry directly. Refuses on
+  Climate::None zones (Void, planes) with "no weather here to
+  control".
+  - **Drift lock (2026-05-18).** New `WeatherDriftLocks` resource
+    (`mud-world/src/resources.rs`) maps `zone_id → Instant` of
+    lock expiry. The setPrecip arm installs a lock for the cast's
+    full `dur_secs` after mutating the catalog entry. `weather_tick`
+    snapshots the live lock set each tick, opportunistically
+    expires stale entries, and skips both `drift_temp` and
+    `drift_precip` for any locked zone. Live verified: zone 30
+    pre-cast "frigid and drizzling" → cast `control weather storm`
+    (skill 100 → 20-hour duration) → 75s elapsed past the 60s
+    drift tick → still "frigid and stormy".
+
+## M — Wall spells (2026-05-17)
+
+- **WALL_OF_STONE / WALL_OF_ICE** ✅ Shipped 2026-05-17. v1
+  exit-blocking machinery: new `RoomBlockedExits` component carries
+  `HashMap<Direction, RoomBlockedExit>`; the "room" dispatcher arm
+  parses the cast arg as a direction (north/up/etc.), refuses if the
+  source room has no exit there, and installs the entry with a
+  reference to the backing `EffectInstance`. `cmd_move` consults
+  the map before traversal and refuses with "A wall of stone blocks
+  your path." Teardown in `effects_tick` removes the matching entry
+  when its instance expires; multiple walls on different directions
+  coexist; re-cast on the same direction overwrites + despawns the
+  prior backing instance so teardown timings stay clean. Live
+  verified: AdminChar casts `wall of stone north` → `north` refuses;
+  `west` still works.
+- **Wall visibility in look / exits (2026-05-18).** ✅ Walls
+  now render in six surfaces:
+  - `cmd_exits` appends a parenthetical to each walled direction
+    line (`north - Cobblestone Path  (wall of stone)`),
+    coloured red (block), yellow (slow), or cyan (illusion).
+  - The autoexit line on `look` swaps the door-state suffix for
+    `[W]` / `[F]` / `[I]` when a wall is in effect — wall takes
+    precedence over door state because it's the more urgent
+    obstacle.
+  - **In-room atmosphere line.** `cmd_look`'s render now emits
+    one wall sentence per walled direction right after the
+    weather line — e.g. "A wall of fog chokes the way east." in
+    yellow / "A wall of stone blocks the way north." in red /
+    "A wall of illusion shimmers across the way south." in
+    cyan. Sorted by canonical direction order so multi-wall
+    rooms read cleanly. Live verified: cast WALL_OF_FOG east →
+    look output carries the yellow line right under the weather.
+  - **Look in walled direction.** `look_direction` now consults
+    the wall map before the destination peek. Block walls hide
+    the destination entirely ("A wall of stone blocks your
+    view." in red); fog/illusion render their own barrier line
+    first ("A wall of fog swirls thickly across the path."
+    yellow / "A wall of illusion shimmers across the path,
+    oddly transparent." cyan) and then fall through to the
+    destination peek so the player can still see what's
+    beyond. Live verified: `look east` after WALL_OF_STONE east
+    shows the red barrier line with no destination peek.
+  - **Cast-time room broadcast.** The wall cast site now fires
+    a `broadcast_room_visual` to everyone in the room (minus
+    the caster) — "X gestures and a wall of stone rises,
+    blocking the way east." / "rolls in, choking" for fog /
+    "shimmers into being across" for illusion. Bystanders no
+    longer see only the spell's generic success line; the wall's
+    materialization is announced.
+  - **Wall expiry room broadcast.** The teardown branch in
+    `effects.rs` now captures the dropping `(direction,
+    kind_label)` before the retain and broadcasts "The wall of
+    stone east shudders and dissolves into nothing." to every
+    player in the affected room. Without it, a wall just
+    vanished silently and any player watching it for a passage
+    cue had no signal it had cleared.
+- **Wear / wield / hold / remove room broadcast (2026-05-18).**
+  ✅ `wear_into` (covers `wear`/`wield`/`hold`) and `cmd_remove`
+  (single + `all` paths) now broadcast a third-person line to
+  everyone else in the room — "X wields a steel longsword.",
+  "X wears the iron helm.", "X removes the leather boots."
+  Previously only the actor saw "You wield/wear/hold/remove X";
+  party-mates had no visual cue when an ally swapped gear.
+  `cmd_drop` already had this; wear/remove were the gap.
+- **Eat / drink / quaff / sip / light / extinguish room
+  broadcast (2026-05-18).** ✅ Same pattern applied to the
+  consume + light-source paths: `consume_item` (eat / quaff),
+  `drink_amount` (drink / sip), `cmd_light`, `cmd_extinguish`
+  now all emit a third-person line. Bystanders see allies
+  quaffing healing potions mid-fight, a torch flaring to life
+  in a dark room, etc. Important for tank/party situational
+  awareness.
+- **Rent (inn) room broadcast (2026-05-18).** ✅
+  `finalize_rent` emits "X hands over N gp and books the
+  {tier_name}." to room observers after the rent completes.
+  Mirrors how `cmd_camp` broadcasts the camp setup — both
+  are visible transactions at an inn/camp scene, so
+  party-mates following the renter into the common room see
+  who booked what tier.
+- **Wall + SUMMON spell descriptions refreshed (2026-05-18).**
+  ✅ Updated `fierylib/data/abilities.json` + live DB for
+  WALL_OF_STONE / WALL_OF_ICE / WALL_OF_FOG / ILLUSORY_WALL
+  and SUMMON. New descriptions name the actual mechanics that
+  L1-v2 / M-section work landed: per-cast accept prompt and
+  level cap for SUMMON; bash HP / cancel verb / traversal
+  semantics for each wall variant. Also adjusted
+  `cmd_nosummon`'s toggle messages to "Incoming summons will
+  now silently auto-decline" / "...will now prompt you" so
+  the on/off line matches the help text and the L1-v2
+  semantics (NoSummon = silent decline, not hard refusal).
+- **Second description refresh wave (2026-05-18).** ✅ Same
+  pass applied to nine more spells whose mechanics shipped
+  since the original text was authored: ANIMATE_DEAD (corpse
+  consumption + HP scaling), CLONE (caster-mirror), SIMULACRUM
+  (remote actor-mirror), CONTROL_WEATHER + RAIN (drift lock
+  for duration), MINOR_GLOBE + MAJOR_GLOBE (concrete circle
+  thresholds and stacking rule), PROT_FROM_EVIL +
+  PROT_FROM_GOOD (concrete 80%/-500/+500 numbers and the
+  neutral-target caveat). JSON + DB both updated.
+- **Lifesteal spells description fix (2026-05-18).** ✅
+  ENERGY_DRAIN's old description claimed it drained XP and
+  gave a quarter to the caster — that was a misreading of
+  legacy; I4's runtime work made it pure HP vampirism. The
+  description now reflects that, plus the at-max-HP
+  polynomial overflow. VAMPIRIC_BREATH's description picked
+  up the same overflow note.
+- **RestState surfaced on score sheet (2026-05-19).** ✅
+  `ScoreData` grew an `Option<RestStateDisplay>` field carrying
+  `(source, tier, repose)`; populated in `cmd_score` from the
+  player's `RestState` component, suppressed when there's
+  nothing to say (no source pending AND no Repose banked).
+  All three renderers updated:
+  - Standard / fancy: `"Rest: Rented Inn tier 2 (resting);
+    1,234 XP banked"`. Variants: `"Camped tier 1 (resting)"`
+    / `"At home (resting)"` / `"Logged out (no pool yet)"`
+    / pool-only `"320 XP banked"`.
+  - Minimal one-liner: `"rest:inn(2)  repose:1234"` /
+    `"rest:camp(1)"` / `"rest:home"` / `"rest:quit"`.
+  Unit test covers all five render variants
+  (`format_rest_line_renders_each_source`). 286 tests pass.
+- **Wear all / remove all consolidate broadcasts (2026-05-18).**
+  ✅ Earlier wear/remove broadcasts emitted one line per
+  item — `wear all` on a 6-piece kit spammed bystanders with
+  six lines. Refactored: `wear_into_silent` variant skips
+  the per-item room line, `cmd_wear all` samples the
+  equipped count before/after and emits a single "X dons N
+  items of gear." Same shape for `cmd_remove all` ("X removes
+  N items of gear."). Single-item wear/remove keeps the
+  per-item line as before. Matches the pattern `cmd_drop all`
+  established.
+- **BANISH (extract effect) room broadcast (2026-05-18).** ✅
+  The "extract" effect arm (used by BANISH and any future
+  send-back-to-home-plane abilities) now snapshots the
+  target name + room before despawning and broadcasts
+  "X banishes Y back to the realm whence it came!" in bold
+  magenta. Without it the creature blinked out silently —
+  text-only clients had no narrative explanation.
+- **RESURRECT room broadcast (2026-05-18).** ✅ The
+  "resurrect" effect arm now broadcasts "X's spirit is yanked
+  back from the void by Y." to room observers in bold cyan.
+  The caster's "X's spirit returns to flesh." and the
+  revived target's "Your spirit is yanked back into your
+  body!" stay personal; the third-person room line is for
+  everyone else. Pairs with the level-up / achievement
+  broadcasts as a high-impact moment worth surfacing.
+- **Achievement unlock room broadcast (2026-05-18).** ✅
+  `grant_achievement` now emits "X earns the achievement 'Y'."
+  to room observers in addition to the personal "Achievement
+  unlocked" line. Skipped for hidden achievements (those are
+  secrets the holder wouldn't want announced). Pairs with the
+  level-up broadcast for celebratory moments.
+- **Level-up room broadcast (2026-05-18).** ✅ When a player
+  advances a level, the room now sees "X surges with newfound
+  power and rises to level N!" (with the rank title appended
+  when one is defined — staff tiers). The personal congratulation
+  ("*** You have advanced to level N! ***" + practice point line)
+  stays private to the leveler. Allies actually notice their
+  party-mate ding up now rather than wondering why nothing
+  happened after the kill.
+- **Equipped gear on examine (2026-05-18).** ✅ `cmd_examine`
+  now lists the target's worn items at the bottom of the
+  output, sorted by `Slot::ORDER`. Reads "Equipped: a claymore
+  (wielded), an iron helm (head), the leather boots (feet)."
+  Lets players gauge a stranger's loadout before engaging
+  (warhammer vs toothpick matters tactically). Mirrors
+  `cmd_equipment`'s shape; skipped on items (their bound
+  state is handled by `identify`). Live verified: AdminChar
+  `examine testwarrior` → "Equipped: a claymore (wielded)."
+- **Recite / wave / tap / quaff room broadcast (2026-05-18).**
+  ✅ `invoke_object_abilities` (the shared path for scroll
+  recite, wand wave, staff tap, and the bindings-quaff
+  variant) now emits a third-person line ("X waves a willow
+  wand.", "X recites from a parchment scroll.", "X taps a
+  glowing staff.") to room observers before the spell
+  effects fire. Bystanders see the gesture itself, not just
+  the spell's downstream success line.
+- **Crit tag in room hit broadcast (2026-05-18).** ✅ The
+  third-person room broadcast on a swing was a generic "X
+  hits Y." regardless of crit / normal; the attacker and
+  target both saw "(critical hit!)" but bystanders didn't.
+  Added a parallel `room_crit_tag` ("(critical!)" in bold
+  red) appended to the room line on `SwingOutcome::Crit`.
+  Damage stays hidden from mortal observers (info-leak
+  policy) but the crit fact surfaces.
+- **Follow / unfollow room broadcast (2026-05-18).** ✅
+  `cmd_follow` and `cmd_unfollow` now emit a third-person line
+  to room observers: "X falls into step behind Y." on follow,
+  "X drops out of step from Y." on unfollow. Skipped on
+  cross-room unfollow where the audience would have no
+  shared frame. Same gap as guard had — silent state flips
+  the rest of the party never saw.
+- **Guard / unguard room broadcast (2026-05-18).** ✅
+  `cmd_guard` now broadcasts "X moves to Y's side, ready to
+  defend them." to the rest of the room when guarding starts,
+  and "X steps back from Y's side." when guarding stops. The
+  guarded target also picks up "X stops guarding you." on
+  unguard (parallel to the existing "X stands ready to defend
+  you." on guard-start). Allies see the formation forming and
+  dissolving rather than silent state flips.
+- **Room effect expiry broadcasts (2026-05-18).** ✅
+  Magical-darkness, magical-light, and burning-room teardown
+  branches in `effects.rs` now broadcast to every player in
+  the affected room when the last backing instance expires:
+  "The unnatural darkness dissipates." / "The magical
+  radiance fades." / "The flames lash one last time, then
+  sputter out." Without it, a hazard or environmental effect
+  just silently lifted — a player waiting out CIRCLE_OF_FIRE
+  had no signal it was safe to walk.
+- **Login / logout text broadcast (2026-05-18).** ✅
+  Disconnect path (`ConnRouter::on_disconnect`) and login
+  path (the post-MOTD enter-world block) both already emit
+  `Room.AddPlayer` / `Room.RemovePlayer` GMCP diffs to other
+  clients in the room, but plain-telnet clients without GMCP
+  got no signal. Added a paired text broadcast: "X fades
+  into being, returning from dreams." on login and "X fades
+  from view, retiring to dreams." on disconnect, going to
+  every other player in the room.
+- **`cancel wall` for room-applied wall effects (2026-05-18).**
+  ✅ `cmd_cancel` previously only looked at effects whose
+  `AppliedTo` was the player themselves, so room-applied wall
+  EffectInstances were invisible to it — the caster (or anyone
+  in the room) had no way to drop a wall short of waiting out
+  the cast duration or splintering it via `doorbash`. Extended
+  the filter to include effects whose `AppliedTo == player_room`
+  AND whose name starts with `"wall-"`. Bash-style hazards
+  (room burning, magical darkness) intentionally stay outside
+  the cancel surface — those are environmental effects the
+  caster expected to persist. Also patched the inline despawn
+  path to clean the matching `RoomBlockedExits` entry before
+  the entity drops; without it the wall stayed phantom in
+  exits / look / movement until `effects_tick` no-op'd the
+  missing instance. Live verified: cast wall, `cancel wall`,
+  `exits` reads clean.
+  - **Room broadcast on cancel.** The inline despawn path now
+    also captures `(direction, kind_label)` and broadcasts
+    "X gestures and the wall of stone north crumbles into
+    nothing." to every other player in the room — same UX
+    parity that natural expiry gets via the `effects_tick`
+    teardown. Without it, other players in the room would
+    notice the wall dropped only when they tried to walk that
+    direction or ran `exits` / `look`.
+- **WALL_OF_FOG / ILLUSORY_WALL.** ✅ Shipped 2026-05-18. Added
+  `WallTraversal::{Block, Slow, Passable}` to `RoomBlockedExit`
+  and routed all three variants through the same cast arm
+  (`type=fog → Slow`, `type=illusion → Passable`, `type=stone|ice →
+  Block`). `cmd_move`'s wall gate now branches:
+  - **Block** — existing refusal path.
+  - **Slow (fog)** — pays an extra `FOG_DRAG = 5` stamina toll,
+    refuses if the player can't afford it ("the wall of fog
+    drains you faster than you can push through"), emits "You
+    push through the wall of fog, gasping in its choking mist."
+  - **Passable (illusion)** — despawns the backing instance,
+    drops the room entry, emits "You step through the wall of
+    illusion — it ripples and dissolves into nothing." to the
+    mover plus a "ripples and dissolves as X steps through"
+    broadcast to the source room.
+  Live verified: AdminChar cast ILLUSORY_WALL north → walked
+  north (wall dissolved, arrived in Cobblestone Path); cast
+  WALL_OF_FOG south → walked south (fog drag fired, arrived in
+  Town Center).
+- **HP-based bash.** ✅ Shipped 2026-05-18. `RoomBlockedExit`
+  now carries an `hp: i32` field; the wall-cast site reads
+  `override_params.hp` (default 100 ice / 200 stone) and stores it
+  on the entry. `cmd_doorbash` checks the per-direction wall map
+  *before* the door pipeline — if a wall blocks that direction,
+  the swing deducts `5 + STR_bonus` from `wall.hp` instead. On
+  `hp ≤ 0` the backing EffectInstance is despawned, the entry
+  removed from `RoomBlockedExits`, and a "shatters into a
+  thousand pieces" broadcast fires. Otherwise the player sees
+  "You hammer the wall of ice north — it cracks but holds
+  (~86 HP)." Live verified: AdminChar (STR bonus 9 → 14/hit)
+  bashed ice wall through 100 → 86 → 72 → 58 across three swings.
 
 ## L — Summon family (2026-05-17)
 
@@ -595,56 +1016,170 @@ on caster with set_fighting**.
 
 **Implementation status (2026-05-17):**
 
-- **L1. SUMMON dispatcher gates.** ✅ Shipped 2026-05-17. The
-  player-target SUMMON spell rides on `effectType=teleport, scope=
-  target, destination=caster` — same teleport machinery, but with
-  a guarded gate set in `commands.rs` `"teleport"` arm that fires
-  only when `def.plain_name == "SUMMON"`. Gates 0-6 wired:
-  self-target refusal, same-zone (proxy for legacy `skill/5` BFS),
-  level cap (`target > caster + 3`), `MobBehavior::NoSummon`,
-  destination `NoSummonRoom`, arena asymmetry, and PC `NoSummon`
-  preference (bypassed by `PkEnabled` or staff `Permission::Summon`).
-  Post-move: depart/arrive `broadcast_room_visual`, "X has summoned
-  you!" private line to victim, NPC retaliation via
-  `engage_combat(victim, caster, dest_room)`, and a 16s (4 combat
-  rounds) cooldown insert on the caster so the spell can't be
-  spammed. Live-verified: AdminChar casts summon on TestRogue
-  (default NoSummon) → caster sees refusal, TestRogue sees
-  hint "Type NOSUMMON to allow other players to summon you." and
-  doesn't move. **Gate 7 (NPC save-vs-spell)** is deferred — save
-  mechanics need a per-spell roll path that doesn't exist yet.
-  **Follow-up L1.1: remote-name resolution.** Today targeting
-  defaults to in-room name lookup; if the target isn't in the
-  caster's room it falls through to self. Legacy uses
-  `find_track_victim` (BFS, max distance = `skill/5`). Without
-  that, SUMMON can't reach someone in another room — defeats the
-  spell's purpose. Add a remote-actor name lookup helper and
-  thread it through targeting for `SUMMON`-class spells.
-- **L2. `nosummon` command + default-protected.** ✅ Shipped
-  2026-05-17. `nosummon` command already existed
-  (`commands/info.rs::cmd_nosummon`); refreshed the help text to
-  describe the gate and the PK bypass. `mud_db::characters::create`
-  now inserts `player_flags = ARRAY['NO_SUMMON']` so new characters
-  are summon-protected by default. fierylib `user_seeder.py` adds
-  the same default to test characters. Live DB backfilled with
-  one UPDATE — all 7 existing characters (AdminChar, BuilderChar,
-  Strider, TestWarrior/Cleric/Mage/Rogue) flipped to NO_SUMMON.
-- **L3. SUMMON_xxx flavor family** (7 spells: SUMMON_DEMON,
-  SUMMON_ELEMENTAL, SUMMON_DRACOLICH, SUMMON_GREATER_DEMON,
-  SUMMON_MOUNT, SUMMON_CORPSE, SPHERE_SUMMON). These use
-  `effectType=summon` and hit the dispatcher catchall today (mob
-  proto spawn not implemented). Plumb a per-class lookup table
-  (similar to CreationRecipe in fierylib doc §8):
-  `SummonRecipe(abilityId, classId, mobZoneId, mobId, minSkill)`.
-  Runtime spawns the mob into the caster's room as a charm
-  follower. Defer.
+- **L1. SUMMON gates + L1-v2 per-cast accept prompt.** ✅ Shipped
+  2026-05-17 (revised same day per user playtest feedback). The
+  player-target SUMMON spell rides on the teleport arm with
+  `def.plain_name == "SUMMON"` guards. Gates 0-5: self-target,
+  same-zone (proxy for legacy `skill/5` BFS — see L1.1), level cap
+  (`target > caster + 3`), `MobBehavior::NoSummon`, destination
+  `NoSummonRoom`, arena asymmetry. Gate 6 was originally a flat
+  `NoSummon` refusal; replaced with three-way PC path:
+  1. `NoSummon` set → silent auto-decline ("X is not accepting
+     summons." to caster, nothing to target).
+  2. `PkEnabled` (target opted into PvP) OR caster carries staff
+     `Permission::Summon` → instant move (no prompt), with the
+     existing post-move broadcasts + retaliation + 16s cooldown.
+  3. Default PC → install `PendingSummon` marker carrying
+     `from`, `from_name`, `dest_room`, `dest_room_name`,
+     `at: Instant::now()`. Target sees "X is attempting to summon
+     you to Y. Type ACCEPT to teleport, or DECLINE to refuse.
+     (Auto-declines in 30 seconds.)" Caster sees "You send a
+     summons to X. They have 30 seconds to accept."
+  - `cmd_accept` / `cmd_decline` in `commands/info.rs` extended
+    with summon-first checks before falling through to
+    GroupInvite. On accept: teleports the target, fires
+    depart/arrive broadcasts, applies the 16s caster cooldown,
+    auto-looks the new room. On decline: removes marker, notifies
+    both sides.
+  - `pending_summon_tick` (in `commands::info`) scans `PendingSummon`
+    every server tick, removes any over 30s old, notifies both
+    parties of the expiry.
+  - Three live-verified paths: ACCEPT (full move + auto-look),
+    DECLINE (both sides notified), NO_SUMMON (caster refusal,
+    target unprompted).
+  - **Gate 7 (NPC save-vs-spell)** is deferred — save mechanics
+    need a per-spell roll path that doesn't exist yet.
+  - **L4 UX glitch** ("you complete the summoning ritual" fires
+    before the gate refusal text) still applies to the gates 1-5
+    failure paths but is harmless for the prompt path (the
+    success line is followed by the "summons pending" notification,
+    not a contradiction).
+  - **L1.1 remote-name resolution.** ✅ Shipped 2026-05-17.
+    `find_online_player_anywhere` (in `commands.rs`) is a global
+    online-player lookup keyed on `Named.name` substring; it returns
+    `Some(entity)` only on a unique match (ambiguous → None so the
+    caster can disambiguate). The SUMMON-target-resolution branch
+    falls back to it when `find_actor_in_room` misses, ahead of the
+    non-violent default-to-self branch (otherwise every cross-room
+    summon collapsed to self and L1.2's self-gate refused). Also
+    duplicated into the pre-queue path: SUMMON with an unknown
+    name refuses instantly with "There's no one named 'X' online
+    to summon." rather than burning the 8s wind-up first. We don't
+    do legacy's BFS distance cap (`skill / 5` rooms) — gates 1-5
+    already enforce same-zone, which is a stricter spatial check
+    than legacy used in practice.
+  - **L1.2 pre-queue self-target check.** ✅ Shipped 2026-05-17.
+    SUMMON with no target → "Summon who?" (actionable hint, not a
+    refusal). SUMMON with explicit self-target ("me" / "self" /
+    caster's display name) → "But you're already here!" Both fire
+    pre-queue so a typo doesn't burn the 8s cast wind-up + slot
+    cost. The dispatcher arm's Gate 0 stays as a safety net for
+    the case where remote-name resolution finds a player whose
+    partial-name happens to match the caster.
+- **L2. `nosummon` command (revised semantics).** ✅ Shipped
+  2026-05-17. The original L2 default-NO_SUMMON intent was
+  reverted when L1 became prompt-based: new characters now spawn
+  with empty `player_flags` (default = get the prompt). `nosummon`
+  is now an opt-OUT — setting it makes incoming summons silently
+  auto-decline without prompting (for players who don't want the
+  interruption). Help text updated to match. fierylib seeder no
+  longer pre-sets NO_SUMMON on test characters; live DB
+  backfilled to remove it from the 6 chars that briefly had it.
+- **L3 v1. SUMMON_xxx conjuration arm.** ✅ Shipped 2026-05-17.
+  Added `"summon"` dispatcher arm: reads `mobType` from
+  override_params and spawns the matching mob proto into the
+  caster's room as a `Follower(caster)`. Hardcoded mobType→(zone,id)
+  table: mount→(324,21), elemental→(52,12), demon→(510,24),
+  greater_demon→(160,11), dracolich→(533,11), simulacrum→(163,8).
+  Mob is bundled with the standard latent components (Sized,
+  LifeForceTag, NaturalAttackType, MobTraits, MovementModeTag) to
+  match the loader path. EffectInstance with `AppliedTo(mob)` and
+  `name = "summoned-{mobType}"` drives the duration; on expiry
+  effects_tick despawns the mob and emits a "fades back" line to
+  room observers. `summon` added to `KNOWN_EFFECT_TYPE_ARMS` so
+  K4's audit now reads clean. Live verified: AdminChar casts
+  `summon demon` → "an Astral Demon" appears for 1125s.
+  - **2026-05-17 follow-up:** ANIMATE_DEAD and CLONE both have
+    empty `mobType` in override_params (just `type=creature`),
+    which was hitting the "unknown mobType" refusal. Added an
+    explicit ability-name fallback: ANIMATE_DEAD → (54, 20) "the
+    Large Skeleton", CLONE → (163, 8) "the Knight Errant"
+    (placeholder; real CLONE should mirror the caster's race/stats
+    once target lookup lands). SIMULACRUM was already covered via
+    its mobType="simulacrum" mapping. Live verified: AdminChar
+    casts ANIMATE_DEAD → "the Large Skeleton" spawns as follower
+    with 7500s duration.
+    Real corpse-target ANIMATE_DEAD (consume a corpse from the
+    room, scale the spawn to that creature's level) shipped 2026-05-17
+    (see ANIMATE_DEAD follow-up below). Real actor-mirror CLONE
+    shipped 2026-05-18 — the spawn block now overrides
+    `mob_name` / `mob_keywords` / `mob_description` for CLONE
+    casts, and the spawned HP mirrors the caster's max HP. Name
+    reads "a clone of {caster}", keywords are `["clone", caster]`,
+    description is "A flickering clone of {caster} stands here."
+    The downstream broadcast and follower-summon diagnostic
+    reuse the same `mob_name`, so the cast emits "You summon a
+    clone of AdminChar to your side..." with no Knight Errant
+    leak. Mob still inherits the proto's combat stats and
+    natural damage — a real per-class scale (Warrior crit /
+    Sorcerer spell-power) would need pulling more components
+    from the caster, which can land later.
+
+    **SIMULACRUM target-mirror** shipped 2026-05-18. Parallel
+    branch to CLONE: resolves `target_word` via
+    `find_online_player_anywhere` (the L1.1 helper), then
+    overrides `mob_name` to "a simulacrum of {target}",
+    keywords to `["simulacrum", target]`, description to "A
+    wavering simulacrum of {target} stands here, eyes vacant."
+    Falls back to mirroring the caster on miss/ambiguity so a
+    typo still produces a recognizable spawn instead of the
+    Knight Errant placeholder. Mob target lookup (cross-zone
+    mob mirroring) is a follow-up — for now SIMULACRUM is
+    player-only on the remote-mirror path. Live verified:
+    AdminChar in zone 30 casts `simulacrum TestRogue` while
+    TestRogue is in zone 100 → "A wavering simulacrum of
+    TestRogue stands here, eyes vacant." spawns next to
+    AdminChar.
+  - **2026-05-17 follow-up:** ANIMATE_DEAD now consumes a target
+    corpse when one is named: cast `animate dead <keyword>` finds
+    a Corpse Item in the caster's room matching the keyword and
+    despawns it before raising the skeleton. Bare cast (no arg)
+    still spawns the default skeleton.
+    **Player-corpse safeguard:** new `PlayerCorpse` companion
+    marker (added at player death in `combat.rs::handle_death`)
+    lets ANIMATE_DEAD distinguish player corpses from mob
+    corpses. When the only matching corpse is a player corpse, the
+    cast refuses with "Necromancy on a fellow adventurer's
+    remains? Some lines aren't crossed." Live verified.
+    **Player-corpse looting protection:** parallel gate in
+    `cmd_get` refuses non-staff looters from another player's
+    corpse with "X isn't yours to loot — disturbing another
+    adventurer's remains requires their consent." Staff bypass via
+    `is_staff`. PlayerCorpse marker is round-tripped through the
+    corpse snapshot (save+load includes `is_player: bool`) so the
+    consent gate survives restarts.
+    **HP scaling:** new `CorpseOriginLevel(i32)` component carries
+    the dead actor's level. Set at both mob and player corpse
+    spawn. ANIMATE_DEAD reads it and scales the spawned skeleton's
+    HP by `(level / 5).clamp(1, 5)` — animating an L10 mob gives
+    a 2× skeleton, L25+ caps at 5×. Round-tripped through the
+    corpse snapshot too. Live verified L1 = 1× (10 HP base).
 - **L4. UX glitch — pre-loop success template fires before gate
-  refusal.** The cast confirmation ("You complete the summoning
-  ritual.") emits unconditionally before the dispatcher arm runs.
-  When gates refuse, the caster sees both lines — confusing.
-  Fix would require either a per-spell suppression flag or a
-  restructure to defer the success emit until the arm decides.
-  Documented; not blocking.
+  refusal.** ✅ Shipped 2026-05-17. Restructured the success-line
+  emission: damage spells (any AbilityEffect with effect_type=
+  "damage") still fire pre-loop so death broadcasts come after the
+  cast confirmation; non-damage spells defer the header into
+  `pending_header` and emit it post-loop ONLY when at least one
+  applied_msg lacks a refusal signature. Refusal substrings
+  recognized: "(refused", "not accepting", "undead", "no life",
+  "self target", "self-drain", "(no ", "(unknown", "(absorbed",
+  "(already there", "(no direction", "(target busy/NoSummon",
+  "(different zone", "(level cap", "(mob NoSummon", "(room
+  NoSummon", "(arena asymmetry", "(target not dead". Live verified:
+  SUMMON on NoSummon-protected target shows just "TestRogue is
+  not accepting summons." with no leading "You complete the
+  summoning ritual."; PROT_FROM_EVIL success still shows
+  "You protect TestRogue from evil."
 - **L5. Cast success template confusion.** Originally the SUMMON
   spell's `success_to_caster` was "You vanish in a flash of light!"
   — copy-pasted from generic teleport but wrong (the caster

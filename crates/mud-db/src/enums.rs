@@ -37,6 +37,45 @@ pub enum ResetMode {
     Normal,
 }
 
+/// Source of the rest a character has prepaid for their next sleep.
+/// `NONE` is the empty state — nothing queued. `QUIT` is the stamp
+/// dropped by the disconnect path when the player logs off without a
+/// real rest source acquired; tier is always 0 and the wake path
+/// skips the Refreshed Effect (just clears the source on first XP
+/// gain). `CAMP` / `INN` / `HOUSE` are the real acquired sources;
+/// each pairs with a `restTier` in 1..=3 and spawns Refreshed plus
+/// any Wake Effect attachments at first-XP-gain.
+///
+/// Mirrors the Prisma schema's `RestSource` enum verbatim. Same
+/// embedded-quote `type_name` pattern as the other Prisma-generated
+/// mixed-case enums — the bare form would fold to lowercase under
+/// sqlx 0.8's `SELECT $1::regtype::oid` lookup and fail at encode.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[sqlx(type_name = r#""RestSource""#, rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RestSource {
+    #[default]
+    None,
+    Quit,
+    Camp,
+    Inn,
+    House,
+}
+
+impl RestSource {
+    /// Schema-text form for the wire / logs. Round-trips with sqlx's
+    /// `SCREAMING_SNAKE_CASE` rename.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "NONE",
+            Self::Quit => "QUIT",
+            Self::Camp => "CAMP",
+            Self::Inn => "INN",
+            Self::House => "HOUSE",
+        }
+    }
+}
+
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[sqlx(type_name = r#""Hemisphere""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Hemisphere {

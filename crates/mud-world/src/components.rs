@@ -659,12 +659,32 @@ pub struct CoreStats {
 }
 
 impl CoreStats {
-    /// Standard `(score - 10) / 2` bonus, integer-truncated. Negative
-    /// for sub-10 scores. Used by ability formulas (`str_bonus`,
-    /// `dex_bonus`, etc.).
+    /// Stat modifier on the schema's 0..100 scale. `50` is average
+    /// (bonus 0); each 5 points yields ±1. Caps at ±10 to keep the
+    /// modifier readable on the score sheet. Replaces the old D&D
+    /// `(score - 10) / 2` formula that produced +45 at the top of
+    /// the actual scale.
     #[must_use]
     pub fn bonus(score: i32) -> i32 {
-        (score - 10) / 2
+        ((score - 50) / 5).clamp(-10, 10)
+    }
+
+    /// Verbal grade for the score sheet — players don't need a
+    /// signed integer when "excellent" / "great" / "average" tells
+    /// them everything. Same 0..100 bands the new `bonus()` curve
+    /// uses, just bucketed coarser.
+    #[must_use]
+    pub fn grade(score: i32) -> &'static str {
+        match score {
+            i32::MIN..=14 => "abysmal",
+            15..=29 => "feeble",
+            30..=44 => "poor",
+            45..=54 => "average",
+            55..=69 => "good",
+            70..=84 => "great",
+            85..=94 => "excellent",
+            _ => "legendary",
+        }
     }
 }
 
@@ -688,6 +708,37 @@ impl From<CoreStats> for mud_db::characters::CoreStatsPayload {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Fighting(pub Entity);
 
+/// In-progress spell cast. Installed by the casting pipeline when an
+/// ability with `cast_time_rounds > 0` is invoked; decremented once
+/// per tick by `casting_tick` and resolved (re-routed through
+/// `invoke_ability_with` with `skip_queue=true`) when
+/// `ticks_remaining` hits 0. Interrupted by damage, posture change,
+/// movement, `cancel`, `flee`, or a second `cast` command.
+///
+/// `kind_label` is the lowercase string from `AbilityKind::label` —
+/// stored as a string so this component can live in mud-world
+/// without pulling `mud-db` into the dependency graph.
+#[derive(Component, Debug, Clone)]
+pub struct Casting {
+    /// `Ability.id` to resolve when the timer expires.
+    pub ability_id: i32,
+    /// `Ability.name` cached so prompts and broadcasts can render
+    /// it without re-querying the catalog every tick.
+    pub ability_name: String,
+    /// Raw arg string the player typed (`"'magic missile' goblin"`).
+    /// Passed back into `invoke_ability_with` on resolution.
+    pub args: String,
+    /// `AbilityKind::label()` — "spell" / "chant" / "song" / "skill".
+    pub kind_label: String,
+    /// Verb used in messages — "cast" / "chant" / "perform".
+    pub verb: String,
+    /// Ticks until the cast lands. Decremented once per `casting_tick`.
+    /// Starts at `cast_time_rounds * COMBAT_ROUND_TICKS`.
+    pub ticks_remaining: i32,
+    /// Original wind-up length so the prompt can render N/M progress.
+    pub ticks_total: i32,
+}
+
 /// Marker: this entity is stunned and skips combat swings. Inserted by
 /// `stun` effects in `invoke_ability`; removed by `effects_tick` once
 /// every backing `EffectInstance` named "stun" on the entity has
@@ -704,12 +755,31 @@ pub struct Stunned;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Ghost;
 
-/// Marker: this Item is a player corpse. Holds items the dead player
-/// was carrying as `Located` children; the corpse-decay tick despawns
-/// it after `CorpseDecay.remaining_secs` reaches zero, dropping the
-/// contained items to the room first.
+/// Marker: this Item is a corpse (player or mob). Holds items the
+/// dead actor was carrying as `Located` children; the corpse-decay
+/// tick despawns it after `CorpseDecay.remaining_secs` reaches zero,
+/// dropping the contained items to the room first.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Corpse;
+
+/// Companion marker on player corpses (distinct from mob corpses)
+/// so spells like ANIMATE_DEAD can refuse them outright — raising
+/// a fellow adventurer as your undead servant is a hard no even
+/// for the most committed necromancer. Also useful for the
+/// resurrect path's "yours vs theirs" lookups; today the
+/// resurrect arm matches on Named, but Player corpses with this
+/// marker are unambiguous.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PlayerCorpse;
+
+/// Records the dead actor's level at corpse-spawn time. Read by
+/// ANIMATE_DEAD to scale the spawned skeleton's HP — animating a
+/// high-level mob's corpse should yield a beefier undead than
+/// animating a goblin's. Round-tripped through the corpse snapshot
+/// so the level survives a restart. Defaults to 1 on legacy
+/// snapshots that pre-date this component.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CorpseOriginLevel(pub i32);
 
 /// Decay timer on a corpse. Decrements one second per game-second;
 /// when it hits 0 the corpse despawns and any items Located on it
@@ -825,6 +895,38 @@ pub struct ArenaRoom;
 /// tag.
 #[derive(Component, Default, Debug, Clone, Copy)]
 pub struct GuildhallRoom;
+
+/// Rest / repose: room is an inn that sells rental rest.
+/// Carries the display name + the available rental tiers from
+/// `Room.inn_tiers`. `cmd_rent` reads this; absent component →
+/// "There's nothing to rent here." The schema's `inn_tiers` is a
+/// JSON array of `{name, tier (1..=3), fee (gp)}` records; the
+/// loader normalizes them into the typed `InnTier` Vec at boot so
+/// the command path doesn't re-parse on every invocation.
+#[derive(Component, Debug, Clone)]
+pub struct InnRoom {
+    pub inn_name: String,
+    pub tiers: Vec<InnTier>,
+}
+
+/// One row in an [`InnRoom`]'s tier menu. `tier` 1..=3 drives the
+/// `Characters.restTier` set on rent, and `fee` is the flat
+/// per-rental charge in gold pieces (1gp = 100 copper at deduct
+/// time). Per ADR 0001 §3 the fee is flat, NOT per-night.
+#[derive(Debug, Clone)]
+pub struct InnTier {
+    /// Display name shown in the `rent` menu (e.g. "basic",
+    /// "suite", "penthouse"). Matched case-insensitively against
+    /// the `rent <name>` argument.
+    pub name: String,
+    /// Tier band 1..=3 (basic / suite / penthouse). Drives the
+    /// Refreshed Effect strength and the offline Repose fill
+    /// table at login time.
+    pub tier: i32,
+    /// Flat charge in gold pieces. Multiplied by 100 at deduct
+    /// time to land in copper-unit wealth.
+    pub fee_gp: i32,
+}
 
 /// Marker on rooms with `Room.allows_mobs = false`. Wandering
 /// mobs refuse to enter; staff-spawned mobs may still be placed
@@ -1022,10 +1124,92 @@ pub struct Meditating;
 /// "long rest with checkpoint" rather than the legacy
 /// safe-logout flow, since the runtime auto-saves on disconnect
 /// anyway.
+///
+/// `kit_entity` / `kit_world_key` are populated when the player
+/// typed `camp <kit-name>` — the resolved kit item is captured at
+/// setup start and consumed on completion (rest / repose R2). The
+/// kit is NOT consumed on cancel; the design doc's edge-case table
+/// is explicit on this.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Camping {
     pub since_tick: u64,
     pub started_in: Entity,
+    /// Reference to the named kit item resolved at setup start.
+    /// `None` for bare `camp` (no arg) — tier falls through to the
+    /// no-kit branch of `computeCampTier`.
+    pub kit_entity: Option<Entity>,
+    /// Cached `(zone, id)` of the kit's proto so the post-consume
+    /// wake-load path can re-query `ObjectWakeEffects` without
+    /// reaching back to the (despawned) entity.
+    pub kit_world_key: Option<(i32, i32)>,
+    /// Cached `camp_kit_tier` from the kit's proto. Folded into
+    /// `computeCampTier` at completion; cached here so the camp
+    /// path doesn't reach back into `ObjectPrototypes` after the
+    /// kit despawn.
+    pub kit_tier_bonus: i32,
+}
+
+/// Rest / repose: the sticky **Repose** pool, the queued
+/// **RestSource**, and the quality tier. All three round-trip
+/// through `Characters.repose` / `Characters.restSource` /
+/// `Characters.restTier`. The component is attached at login (R3)
+/// and mutated by:
+///
+/// - `cmd_rent` → set source to `Inn`, tier to chosen menu row
+/// - `cmd_camp` completion → set source to `Camp`, tier to
+///   `computeCampTier` result
+/// - `save_player` disconnect path → stamps `Quit`/tier 0 when the
+///   current source is `None` (so the player who logs off without
+///   buying rest doesn't silently miss the 30-min grace window)
+/// - first XP gain → clears source to `None` and tier to 0,
+///   spawns Refreshed Effect, applies Wake Effect attachments
+/// - any XP gain → spends Repose to multiply the gain
+///
+/// Per ADR 0001 §2 the Repose pool is sticky forever — never decays
+/// while the character is alive. Per ADR 0001 §1 source is consumed
+/// on first XP gain, not login.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RestState {
+    pub repose: i32,
+    pub source: mud_db::enums::RestSource,
+    pub tier: i32,
+}
+
+impl Default for RestState {
+    fn default() -> Self {
+        Self {
+            repose: 0,
+            source: mud_db::enums::RestSource::None,
+            tier: 0,
+        }
+    }
+}
+
+/// Rest / repose: transient component populated at camp completion
+/// when a kit was consumed. Holds the kit's `(zone, id)` so the
+/// next-XP-gain wake consumer can query `ObjectWakeEffects` for
+/// the original kit even after the kit entity has been despawned.
+/// Cleared by the wake consumer once the rows have been applied.
+///
+/// We carry the key (not the rows) because the rows live in the DB
+/// and the wake load is async; the synchronous camp-completion path
+/// can't `await` the load, so we defer it to the (already-async-
+/// capable) XP-gain pathway.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PendingWakeAttachments {
+    pub kit_zone: i32,
+    pub kit_id: i32,
+}
+
+/// Rest / repose: companion to a Refreshed `EffectInstance`. Records
+/// the flat `RegenBonus` delta the wake path stamped onto the
+/// wearer's `RegenBonus` component so the on-remove tick can subtract
+/// the same amount when Refreshed fades. Mirrors how
+/// `ModifyDelta` round-trips for `effectType="modify"` attachments.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RefreshedBonus {
+    pub hp: i32,
+    pub stamina: i32,
 }
 
 /// Custom arrival / departure messages a staff member uses on
@@ -1096,6 +1280,103 @@ pub struct ScriptVars(pub std::collections::BTreeMap<String, String>);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Flying;
 
+/// Marker: the target is under a `bless`-family buff (cleric BLESS,
+/// paladin BLESS, etc.). Read in `combat::hit_chance_pct` to grant
+/// the attacker a flat +5 accuracy bonus. Installed by the
+/// catchall arm of `invoke_ability_with` when an effect's
+/// `params.flag` resolves to `"bless"`; removed by `effects_tick`
+/// when the last backing "bless" instance expires.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Bless;
+
+/// Marker: the target is under a `sanctuary`-family buff (SANCTUARY,
+/// SOULSHIELD when seeded with the flag). Read in `apply_damage`
+/// to halve incoming damage. Same install/teardown rhythm as
+/// `Bless`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Sanctuary;
+
+/// Marker: the bearer attacks twice per combat round. `combat_tick`
+/// runs a Haste pass after the main swing pass and re-fires
+/// `apply_swing` for every Haste'd attacker whose target is still
+/// alive. Installed by the catchall arm when `flag == "haste"`;
+/// auto-removed by `effects_tick` when the last backing `"haste"`
+/// instance fades.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Haste;
+
+/// Marker on a Room entity: the room is magically lit (ILLUMINATION,
+/// MAGIC_TORCH). `room_is_dark` returns false while the marker is
+/// present; `room_has_light` returns true. Installed by the room-
+/// effect arm of `invoke_ability_with` when an effect's
+/// `params.type` is `"light"`. Removed by `effects_tick` when the
+/// last backing `"light"`-named effect on the room fades.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RoomMagicalLight;
+
+/// Room hazard: leaving or entering the room burns the mover for
+/// `damage_per_move` HP. Installed by the room-effect arm when an
+/// effect's `params.type` is `"burning"` (CIRCLE_OF_FIRE).
+/// Removed by `effects_tick` when the last backing `"burning"`
+/// instance fades.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RoomBurningEffect {
+    pub damage_per_move: i32,
+}
+
+/// Marker on a Room entity: the room is magically darkened
+/// (DARKNESS). `room_is_dark` returns true while the marker is
+/// present, even when the sector is normally lit (city / road)
+/// or the room carries a positive `BaseLightLevel`. Installed by
+/// the room-effect arm when an effect's `params.type` is
+/// `"darkness"`. Removed by `effects_tick` when the last backing
+/// `"darkness"`-named effect on the room fades.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RoomMagicalDarkness;
+
+/// Marker: the bearer's next damage spell lands at +50% amount.
+/// Installed by the HARNESS catchall flag (`empowered` +
+/// `consumeOnCast`); consumed by the damage arm on the next cast
+/// (marker removed + the matching EffectInstance despawned so
+/// `effects` no longer lists it). `effects_tick` is the
+/// duration-based fallback removal — for the rare case where the
+/// player never casts a damage spell before the wind-up expires.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Empowered;
+
+/// Marker: the target is magically invisible (INVISIBLE,
+/// MASS_INVIS). Read in `can_see_player`: an observer without
+/// `DetectInvis` (or admin `HolyLight`) sees nothing where the
+/// target stands. Pair with `DetectInvis` for the see-through.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Invisible;
+
+/// Marker: the bearer can perceive `Invisible` targets. Installed
+/// by the catchall arm when `flag == "detect_invisible"`; removed
+/// by `effects_tick` when the last backing instance fades.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DetectInvis;
+
+/// Tag component on an `EffectInstance` entity: this effect is
+/// what's keeping its target `Invisible`. Used by `effects_tick`
+/// to decide whether the `Invisible` marker on the target should
+/// survive after one INVISIBLE / MASS_INVIS effect expires — if
+/// another tagged effect is still in flight, the target stays
+/// invisible.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct InvisibleSource;
+
+/// Tag component on an `EffectInstance` entity: records the
+/// `(element, percent)` resistance delta this effect added to its
+/// target's `Resistances` map. `effects_tick` reads it on expiry
+/// and subtracts the same delta, so stacked PROT_*/STONE_SKIN
+/// effects unwind cleanly without leaving phantom resistance.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SpellResistanceDelta {
+    pub element: mud_db::enums::ElementType,
+    pub percent: i32,
+}
+
 /// Marker: this mob is mountable. Set on horse/warhorse-style mobs
 /// at content time (currently auto-applied to mobs whose proto
 /// keywords contain "horse" / "mount"; richer content metadata can
@@ -1122,6 +1403,111 @@ pub struct RiddenBy(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct GroupInvite {
     pub from: Entity,
+    pub at: std::time::Instant,
+}
+
+/// Per-room map of magical walls blocking specific exits. Installed
+/// by WALL_OF_STONE / WALL_OF_ICE (and any future opaque barriers);
+/// consulted by `cmd_move` before a player can leave the room
+/// through the matching direction. Stored as a HashMap keyed on
+/// `Direction` so multiple walls across different exits coexist;
+/// the value carries the EffectInstance entity that backs each
+/// wall so the teardown path can remove exactly the expiring
+/// entry (multiple WALL_OF_STONE casts on the same direction
+/// stack, and only the most recent is removed when one fades).
+#[derive(Component, Debug, Default)]
+pub struct RoomBlockedExits {
+    pub by_direction: std::collections::HashMap<mud_db::enums::Direction, RoomBlockedExit>,
+}
+
+/// One blocked-exit entry. `kind_label` is rendered in the refusal
+/// line ("A wall of stone blocks your path." / "A wall of ice
+/// blocks your path."); `backed_by` is the EffectInstance entity
+/// for teardown lookup. `hp` is the remaining hit-point pool for
+/// bash mechanics — when a player `doorbash`es into a wall'd
+/// direction the swing deducts STR-scaled damage; on hp ≤ 0 the
+/// backing instance despawns and the entry drops early, mirroring
+/// how `cmd_doorbash` already handles wood doors. `traversal`
+/// distinguishes the three wall variants:
+/// - `Block` — solid (stone/ice). Refuse all movement; bashable.
+/// - `Slow` — fog. Pass through but charge extra stamina; no bash.
+/// - `Passable` — illusion. Pass silently AND consume the wall on
+///   the first traversal (mirrors legacy ILLUSORY_WALL: once a
+///   traveler steps through, the illusion shatters for everyone).
+#[derive(Debug, Clone)]
+pub struct RoomBlockedExit {
+    pub kind_label: String,
+    pub backed_by: bevy_ecs::entity::Entity,
+    pub hp: i32,
+    pub traversal: WallTraversal,
+}
+
+/// Per-wall traversal semantics. See `RoomBlockedExit::traversal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallTraversal {
+    Block,
+    Slow,
+    Passable,
+}
+
+/// Spell-absorb marker installed by MINOR_GLOBE / MAJOR_GLOBE (and
+/// any equipped item granting the "globe" effect). Hostile spell
+/// damage targeting this entity is *consumed without effect* when
+/// the cast spell's minimum circle is ≤ this value. Legacy:
+/// `EFF_MINOR_GLOBE` blocks circles 1-3, `EFF_MAJOR_GLOBE` blocks
+/// 1-6. The runtime stores only the highest threshold so stacking
+/// MINOR over MAJOR is a no-op (correct legacy semantics). Teardown
+/// in `effects_tick` walks remaining `EffectInstance` rows when the
+/// "globe" effect expires; the marker is removed only when no
+/// backing instance remains so a cast-and-then-item-buff chain
+/// retains coverage.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MaxAbsorbCircle(pub i32);
+
+/// Alignment-protect marker installed by PROT_FROM_EVIL (or items
+/// granting the same effect). Combat-side hook reduces incoming
+/// damage by 20% when the attacker is strongly evil-aligned
+/// (≤ -500) AND the victim is strongly good-aligned (≥ +500) —
+/// mirrors legacy `fight.cpp:1639`. The aligned-victim threshold
+/// is intentional: a neutral player wearing protect-from-evil
+/// doesn't get the discount.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ProtectFromEvil;
+
+/// Mirror of [`ProtectFromEvil`] for inverted alignments.
+/// Reduces damage 20% when attacker is strongly good (≥ +500)
+/// AND victim is strongly evil (≤ -500).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ProtectFromGood;
+
+/// Companion tag on the `EffectInstance` entity for an
+/// alignment-protect spell. The "resistance" flag covers many
+/// flavors (PROT_FROM_FIRE, PROT_FROM_EVIL, ...) and they all
+/// land with `EffectInstance.name = "resistance"`, so the
+/// teardown can't disambiguate by name alone. This tag tells
+/// `effects_tick` which marker (ProtectFromEvil or
+/// ProtectFromGood) corresponds to the expiring instance.
+#[derive(Component, Debug, Clone, Copy)]
+pub enum AlignmentProtectionTag {
+    Evil,
+    Good,
+}
+
+/// Pending summon offer from another player. Set on the recipient
+/// when a caster's SUMMON spell resolves successfully against a
+/// promptable target. The target sees a one-time prompt and types
+/// `accept` to teleport (or `decline` / let it auto-expire). The
+/// 30-second window is enforced by `commands::pending_summon_tick`
+/// — when it elapses, both parties get a notification and the
+/// marker is removed without moving the target. Carries cached
+/// names so the prompt still renders if the caster disconnects or
+/// the destination room despawns.
+#[derive(Component, Debug, Clone)]
+pub struct PendingSummon {
+    pub from: Entity,
+    pub from_name: String,
+    pub dest_room: Entity,
+    pub dest_room_name: String,
     pub at: std::time::Instant,
 }
 
@@ -1868,6 +2254,16 @@ pub struct ExitData {
     /// Schema `ExitFlag::PICKPROOF`. `pick` refuses regardless of
     /// proficiency; the lock is keyed-only or magically sealed.
     pub is_pickproof: bool,
+    /// Schema `ExitFlag::BASHABLE`. `doorbash` only flips this
+    /// exit when set — magical / story doors stay sealed.
+    pub is_bashable: bool,
+    /// Current door HP, decremented by each successful doorbash.
+    /// `None` means the exit isn't bashable at all (legacy:
+    /// magical-seal). 0 means the door has been splintered and
+    /// stays open. Defaults to the seeded
+    /// `RoomExit.hit_points` value (or the engine default when
+    /// NULL), refreshed at boot.
+    pub hit_points: Option<i32>,
 }
 
 #[derive(Component, Debug, Clone, Default)]

@@ -6,7 +6,7 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{
-    broadcast_room_except_players_rendered, broadcast_room_except_rendered,
+    broadcast_room_except_players_rendered, broadcast_room_except_rendered, cap_sentence_start,
     sector_is_outdoor_for_weather,
 };
 use mud_world::Player;
@@ -119,7 +119,7 @@ fn sleep_outdoor_mobs(world: &mut World) {
                 world,
                 room,
                 &[mob],
-                &format!("{name} settles down to sleep.\r\n"),
+                &cap_sentence_start(&format!("{name} settles down to sleep.\r\n")),
             );
         }
     }
@@ -153,7 +153,7 @@ fn wake_night_sleepers(world: &mut World) {
                     world,
                     room,
                     &[mob],
-                    &format!("{name} wakes and stretches.\r\n"),
+                    &cap_sentence_start(&format!("{name} wakes and stretches.\r\n")),
                 );
             }
         }

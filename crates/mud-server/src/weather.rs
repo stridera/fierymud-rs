@@ -65,6 +65,16 @@ pub fn weather_tick(world: &mut World) {
     // Track zones whose precip changed so the post-tick pass can
     // broadcast "the sky shifts" lines to outdoor players in them.
     let mut precip_changes: Vec<(i32, PrecipKind, PrecipKind)> = Vec::new();
+    // Snapshot the lock map (zone -> expiry). Skip drift on any zone
+    // whose lock is still in the future; opportunistically clear
+    // expired locks at the same time so the map doesn't grow without
+    // bound after a long-running session.
+    let now = std::time::Instant::now();
+    let locked_zones: std::collections::HashSet<i32> = {
+        let mut locks = world.resource_mut::<mud_world::WeatherDriftLocks>();
+        locks.by_zone.retain(|_, expiry| *expiry > now);
+        locks.by_zone.keys().copied().collect()
+    };
     {
         let mut weather = world.resource_mut::<WeatherCatalog>();
         for (zone_id, climate) in climates {
@@ -73,6 +83,11 @@ pub fn weather_tick(world: &mut World) {
                 .entry(zone_id)
                 .or_insert_with(|| mud_world::default_weather_for_climate(climate))
                 .precip;
+            if locked_zones.contains(&zone_id) {
+                // CONTROL_WEATHER / RAIN are holding this zone — leave
+                // both temp and precip alone for the rest of the lock.
+                continue;
+            }
             let entry = weather.by_zone.get_mut(&zone_id).unwrap();
             entry.temp = drift_temp(entry.temp, climate, season);
             entry.precip = drift_precip(entry.precip, climate);

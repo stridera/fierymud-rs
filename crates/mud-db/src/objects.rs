@@ -78,6 +78,14 @@ pub struct Object {
     /// Maximum body size allowed to wear (B6). `None` = no
     /// ceiling.
     pub max_size: Option<String>,
+    /// Camp-kit tier (1 = basic, 2 = premium) for the rest / repose
+    /// system. `None` for ordinary items. When a player runs
+    /// `camp <kit-name>` and references this object by keyword, the
+    /// kit is consumed on camp completion and its tier folds into
+    /// `computeCampTier`. Also gates which objects can carry
+    /// `ObjectWakeEffects` rows (a kit's wake attachments apply at
+    /// first-XP-gain).
+    pub camp_kit_tier: Option<i32>,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -111,7 +119,8 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             decompose_timer,
             allowed_races::text[] AS "allowed_races!: Vec<String>",
             min_size::text AS "min_size?: String",
-            max_size::text AS "max_size?: String"
+            max_size::text AS "max_size?: String",
+            camp_kit_tier
         FROM "Objects"
         ORDER BY zone_id, id
         "#

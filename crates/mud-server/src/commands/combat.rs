@@ -172,8 +172,8 @@ inventory::submit! {
         usage: "kick",
         summary: "Make an immediate kick attack on your current target.",
         long: "Extra attack outside the normal combat-tick rhythm. \
-               Damage = dmg_roll + 4. You must already be fighting \
-               someone.",
+               Rolls weapon damage scaled by attack_power, then \
+               adds +4. You must already be fighting someone.",
     },
     run: cmd_kick,
     }
@@ -206,7 +206,7 @@ inventory::submit! {
     help: Help {
         usage: "tripup [<target>]",
         summary: "Trip target into Resting posture (lighter than stomp).",
-        long: "Costs 5 stamina, deals 1/4 your dmg_roll, sets the \
+        long: "Costs 5 stamina, deals 1/4 your damage, sets the \
                target to Resting. Like stomp but cheaper and \
                leaves them slightly less prone.",
     },
@@ -223,7 +223,7 @@ inventory::submit! {
     help: Help {
         usage: "sweep",
         summary: "Sweeping kick — knock every standing mob in room prone.",
-        long: "Costs 12 stamina. Deals 1/4 dmg_roll to every \
+        long: "Costs 12 stamina. Deals 1/4 damage to every \
                Standing Mob in the room and sets each to Sitting. \
                Players never targeted.",
     },
@@ -239,9 +239,9 @@ inventory::submit! {
     category: Category::Combat,
     help: Help {
         usage: "roundhouse",
-        summary: "Powerful kick — 1.5x dmg_roll on your current target.",
+        summary: "Powerful kick — 1.5x damage on your current target.",
         long: "Costs 7 stamina. Heavier kick than the basic `kick` \
-               skill (which adds +4); pure dmg_roll multiplier. \
+               skill (which adds +4); pure damage multiplier. \
                Requires you to be fighting someone.",
     },
     run: cmd_roundhouse,
@@ -257,7 +257,7 @@ inventory::submit! {
     help: Help {
         usage: "stomp [<target>]",
         summary: "Knock the target prone (Sitting posture).",
-        long: "Costs 6 stamina, deals half your dmg_roll, sets the \
+        long: "Costs 6 stamina, deals half your damage, sets the \
                target's posture to Sitting. Default target is your \
                current Fighting target. Refused on already-prone \
                targets.",
@@ -293,7 +293,7 @@ inventory::submit! {
     help: Help {
         usage: "rend [<target>]",
         summary: "Tearing attack — damage plus bleed effect.",
-        long: "Costs 7 stamina, deals dmg_roll damage, applies a \
+        long: "Costs 7 stamina, deals weapon damage, applies a \
                `bleed` EffectInstance for 30s. Default target is \
                the current Fighting target. Refused if the target \
                is already bleeding.",
@@ -311,7 +311,7 @@ inventory::submit! {
     help: Help {
         usage: "gouge [<target>]",
         summary: "Eye gouge — damage plus a temporary blind effect.",
-        long: "Costs 7 stamina, deals dmg_roll damage, applies a \
+        long: "Costs 7 stamina, deals weapon damage, applies a \
                `blind` EffectInstance for 30s. Default target is \
                your current Fighting target. Refused if the target \
                is already blinded.",
@@ -329,7 +329,7 @@ inventory::submit! {
     help: Help {
         usage: "springleap <target>",
         summary: "Out-of-combat leaping kick — 1.5x damage opener.",
-        long: "Deals 1.5x your dmg_roll on the opening swing and \
+        long: "Deals 1.5x your damage on the opening swing and \
                engages the target. Refused if you're already \
                fighting or if the target is already in combat.",
     },
@@ -346,7 +346,7 @@ inventory::submit! {
     help: Help {
         usage: "throatcut <target>",
         summary: "Out-of-combat assassination — 2.5x damage opener.",
-        long: "Like backstab but heavier: 2.5x your dmg_roll on \
+        long: "Like backstab but heavier: 2.5x your damage on \
                the opening swing. Costs 8 stamina. Same engagement \
                rules — refused if you or target are already in \
                combat.",
@@ -364,7 +364,7 @@ inventory::submit! {
     help: Help {
         usage: "backstab <target>",
         summary: "Surprise opener for double damage; out-of-combat only.",
-        long: "Deals 2x your dmg_roll on the opening swing and \
+        long: "Deals 2x your damage on the opening swing and \
                engages the target. Refused if you're already \
                fighting (the target sees you coming) or if your \
                target is already in combat with someone else.",
@@ -383,7 +383,7 @@ inventory::submit! {
         usage: "hitall",
         summary: "One swing at every hostile mob in your room.",
         long: "Costs 10 stamina. Damages each Mob in the room \
-               for half your dmg_roll. Mobs with no Health (test \
+               for half your damage. Mobs with no Health (test \
                dummy) are skipped. The first surviving mob \
                becomes your Fighting target if you weren't \
                already fighting. Players are never targeted.",
@@ -752,7 +752,7 @@ inventory::submit! {
     help: Help {
         usage: "bash <target>",
         summary: "Slam a target, knocking them off their feet.",
-        long: "Deals dmg_roll+3 damage and forces the target into a \
+        long: "Deals weapon damage + 3 and forces the target into a \
                sitting posture. Targets without combat stats simply \
                take the damage.",
     },
@@ -813,9 +813,84 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
-    let cur_state = world
+    // Wall-bash gate. If a WALL_OF_STONE / WALL_OF_ICE blocks this
+    // direction, the swing slams into the wall instead of the door
+    // beyond. Deduct STR-scaled damage from the per-direction HP
+    // pool; on hp ≤ 0 despawn the backing EffectInstance and drop
+    // the entry so movement clears. Wall HP defaults 100 (ice) /
+    // 200 (stone) on the cast site so an unmodified wall survives
+    // ~20-40 bashes.
+    let wall_entry = world
+        .get::<mud_world::RoomBlockedExits>(room)
+        .and_then(|b| b.by_direction.get(&dir).cloned());
+    if let Some(wall) = wall_entry {
+        drain_stamina(world, player, cost);
+        let str_bonus = world
+            .get::<mud_world::CoreStats>(player)
+            .map(|s| mud_world::CoreStats::bonus(s.strength))
+            .unwrap_or(0);
+        let damage = (5 + str_bonus).max(1);
+        let new_hp = wall.hp.saturating_sub(damage);
+        let player_name = name_of(world, player);
+        let dir_label = direction_name(dir);
+        let kind = wall.kind_label.clone();
+        if new_hp <= 0 {
+            // Crumble — despawn the backing instance, drop the
+            // map entry, broadcast the crash. The teardown path
+            // in effects.rs is keyed off the EffectInstance's
+            // expiry; we beat it to the punch here.
+            if let Ok(em) = world.get_entity_mut(wall.backed_by) {
+                em.despawn();
+            }
+            if let Some(mut b) = world.get_mut::<mud_world::RoomBlockedExits>(room) {
+                b.by_direction.remove(&dir);
+            }
+            send_to(
+                world,
+                player,
+                format!(
+                    "You smash through the {kind} {dir_label} with a final shattering blow!\r\n"
+                ),
+            );
+            broadcast_room_except_players_rendered(
+                world,
+                room,
+                &[player],
+                &format!(
+                    "{player_name} shatters the {kind} {dir_label} into a thousand pieces!\r\n"
+                ),
+            );
+        } else {
+            if let Some(mut b) = world.get_mut::<mud_world::RoomBlockedExits>(room)
+                && let Some(entry) = b.by_direction.get_mut(&dir)
+            {
+                entry.hp = new_hp;
+            }
+            send_to(
+                world,
+                player,
+                format!(
+                    "You hammer the {kind} {dir_label} — it cracks but holds (~{new_hp} HP).\r\n"
+                ),
+            );
+            broadcast_room_except_players_rendered(
+                world,
+                room,
+                &[player],
+                &format!(
+                    "{player_name} slams into the {kind} {dir_label} with a thunderous crash!\r\n"
+                ),
+            );
+        }
+        return;
+    }
+    let (cur_state, cur_hp, is_bashable) = world
         .get::<Exits>(room)
-        .and_then(|e| e.0.get(&dir).map(|ed| ed.state));
+        .and_then(|e| {
+            e.0.get(&dir)
+                .map(|ed| (Some(ed.state), ed.hit_points, ed.is_bashable))
+        })
+        .unwrap_or((None, None, false));
     let Some(state) = cur_state else {
         send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
         return;
@@ -824,20 +899,58 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("It's already open {}.\r\n", direction_name(dir)));
         return;
     }
+    if !is_bashable {
+        send_to(world, player, format!("The way {} is sealed by something stronger than your shoulder.\r\n", direction_name(dir)));
+        return;
+    }
     drain_stamina(world, player, cost);
-    flip_door_both_sides(world, room, dir, ExitState::Open);
-
+    // Roll the hit. STR bonus drives the damage taken; default ~5
+    // per swing means an unmodified door (50 HP) survives ~10
+    // bashes. CoreStats::bonus on the 0-100 scale gives ±10.
+    let str_bonus = world
+        .get::<mud_world::CoreStats>(player)
+        .map(|s| mud_world::CoreStats::bonus(s.strength))
+        .unwrap_or(0);
+    let damage = (5 + str_bonus).max(1);
+    let new_hp = cur_hp.unwrap_or(50).saturating_sub(damage);
     let player_name = name_of(world, player);
-    send_to(world, player, format!(
-        "You bash open the way {}!\r\n",
-        direction_name(dir),
-    ));
-    broadcast_room_except_players_rendered(
-        world,
-        room,
-        &[player],
-        &format!("{player_name} bashes the door {} wide open!\r\n", direction_name(dir)),
-    );
+    if new_hp <= 0 {
+        // Splintered — fully open on this side AND mirror on the
+        // far side so the player can walk through.
+        flip_door_both_sides(world, room, dir, ExitState::Open);
+        // Reset HP for future re-locks (some triggers re-close).
+        if let Some(mut exits) = world.get_mut::<Exits>(room)
+            && let Some(ed) = exits.0.get_mut(&dir)
+        {
+            ed.hit_points = Some(50);
+        }
+        send_to(world, player, format!(
+            "You bash open the way {} with a splintering crash!\r\n",
+            direction_name(dir),
+        ));
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} bashes the door {} wide open!\r\n", direction_name(dir)),
+        );
+    } else {
+        if let Some(mut exits) = world.get_mut::<Exits>(room)
+            && let Some(ed) = exits.0.get_mut(&dir)
+        {
+            ed.hit_points = Some(new_hp);
+        }
+        send_to(world, player, format!(
+            "You shoulder-charge the door {} — it groans but holds.\r\n",
+            direction_name(dir),
+        ));
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} slams against the door {} with a thunderous crash!\r\n", direction_name(dir)),
+        );
+    }
 }
 pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     if !require_alert_posture(world, player, "attack") {
@@ -909,7 +1022,9 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         send_to(
             world,
             player,
-            format!("{target_name_owned} radiates a calm that turns your blow aside.\r\n"),
+            crate::commands::cap_sentence_start(&format!(
+                "{target_name_owned} radiates a calm that turns your blow aside.\r\n"
+            )),
         );
         return;
     }
@@ -991,7 +1106,7 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     let self_max_hp = world.get::<Health>(player).map_or(1, |h| h.max).max(1);
     let self_stats = world.get::<CombatStats>(player).copied();
     // attack_power feeds the consider verdict in place of the
-    // legacy dmg_roll. Same intent: "how hard does this side hit?"
+    // legacy damage. Same intent: "how hard does this side hit?"
     let self_dmg = self_stats.map_or(0, |c| c.attack_power);
     let self_accuracy = self_stats.map_or(0, |c| c.accuracy);
     let self_evasion = self_stats.map_or(0, |c| c.evasion);
@@ -1002,7 +1117,12 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     let target_evasion = target_stats.map_or(0, |c| c.evasion);
 
     if target_max_hp == 0 {
-        send_rendered(world, player, &format!("{target_name} doesn't look like a fighter at all.\r\n"),
+        send_rendered(
+            world,
+            player,
+            &crate::commands::cap_sentence_start(&format!(
+                "{target_name} doesn't look like a fighter at all.\r\n"
+            )),
         );
         return;
     }
@@ -1031,43 +1151,54 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     // player having to parse the prose.
     let verdict_open = consider_verdict_color(ratio);
     let mut out = format!(
-        "<b:cyan>{target_name}</> {verdict_open}{verdict}</>\r\n"
+        "<b:cyan>{}</> {verdict_open}{verdict}</>\r\n",
+        crate::commands::cap_sentence_start(&target_name),
     );
-    // Hit-chance hints both ways. Use the same formula combat does
-    // so what `consider` predicts matches what swings actually land.
-    // Each percentage is graded green→red so a player can compare
-    // their swing chance vs the target's at a glance.
+    // Hit chances + raw HP are *god-only*. Mortal players see a
+    // verbal impression of the target's wound state instead of an
+    // exact integer. Staff need the numbers for tuning passes.
+    let staff = crate::commands::is_staff(world, player);
     let your_chance = crate::combat::hit_chance_pct(self_accuracy, target_evasion);
     let their_chance = crate::combat::hit_chance_pct(target_accuracy, self_evasion);
-    let your_pct_text =
-        hit_chance_color(your_chance).map_or(format!("{your_chance}%"), |open| {
-            format!("{open}{your_chance}%</>")
-        });
-    // Their chance flips the gradient — a high percentage means
-    // *they* land swings reliably (bad for the player), so wrap in
-    // red bands. Reuse the helper but invert: pct >= 65 → red, low
-    // pct → green from the player's perspective.
-    let their_pct_text = match their_chance {
-        i32::MIN..=14 => format!("<b:green>{their_chance}%</>"),
-        15..=34 => format!("<green>{their_chance}%</>"),
-        35..=64 => format!("{their_chance}%"),
-        65..=84 => format!("<red>{their_chance}%</>"),
-        _ => format!("<b:red>{their_chance}%</>"),
-    };
-    out.push_str(&format!(
-        "Your strikes would land about {your_pct_text}; theirs about {their_pct_text}.\r\n",
-    ));
-    // Surface the target's actual current HP so the player can
-    // judge "is this thing already wounded?" before engaging.
     let target_hp = world.get::<Health>(target).map_or(0, |h| h.hp).max(0);
     let target_pct = if target_max_hp > 0 {
         (target_hp * 100) / target_max_hp
     } else {
         0
     };
-    out.push_str(&format!(
-        "Their condition: <b:yellow>{target_hp}/{target_max_hp} HP</> ({target_pct}%).\r\n",
-    ));
+    if staff {
+        let your_pct_text =
+            hit_chance_color(your_chance).map_or(format!("{your_chance}%"), |open| {
+                format!("{open}{your_chance}%</>")
+            });
+        let their_pct_text = match their_chance {
+            i32::MIN..=14 => format!("<b:green>{their_chance}%</>"),
+            15..=34 => format!("<green>{their_chance}%</>"),
+            35..=64 => format!("{their_chance}%"),
+            65..=84 => format!("<red>{their_chance}%</>"),
+            _ => format!("<b:red>{their_chance}%</>"),
+        };
+        out.push_str(&format!(
+            "Your strikes would land about {your_pct_text}; theirs about {their_pct_text}.\r\n",
+        ));
+        out.push_str(&format!(
+            "Their condition: <b:yellow>{target_hp}/{target_max_hp} HP</> ({target_pct}%).\r\n",
+        ));
+    } else {
+        // Mortal: verbal impression only. Mirrors the classic MUD
+        // `consider` flavor — give a feel for how worn-down the
+        // target looks, never the exact ratio. Uses a pronoun so
+        // the line doesn't repeat the target name a second time.
+        let impression = match target_pct {
+            100 => "<green>looks untouched</>",
+            90..=99 => "<green>has only a few scratches</>",
+            70..=89 => "<yellow>is wounded</>",
+            40..=69 => "<yellow>is bleeding heavily</>",
+            10..=39 => "<red>looks badly hurt</>",
+            _ => "<b:red>is on the verge of death</>",
+        };
+        out.push_str(&format!("It {impression}.\r\n"));
+    }
     // Aggro hint: same threshold the room-entry check uses, so
     // `consider` matches the auto-engage rule. Players passing
     // through a known-hostile zone can size up the danger before
@@ -1348,7 +1479,14 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
         let pool = world.get::<mud_world::Wealth>(target).map_or(0, |w| w.0);
         let take = (pool / 4).min(i64::from(player_level) * 100).max(0);
         if take == 0 {
-            send_to(world, player, format!("{target_name} has no coin worth lifting.\r\n"));
+            send_to(
+                world,
+                player,
+                format!(
+                    "{} has no coin worth lifting.\r\n",
+                    crate::commands::cap_sentence_start(&target_name)
+                ),
+            );
             return;
         }
         if let Some(mut w) = world.get_mut::<mud_world::Wealth>(target) {
@@ -1385,7 +1523,10 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
         send_rendered(
             world,
             player,
-            &format!("{target_name} hasn't got '{what}' on them.\r\n"),
+            &format!(
+                "{} hasn't got '{what}' on them.\r\n",
+                crate::commands::cap_sentence_start(&target_name)
+            ),
         );
         return;
     };
@@ -1480,6 +1621,9 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
 }
 
 pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
+    // Panic exit cancels any in-progress cast — no concentration to
+    // be had while bolting for the door.
+    crate::casting::cancel_own_cast(world, player);
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
@@ -1630,8 +1774,8 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     };
 
     // Skill base damage scales with the attacker's attack_power.
-    // Pre-pivot this read `dmg_roll / 2`; in the new model
-    // attack_power is a +%, so we recover an effective dmg_roll
+    // Pre-pivot this read `damage / 2`; in the new model
+    // attack_power is a +%, so we recover an effective damage
     // as `attack_power / 5` (the inverse of the migration's
     // `damage_roll * 5 = attack_power` mapping).
     let dmg = world
@@ -2144,7 +2288,14 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     };
     let Some(weapon) = weapon else {
         let target_name = name_or(world, target, "(unknown)");
-        send_to(world, player, format!("{target_name} isn't wielding anything.\r\n"));
+        send_to(
+            world,
+            player,
+            format!(
+                "{} isn't wielding anything.\r\n",
+                crate::commands::cap_sentence_start(&target_name)
+            ),
+        );
         return;
     };
     let Some(target_room) = world
@@ -2192,10 +2343,28 @@ pub(crate) fn cmd_guard(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("none") {
-        let had = world.get::<mud_world::Guarding>(player).is_some();
+        let was_guarding = world.get::<mud_world::Guarding>(player).map(|g| g.0);
         try_remove::<mud_world::Guarding>(world, player);
-        if had {
+        if let Some(target) = was_guarding {
             send_to(world, player, "You stop guarding.\r\n");
+            let target_name = name_of(world, target);
+            let player_name = name_of(world, player);
+            send_rendered(
+                world,
+                target,
+                &format!("{player_name} stops guarding you.\r\n"),
+            );
+            if let Some(located) = world.get::<Located>(player).copied() {
+                crate::commands::broadcast_room_visual(
+                    world,
+                    located.0,
+                    player,
+                    &[player, target],
+                    &crate::commands::cap_sentence_start(&format!(
+                        "{player_name} steps back from {target_name}'s side.\r\n"
+                    )),
+                );
+            }
         } else {
             send_to(world, player, "You aren't guarding anyone.\r\n");
         }
@@ -2216,14 +2385,24 @@ pub(crate) fn cmd_guard(world: &mut World, player: Entity, args: &str) {
         .entity_mut(player)
         .insert(mud_world::Guarding(target));
     let n = name_of(world, target);
+    let player_name = name_of(world, player);
     send_to(world, player, format!("You begin guarding {n}.\r\n"));
     send_rendered(
         world,
         target,
-        &format!(
-            "{} stands ready to defend you.\r\n",
-            name_of(world, player)
-        ),
+        &format!("{player_name} stands ready to defend you.\r\n"),
+    );
+    // Broadcast to the rest of the room so allies see the formation
+    // forming. A "X moves to Y's side" line is more atmospheric than
+    // the silent state-change and matches legacy guard UX.
+    crate::commands::broadcast_room_visual(
+        world,
+        located.0,
+        player,
+        &[player, target],
+        &crate::commands::cap_sentence_start(&format!(
+            "{player_name} moves to {n}'s side, ready to defend them.\r\n"
+        )),
     );
 }
 pub(crate) fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
@@ -2601,10 +2780,10 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     }
 
     // Effective legacy damroll for the +3 flat formula.
-    let dmg_roll = world
+    let damage = world
         .get::<CombatStats>(player)
         .map_or(1, |cs| cs.attack_power / 5);
-    let damage = (dmg_roll + 3).max(1);
+    let damage = (damage + 3).max(1);
     drain_stamina(world, player, cost);
 
     let target_name = name_of(world, target);

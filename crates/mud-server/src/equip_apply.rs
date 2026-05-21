@@ -432,6 +432,7 @@ mod tests {
                 allowed_races: vec![],
                 min_size: None,
                 max_size: None,
+                camp_kit_tier: None,
             },
         );
         world.insert_resource(protos);
@@ -545,6 +546,7 @@ mod tests {
                 allowed_races: vec![],
                 min_size: None,
                 max_size: None,
+                camp_kit_tier: None,
             },
         );
         world.insert_resource(protos);

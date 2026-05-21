@@ -1,5 +1,7 @@
 mod admin;
+mod aggression;
 mod camp;
+mod casting;
 mod combat;
 mod commands;
 mod corpses;
@@ -13,6 +15,7 @@ mod item_decay;
 mod login;
 mod memorize;
 mod regen;
+mod rest;
 mod respawn;
 mod shops;
 mod sleep;
@@ -145,6 +148,7 @@ async fn main() {
     world.insert_resource(mud_world::MudClock::default());
     world.insert_resource(mud_world::HousingIndex::default());
     world.insert_resource(respawn::MobRespawnTimers::default());
+    world.insert_resource(aggression::AggressionFormulaCache::default());
     world.insert_resource(mud_script::LuaHost::default());
     // Install the skill-dispatch shim. The Lua corpus calls
     // `skills.execute(actor, "kick", target)` from combat AI; the
@@ -191,6 +195,12 @@ async fn main() {
     for mob in mob_entities {
         equip_apply::recompute_equipped_for(&mut world, mob);
     }
+
+    // K4 dead-spell audit: walk every SPELL in the catalog and warn
+    // about content gaps (zero AbilityEffect rows OR an effect_type
+    // with no dispatcher arm). Runs once at boot so the gap surfaces
+    // in syslog without per-cast noise.
+    commands::audit_dead_spells(&world);
 
     // Overlay persisted weather (if any) on top of the climate-default
     // state the loader populated. Silent no-op on first boot.
@@ -384,6 +394,8 @@ async fn main() {
             (
                 advance_tick,
                 mud_clock_tick,
+                casting::casting_tick,
+                commands::info::pending_summon_tick,
                 combat::combat_tick,
                 combat::corpse_decay_tick,
                 item_decay::item_decay_tick,

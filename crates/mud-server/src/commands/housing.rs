@@ -407,6 +407,8 @@ fn synthesize_single_room(
                     keywords: Vec::new(),
                     is_hidden: false,
                     is_pickproof: false,
+                    is_bashable: false,
+                    hit_points: None,
                 },
             );
         }
@@ -421,6 +423,8 @@ fn synthesize_single_room(
                     keywords: Vec::new(),
                     is_hidden: false,
                     is_pickproof: false,
+                    is_bashable: false,
+                    hit_points: None,
                 },
             );
         }

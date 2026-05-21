@@ -232,6 +232,29 @@ pub fn effects_tick(world: &mut World) {
                     delta.amount,
                 );
             }
+            // Rest / repose R6: when the Refreshed Effect fades,
+            // subtract the RegenBonus delta the wake path stamped.
+            // The companion `RefreshedBonus` component records the
+            // exact amount so stacked Refresheds (rare — would
+            // require a mid-session re-rent and re-consume) cleanly
+            // unwind one at a time.
+            crate::rest::unwind_refreshed_bonus(world, eff_entity, target);
+            // Reverse a `SpellResistanceDelta` companion the same way
+            // ModifyDelta unwinds. Stacked PROT_*/STONE_SKIN cleanly
+            // peel back to whatever the underlying item-resistance
+            // value was.
+            if let Some(delta) =
+                world.get::<mud_world::SpellResistanceDelta>(eff_entity).copied()
+                && world.get_entity(target).is_ok()
+            {
+                if let Some(mut r) = world.get_mut::<mud_world::Resistances>(target) {
+                    let entry = r.0.entry(delta.element).or_insert(0);
+                    *entry = entry.saturating_sub(delta.percent);
+                    if *entry == 0 {
+                        r.0.remove(&delta.element);
+                    }
+                }
+            }
             if let Ok(e) = world.get_entity_mut(eff_entity) {
                 e.despawn();
             }
@@ -279,6 +302,322 @@ pub fn effects_tick(world: &mut World) {
                 };
                 if !still_hidden {
                     try_remove::<Stealth>(world, target);
+                }
+            }
+            // Flying marker mirrors the Stealth pattern — alive only
+            // while at least one backing effect (FLY, WINGS_OF_*) is
+            // on the target. Race-set Flying is proto-attached and
+            // not subject to this teardown.
+            if name.eq_ignore_ascii_case("fly") {
+                let still_flying = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("fly")
+                    })
+                };
+                if !still_flying {
+                    try_remove::<mud_world::Flying>(world, target);
+                }
+            }
+            if name.eq_ignore_ascii_case("bless") {
+                let still_blessed = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("bless")
+                    })
+                };
+                if !still_blessed {
+                    try_remove::<mud_world::Bless>(world, target);
+                }
+            }
+            if name.eq_ignore_ascii_case("sanctuary") {
+                let still_sanctified = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("sanctuary")
+                    })
+                };
+                if !still_sanctified {
+                    try_remove::<mud_world::Sanctuary>(world, target);
+                }
+            }
+            if name.eq_ignore_ascii_case("haste") {
+                let still_hasted = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("haste")
+                    })
+                };
+                if !still_hasted {
+                    try_remove::<mud_world::Haste>(world, target);
+                }
+            }
+            if name.eq_ignore_ascii_case("empowered") {
+                let still_empowered = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("empowered")
+                    })
+                };
+                if !still_empowered {
+                    try_remove::<mud_world::Empowered>(world, target);
+                }
+            }
+            // J2 alignment-protect teardown — PROT_FROM_EVIL /
+            // PROT_FROM_GOOD spawn instances with name="resistance"
+            // (shared with element-resistance flavors) but tag the
+            // backing EffectInstance entity with
+            // `AlignmentProtectionTag(Evil|Good)`. When *this*
+            // expiring entity carries that tag, drop the marker only
+            // when no remaining EffectInstance shares the same tag —
+            // mirrors the bless/sanctuary refcount pattern.
+            if let Some(tag) =
+                world.get::<mud_world::AlignmentProtectionTag>(eff_entity).copied()
+            {
+                let still_protected = {
+                    let mut q = world
+                        .query::<(Entity, &EffectInstance, &AppliedTo, &mud_world::AlignmentProtectionTag)>();
+                    q.iter(world).any(|(e, _, applied, t)| {
+                        e != eff_entity
+                            && applied.0 == target
+                            && matches!(
+                                (*t, tag),
+                                (
+                                    mud_world::AlignmentProtectionTag::Evil,
+                                    mud_world::AlignmentProtectionTag::Evil
+                                ) | (
+                                    mud_world::AlignmentProtectionTag::Good,
+                                    mud_world::AlignmentProtectionTag::Good
+                                )
+                            )
+                    })
+                };
+                if !still_protected {
+                    match tag {
+                        mud_world::AlignmentProtectionTag::Evil => {
+                            try_remove::<mud_world::ProtectFromEvil>(world, target);
+                        }
+                        mud_world::AlignmentProtectionTag::Good => {
+                            try_remove::<mud_world::ProtectFromGood>(world, target);
+                        }
+                    }
+                }
+            }
+            // L3 summon teardown — conjuration spells spawn an
+            // EffectInstance with name="summoned-{mobType}" pointing
+            // at the spawned mob via AppliedTo(mob). When the
+            // instance expires, the conjured mob vanishes — same
+            // semantics as the legacy "follower fades" behavior.
+            // Cleanup: drop a final flavor line into the mob's room
+            // so observers see the dispel, then despawn the mob and
+            // anything it was carrying.
+            if name.starts_with("summoned-") {
+                if let Some(mob_room) =
+                    world.get::<mud_world::Located>(target).map(|l| l.0)
+                {
+                    let mob_name = world
+                        .get::<mud_world::Named>(target)
+                        .map_or("the summoned creature".to_string(), |n| n.name.clone());
+                    let players: Vec<bevy_ecs::entity::Entity> = {
+                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
+                        q.iter(world)
+                            .filter(|(_, l)| l.0 == mob_room)
+                            .map(|(e, _)| e)
+                            .collect()
+                    };
+                    let msg = format!("{mob_name} fades back to where it was summoned from.\r\n");
+                    for p in players {
+                        crate::commands::send_to(world, p, msg.clone());
+                    }
+                }
+                if let Ok(em) = world.get_entity_mut(target) {
+                    em.despawn();
+                }
+            }
+            // Wall teardown — WALL_OF_STONE / WALL_OF_ICE spawn an
+            // EffectInstance named "wall-{type}" with
+            // AppliedTo(room). The room carries a RoomBlockedExits
+            // map keyed on Direction; on expiry, remove whichever
+            // entry was backed by THIS expiring entity (the cast
+            // arm overwrites stale entries on re-cast, so there's
+            // at most one match). Despawn the (now-empty) map when
+            // it's the last wall.
+            if name.starts_with("wall-") {
+                // Capture the (direction, kind_label) of the entry
+                // about to drop so the post-cleanup broadcast can
+                // name what just faded. Done before the retain so
+                // the map still has the entry.
+                let expiring: Option<(mud_db::enums::Direction, String)> = world
+                    .get::<mud_world::RoomBlockedExits>(target)
+                    .and_then(|b| {
+                        b.by_direction
+                            .iter()
+                            .find(|(_, e)| e.backed_by == eff_entity)
+                            .map(|(d, e)| (*d, e.kind_label.clone()))
+                    });
+                if let Some(mut blocked) =
+                    world.get_mut::<mud_world::RoomBlockedExits>(target)
+                {
+                    blocked
+                        .by_direction
+                        .retain(|_, entry| entry.backed_by != eff_entity);
+                }
+                let empty = world
+                    .get::<mud_world::RoomBlockedExits>(target)
+                    .is_some_and(|b| b.by_direction.is_empty());
+                if empty {
+                    try_remove::<mud_world::RoomBlockedExits>(world, target);
+                }
+                // Broadcast the fade to everyone in the affected
+                // room. Otherwise a wall just silently vanishes —
+                // a player who was waiting for it to expire (or who
+                // got cornered behind one) would have no signal it's
+                // safe to move now. Mirrors the bash-crumble UX.
+                if let Some((dir, kind_label)) = expiring {
+                    let players: Vec<bevy_ecs::entity::Entity> = {
+                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
+                        q.iter(world)
+                            .filter(|(_, l)| l.0 == target)
+                            .map(|(e, _)| e)
+                            .collect()
+                    };
+                    let dir_name = crate::commands::direction_name(dir);
+                    let msg = format!(
+                        "The {kind_label} {dir_name} shudders and dissolves into nothing.\r\n"
+                    );
+                    for p in players {
+                        crate::commands::send_to(world, p, msg.clone());
+                    }
+                }
+            }
+            // J1 globe teardown — MINOR/MAJOR_GLOBE both spawn an
+            // EffectInstance named "globe" with the maxCircle stored
+            // in `strength`. When the last one fades, recompute the
+            // marker from any remaining instances rather than
+            // removing outright — stacking MAJOR over MINOR shouldn't
+            // drop coverage to nothing when only one expires.
+            if name.eq_ignore_ascii_case("globe") {
+                let highest = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world)
+                        .filter(|(eff, applied)| {
+                            applied.0 == target && eff.name.eq_ignore_ascii_case("globe")
+                        })
+                        .map(|(eff, _)| eff.strength)
+                        .max()
+                };
+                match highest {
+                    Some(s) if s > 0 => {
+                        try_insert(world, target, mud_world::MaxAbsorbCircle(s));
+                    }
+                    _ => {
+                        try_remove::<mud_world::MaxAbsorbCircle>(world, target);
+                    }
+                }
+            }
+            // Room-light teardown: ILLUMINATION / MAGIC_TORCH land
+            // an EffectInstance named "light" with AppliedTo(room).
+            // When the last one fades, drop the RoomMagicalLight
+            // marker so room_is_dark / room_has_light read normally.
+            if name.eq_ignore_ascii_case("light") {
+                let still_lit = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("light")
+                    })
+                };
+                if !still_lit {
+                    try_remove::<mud_world::RoomMagicalLight>(world, target);
+                    let players: Vec<bevy_ecs::entity::Entity> = {
+                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
+                        q.iter(world)
+                            .filter(|(_, l)| l.0 == target)
+                            .map(|(e, _)| e)
+                            .collect()
+                    };
+                    let msg = "The magical radiance fades.\r\n".to_string();
+                    for p in players {
+                        crate::commands::send_to(world, p, msg.clone());
+                    }
+                }
+            }
+            // Mirror for DARKNESS.
+            if name.eq_ignore_ascii_case("darkness") {
+                let still_dark = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("darkness")
+                    })
+                };
+                if !still_dark {
+                    try_remove::<mud_world::RoomMagicalDarkness>(world, target);
+                    let players: Vec<bevy_ecs::entity::Entity> = {
+                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
+                        q.iter(world)
+                            .filter(|(_, l)| l.0 == target)
+                            .map(|(e, _)| e)
+                            .collect()
+                    };
+                    let msg = "The unnatural darkness dissipates.\r\n".to_string();
+                    for p in players {
+                        crate::commands::send_to(world, p, msg.clone());
+                    }
+                }
+            }
+            // CIRCLE_OF_FIRE teardown.
+            if name.eq_ignore_ascii_case("burning") {
+                let still_burning = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("burning")
+                    })
+                };
+                if !still_burning {
+                    try_remove::<mud_world::RoomBurningEffect>(world, target);
+                    // Broadcast the flames dying down to anyone in
+                    // the room so they know it's safe to walk again
+                    // without taking damage. Without it the hazard
+                    // just silently lifts.
+                    let players: Vec<bevy_ecs::entity::Entity> = {
+                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
+                        q.iter(world)
+                            .filter(|(_, l)| l.0 == target)
+                            .map(|(e, _)| e)
+                            .collect()
+                    };
+                    let msg = "The flames lash one last time, then sputter out.\r\n".to_string();
+                    for p in players {
+                        crate::commands::send_to(world, p, msg.clone());
+                    }
+                }
+            }
+            // DetectInvis teardown — flag-based effect with name
+            // "detect_invisible" (the data carries it as a status
+            // effect with that name).
+            if name.eq_ignore_ascii_case("detect_invisible") {
+                let still_seeing = {
+                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target
+                            && eff.name.eq_ignore_ascii_case("detect_invisible")
+                    })
+                };
+                if !still_seeing {
+                    try_remove::<mud_world::DetectInvis>(world, target);
+                }
+            }
+            // Invisible marker: the expiring effect itself doesn't
+            // need a name match — we tag the install with
+            // `InvisibleSource` and walk those at expiry. When no
+            // other tagged effect remains on the target, the
+            // Invisible marker drops.
+            {
+                let still_invisible = {
+                    let mut q = world.query::<(&mud_world::InvisibleSource, &AppliedTo)>();
+                    q.iter(world).any(|(_, applied)| applied.0 == target)
+                };
+                if !still_invisible {
+                    try_remove::<mud_world::Invisible>(world, target);
                 }
             }
         }

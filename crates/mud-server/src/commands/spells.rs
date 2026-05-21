@@ -150,27 +150,18 @@ inventory::submit! {
     }
 }
 
-inventory::submit! {
-    Command {
-        names: &["skill", "use"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Combat,
-        help: Help {
-            usage: "skill <name> [target]",
-            summary: "Invoke a SKILL-type ability from the catalog.",
-            long: "Sibling to cast/chant/perform: looks up a SKILL \
-                   row by name and runs it through the same effect \
-                   application pipeline. New combat skills should be \
-                   added as Muditor `Ability` rows (kind=SKILL) with \
-                   `AbilityEffect` mappings — no Rust change needed. \
-                   Hardcoded skills (bandage, gouge, etc.) coexist \
-                   for now; they'll migrate as Phase B effect-type \
-                   consumers land.",
-        },
-        run: cmd_skill,
-    }
-}
+// `skill` / `use` as a generic ability-dispatch command was removed
+// 2026-05-17 — it was a backdoor that let players invoke passive
+// defensives (DODGE, PARRY, RIPOSTE), weapon proficiencies
+// (BLUDGEONING, PIERCING, …), and sphere masteries
+// (SPHERE_FIRE, …) as if they were active commands. Every active
+// skill already has a dedicated command in `commands/combat.rs`
+// (`bash`, `kick`, `backstab`, `disarm`, `rescue`, `bandage`, …)
+// with the right targeting + flavor; passive/proficiency skills
+// fire automatically from the combat pipeline and aren't meant to
+// be triggered manually. The `skills` listing command (in
+// `commands/info.rs`) is untouched — that's the right shape for
+// "what do I know?".
 
 inventory::submit! {
     Command {
@@ -334,6 +325,9 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     }
 }
 pub(crate) fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
+    if crate::casting::cancel_own_cast(world, player) {
+        return;
+    }
     send_to(
         world,
         player,
@@ -342,11 +336,45 @@ pub(crate) fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
 }
 pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     let needle = args.trim().to_ascii_lowercase();
-    let cancellable: Vec<(Entity, String, i32)> = {
+    // Snapshot every effect on the player + its source-ability
+    // plain_name (when the originating ability is known). The
+    // ability name is what the user sees on `effects` ("from
+    // Enhance Ability"), so matching against it lets `cancel
+    // enhance` work alongside `cancel cha`.
+    let ability_names: std::collections::HashMap<i32, String> = world
+        .resource::<crate::commands::AbilityCatalog>()
+        .by_name
+        .values()
+        .map(|d| (d.id, d.plain_name.replace('_', " ").to_ascii_lowercase()))
+        .collect();
+    // Also pull effects in the player's current room when the name
+    // starts with "wall-" — that's the caster (or any room
+    // occupant) cleaning up a barrier they no longer want. Other
+    // room-applied effects (magical darkness, room burning) are
+    // intentionally excluded: those are environmental hazards
+    // whose caster expected them to last, and a random passerby
+    // cancelling them would surprise the original caster. Walls
+    // are scoped narrowly enough that "anyone in the room can
+    // drop one" matches the immediate, blocking-the-only-path UX.
+    let player_room = world.get::<mud_world::Located>(player).map(|l| l.0);
+    let cancellable: Vec<(Entity, String, Option<String>, i32)> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
-            .filter(|(_, inst, a)| a.0 == player && inst.remaining_secs >= 0)
-            .map(|(e, inst, _)| (e, inst.name.clone(), inst.remaining_secs))
+            .filter(|(_, inst, a)| {
+                if inst.remaining_secs < 0 {
+                    return false;
+                }
+                if a.0 == player {
+                    return true;
+                }
+                player_room.is_some_and(|r| a.0 == r) && inst.name.starts_with("wall-")
+            })
+            .map(|(e, inst, _)| {
+                let src = inst
+                    .ability_id
+                    .and_then(|id| ability_names.get(&id).cloned());
+                (e, inst.name.clone(), src, inst.remaining_secs)
+            })
             .collect()
     };
     if cancellable.is_empty() {
@@ -359,8 +387,12 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     }
     if needle.is_empty() {
         let mut out = format!("\r\n{} cancellable effect(s):\r\n", cancellable.len());
-        for (_, name, remaining) in &cancellable {
-            out.push_str(&format!("  {name} ({remaining}s)\r\n"));
+        for (_, name, src, remaining) in &cancellable {
+            if let Some(src) = src {
+                out.push_str(&format!("  {name} ({remaining}s) — from {src}\r\n"));
+            } else {
+                out.push_str(&format!("  {name} ({remaining}s)\r\n"));
+            }
         }
         out.push_str("\r\nUse `cancel <name>` to drop one.\r\n");
         send_to(world, player, out);
@@ -368,8 +400,11 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     }
     let target = cancellable
         .iter()
-        .find(|(_, name, _)| name.to_ascii_lowercase().contains(&needle))
-        .map(|(e, _, _)| *e);
+        .find(|(_, name, src, _)| {
+            name.to_ascii_lowercase().contains(&needle)
+                || src.as_deref().is_some_and(|s| s.contains(&needle))
+        })
+        .map(|(e, _, _, _)| *e);
     let Some(target_effect) = target else {
         send_to(
             world,
@@ -381,6 +416,66 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     let removed_name = world
         .get::<EffectInstance>(target_effect)
         .map_or_else(|| "?".to_string(), |i| i.name.clone());
+    // If this is a wall, the room carries a RoomBlockedExits map
+    // keyed on Direction that effect-expiry normally cleans up via
+    // `effects_tick`. Despawning the EffectInstance directly skips
+    // that branch and would leave a phantom wall entry in the map
+    // — exits, look, and movement would all keep refusing the
+    // blocked direction even though the backing effect was gone.
+    // Walk the map up front, drop the matching entry inline, and
+    // broadcast the dissolve to other players in the room so they
+    // get the same "wall is gone" signal `effects_tick` would
+    // emit on a natural expiry.
+    if removed_name.starts_with("wall-") {
+        let target_room = world
+            .get::<AppliedTo>(target_effect)
+            .map(|a| a.0);
+        let mut dissolved: Option<(mud_db::enums::Direction, String, bevy_ecs::entity::Entity)> = None;
+        if let Some(room) = target_room {
+            // Capture (dir, kind_label) for the broadcast before
+            // the retain mutates the map.
+            let captured = world
+                .get::<mud_world::RoomBlockedExits>(room)
+                .and_then(|b| {
+                    b.by_direction
+                        .iter()
+                        .find(|(_, e)| e.backed_by == target_effect)
+                        .map(|(d, e)| (*d, e.kind_label.clone()))
+                });
+            if let Some(mut blocked) = world.get_mut::<mud_world::RoomBlockedExits>(room) {
+                blocked
+                    .by_direction
+                    .retain(|_, entry| entry.backed_by != target_effect);
+                let empty = blocked.by_direction.is_empty();
+                drop(blocked);
+                if empty
+                    && let Ok(mut em) = world.get_entity_mut(room)
+                {
+                    em.remove::<mud_world::RoomBlockedExits>();
+                }
+            }
+            if let Some((dir, kind_label)) = captured {
+                dissolved = Some((dir, kind_label, room));
+            }
+        }
+        if let Some((dir, kind_label, room)) = dissolved {
+            let player_name = crate::commands::name_of(world, player);
+            let dir_name = crate::commands::direction_name(dir);
+            let players: Vec<bevy_ecs::entity::Entity> = {
+                let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
+                q.iter(world)
+                    .filter(|(e, l)| *e != player && l.0 == room)
+                    .map(|(e, _)| e)
+                    .collect()
+            };
+            let msg = format!(
+                "{player_name} gestures and the {kind_label} {dir_name} crumbles into nothing.\r\n"
+            );
+            for p in players {
+                crate::commands::send_to(world, p, msg.clone());
+            }
+        }
+    }
     if let Ok(e) = world.get_entity_mut(target_effect) {
         e.despawn();
     }
@@ -475,7 +570,4 @@ pub(crate) fn cmd_chant(world: &mut World, player: Entity, args: &str) {
 }
 pub(crate) fn cmd_perform(world: &mut World, player: Entity, args: &str) {
     invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Song, "perform");
-}
-pub(crate) fn cmd_skill(world: &mut World, player: Entity, args: &str) {
-    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Skill, "use");
 }

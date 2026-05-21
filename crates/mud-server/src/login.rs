@@ -131,6 +131,24 @@ const MAX_CHARACTER_NAME_LEN: usize = 20;
 /// (0, 0) is "The Void" — fitting.
 const FALLBACK_START: (i32, i32) = (0, 0);
 
+/// Rest / repose: quit-grace window. A player whose `restSource` is
+/// `NONE` or `QUIT` and who logs back in within this window spawns at
+/// their last room rather than at recall. Per design doc §"Login
+/// spawn location". 30 minutes wall-clock. **TUNABLE**.
+pub(crate) const REST_QUIT_GRACE_SECS: i64 = 30 * 60;
+
+/// Rest / repose: offline Repose fill rate per tier. Indexed by
+/// `restTier` (0..=3); tier 0 is `NONE` / `QUIT` and contributes
+/// nothing. Values are XP-per-real-hour while logged off. Matches
+/// the design doc §"Tier table" (TUNABLE: 2.5 / 5.0 / 10.0).
+const REPOSE_FILL_PER_HOUR: [f64; 4] = [0.0, 2.5, 5.0, 10.0];
+
+/// Rest / repose: per-tier cap on the Repose pool, as a fraction of
+/// the XP needed to advance from the player's current level to the
+/// next. Indexed by `restTier`. **TUNABLE** — design doc §"Tier table":
+/// 10% basic, 25% suite, 50% penthouse. Tier 0 caps at zero.
+const REPOSE_CAP_FRAC: [f64; 4] = [0.0, 0.10, 0.25, 0.50];
+
 /// Maximum disconnect window across which non-staff effects persist,
 /// in seconds. Reconnect within this window restores active buffs /
 /// debuffs / poisons / blinds with their elapsed time deducted from
@@ -559,9 +577,23 @@ impl ConnRouter {
             // Broadcast a Room.RemovePlayer diff so other clients in
             // the room update their "who's here" panel. Done before
             // save/despawn so the entity's Located is still valid.
+            // Pair it with a text leave-broadcast so plain-telnet
+            // clients without GMCP support also see the departure —
+            // without this, players in the room had no signal an
+            // ally just logged out / disconnected.
             if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
                 commands::broadcast_room_player_diff(
                     world, room, entity, "RemovePlayer",
+                );
+                let player_name = commands::name_of(world, entity);
+                commands::broadcast_room_visual(
+                    world,
+                    room,
+                    entity,
+                    &[entity],
+                    &commands::cap_sentence_start(&format!(
+                        "{player_name} fades from view, retiring to dreams.\r\n"
+                    )),
                 );
             }
             // Disconnect path — player is gone before we could
@@ -2302,9 +2334,22 @@ impl ConnRouter {
         // their "who's here" panel updates. The arriving player's
         // own snapshot lands at first prompt via send_prompt's
         // companion frames (or via cmd_look once they look around).
+        // Pair with a text arrival line so plain-telnet clients
+        // without GMCP support also see the join — mirrors the
+        // leave broadcast on disconnect.
         if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
             commands::broadcast_room_player_diff(
                 world, room, entity, "AddPlayer",
+            );
+            let player_name = commands::name_of(world, entity);
+            commands::broadcast_room_visual(
+                world,
+                room,
+                entity,
+                &[entity],
+                &commands::cap_sentence_start(&format!(
+                    "{player_name} fades into being, returning from dreams.\r\n"
+                )),
             );
         }
         // One-shot per login: ship the chat-channel directory so
@@ -2420,7 +2465,25 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         .start_room_by_race
         .get(&c.race)
         .copied();
-    let (zone, room) = pick_starting_room(c, race_start);
+    // Rest / repose R3: spawn-room decision factors in the queued
+    // RestSource and the elapsed offline window. Quit-with-grace
+    // (< 30min) and any non-NONE source land the player back where
+    // they logged off; QUIT past grace routes through recall.
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+    let last_login_unix = c.last_login.map(|ts| ts.and_utc().timestamp());
+    let (zone, room) = pick_rest_starting_room(c, race_start, now_unix, last_login_unix);
+
+    // Rest / repose R3: accrue Repose for the elapsed offline window
+    // BEFORE the spawn bundle insert, so the RestState component
+    // lands with the new pool value. Source / tier round-trip
+    // verbatim — they're consumed only on first XP gain (R4), never
+    // on login per ADR 0001 §1.
+    let elapsed_secs = last_login_unix
+        .map(|prev| now_unix.saturating_sub(prev).max(0))
+        .unwrap_or(0);
+    let new_repose = accrue_repose(c.repose, c.rest_tier, c.level, elapsed_secs);
 
     let index = world.resource::<WorldKeyIndex>();
     let room_entity = index
@@ -2581,6 +2644,15 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         if let Some(ts) = c.last_login {
             e.insert(mud_world::PreviousLogin(ts.and_utc().timestamp()));
         }
+        // Rest / repose R3: install the RestState component with
+        // the freshly-accrued Repose pool. Source / tier persist
+        // verbatim from the row; the wake consumer (R4) clears them
+        // on the next XP gain.
+        e.insert(mud_world::RestState {
+            repose: new_repose,
+            source: c.rest_source,
+            tier: c.rest_tier,
+        });
         // Restore the dead-but-incorporeal marker if the player
         // logged out as a ghost. The matching Posture column was
         // already mapped in the spawn bundle; this side just adds
@@ -2740,6 +2812,23 @@ pub(crate) async fn save_player(
     let (poof_in, poof_out) = world
         .get::<mud_world::Poofs>(entity)
         .map_or((None, None), |p| (p.poof_in.clone(), p.poof_out.clone()));
+
+    // Rest / repose R2: stamp `restSource=QUIT, restTier=0` on the
+    // way out if the player logs off without a real source acquired.
+    // Don't overwrite an existing CAMP / INN / HOUSE — those are the
+    // rest the player paid for and must survive the disconnect.
+    // TODO(housing): when the housing schema lands, detect "logged
+    // out in a HOUSE-owned room" here and stamp restSource=HOUSE,
+    // restTier=<house quality> instead of QUIT.
+    let rest_snapshot = world
+        .get::<mud_world::RestState>(entity)
+        .copied()
+        .unwrap_or_default();
+    let (rest_source, rest_tier) = match rest_snapshot.source {
+        mud_db::enums::RestSource::None => (mud_db::enums::RestSource::Quit, 0),
+        other => (other, rest_snapshot.tier),
+    };
+    let repose = rest_snapshot.repose;
 
     // Snapshot every Item rooted at the player — both directly carried
     // and nested inside any container the player carries. BFS keeps
@@ -3091,6 +3180,14 @@ pub(crate) async fn save_player(
         .await?;
         mud_db::characters::save_pets(&mut *tx, &cid, pets_json.as_ref()).await?;
         mud_db::characters::save_bank_wealth(&mut *tx, &cid, bank).await?;
+        mud_db::characters::save_rest_state(
+            &mut *tx,
+            &cid,
+            repose,
+            rest_source,
+            rest_tier,
+        )
+        .await?;
         mud_db::users::save_account_wealth(&mut *tx, &user_id, account_wealth).await?;
         if let Some(t) = new_time_played {
             mud_db::characters::save_time_played(&mut *tx, &cid, t).await?;
@@ -3518,6 +3615,89 @@ fn pick_starting_room(c: &CharacterRow, race_start: Option<(i32, i32)>) -> (i32,
     FALLBACK_START
 }
 
+/// Rest / repose: compute the spawn-room decision per design doc
+/// §"Login spawn location":
+///
+/// - `restSource in {CAMP, INN, HOUSE}` → spawn at the saved
+///   `currentRoom` (the room the player rented / camped in).
+/// - `restSource in {QUIT, NONE}` AND elapsed ≥ 30min → spawn at
+///   `recallRoom` (fall through to race start, then Void).
+/// - Otherwise (no source, within grace window) → saved
+///   `currentRoom`.
+///
+/// `now_unix` and `last_login_unix` are wall-clock seconds; the
+/// difference is the offline window length. `None` last_login means
+/// fresh character — pretend they exited inside grace.
+fn pick_rest_starting_room(
+    c: &CharacterRow,
+    race_start: Option<(i32, i32)>,
+    now_unix: i64,
+    last_login_unix: Option<i64>,
+) -> (i32, i32) {
+    use mud_db::enums::RestSource;
+    let elapsed = last_login_unix
+        .map(|prev| now_unix.saturating_sub(prev).max(0))
+        .unwrap_or(0);
+    // CAMP / INN / HOUSE: spawn where logged off, period.
+    match c.rest_source {
+        RestSource::Camp | RestSource::Inn | RestSource::House => {
+            if let (Some(z), Some(r)) = (c.current_room_zone_id, c.current_room_id) {
+                return (z, r);
+            }
+            return pick_starting_room(c, race_start);
+        }
+        RestSource::Quit | RestSource::None => {
+            if elapsed >= REST_QUIT_GRACE_SECS {
+                // Grace expired: route to recall first, then race
+                // start, then the Void.
+                if let (Some(z), Some(r)) = (c.recall_room_zone_id, c.recall_room_id) {
+                    return (z, r);
+                }
+                if let Some(rs) = race_start {
+                    return rs;
+                }
+                return FALLBACK_START;
+            }
+            // Inside grace window: behave like the legacy
+            // "back where you left off" path.
+            pick_starting_room(c, race_start)
+        }
+    }
+}
+
+/// Rest / repose: accrue Repose for the elapsed offline window.
+/// Returns the new pool value (clamped to per-tier cap). Pure-fn for
+/// unit testability — no DB or component writes.
+///
+/// `elapsed_secs` is wall-clock seconds offline; `level` and `tier`
+/// drive the rate / cap table. `existing_repose` is the sticky pool
+/// that survives logouts.
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn accrue_repose(existing_repose: i32, tier: i32, level: i32, elapsed_secs: i64) -> i32 {
+    if !(1..=3).contains(&tier) || elapsed_secs <= 0 {
+        return existing_repose;
+    }
+    let tier_idx = usize::try_from(tier).unwrap_or(0);
+    let Some(rate) = REPOSE_FILL_PER_HOUR.get(tier_idx).copied() else {
+        return existing_repose;
+    };
+    let Some(cap_frac) = REPOSE_CAP_FRAC.get(tier_idx).copied() else {
+        return existing_repose;
+    };
+    let hours = elapsed_secs as f64 / 3600.0;
+    let gained = (hours * rate).max(0.0) as i64;
+    // xpForNextLevel: bracket between current and next level. Mirror
+    // the runtime's `experience_for_level` curve so the cap tracks
+    // actual progression.
+    let bracket = commands::experience_for_level(level + 1)
+        .saturating_sub(commands::experience_for_level(level))
+        .max(1);
+    let cap = ((bracket as f64) * cap_frac).max(0.0) as i64;
+    let total = i64::from(existing_repose).saturating_add(gained).min(cap);
+    i32::try_from(total).unwrap_or(i32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3584,6 +3764,9 @@ mod tests {
             poof_out: None,
             position: mud_db::enums::Position::Standing,
             name_approved: true,
+            repose: 0,
+            rest_source: mud_db::enums::RestSource::None,
+            rest_tier: 0,
         }
     }
 
@@ -3644,6 +3827,92 @@ mod tests {
         r.current_room_zone_id = Some(30);
         // current_room_id stays None — pick_starting_room should skip it.
         assert_eq!(pick_starting_room(&r, Some((50, 1))), (10, 1));
+    }
+
+    // --- Rest / repose spawn + accrue tests ---
+
+    #[test]
+    fn pick_rest_starting_room_camp_returns_current_regardless_of_elapsed() {
+        let mut r = row(Some((30, 5)), Some((10, 1)));
+        r.rest_source = mud_db::enums::RestSource::Camp;
+        r.rest_tier = 2;
+        // Even a year offline: CAMP source lands at current_room.
+        assert_eq!(
+            pick_rest_starting_room(&r, Some((50, 1)), 1_000_000_000, Some(1)),
+            (30, 5),
+        );
+    }
+
+    #[test]
+    fn pick_rest_starting_room_quit_under_grace_uses_current() {
+        let mut r = row(Some((30, 5)), Some((10, 1)));
+        r.rest_source = mud_db::enums::RestSource::Quit;
+        // 5 minutes elapsed — well under the 30-min grace.
+        assert_eq!(
+            pick_rest_starting_room(&r, Some((50, 1)), 600, Some(300)),
+            (30, 5),
+        );
+    }
+
+    #[test]
+    fn pick_rest_starting_room_quit_past_grace_routes_to_recall() {
+        let mut r = row(Some((30, 5)), Some((10, 1)));
+        r.rest_source = mud_db::enums::RestSource::Quit;
+        // 31 minutes elapsed — past grace, recall wins.
+        assert_eq!(
+            pick_rest_starting_room(&r, Some((50, 1)), 1860 + 1000, Some(1000)),
+            (10, 1),
+        );
+    }
+
+    #[test]
+    fn pick_rest_starting_room_none_past_grace_with_no_recall_uses_race_start() {
+        let mut r = row(Some((30, 5)), None);
+        r.rest_source = mud_db::enums::RestSource::None;
+        assert_eq!(
+            pick_rest_starting_room(&r, Some((50, 1)), 5000, Some(1000)),
+            (50, 1),
+        );
+    }
+
+    #[test]
+    fn accrue_repose_zero_for_tier_zero() {
+        assert_eq!(accrue_repose(100, 0, 5, 36_000), 100);
+    }
+
+    #[test]
+    fn accrue_repose_zero_for_negative_elapsed() {
+        assert_eq!(accrue_repose(100, 2, 5, -1), 100);
+    }
+
+    #[test]
+    fn accrue_repose_t1_basic_caps_at_10_percent() {
+        // L5: bracket = ceil(6) - ceil(5) per the curve. Just check
+        // the function clamps to <= cap and never exceeds.
+        let result = accrue_repose(0, 1, 5, 365 * 24 * 3600); // a year offline
+        // T1 cap = 10% of bracket; for L5 bracket ≈ 33k, so cap ≈ 3.3k.
+        assert!(result > 0);
+        let bracket = commands::experience_for_level(6) - commands::experience_for_level(5);
+        let expected_cap = (bracket as f64 * 0.10) as i32;
+        assert!(result <= expected_cap, "{result} > {expected_cap}");
+    }
+
+    #[test]
+    fn accrue_repose_t3_penthouse_caps_higher_than_t1() {
+        let t1 = accrue_repose(0, 1, 10, 365 * 24 * 3600);
+        let t3 = accrue_repose(0, 3, 10, 365 * 24 * 3600);
+        assert!(t3 > t1, "tier 3 cap should exceed tier 1");
+    }
+
+    #[test]
+    fn accrue_repose_preserves_existing_pool_above_cap() {
+        // If repose already exceeds the per-tier cap (rare — would
+        // need cross-tier history), the helper still clamps to cap
+        // because the spec wants a deterministic per-tier ceiling.
+        let r = accrue_repose(999_999_999, 1, 5, 3_600);
+        let bracket = commands::experience_for_level(6) - commands::experience_for_level(5);
+        let cap = (bracket as f64 * 0.10) as i32;
+        assert_eq!(r, cap);
     }
 
     // --- creation-flow validators ---

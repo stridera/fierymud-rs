@@ -1064,6 +1064,12 @@ pub struct ObjectProto {
     pub min_size: Option<String>,
     /// Maximum body size to wear (B6). `None` = no ceiling.
     pub max_size: Option<String>,
+    /// Camp-kit tier (1 = basic, 2 = premium) for the rest / repose
+    /// system. `None` for ordinary items. `cmd_camp` reads this when
+    /// resolving a kit-name argument; non-`None` and the kit is
+    /// consumed on camp completion, its tier folding into
+    /// `computeCampTier`.
+    pub camp_kit_tier: Option<i32>,
 }
 
 /// One `ObjectEffects` row, denormalized into the proto.
@@ -1427,6 +1433,26 @@ impl ClassSkillsData {
 }
 
 impl SpellSlotData {
+    /// Minimum circle this ability appears at across every class
+    /// that can cast it — mirrors legacy `SINFO.lowest_level` used
+    /// by the globe-absorb gate. Returns `None` for abilities with
+    /// no `ClassAbilities` rows (SKILL-side abilities, content
+    /// gaps). The globe gate treats `None` as "not blockable" —
+    /// a spell without a circle assignment is also without a
+    /// shieldable level reference.
+    ///
+    /// O(n) over `ability_circle` (n ≈ 1000 in practice). Called
+    /// only when a hostile spell hits an absorb-marked target, so
+    /// the linear scan is not a hot path.
+    #[must_use]
+    pub fn min_circle_for_ability(&self, ability_id: i32) -> Option<i32> {
+        self.ability_circle
+            .iter()
+            .filter(|((_, aid), _)| *aid == ability_id)
+            .map(|(_, circle)| *circle)
+            .min()
+    }
+
     /// Maximum slots for `class_id` at character `level`, broken
     /// down by circle. Includes only circles whose `min_level <=
     /// level`. Returns `Vec<(circle, slots)>` sorted by circle.
@@ -2270,6 +2296,21 @@ pub struct WeatherState {
 #[derive(Resource, Default, Debug)]
 pub struct WeatherCatalog {
     pub by_zone: HashMap<i32, WeatherState>,
+}
+
+/// Per-zone "weather is being controlled" lock. Each entry is the
+/// `Instant` at which natural drift should resume. CONTROL_WEATHER /
+/// RAIN install one of these for the cast's full duration so the
+/// chosen precip actually holds instead of being undone by the very
+/// next drift tick. Stale entries (now > expiry) are no-ops; the
+/// weather tick clears them opportunistically.
+///
+/// Not persisted — restart drops every lock and resumes climate-
+/// natural drift. That's the conservative choice: a player-cast
+/// override surviving a hot-reboot would be surprising.
+#[derive(Resource, Default, Debug)]
+pub struct WeatherDriftLocks {
+    pub by_zone: HashMap<i32, std::time::Instant>,
 }
 
 /// Per-entity bag of Lua-trigger-set variables, backed by the

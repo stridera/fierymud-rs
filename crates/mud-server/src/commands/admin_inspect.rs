@@ -15,8 +15,9 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{
-    AdminAuditLog, Category, Command, Connection, DbPool, Help, direction_name, direction_rank,
-    drain_lua_outbox, find_actor_in_room, find_in_room, matches, name_of, name_or, send_to,
+    AdminAuditLog, Category, Command, Connection, DbPool, Help, cap_sentence_start,
+    direction_name, direction_rank, drain_lua_outbox, find_actor_in_room, find_in_room, matches,
+    name_of, name_or, send_to,
 };
 
 inventory::submit! {
@@ -802,7 +803,7 @@ pub(crate) fn cmd_varlist(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("{target_name} has no script vars.\r\n"),
+            format!("{} has no script vars.\r\n", cap_sentence_start(&target_name)),
         );
         return;
     }
@@ -840,7 +841,10 @@ pub(crate) fn cmd_varclear(world: &mut World, player: Entity, args: &str) {
             send_to(
                 world,
                 player,
-                format!("{target_name} has no var named {key}.\r\n"),
+                format!(
+                    "{} has no var named {key}.\r\n",
+                    cap_sentence_start(&target_name)
+                ),
             );
         }
     } else {
@@ -854,7 +858,10 @@ pub(crate) fn cmd_varclear(world: &mut World, player: Entity, args: &str) {
             send_to(
                 world,
                 player,
-                format!("{target_name} had no script vars to clear.\r\n"),
+                format!(
+                    "{} had no script vars to clear.\r\n",
+                    cap_sentence_start(&target_name)
+                ),
             );
         } else {
             let suffix = if count == 1 { "" } else { "s" };
@@ -1792,7 +1799,10 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("{target_name} has no component for {field}.\r\n"),
+            format!(
+                "{} has no component for {field}.\r\n",
+                cap_sentence_start(&target_name)
+            ),
         );
     }
 }

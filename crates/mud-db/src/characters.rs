@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgPool};
 
-use crate::enums::{Permission, PlayerFlag, Position};
+use crate::enums::{Permission, PlayerFlag, Position, RestSource};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterRow {
@@ -141,6 +141,21 @@ pub struct CharacterRow {
     /// `true` via `approve_name` (keep name) or `reject_name <new>`
     /// (force-rename + auto-approve).
     pub name_approved: bool,
+    /// Sticky bonus-XP pool — the **Repose** stat from the rest /
+    /// repose feature. Spent only at XP-gain time (`apply_repose`
+    /// multiplies the next gain), never decays, persists across
+    /// logouts. Filled passively while offline by the login flow
+    /// based on `restSource` / `restTier`.
+    pub repose: i32,
+    /// Kind of prepaid rest queued for the next sleep — the
+    /// **RestSource** stat. Consumed exactly once at the next XP
+    /// gain after acquisition. Survives logout.
+    pub rest_source: RestSource,
+    /// Quality tier of the queued rest (0..=3). 0 for `NONE` /
+    /// `QUIT`; 1..=3 for `CAMP` / `INN` / `HOUSE`. Drives Refreshed
+    /// strength and the Repose fill rate / cap during offline
+    /// accrual.
+    pub rest_tier: i32,
 }
 
 /// Bundle of fields fed into `create` from the login-creation
@@ -199,6 +214,12 @@ pub async fn create<'e, E: PgExecutor<'e>>(
     // `users::create` inside a transaction (the login-creation
     // flow uses `&mut *tx` for both INSERTs to keep the row
     // pair atomic).
+    // `player_flags` left at the schema default (empty). The SUMMON
+    // spell uses an interactive `PendingSummon` prompt — target sees
+    // "X is attempting to summon you to Y. Type ACCEPT / DECLINE" and
+    // judges per-cast. `NoSummon` is an opt-out for players who want
+    // the cast to silently auto-decline (don't even bother me with
+    // prompts) — most players want the prompt, so default off.
     let row = sqlx::query_scalar::<_, String>(
         r#"
         INSERT INTO "Characters" (
@@ -826,7 +847,10 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             invis_level, freeze_level, wimpy_threshold,
             poof_in, poof_out,
             position AS "position!: Position",
-            name_approved
+            name_approved,
+            repose,
+            rest_source AS "rest_source!: RestSource",
+            rest_tier
         FROM "Characters"
         WHERE LOWER(name) = LOWER($1)
         LIMIT 1
@@ -939,7 +963,10 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             poof_in,
             poof_out,
             position AS "position!: Position",
-            name_approved
+            name_approved,
+            repose,
+            rest_source AS "rest_source!: RestSource",
+            rest_tier
         FROM "Characters"
         WHERE user_id = $1
         ORDER BY level DESC, name
@@ -948,6 +975,38 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
     )
     .fetch_all(pool)
     .await
+}
+
+/// Persist the **Repose** / **RestSource** triplet
+/// (`repose`, `rest_source`, `rest_tier`). Split from `save_state`
+/// so the rest / repose hot paths (acquire-source commands, login
+/// fill, disconnect QUIT stamp, XP-gain consume) round-trip without
+/// rewriting every other column. Source is mapped through the
+/// `RestSource` enum's sqlx cast so the value flows back as the
+/// case-preserved Postgres enum.
+pub async fn save_rest_state<'e, E: PgExecutor<'e>>(
+    executor: E,
+    character_id: &str,
+    repose: i32,
+    rest_source: RestSource,
+    rest_tier: i32,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE "Characters"
+        SET repose = $1,
+            rest_source = $2,
+            rest_tier = $3
+        WHERE id = $4
+        "#,
+        repose,
+        rest_source as RestSource,
+        rest_tier,
+        character_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Flip a character's `name_approved` column. Used by the

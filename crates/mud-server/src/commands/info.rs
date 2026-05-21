@@ -1872,9 +1872,16 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "nosummon",
-            summary: "Refuse incoming summon spells.",
-            long: "Sets NO_SUMMON. Once summon-class spells land, this \
-                   blocks remote teleport effects targeting you.",
+            summary: "Silently auto-decline incoming summon spells.",
+            long: "By default, when someone casts SUMMON on you, you get a \
+                   30-second `accept` / `decline` prompt. Setting NO_SUMMON \
+                   short-circuits that — incoming summons are silently \
+                   refused without prompting you, and the caster sees \
+                   \"X is not accepting summons.\" Use this when you want \
+                   to AFK without summon-prompt interruptions. Run again \
+                   to re-enable the prompt. PK-flagged players (see `pk`) \
+                   bypass the prompt entirely — that's part of opting \
+                   into PvP.",
         },
         run: cmd_nosummon,
     }
@@ -3350,13 +3357,44 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         let class_label = class_name
             .as_deref()
             .map_or_else(String::new, |c| format!(" {c}"));
-        let lvl_open = who_level_color(prof.level).unwrap_or("");
-        let lvl_close = if lvl_open.is_empty() { "" } else { "</>" };
-        out.push_str(&format!(
-            "<b:cyan>{name_rendered}</> is a level {lvl_open}{}{lvl_close} \
-             {race_label}{class_label}.\r\n",
-            prof.level,
-        ));
+        // K3: gate exact level for mortals examining a much-stronger
+        // mob. Staff (Builder+) always see the number; mortals see a
+        // verbal tier when the gap is wide enough that the number
+        // would just say "go away." Equal-or-lower mobs keep the
+        // number so a player can gauge weak prey.
+        let viewer_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+        let staff = crate::commands::is_staff(world, player);
+        let gap = prof.level - viewer_level;
+        if !staff && target != player && gap >= 5 {
+            let stature = if gap >= 21 {
+                "of legendary stature"
+            } else if gap >= 11 {
+                "of formidable power"
+            } else {
+                "of considerable skill"
+            };
+            // "a Elf" → "an Elf"; same for "an Halfling" → "a Halfling".
+            // First-letter vowel check is the cheap heuristic that
+            // covers every race/class label in our catalog without
+            // a lookup table.
+            let first = race_label.chars().next().unwrap_or('x').to_ascii_lowercase();
+            let article = if matches!(first, 'a' | 'e' | 'i' | 'o' | 'u') {
+                "an"
+            } else {
+                "a"
+            };
+            out.push_str(&format!(
+                "<b:cyan>{name_rendered}</> is {article} {race_label}{class_label} {stature}.\r\n",
+            ));
+        } else {
+            let lvl_open = who_level_color(prof.level).unwrap_or("");
+            let lvl_close = if lvl_open.is_empty() { "" } else { "</>" };
+            out.push_str(&format!(
+                "<b:cyan>{name_rendered}</> is a level {lvl_open}{}{lvl_close} \
+                 {race_label}{class_label}.\r\n",
+                prof.level,
+            ));
+        }
         // Size + lifeforce + body metrics from `RaceCatalog`.
         // Surfaced on examine so a player can gauge a stranger's
         // physique without poking their score sheet. Size + lifeforce
@@ -3445,12 +3483,16 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 mud_db::enums::MobProfession::Shopkeeper => None,
             };
             if let Some(line) = line {
-                out.push_str(&format!("{name_rendered} is {line}\r\n"));
+                out.push_str(&crate::commands::cap_sentence_start(&format!(
+                    "{name_rendered} is {line}\r\n"
+                )));
             }
         }
     }
     if world.get::<mud_world::Flying>(target).is_some() {
-        out.push_str(&format!("{name_rendered} hovers in mid-air.\r\n"));
+        out.push_str(&crate::commands::cap_sentence_start(&format!(
+            "{name_rendered} hovers in mid-air.\r\n"
+        )));
     }
     // Mob latent parity (Wave 2.L) atmospheric flavor lines.
     // Size: surface non-MEDIUM body classes — most mobs are MEDIUM
@@ -3512,11 +3554,15 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     }
     if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(target).copied() {
         let mount_name = name_or(world, mount, "(unknown)");
-        out.push_str(&format!("{name_rendered} is riding {mount_name}.\r\n"));
+        out.push_str(&crate::commands::cap_sentence_start(&format!(
+            "{name_rendered} is riding {mount_name}.\r\n"
+        )));
     }
     if let Some(mud_world::RiddenBy(rider)) = world.get::<mud_world::RiddenBy>(target).copied() {
         let rider_name = name_or(world, rider, "(unknown)");
-        out.push_str(&format!("{rider_name} is riding {name_rendered}.\r\n"));
+        out.push_str(&crate::commands::cap_sentence_start(&format!(
+            "{rider_name} is riding {name_rendered}.\r\n"
+        )));
     }
     if world.get::<Stealth>(target).is_some() && target == player {
         // Self-only — others shouldn't see your stealth marker.
@@ -3572,6 +3618,35 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             out.push_str(&format!(
                 "{name_rendered} is affected by: {}.\r\n",
                 names.join(", "),
+            ));
+        }
+        // Equipped gear list. Players and mobs alike — bystanders
+        // should see what someone's wielding before engaging them
+        // (the warhammer vs the toothpick matters tactically).
+        // Mirrors `cmd_equipment`'s ordering via Slot::ORDER so the
+        // readout reads consistently regardless of equip sequence.
+        let worn: Vec<(Slot, String)> = {
+            let mut q = world.query_filtered::<
+                (&Located, &Named, &EquippedSlot),
+                With<Item>,
+            >();
+            q.iter(world)
+                .filter(|(l, _, _)| l.0 == target)
+                .map(|(_, n, eq)| (eq.0, n.name.clone()))
+                .collect()
+        };
+        if !worn.is_empty() {
+            let mut sorted = worn;
+            sorted.sort_by_key(|(s, _)| {
+                Slot::ORDER.iter().position(|x| x == s).unwrap_or(usize::MAX)
+            });
+            let entries: Vec<String> = sorted
+                .iter()
+                .map(|(s, n)| format!("{} <dim>({})</>", n, s.label()))
+                .collect();
+            out.push_str(&format!(
+                "<cyan>Equipped:</> {}.\r\n",
+                entries.join(", "),
             ));
         }
     }
@@ -3775,11 +3850,25 @@ pub(crate) fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "You have no profile.\r\n");
         return;
     };
-    send_to(
-        world,
-        player,
-        format!("\r\nLevel {}    Experience: {}\r\n", p.level, p.experience),
-    );
+    let mut out = format!("\r\nLevel {}    Experience: {}\r\n", p.level, p.experience);
+    if let Some(lp) = crate::commands::level_progress_for(p.level, p.experience) {
+        let into_bracket = (lp.current_xp - lp.level_floor_xp).max(0);
+        let bracket = (lp.next_level_xp - lp.level_floor_xp).max(1);
+        let to_go = (bracket - into_bracket).max(0);
+        out.push_str(&format!(
+            "Level {} → {}:  {} / {}  {} {}%  ({} to go)\r\n",
+            p.level,
+            p.level + 1,
+            into_bracket,
+            bracket,
+            crate::commands::progress_bar(lp.percent),
+            lp.percent,
+            to_go,
+        ));
+    } else {
+        out.push_str("(Level cap reached — no further progress shown.)\r\n");
+    }
+    send_to(world, player, out);
 }
 
 /// `wealth` / `gold` / `money`: split the on-hand copper total into
@@ -5008,6 +5097,19 @@ pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     }
+    // Dark-room gate: scan is purely visual. With no light and no
+    // dark-vision the scanner sees nothing — refuse outright rather
+    // than printing an empty result. (Infravision / heat-source
+    // detection isn't wired up yet; once it lands, this gate should
+    // skip the refusal for observers carrying it and instead filter
+    // the per-room actor list to heat-producing entities only.)
+    if crate::commands::room_is_dark(world, here)
+        && !crate::commands::room_has_light(world, here)
+        && !crate::commands::player_can_see_in_dark(world, player)
+    {
+        send_to(world, player, "It is pitch black; you can see nothing.\r\n");
+        return;
+    }
     // Legacy maxdis: rogues/assassins/staff get 3, everyone else 1.
     // We don't carry a class-name string on the runtime side yet
     // (class is an i32 catalog id), so for now staff get the long
@@ -5397,28 +5499,10 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         if any_hum_dark {
             out.push_str("You hear something humming nearby.\r\n");
         }
-        if has_flag(world, player, PlayerFlag::AutoExit) {
-            // Hidden exits stay out of the auto-listing even in
-            // pitch-black unless this player has already found
-            // them via `search`.
-            let exits: Vec<Direction> = world
-                .get::<Exits>(room)
-                .map(|e| {
-                    e.0.iter()
-                        .filter(|(d, ed)| {
-                            !exit_is_hidden_to(world, player, room, **d, ed)
-                        })
-                        .map(|(d, _)| *d)
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !exits.is_empty() {
-                let mode = color_mode_for(world, player);
-                let header = render_color_tags("<cyan>Exits:</>", mode);
-                let names: Vec<&str> = exits.iter().map(|d| direction_name(*d)).collect();
-                out.push_str(&format!("{header} {}\r\n", names.join(", ")));
-            }
-        }
+        // In pitch black with no dark-vision the player can't see
+        // where the room leads, so exits are suppressed entirely —
+        // even when AUTO_EXIT is on. (A future search/feel-the-wall
+        // skill would surface them; nothing today does.)
         send_to(world, player, out);
         return;
     }
@@ -5644,6 +5728,34 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     {
         out.push_str(&format!("{}\r\n", crate::weather::describe(state)));
     }
+    // Wall sentences, one per walled direction. Rendered between
+    // the weather line and the mob block so the player sees
+    // active barriers as part of the room's atmosphere rather
+    // than having to type `exits` to discover them. Skipped when
+    // the room has no walls (the common case).
+    if let Some(walls) = world.get::<mud_world::RoomBlockedExits>(room) {
+        let mut entries: Vec<(mud_db::enums::Direction, mud_world::RoomBlockedExit)> =
+            walls.by_direction.iter().map(|(d, w)| (*d, w.clone())).collect();
+        entries.sort_by_key(|(d, _)| direction_order(*d));
+        for (dir, wall) in entries {
+            let color = match wall.traversal {
+                mud_world::WallTraversal::Block => "<red>",
+                mud_world::WallTraversal::Slow => "<yellow>",
+                mud_world::WallTraversal::Passable => "<cyan>",
+            };
+            let verb = match wall.traversal {
+                mud_world::WallTraversal::Block => "blocks",
+                mud_world::WallTraversal::Slow => "chokes",
+                mud_world::WallTraversal::Passable => "shimmers across",
+            };
+            let line = format!(
+                "{color}A {kind} {verb} the way {dir}.</>",
+                kind = wall.kind_label,
+                dir = direction_name(dir),
+            );
+            out.push_str(&format!("{}\r\n", render_color_tags(&line, mode)));
+        }
+    }
     // Blank line between description / weather and the actor block
     // so mob lines don't read as another sentence of the description.
     // Only inserted when there's actually something to separate.
@@ -5688,15 +5800,36 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         if exits.is_empty() {
             out.push_str(&format!("{header} none\r\n"));
         } else {
+            // Wall snapshot for the autoexit line — same source
+            // `cmd_exits` consults so the two surfaces stay
+            // consistent. Walled directions get a `[W]` (block) /
+            // `[F]` (fog) / `[I]` (illusion) suffix, taking
+            // precedence over the door-state suffix because a
+            // wall is the more urgent obstacle.
+            let walls: std::collections::HashMap<
+                mud_db::enums::Direction,
+                mud_world::RoomBlockedExit,
+            > = world
+                .get::<mud_world::RoomBlockedExits>(room)
+                .map(|b| b.by_direction.clone())
+                .unwrap_or_default();
             let names: Vec<String> = exits
                 .iter()
                 .map(|(d, state)| {
-                    let open = exit_state_color(*state);
-                    let suffix = match state {
-                        ExitState::Open => "",
-                        ExitState::Closed => "[C]",
-                        ExitState::Locked => "[L]",
+                    let suffix = if let Some(w) = walls.get(d) {
+                        match w.traversal {
+                            mud_world::WallTraversal::Block => "[W]",
+                            mud_world::WallTraversal::Slow => "[F]",
+                            mud_world::WallTraversal::Passable => "[I]",
+                        }
+                    } else {
+                        match state {
+                            ExitState::Open => "",
+                            ExitState::Closed => "[C]",
+                            ExitState::Locked => "[L]",
+                        }
                     };
+                    let open = exit_state_color(*state);
                     let raw = format!("{open}{}{suffix}</>", direction_name(*d));
                     render_color_tags(&raw, mode)
                 })
@@ -6110,8 +6243,8 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-pub(crate) fn cmd_camp(world: &mut World, player: Entity, _args: &str) {
-    use mud_world::Camping;
+pub(crate) fn cmd_camp(world: &mut World, player: Entity, args: &str) {
+    use mud_world::{Camping, Item, Keywords, ObjectPrototypes, WorldKey};
     if world.get::<Camping>(player).is_some() {
         send_to(world, player, "You're already setting up camp.\r\n");
         return;
@@ -6148,6 +6281,50 @@ pub(crate) fn cmd_camp(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     }
+    // Rest / repose R2: optional `camp <kit-name>` resolves to an
+    // item in inventory whose proto carries `campKitTier`. The kit
+    // is held by reference on the `Camping` component and consumed
+    // only at completion (NOT on cancel — design doc edge-case
+    // table is explicit).
+    let needle = args.trim().to_ascii_lowercase();
+    let (kit_entity, kit_world_key, kit_tier_bonus) = if needle.is_empty() {
+        (None, None, 0)
+    } else {
+        // Walk inventory items for a name/keyword match, then check
+        // the proto's camp_kit_tier. A name-match that isn't a kit
+        // surfaces a specific refusal so the player knows the item
+        // is wrong, not the keyword.
+        let candidate: Option<(Entity, WorldKey)> = {
+            let mut q = world
+                .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>, &WorldKey), With<Item>>();
+            q.iter(world)
+                .find(|(_, l, n, kw, _)| l.0 == player && matches(&needle, n, *kw))
+                .map(|(e, _, _, _, wk)| (e, *wk))
+        };
+        let Some((item, wk)) = candidate else {
+            send_to(
+                world,
+                player,
+                format!("You don't have a kit called '{needle}'.\r\n"),
+            );
+            return;
+        };
+        let tier_bonus = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(wk.zone, wk.id))
+            .and_then(|p| p.camp_kit_tier);
+        let Some(tier_bonus) = tier_bonus else {
+            let item_name = name_of(world, item);
+            send_to(
+                world,
+                player,
+                format!("{item_name} isn't a camp kit.\r\n"),
+            );
+            return;
+        };
+        (Some(item), Some((wk.zone, wk.id)), tier_bonus)
+    };
     let now_tick = world.resource::<TickCount>().0;
     try_insert(
         world,
@@ -6155,14 +6332,25 @@ pub(crate) fn cmd_camp(world: &mut World, player: Entity, _args: &str) {
         Camping {
             since_tick: now_tick,
             started_in: room,
+            kit_entity,
+            kit_world_key,
+            kit_tier_bonus,
         },
     );
     let player_name = name_of(world, player);
-    send_rendered(
-        world,
-        player,
-        "<b:cyan>You start setting up camp.</>\r\n",
-    );
+    if kit_entity.is_some() {
+        send_rendered(
+            world,
+            player,
+            "<b:cyan>You start setting up camp with your kit.</>\r\n",
+        );
+    } else {
+        send_rendered(
+            world,
+            player,
+            "<b:cyan>You start setting up camp.</>\r\n",
+        );
+    }
     broadcast_room_except_players_rendered(
         world,
         room,
@@ -6672,6 +6860,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
                 Some(LevelProgress {
                     current_xp: i64::from(*xp),
                     next_level_xp: i64::from(next),
+                    level_floor_xp: i64::from(prev),
                     percent: i32::try_from(percent).unwrap_or(0),
                 })
             } else {
@@ -6738,6 +6927,21 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         is_ghost: world.get::<mud_world::Ghost>(player).is_some(),
         is_stunned: world.get::<mud_world::Stunned>(player).is_some(),
         is_frozen: world.get::<mud_world::Frozen>(player).is_some(),
+        rest: world.get::<mud_world::RestState>(player).and_then(|r| {
+            // Suppress entirely when nothing's worth saying — no
+            // pending source AND no banked Repose. Avoids a noisy
+            // "Rest: none / 0 XP" line for players who have neither
+            // rented nor camped nor accumulated any pool.
+            if matches!(r.source, mud_db::enums::RestSource::None) && r.repose == 0 {
+                None
+            } else {
+                Some(crate::commands::RestStateDisplay {
+                    source: r.source,
+                    tier: r.tier,
+                    repose: r.repose,
+                })
+            }
+        }),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
@@ -6861,7 +7065,14 @@ pub(crate) fn cmd_wake(world: &mut World, player: Entity, args: &str) {
     };
     let target_name = name_of(world, target);
     if world.get::<Posture>(target).map(|p| p.0) != Some(PostureKind::Sleeping) {
-        send_rendered(world, player, &format!("{target_name} is already awake.\r\n"));
+        send_rendered(
+            world,
+            player,
+            &format!(
+                "{} is already awake.\r\n",
+                crate::commands::cap_sentence_start(&target_name)
+            ),
+        );
         return;
     }
     try_insert(world, target, Posture(PostureKind::Standing));
@@ -7421,12 +7632,16 @@ pub(crate) fn cmd_norepeat(world: &mut World, player: Entity, _args: &str) {
 }
 
 pub(crate) fn cmd_nosummon(world: &mut World, player: Entity, _args: &str) {
+    // NoSummon's runtime semantic (L1-v2): incoming summon casts
+    // silently auto-decline instead of prompting you. Flipping it
+    // off lets you receive the standard `ACCEPT / DECLINE`
+    // prompt, so you can opt in per-cast.
     toggle_player_flag(
         world,
         player,
         PlayerFlag::NoSummon,
-        "You can no longer be summoned by spells.",
-        "You can again be summoned by spells.",
+        "Incoming summons will now silently auto-decline (no interruption).",
+        "Incoming summons will now prompt you (`accept` or `decline` within 30s).",
     );
 }
 
@@ -7547,6 +7762,16 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
     let mut out = String::from("\r\n");
     out.push_str(&render_color_tags("<cyan>Exits:</>", mode));
     out.push_str("\r\n");
+    // Snapshot any walled directions ahead of the row loop. Each
+    // wall is annotated in-line so the exits listing reflects the
+    // same barriers `cmd_move` will refuse / drag on / dispel.
+    // Empty when no wall is in effect — the conditional read keeps
+    // the no-wall case to a single resource fetch.
+    let walls: std::collections::HashMap<mud_db::enums::Direction, mud_world::RoomBlockedExit> =
+        world
+            .get::<mud_world::RoomBlockedExits>(located.0)
+            .map(|b| b.by_direction.clone())
+            .unwrap_or_default();
     for (dir, room, state) in &rows {
         let open = exit_state_color(*state);
         // Pad in XML-Lite space (visible_width sees `<tag>`),
@@ -7568,7 +7793,24 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
             ExitState::Closed => render_color_tags("  <yellow>(closed)</>", mode),
             ExitState::Locked => render_color_tags("  <red>(locked)</>", mode),
         };
-        out.push_str(&format!("  {dir_label} - {room_label}{state_label}\r\n"));
+        // Wall trailer (after door state so a door+wall direction
+        // reads "north - X (closed) (wall of stone)"). Color cue
+        // mirrors traversal severity: red for block, yellow for
+        // slow, cyan for illusion.
+        let wall_label = walls.get(dir).map_or(String::new(), |w| {
+            let color = match w.traversal {
+                mud_world::WallTraversal::Block => "<red>",
+                mud_world::WallTraversal::Slow => "<yellow>",
+                mud_world::WallTraversal::Passable => "<cyan>",
+            };
+            render_color_tags(
+                &format!("  {color}({})</>", w.kind_label),
+                mode,
+            )
+        });
+        out.push_str(&format!(
+            "  {dir_label} - {room_label}{state_label}{wall_label}\r\n"
+        ));
     }
     send_to(world, player, out);
 }
@@ -8459,6 +8701,21 @@ pub(crate) fn cmd_weather(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let room = located.0;
+    // Indoor / underground rooms muffle the weather report — players
+    // shouldn't get "gulls wheel and complain" while standing in a
+    // sealed forest temple. Show a single muted line instead of
+    // the full climate + live-state + season triplet.
+    let sector = world
+        .get::<mud_world::RoomSector>(room)
+        .map_or(mud_db::enums::Sector::Field, |s| s.0);
+    if !crate::commands::sector_is_outdoor_for_weather(sector) {
+        send_to(
+            world,
+            player,
+            "\r\n<dim>You can't tell what the weather is doing from in here.</>\r\n",
+        );
+        return;
+    }
     let zone_id = world.get::<WorldKey>(room).map(|k| k.zone);
     let zone = zone_id.and_then(|z| world.resource::<WorldKeyIndex>().zones.get(&z).copied());
     let climate = zone.and_then(|z| world.get::<ZoneClimate>(z).map(|c| c.0));
@@ -8723,6 +8980,31 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
                 ),
             );
             return;
+        }
+
+        // Player-corpse consent gate. Mirrors legacy CONSENT: only
+        // the dead player themselves (matched by name extracted
+        // from "the corpse of X") or staff can loot a player
+        // corpse. Stops opportunistic gear theft when a player
+        // dies; uncollected items still drop to the room on decay.
+        let is_pc = world.get::<mud_world::PlayerCorpse>(container).is_some();
+        if is_pc && !crate::commands::is_staff(world, player) {
+            let owner_name = container_name
+                .strip_prefix("the corpse of ")
+                .unwrap_or("")
+                .trim();
+            if !owner_name.eq_ignore_ascii_case(player_name.as_str()) {
+                send_to(
+                    world,
+                    player,
+                    format!(
+                        "{container_name} isn't yours to loot — \
+                         disturbing another adventurer's remains \
+                         requires their consent.\r\n"
+                    ),
+                );
+                return;
+            }
         }
 
         // `get all from <container>`: snapshot every item inside,
@@ -9469,7 +9751,10 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
         send_rendered(
             world,
             player,
-            &format!("{target_name} is too laden to take {item_name}.\r\n"),
+            &format!(
+                "{} is too laden to take {item_name}.\r\n",
+                crate::commands::cap_sentence_start(&target_name)
+            ),
         );
         return;
     }
@@ -9534,11 +9819,39 @@ pub(crate) fn cmd_wear(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, "You have nothing wearable in your inventory.\r\n");
             return;
         }
-        // wear_into handles its own per-item messaging including
-        // refusal lines for slot conflicts; we just feed it a name.
+        // Use the silent-room variant so the loop doesn't fire N
+        // per-item bystander broadcasts. We count actual equips by
+        // sampling the EquippedSlot count delta around the loop,
+        // then emit one consolidated room line at the end.
+        let before_equipped: usize = {
+            let mut q = world
+                .query_filtered::<(&Located, &EquippedSlot), With<Item>>();
+            q.iter(world).filter(|(l, _)| l.0 == player).count()
+        };
         for item in items {
             let name = name_of(world, item);
-            wear_into(world, player, &name, None);
+            crate::commands::wear_into_silent(world, player, &name, None);
+        }
+        let after_equipped: usize = {
+            let mut q = world
+                .query_filtered::<(&Located, &EquippedSlot), With<Item>>();
+            q.iter(world).filter(|(l, _)| l.0 == player).count()
+        };
+        let newly = after_equipped.saturating_sub(before_equipped);
+        if newly > 0
+            && let Some(located) = world.get::<Located>(player).copied()
+        {
+            let actor_name = name_of(world, player);
+            let plural = if newly == 1 { "item" } else { "items" };
+            broadcast_room_visual(
+                world,
+                located.0,
+                player,
+                &[player],
+                &cap_sentence_start(&format!(
+                    "{actor_name} dons {newly} {plural} of gear.\r\n"
+                )),
+            );
         }
         refresh_player_items_gmcp(world, player);
         return;
@@ -9585,6 +9898,18 @@ pub(crate) fn cmd_light(world: &mut World, player: Entity, args: &str) {
         e.insert(mud_world::Lit);
     }
     send_rendered(world, player, &format!("You light {item_name}.\r\n"));
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let actor_name = name_of(world, player);
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&format!(
+                "{actor_name} lights {item_name}.\r\n"
+            )),
+        );
+    }
 }
 
 /// `extinguish <item>`: clear the Lit marker.
@@ -9607,6 +9932,18 @@ pub(crate) fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
         e.remove::<mud_world::Lit>();
     }
     send_rendered(world, player, &format!("You extinguish {item_name}.\r\n"));
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let actor_name = name_of(world, player);
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&format!(
+                "{actor_name} extinguishes {item_name}.\r\n"
+            )),
+        );
+    }
 }
 
 /// `mount <mob>`: climb onto a mountable mob in the room. Installs
@@ -10226,6 +10563,8 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, "You aren't wearing anything.\r\n");
             return;
         }
+        let actor_name = name_of(world, player);
+        let located = world.get::<Located>(player).copied();
         for (item, item_name) in &items {
             // Reverse the wear-granted stat bonuses BEFORE removing
             // the EquippedSlot — `unapply_object_from_wearer` reads
@@ -10242,6 +10581,22 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
                 mud_world::TriggerEvent::Remove,
             );
         }
+        // Single consolidated room broadcast for the bulk strip —
+        // one line per item would spam bystanders. Matches the
+        // shape `cmd_drop all` uses.
+        if let Some(l) = located {
+            let count = items.len();
+            let plural = if count == 1 { "item" } else { "items" };
+            broadcast_room_visual(
+                world,
+                l.0,
+                player,
+                &[player],
+                &cap_sentence_start(&format!(
+                    "{actor_name} removes {count} {plural} of gear.\r\n"
+                )),
+            );
+        }
         refresh_player_items_gmcp(world, player);
         return;
     }
@@ -10255,6 +10610,18 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     crate::equip_apply::unapply_object_from_wearer(world, item, player);
     try_remove::<EquippedSlot>(world, item);
     send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let actor_name = name_of(world, player);
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&format!(
+                "{actor_name} removes {item_name}.\r\n"
+            )),
+        );
+    }
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Remove);
     refresh_player_items_gmcp(world, player);
 }
@@ -11049,12 +11416,104 @@ pub(crate) fn cmd_invite(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-/// `accept`: accept the most recent group invite. Installs a
-/// `Follower(inviter)` on the caller (matching the existing
-/// follow-chain group model). Refused if the invite has expired
-/// (older than 5 minutes), the inviter has disconnected, or no
-/// invite exists.
+/// `accept`: accept whichever pending offer is currently
+/// outstanding. A pending `PendingSummon` (from someone casting
+/// SUMMON on you) takes priority over a `GroupInvite` because
+/// it's time-sensitive (30s expiry vs. 5min). On summon accept:
+/// teleports the caller to the caster's room, broadcasts the
+/// depart/arrive, applies a 16s cooldown on the caster, and
+/// (when the original caster's spell came back successfully)
+/// runs the auto-look. Refused if the offer has expired or the
+/// other party has disconnected.
 pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
+    // Summon offer first — it has the shorter expiry window.
+    if let Some(summon) = world.get::<mud_world::PendingSummon>(player).cloned() {
+        if summon.at.elapsed() > std::time::Duration::from_secs(30) {
+            try_remove::<mud_world::PendingSummon>(world, player);
+            send_to(world, player, "The summons offer has already expired.\r\n");
+            return;
+        }
+        if world.get_entity(summon.from).is_err() {
+            try_remove::<mud_world::PendingSummon>(world, player);
+            send_to(world, player, "The summoner is no longer around.\r\n");
+            return;
+        }
+        if world.get_entity(summon.dest_room).is_err() {
+            try_remove::<mud_world::PendingSummon>(world, player);
+            send_to(world, player, "The destination has crumbled away.\r\n");
+            return;
+        }
+        let cur_room = world.get::<Located>(player).map(|l| l.0);
+        let actually_moved = cur_room != Some(summon.dest_room);
+        if actually_moved
+            && let Some(mut l) = world.get_mut::<Located>(player)
+        {
+            l.0 = summon.dest_room;
+        }
+        let tname = world
+            .get::<Named>(player)
+            .map_or("Someone".to_string(), |n| n.name.clone());
+        if actually_moved {
+            if let Some(old_room) = cur_room {
+                crate::commands::broadcast_room_visual(
+                    world,
+                    old_room,
+                    player,
+                    &[player],
+                    &crate::commands::cap_sentence_start(&format!(
+                        "{tname} disappears suddenly.\r\n"
+                    )),
+                );
+            }
+            crate::commands::broadcast_room_visual(
+                world,
+                summon.dest_room,
+                player,
+                &[player],
+                &crate::commands::cap_sentence_start(&format!(
+                    "{tname} arrives suddenly.\r\n"
+                )),
+            );
+        }
+        send_to(
+            world,
+            player,
+            format!(
+                "You accept the summons and find yourself in {dest}.\r\n",
+                dest = summon.dest_room_name
+            ),
+        );
+        send_to(
+            world,
+            summon.from,
+            format!("{tname} accepts your summons.\r\n"),
+        );
+        // 16-second post-summon cooldown on the caster — matches the
+        // legacy WAIT_STATE(4 rounds) on summoner. Cooldown rides
+        // the SUMMON ability id so `cast summon` is the only thing
+        // locked out, not the caster's other spells.
+        let summon_ability_id = world
+            .resource::<mud_world::AbilityCatalog>()
+            .by_name
+            .get("summon")
+            .map(|d| d.id);
+        if let Some(aid) = summon_ability_id {
+            let ready_at =
+                std::time::Instant::now() + std::time::Duration::from_secs(16);
+            let mut cd = world
+                .get_mut::<mud_world::Cooldowns>(summon.from)
+                .map(|mut c| std::mem::take(&mut *c))
+                .unwrap_or_default();
+            cd.ready_at.insert(aid, ready_at);
+            try_insert(world, summon.from, cd);
+        }
+        try_remove::<mud_world::PendingSummon>(world, player);
+        // Show the new surroundings — matches the auto_look_after_cast
+        // pattern used by teleport spells.
+        cmd_look(world, player, "");
+        return;
+    }
+
     let Some(invite) = world.get::<mud_world::GroupInvite>(player).copied() else {
         send_to(
             world,
@@ -11100,8 +11559,58 @@ pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-/// `decline`: discard the pending group invite without joining.
+/// Per-tick sweep over outstanding `PendingSummon` markers. Drops
+/// any older than 30 seconds, notifying both parties so the prompt
+/// doesn't silently disappear. Cheap — n is small in practice (one
+/// component per actively-prompted target).
+pub(crate) fn pending_summon_tick(world: &mut World) {
+    let now = std::time::Instant::now();
+    let expired: Vec<(Entity, Entity, String, String)> = {
+        let mut q = world.query::<(Entity, &mud_world::PendingSummon)>();
+        q.iter(world)
+            .filter(|(_, p)| now.duration_since(p.at) > std::time::Duration::from_secs(30))
+            .map(|(e, p)| (e, p.from, p.from_name.clone(), p.dest_room_name.clone()))
+            .collect()
+    };
+    for (target, caster, _caster_name, dest_room_name) in expired {
+        try_remove::<mud_world::PendingSummon>(world, target);
+        let tname = world
+            .get::<Named>(target)
+            .map_or("Someone".to_string(), |n| n.name.clone());
+        send_to(
+            world,
+            target,
+            format!("Your pending summons offer to {dest_room_name} expired.\r\n"),
+        );
+        if world.get_entity(caster).is_ok() {
+            send_to(
+                world,
+                caster,
+                format!("Your summons to {tname} expired without a response.\r\n"),
+            );
+        }
+    }
+}
+
+/// `decline`: discard whichever pending offer is outstanding.
+/// `PendingSummon` is checked first (shorter expiry); falls
+/// through to `GroupInvite`.
 pub(crate) fn cmd_decline(world: &mut World, player: Entity, _args: &str) {
+    if let Some(summon) = world.get::<mud_world::PendingSummon>(player).cloned() {
+        try_remove::<mud_world::PendingSummon>(world, player);
+        send_to(world, player, "You decline the summons.\r\n");
+        if world.get_entity(summon.from).is_ok() {
+            let tname = world
+                .get::<Named>(player)
+                .map_or("Someone".to_string(), |n| n.name.clone());
+            send_to(
+                world,
+                summon.from,
+                format!("{tname} declines your summons.\r\n"),
+            );
+        }
+        return;
+    }
     let Some(invite) = world.get::<mud_world::GroupInvite>(player).copied() else {
         send_to(world, player, "You have no pending group invites.\r\n");
         return;
@@ -11439,6 +11948,18 @@ pub(crate) fn cmd_follow(world: &mut World, player: Entity, args: &str) {
         target,
         &format!("{player_name} starts following you.\r\n"),
     );
+    // Broadcast the new follow to other room observers so they
+    // see the party shape forming. Skipping player + target since
+    // they already got the personalized line above.
+    broadcast_room_visual(
+        world,
+        located.0,
+        player,
+        &[player, target],
+        &cap_sentence_start(&format!(
+            "{player_name} falls into step behind {target_name}.\r\n"
+        )),
+    );
 }
 
 pub(crate) fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
@@ -11453,6 +11974,22 @@ pub(crate) fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
             prev_target,
             &format!("{player_name} stops following you.\r\n"),
         );
+        // Room broadcast — same shape as cmd_follow's join. Only
+        // fires when the unfollow target is in the same room; a
+        // cross-room unfollow has no shared audience to notify.
+        if let Some(located) = world.get::<Located>(player).copied()
+            && world.get::<Located>(prev_target).map(|l| l.0) == Some(located.0)
+        {
+            broadcast_room_visual(
+                world,
+                located.0,
+                player,
+                &[player, prev_target],
+                &cap_sentence_start(&format!(
+                    "{player_name} drops out of step from {target_name}.\r\n"
+                )),
+            );
+        }
     } else {
         send_to(world, player, "You weren't following anyone.\r\n");
     }
@@ -11761,7 +12298,12 @@ pub(crate) fn render_identify_block(
         restrictions.push(("Races", names.join(", ")));
     }
     if !restrictions.is_empty() {
-        out.push_str("\r\n  <b:red>Restrictions</> <dim>(cannot equip)</>\r\n");
+        // Header reads "Forbidden to" because the list is the set
+        // of classes/races/alignments that *can't* equip the item —
+        // anyone NOT in the list can. The old "(cannot equip)"
+        // hint read as "you can't equip this" which is wrong for
+        // most viewers.
+        out.push_str("\r\n  <b:red>Forbidden to</>\r\n");
         for (label, body) in restrictions {
             out.push_str(&format!(
                 "    <red>·</> <cyan>{label}:</> <dim>{body}</>\r\n"

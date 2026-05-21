@@ -16,8 +16,8 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{
-    self, Category, Command, Help, broadcast_room_except_players_rendered, cmd_look,
-    find_actor_in_room, matches, matches_self, name_of, name_or, pad_visible,
+    self, Category, Command, Help, broadcast_room_except_players_rendered, cap_sentence_start,
+    cmd_look, find_actor_in_room, matches, matches_self, name_of, name_or, pad_visible,
     record_admin_action, send_rendered, send_to, try_insert, try_remove,
 };
 
@@ -786,7 +786,10 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
     send_rendered(
         world,
         player,
-        &format!("{target_name} is in: {room_name}  [{zone}:{id}]\r\n"),
+        &format!(
+            "{} is in: {room_name}  [{zone}:{id}]\r\n",
+            cap_sentence_start(&target_name)
+        ),
     );
 }
 pub(crate) fn cmd_slay(world: &mut World, player: Entity, args: &str) {
@@ -2329,7 +2332,10 @@ pub(crate) fn cmd_unaffect(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("{target_name} has no active effects.\r\n"),
+            format!(
+                "{} has no active effects.\r\n",
+                cap_sentence_start(&target_name)
+            ),
         );
     } else {
         let suffix = if removed == 1 { "" } else { "s" };

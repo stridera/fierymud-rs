@@ -213,10 +213,14 @@ pub fn corpse_decay_tick(world: &mut World) {
         }
         let line = if spilled > 0 {
             format!(
-                "{name} crumbles to dust, scattering {spilled} item(s) across the floor.\r\n"
+                "{} crumbles to dust, scattering {spilled} item(s) across the floor.\r\n",
+                crate::commands::cap_sentence_start(&name),
             )
         } else {
-            format!("{name} crumbles to dust, taking its contents with it.\r\n")
+            format!(
+                "{} crumbles to dust, taking its contents with it.\r\n",
+                crate::commands::cap_sentence_start(&name),
+            )
         };
         broadcast_room_except_rendered(world, room, &[], &line);
         let _ = decayed;
@@ -602,9 +606,15 @@ fn decay_milestone(prev: i32, now: i32, name: &str) -> Option<String> {
     if prev > 300 && now <= 300 {
         Some(format!("Flies gather around {name}.\r\n"))
     } else if prev > 120 && now <= 120 {
-        Some(format!("{name} begins to stink.\r\n"))
+        Some(format!(
+            "{} begins to stink.\r\n",
+            crate::commands::cap_sentence_start(name),
+        ))
     } else if prev > 30 && now <= 30 {
-        Some(format!("{name} sags as decay sets in.\r\n"))
+        Some(format!(
+            "{} sags as decay sets in.\r\n",
+            crate::commands::cap_sentence_start(name),
+        ))
     } else {
         None
     }
@@ -851,6 +861,30 @@ pub fn combat_tick(world: &mut World) {
     };
 
     for s in &swings {
+        apply_swing(world, s);
+    }
+    // Haste pass: every attacker with the `Haste` marker gets a
+    // second swing this round, against the same target (when
+    // still alive and still in the same room). Mirrors the classic
+    // "double-attack from speed" feel without needing the swing
+    // scheduler to fire on a faster cadence.
+    for s in &swings {
+        if world.get::<mud_world::Haste>(s.attacker).is_none() {
+            continue;
+        }
+        if world.get_entity(s.attacker).is_err()
+            || world.get_entity(s.target).is_err()
+        {
+            continue;
+        }
+        // Skip the second swing if the first dropped the target
+        // (zero HP) — let death broadcast settle in this tick.
+        let target_dead = world
+            .get::<mud_world::Health>(s.target)
+            .is_none_or(|h| h.hp <= 0);
+        if target_dead {
+            continue;
+        }
         apply_swing(world, s);
     }
     // Fire FIGHT triggers on every still-living target after the
@@ -1111,10 +1145,16 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // ties to attacker. Posture penalty subtracts from defender's
     // evasion (a sitting target evades worse). Crit chance is a
     // separate d100 vs the attacker's `crit_chance`.
+    // Bless: +5 accuracy when the attacker is blessed. Mirrors the
+    // legacy +1 hit-roll bump scaled to the modern 100-point band.
+    let bless_acc_bonus = i32::from(
+        world.get::<mud_world::Bless>(s.attacker).is_some(),
+    ) * 5;
     let attacker_accuracy = world
         .get::<CombatStats>(s.attacker)
         .map_or(50, |cs| cs.accuracy)
-        + stealth_acc_bonus;
+        + stealth_acc_bonus
+        + bless_acc_bonus;
     let attacker_crit_chance = world
         .get::<CombatStats>(s.attacker)
         .map_or(5, |cs| cs.crit_chance);
@@ -1146,10 +1186,12 @@ fn apply_swing(world: &mut World, s: &Swing) {
     if let Some(via) = evaded_via {
         let tail = if dice_on { show_dice_evade(via) } else { String::new() };
         let target_tail = if target_dice_on { show_dice_evade(via) } else { String::new() };
+        let target_cap = crate::commands::cap_sentence_start(&target_name);
+        let attacker_cap = crate::commands::cap_sentence_start(&s.attacker_name);
         send_to(
             world,
             s.attacker,
-            format!("{target_name} {via}s your attack!\r\n{tail}"),
+            format!("{target_cap} {via}s your attack!\r\n{tail}"),
         );
         send_to(
             world,
@@ -1160,10 +1202,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
             world,
             room,
             &[s.attacker, s.target],
-            &format!(
-                "{target_name} {via}s {}'s attack.\r\n",
-                s.attacker_name
-            ),
+            &format!("{target_cap} {via}s {attacker_cap}'s attack.\r\n"),
         );
         drain_stamina(world, s.attacker, 1);
         return;
@@ -1181,18 +1220,19 @@ fn apply_swing(world: &mut World, s: &Swing) {
             s.attacker,
             format!("<dim>You swing at {target_name} but miss.</>\r\n{tail}"),
         );
+        let attacker_cap = crate::commands::cap_sentence_start(&s.attacker_name);
+        let target_cap_for_room = crate::commands::cap_sentence_start(&target_name);
         send_to(
             world,
             s.target,
-            format!("<dim>{} swings at you but misses.</>\r\n{target_tail}", s.attacker_name),
+            format!("<dim>{attacker_cap} swings at you but misses.</>\r\n{target_tail}"),
         );
         broadcast_room_except_rendered(
             world,
             room,
             &[s.attacker, s.target],
             &format!(
-                "<dim>{} swings at {target_name} but misses.</>\r\n",
-                s.attacker_name
+                "<dim>{attacker_cap} swings at {target_cap_for_room} but misses.</>\r\n",
             ),
         );
         // Stamina still drains — you swung, you spent the breath.
@@ -1307,6 +1347,21 @@ fn apply_swing(world: &mut World, s: &Swing) {
     if damage < def_hardness {
         damage = 0;
     }
+    // J2 alignment-protect (PROT_FROM_EVIL / PROT_FROM_GOOD): 20%
+    // damage reduction when the attacker is strongly opposite-
+    // aligned to the victim. Sits after resist / hardness so the
+    // mitigation stacks on whatever the physical pipeline produces;
+    // sits before MAX_DAMAGE_PER_SWING so the cap still bounds the
+    // worst case.
+    let align_mult =
+        crate::commands::alignment_protection_factor(world, s.attacker, s.target);
+    if (align_mult - 1.0).abs() > f32::EPSILON {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            damage = ((damage as f32) * align_mult) as i32;
+        }
+        damage = damage.max(0);
+    }
     // Final cap per legacy MAX_DAMAGE so even a god-tier crit
     // can't one-shot a fully-buffed player from full HP.
     damage = damage.min(MAX_DAMAGE_PER_SWING);
@@ -1350,12 +1405,12 @@ fn apply_swing(world: &mut World, s: &Swing) {
             "You hit <b:cyan>{target_name}</> for {damage_label} damage{crit_tag}.\r\n{tail}"
         ),
     );
+    let attacker_cap = crate::commands::cap_sentence_start(&s.attacker_name);
     send_to(
         world,
         s.target,
         format!(
-            "{} {attacker_verb_third} you for {damage_label} damage{crit_tag}.\r\n{target_tail}",
-            s.attacker_name
+            "{attacker_cap} {attacker_verb_third} you for {damage_label} damage{crit_tag}.\r\n{target_tail}",
         ),
     );
     if was_sleeping && !dead {
@@ -1384,11 +1439,20 @@ fn apply_swing(world: &mut World, s: &Swing) {
     if let Some(m) = threshold_msg {
         send_to(world, s.target, m);
     }
+    // Room broadcast: surface crit tag so bystanders see the
+    // "X critically hits Y!" beat the attacker/target are already
+    // seeing. Damage stays hidden (info-leak — mortal observers
+    // can't see exact numbers; staff get them via `consider`).
+    let room_crit_tag = if outcome == SwingOutcome::Crit {
+        " <b:red>(critical!)</>"
+    } else {
+        ""
+    };
     broadcast_room_except_rendered(
         world,
         room,
         &[s.attacker, s.target],
-        &format!("{} {attacker_verb_third} {target_name}.\r\n", s.attacker_name),
+        &format!("{attacker_cap} {attacker_verb_third} {target_name}{room_crit_tag}.\r\n"),
     );
 
     // Sustained-combat stamina drain: 1 per swing on the attacker. No-op
@@ -1543,6 +1607,18 @@ pub(crate) fn handle_death(
                 CorpseDecay { remaining_secs: PLAYER_CORPSE_DECAY_SECS },
             ))
             .id();
+        // Tag as a player corpse separately so ANIMATE_DEAD /
+        // looting gates can distinguish from mob corpses. Inserted
+        // after spawn — bundling it inline with the 6+ components
+        // in `spawn(...)` above doesn't reliably attach in this
+        // Bevy version (verified empirically; the second insert
+        // attaches cleanly). Snapshot save/load round-trips this
+        // marker so it survives a restart.
+        let victim_level = world.get::<mud_world::Profile>(victim).map_or(1, |p| p.level);
+        if let Ok(mut em) = world.get_entity_mut(corpse) {
+            em.insert(mud_world::PlayerCorpse);
+            em.insert(mud_world::CorpseOriginLevel(victim_level));
+        }
         for (it, bound) in owned_items {
             if bound {
                 // Skip both moves — bound gear stays on the ghost.
@@ -1654,7 +1730,10 @@ pub(crate) fn handle_death(
             world,
             room,
             &[victim],
-            &format!("{victim_name} collapses, dead.\r\n"),
+            &format!(
+                "{} collapses, dead.\r\n",
+                crate::commands::cap_sentence_start(victim_name),
+            ),
         );
         info!(?victim, name = %victim_name, ?corpse, "player corpsed");
     } else {
@@ -1668,7 +1747,10 @@ pub(crate) fn handle_death(
             world,
             room,
             &[],
-            &format!("{victim_name} dies.\r\n"),
+            &format!(
+                "{} dies.\r\n",
+                crate::commands::cap_sentence_start(victim_name),
+            ),
         );
         award_kill_xp(world, victim, victim_name);
         // Achievement hooks: first_kill and (eventually)
@@ -1717,6 +1799,14 @@ pub(crate) fn handle_death(
                 CorpseDecay { remaining_secs: MOB_CORPSE_DECAY_SECS },
             ))
             .id();
+        // Record the dead mob's level on the corpse for downstream
+        // mechanics — ANIMATE_DEAD reads it to scale the spawned
+        // skeleton's HP. Profile is the canonical source for mob
+        // levels (Mob protos seed it at spawn).
+        let mob_level = world.get::<mud_world::Profile>(victim).map_or(1, |p| p.level);
+        if let Ok(mut em) = world.get_entity_mut(corpse) {
+            em.insert(mud_world::CorpseOriginLevel(mob_level));
+        }
         // Loot-claim window: 5 minutes for the killer. Player-only
         // — mob killers don't claim corpses (this path is reached
         // only when a player landed the killing blow against
@@ -2060,11 +2150,17 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
             .saturating_mul(exp_factor)
             .saturating_div(100)
             .max(1);
-        if let Some(mut p) = world.get_mut::<mud_world::Profile>(*entity) {
-            p.experience = p.experience.saturating_add(scaled);
+        // Rest / repose R4 + R5: route through `rest::award_experience`
+        // so the wake consumer fires on the first XP gain after
+        // acquiring a source, and Repose multiplies the gain when
+        // the pool is non-zero. The fn returns the actual XP
+        // applied (base + Repose bonus) for the narration line.
+        let awarded = if world.get::<mud_world::Profile>(*entity).is_some() {
+            crate::rest::award_experience(world, *entity, scaled)
         } else {
             continue;
-        }
+        };
+        let scaled = awarded;
         // Record the kill into trophy *after* XP scales — so the
         // current swing benefits from the lower-band rate, and the
         // next one feels the new cap.
@@ -2178,35 +2274,53 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
             s.max = s.max.saturating_add(next_row.stamina_gain);
             s.current = s.max;
         }
-        // Practice points per level: a base of 2, plus the better
-        // of the caster's INT or WIS bonus. Scales mental-stat-heavy
-        // builds without making physical-stat builds bone-dry.
-        // Floor at 1 so a level-up always grants something even for
-        // a -2-bonus character.
-        let bonus = world
+        // Practice points per level: base of 1, +1 every 10 caster
+        // levels, plus the better of the INT or WIS bonus (capped
+        // at +10 by CoreStats::bonus on the 0..100 scale). Floor at
+        // 1 so a level-up always grants something.
+        let mental_bonus = world
             .get::<mud_world::CoreStats>(entity)
             .map_or(0, |s| {
                 let int_b = mud_world::CoreStats::bonus(s.intelligence);
                 let wis_b = mud_world::CoreStats::bonus(s.wisdom);
-                int_b.max(wis_b)
+                int_b.max(wis_b).max(0)
             });
-        let granted = (2 + bonus).max(1);
+        let granted = (1 + (level / 10) + mental_bonus).max(1);
         if let Some(mut sp) = world.get_mut::<mud_world::SkillPoints>(entity) {
             sp.0 = sp.0.saturating_add(granted);
         }
         let plural = if granted == 1 { "point" } else { "points" };
+        let title_suffix = next_row
+            .name
+            .as_deref()
+            .map_or_else(String::new, |n| format!(" ({n})"));
         send_to(
             world,
             entity,
             format!(
-                "*** You have advanced to level {next}{}! ***\r\n\
+                "*** You have advanced to level {next}{title_suffix}! ***\r\n\
                  You gained {granted} practice {plural}.\r\n",
-                next_row
-                    .name
-                    .as_deref()
-                    .map_or_else(String::new, |n| format!(" ({n})"))
             ),
         );
+        // Room broadcast — leveling up is a moment of triumph
+        // worth surfacing to anyone watching. Bystanders see
+        // "X surges with newfound power and rises to level N!"
+        // Includes the title when one is defined for the new
+        // level (mostly staff tiers). Mortal observers don't see
+        // raw stat gains — those stay in the personal message.
+        if let Some(located) = world.get::<Located>(entity).copied() {
+            let actor_name = name_of(world, entity);
+            let line = format!(
+                "{actor_name} surges with newfound power and rises to level {next}{title_suffix}!\r\n"
+            );
+            crate::commands::broadcast_room_visual(
+                world,
+                located.0,
+                entity,
+                &[entity],
+                &crate::commands::cap_sentence_start(&line),
+            );
+        }
         // B5: union the level row's permissions into the
         // character's Account.perms. Mortal levels carry empty
         // permission lists; staff tiers (Builder/Coder/Admin/God)
@@ -2551,6 +2665,7 @@ mod tests {
                 traits: Vec::new(),
                 movement_mode: mud_db::enums::MovementMode::Normal,
                 default_movement_mode: mud_db::enums::MovementMode::Normal,
+                aggression_formula: None,
             },
         );
         world.insert_resource(protos);

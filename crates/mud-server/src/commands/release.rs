@@ -5,7 +5,8 @@ use mud_db::enums::UserRole;
 use mud_world::{Ghost, Health, Located, Profile, RaceDefaults, RecallPoint, WorldKeyIndex};
 
 use crate::commands::{
-    Category, Command, Help, cmd_look, send_to, try_insert, try_remove,
+    Category, Command, Help, broadcast_room_visual, cap_sentence_start, cmd_look, name_of,
+    send_to, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -94,6 +95,22 @@ fn cmd_release(world: &mut World, player: Entity, _args: &str) {
         world,
         player,
         "Your spirit settles back into your body. You return, alive once more.\r\n",
+    );
+    // Arrival broadcast — others in the recall room should see the
+    // returning ghost shimmer in, otherwise the player just
+    // materializes silently. Mirrors the leave/arrive shape used
+    // by `cmd_move`. No source-room broadcast since the dying
+    // player's corpse is what's at the death scene, not their
+    // ghost; the body remains for looting until decay.
+    let player_name = name_of(world, player);
+    broadcast_room_visual(
+        world,
+        target,
+        player,
+        &[player],
+        &cap_sentence_start(&format!(
+            "{player_name} reforms in a shimmer of returning spirit.\r\n"
+        )),
     );
     cmd_look(world, player, "");
 }

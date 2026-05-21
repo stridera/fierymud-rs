@@ -77,6 +77,18 @@ pub struct Room {
     pub layout_x: Option<i32>,
     pub layout_y: Option<i32>,
     pub layout_z: Option<i32>,
+    /// Rest / repose: true when builders have flagged this room as an
+    /// inn. Gates the `rent` command — listing tiers and accepting
+    /// payment for an `INN` RestSource.
+    pub is_inn: bool,
+    /// Display name for the inn (e.g. "The Rusty Boar"). Used in the
+    /// tier menu rendered by `rent`. Null on non-inn rooms.
+    pub inn_name: Option<String>,
+    /// Available rental tiers as a JSON array:
+    /// `[{name: string, tier: 1-3, fee: int}]`. `fee` is in gold
+    /// pieces (1gp = 100 copper at deduct time). Null / empty array on
+    /// non-inn rooms.
+    pub inn_tiers: Option<serde_json::Value>,
 }
 
 pub async fn list_rooms(pool: &PgPool) -> sqlx::Result<Vec<Room>> {
@@ -107,7 +119,10 @@ pub async fn list_rooms(pool: &PgPool) -> sqlx::Result<Vec<Room>> {
             allows_scanning,
             layout_x,
             layout_y,
-            layout_z
+            layout_z,
+            is_inn,
+            inn_name,
+            inn_tiers
         FROM "Room"
         WHERE deleted_at IS NULL
         ORDER BY zone_id, id
