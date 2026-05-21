@@ -116,8 +116,22 @@ fn mud_clock_tick(tick: Res<TickCount>, mut clock: ResMut<mud_world::MudClock>) 
 #[tokio::main(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)]
 async fn main() {
+    // Start from RUST_LOG (or info), then *always* append a clamp on
+    // rustls's handshake module to error. A public TLS port gets
+    // scanners that send illegal handshakes (IP-as-SNI, corrupt
+    // ClientHellos), and rustls logs each at WARN — library-internal
+    // noise about clients doing illegal things, not operator-
+    // actionable. Appending (rather than only defaulting) means the
+    // clamp survives the deploy env setting RUST_LOG=info.
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive(
+            "rustls::msgs::handshake=error"
+                .parse()
+                .expect("static rustls log directive is valid"),
+        );
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
         .with(syslog::SyslogLayer)
         .init();
