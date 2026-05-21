@@ -149,10 +149,18 @@ pub async fn serve(
             drop(stream);
             continue;
         }
-        if !throttle_allow(peer.ip()) {
-            warn!(%peer, "throttle: rejecting connection — over rate limit");
-            drop(stream);
-            continue;
+        match throttle_allow(peer.ip()) {
+            Throttle::Allow => {}
+            Throttle::RejectFirst => {
+                warn!(%peer, "throttle: rejecting connection — over rate limit");
+                drop(stream);
+                continue;
+            }
+            Throttle::RejectRepeat => {
+                debug!(%peer, "throttle: rejecting connection (continuing flood)");
+                drop(stream);
+                continue;
+            }
         }
         if ACTIVE_CONNECTIONS.load(std::sync::atomic::Ordering::SeqCst) >= max_connections {
             warn!(%peer, max_connections, "max_connections reached; refusing");
@@ -177,10 +185,28 @@ pub async fn serve(
 /// last minute. Shared between the plain-TCP and TLS listeners
 /// since they both share the same threat model.
 static THROTTLER: std::sync::OnceLock<
-    std::sync::Mutex<
-        std::collections::HashMap<std::net::IpAddr, std::collections::VecDeque<std::time::Instant>>,
-    >,
+    std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, ThrottleEntry>>,
 > = std::sync::OnceLock::new();
+
+/// Per-IP throttle state: connection timestamps in the rolling
+/// window plus a `warned` latch so a sustained flood logs a single
+/// WARN on the transition into throttled state rather than one per
+/// rejected connection. The latch clears once the peer falls back
+/// under the limit (window slides / flood stops).
+#[derive(Default)]
+struct ThrottleEntry {
+    times: std::collections::VecDeque<std::time::Instant>,
+    warned: bool,
+}
+
+/// Outcome of a throttle check. `RejectFirst` is the transition into
+/// throttled state (worth a WARN); `RejectRepeat` is a continuing
+/// flood (debug — the operator already saw the first WARN).
+enum Throttle {
+    Allow,
+    RejectFirst,
+    RejectRepeat,
+}
 
 const MAX_CONNECTS_PER_MIN: usize = 10;
 
@@ -223,20 +249,29 @@ fn banned(ip: std::net::IpAddr) -> bool {
 /// Returns true when the IP is allowed to connect. Records the
 /// attempt; expired entries are pruned in the same call so the
 /// map doesn't grow unboundedly.
-fn throttle_allow(ip: std::net::IpAddr) -> bool {
+fn throttle_allow(ip: std::net::IpAddr) -> Throttle {
     let map_lock = THROTTLER.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut map = map_lock.lock().expect("throttler poisoned");
     let now = std::time::Instant::now();
     let window = std::time::Duration::from_secs(60);
     let entry = map.entry(ip).or_default();
-    while entry.front().is_some_and(|t| now.duration_since(*t) > window) {
-        entry.pop_front();
+    while entry.times.front().is_some_and(|t| now.duration_since(*t) > window) {
+        entry.times.pop_front();
     }
-    if entry.len() >= MAX_CONNECTS_PER_MIN {
-        return false;
+    if entry.times.len() >= MAX_CONNECTS_PER_MIN {
+        // Latch the warn so a sustained flood logs once, not per
+        // rejected connection.
+        if entry.warned {
+            return Throttle::RejectRepeat;
+        }
+        entry.warned = true;
+        return Throttle::RejectFirst;
     }
-    entry.push_back(now);
-    true
+    // Back under the limit — clear the latch so the next burst that
+    // crosses the threshold warns afresh.
+    entry.warned = false;
+    entry.times.push_back(now);
+    Throttle::Allow
 }
 
 /// Like [`serve`] but wraps every accepted connection in TLS using the
@@ -276,10 +311,18 @@ pub async fn serve_tls(
             drop(stream);
             continue;
         }
-        if !throttle_allow(peer.ip()) {
-            warn!(%peer, "throttle: rejecting TLS connection — over rate limit");
-            drop(stream);
-            continue;
+        match throttle_allow(peer.ip()) {
+            Throttle::Allow => {}
+            Throttle::RejectFirst => {
+                warn!(%peer, "throttle: rejecting TLS connection — over rate limit");
+                drop(stream);
+                continue;
+            }
+            Throttle::RejectRepeat => {
+                debug!(%peer, "throttle: rejecting TLS connection (continuing flood)");
+                drop(stream);
+                continue;
+            }
         }
         if ACTIVE_CONNECTIONS.load(std::sync::atomic::Ordering::SeqCst) >= max_connections {
             warn!(%peer, max_connections, "max_connections reached; refusing TLS");
