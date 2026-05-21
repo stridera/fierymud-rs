@@ -297,7 +297,13 @@ pub async fn serve_tls(
             let _guard = ConnGuard::new();
             match acceptor.accept(stream).await {
                 Ok(tls) => handle_connection(conn_id, peer, tls, inbound).await,
-                Err(e) => warn!(conn_id, peer = %peer, error = %e, "TLS accept failed"),
+                // A handshake failure from a random peer is expected
+                // background noise on a public TLS port — port
+                // scanners and non-TLS clients probe 4443 constantly
+                // and rustls rejects them with "corrupt message".
+                // That's not operator-actionable, so log at debug
+                // rather than spamming the WARN-level operational log.
+                Err(e) => debug!(conn_id, peer = %peer, error = %e, "TLS accept failed"),
             }
         });
     }
