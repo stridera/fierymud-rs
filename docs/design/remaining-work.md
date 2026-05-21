@@ -707,6 +707,14 @@ Look at legacy for an example, but we can improve on that system."
     realizing the BASH ability's `interrupt` effect intent that
     the inline bash path previously ignored. PALM/rogue-skill
     wiring remains a feature follow-up.
+    - **Live-verified 2026-05-21:** PK'd L25 TestWarrior bashed
+      L15 TestMage mid Magic-Missile wind-up → mage saw "Your
+      concentration on Magic Missile shatters — the bash knocks
+      you flat." and the spell never resolved. (Drove the
+      teleport setup via curl against `/api/admin/teleport`,
+      since the `mcp__fierymud__teleport` tool was returning a
+      JSON-parse error this session — the endpoint itself is
+      healthy with `player_name`/`zone_id`/`room_id`.)
 
 ## N — Weather spells (2026-05-17)
 
