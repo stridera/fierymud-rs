@@ -68,6 +68,14 @@ PostgreSQL database:
 - **FieryLib** — Python one-time importer for legacy CircleMUD `lib/` data.
 - **FieryMUD (legacy)** — the original C++23 CircleMUD-based production server.
 
+## Production
+
+Production runs on `doom.fierymud.org` (`ssh fierymud`) under `/opt/NEXT/fierymud-rs` as the systemd unit `fieryNT`
+(telnet 4003, TLS 4443, admin HTTP 127.0.0.1:8080). The legacy MUD on 4000/9999 shares the host and must not be touched.
+To deploy: `ssh fierymud 'bash -lc "/opt/NEXT/deploy/update.sh mud"'` (pull, offline release build with `.sqlx/`), then
+`ssh fierymud 'sudo -n systemctl restart fieryNT'` after checking no players are online via `/api/admin/world/status`.
+The deploy kit and runbook live in the Muditor repo: `muditor/docs/PROD.md` and `muditor/deploy/prod/README.md`.
+
 ## License
 
 Licensed under either of
