@@ -1022,6 +1022,46 @@ pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
     send_raw(world, target, rendered);
 }
 
+/// Default website URL quoted in the "link your character" hint.
+const LINK_HINT_DEFAULT_URL: &str = "https://muditor.fierymud.org";
+
+/// Resolve the website account behind `player` for features that are
+/// stored per *account* (shared chest/bank, mail, Discord link, ...).
+///
+/// Legacy characters that have not been claimed on the website carry an
+/// `Account` with an empty `user_id` (no placeholder user is created on
+/// login). For those, and for entities with no `Account` at all, this
+/// tells the player how to get one and returns `None`; callers just
+/// `return`. `feature` completes "...to use {feature}.".
+pub(crate) fn require_linked_account(
+    world: &World,
+    player: Entity,
+    feature: &str,
+) -> Option<mud_world::Account> {
+    match world.get::<Account>(player) {
+        Some(a) if !a.user_id.is_empty() => Some(a.clone()),
+        Some(_) => {
+            let url = world
+                .get_resource::<mud_world::RuntimeConfig>()
+                .map_or(LINK_HINT_DEFAULT_URL, |c| {
+                    c.get_string("security", "website_url", LINK_HINT_DEFAULT_URL)
+                })
+                .trim_end_matches('/')
+                .to_string();
+            send_to(
+                world,
+                player,
+                format!("Link this character to a website account at {url} to use {feature}.\r\n"),
+            );
+            None
+        }
+        None => {
+            send_to(world, player, "You don't have an account.\r\n");
+            None
+        }
+    }
+}
+
 /// Raw-bytes send, no color-tag rendering. `PROMPT_RECIPIENTS` is
 /// still tracked. Used by `send_to` after rendering, and by callers
 /// that ship pre-rendered ANSI. Also mirrors to a snooper when the
@@ -6884,7 +6924,10 @@ pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) 
     }) && proto
         .professions
         .contains(&mud_db::enums::MobProfession::Postmaster)
-        && let Some(user_id) = world.get::<Account>(viewer).map(|a| a.user_id.clone())
+        && let Some(user_id) = world
+            .get::<Account>(viewer)
+            .map(|a| a.user_id.clone())
+            .filter(|u| !u.is_empty())
         && let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone())
     {
         let out = conn.0.clone();
@@ -8157,7 +8200,11 @@ pub(crate) fn record_admin_action(
     // actor's Account; the target identifier is the actor name
     // for now (the verb's actual target is in `args` and a
     // future pass can parse + index that more cleanly).
-    let user_id = world.get::<Account>(actor).map(|a| a.user_id.clone());
+    // Unlinked legacy characters have no user row to attribute to.
+    let user_id = world
+        .get::<Account>(actor)
+        .map(|a| a.user_id.clone())
+        .filter(|u| !u.is_empty());
     if let (Some(uid), Some(pool)) = (user_id, world.get_resource::<DbPool>().map(|p| p.0.clone()))
     {
         let args = args.to_string();

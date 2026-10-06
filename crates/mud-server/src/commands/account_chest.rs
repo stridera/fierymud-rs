@@ -31,9 +31,8 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{
-    Account, AttachedTriggers, BoardLink, Charges, Description, Item, Keywords, LightFuel,
-    LiquidContainer, Located, Named, ObjectFlags, ObjectPrototypes, ObjectRestrictions,
-    TriggerCatalog, WorldKey,
+    AttachedTriggers, BoardLink, Charges, Description, Item, Keywords, LightFuel, LiquidContainer,
+    Located, Named, ObjectFlags, ObjectPrototypes, ObjectRestrictions, TriggerCatalog, WorldKey,
 };
 use serde::{Deserialize, Serialize};
 
@@ -131,8 +130,8 @@ pub(crate) struct ChestItemState {
 }
 
 async fn cmd_account_chest(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
-    let Some(account) = world.get::<Account>(player).cloned() else {
-        send_to(world, player, "You don't have an account chest.\r\n");
+    let Some(account) = crate::commands::require_linked_account(world, player, "the account chest")
+    else {
         return;
     };
     let rows = match mud_db::account_items::list_for_user(pool, &account.user_id).await {
@@ -184,8 +183,8 @@ async fn cmd_chest_deposit(
         send_to(world, player, "Deposit what?\r\n");
         return;
     }
-    let Some(account) = world.get::<Account>(player).cloned() else {
-        send_to(world, player, "You don't have an account chest.\r\n");
+    let Some(account) = crate::commands::require_linked_account(world, player, "the account chest")
+    else {
         return;
     };
     let Some(item) = find_carried_by(world, target, player, EquipFilter::Inventory) else {
@@ -265,8 +264,8 @@ async fn cmd_chest_withdraw(
         send_to(world, player, "Withdraw which slot?\r\n");
         return;
     }
-    let Some(account) = world.get::<Account>(player).cloned() else {
-        send_to(world, player, "You don't have an account chest.\r\n");
+    let Some(account) = crate::commands::require_linked_account(world, player, "the account chest")
+    else {
         return;
     };
     // Resolve the target — first try numeric slot, then proto-name
@@ -428,6 +427,37 @@ pub(crate) fn spawn_withdrawn_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mud_world::Account;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unlinked_character_gets_link_hint_instead_of_account_chest() {
+        let mut world = World::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let e = world
+            .spawn((
+                Account {
+                    user_id: String::new(),
+                    character_id: "char-l".to_string(),
+                    role: UserRole::Player,
+                    perms: Vec::new(),
+                },
+                crate::commands::Connection(tx),
+            ))
+            .id();
+        // Never connects: the link check must short-circuit before any DB use.
+        let pool = mud_db::sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap();
+        cmd_account_chest(&mut world, e, &pool).await;
+        cmd_chest_deposit(&mut world, e, &pool, "sword").await;
+        cmd_chest_withdraw(&mut world, e, &pool, "1").await;
+        let mut out = String::new();
+        while let Ok(b) = rx.try_recv() {
+            out.push_str(&String::from_utf8_lossy(&b));
+        }
+        assert_eq!(out.matches("to use the account chest.").count(), 3, "{out}");
+        assert!(out.contains("https://muditor.fierymud.org"), "{out}");
+    }
 
     #[test]
     fn chest_state_round_trips() {

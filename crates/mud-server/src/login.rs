@@ -1450,10 +1450,11 @@ impl ConnRouter {
                             };
                             // Legacy-orphan path: imported CircleMUD
                             // characters land with no `user_id`. A sentinel
-                            // user (empty id) marks them so that after the
-                            // game password verifies, `finish_password`
-                            // provisions a `Users` row, links the character
-                            // and upgrades the hash to bcrypt in place.
+                            // user (empty id) marks them; after the game
+                            // password verifies, `finish_password` only
+                            // upgrades the hash to bcrypt. No `Users` row is
+                            // created: the player claims the character on
+                            // the website.
                             let user = user_lookup.unwrap_or_else(sentinel_user);
                             ctx.stage = Stage::AwaitingPassword {
                                 user,
@@ -2291,7 +2292,7 @@ impl ConnRouter {
     async fn finish_password(
         &mut self,
         conn_id: ConnId,
-        mut user: User,
+        user: User,
         preselected: Option<Box<CharacterRow>>,
         ok: bool,
         migration_hash: Option<Result<String, String>>,
@@ -2393,118 +2394,24 @@ impl ConnRouter {
             self.legacy_throttle
                 .clear(&LegacyLoginThrottle::key(&c.name));
         }
-        // Linked character still on a legacy crypt(3) game hash: upgrade it
-        // to bcrypt now that the plaintext was verified.
-        if !user.id.is_empty()
-            && let Some(Ok(new_hash)) = &migration_hash
-            && let Some(c) = preselected.as_deref()
-        {
-            match characters::set_password_hash(pool, &c.id, new_hash).await {
-                Ok(()) => info!(conn_id, character = %c.name, "game password upgraded to bcrypt"),
-                Err(e) => warn!(conn_id, error = %e, "game password bcrypt upgrade failed"),
-            }
-        }
-        // Legacy-orphan migration: the player auth'd against
-        // a `Characters.password_hash` (imported Unix crypt(3)
-        // value) with no `Users` row backing them. Provision a
-        // fresh `Users` row with a bcrypt re-hash of the
-        // password they just typed, link the character to it,
-        // and swap the in-memory sentinel for the real row so
-        // the rest of the login pipeline (failed-login reset,
-        // ban check, account-wealth, complete_login) has a
-        // valid id to work with. Wrapped in a transaction so
-        // a mid-way crash doesn't leave an orphan `Users` row
-        // or a dangling `user_id` FK.
-        if user.id.is_empty() {
-            let Some(char_row) = preselected.as_deref() else {
-                // Defensive: sentinel only happens on the
-                // character-name path, which always preselects.
-                warn!(conn_id, "legacy migration: missing preselected character");
-                let _ = ctx
-                    .outbound
-                    .try_send("Server error.\r\n".as_bytes().to_vec());
-                ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
-                return;
-            };
-            let new_hash = match migration_hash {
-                Some(Ok(h)) => h,
-                Some(Err(e)) => {
-                    warn!(conn_id, error = %e, "legacy migration: bcrypt hash failed");
-                    let _ = ctx
-                        .outbound
-                        .try_send("Server error.\r\n".as_bytes().to_vec());
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(
-                        world,
-                        "EMAIL_PROMPT",
-                        IDENT_PROMPT_FALLBACK,
-                    ));
-                    return;
+        // The game password verified against the character's own hash. If
+        // it was still a legacy crypt(3) value, upgrade it to bcrypt now
+        // that the plaintext is known. Unlinked legacy characters (no
+        // `user_id`) stay unlinked: no placeholder website account is
+        // created, so the website's `linkCharacter` can still claim them;
+        // account-only features tell the player to link on the website.
+        if let Some(c) = preselected.as_deref() {
+            match &migration_hash {
+                Some(Ok(new_hash)) => {
+                    match characters::set_password_hash(pool, &c.id, new_hash).await {
+                        Ok(()) => {
+                            info!(conn_id, character = %c.name, "game password upgraded to bcrypt");
+                        }
+                        Err(e) => warn!(conn_id, error = %e, "game password bcrypt upgrade failed"),
+                    }
                 }
-                None => {
-                    warn!(conn_id, "legacy migration: no hash computed");
-                    let _ = ctx
-                        .outbound
-                        .try_send("Server error.\r\n".as_bytes().to_vec());
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(
-                        world,
-                        "EMAIL_PROMPT",
-                        IDENT_PROMPT_FALLBACK,
-                    ));
-                    return;
-                }
-            };
-            // Synthetic placeholder email — character names are
-            // unique so this collision-free by construction. The
-            // player can change it later via a `setemail`-style
-            // command (TODO) without affecting the auth path,
-            // which keys on `Users.id` once linked.
-            let synth_email = format!(
-                "{}@legacy.fierymud.local",
-                char_row.name.to_ascii_lowercase()
-            );
-            let display_name = char_row.name.clone();
-            let migrate = async {
-                let mut tx = pool.begin().await?;
-                let new_id = mud_db::users::create(&mut *tx, &synth_email, &display_name).await?;
-                mud_db::characters::link_to_user(&mut *tx, &char_row.id, &new_id).await?;
-                // The bcrypt upgrade of the GAME password lives on the
-                // character; the new account has no website password.
-                mud_db::characters::set_password_hash(&mut *tx, &char_row.id, &new_hash).await?;
-                tx.commit().await?;
-                Ok::<String, mud_db::sqlx::Error>(new_id)
-            };
-            match migrate.await {
-                Ok(new_id) => {
-                    info!(
-                        conn_id,
-                        user_id = %new_id,
-                        character = %char_row.name,
-                        "legacy login migrated to bcrypt"
-                    );
-                    user.id = new_id;
-                    user.email = synth_email;
-                    user.display_name = display_name;
-                }
-                Err(e) => {
-                    warn!(conn_id, error = %e, "legacy migration db error");
-                    let _ = ctx
-                        .outbound
-                        .try_send("Server error.\r\n".as_bytes().to_vec());
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(
-                        world,
-                        "EMAIL_PROMPT",
-                        IDENT_PROMPT_FALLBACK,
-                    ));
-                    return;
-                }
+                Some(Err(e)) => warn!(conn_id, error = %e, "game password bcrypt hash failed"),
+                None => {}
             }
         }
         // Auth succeeded — reset the failed-login counter so
@@ -2657,7 +2564,6 @@ impl ConnRouter {
             ctx.stage = Stage::Authenticating;
         }
         let tx = self.auth_tx.clone();
-        let is_legacy = user.id.is_empty();
         // Anything that isn't bcrypt is a legacy crypt(3) hash that gets
         // upgraded on a successful login.
         let needs_upgrade = !game_hash.starts_with("$2");
@@ -2667,7 +2573,7 @@ impl ConnRouter {
             } else {
                 verify_password_blocking(password.clone(), game_hash).await
             };
-            let migration_hash = if ok && (is_legacy || needs_upgrade) {
+            let migration_hash = if ok && needs_upgrade {
                 Some(hash_password_blocking(password).await)
             } else {
                 None
@@ -4424,7 +4330,10 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         mud_db::characters::save_pets(&mut *tx, &cid, pets_json.as_ref()).await?;
         mud_db::characters::save_bank_wealth(&mut *tx, &cid, bank).await?;
         mud_db::characters::save_rest_state(&mut *tx, &cid, repose, rest_source, rest_tier).await?;
-        mud_db::users::save_account_wealth(&mut *tx, &user_id, account_wealth).await?;
+        // Unlinked legacy characters have no `Users` row to carry the pool.
+        if !user_id.is_empty() {
+            mud_db::users::save_account_wealth(&mut *tx, &user_id, account_wealth).await?;
+        }
         if let Some(t) = new_time_played {
             mud_db::characters::save_time_played(&mut *tx, &cid, t).await?;
         }
@@ -5801,6 +5710,111 @@ mod tests {
             router.login.get(&1).unwrap().stage,
             Stage::AwaitingPassword { .. }
         ));
+    }
+
+    /// A correct crypt(3) password on an unlinked legacy character
+    /// upgrades the character's hash to bcrypt but must NOT create a
+    /// placeholder web user or link the character (the website's
+    /// `linkCharacter` has to stay able to claim it). Wizlock stops the
+    /// flow right after the upgrade so no player spawn is needed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_login_upgrades_hash_without_creating_user() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("LegacyT{suffix}");
+        let tmp_email = format!("{}@tmp.invalid", name.to_ascii_lowercase());
+        let placeholder = format!("{}@legacy.fierymud.local", name.to_ascii_lowercase());
+        let tmp_user = mud_db::users::create(&pool, &tmp_email, &name)
+            .await
+            .unwrap();
+        let char_id = mud_db::characters::create(
+            &pool,
+            &mud_db::characters::NewCharacter {
+                user_id: &tmp_user,
+                name: &name,
+                race: "HUMAN",
+                gender: "neutral",
+                class_id: 1,
+                strength: 13,
+                intelligence: 13,
+                wisdom: 13,
+                dexterity: 13,
+                constitution: 13,
+                charisma: 13,
+                name_approved: true,
+                password_hash: "",
+            },
+        )
+        .await
+        .unwrap();
+        // Make it a legacy orphan with a crypt(3) game hash.
+        let hash = legacy_hash("hunter2");
+        mud_db::sqlx::query(
+            "UPDATE \"Characters\" SET user_id = NULL, password_hash = $1 WHERE id = $2",
+        )
+        .bind(&hash)
+        .bind(&char_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        mud_db::sqlx::query("DELETE FROM \"Users\" WHERE id = $1")
+            .bind(&tmp_user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let char_row = characters::find_by_name(&pool, &name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(char_row.user_id.is_none());
+
+        let mut world = auth_world(0);
+        world.insert_resource(mud_world::WizLock { active: true });
+        let mut router = ConnRouter::new();
+        let mut rx = router.take_auth_rx().unwrap();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        drain(&mut orx);
+        let mut user = legacy_sentinel().0;
+        user.email = name.clone();
+        router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+            user,
+            preselected: Some(Box::new(char_row)),
+            game_hash: hash,
+        };
+        attempt(&mut router, &mut rx, &mut world, &pool, 1, "hunter2").await;
+        let out = drain(&mut orx);
+
+        let (user_id, new_hash): (Option<String>, String) = mud_db::sqlx::query_as(
+            "SELECT user_id, password_hash FROM \"Characters\" WHERE id = $1",
+        )
+        .bind(&char_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let placeholders: i64 =
+            mud_db::sqlx::query_scalar("SELECT COUNT(*) FROM \"Users\" WHERE email = $1")
+                .bind(&placeholder)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        mud_db::sqlx::query("DELETE FROM \"Characters\" WHERE id = $1")
+            .bind(&char_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(out.contains("locked for staff only"), "{out}");
+        assert!(user_id.is_none(), "character must stay unlinked");
+        assert_eq!(placeholders, 0, "no placeholder web user may be created");
+        assert!(new_hash.starts_with("$2"), "hash upgraded to bcrypt");
+        assert!(bcrypt::verify("hunter2", &new_hash).unwrap());
     }
 
     /// Connect to the dev database for the flow tests that exercise

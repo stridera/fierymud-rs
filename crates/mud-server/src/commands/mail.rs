@@ -165,11 +165,10 @@ pub(crate) async fn compose_mail_step(
             return;
         }
         let body = draft.body.join("\n");
-        let sender_user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
-        let Some(sender_user_id) = sender_user_id else {
-            send_to(world, player, "No account info; can't send.\r\n");
+        let Some(sender) = require_linked_account(world, player, "mail") else {
             return;
         };
+        let sender_user_id = sender.user_id;
         match mud_db::mail::send(
             pool,
             &sender_user_id,
@@ -253,6 +252,9 @@ pub(crate) async fn cmd_mail(
     ) {
         return;
     }
+    if require_linked_account(world, player, "mail").is_none() {
+        return;
+    }
     let resolved = match mud_db::mail::user_for_character_name(pool, arg).await {
         Ok(r) => r,
         Err(e) => {
@@ -306,11 +308,10 @@ pub(crate) fn cmd_mail_stub(world: &mut World, player: Entity, _args: &str) {
 /// newest first. Each line shows `# unread? sender — subject`.
 /// `readmail <#>` reads the body and marks the row read.
 pub(crate) async fn cmd_mailbox(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
-    let user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
-    let Some(user_id) = user_id else {
-        send_to(world, player, "No account info; can't fetch mail.\r\n");
+    let Some(account) = require_linked_account(world, player, "mail") else {
         return;
     };
+    let user_id = account.user_id;
     let rows = match mud_db::mail::inbox_for(pool, &user_id).await {
         Ok(r) => r,
         Err(e) => {
@@ -358,11 +359,10 @@ pub(crate) async fn cmd_readmail(
         send_to(world, player, "Mail slots are 1-based.\r\n");
         return;
     }
-    let user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
-    let Some(user_id) = user_id else {
-        send_to(world, player, "No account info; can't fetch mail.\r\n");
+    let Some(account) = require_linked_account(world, player, "mail") else {
         return;
     };
+    let user_id = account.user_id;
     let rows = match mud_db::mail::inbox_for(pool, &user_id).await {
         Ok(r) => r,
         Err(e) => {
@@ -410,11 +410,10 @@ pub(crate) async fn cmd_delmail(
         send_to(world, player, "Mail slots are 1-based.\r\n");
         return;
     }
-    let user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
-    let Some(user_id) = user_id else {
-        send_to(world, player, "No account info; can't fetch mail.\r\n");
+    let Some(account) = require_linked_account(world, player, "mail") else {
         return;
     };
+    let user_id = account.user_id;
     let rows = match mud_db::mail::inbox_for(pool, &user_id).await {
         Ok(r) => r,
         Err(e) => {

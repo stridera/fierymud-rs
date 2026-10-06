@@ -8498,7 +8498,8 @@ pub(crate) async fn cmd_account(world: &mut World, player: Entity, pool: &mud_db
     // (player hasn't linked) or fail (transient DB hiccup); both
     // collapse to `not linked` in the render so the command never
     // hard-errors on a side-table read.
-    let (discord, google) = if let Some(acct) = &account {
+    let linked = account.as_ref().is_some_and(|a| !a.user_id.is_empty());
+    let (discord, google) = if let Some(acct) = account.as_ref().filter(|_| linked) {
         let discord = mud_db::discord_links::for_user(pool, &acct.user_id)
             .await
             .unwrap_or_else(|e| {
@@ -8530,11 +8531,19 @@ pub(crate) async fn cmd_account(world: &mut World, player: Entity, pool: &mud_db
     let mut out = String::from("\r\n<b:cyan>Account</>\r\n");
     out.push_str(&format!(
         "  <cyan>Email:</>        <dim>{}</>\r\n",
-        summary.email
+        if linked {
+            summary.email.as_str()
+        } else {
+            "not linked"
+        }
     ));
     out.push_str(&format!(
         "  <cyan>Display name:</> <dim>{}</>\r\n",
-        summary.display_name
+        if linked {
+            summary.display_name.clone()
+        } else {
+            active_name.clone()
+        }
     ));
     out.push_str(&format!("  <cyan>Role:</>         {role_text}\r\n"));
     out.push_str(&format!(
@@ -8558,6 +8567,15 @@ pub(crate) async fn cmd_account(world: &mut World, player: Entity, pool: &mud_db
     // state surfaces on Discord so the player can tell whether the
     // bot has confirmed the binding; Google links don't carry a
     // verification flag (OAuth handshake is implicitly the proof).
+    if !linked {
+        out.push_str(
+            "\r\n<dim>This character is not linked to a website account. \
+             Link it on the website to use the account chest/bank, mail \
+             and Discord linking.</>\r\n",
+        );
+        send_to(world, player, out);
+        return;
+    }
     out.push_str("\r\n<b:cyan>Linked accounts</>\r\n");
     out.push_str(&format!(
         "  <cyan>Discord:</>      {}\r\n",

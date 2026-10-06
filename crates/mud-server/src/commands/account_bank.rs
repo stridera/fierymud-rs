@@ -21,7 +21,9 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{Account, AccountWealth, BankWealth, Online, Player};
 
-use crate::commands::{Category, Command, DbPool, Help, format_wealth, send_to};
+use crate::commands::{
+    Category, Command, DbPool, Help, format_wealth, require_linked_account, send_to,
+};
 
 inventory::submit! {
     Command {
@@ -79,6 +81,9 @@ inventory::submit! {
 }
 
 fn cmd_account_balance(world: &mut World, player: Entity, _args: &str) {
+    if require_linked_account(world, player, "the account chest/bank").is_none() {
+        return;
+    }
     let pool = world.get::<AccountWealth>(player).map_or(0, |a| a.0);
     let line = format_wealth(pool).map_or_else(
         || "Your account chest is empty.".to_string(),
@@ -116,6 +121,9 @@ fn account_transfer(world: &mut World, player: Entity, args: &str, direction: Ac
     let label = match direction {
         AccountDir::Deposit => "account_deposit",
         AccountDir::Withdraw => "account_withdraw",
+    };
+    let Some(account) = require_linked_account(world, player, "the account chest/bank") else {
+        return;
     };
     let amount = match args.trim().parse::<i64>() {
         Ok(n) if n > 0 => n,
@@ -165,18 +173,14 @@ fn account_transfer(world: &mut World, player: Entity, args: &str, direction: Ac
     }
     // user_id stamped on the calling character — every sibling
     // online shares the same id and needs the AccountWealth
-    // component refreshed. Skip fanout when the player has no
-    // Account component (shouldn't happen for a real player).
-    let user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
-    if let Some(uid) = user_id.clone() {
-        fanout_account_wealth(world, &uid, new_account_pool, Some(player));
-    }
+    // component refreshed.
+    let uid = account.user_id;
+    fanout_account_wealth(world, &uid, new_account_pool, Some(player));
     // Fire-and-forget DB write — the in-memory state already
     // reflects the transfer, so the player sees an immediate
     // response. If the DB write fails the next save tick covers it
     // because save_player also persists account_wealth.
-    if let (Some(uid), Some(pool)) = (user_id, world.get_resource::<DbPool>().map(|p| p.0.clone()))
-    {
+    if let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) {
         let new_pool = new_account_pool;
         tokio::spawn(async move {
             if let Err(e) = mud_db::users::save_account_wealth(&pool, &uid, new_pool).await {
@@ -281,6 +285,55 @@ mod tests {
             ))
             .id();
         (world, a, b, user_id)
+    }
+
+    /// An unlinked legacy character: `Account.user_id` is empty and a
+    /// `Connection` captures what the player is told.
+    fn make_unlinked_world() -> (World, Entity, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        let mut world = World::new();
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let e = world
+            .spawn((
+                Player,
+                Online,
+                Named {
+                    name: "Legacy".to_string(),
+                },
+                Account {
+                    user_id: String::new(),
+                    character_id: "char-l".to_string(),
+                    role: UserRole::Player,
+                    perms: Vec::<Permission>::new(),
+                },
+                crate::commands::Connection(tx),
+                BankWealth(1000),
+                AccountWealth(0),
+            ))
+            .id();
+        (world, e, rx)
+    }
+
+    #[test]
+    fn unlinked_character_gets_link_hint_instead_of_account_bank() {
+        let (mut world, e, mut rx) = make_unlinked_world();
+        cmd_account_balance(&mut world, e, "");
+        account_transfer(&mut world, e, "300", AccountDir::Deposit);
+        let mut out = String::new();
+        while let Ok(b) = rx.try_recv() {
+            out.push_str(&String::from_utf8_lossy(&b));
+        }
+        assert_eq!(
+            out.matches(
+                "Link this character to a website account at \
+                 https://muditor.fierymud.org to use the account chest/bank."
+            )
+            .count(),
+            2,
+            "{out}"
+        );
+        // Nothing moved.
+        assert_eq!(world.get::<BankWealth>(e).unwrap().0, 1000);
+        assert_eq!(world.get::<AccountWealth>(e).unwrap().0, 0);
     }
 
     #[test]

@@ -22,9 +22,11 @@ use std::time::{Duration, Instant};
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Account, DiscordConfigCatalog, PendingDiscordLink, PendingDiscordLinks};
+use mud_world::{DiscordConfigCatalog, PendingDiscordLink, PendingDiscordLinks};
 
-use crate::commands::{AsyncCommand, Category, Command, Help, cmd_mail_stub, name_of, send_to};
+use crate::commands::{
+    AsyncCommand, Category, Command, Help, cmd_mail_stub, name_of, require_linked_account, send_to,
+};
 
 /// Verification-code lifetime. The bot side has to see the player's
 /// `/verify <code>` arrive in the gossip channel before this elapses.
@@ -114,8 +116,7 @@ async fn cmd_discord_link(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    let Some(account) = world.get::<Account>(player).cloned() else {
-        send_to(world, player, "You don't have an account.\r\n");
+    let Some(account) = require_linked_account(world, player, "Discord linking") else {
         return;
     };
     let cfg = world.resource::<DiscordConfigCatalog>().clone();
@@ -165,8 +166,7 @@ async fn cmd_discord_link(world: &mut World, player: Entity, args: &str) {
 /// Drop the player's existing Discord link. Idempotent — running it
 /// against a user without a link prints a friendly "no link" line.
 async fn cmd_discord_unlink(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
-    let Some(account) = world.get::<Account>(player).cloned() else {
-        send_to(world, player, "You don't have an account.\r\n");
+    let Some(account) = require_linked_account(world, player, "Discord linking") else {
         return;
     };
     // Also clear any pending verification code so a re-link starts

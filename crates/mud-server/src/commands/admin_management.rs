@@ -9,7 +9,7 @@ use mud_world::{Account, Located, WorldKey};
 
 use crate::commands::{
     AsyncCommand, Category, Command, Connection, DbPool, Help, cmd_mail_stub, name_of,
-    record_admin_action, send_to, try_remove,
+    record_admin_action, require_linked_account, send_to, try_remove,
 };
 
 inventory::submit! {
@@ -296,12 +296,14 @@ pub(crate) fn cmd_ban(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
-    let admin_uid = world.get::<Account>(player).map(|a| a.user_id.clone());
+    let Some(admin_uid) = require_linked_account(world, player, "ban records").map(|a| a.user_id)
+    else {
+        return;
+    };
     let target_name = target_name.to_string();
     let reason = reason.to_string();
     tokio::spawn(async move {
         let Some(out) = outbound else { return };
-        let Some(admin_uid) = admin_uid else { return };
         let Ok(Some(target)) = mud_db::characters::find_by_name(&pool, &target_name).await else {
             let _ = out.try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
             return;
