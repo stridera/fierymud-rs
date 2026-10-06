@@ -27,6 +27,7 @@ mod triggers;
 mod wander;
 mod weather;
 
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -115,6 +116,35 @@ fn mud_clock_tick(tick: Res<TickCount>, mut clock: ResMut<mud_world::MudClock>) 
     }
 }
 
+/// Route panics through `tracing` (ERROR, target `panic`) with message,
+/// location, thread and a forced backtrace, then run the default hook so the
+/// usual stderr report is kept. Must run after the subscriber is installed.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        let location = info.location().map_or_else(
+            || "unknown".to_string(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
+        let thread = std::thread::current();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        error!(
+            target: "panic",
+            location = %location,
+            thread = thread.name().unwrap_or("<unnamed>"),
+            backtrace = %backtrace,
+            "{message}"
+        );
+        default_hook(info);
+    }));
+}
+
 #[tokio::main(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)]
 async fn main() {
@@ -134,9 +164,13 @@ async fn main() {
         );
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer())
+        // Text format `<ts> <LEVEL> [span:] <target>: <message> key=value ...`.
+        // ANSI colours only on a real terminal so journald gets plain text
+        // (the error digest parser strips ANSI regardless, for old lines).
+        .with(tracing_subscriber::fmt::layer().with_ansi(std::io::stdout().is_terminal()))
         .with(syslog::SyslogLayer)
         .init();
+    install_panic_hook();
 
     let _ = dotenvy::dotenv();
 
