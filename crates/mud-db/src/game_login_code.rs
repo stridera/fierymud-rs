@@ -123,6 +123,19 @@ pub async fn expire_pending(pool: &PgPool, id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
+/// Mark a code EXPIRED unless it has already been consumed (used when
+/// an APPROVED code fails the server-side checks and must never be
+/// usable afterwards).
+pub async fn expire_unconsumed(pool: &PgPool, id: &str) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "GameLoginCode" SET status = 'EXPIRED' WHERE id = $1 AND status IN ('PENDING', 'APPROVED')"#,
+        id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Best-effort delete of a row by id (tests only use this to clean up
 /// after themselves).
 pub async fn delete(pool: &PgPool, id: &str) -> sqlx::Result<()> {

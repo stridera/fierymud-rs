@@ -162,8 +162,10 @@ pub struct WebLogin {
     /// `GameLoginCode.id`.
     code_id: String,
     expires_at: Instant,
-    /// Website account that must approve the code. Never empty:
-    /// unlinked legacy characters cannot use code login.
+    /// Website account that must approve the code. Empty for an
+    /// unlinked legacy character: the website links the character to
+    /// the approving account during approval, and
+    /// `resolve_web_approval` re-reads the character to find out which.
     user_id: String,
     user: User,
     /// Character picked at the identifier prompt (character-name
@@ -1897,28 +1899,9 @@ impl ConnRouter {
                 // `code` instead of a password: log in by approving a
                 // short code on the website (no password is sent).
                 if trimmed.eq_ignore_ascii_case("code") {
-                    if user.id.is_empty() {
-                        // Unlinked legacy character: no website account
-                        // exists that could approve the code.
-                        let _ = ctx.outbound.try_send(
-                            "This character is not linked to a website account yet, so \
-                             website login is unavailable. Enter its game password \
-                             instead.\r\n"
-                                .as_bytes()
-                                .to_vec(),
-                        );
-                        ctx.stage = Stage::AwaitingPassword {
-                            user,
-                            preselected,
-                            game_hash,
-                        };
-                        let _ = ctx.outbound.try_send(login_message_bytes(
-                            world,
-                            "PASSWORD_PROMPT",
-                            PASSWORD_PROMPT_FALLBACK,
-                        ));
-                        return;
-                    }
+                    // Unlinked legacy characters (empty `user.id`) are
+                    // allowed too: the website links the character to
+                    // the approving account.
                     self.begin_web_approval(conn_id, user, preselected, pool, world)
                         .await;
                     return;
@@ -2647,8 +2630,9 @@ impl ConnRouter {
     /// Start a device-code login for `user` (and, on the character-name
     /// path, `preselected`): rate-limit, insert the `GameLoginCode`
     /// row, spawn its poller, tell the player where to approve it.
-    /// `user.id` must be non-empty (callers refuse unlinked legacy
-    /// characters first).
+    /// `user.id` is empty for an unlinked legacy character, in which
+    /// case `preselected` is required and the row is inserted with a
+    /// NULL `"userId"`.
     #[allow(clippy::too_many_lines)]
     async fn begin_web_approval(
         &mut self,
@@ -2661,8 +2645,11 @@ impl ConnRouter {
         let Some(ctx) = self.login.get_mut(&conn_id) else {
             return;
         };
-        if user.id.is_empty() {
-            warn!(conn_id, "web approval requested without a linked account");
+        if user.id.is_empty() && preselected.is_none() {
+            warn!(
+                conn_id,
+                "web approval requested without account or character"
+            );
             let _ = ctx
                 .outbound
                 .try_send("Server error.\r\n".as_bytes().to_vec());
@@ -2709,7 +2696,7 @@ impl ConnRouter {
             let new = mud_db::game_login_code::NewGameLoginCode {
                 code: &code,
                 character_name,
-                user_id: Some(&user.id),
+                user_id: (!user.id.is_empty()).then_some(user.id.as_str()),
                 client_ip: &ip_text,
                 client_port,
                 tls: ctx.tls,
@@ -2784,6 +2771,14 @@ impl ConnRouter {
             )
             .into_bytes(),
         );
+        if user.id.is_empty() {
+            let _ = ctx.outbound.try_send(
+                "This character isn't linked to a website account yet; you'll be asked \
+                 to link it when you approve.\r\n"
+                    .as_bytes()
+                    .to_vec(),
+            );
+        }
         ctx.stage = Stage::AwaitingWebApproval(Box::new(WebLogin {
             code,
             code_id,
@@ -2859,6 +2854,16 @@ impl ConnRouter {
                     ctx.stage = Stage::AwaitingWebApproval(Box::new(web));
                 }
             }
+            "APPROVED" if web.user_id.is_empty() => {
+                self.resolve_unlinked_approval(
+                    conn_id,
+                    web,
+                    state.approved_by_user_id,
+                    pool,
+                    world,
+                )
+                .await;
+            }
             "APPROVED" => {
                 if state.approved_by_user_id.as_deref() != Some(web.user_id.as_str()) {
                     warn!(
@@ -2931,6 +2936,96 @@ impl ConnRouter {
                 reprompt_identifier(ctx, world);
             }
         }
+    }
+
+    /// APPROVED code for an unlinked legacy character. The website
+    /// links the character to the approving account *before* marking
+    /// the code APPROVED, so re-read the character and require that its
+    /// `user_id` is set and equals `approvedByUserId`. Then consume the
+    /// code for that user and log in as the (now linked) character.
+    async fn resolve_unlinked_approval(
+        &mut self,
+        conn_id: ConnId,
+        web: WebLogin,
+        approved_by: Option<String>,
+        pool: &PgPool,
+        world: &mut World,
+    ) {
+        let WebLogin {
+            code_id,
+            preselected,
+            ..
+        } = web;
+        let linked: Option<(Box<CharacterRow>, User)> = 'check: {
+            let Some(name) = preselected.as_deref().map(|c| c.name.clone()) else {
+                break 'check None;
+            };
+            let character = match characters::find_by_name(pool, &name).await {
+                Ok(Some(c)) => c,
+                Ok(None) => break 'check None,
+                Err(e) => {
+                    warn!(conn_id, error = %e, "character re-read after approval failed");
+                    break 'check None;
+                }
+            };
+            let (Some(uid), Some(approver)) =
+                (character.user_id.as_deref(), approved_by.as_deref())
+            else {
+                break 'check None;
+            };
+            if uid != approver {
+                break 'check None;
+            }
+            let consumed = mud_db::game_login_code::consume(
+                pool,
+                &code_id,
+                uid,
+                chrono::Utc::now().naive_utc(),
+            )
+            .await;
+            if !matches!(consumed, Ok(true)) {
+                if let Err(e) = &consumed {
+                    warn!(conn_id, error = %e, "login code consume failed");
+                }
+                break 'check None;
+            }
+            match users::find_by_id(pool, uid).await {
+                Ok(Some(u)) => Some((Box::new(character), u)),
+                Ok(None) => None,
+                Err(e) => {
+                    warn!(conn_id, error = %e, "user lookup after approval failed");
+                    None
+                }
+            }
+        };
+        let Some((character, user)) = linked else {
+            warn!(conn_id, "unlinked-character code approval did not link it");
+            // An APPROVED row that failed the check is flipped to
+            // EXPIRED so it can never be consumed later.
+            if let Err(e) = mud_db::game_login_code::expire_unconsumed(pool, &code_id).await {
+                warn!(conn_id, error = %e, "login code expire failed");
+            }
+            let Some(ctx) = self.login.get_mut(&conn_id) else {
+                return;
+            };
+            let _ = ctx.outbound.try_send(
+                "Approval did not link this character.\r\n"
+                    .as_bytes()
+                    .to_vec(),
+            );
+            reprompt_identifier(ctx, world);
+            return;
+        };
+        if let Err(e) = users::clear_failed_logins(pool, &user.id).await {
+            warn!(conn_id, error = %e, "clear_failed_logins after code login failed");
+        }
+        if let Some(ctx) = self.login.get(&conn_id) {
+            let _ = ctx
+                .outbound
+                .try_send("Code approved. Logging in...\r\n".as_bytes().to_vec());
+        }
+        self.finish_password(conn_id, user, Some(character), true, None, pool, world)
+            .await;
     }
 
     /// Classic MUD "take over" for a duplicate login. If a player
@@ -5694,24 +5789,6 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn code_is_refused_for_unlinked_legacy_character() {
-        let mut world = auth_world(0);
-        let pool = lazy_pool();
-        let mut router = ConnRouter::new();
-        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
-        router.on_connect(1, tx, None, &world);
-        drain(&mut orx);
-        park_at_password(&mut router, 1, "irrelevant");
-        router.on_line(1, "CoDe".into(), &pool, &mut world).await;
-        let out = drain(&mut orx);
-        assert!(out.contains("not linked to a website account"), "{out}");
-        assert!(matches!(
-            router.login.get(&1).unwrap().stage,
-            Stage::AwaitingPassword { .. }
-        ));
-    }
-
     /// A correct crypt(3) password on an unlinked legacy character
     /// upgrades the character's hash to bcrypt but must NOT create a
     /// placeholder web user or link the character (the website's
@@ -5953,6 +6030,285 @@ mod tests {
         mud_db::game_login_code::delete(&pool, &code_id)
             .await
             .unwrap();
+    }
+
+    /// Temp website account for the unlinked-character flow tests.
+    async fn temp_user(pool: &PgPool, tag: &str) -> Option<String> {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        mud_db::users::create(
+            pool,
+            &format!("{tag}{suffix}@example.invalid"),
+            &format!("{tag}{suffix}"),
+        )
+        .await
+        .ok()
+    }
+
+    /// Temp unlinked (NULL `user_id`) legacy-style character; returns
+    /// the sentinel-user + preselected pair the password prompt holds.
+    async fn temp_unlinked_char(pool: &PgPool, tag: &str) -> (User, Box<CharacterRow>) {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("Zz{tag}{}", suffix % 1_000_000_000_000);
+        let id = format!("zz-{tag}-{suffix}");
+        mud_db::sqlx::query(
+            "INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(&id)
+        .bind(&name)
+        .execute(pool)
+        .await
+        .unwrap();
+        let (user, _) = legacy_sentinel();
+        let mut c = row(None, None);
+        c.id = id;
+        c.name = name;
+        c.user_id = None;
+        (user, Box::new(c))
+    }
+
+    async fn temp_cleanup(pool: &PgPool, code_ids: &[&str], char_ids: &[&str], user_ids: &[&str]) {
+        for id in code_ids {
+            mud_db::game_login_code::delete(pool, id).await.unwrap();
+        }
+        for id in char_ids {
+            mud_db::sqlx::query("DELETE FROM \"Characters\" WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        for id in user_ids {
+            mud_db::sqlx::query("DELETE FROM \"BanRecords\" WHERE user_id = $1 OR banned_by = $1")
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap();
+            mud_db::sqlx::query("DELETE FROM \"Users\" WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_for_unlinked_character_inserts_null_user_row_and_ignores_throttles() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (user, c) = temp_unlinked_char(&pool, "nul").await;
+        let (char_id, char_name) = (c.id.clone(), c.name.clone());
+        let mut world = auth_world(3);
+        let mut router = ConnRouter::new();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, Some("198.51.100.20:3000".parse().unwrap()), &world);
+        drain(&mut orx);
+        // The per-name throttle is tripped and one more wrong password
+        // would drop the connection: `code` is blocked by neither.
+        let key = LegacyLoginThrottle::key(&char_name);
+        for _ in 0..3 {
+            router
+                .legacy_throttle
+                .record_failure(&key, Instant::now(), 3, lock_window(15));
+        }
+        assert!(
+            router
+                .legacy_throttle
+                .locked_for(&key, Instant::now(), 3, lock_window(15))
+                .is_some()
+        );
+        router.login.get_mut(&1).unwrap().failed_attempts = MAX_FAILED_PASSWORDS_PER_CONN - 1;
+        router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+            user,
+            preselected: Some(c),
+            game_hash: "irrelevant".into(),
+        };
+        router.on_line(1, "code".into(), &pool, &mut world).await;
+        let out = drain(&mut orx);
+        let (code_id, code) = pending_web(&router, 1);
+        assert!(
+            out.contains(&format!("Your login code is {}.", format_login_code(&code))),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "This character isn't linked to a website account yet; you'll be asked \
+                 to link it when you approve."
+            ),
+            "{out}"
+        );
+        assert_eq!(
+            router.login.get(&1).unwrap().failed_attempts,
+            MAX_FAILED_PASSWORDS_PER_CONN - 1
+        );
+        let (status, user_id, name): (String, Option<String>, String) = mud_db::sqlx::query_as(
+            "SELECT status::text, \"userId\", \"characterName\" FROM \"GameLoginCode\" \
+             WHERE id = $1",
+        )
+        .bind(&code_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        temp_cleanup(&pool, &[&code_id], &[&char_id], &[]).await;
+        assert_eq!(status, "PENDING");
+        assert_eq!(user_id, None);
+        assert_eq!(name, char_name);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unlinked_code_approved_after_link_logs_in_as_linked_user() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(uid) = temp_user(&pool, "unlink").await else {
+            eprintln!("skipping: could not create temp user");
+            return;
+        };
+        // Ban the temp account so a proceeding login stops at the ban
+        // gate in `finish_password` (a bare test World can't spawn a
+        // player); that gate only runs for the account the login
+        // continued as.
+        mud_db::bans::ban(&pool, &uid, &uid, "unlinked-code test", None)
+            .await
+            .unwrap();
+        let (user, c) = temp_unlinked_char(&pool, "lnk").await;
+        let char_id = c.id.clone();
+        let mut world = auth_world(0);
+        let mut router = ConnRouter::new();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, Some("198.51.100.21:3001".parse().unwrap()), &world);
+        drain(&mut orx);
+        router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+            user,
+            preselected: Some(c),
+            game_hash: String::new(),
+        };
+        router.on_line(1, "code".into(), &pool, &mut world).await;
+        let (code_id, _) = pending_web(&router, 1);
+        drain(&mut orx);
+        // Website side: link the character, then approve as that user.
+        mud_db::sqlx::query("UPDATE \"Characters\" SET user_id = $2 WHERE id = $1")
+            .bind(&char_id)
+            .bind(&uid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        mud_db::sqlx::query(
+            "UPDATE \"GameLoginCode\" SET status = 'APPROVED', \"approvedByUserId\" = $2 \
+             WHERE id = $1",
+        )
+        .bind(&code_id)
+        .bind(&uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        router.on_line(1, String::new(), &pool, &mut world).await;
+        let out = drain(&mut orx);
+        let st = mud_db::game_login_code::state(&pool, &code_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let stage_is_ident = matches!(
+            router.login.get(&1).map(|c| &c.stage),
+            Some(Stage::AwaitingIdentifier)
+        );
+        temp_cleanup(&pool, &[&code_id], &[&char_id], &[&uid]).await;
+        assert!(out.contains("Code approved"), "{out}");
+        assert!(out.contains("Your account is banned"), "{out}");
+        assert!(!out.contains("did not link"), "{out}");
+        assert!(stage_is_ident);
+        assert_eq!(st.status, "CONSUMED");
+        assert_eq!(st.approved_by_user_id.as_deref(), Some(uid.as_str()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unlinked_code_approved_without_link_is_rejected_and_expired() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(uid) = temp_user(&pool, "nolink").await else {
+            eprintln!("skipping: could not create temp user");
+            return;
+        };
+        let Some(other) = temp_user(&pool, "nolinkb").await else {
+            eprintln!("skipping: could not create temp user");
+            return;
+        };
+        let mut world = auth_world(0);
+        let mut router = ConnRouter::new();
+        let mut code_ids = Vec::new();
+        let mut char_ids = Vec::new();
+        // Conn 1: character never linked. Conn 2: linked to a different
+        // account than the approver.
+        for (conn, port, link_to) in [(1, 3002u16, None), (2, 3003, Some(&other))] {
+            let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+            let peer = format!("198.51.100.{}:{port}", 30 + conn);
+            router.on_connect(conn, tx, Some(peer.parse().unwrap()), &world);
+            drain(&mut orx);
+            let (user, c) = temp_unlinked_char(&pool, "nlk").await;
+            char_ids.push(c.id.clone());
+            if let Some(owner) = link_to {
+                mud_db::sqlx::query("UPDATE \"Characters\" SET user_id = $2 WHERE id = $1")
+                    .bind(&c.id)
+                    .bind(owner)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            router.login.get_mut(&conn).unwrap().stage = Stage::AwaitingPassword {
+                user,
+                preselected: Some(c),
+                game_hash: String::new(),
+            };
+            router.on_line(conn, "code".into(), &pool, &mut world).await;
+            let (code_id, _) = pending_web(&router, conn);
+            code_ids.push(code_id.clone());
+            drain(&mut orx);
+            mud_db::sqlx::query(
+                "UPDATE \"GameLoginCode\" SET status = 'APPROVED', \"approvedByUserId\" = $2 \
+                 WHERE id = $1",
+            )
+            .bind(&code_id)
+            .bind(&uid)
+            .execute(&pool)
+            .await
+            .unwrap();
+            router.on_line(conn, String::new(), &pool, &mut world).await;
+            let out = drain(&mut orx);
+            let st = mud_db::game_login_code::state(&pool, &code_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let at_ident = matches!(
+                router.login.get(&conn).map(|c| &c.stage),
+                Some(Stage::AwaitingIdentifier)
+            );
+            if !(out.contains("Approval did not link this character.")
+                && !out.contains("Code approved")
+                && at_ident
+                && st.status == "EXPIRED")
+            {
+                let ids: Vec<&str> = code_ids.iter().map(String::as_str).collect();
+                let cids: Vec<&str> = char_ids.iter().map(String::as_str).collect();
+                temp_cleanup(&pool, &ids, &cids, &[&uid, &other]).await;
+                panic!(
+                    "conn {conn}: out={out:?} ident={at_ident} status={}",
+                    st.status
+                );
+            }
+        }
+        let ids: Vec<&str> = code_ids.iter().map(String::as_str).collect();
+        let cids: Vec<&str> = char_ids.iter().map(String::as_str).collect();
+        temp_cleanup(&pool, &ids, &cids, &[&uid, &other]).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
