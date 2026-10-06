@@ -434,6 +434,26 @@ impl HelpCatalog {
         }
     }
 
+    /// Exact-keyword (case-insensitive) match only, no title-prefix
+    /// fallback. Returns an entry only when the viewer can see exactly
+    /// one distinct article under that keyword; ambiguous or invisible
+    /// hits yield `None` so callers can fall through to other sources.
+    #[must_use]
+    pub fn lookup_exact_keyword(&self, keyword: &str, viewer_level: i32) -> Option<HelpEntry> {
+        let ids = self.by_keyword.get(&keyword.trim().to_ascii_lowercase())?;
+        let mut visible: Vec<&HelpEntry> = ids
+            .iter()
+            .filter_map(|id| self.entries.get(id))
+            .filter(|e| viewer_level >= e.min_level)
+            .collect();
+        visible.sort_by(|a, b| a.title.cmp(&b.title).then(a.id.cmp(&b.id)));
+        let first = *visible.first()?;
+        visible
+            .iter()
+            .all(|e| e.title == first.title)
+            .then(|| first.clone())
+    }
+
     /// Distinct categories present in the visible catalog, sorted
     /// alphabetically. Used by `help` with no args to render a
     /// "type help <topic>" index gated by viewer level.
@@ -2998,6 +3018,25 @@ mod tests {
             HelpLookup::Found(e) => assert_eq!(e.title, "Fireball"),
             other => panic!("expected Found, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn help_exact_keyword_ignores_prefix_and_respects_level() {
+        let mut cat = fireball_only();
+        insert_help(&mut cat, help_entry(2, "Quest Guide", &["QUEST"], 0));
+        insert_help(&mut cat, help_entry(3, "Staff Quest", &["SQUEST"], 90));
+        assert_eq!(
+            cat.lookup_exact_keyword("Quest", 1).map(|e| e.title),
+            Some("Quest Guide".to_string())
+        );
+        // Title prefix only: not an exact keyword.
+        assert!(cat.lookup_exact_keyword("fire", 50).is_none());
+        // Level-gated.
+        assert!(cat.lookup_exact_keyword("squest", 1).is_none());
+        assert!(cat.lookup_exact_keyword("squest", 95).is_some());
+        // Ambiguous distinct titles under one keyword: no exact winner.
+        insert_help(&mut cat, help_entry(4, "Other Quest", &["QUEST"], 0));
+        assert!(cat.lookup_exact_keyword("quest", 1).is_none());
     }
 
     #[test]

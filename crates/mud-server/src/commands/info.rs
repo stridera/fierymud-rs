@@ -2500,7 +2500,12 @@ fn render_social_help(world: &mut World, player: Entity, social: &SocialDef) {
 /// hand-authored command page or a builder-authored article — same
 /// bold-cyan title, cyan section labels for metadata, body content
 /// last. Usage / Sphere / Duration only render when set on the row.
-fn render_help_entry(world: &mut World, player: Entity, entry: &mud_world::HelpEntry) {
+fn render_help_entry(
+    world: &mut World,
+    player: Entity,
+    entry: &mud_world::HelpEntry,
+    command_usage: Option<&str>,
+) {
     let mut out = format!("\r\n<b:cyan>{}</>\r\n", entry.title);
     if let Some(usage) = entry.usage.as_ref() {
         out.push_str(&format!("\r\n  <cyan>Usage:</> {usage}\r\n"));
@@ -2518,6 +2523,9 @@ fn render_help_entry(world: &mut World, player: Entity, entry: &mud_world::HelpE
     out.push_str("\r\n");
     if let Some(category) = entry.category.as_ref() {
         out.push_str(&format!("\r\n  <cyan>Category:</> <dim>{category}</>\r\n"));
+    }
+    if let Some(usage) = command_usage {
+        out.push_str(&format!("\r\n<dim>Command usage:</> {usage}\r\n"));
     }
     send_to(world, player, out);
 }
@@ -2931,6 +2939,26 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
         return;
     }
 
+    // Authored HelpEntry wins over the auto-generated command stub when
+    // it matches the topic by exact keyword and the viewer's level
+    // permits. A same-named command's usage rides along as a footer so
+    // nothing from the stub is lost. Title-prefix matches stay below
+    // the registry (handled in the HelpEntry fallback further down).
+    if matches!(scope, HelpScope::Player) {
+        let viewer_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+        let exact = world
+            .resource::<HelpCatalog>()
+            .lookup_exact_keyword(topic.as_str(), viewer_level);
+        if let Some(entry) = exact {
+            let usage = REGISTRY
+                .get(topic.as_str())
+                .filter(|c| scope.includes(c) && visible(c, role, &perms))
+                .map(|c| c.help.usage);
+            render_help_entry(world, player, &entry, usage);
+            return;
+        }
+    }
+
     if let Some(cmd) = REGISTRY.get(topic.as_str()).filter(|c| scope.includes(c)) {
         if !visible(cmd, role, &perms) {
             send_to(world, player, format!("<dim>No help on '{topic}'.</>\r\n"));
@@ -2989,7 +3017,7 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
         .lookup(topic.as_str(), viewer_level);
     match lookup {
         HelpLookup::Found(entry) => {
-            render_help_entry(world, player, &entry);
+            render_help_entry(world, player, &entry, None);
             return;
         }
         HelpLookup::AmbiguousMatches(titles) => {
