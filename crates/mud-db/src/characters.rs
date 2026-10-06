@@ -148,7 +148,7 @@ pub struct CharacterRow {
     /// based on `restSource` / `restTier`.
     pub repose: i32,
     /// Kind of prepaid rest queued for the next sleep — the
-    /// **RestSource** stat. Consumed exactly once at the next XP
+    /// **`RestSource`** stat. Consumed exactly once at the next XP
     /// gain after acquisition. Survives logout.
     pub rest_source: RestSource,
     /// Quality tier of the queued rest (0..=3). 0 for `NONE` /
@@ -306,11 +306,7 @@ pub async fn save_core_stats<'e, E: PgExecutor<'e>>(
 /// column surfaces as a `sqlx::Error::Database` from the
 /// underlying Postgres index — caller renders that as a "name
 /// already taken" message.
-pub async fn rename(
-    pool: &PgPool,
-    character_id: &str,
-    new_name: &str,
-) -> sqlx::Result<u64> {
+pub async fn rename(pool: &PgPool, character_id: &str, new_name: &str) -> sqlx::Result<u64> {
     let res = sqlx::query!(
         r#"UPDATE "Characters" SET name = $1 WHERE id = $2"#,
         new_name,
@@ -442,10 +438,7 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
 /// prior behavior made the column mean "last save," which broke the
 /// `clientinfo` "Last login" line and any downstream return-player
 /// detection.
-pub async fn update_last_login(
-    pool: &PgPool,
-    character_id: &str,
-) -> sqlx::Result<()> {
+pub async fn update_last_login(pool: &PgPool, character_id: &str) -> sqlx::Result<()> {
     sqlx::query!(
         r#"UPDATE "Characters" SET last_login = NOW() WHERE id = $1"#,
         character_id,
@@ -758,10 +751,7 @@ pub async fn save_pets<'e, E: PgExecutor<'e>>(
 /// Read the staff-notes blob for a character (Builder+ visibility).
 /// Returns Ok(None) when null. Single shared blob — appended to by
 /// the runtime's `pnote add` path.
-pub async fn load_staff_notes(
-    pool: &PgPool,
-    character_id: &str,
-) -> sqlx::Result<Option<String>> {
+pub async fn load_staff_notes(pool: &PgPool, character_id: &str) -> sqlx::Result<Option<String>> {
     let row = sqlx::query!(
         r#"SELECT staff_notes FROM "Characters" WHERE id = $1"#,
         character_id,
@@ -774,11 +764,7 @@ pub async fn load_staff_notes(
 /// Overwrite the staff-notes blob. Caller is responsible for the
 /// concatenation (load → append → save) — the runtime treats the
 /// column as a free-form append-only log with author prefixes.
-pub async fn save_staff_notes(
-    pool: &PgPool,
-    character_id: &str,
-    notes: &str,
-) -> sqlx::Result<()> {
+pub async fn save_staff_notes(pool: &PgPool, character_id: &str, notes: &str) -> sqlx::Result<()> {
     sqlx::query!(
         r#"UPDATE "Characters" SET staff_notes = $1 WHERE id = $2"#,
         notes,
@@ -862,7 +848,7 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
 }
 
 /// Read the per-character `password_hash` column. Imported legacy
-/// CircleMUD characters land in the DB with no `user_id` and their
+/// `CircleMUD` characters land in the DB with no `user_id` and their
 /// original Unix `crypt(3)` hash stored here; the login flow uses
 /// this to authenticate the player exactly once, then provisions a
 /// real `Users` row + bcrypt hash and links the character. After
@@ -870,10 +856,7 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
 /// the `create` doc), but the live verification path goes through
 /// `Users.password_hash` instead. Returns an empty string for
 /// post-creation rows that wrote `''` at INSERT time.
-pub async fn load_legacy_password_hash(
-    pool: &PgPool,
-    character_id: &str,
-) -> sqlx::Result<String> {
+pub async fn load_legacy_password_hash(pool: &PgPool, character_id: &str) -> sqlx::Result<String> {
     let row = sqlx::query!(
         r#"SELECT password_hash FROM "Characters" WHERE id = $1"#,
         character_id,
@@ -977,7 +960,7 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
     .await
 }
 
-/// Persist the **Repose** / **RestSource** triplet
+/// Persist the **Repose** / **`RestSource`** triplet
 /// (`repose`, `rest_source`, `rest_tier`). Split from `save_state`
 /// so the rest / repose hot paths (acquire-source commands, login
 /// fill, disconnect QUIT stamp, XP-gain consume) round-trip without

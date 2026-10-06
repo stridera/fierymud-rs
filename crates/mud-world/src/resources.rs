@@ -232,10 +232,7 @@ impl LoginMessages {
     pub fn get(&self, stage: &str, variant: &str) -> Option<&str> {
         self.by_key
             .get(&(stage.to_string(), variant.to_string()))
-            .or_else(|| {
-                self.by_key
-                    .get(&(stage.to_string(), "default".to_string()))
-            })
+            .or_else(|| self.by_key.get(&(stage.to_string(), "default".to_string())))
             .map(String::as_str)
     }
 
@@ -275,23 +272,17 @@ impl DiscordConfigCatalog {
     /// admin / announcement channels apply.
     #[must_use]
     pub fn can_send_gossip(&self) -> bool {
-        self.enabled
-            && self.guild_id.is_some()
-            && self.gossip_channel_id.is_some()
+        self.enabled && self.guild_id.is_some() && self.gossip_channel_id.is_some()
     }
 
     #[must_use]
     pub fn can_send_admin(&self) -> bool {
-        self.enabled
-            && self.guild_id.is_some()
-            && self.admin_channel_id.is_some()
+        self.enabled && self.guild_id.is_some() && self.admin_channel_id.is_some()
     }
 
     #[must_use]
     pub fn can_send_announcement(&self) -> bool {
-        self.enabled
-            && self.guild_id.is_some()
-            && self.announcement_channel_id.is_some()
+        self.enabled && self.guild_id.is_some() && self.announcement_channel_id.is_some()
     }
 }
 
@@ -352,7 +343,7 @@ pub struct HelpCatalog {
     /// All entries, indexed by case-insensitive keyword. Multiple
     /// keywords on the same row each map back to the same entry id;
     /// duplicate keywords across rows produce a Vec<id> the lookup
-    /// disambiguates by min_level filter then ambiguity check.
+    /// disambiguates by `min_level` filter then ambiguity check.
     pub by_keyword: HashMap<String, Vec<i32>>,
     /// All entries, indexed by id. Title-prefix fallback walks this
     /// map directly.
@@ -409,8 +400,7 @@ impl HelpCatalog {
                 0 => {} // fall through to prefix match
                 1 => return HelpLookup::Found(visible[0].clone()),
                 _ => {
-                    let mut titles: Vec<String> =
-                        visible.iter().map(|e| e.title.clone()).collect();
+                    let mut titles: Vec<String> = visible.iter().map(|e| e.title.clone()).collect();
                     titles.sort_unstable();
                     titles.dedup();
                     return if titles.len() == 1 {
@@ -438,9 +428,9 @@ impl HelpCatalog {
         match matches.len() {
             0 => HelpLookup::NotFound,
             1 => HelpLookup::Found(matches[0].clone()),
-            _ => HelpLookup::AmbiguousMatches(
-                matches.into_iter().map(|e| e.title.clone()).collect(),
-            ),
+            _ => {
+                HelpLookup::AmbiguousMatches(matches.into_iter().map(|e| e.title.clone()).collect())
+            }
         }
     }
 
@@ -596,14 +586,12 @@ impl RaceCatalog {
 
 /// Parse a `{"FIRE": 25, "COLD": -10}`-style JSON object into the
 /// typed `ElementType` map used by the runtime. Keys are matched
-/// case-insensitively against the SCREAMING_SNAKE schema labels;
+/// case-insensitively against the `SCREAMING_SNAKE` schema labels;
 /// unknown keys and non-number values are dropped silently. Shared
 /// between race + class catalog hydration so the parsing rules
 /// stay in one place.
 #[must_use]
-pub fn parse_resistance_json(
-    raw: &serde_json::Value,
-) -> HashMap<mud_db::enums::ElementType, i32> {
+pub fn parse_resistance_json(raw: &serde_json::Value) -> HashMap<mud_db::enums::ElementType, i32> {
     use mud_db::enums::ElementType;
     let mut out: HashMap<ElementType, i32> = HashMap::new();
     let Some(obj) = raw.as_object() else {
@@ -637,8 +625,8 @@ pub fn parse_resistance_json(
             _ => continue,
         };
         if let Some(n) = v.as_i64() {
-            let clamped = i32::try_from(n.clamp(i64::from(i32::MIN), i64::from(i32::MAX)))
-                .unwrap_or(0);
+            let clamped =
+                i32::try_from(n.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0);
             out.insert(element, clamped);
         } else if let Some(f) = v.as_f64() {
             #[allow(clippy::cast_possible_truncation)]
@@ -748,7 +736,7 @@ pub struct RaceDef {
     /// Per-element resistance map. Parsed once at hydration from
     /// the schema's `Races.resistances` JSON — keys outside the
     /// runtime's `ElementType` set are dropped, keys are matched
-    /// case-insensitively against the SCREAMING_SNAKE schema label.
+    /// case-insensitively against the `SCREAMING_SNAKE` schema label.
     /// Empty when the row has `{}` or NULL.
     pub resistances: HashMap<mud_db::enums::ElementType, i32>,
     /// Original JSON blob, kept for round-trip / authoring debug.
@@ -764,7 +752,7 @@ pub struct EffectCatalog {
 }
 
 impl EffectCatalog {
-    #[must_use] 
+    #[must_use]
     pub fn find_by_name(&self, name: &str) -> Option<&EffectDef> {
         self.by_id
             .values()
@@ -1040,8 +1028,8 @@ pub struct ObjectProto {
     /// the component rather than reaching back to the proto.
     pub flags: Vec<mud_db::enums::ObjectFlag>,
     /// "Can't do that" restriction flags from `Objects.restrictions`:
-    /// NO_DROP / NO_TAKE / NO_SELL / NO_BURN / NO_LOCATE /
-    /// NO_INVISIBLE. Per-command gates consult these before
+    /// `NO_DROP` / `NO_TAKE` / `NO_SELL` / `NO_BURN` / `NO_LOCATE` /
+    /// `NO_INVISIBLE`. Per-command gates consult these before
     /// mutating world state so a quest item never lands on the
     /// floor by accident.
     pub restrictions: Vec<mud_db::enums::ObjectRestriction>,
@@ -1310,7 +1298,10 @@ impl LevelTable {
     /// level isn't in the table (above max).
     #[must_use]
     pub fn exp_for(&self, level: i32) -> Option<i32> {
-        self.rows.iter().find(|r| r.level == level).map(|r| r.exp_required)
+        self.rows
+            .iter()
+            .find(|r| r.level == level)
+            .map(|r| r.exp_required)
     }
 
     /// Display label for `level` ("Apprentice", "Mage", ...) or
@@ -1367,21 +1358,21 @@ impl LevelTable {
 /// slot stays in cooldown. `Ability.addl_mem_time` (per-spell tax)
 /// is added on top in the cast handler.
 pub const CIRCLE_RECOVER_TIME: [i32; 15] = [
-    0,    // 0 — unused
-    30,   // circle 1
-    35,   // circle 2
-    50,   // circle 3
-    65,   // circle 4
-    80,   // circle 5
-    95,   // circle 6
-    130,  // circle 7
-    145,  // circle 8
-    165,  // circle 9
-    210,  // circle 10
-    250,  // circle 11
-    290,  // circle 12
-    310,  // circle 13
-    330,  // circle 14 — extrapolated; legacy table tops out at 12 entries
+    0,   // 0 — unused
+    30,  // circle 1
+    35,  // circle 2
+    50,  // circle 3
+    65,  // circle 4
+    80,  // circle 5
+    95,  // circle 6
+    130, // circle 7
+    145, // circle 8
+    165, // circle 9
+    210, // circle 10
+    250, // circle 11
+    290, // circle 12
+    310, // circle 13
+    330, // circle 14 — extrapolated; legacy table tops out at 12 entries
 ];
 
 /// Spell-slot tables loaded once at startup. `progression` maps
@@ -2065,7 +2056,7 @@ pub struct MobProto {
     /// Folded into `CombatStats.armor_pct` together with `armor_rating`
     /// at conversion time (sum clamped to 100). Schema retains both
     /// columns for content-authoring clarity; the runtime conflates
-    /// them per the audit's "fold into armor_pct" plan.
+    /// them per the audit's "fold into `armor_pct`" plan.
     pub damage_reduction_percent: i32,
     pub soak: i32,
     pub hardness: i32,
@@ -2166,11 +2157,13 @@ impl MobProto {
 
     /// Build a `CombatStats` component from this proto's new combat
     /// fields. Direct mapping with two conflations:
+    ///
     ///   * `armor_rating + damage_reduction_percent → armor_pct`
     ///     (sum clamped to 100). Schema keeps both for builder
     ///     clarity; runtime collapses them onto the single mitigation
     ///     axis.
     ///   * `soak → armor_flat` (rename only).
+    ///
     /// `crit_chance` is fixed at 5 (parity with legacy d20==20 → 5%);
     /// promote to a schema column later if balance demands per-mob
     /// crit tuning.
@@ -2206,7 +2199,7 @@ pub struct SocialRegistry {
 }
 
 impl SocialRegistry {
-    #[must_use] 
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&SocialDef> {
         self.by_name.get(&name.to_ascii_lowercase())
     }
@@ -2299,7 +2292,7 @@ pub struct WeatherCatalog {
 }
 
 /// Per-zone "weather is being controlled" lock. Each entry is the
-/// `Instant` at which natural drift should resume. CONTROL_WEATHER /
+/// `Instant` at which natural drift should resume. `CONTROL_WEATHER` /
 /// RAIN install one of these for the cast's full duration so the
 /// chosen precip actually holds instead of being undone by the very
 /// next drift tick. Stale entries (now > expiry) are no-ops; the
@@ -2412,6 +2405,7 @@ impl EntityVariableCache {
     /// Empty `inner` bags left over from a clear-only entity are also
     /// dropped to keep memory bounded.
     #[must_use]
+    #[allow(clippy::type_complexity)] // flush-tick tuple, consumed once
     pub fn drain_dirty(
         &mut self,
     ) -> Vec<(
@@ -2476,10 +2470,7 @@ impl EntityVariableCache {
 /// is dual-purpose.
 #[derive(Resource, Default, Debug)]
 pub struct QuestVariableCache {
-    inner: HashMap<
-        (String, i32, i32),
-        HashMap<String, Option<serde_json::Value>>,
-    >,
+    inner: HashMap<(String, i32, i32), HashMap<String, Option<serde_json::Value>>>,
     dirty: HashSet<(String, i32, i32)>,
 }
 
@@ -2558,6 +2549,7 @@ impl QuestVariableCache {
     /// Tombstoned keys come back as `clears` and are evicted from
     /// the live map so subsequent `get`s correctly miss.
     #[must_use]
+    #[allow(clippy::type_complexity)] // flush-tick tuple, consumed once
     pub fn drain_dirty(
         &mut self,
     ) -> Vec<(
@@ -2608,14 +2600,24 @@ mod tests {
     use super::*;
 
     fn clock_for_month(month: i32) -> MudClock {
-        MudClock { year: 1, month, day: 1, hour: 12, minute: 0, stamp: 0 }
+        MudClock {
+            year: 1,
+            month,
+            day: 1,
+            hour: 12,
+            minute: 0,
+            stamp: 0,
+        }
     }
 
     #[test]
     fn month_name_covers_full_calendar() {
         assert_eq!(clock_for_month(1).month_name(), "the Month of Deepwinter");
         assert_eq!(clock_for_month(8).month_name(), "the Month of the High Sun");
-        assert_eq!(clock_for_month(16).month_name(), "the Month of the Long Night");
+        assert_eq!(
+            clock_for_month(16).month_name(),
+            "the Month of the Long Night"
+        );
     }
 
     #[test]
@@ -2738,15 +2740,28 @@ mod tests {
             "count".to_string(),
             serde_json::json!(7),
         );
-        assert_eq!(c.get(EntityType::Mob, 30, 1, "count"), Some(&serde_json::json!(7)));
+        assert_eq!(
+            c.get(EntityType::Mob, 30, 1, "count"),
+            Some(&serde_json::json!(7))
+        );
         assert_eq!(c.get(EntityType::Mob, 30, 2, "count"), None, "different id");
-        assert_eq!(c.get(EntityType::Object, 30, 1, "count"), None, "different type");
+        assert_eq!(
+            c.get(EntityType::Object, 30, 1, "count"),
+            None,
+            "different type"
+        );
     }
 
     #[test]
     fn entity_var_cache_clear_marks_dirty_and_drains() {
         let mut c = EntityVariableCache::default();
-        c.set(EntityType::Room, 10, 5, "state".to_string(), serde_json::json!("alpha"));
+        c.set(
+            EntityType::Room,
+            10,
+            5,
+            "state".to_string(),
+            serde_json::json!("alpha"),
+        );
         // Drain — should produce one set.
         let drained = c.drain_dirty();
         assert_eq!(drained.len(), 1);
@@ -2777,10 +2792,19 @@ mod tests {
     #[test]
     fn entity_var_cache_hydrate_does_not_dirty() {
         let mut c = EntityVariableCache::default();
-        c.hydrate(EntityType::Object, 1, 2, "loaded".to_string(), serde_json::json!(true));
+        c.hydrate(
+            EntityType::Object,
+            1,
+            2,
+            "loaded".to_string(),
+            serde_json::json!(true),
+        );
         let drained = c.drain_dirty();
         assert!(drained.is_empty(), "hydrate must not mark dirty");
-        assert_eq!(c.get(EntityType::Object, 1, 2, "loaded"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            c.get(EntityType::Object, 1, 2, "loaded"),
+            Some(&serde_json::json!(true))
+        );
     }
 
     #[test]
@@ -2805,18 +2829,42 @@ mod tests {
     #[test]
     fn quest_var_cache_set_get_roundtrip() {
         let mut c = QuestVariableCache::default();
-        c.set("char-1".into(), 30, 1, "progress".into(), serde_json::json!(5));
-        assert_eq!(c.get("char-1", 30, 1, "progress"), Some(&serde_json::json!(5)));
+        c.set(
+            "char-1".into(),
+            30,
+            1,
+            "progress".into(),
+            serde_json::json!(5),
+        );
+        assert_eq!(
+            c.get("char-1", 30, 1, "progress"),
+            Some(&serde_json::json!(5))
+        );
         // Different character / zone / quest id all miss.
-        assert!(c.get("char-2", 30, 1, "progress").is_none(), "different char");
-        assert!(c.get("char-1", 31, 1, "progress").is_none(), "different zone");
-        assert!(c.get("char-1", 30, 2, "progress").is_none(), "different quest");
+        assert!(
+            c.get("char-2", 30, 1, "progress").is_none(),
+            "different char"
+        );
+        assert!(
+            c.get("char-1", 31, 1, "progress").is_none(),
+            "different zone"
+        );
+        assert!(
+            c.get("char-1", 30, 2, "progress").is_none(),
+            "different quest"
+        );
     }
 
     #[test]
     fn quest_var_cache_set_marks_dirty_and_drains() {
         let mut c = QuestVariableCache::default();
-        c.set("char-1".into(), 30, 1, "stage".into(), serde_json::json!("alpha"));
+        c.set(
+            "char-1".into(),
+            30,
+            1,
+            "stage".into(),
+            serde_json::json!("alpha"),
+        );
         let drained = c.drain_dirty();
         assert_eq!(drained.len(), 1);
         let (cid, qz, qid, sets, clears) = &drained[0];
@@ -2828,18 +2876,33 @@ mod tests {
         assert_eq!(sets[0].1, serde_json::json!("alpha"));
         assert!(clears.is_empty());
         // Value still readable post-drain (mirrors entity_var_cache shape).
-        assert_eq!(c.get("char-1", 30, 1, "stage"), Some(&serde_json::json!("alpha")));
+        assert_eq!(
+            c.get("char-1", 30, 1, "stage"),
+            Some(&serde_json::json!("alpha"))
+        );
     }
 
     #[test]
     fn quest_var_cache_clear_tombstones_until_flush() {
         let mut c = QuestVariableCache::default();
-        c.set("char-1".into(), 30, 1, "stage".into(), serde_json::json!("alpha"));
+        c.set(
+            "char-1".into(),
+            30,
+            1,
+            "stage".into(),
+            serde_json::json!("alpha"),
+        );
         let _ = c.drain_dirty();
         // Clear → read sees None (the tombstone shadows the prior value);
         // drain produces a `clears` entry; after drain the entry evaporates.
-        assert!(c.clear("char-1".into(), 30, 1, "stage"), "had value before clear");
-        assert!(c.get("char-1", 30, 1, "stage").is_none(), "tombstone reads as None");
+        assert!(
+            c.clear("char-1".into(), 30, 1, "stage"),
+            "had value before clear"
+        );
+        assert!(
+            c.get("char-1", 30, 1, "stage").is_none(),
+            "tombstone reads as None"
+        );
         let drained = c.drain_dirty();
         assert_eq!(drained.len(), 1);
         let (_, _, _, sets, clears) = &drained[0];
@@ -2851,7 +2914,13 @@ mod tests {
     #[test]
     fn quest_var_cache_hydrate_does_not_dirty() {
         let mut c = QuestVariableCache::default();
-        c.hydrate("char-1".into(), 30, 1, "preset".into(), serde_json::json!("from-db"));
+        c.hydrate(
+            "char-1".into(),
+            30,
+            1,
+            "preset".into(),
+            serde_json::json!("from-db"),
+        );
         assert!(c.drain_dirty().is_empty(), "hydrate must not mark dirty");
         // The hydrated value is still readable through `get`.
         assert_eq!(
@@ -2871,17 +2940,15 @@ mod tests {
         let (_, _, _, sets, clears) = &drained[0];
         assert_eq!(sets.len(), 2);
         assert_eq!(clears.len(), 1);
-        assert!(c.drain_dirty().is_empty(), "second drain after no writes is empty");
+        assert!(
+            c.drain_dirty().is_empty(),
+            "second drain after no writes is empty"
+        );
     }
 
     // ---- HelpCatalog ----
 
-    fn help_entry(
-        id: i32,
-        title: &str,
-        keywords: &[&str],
-        min_level: i32,
-    ) -> HelpEntry {
+    fn help_entry(id: i32, title: &str, keywords: &[&str], min_level: i32) -> HelpEntry {
         HelpEntry {
             id,
             title: title.to_string(),
@@ -2907,7 +2974,10 @@ mod tests {
 
     fn fireball_only() -> HelpCatalog {
         let mut c = HelpCatalog::default();
-        insert_help(&mut c, help_entry(1, "Fireball", &["FIREBALL", "FIRE BALL"], 0));
+        insert_help(
+            &mut c,
+            help_entry(1, "Fireball", &["FIREBALL", "FIRE BALL"], 0),
+        );
         c
     }
 
@@ -2994,7 +3064,10 @@ mod tests {
         // fallback yields both — should surface as Ambiguous.
         match cat.lookup("fire", 50) {
             HelpLookup::AmbiguousMatches(titles) => {
-                assert_eq!(titles, vec!["Fireball".to_string(), "Fireshield".to_string()]);
+                assert_eq!(
+                    titles,
+                    vec!["Fireball".to_string(), "Fireshield".to_string()]
+                );
             }
             other => panic!("expected AmbiguousMatches, got {other:?}"),
         }
@@ -3086,6 +3159,7 @@ mod tests {
     /// Build a minimal `RaceDef` for tests. Defaults match the
     /// schema (76 stat caps, 100 factors). Callers override only
     /// what they actually exercise.
+    #[allow(clippy::similar_names)]
     fn race_def_for_test(
         race: &str,
         male_height: (i32, i32),
@@ -3146,17 +3220,9 @@ mod tests {
         );
         for _ in 0..32 {
             let m = cat.random_height("ELF", "male").expect("male band set");
-            assert!(
-                (60..=72).contains(&m),
-                "male height {m} outside [60,72]",
-            );
-            let f = cat
-                .random_height("ELF", "female")
-                .expect("female band set");
-            assert!(
-                (56..=66).contains(&f),
-                "female height {f} outside [56,66]",
-            );
+            assert!((60..=72).contains(&m), "male height {m} outside [60,72]",);
+            let f = cat.random_height("ELF", "female").expect("female band set");
+            assert!((56..=66).contains(&f), "female height {f} outside [56,66]",);
         }
     }
 
@@ -3246,9 +3312,10 @@ mod tests {
         assert_eq!(map.get(&mud_db::enums::ElementType::Fire), Some(&25));
         assert_eq!(map.get(&mud_db::enums::ElementType::Cold), Some(&-10));
         assert_eq!(map.get(&mud_db::enums::ElementType::Mental), Some(&50));
-        assert!(!map
-            .keys()
-            .any(|k| matches!(k, mud_db::enums::ElementType::Slash)));
+        assert!(
+            !map.keys()
+                .any(|k| matches!(k, mud_db::enums::ElementType::Slash))
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! user called out).
 //!
 //! Rest / repose (R2): on completion, the camp also acquires a
-//! `CAMP` **RestSource** with a tier computed from the player's
+//! `CAMP` **`RestSource`** with a tier computed from the player's
 //! class, group composition, and the optional kit. The kit (if any)
 //! is consumed at completion only; mid-camp cancels leave the kit
 //! intact per the design doc's edge-case table.
@@ -107,18 +107,12 @@ pub fn camp_tick(world: &mut World) {
     let now_tick = world.resource::<TickCount>().0;
     let snapshot: Vec<(Entity, Camping)> = {
         let mut q = world.query::<(Entity, &Camping)>();
-        q.iter(world)
-            .map(|(e, c)| (e, *c))
-            .collect()
+        q.iter(world).map(|(e, c)| (e, *c)).collect()
     };
     for (entity, camp) in snapshot {
         // Combat-cancel: mid-camp ambush wakes you up.
         if world.get::<Fighting>(entity).is_some() {
-            cancel(
-                world,
-                entity,
-                "Combat shatters your half-finished camp.",
-            );
+            cancel(world, entity, "Combat shatters your half-finished camp.");
             continue;
         }
         // Movement-cancel: leaving the campsite ends it.
@@ -175,7 +169,10 @@ fn complete(world: &mut World, entity: Entity, camp: Camping) {
             tier,
         });
         if let Some((zone, id)) = camp.kit_world_key {
-            em.insert(PendingWakeAttachments { kit_zone: zone, kit_id: id });
+            em.insert(PendingWakeAttachments {
+                kit_zone: zone,
+                kit_id: id,
+            });
         }
     }
     let player_name = name_of(world, entity);

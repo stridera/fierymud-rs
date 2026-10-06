@@ -4,7 +4,7 @@
 //! - `rent` with no arg in an `is_inn` room: print the available tier
 //!   menu pulled from the room's `InnRoom` component.
 //! - `rent <tier-name>`: validate the name, check gold, and either
-//!   set the RestSource to `Inn` immediately (tier 1) or stash a
+//!   set the `RestSource` to `Inn` immediately (tier 1) or stash a
 //!   `PendingRentConfirm` component and prompt the player to confirm
 //!   (tier > 1).
 //! - Outside an `is_inn` room: "There's nothing to rent here."

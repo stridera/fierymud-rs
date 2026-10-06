@@ -12,13 +12,12 @@ use crate::commands::{
     ATTACK_COST, AoeScope, BACKSTAB_COST, BANDAGE_COST, BASH_COST, BERSERK_COST, Category, Command,
     DISARM_COST, DOORBASH_COST, GOUGE_COST, HITALL_COST, Help, KICK_COST, LAYHANDS_COST, REND_COST,
     RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST, TAUNT_COST,
-    THROATCUT_COST,
-    TRIPUP_COST, aggro_alignment, apply_damage, auto_assist_followers_of, skill_stamina_cost,
+    THROATCUT_COST, TRIPUP_COST, aggro_alignment, apply_damage, auto_assist_followers_of,
     broadcast_room_except_players_rendered, broadcast_room_except_rendered, check_stamina,
     cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
     find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_aoe,
-    mob_helpers_engage, name_of, name_or, opposite, parse_direction,
-    remove_effect_named, require_alert_posture, send_rendered, send_to, try_insert, try_remove,
+    mob_helpers_engage, name_of, name_or, opposite, parse_direction, remove_effect_named,
+    require_alert_posture, send_rendered, send_to, skill_stamina_cost, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -451,7 +450,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-    names: &["assist"],
+    names: &["assist", "ass"],
     min_role: UserRole::Player,
     required_perm: None,
     category: Category::Combat,
@@ -501,7 +500,6 @@ inventory::submit! {
     run: cmd_retreat,
     }
 }
-
 
 inventory::submit! {
     Command {
@@ -702,12 +700,6 @@ inventory::submit! {
     }
 }
 
-
-
-
-
-
-
 inventory::submit! {
     Command {
     names: &["disengage"],
@@ -781,21 +773,11 @@ inventory::submit! {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
 //  `gsay` / `gtell` / `gecho` / `gt` migrated to commands/room_chat.rs.
-
 
 // ---- handler bodies ----
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "doorbash") {
         return;
@@ -827,8 +809,7 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         drain_stamina(world, player, cost);
         let str_bonus = world
             .get::<mud_world::CoreStats>(player)
-            .map(|s| mud_world::CoreStats::bonus(s.strength))
-            .unwrap_or(0);
+            .map_or(0, |s| mud_world::CoreStats::bonus(s.strength));
         let damage = (5 + str_bonus).max(1);
         let new_hp = wall.hp.saturating_sub(damage);
         let player_name = name_of(world, player);
@@ -892,15 +873,30 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         })
         .unwrap_or((None, None, false));
     let Some(state) = cur_state else {
-        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        send_to(
+            world,
+            player,
+            format!("No exit {}.\r\n", direction_name(dir)),
+        );
         return;
     };
     if state == ExitState::Open {
-        send_to(world, player, format!("It's already open {}.\r\n", direction_name(dir)));
+        send_to(
+            world,
+            player,
+            format!("It's already open {}.\r\n", direction_name(dir)),
+        );
         return;
     }
     if !is_bashable {
-        send_to(world, player, format!("The way {} is sealed by something stronger than your shoulder.\r\n", direction_name(dir)));
+        send_to(
+            world,
+            player,
+            format!(
+                "The way {} is sealed by something stronger than your shoulder.\r\n",
+                direction_name(dir)
+            ),
+        );
         return;
     }
     drain_stamina(world, player, cost);
@@ -909,8 +905,7 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
     // bashes. CoreStats::bonus on the 0-100 scale gives ±10.
     let str_bonus = world
         .get::<mud_world::CoreStats>(player)
-        .map(|s| mud_world::CoreStats::bonus(s.strength))
-        .unwrap_or(0);
+        .map_or(0, |s| mud_world::CoreStats::bonus(s.strength));
     let damage = (5 + str_bonus).max(1);
     let new_hp = cur_hp.unwrap_or(50).saturating_sub(damage);
     let player_name = name_of(world, player);
@@ -924,15 +919,22 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         {
             ed.hit_points = Some(50);
         }
-        send_to(world, player, format!(
-            "You bash open the way {} with a splintering crash!\r\n",
-            direction_name(dir),
-        ));
+        send_to(
+            world,
+            player,
+            format!(
+                "You bash open the way {} with a splintering crash!\r\n",
+                direction_name(dir),
+            ),
+        );
         broadcast_room_except_players_rendered(
             world,
             room,
             &[player],
-            &format!("{player_name} bashes the door {} wide open!\r\n", direction_name(dir)),
+            &format!(
+                "{player_name} bashes the door {} wide open!\r\n",
+                direction_name(dir)
+            ),
         );
     } else {
         if let Some(mut exits) = world.get_mut::<Exits>(room)
@@ -940,15 +942,22 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         {
             ed.hit_points = Some(new_hp);
         }
-        send_to(world, player, format!(
-            "You shoulder-charge the door {} — it groans but holds.\r\n",
-            direction_name(dir),
-        ));
+        send_to(
+            world,
+            player,
+            format!(
+                "You shoulder-charge the door {} — it groans but holds.\r\n",
+                direction_name(dir),
+            ),
+        );
         broadcast_room_except_players_rendered(
             world,
             room,
             &[player],
-            &format!("{player_name} slams against the door {} with a thunderous crash!\r\n", direction_name(dir)),
+            &format!(
+                "{player_name} slams against the door {} with a thunderous crash!\r\n",
+                direction_name(dir)
+            ),
         );
     }
 }
@@ -991,7 +1000,10 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     };
 
     let Some(target) = target else {
-        send_rendered(world, player, &format!("You don't see '{target_name}' here.\r\n"),
+        send_rendered(
+            world,
+            player,
+            &format!("You don't see '{target_name}' here.\r\n"),
         );
         return;
     };
@@ -1068,12 +1080,7 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     // Fire ATTACK trigger on the target. Bodies typically run
     // initial-aggression flavor or counter-attacks. `self` = target,
     // `actor` = attacker.
-    crate::triggers::fire_event_with_actor(
-        world,
-        target,
-        player,
-        mud_world::TriggerEvent::Attack,
-    );
+    crate::triggers::fire_event_with_actor(world, target, player, mud_world::TriggerEvent::Attack);
 
     // G3.1: fire the player's first swing right here so they don't
     // sit through "You attack X!" with no follow-up until the next
@@ -1086,6 +1093,7 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         crate::combat::engage_swing_now(world, player, target);
     }
 }
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
     let target_word = target_word.trim();
     if target_word.is_empty() {
@@ -1097,7 +1105,10 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
         return;
     };
     let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
-        send_rendered(world, player, &format!("You don't see '{target_word}' here.\r\n"),
+        send_rendered(
+            world,
+            player,
+            &format!("You don't see '{target_word}' here.\r\n"),
         );
         return;
     };
@@ -1167,8 +1178,8 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
         0
     };
     if staff {
-        let your_pct_text =
-            hit_chance_color(your_chance).map_or(format!("{your_chance}%"), |open| {
+        let your_pct_text = hit_chance_color(your_chance)
+            .map_or(format!("{your_chance}%"), |open| {
                 format!("{open}{your_chance}%</>")
             });
         let their_pct_text = match their_chance {
@@ -1213,9 +1224,7 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
             .is_some_and(|m| m.0.contains(&player));
         let target_alignment = target_stats.map_or(0, |c| c.alignment);
         if remembers_you {
-            out.push_str(
-                "<b:red>It remembers you, and its hand goes to its weapon.</>\r\n",
-            );
+            out.push_str("<b:red>It remembers you, and its hand goes to its weapon.</>\r\n");
         } else if target_alignment <= aggro_alignment(world) {
             out.push_str(
                 "<b:red>Its eyes follow you with malice — it would attack on sight.</>\r\n",
@@ -1261,7 +1270,11 @@ fn perform_class_strike(
     let target_word = if arg.is_empty() {
         // No arg → attack current combat target if any.
         let Some(f) = world.get::<Fighting>(player).copied() else {
-            send_to(world, player, format!("{} whom?\r\n", crate::commands::capitalize(skill_name)));
+            send_to(
+                world,
+                player,
+                format!("{} whom?\r\n", crate::commands::capitalize(skill_name)),
+            );
             return;
         };
         let Some(loc) = world.get::<Located>(player).map(|l| l.0) else {
@@ -1321,9 +1334,7 @@ fn perform_class_strike(
             &format!("{player_name} {verb_other} you for {dam} damage!\r\n"),
         );
         let (dead, _msg) = apply_damage(world, target, dam);
-        if dead
-            && let Some(loc) = world.get::<Located>(target).copied()
-        {
+        if dead && let Some(loc) = world.get::<Located>(target).copied() {
             crate::combat::handle_death(world, target, &target_name, loc.0);
             return;
         }
@@ -1343,11 +1354,7 @@ fn perform_class_strike(
 pub(crate) fn cmd_claw(world: &mut World, player: Entity, args: &str) {
     let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
     if !class_id.is_some_and(|id| CLAW_CLASS_IDS.contains(&id)) {
-        send_to(
-            world,
-            player,
-            "Grow some longer fingernails first.\r\n",
-        );
+        send_to(world, player, "Grow some longer fingernails first.\r\n");
         return;
     }
     perform_class_strike(world, player, args, "claw", "rake", "rakes");
@@ -1406,7 +1413,11 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
         return;
     };
     if target == player {
-        send_to(world, player, "Stealing from yourself is rather stupid.\r\n");
+        send_to(
+            world,
+            player,
+            "Stealing from yourself is rather stupid.\r\n",
+        );
         return;
     }
     // Refuse against staff, shopkeepers, and the room's
@@ -1509,13 +1520,16 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
     // Item path: find a carried (non-equipped) item by keyword.
     let needle = what.to_ascii_lowercase();
     let item_opt: Option<(Entity, String)> = {
-        let mut q = world
-            .query_filtered::<(Entity, &mud_world::Located, &Named, Option<&mud_world::Keywords>, Option<&mud_world::EquippedSlot>), With<Item>>();
+        let mut q = world.query_filtered::<(
+            Entity,
+            &mud_world::Located,
+            &Named,
+            Option<&mud_world::Keywords>,
+            Option<&mud_world::EquippedSlot>,
+        ), With<Item>>();
         q.iter(world)
             .find(|(_, l, n, kw, eq)| {
-                l.0 == target
-                    && eq.is_none()
-                    && crate::commands::matches(&needle, n, *kw)
+                l.0 == target && eq.is_none() && crate::commands::matches(&needle, n, *kw)
             })
             .map(|(e, _, n, _, _)| (e, n.name.clone()))
     };
@@ -1615,7 +1629,11 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
             &same_room,
             &format!("{capped} arrives, panting, from {arrival_dir}.\r\n"),
         );
-        send_to(world, *m, format!("You retreat with the group {dir_name}!\r\n"));
+        send_to(
+            world,
+            *m,
+            format!("You retreat with the group {dir_name}!\r\n"),
+        );
         cmd_look(world, *m, "");
     }
 }
@@ -1763,9 +1781,11 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     let cur_posture = world.get::<Posture>(target).map(|p| p.0);
     if !matches!(cur_posture, Some(PostureKind::Standing)) {
         let target_name = name_or(world, target, "(unknown)");
-        send_to(world, player, format!(
-            "{target_name} is already on the ground.\r\n",
-        ));
+        send_to(
+            world,
+            player,
+            format!("{target_name} is already on the ground.\r\n",),
+        );
         return;
     }
     let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
@@ -1787,19 +1807,21 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     let target_name = name_or(world, target, "(unknown)");
     let (dead, _) = apply_damage(world, target, dmg);
 
-    if !dead
-        && let Ok(mut e) = world.get_entity_mut(target)
-    {
+    if !dead && let Ok(mut e) = world.get_entity_mut(target) {
         e.insert(Posture(PostureKind::Sitting));
     }
 
-    send_to(world, player, format!(
-        "You stomp on {target_name} for {dmg} damage; they go down!\r\n"
-    ));
+    send_to(
+        world,
+        player,
+        format!("You stomp on {target_name} for {dmg} damage; they go down!\r\n"),
+    );
     if !dead {
-        send_rendered(world, target, &format!(
-            "{player_name} stomps you to the ground!\r\n"
-        ));
+        send_rendered(
+            world,
+            target,
+            &format!("{player_name} stomps you to the ground!\r\n"),
+        );
     }
     broadcast_room_except_rendered(
         world,
@@ -1864,7 +1886,8 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
         .get::<CombatStats>(player)
         .map_or(1, |c| ((c.attack_power / 5) / 4).max(1));
     let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located, Option<&Posture>, Option<&Health>), With<Mob>>();
+        let mut q = world
+            .query_filtered::<(Entity, &Located, Option<&Posture>, Option<&Health>), With<Mob>>();
         q.iter(world)
             .filter(|(_, l, p, h)| {
                 l.0 == room
@@ -1890,11 +1913,15 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
             e.insert(Posture(PostureKind::Sitting));
         }
     }
-    send_to(world, player, format!(
-        "You sweep your leg in a wide arc — {count} go down!\r\n"
-    ));
+    send_to(
+        world,
+        player,
+        format!("You sweep your leg in a wide arc — {count} go down!\r\n"),
+    );
     broadcast_room_except_rendered(
-        world, room, &[player],
+        world,
+        room,
+        &[player],
         &format!("{player_name} sweeps a wide kick across the room!\r\n"),
     );
 }
@@ -2009,7 +2036,11 @@ pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if world.get::<Fighting>(player).is_some() {
-        send_to(world, player, "You can't springleap while already fighting.\r\n");
+        send_to(
+            world,
+            player,
+            "You can't springleap while already fighting.\r\n",
+        );
         return;
     }
     let arg = args.trim();
@@ -2216,9 +2247,7 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
     }
 
     // Engage the first survivor if we weren't already fighting.
-    if !already_fighting
-        && let Some(first) = first_alive
-    {
+    if !already_fighting && let Some(first) = first_alive {
         try_insert(world, player, Fighting(first));
         // First-attacker priority (see cmd_attack).
         if world.get::<Fighting>(first).is_none()
@@ -2242,9 +2271,7 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
         world,
         room,
         &[player],
-        &format!(
-            "{player_name} swings wildly at everyone here.\r\n",
-        ),
+        &format!("{player_name} swings wildly at everyone here.\r\n",),
     );
 }
 pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
@@ -2280,8 +2307,7 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
 
     // Find the target's wielded item.
     let weapon: Option<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
+        let mut q = world.query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
         q.iter(world)
             .find(|(_, l, eq)| l.0 == target && eq.0 == Slot::Wield)
             .map(|(e, _, _)| e)
@@ -2298,11 +2324,7 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    let Some(target_room) = world
-        .get::<Located>(target)
-        .copied()
-        .map(|l| l.0)
-    else {
+    let Some(target_room) = world.get::<Located>(target).copied().map(|l| l.0) else {
         send_to(world, player, "Target is in limbo; can't disarm.\r\n");
         return;
     };
@@ -2316,13 +2338,17 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     let weapon_name = name_or(world, weapon, "<weapon>");
     let target_name = name_or(world, target, "(unknown)");
     let player_name = name_of(world, player);
-    send_to(world, player, format!(
-        "You disarm {target_name}; {weapon_name} clatters to the ground.\r\n"
-    ));
+    send_to(
+        world,
+        player,
+        format!("You disarm {target_name}; {weapon_name} clatters to the ground.\r\n"),
+    );
     if target != player {
-        send_rendered(world, target, &format!(
-            "{player_name} disarms you! {weapon_name} clatters to the ground.\r\n"
-        ));
+        send_rendered(
+            world,
+            target,
+            &format!("{player_name} disarms you! {weapon_name} clatters to the ground.\r\n"),
+        );
     }
     broadcast_room_except_rendered(
         world,
@@ -2381,9 +2407,7 @@ pub(crate) fn cmd_guard(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can't guard yourself.\r\n");
         return;
     }
-    world
-        .entity_mut(player)
-        .insert(mud_world::Guarding(target));
+    world.entity_mut(player).insert(mud_world::Guarding(target));
     let n = name_of(world, target);
     let player_name = name_of(world, player);
     send_to(world, player, format!("You begin guarding {n}.\r\n"));
@@ -2458,7 +2482,11 @@ pub(crate) fn cmd_assist(world: &mut World, player: Entity, args: &str) {
     };
     let Some(Fighting(ally_target)) = world.get::<Fighting>(ally).copied() else {
         let ally_name = name_or(world, ally, "(unknown)");
-        send_to(world, player, format!("{ally_name} isn't fighting anyone.\r\n"));
+        send_to(
+            world,
+            player,
+            format!("{ally_name} isn't fighting anyone.\r\n"),
+        );
         return;
     };
     if world.get_entity(ally_target).is_err() {
@@ -2483,11 +2511,19 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let Some(ed) = exits.0.get(&dir).cloned() else {
-        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        send_to(
+            world,
+            player,
+            format!("No exit {}.\r\n", direction_name(dir)),
+        );
         return;
     };
     if ed.state != ExitState::Open {
-        send_to(world, player, format!("The exit {} is closed.\r\n", direction_name(dir)));
+        send_to(
+            world,
+            player,
+            format!("The exit {} is closed.\r\n", direction_name(dir)),
+        );
         return;
     }
     let Some(target) = ed.to else {
@@ -2710,16 +2746,14 @@ pub(crate) fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
     // Resolve target (for the bleed staunch — invoke_ability also
     // resolves it but we need access to call remove_effect_named).
     let arg = args.trim();
-    let target = if arg.is_empty()
-        || arg.eq_ignore_ascii_case("me")
-        || arg.eq_ignore_ascii_case("self")
-    {
-        Some(player)
-    } else if let Some(located) = world.get::<Located>(player).copied() {
-        find_actor_in_room(world, arg, located.0, player)
-    } else {
-        None
-    };
+    let target =
+        if arg.is_empty() || arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+            Some(player)
+        } else if let Some(located) = world.get::<Located>(player).copied() {
+            find_actor_in_room(world, arg, located.0, player)
+        } else {
+            None
+        };
     if let Some(t) = target {
         let staunched = remove_effect_named(world, t, "bleed") > 0;
         if staunched {
@@ -2760,15 +2794,17 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     };
     let target = find_actor_in_room(world, target_word, located.0, player);
     let Some(target) = target else {
-        send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
+        send_to(
+            world,
+            player,
+            format!("You don't see '{target_word}' here.\r\n"),
+        );
         return;
     };
 
     // Engage if not already.
     let already_fighting = world.get::<Fighting>(player).is_some();
-    if !already_fighting
-        && let Ok(mut e) = world.get_entity_mut(player)
-    {
+    if !already_fighting && let Ok(mut e) = world.get_entity_mut(player) {
         e.insert(Fighting(target));
     }
     // First-attacker priority (see cmd_attack).
@@ -2805,9 +2841,15 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         crate::casting::interrupt_cast(world, target, "the bash knocks you flat");
     }
 
-    send_rendered(world, player, &format!("You bash {target_name} for {damage} damage, knocking them down!\r\n"),
+    send_rendered(
+        world,
+        player,
+        &format!("You bash {target_name} for {damage} damage, knocking them down!\r\n"),
     );
-    send_rendered(world, target, &format!("{player_name} bashes you for {damage} damage, knocking you down!\r\n"),
+    send_rendered(
+        world,
+        target,
+        &format!("{player_name} bashes you for {damage} damage, knocking you down!\r\n"),
     );
     if let Some(m) = threshold_msg {
         send_to(world, target, m);
@@ -2825,7 +2867,7 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
 }
 /// `taunt <target>`: redirect the target mob's aggro onto the
 /// caster. Sets target.Fighting = caster (overriding whoever
-/// they were on), moves caster to the front of the HateList so
+/// they were on), moves caster to the front of the `HateList` so
 /// the re-engage pre-pass picks them. The legacy semantic is
 /// "tank pulls heat off the squishies" — making this a real
 /// skill closes Q6 from combat-rebalance.md.
@@ -2833,7 +2875,7 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
 /// Players can be tauntd by other players in PK contexts (mirrors
 /// bash). Non-mob, non-player targets refuse. Peaceful mob gate
 /// applies (a peaceful shopkeeper won't attack you back even if
-/// you taunt them — the gate stays consistent with cmd_attack).
+/// you taunt them — the gate stays consistent with `cmd_attack`).
 pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
     if !require_alert_posture(world, player, "taunt") {
         return;
@@ -2851,7 +2893,11 @@ pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
         return;
     };
     let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
-        send_to(world, player, format!("You don't see '{target_word}' here.\r\n"));
+        send_to(
+            world,
+            player,
+            format!("You don't see '{target_word}' here.\r\n"),
+        );
         return;
     };
     if target == player {
@@ -2859,7 +2905,11 @@ pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
         return;
     }
     if world.get::<CombatStats>(target).is_none() {
-        send_to(world, player, "Nothing about that target responds to provocation.\r\n");
+        send_to(
+            world,
+            player,
+            "Nothing about that target responds to provocation.\r\n",
+        );
         return;
     }
     if world.get::<mud_world::PeacefulRoom>(located.0).is_some() {
@@ -2913,7 +2963,11 @@ pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
         try_insert(world, target, list);
     }
 
-    send_to(world, player, format!("You taunt {target_name} into focusing on you!\r\n"));
+    send_to(
+        world,
+        player,
+        format!("You taunt {target_name} into focusing on you!\r\n"),
+    );
     send_rendered(
         world,
         target,

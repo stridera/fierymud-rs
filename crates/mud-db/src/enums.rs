@@ -210,7 +210,11 @@ pub enum ExitState {
 /// impl so the manual impl below can supply the case-preserving
 /// quoted array name (`_ExitFlag`); the auto-derive lowercases.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[sqlx(type_name = r#""ExitFlag""#, rename_all = "SCREAMING_SNAKE_CASE", no_pg_array)]
+#[sqlx(
+    type_name = r#""ExitFlag""#,
+    rename_all = "SCREAMING_SNAKE_CASE",
+    no_pg_array
+)]
 pub enum ExitFlag {
     IsDoor,
     Pickproof,
@@ -319,7 +323,10 @@ impl ObjectType {
 }
 
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[sqlx(type_name = r#""AchievementCategory""#, rename_all = "SCREAMING_SNAKE_CASE")]
+#[sqlx(
+    type_name = r#""AchievementCategory""#,
+    rename_all = "SCREAMING_SNAKE_CASE"
+)]
 pub enum AchievementCategory {
     Combat,
     Exploration,
@@ -863,7 +870,7 @@ impl Permission {
 
 /// Which kind of world entity owns an `EntityVariables` row. Mirrors the
 /// schema's `EntityType` Prisma enum verbatim — `MOB` / `OBJECT` / `ROOM`.
-/// The (entity_type, zone, id, key) tuple is the primary key on
+/// The `(entity_type, zone, id, key)` tuple is the primary key on
 /// `entity_variables`, so this enum is the discriminator that lets one
 /// table back trigger-set vars for all three runtime entity shapes.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -932,7 +939,11 @@ pub enum ElementType {
 /// so the manual impl below can supply the case-preserving quoted
 /// array name (`_ObjectFlag`); the auto-derive lowercases.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[sqlx(type_name = r#""ObjectFlag""#, rename_all = "SCREAMING_SNAKE_CASE", no_pg_array)]
+#[sqlx(
+    type_name = r#""ObjectFlag""#,
+    rename_all = "SCREAMING_SNAKE_CASE",
+    no_pg_array
+)]
 pub enum ObjectFlag {
     Glow,
     Hum,
@@ -978,7 +989,7 @@ impl ObjectFlag {
 /// "Can't do that" restrictions on an object proto. Stored as a
 /// Postgres `_ObjectRestriction` array on `Objects.restrictions`.
 /// Each variant gates a specific command (`drop` / `get` / `sell`
-/// / etc.); the gate fires before any state mutation so a NO_DROP
+/// / etc.); the gate fires before any state mutation so a `NO_DROP`
 /// quest item can't accidentally land on the floor.
 ///
 /// `no_pg_array` for the same case-preserved array-type reason as
@@ -1027,7 +1038,9 @@ impl ObjectRestriction {
 /// match the schema enum verbatim; numeric `rank()` is the ordinal
 /// used by gameplay gates that compare sizes ("bash refuses targets
 /// more than one band larger than you").
-#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 #[sqlx(type_name = r#""Size""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Size {
     Tiny,
@@ -1170,7 +1183,7 @@ impl DamageType {
             Self::Maul => "mauls",
             Self::Thrash => "thrashes",
             Self::Pierce => "pierces",
-            Self::Blast => "blasts",
+            Self::Blast | Self::Energy => "blasts",
             Self::Punch => "punches",
             Self::Stab => "stabs",
             Self::Fire => "burns",
@@ -1181,7 +1194,6 @@ impl DamageType {
             Self::Align => "smites",
             Self::Mental => "psychically lashes",
             Self::Rot => "withers",
-            Self::Energy => "blasts",
             Self::Water => "douses",
         }
     }
@@ -1229,7 +1241,11 @@ impl DamageType {
 /// `no_pg_array` for the same case-preserved array-type reason as
 /// `ObjectFlag` above — the auto-derive lowercases the array name.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[sqlx(type_name = r#""MobTrait""#, rename_all = "SCREAMING_SNAKE_CASE", no_pg_array)]
+#[sqlx(
+    type_name = r#""MobTrait""#,
+    rename_all = "SCREAMING_SNAKE_CASE",
+    no_pg_array
+)]
 pub enum MobTrait {
     Illusion,
     Animated,
@@ -1294,4 +1310,3 @@ impl MovementMode {
         }
     }
 }
-

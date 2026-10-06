@@ -9,9 +9,7 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{BankWealth, Wealth};
 
-use crate::commands::{
-    Category, Command, Help, format_wealth, send_to,
-};
+use crate::commands::{Category, Command, Help, format_wealth, send_to};
 
 inventory::submit! {
     Command {

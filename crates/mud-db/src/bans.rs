@@ -18,10 +18,7 @@ pub struct ActiveBanRow {
 
 /// Active ban for `user_id` if any. Filters expired bans
 /// (`expires_at < NOW()`) so temporary bans auto-release.
-pub async fn active_for(
-    pool: &PgPool,
-    user_id: &str,
-) -> sqlx::Result<Option<ActiveBanRow>> {
+pub async fn active_for(pool: &PgPool, user_id: &str) -> sqlx::Result<Option<ActiveBanRow>> {
     sqlx::query_as!(
         ActiveBanRow,
         r#"
@@ -52,8 +49,7 @@ pub async fn ban(
     duration_secs: Option<i64>,
 ) -> sqlx::Result<String> {
     let expires_at = duration_secs.map(|secs| {
-        let naive = chrono::Utc::now()
-            + chrono::Duration::seconds(secs);
+        let naive = chrono::Utc::now() + chrono::Duration::seconds(secs);
         naive.naive_utc()
     });
     let row = sqlx::query!(
@@ -75,11 +71,7 @@ pub async fn ban(
 
 /// Lift the most recent active ban on `user_id`. Returns the
 /// number of rows updated (0 if no active ban existed).
-pub async fn unban(
-    pool: &PgPool,
-    user_id: &str,
-    unbanned_by: &str,
-) -> sqlx::Result<u64> {
+pub async fn unban(pool: &PgPool, user_id: &str, unbanned_by: &str) -> sqlx::Result<u64> {
     let res = sqlx::query!(
         r#"
         UPDATE "BanRecords"

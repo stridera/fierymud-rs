@@ -26,13 +26,15 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use bevy_ecs::prelude::*;
-use mud_db::{characters, characters::CharacterRow, character_items, sqlx::PgPool, users, users::User};
+use mud_db::{
+    character_items, characters, characters::CharacterRow, sqlx::PgPool, users, users::User,
+};
 use mud_net::Outbound;
 use mud_world::{
     AppliedTo, AttachedTriggers, BoardLink, CombatStats, Description, EffectInstance, Exits,
-    Health, Item, Keywords, LiquidContainer, Located, Mob, MobPrototypes, Named,
-    ObjectPrototypes, Online, Player, Posture, PostureKind, Profile, Stamina, TriggerCatalog,
-    WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
+    Health, Item, Keywords, LiquidContainer, Located, Mob, MobPrototypes, Named, ObjectPrototypes,
+    Online, Player, Posture, PostureKind, Profile, Stamina, TriggerCatalog, WearableIn, WorldKey,
+    WorldKeyIndex, wear_flags_primary_slot,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -87,8 +89,13 @@ pub struct AdminCommand {
 #[allow(clippy::large_enum_variant)]
 pub enum AdminRequest {
     WorldStatus,
-    LookRoom { zone_id: i32, id: i32 },
-    InspectActor { name: String },
+    LookRoom {
+        zone_id: i32,
+        id: i32,
+    },
+    InspectActor {
+        name: String,
+    },
     SessionCreate {
         player_name: String,
         user: Box<User>,
@@ -104,28 +111,62 @@ pub enum AdminRequest {
         ignore_list_json: Option<serde_json::Value>,
         effect_instances_json: Option<serde_json::Value>,
     },
-    SessionDestroy { player_name: String },
+    SessionDestroy {
+        player_name: String,
+    },
     /// Mark an online (or virtual-session) player with `PendingSave`
     /// so the post-tick autosave loop checkpoints them within the
     /// next tick. Used by smoke tests to force the disconnect-save
     /// path without actually disconnecting; not part of the regular
     /// gameplay surface.
-    MarkPendingSave { player_name: String },
-    Command { executor: String, command: String },
-    Teleport { player_name: String, zone_id: i32, room_id: i32 },
-    Spawn { kind: String, zone_id: i32, id: i32, room_zone: i32, room_id: i32 },
-    InspectMob { zone_id: i32, id: i32 },
+    MarkPendingSave {
+        player_name: String,
+    },
+    Command {
+        executor: String,
+        command: String,
+    },
+    Teleport {
+        player_name: String,
+        zone_id: i32,
+        room_id: i32,
+    },
+    Spawn {
+        kind: String,
+        zone_id: i32,
+        id: i32,
+        room_zone: i32,
+        room_id: i32,
+    },
+    InspectMob {
+        zone_id: i32,
+        id: i32,
+    },
     PauseWorld,
     UnpauseWorld,
-    TickWorld { count: u32 },
-    TriggerInfo { zone_id: Option<i32>, id: Option<i32> },
-    TriggerErrors { limit: Option<usize> },
+    TickWorld {
+        count: u32,
+    },
+    TriggerInfo {
+        zone_id: Option<i32>,
+        id: Option<i32>,
+    },
+    TriggerErrors {
+        limit: Option<usize>,
+    },
     TriggerStats,
+    /// Syntax-check every loaded trigger body (optionally one zone)
+    /// without running it. Backs `GET /api/admin/triggers/validate`.
+    ValidateTriggers {
+        zone_id: Option<i32>,
+    },
     /// New catalog assembled from the DB by the HTTP handler;
     /// the world dispatch swaps the resource and re-applies room
     /// attachments. Mob/object spawns will pick up new trigger
     /// rows on their next respawn naturally.
-    ReloadTriggers { catalog: Box<mud_world::TriggerCatalog> },
+    ReloadTriggers {
+        catalog: Box<mud_world::TriggerCatalog>,
+    },
     /// Manually invoke a trigger body against a chosen `self`
     /// entity, optionally with an `actor` binding. Bypasses the
     /// usual event-flag gating — you can fire any body regardless
@@ -186,6 +227,9 @@ pub fn spawn_admin_server(pool: PgPool) -> mpsc::Receiver<AdminCommand> {
         );
         return rx;
     }
+    if token.is_none() {
+        warn!(%addr, "admin HTTP API starting WITHOUT ADMIN_TOKEN: all /api/admin/* endpoints are unauthenticated");
+    }
     let state = AppState { tx, token, pool };
     tokio::spawn(async move {
         let app = build_router(state);
@@ -218,9 +262,13 @@ fn build_router(state: AppState) -> Router {
         .route("/api/admin/world/unpause", post(handle_unpause_world))
         .route("/api/admin/world/tick", post(handle_tick_world))
         .route("/api/admin/triggers", get(handle_trigger_info))
-        .route("/api/admin/triggers/{zone_id}/{id}", get(handle_trigger_info_one))
+        .route(
+            "/api/admin/triggers/{zone_id}/{id}",
+            get(handle_trigger_info_one),
+        )
         .route("/api/admin/triggers/errors", get(handle_trigger_errors))
         .route("/api/admin/triggers/stats", get(handle_trigger_stats))
+        .route("/api/admin/triggers/validate", get(handle_trigger_validate))
         .route("/api/admin/triggers/reload", post(handle_trigger_reload))
         .route("/api/admin/triggers/fire", post(handle_trigger_fire))
         .route("/api/admin/player/set", post(handle_player_set))
@@ -259,14 +307,14 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, 
     if constant_time_eq(got.as_bytes(), expected.as_bytes()) {
         Ok(())
     } else {
-        Err((StatusCode::UNAUTHORIZED, "missing or invalid bearer token".into()))
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid bearer token".into(),
+        ))
     }
 }
 
-async fn enqueue(
-    state: &AppState,
-    request: AdminRequest,
-) -> Result<Value, (StatusCode, String)> {
+async fn enqueue(state: &AppState, request: AdminRequest) -> Result<Value, (StatusCode, String)> {
     let (tx, rx) = oneshot::channel();
     // try_send instead of .send().await — admin requests are
     // synchronous from the caller's perspective, and a saturated
@@ -285,8 +333,12 @@ async fn enqueue(
                 "world tick channel closed".into(),
             ),
         })?;
-    rx.await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "no reply from world tick".into()))?
+    rx.await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no reply from world tick".into(),
+        )
+    })?
 }
 
 async fn handle_world_status(
@@ -369,7 +421,10 @@ async fn handle_session_create(
         Ok(None) => {
             return json_err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("character '{}' references missing user_id", body.player_name),
+                format!(
+                    "character '{}' references missing user_id",
+                    body.player_name
+                ),
             ));
         }
         Err(e) => return json_err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
@@ -436,7 +491,13 @@ async fn handle_session_destroy(
         return json_err(e);
     }
     json_ok(
-        enqueue(&state, AdminRequest::SessionDestroy { player_name: body.player_name }).await,
+        enqueue(
+            &state,
+            AdminRequest::SessionDestroy {
+                player_name: body.player_name,
+            },
+        )
+        .await,
     )
 }
 
@@ -449,7 +510,13 @@ async fn handle_player_save(
         return json_err(e);
     }
     json_ok(
-        enqueue(&state, AdminRequest::MarkPendingSave { player_name: body.player_name }).await,
+        enqueue(
+            &state,
+            AdminRequest::MarkPendingSave {
+                player_name: body.player_name,
+            },
+        )
+        .await,
     )
 }
 
@@ -465,9 +532,10 @@ struct CommandBody {
 fn de_i32_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
     use serde::Deserialize as _;
     match Value::deserialize(d)? {
-        Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()).ok_or_else(|| {
-            serde::de::Error::custom("number out of range for i32")
-        }),
+        Value::Number(n) => n
+            .as_i64()
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or_else(|| serde::de::Error::custom("number out of range for i32")),
         Value::String(s) => s
             .parse::<i32>()
             .map_err(|e| serde::de::Error::custom(e.to_string())),
@@ -484,9 +552,9 @@ fn de_i32_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i32, D::Erro
 fn de_i64_lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
     use serde::Deserialize as _;
     match Value::deserialize(d)? {
-        Value::Number(n) => n.as_i64().ok_or_else(|| {
-            serde::de::Error::custom("number out of range for i64")
-        }),
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| serde::de::Error::custom("number out of range for i64")),
         Value::String(s) => s
             .parse::<i64>()
             .map_err(|e| serde::de::Error::custom(e.to_string())),
@@ -548,7 +616,10 @@ async fn handle_command(
     json_ok(
         enqueue(
             &state,
-            AdminRequest::Command { executor: body.executor, command: body.command },
+            AdminRequest::Command {
+                executor: body.executor,
+                command: body.command,
+            },
         )
         .await,
     )
@@ -668,7 +739,10 @@ async fn handle_trigger_info(
     json_ok(
         enqueue(
             &state,
-            AdminRequest::TriggerInfo { zone_id: None, id: None },
+            AdminRequest::TriggerInfo {
+                zone_id: None,
+                id: None,
+            },
         )
         .await,
     )
@@ -714,6 +788,18 @@ async fn handle_trigger_stats(
         return json_err(e);
     }
     json_ok(enqueue(&state, AdminRequest::TriggerStats).await)
+}
+
+async fn handle_trigger_validate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    let zone_id = params.get("zone").and_then(|s| s.parse().ok());
+    json_ok(enqueue(&state, AdminRequest::ValidateTriggers { zone_id }).await)
 }
 
 async fn handle_player_set(
@@ -826,23 +912,50 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::LookRoom { zone_id, id } => look_room(world, zone_id, id),
         AdminRequest::InspectActor { name } => inspect_actor(world, &name),
         AdminRequest::SessionCreate {
-            player_name, user, character, items, abilities, aliases, achievements,
-            script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
-            ignore_list_json, effect_instances_json,
+            player_name,
+            user,
+            character,
+            items,
+            abilities,
+            aliases,
+            achievements,
+            script_vars_json,
+            trophy_json,
+            spell_cooldowns_json,
+            cooldowns_json,
+            ignore_list_json,
+            effect_instances_json,
         } => session_create(
-            world, &player_name, &user, &character, &items, &abilities, &aliases, &achievements,
-            script_vars_json, trophy_json, spell_cooldowns_json, cooldowns_json,
-            ignore_list_json, effect_instances_json,
+            world,
+            &player_name,
+            &user,
+            &character,
+            &items,
+            &abilities,
+            &aliases,
+            &achievements,
+            script_vars_json,
+            trophy_json,
+            spell_cooldowns_json,
+            cooldowns_json,
+            ignore_list_json,
+            effect_instances_json,
         ),
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
         AdminRequest::MarkPendingSave { player_name } => mark_pending_save(world, &player_name),
         AdminRequest::Command { executor, command } => run_command(world, &executor, &command),
-        AdminRequest::Teleport { player_name, zone_id, room_id } => {
-            teleport(world, &player_name, zone_id, room_id)
-        }
-        AdminRequest::Spawn { kind, zone_id, id, room_zone, room_id } => {
-            spawn_into(world, &kind, zone_id, id, room_zone, room_id)
-        }
+        AdminRequest::Teleport {
+            player_name,
+            zone_id,
+            room_id,
+        } => teleport(world, &player_name, zone_id, room_id),
+        AdminRequest::Spawn {
+            kind,
+            zone_id,
+            id,
+            room_zone,
+            room_id,
+        } => spawn_into(world, &kind, zone_id, id, room_zone, room_id),
         AdminRequest::InspectMob { zone_id, id } => inspect_mob(world, zone_id, id),
         AdminRequest::PauseWorld => {
             let mut p = world.resource_mut::<WorldPause>();
@@ -873,13 +986,19 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::TriggerInfo { zone_id, id } => Ok(trigger_info(world, zone_id, id)),
         AdminRequest::TriggerErrors { limit } => Ok(trigger_errors(world, limit)),
         AdminRequest::TriggerStats => Ok(trigger_stats(world)),
+        AdminRequest::ValidateTriggers { zone_id } => Ok(validate_triggers(world, zone_id)),
         AdminRequest::ReloadTriggers { catalog } => Ok(reload_triggers(world, *catalog)),
-        AdminRequest::FireTrigger { zone_id, id, self_name, actor_name } => {
-            fire_trigger(world, zone_id, id, &self_name, actor_name.as_deref())
-        }
-        AdminRequest::SetPlayerField { player_name, field, value } => {
-            set_player_field(world, &player_name, &field, value)
-        }
+        AdminRequest::FireTrigger {
+            zone_id,
+            id,
+            self_name,
+            actor_name,
+        } => fire_trigger(world, zone_id, id, &self_name, actor_name.as_deref()),
+        AdminRequest::SetPlayerField {
+            player_name,
+            field,
+            value,
+        } => set_player_field(world, &player_name, &field, value),
     }
 }
 
@@ -1047,9 +1166,7 @@ fn set_player_field(
     if !applied {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "actor '{player_name}' has no '{field}' component to write"
-            ),
+            format!("actor '{player_name}' has no '{field}' component to write"),
         ));
     }
     Ok(json!({
@@ -1064,7 +1181,8 @@ fn set_player_field(
 /// Mob or Player. Used by `fire_trigger` self/actor binding.
 fn find_actor_by_name(world: &mut World, name: &str) -> Option<Entity> {
     let needle = name.to_ascii_lowercase();
-    let mut q = world.query_filtered::<(Entity, &Named), bevy_ecs::prelude::Or<(With<Mob>, With<Player>)>>();
+    let mut q = world
+        .query_filtered::<(Entity, &Named), bevy_ecs::prelude::Or<(With<Mob>, With<Player>)>>();
     q.iter(world)
         .find(|(_, n)| n.name.to_ascii_lowercase().contains(&needle))
         .map(|(e, _)| e)
@@ -1102,10 +1220,7 @@ fn fire_trigger(
         Some(n) => match find_actor_by_name(world, n) {
             Some(e) => e,
             None => {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    format!("no actor matching '{n}'"),
-                ));
+                return Err((StatusCode::NOT_FOUND, format!("no actor matching '{n}'")));
             }
         },
         None => self_entity,
@@ -1276,6 +1391,30 @@ fn trigger_stats(world: &World) -> Value {
     })
 }
 
+/// Compile-check every loaded trigger body and report failures. Syntax
+/// only: nothing is executed, so this is safe against a live world.
+fn validate_triggers(world: &World, zone_id: Option<i32>) -> Value {
+    let report = crate::triggers::validate_catalog(world.resource::<TriggerCatalog>(), zone_id);
+    let failures: Vec<Value> = report
+        .failures
+        .iter()
+        .map(|f| {
+            json!({
+                "zone_id": f.zone_id,
+                "id": f.id,
+                "name": f.name,
+                "error": f.error,
+            })
+        })
+        .collect();
+    json!({
+        "total": report.total,
+        "passed": report.total - report.failures.len(),
+        "failed": report.failures.len(),
+        "failures": failures,
+    })
+}
+
 fn world_status(world: &mut World) -> Value {
     let tick = world.resource::<crate::TickCount>().0;
     let pause = world.resource::<WorldPause>();
@@ -1304,7 +1443,10 @@ fn look_room(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
         .get(&(zone_id, id))
         .copied()
     else {
-        return Err((StatusCode::NOT_FOUND, format!("room ({zone_id}, {id}) not loaded")));
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("room ({zone_id}, {id}) not loaded"),
+        ));
     };
     let name = name_of(world, room);
     let mut exits_json = Vec::new();
@@ -1347,7 +1489,8 @@ fn look_room(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
         }
     }
     let item_rows: Vec<(Entity, Located, Named, Option<WorldKey>)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&WorldKey>), With<Item>>();
+        let mut q =
+            world.query_filtered::<(Entity, &Located, &Named, Option<&WorldKey>), With<Item>>();
         q.iter(world)
             .map(|(e, l, n, wk)| (e, *l, n.clone(), wk.copied()))
             .collect()
@@ -1374,8 +1517,7 @@ fn look_room(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
 
 fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
     let needle = name.to_ascii_lowercase();
-    let mut q = world
-        .query_filtered::<(Entity, &Named), Or<(With<Mob>, With<Player>)>>();
+    let mut q = world.query_filtered::<(Entity, &Named), Or<(With<Mob>, With<Player>)>>();
     let entity = q
         .iter(world)
         .find(|(_, n)| n.name.to_ascii_lowercase().contains(&needle))
@@ -1391,11 +1533,15 @@ fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
         .get::<Located>(entity)
         .and_then(|l| world.get::<WorldKey>(l.0).copied())
         .map(|wk| json!([wk.zone, wk.id]));
-    let health = world.get::<Health>(entity).map(|h| json!({"hp": h.hp, "max": h.max}));
+    let health = world
+        .get::<Health>(entity)
+        .map(|h| json!({"hp": h.hp, "max": h.max}));
     let stamina = world
         .get::<Stamina>(entity)
         .map(|s| json!({"current": s.current, "max": s.max}));
-    let posture = world.get::<Posture>(entity).map(|p| p.0.label().to_string());
+    let posture = world
+        .get::<Posture>(entity)
+        .map(|p| p.0.label().to_string());
     let kind = if world.get::<Player>(entity).is_some() {
         "player"
     } else if world.get::<Mob>(entity).is_some() {
@@ -1468,7 +1614,8 @@ fn session_create(
     // the same character_id, conflicting saves on disconnect).
     let already_online = {
         let mut q = world.query_filtered::<&Named, (With<Player>, With<Online>)>();
-        q.iter(world).any(|n| n.name.eq_ignore_ascii_case(player_name))
+        q.iter(world)
+            .any(|n| n.name.eq_ignore_ascii_case(player_name))
     };
     if already_online {
         return Err((
@@ -1543,17 +1690,15 @@ fn session_create(
             });
         }
         if let Some(json) = script_vars_json
-            && let Ok(map) = serde_json::from_value::<
-                std::collections::BTreeMap<String, String>,
-            >(json)
+            && let Ok(map) =
+                serde_json::from_value::<std::collections::BTreeMap<String, String>>(json)
             && !map.is_empty()
         {
             e.insert(mud_world::ScriptVars(map));
         }
         if let Some(json) = trophy_json
-            && let Ok(entries) = serde_json::from_value::<
-                std::collections::VecDeque<mud_world::TrophyEntry>,
-            >(json)
+            && let Ok(entries) =
+                serde_json::from_value::<std::collections::VecDeque<mud_world::TrophyEntry>>(json)
             && !entries.is_empty()
         {
             e.insert(mud_world::Trophy { entries });
@@ -1571,9 +1716,7 @@ fn session_create(
             e.insert(mud_world::IgnoreList(list));
         }
         if let Some(json) = cooldowns_json
-            && let Ok(map) = serde_json::from_value::<
-                std::collections::HashMap<String, i64>,
-            >(json)
+            && let Ok(map) = serde_json::from_value::<std::collections::HashMap<String, i64>>(json)
         {
             let now_unix = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1588,7 +1731,8 @@ fn session_create(
                 }
                 cd.ready_at.insert(
                     id,
-                    now_inst + std::time::Duration::from_secs(u64::try_from(secs_left).unwrap_or(0)),
+                    now_inst
+                        + std::time::Duration::from_secs(u64::try_from(secs_left).unwrap_or(0)),
                 );
             }
             if !cd.ready_at.is_empty() {
@@ -1606,11 +1750,12 @@ fn session_create(
     {
         crate::login::restore_persisted_effects(world, entity, persisted);
     }
-    let mut by_name = world.resource::<VirtualSessions>().by_name.lock().expect("sessions poisoned");
-    by_name.insert(
-        player_name.to_string(),
-        VirtualSession { entity, rx },
-    );
+    let mut by_name = world
+        .resource::<VirtualSessions>()
+        .by_name
+        .lock()
+        .expect("sessions poisoned");
+    by_name.insert(player_name.to_string(), VirtualSession { entity, rx });
     Ok(json!({
         "success": true,
         "player_name": player_name,
@@ -1668,8 +1813,7 @@ fn session_destroy(world: &mut World, player_name: &str) -> AdminResponse {
 
 fn mark_pending_save(world: &mut World, player_name: &str) -> AdminResponse {
     let entity = {
-        let mut q = world
-            .query_filtered::<(Entity, &Named), With<Player>>();
+        let mut q = world.query_filtered::<(Entity, &Named), With<Player>>();
         q.iter(world)
             .find(|(_, n)| n.name.eq_ignore_ascii_case(player_name))
             .map(|(e, _)| e)
@@ -1733,8 +1877,7 @@ fn run_command(world: &mut World, executor: &str, command_line: &str) -> AdminRe
 fn teleport(world: &mut World, name: &str, zone_id: i32, room_id: i32) -> AdminResponse {
     let needle = name.to_ascii_lowercase();
     let entity = {
-        let mut q = world
-            .query_filtered::<(Entity, &Named), Or<(With<Mob>, With<Player>)>>();
+        let mut q = world.query_filtered::<(Entity, &Named), Or<(With<Mob>, With<Player>)>>();
         q.iter(world)
             .find(|(_, n)| n.name.eq_ignore_ascii_case(&needle))
             .map(|(e, _)| e)
@@ -1814,10 +1957,15 @@ fn spawn_into(
                 .cloned();
             let mut em = world.spawn((
                 Mob,
-                Named { name: proto.name.clone() },
+                Named {
+                    name: proto.name.clone(),
+                },
                 Keywords(proto.keywords.clone()),
                 Description(proto.room_description.clone()),
-                WorldKey { zone: proto.zone_id, id: proto.id },
+                WorldKey {
+                    zone: proto.zone_id,
+                    id: proto.id,
+                },
                 Located(room_entity),
                 Health { hp, max: hp },
                 proto.derived_combat_stats(),
@@ -1864,9 +2012,14 @@ fn spawn_into(
                 .cloned();
             let mut bundle = world.spawn((
                 Item,
-                Named { name: proto.name.clone() },
+                Named {
+                    name: proto.name.clone(),
+                },
                 Keywords(proto.keywords.clone()),
-                WorldKey { zone: proto.zone_id, id: proto.id },
+                WorldKey {
+                    zone: proto.zone_id,
+                    id: proto.id,
+                },
                 Located(room_entity),
             ));
             if let Some(desc) = proto.examine_description.clone() {
@@ -1953,4 +2106,40 @@ fn inspect_mob(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
         "class_id": p.class_id,
         "aggression_formula": p.aggression_formula,
     }))
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+    use mud_world::{TriggerAttach, TriggerDef};
+
+    #[test]
+    fn validate_triggers_json_shape() {
+        let mut world = World::new();
+        let mut cat = TriggerCatalog::default();
+        for (id, body) in [(1, "return 1"), (2, "if then")] {
+            cat.by_key.insert(
+                (7, id),
+                TriggerDef {
+                    zone_id: 7,
+                    id,
+                    name: format!("t{id}"),
+                    attach_type: TriggerAttach::Mob,
+                    commands: body.to_string(),
+                    flags: vec![],
+                    arg_list: vec![],
+                    num_args: 0,
+                },
+            );
+        }
+        world.insert_resource(cat);
+        let v = validate_triggers(&world, None);
+        assert_eq!(v["total"], 2);
+        assert_eq!(v["passed"], 1);
+        assert_eq!(v["failed"], 1);
+        assert_eq!(v["failures"][0]["zone_id"], 7);
+        assert_eq!(v["failures"][0]["id"], 2);
+        let none = validate_triggers(&world, Some(8));
+        assert_eq!(none["total"], 0);
+    }
 }

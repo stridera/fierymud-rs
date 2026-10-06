@@ -24,7 +24,7 @@ use tracing::warn;
 use crate::TickCount;
 use crate::commands::DbPool;
 
-/// Flush every 10 seconds. At TICK_HZ=10 that's 100 ticks. Tunable;
+/// Flush every 10 seconds. At `TICK_HZ=10` that's 100 ticks. Tunable;
 /// raise for heavier write loads (mass quest completion), lower for
 /// tighter durability if it becomes a concern.
 const FLUSH_PERIOD_TICKS: u64 = 100;
@@ -45,9 +45,7 @@ pub fn entity_var_flush_tick(world: &mut World) {
     if !world.contains_resource::<EntityVariableCache>() {
         return;
     }
-    let drained = world
-        .resource_mut::<EntityVariableCache>()
-        .drain_dirty();
+    let drained = world.resource_mut::<EntityVariableCache>().drain_dirty();
     if drained.is_empty() {
         return;
     }

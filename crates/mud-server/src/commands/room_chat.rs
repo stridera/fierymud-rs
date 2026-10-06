@@ -9,8 +9,8 @@ use mud_world::{Located, Mob, Player, WorldKey};
 
 use crate::commands::{
     Category, Command, Help, Prevent, broadcast_room_except_players_rendered,
-    bump_talk_quest_progress, effect_prevents, find_actor_in_room, group_members,
-    group_root, name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to,
+    bump_talk_quest_progress, effect_prevents, find_actor_in_room, group_members, group_root,
+    name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to,
 };
 
 inventory::submit! {
@@ -67,7 +67,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["whisper"],
+        names: &["whisper", "wh"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Communication,
@@ -253,9 +253,7 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
         // already walking a dialogue tree, match the utterance
         // against the current node's responses and emit the next
         // node's `npc_message` in-band. No DB round-trip.
-        if let Some(reply) = crate::quest_dialogue::try_advance_active_tree(
-            world, player, topic,
-        ) {
+        if let Some(reply) = crate::quest_dialogue::try_advance_active_tree(world, player, topic) {
             let target_name = name_of(world, target);
             send_rendered(
                 world,
@@ -359,13 +357,15 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
     let line = INSULT_LINES[rand::random_range(0..INSULT_LINES.len())];
     let actor_name = name_of(world, player);
     let target_name = name_of(world, target);
-    send_to(world, player, format!("You insult {target_name}: {line}\r\n"));
+    send_to(
+        world,
+        player,
+        format!("You insult {target_name}: {line}\r\n"),
+    );
     send_to(
         world,
         target,
-        crate::commands::cap_sentence_start(&format!(
-            "{actor_name} insults you: {line}\r\n"
-        )),
+        crate::commands::cap_sentence_start(&format!("{actor_name} insults you: {line}\r\n")),
     );
     let bystanders: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
@@ -374,9 +374,8 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _)| e)
             .collect()
     };
-    let line_room = crate::commands::cap_sentence_start(&format!(
-        "{actor_name} insults {target_name}.\r\n"
-    ));
+    let line_room =
+        crate::commands::cap_sentence_start(&format!("{actor_name} insults {target_name}.\r\n"));
     for e in bystanders {
         send_to(world, e, line_room.clone());
     }

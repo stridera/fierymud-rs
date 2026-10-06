@@ -410,9 +410,92 @@ caching of item details).
 (keeper of a defined shop). Future blocks (`trainer`, `bank`, …)
 follow the same optional-key pattern.
 
+```ts
+  inn?: {
+    inn_name: string,
+    tiers: Array<{
+      name: string,        // rent <name> argument (case-insensitive)
+      tier: number,        // 1..3 (basic / suite / penthouse)
+      fee_gp: number,      // flat charge in gold
+      affordable: boolean, // precomputed vs viewer's on-hand Wealth
+    }>,
+    current_rest: {        // null when the viewer holds no RestState
+      source: string,      // "NONE" | "QUIT" | "CAMP" | "INN" | "HOUSE"
+      tier: number,
+      repose: number,      // sticky repose-point pool
+    } | null,
+  }
+```
+
+`inn` is present only when the mob carries `MobProfession::Receptionist`
+*and* its room has an `InnRoom`. The rental data lives on the room
+(where `rent` reads it); the server hops mob → room → `InnRoom` to
+build the block. `affordable` and `current_rest` are viewer-scoped, so
+the block is built per requesting player. To rent, the client sends the
+plain `rent <name>` command — tiers 2-3 trigger a server-side y/n
+confirm that lands in the main console.
+
+```ts
+  bank?: {
+    on_hand: number,    // copper, viewer's Wealth
+    per_char: number,   // copper, viewer's BankWealth
+    account: number,    // copper, viewer's AccountWealth (shared across the account's characters)
+  }
+```
+
+`bank` is present when the mob carries `MobProfession::Banker`. All
+three pools are viewer-scoped — each pool is the requesting player's
+own balance, taken at the moment of the request. The server has no
+`deposit all`/`withdraw all` keyword; the client uses the GMCP pool
+values to compute "all" amounts at click time and sends a numeric
+`deposit <n>` / `withdraw <n>` / `adeposit <n>` / `awithdraw <n>`.
+A second click refreshes the snapshot.
+
 **Cadence:** On demand — one `Room.Mob.Info` per `Room.Mob.Get`.
 
-**Consumer:** Mob detail popover (to be wired).
+**Consumer:** Mob detail popover — shop + inn + bank blocks wired.
+
+### `Room.Mail.Inbox`  — **Live**
+
+Async follow-up to a `Room.Mob.Get` on a Postmaster. Ships as a
+separate GMCP frame (not a `mail?` sub-block on `Room.Mob.Info`)
+because the inbox is a DB fetch and `handle_room_mob_get` is
+sync — the server `tokio::spawn`s the fetch and pushes this
+frame when it lands, typically within one round-trip.
+
+```ts
+{
+  mob_id: string,    // echoes the Room.Mob.Get target id; lets the client
+                     // correlate this inbox with the popup that requested it
+  unread: number,
+  total: number,
+  messages: Array<{
+    id: number,      // mail row PK, stable across session
+    slot: number,    // 1-based, matches `mailbox` listing
+    sender: string,  // sender's display name
+    subject: string,
+    sent_at: string, // "YYYY-MM-DD HH:MM"
+    unread: boolean,
+  }>,                // capped at 50 most recent (newest first)
+}
+```
+
+The client correlates by `mob_id`: if the popup is still showing
+the originating Postmaster, the inbox is merged in and the popup
+re-rendered. A stale frame (player closed the popup or clicked
+another mob) is silently dropped so the popup doesn't pop back
+up.
+
+To act on a row, the client sends the existing line commands:
+`readmail <slot>` / `delmail <slot>`. Compose flow stays
+text-driven via `mail <recipient>` — the popup pre-fills the
+input bar but the multi-line composition session continues in
+the main console.
+
+**Cadence:** On demand — at most one `Room.Mail.Inbox` per
+`Room.Mob.Get` on a Postmaster.
+
+**Consumer:** Mob detail popover — wired.
 
 ### `Char.Skills`  — **Live**
 

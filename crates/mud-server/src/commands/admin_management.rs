@@ -206,7 +206,7 @@ inventory::submit! {
 // ---- handler bodies ----
 
 /// to find the owning `Users.id`, then inserts a `BanRecords` row.
-/// Server-wide DevMode toggle. Loud syslog warning on every flip
+/// Server-wide `DevMode` toggle. Loud syslog warning on every flip
 /// so a forgotten "on" leaves a paper trail. Also persists to
 /// `GameConfig.server.dev_mode` so the choice survives a restart.
 pub(crate) fn cmd_devmode(world: &mut World, player: Entity, args: &str) {
@@ -216,7 +216,11 @@ pub(crate) fn cmd_devmode(world: &mut World, player: Entity, args: &str) {
     let current = world.get_resource::<crate::DevMode>().is_some_and(|d| d.0);
     let new_state = match arg.as_str() {
         "" | "status" => {
-            let state = if current { "<b:red>ON</>" } else { "<dim>off</>" };
+            let state = if current {
+                "<b:red>ON</>"
+            } else {
+                "<dim>off</>"
+            };
             send_to(world, player, format!("DevMode is {state}.\r\n"));
             return;
         }
@@ -248,7 +252,11 @@ pub(crate) fn cmd_devmode(world: &mut World, player: Entity, args: &str) {
     }
     if new_state {
         tracing::warn!(by = %player_name, "DevMode ENABLED — all players treated as Implementor + dice rolls visible");
-        send_to(world, player, "<b:red>DevMode ENABLED</> — all players treated as Implementor.\r\n");
+        send_to(
+            world,
+            player,
+            "<b:red>DevMode ENABLED</> — all players treated as Implementor.\r\n",
+        );
     } else {
         tracing::warn!(by = %player_name, "DevMode disabled — back to normal role gating");
         send_to(world, player, "<dim>DevMode disabled.</>\r\n");
@@ -288,25 +296,19 @@ pub(crate) fn cmd_ban(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
-    let admin_uid = world
-        .get::<Account>(player)
-        .map(|a| a.user_id.clone());
+    let admin_uid = world.get::<Account>(player).map(|a| a.user_id.clone());
     let target_name = target_name.to_string();
     let reason = reason.to_string();
     tokio::spawn(async move {
         let Some(out) = outbound else { return };
         let Some(admin_uid) = admin_uid else { return };
-        let Ok(Some(target)) =
-            mud_db::characters::find_by_name(&pool, &target_name).await
-        else {
-            let _ = out
-                .try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
+        let Ok(Some(target)) = mud_db::characters::find_by_name(&pool, &target_name).await else {
+            let _ = out.try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
             return;
         };
         let Some(uid) = target.user_id else {
             let _ = out.try_send(
-                format!("{} has no associated user account.\r\n", target.name)
-                    .into_bytes(),
+                format!("{} has no associated user account.\r\n", target.name).into_bytes(),
             );
             return;
         };
@@ -359,7 +361,8 @@ pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
         // insensitive). The query borrows the world; collect the
         // entity list first, then mutate.
         let needle = abbrev_arg.to_ascii_lowercase();
-        let mut q = world.query_filtered::<(Entity, &mud_world::ClanMembership), With<mud_world::Player>>();
+        let mut q =
+            world.query_filtered::<(Entity, &mud_world::ClanMembership), With<mud_world::Player>>();
         let online_in_clan: Vec<Entity> = q
             .iter(world)
             .filter(|(_, c)| c.clan_abbrev.eq_ignore_ascii_case(&needle))
@@ -376,9 +379,8 @@ pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
         tokio::spawn(async move {
             let Some(out) = outbound else { return };
             let Ok(Some(clan)) = mud_db::clans::get_by_abbrev(&pool, &abbrev_arg).await else {
-                let _ = out.try_send(
-                    format!("No clan with abbrev '{abbrev_arg}'.\r\n").into_bytes(),
-                );
+                let _ =
+                    out.try_send(format!("No clan with abbrev '{abbrev_arg}'.\r\n").into_bytes());
                 return;
             };
             match mud_db::clans::delete_clan(&pool, clan.id).await {
@@ -418,13 +420,11 @@ pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
                 match mud_db::clans::create_clan(&pool, &name, abbrev).await {
                     Ok(id) => {
                         let _ = out.try_send(
-                            format!("Clan #{id} '{name}' [{abbrev}] created.\r\n")
-                                .into_bytes(),
+                            format!("Clan #{id} '{name}' [{abbrev}] created.\r\n").into_bytes(),
                         );
                     }
                     Err(e) => {
-                        let _ = out
-                            .try_send(format!("Couldn't create clan: {e}\r\n").into_bytes());
+                        let _ = out.try_send(format!("Couldn't create clan: {e}\r\n").into_bytes());
                     }
                 }
             }
@@ -434,28 +434,25 @@ pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
                 let abbrev = tokens.next();
                 let rank = tokens.next().unwrap_or("MEMBER").to_ascii_uppercase();
                 let (Some(player_name), Some(abbrev)) = (player_name, abbrev) else {
-                    let _ = out.try_send(
-                        b"Usage: cclan assign <player> <abbrev> [rank]\r\n".to_vec(),
-                    );
+                    let _ =
+                        out.try_send(b"Usage: cclan assign <player> <abbrev> [rank]\r\n".to_vec());
                     return;
                 };
-                if !matches!(rank.as_str(), "LEADER" | "OFFICER" | "MEMBER" | "APPLICANT")
-                {
+                if !matches!(rank.as_str(), "LEADER" | "OFFICER" | "MEMBER" | "APPLICANT") {
                     let _ = out.try_send(
                         b"Rank must be LEADER, OFFICER, MEMBER, or APPLICANT.\r\n".to_vec(),
                     );
                     return;
                 }
-                let Ok(Some(target)) =
-                    mud_db::characters::find_by_name(&pool, player_name).await
+                let Ok(Some(target)) = mud_db::characters::find_by_name(&pool, player_name).await
                 else {
                     let _ = out
                         .try_send(format!("No character named '{player_name}'.\r\n").into_bytes());
                     return;
                 };
                 let Ok(Some(clan)) = mud_db::clans::get_by_abbrev(&pool, abbrev).await else {
-                    let _ = out
-                        .try_send(format!("No clan with abbrev '{abbrev}'.\r\n").into_bytes());
+                    let _ =
+                        out.try_send(format!("No clan with abbrev '{abbrev}'.\r\n").into_bytes());
                     return;
                 };
                 if let Err(e) =
@@ -464,8 +461,7 @@ pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
                     let _ = out.try_send(format!("Assign failed: {e}\r\n").into_bytes());
                 } else {
                     let _ = out.try_send(
-                        format!("{} → {} as {rank}.\r\n", target.name, clan.abbrev)
-                            .into_bytes(),
+                        format!("{} → {} as {rank}.\r\n", target.name, clan.abbrev).into_bytes(),
                     );
                 }
             }
@@ -475,8 +471,7 @@ pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
                     let _ = out.try_send(b"Usage: cclan kick <player>\r\n".to_vec());
                     return;
                 }
-                let Ok(Some(target)) =
-                    mud_db::characters::find_by_name(&pool, player_name).await
+                let Ok(Some(target)) = mud_db::characters::find_by_name(&pool, player_name).await
                 else {
                     let _ = out
                         .try_send(format!("No character named '{player_name}'.\r\n").into_bytes());
@@ -484,12 +479,14 @@ pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
                 };
                 match mud_db::clans::remove_member(&pool, &target.id).await {
                     Ok(0) => {
-                        let _ = out
-                            .try_send(format!("{} isn't in any clan.\r\n", target.name).into_bytes());
+                        let _ = out.try_send(
+                            format!("{} isn't in any clan.\r\n", target.name).into_bytes(),
+                        );
                     }
                     Ok(_) => {
-                        let _ = out
-                            .try_send(format!("{} kicked from clan.\r\n", target.name).into_bytes());
+                        let _ = out.try_send(
+                            format!("{} kicked from clan.\r\n", target.name).into_bytes(),
+                        );
                     }
                     Err(e) => {
                         let _ = out.try_send(format!("Kick failed: {e}\r\n").into_bytes());
@@ -501,28 +498,24 @@ pub(crate) fn cmd_cclan(world: &mut World, player: Entity, args: &str) {
                 let abbrev = tokens.next();
                 let body = tokens.next().unwrap_or("").trim();
                 let Some(abbrev) = abbrev else {
-                    let _ = out
-                        .try_send(b"Usage: cclan motd <abbrev> <text>\r\n".to_vec());
+                    let _ = out.try_send(b"Usage: cclan motd <abbrev> <text>\r\n".to_vec());
                     return;
                 };
                 let Ok(Some(clan)) = mud_db::clans::get_by_abbrev(&pool, abbrev).await else {
-                    let _ = out
-                        .try_send(format!("No clan with abbrev '{abbrev}'.\r\n").into_bytes());
+                    let _ =
+                        out.try_send(format!("No clan with abbrev '{abbrev}'.\r\n").into_bytes());
                     return;
                 };
                 let new_motd = if body.is_empty() { None } else { Some(body) };
                 if let Err(e) = mud_db::clans::set_motd(&pool, clan.id, new_motd).await {
                     let _ = out.try_send(format!("MOTD set failed: {e}\r\n").into_bytes());
                 } else {
-                    let _ = out.try_send(
-                        format!("MOTD updated on {}.\r\n", clan.abbrev).into_bytes(),
-                    );
+                    let _ =
+                        out.try_send(format!("MOTD updated on {}.\r\n", clan.abbrev).into_bytes());
                 }
             }
             other => {
-                let _ = out.try_send(
-                    format!("Unknown cclan action '{other}'.\r\n").into_bytes(),
-                );
+                let _ = out.try_send(format!("Unknown cclan action '{other}'.\r\n").into_bytes());
             }
         }
     });
@@ -569,17 +562,13 @@ pub(crate) fn cmd_pnote(world: &mut World, player: Entity, args: &str) {
             match mud_db::characters::load_staff_notes(&pool, &target.id).await {
                 Ok(Some(notes)) if !notes.is_empty() => {
                     let _ = out.try_send(
-                        format!(
-                            "\r\n=== Staff notes for {} ===\r\n{notes}\r\n",
-                            target.name
-                        )
-                        .into_bytes(),
+                        format!("\r\n=== Staff notes for {} ===\r\n{notes}\r\n", target.name)
+                            .into_bytes(),
                     );
                 }
                 Ok(_) => {
-                    let _ = out.try_send(
-                        format!("No staff notes on {}.\r\n", target.name).into_bytes(),
-                    );
+                    let _ = out
+                        .try_send(format!("No staff notes on {}.\r\n", target.name).into_bytes());
                 }
                 Err(e) => {
                     let _ = out.try_send(format!("DB error: {e}\r\n").into_bytes());
@@ -595,8 +584,7 @@ pub(crate) fn cmd_pnote(world: &mut World, player: Entity, args: &str) {
             match mud_db::characters::save_staff_notes(&pool, &target.id, "").await {
                 Ok(()) => {
                     let _ = out.try_send(
-                        format!("Cleared staff notes on {}.\r\n", target.name)
-                            .into_bytes(),
+                        format!("Cleared staff notes on {}.\r\n", target.name).into_bytes(),
                     );
                 }
                 Err(e) => {
@@ -620,9 +608,7 @@ pub(crate) fn cmd_pnote(world: &mut World, player: Entity, args: &str) {
         };
         match mud_db::characters::save_staff_notes(&pool, &target.id, &new_blob).await {
             Ok(()) => {
-                let _ = out.try_send(
-                    format!("Note added to {}.\r\n", target.name).into_bytes(),
-                );
+                let _ = out.try_send(format!("Note added to {}.\r\n", target.name).into_bytes());
             }
             Err(e) => {
                 let _ = out.try_send(format!("DB error: {e}\r\n").into_bytes());
@@ -683,9 +669,7 @@ pub(crate) fn cmd_hgrant(world: &mut World, player: Entity, args: &str) {
                 );
             }
             Err(e) => {
-                let _ = out.try_send(
-                    format!("Couldn't create house: {e}\r\n").into_bytes(),
-                );
+                let _ = out.try_send(format!("Couldn't create house: {e}\r\n").into_bytes());
             }
         }
     });
@@ -724,8 +708,11 @@ pub(crate) fn cmd_hrevoke(world: &mut World, player: Entity, args: &str) {
             Ok(Some(h)) => h,
             Ok(None) => {
                 let _ = out.try_send(
-                    format!("{} doesn't own a house — nothing to revoke.\r\n", target.name)
-                        .into_bytes(),
+                    format!(
+                        "{} doesn't own a house — nothing to revoke.\r\n",
+                        target.name
+                    )
+                    .into_bytes(),
                 );
                 return;
             }
@@ -786,9 +773,8 @@ pub(crate) fn cmd_hinfo(world: &mut World, player: Entity, args: &str) {
         let house = match mud_db::housing::for_character(&pool, &target.id).await {
             Ok(Some(h)) => h,
             Ok(None) => {
-                let _ = out.try_send(
-                    format!("{} doesn't own a house.\r\n", target.name).into_bytes(),
-                );
+                let _ =
+                    out.try_send(format!("{} doesn't own a house.\r\n", target.name).into_bytes());
                 return;
             }
             Err(e) => {
@@ -796,11 +782,20 @@ pub(crate) fn cmd_hinfo(world: &mut World, player: Entity, args: &str) {
                 return;
             }
         };
-        let rooms = mud_db::housing::rooms_for_house(&pool, house.id).await.unwrap_or_default();
-        let items = mud_db::housing::items_for_house(&pool, house.id).await.unwrap_or_default();
-        let guests = mud_db::housing::guests_for_house(&pool, house.id).await.unwrap_or_default();
+        let rooms = mud_db::housing::rooms_for_house(&pool, house.id)
+            .await
+            .unwrap_or_default();
+        let items = mud_db::housing::items_for_house(&pool, house.id)
+            .await
+            .unwrap_or_default();
+        let guests = mud_db::housing::guests_for_house(&pool, house.id)
+            .await
+            .unwrap_or_default();
         let mut buf = String::new();
-        buf.push_str(&format!("\r\n=== House #{} ({}) ===\r\n", house.id, target.name));
+        buf.push_str(&format!(
+            "\r\n=== House #{} ({}) ===\r\n",
+            house.id, target.name
+        ));
         buf.push_str(&format!(
             "Entrance: zone {} room {}\r\n",
             house.entrance_room_zone_id, house.entrance_room_id
@@ -826,7 +821,11 @@ pub(crate) fn cmd_hinfo(world: &mut World, player: Entity, args: &str) {
             buf.push_str(&format!(
                 "  {} ({})\r\n",
                 g.character_id,
-                if g.can_place { "can place items" } else { "visit only" },
+                if g.can_place {
+                    "can place items"
+                } else {
+                    "visit only"
+                },
             ));
         }
         let _ = out.try_send(buf.into_bytes());
@@ -1092,7 +1091,8 @@ pub(crate) fn cmd_rename(world: &mut World, player: Entity, args: &str) {
     // we want them to track the new name.
     let online = {
         let mut q = world.query_filtered::<&mud_world::Named, (With<mud_world::Player>, With<mud_world::Online>)>();
-        q.iter(world).any(|n| n.name.eq_ignore_ascii_case(&old_name))
+        q.iter(world)
+            .any(|n| n.name.eq_ignore_ascii_case(&old_name))
     };
     if online {
         send_to(
@@ -1113,8 +1113,7 @@ pub(crate) fn cmd_rename(world: &mut World, player: Entity, args: &str) {
         let row = match mud_db::characters::find_by_name(&pool, &old_name).await {
             Ok(Some(r)) => r,
             Ok(None) => {
-                let _ = out
-                    .try_send(format!("No character named '{old_name}'.\r\n").into_bytes());
+                let _ = out.try_send(format!("No character named '{old_name}'.\r\n").into_bytes());
                 return;
             }
             Err(e) => {
@@ -1125,21 +1124,18 @@ pub(crate) fn cmd_rename(world: &mut World, player: Entity, args: &str) {
         match mud_db::characters::rename(&pool, &row.id, &new_name).await {
             Ok(0) => {
                 let _ = out.try_send(
-                    format!("Character row '{old_name}' vanished mid-rename.\r\n")
-                        .into_bytes(),
+                    format!("Character row '{old_name}' vanished mid-rename.\r\n").into_bytes(),
                 );
             }
             Ok(_) => {
-                let _ = out.try_send(
-                    format!("Renamed '{old_name}' → '{new_name}'.\r\n").into_bytes(),
-                );
+                let _ =
+                    out.try_send(format!("Renamed '{old_name}' → '{new_name}'.\r\n").into_bytes());
             }
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("unique") || msg.contains("duplicate key") {
-                    let _ = out.try_send(
-                        format!("Name '{new_name}' is already taken.\r\n").into_bytes(),
-                    );
+                    let _ = out
+                        .try_send(format!("Name '{new_name}' is already taken.\r\n").into_bytes());
                 } else {
                     let _ = out.try_send(format!("Rename failed: {e}\r\n").into_bytes());
                 }
@@ -1177,8 +1173,10 @@ pub(crate) fn cmd_pscan(world: &mut World, player: Entity, args: &str) {
             return;
         }
         // Group by character so the renderer doesn't emit "Strider" five times in a row.
-        let mut by_char: std::collections::BTreeMap<String, Vec<mud_db::character_items::OwnerHit>> =
-            std::collections::BTreeMap::new();
+        let mut by_char: std::collections::BTreeMap<
+            String,
+            Vec<mud_db::character_items::OwnerHit>,
+        > = std::collections::BTreeMap::new();
         for h in hits {
             by_char.entry(h.character_name.clone()).or_default().push(h);
         }
@@ -1230,21 +1228,19 @@ pub(crate) fn cmd_viewchar(world: &mut World, player: Entity, args: &str) {
         let row = match mud_db::characters::find_by_name(&pool, &target_name).await {
             Ok(Some(r)) => r,
             Ok(None) => {
-                let _ = out
-                    .try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
+                let _ =
+                    out.try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
                 return;
             }
             Err(e) => {
-                let _ = out
-                    .try_send(format!("DB error: {e}\r\n").into_bytes());
+                let _ = out.try_send(format!("DB error: {e}\r\n").into_bytes());
                 return;
             }
         };
         let items = match mud_db::character_items::list_for(&pool, &row.id).await {
             Ok(v) => v,
             Err(e) => {
-                let _ = out
-                    .try_send(format!("DB error loading items: {e}\r\n").into_bytes());
+                let _ = out.try_send(format!("DB error loading items: {e}\r\n").into_bytes());
                 return;
             }
         };

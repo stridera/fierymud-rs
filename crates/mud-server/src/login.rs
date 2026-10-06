@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use bevy_ecs::prelude::*;
+use mud_db::character_items::CharacterItemRow;
 use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::User};
 use mud_net::{ConnId, Outbound};
-use mud_db::character_items::CharacterItemRow;
 use mud_world::{
     Account, AccountSummary, AttachedTriggers, BankWealth, BoardLink, CombatStats, CoreStats,
     Description, EquippedSlot, Follower, Health, Item, Keywords, KnownAbilities, LiquidContainer,
@@ -11,6 +12,8 @@ use mud_world::{
     Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title, TriggerCatalog,
     Wealth, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
 };
+use subtle::ConstantTimeEq;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
 
 use crate::commands::{self, Connection};
@@ -84,7 +87,7 @@ fn login_message_bytes(world: &World, stage: &str, fallback: &str) -> Vec<u8> {
 }
 /// Verify a plaintext password against a stored hash, transparently
 /// handling both bcrypt (new accounts + migrated legacy accounts) and
-/// the original FieryMUD CircleMUD `crypt(3)` hash format (legacy
+/// the original `FieryMUD` `CircleMUD` `crypt(3)` hash format (legacy
 /// imported characters that haven't logged in yet).
 ///
 /// Bcrypt hashes always start with `$2` (variants `$2a$` / `$2b$` /
@@ -94,20 +97,30 @@ fn login_message_bytes(world: &World, stage: &str, fallback: &str) -> Vec<u8> {
 /// silently fall through to the legacy path.
 ///
 /// The legacy path mirrors `interpreter.cpp:2502` in the C++ server:
-/// `strncasecmp(CRYPT(arg, stored), stored, MAX_PWD_LENGTH)` where
-/// `MAX_PWD_LENGTH = 10`. The stored hash's first two characters
-/// double as the salt — the C++ creation code seeds `crypt()` with
-/// the character name, but the resulting hash embeds those two name
-/// chars at its head, so the verify side doesn't need the name.
+/// `crypt(arg, stored)` compared against `stored` over the first
+/// `MAX_PWD_LENGTH = 10` characters (the C++ side used a
+/// case-insensitive `strncasecmp`; here the compare is exact because
+/// `crypt` output is case-sensitive). The stored hash's first two
+/// characters double as the salt — the C++ creation code seeds
+/// `crypt()` with the character name, but the resulting hash embeds
+/// those two name chars at its head, so the verify side doesn't need
+/// the name.
 ///
 /// On success the caller is expected to re-hash with bcrypt and
 /// migrate the stored value so subsequent logins go through the
 /// modern path.
+///
+/// This is the synchronous, CPU-bound primitive (bcrypt cost 12 is
+/// ~250 ms). Never call it from the game loop — use
+/// [`verify_password_blocking`], which runs it on the blocking pool.
 fn verify_password_any(plaintext: &str, hash: &str) -> bool {
     if hash.starts_with("$2") {
         return bcrypt::verify(plaintext, hash).unwrap_or(false);
     }
-    if hash.len() < 2 {
+    // A stored value shorter than MAX_PWD_LENGTH would compare only
+    // the salt prefix (the first two characters of `crypt` output are
+    // the salt itself), accepting any password.
+    if hash.len() < LEGACY_MIN_HASH_LEN {
         return false;
     }
     let salt = &hash[..2];
@@ -116,7 +129,140 @@ fn verify_password_any(plaintext: &str, hash: &str) -> bool {
         return false;
     };
     let cmp_len = hash.len().min(full.len());
-    hash.as_bytes()[..cmp_len].eq_ignore_ascii_case(&full.as_bytes()[..cmp_len])
+    // crypt(3) output is case-sensitive (base64-style alphabet), so
+    // the comparison is exact and constant-time.
+    hash.as_bytes()[..cmp_len]
+        .ct_eq(&full.as_bytes()[..cmp_len])
+        .into()
+}
+
+/// `MAX_PWD_LENGTH` from the legacy C++ server: the stored legacy
+/// hash is a 10-character truncation of the DES `crypt(3)` output.
+const LEGACY_MIN_HASH_LEN: usize = 10;
+
+/// Hash a new password with bcrypt at the default cost. CPU-bound;
+/// use [`hash_password_blocking`] from async code.
+fn hash_password(plaintext: &str) -> Result<String, String> {
+    bcrypt::hash(plaintext, bcrypt::DEFAULT_COST).map_err(|e| e.to_string())
+}
+
+/// [`verify_password_any`] on the blocking pool so the (single
+/// threaded) game runtime keeps servicing other work. A panicked or
+/// cancelled job counts as a failed verification.
+async fn verify_password_blocking(plaintext: String, hash: String) -> bool {
+    tokio::task::spawn_blocking(move || verify_password_any(&plaintext, &hash))
+        .await
+        .unwrap_or(false)
+}
+
+/// [`hash_password`] on the blocking pool.
+async fn hash_password_blocking(plaintext: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || hash_password(&plaintext))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))
+}
+
+/// Wrong passwords allowed on one connection before it is dropped.
+const MAX_FAILED_PASSWORDS_PER_CONN: u32 = 5;
+
+/// Lockout window for the in-memory throttle, from the same
+/// `security.login_timeout_minutes` value the account path uses.
+fn lock_window(lock_minutes: i32) -> Duration {
+    Duration::from_secs(u64::try_from(lock_minutes.max(0)).unwrap_or(0) * 60)
+}
+
+/// In-memory failed-login counter for imported legacy characters that
+/// have no linked `Users` row (so `record_failed_login` has nothing to
+/// update). Keyed on the lower-cased character name; same
+/// threshold / window semantics as the account path
+/// (`security.max_login_attempts`, `security.login_timeout_minutes`).
+/// Entry value is `(consecutive failures, time of last failure)`.
+#[derive(Debug, Default)]
+pub struct LegacyLoginThrottle {
+    entries: HashMap<String, (u32, Instant)>,
+}
+
+impl LegacyLoginThrottle {
+    fn key(name: &str) -> String {
+        name.trim().to_ascii_lowercase()
+    }
+
+    /// Time remaining on an active lock, if any. `max <= 0` disables.
+    fn locked_for(&self, key: &str, now: Instant, max: i32, window: Duration) -> Option<Duration> {
+        if max <= 0 {
+            return None;
+        }
+        let (count, last) = self.entries.get(key)?;
+        if i64::from(*count) < i64::from(max) {
+            return None;
+        }
+        window
+            .checked_sub(now.saturating_duration_since(*last))
+            .filter(|d| !d.is_zero())
+    }
+
+    /// Record a failed attempt; returns `(attempts, locked_now)`.
+    /// A failure arriving after the window has elapsed starts a new
+    /// count, so locks and partial strikes both expire.
+    fn record_failure(
+        &mut self,
+        key: &str,
+        now: Instant,
+        max: i32,
+        window: Duration,
+    ) -> (i32, bool) {
+        if self.entries.len() > 256 {
+            self.entries
+                .retain(|_, (_, last)| now.saturating_duration_since(*last) < window);
+        }
+        let entry = self.entries.entry(key.to_string()).or_insert((0, now));
+        if now.saturating_duration_since(entry.1) >= window {
+            entry.0 = 0;
+        }
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = now;
+        let attempts = i32::try_from(entry.0).unwrap_or(i32::MAX);
+        (attempts, max > 0 && attempts >= max)
+    }
+
+    fn clear(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+}
+
+/// Everything collected by the creation flow, minus the plaintext
+/// password (which only lives long enough to be hashed).
+pub struct NewCharDraft {
+    email: Option<String>,
+    character_name: String,
+    race: &'static str,
+    class_id: i32,
+    class_plain_name: String,
+    gender: &'static str,
+    stats: CoreStats,
+}
+
+/// Completion message for an off-thread credential job. Produced on
+/// the blocking pool, consumed by the main loop via
+/// [`ConnRouter::on_auth_done`].
+pub struct AuthDone {
+    conn_id: ConnId,
+    kind: AuthDoneKind,
+}
+
+enum AuthDoneKind {
+    Password {
+        user: User,
+        preselected: Option<Box<CharacterRow>>,
+        ok: bool,
+        /// bcrypt re-hash of the typed password, computed only when
+        /// verification succeeded for an unlinked legacy character.
+        migration_hash: Option<Result<String, String>>,
+    },
+    Create {
+        draft: NewCharDraft,
+        hashed: Result<String, String>,
+    },
 }
 
 /// Inclusive length window for a new character name. Lower bound
@@ -219,11 +365,7 @@ pub(crate) struct PersistedPets {
 /// not staff rewards). Located next to the player; HP restored
 /// verbatim (a wounded pet stays wounded). Pulls cosmetic /
 /// combat-stat fields from the proto.
-pub(crate) fn restore_persisted_pets(
-    world: &mut World,
-    player: Entity,
-    persisted: PersistedPets,
-) {
+pub(crate) fn restore_persisted_pets(world: &mut World, player: Entity, persisted: PersistedPets) {
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
@@ -252,12 +394,20 @@ pub(crate) fn restore_persisted_pets(
         };
         let mut pet_entity = world.spawn((
             Mob,
-            Named { name: pet.name.clone() },
+            Named {
+                name: pet.name.clone(),
+            },
             Keywords(proto.keywords.clone()),
             Description(proto.room_description.clone()),
-            WorldKey { zone: proto.zone_id, id: proto.id },
+            WorldKey {
+                zone: proto.zone_id,
+                id: proto.id,
+            },
             Located(player_room),
-            Health { hp: pet.hp, max: pet.max_hp },
+            Health {
+                hp: pet.hp,
+                max: pet.max_hp,
+            },
             proto.derived_combat_stats(),
             Posture(PostureKind::Standing),
             Follower(player),
@@ -334,18 +484,12 @@ pub enum Stage {
     /// user whether they want to create a new account / character
     /// rather than silently bouncing them through a doomed
     /// password check.
-    ConfirmCreate {
-        identifier: String,
-        is_email: bool,
-    },
+    ConfirmCreate { identifier: String, is_email: bool },
     /// Confirm-create answered "yes". Collect a password for the
     /// new account. The character-name path collapses both
     /// account + character creation behind one identifier — the
     /// password covers the user-row.
-    AwaitingNewPassword {
-        identifier: String,
-        is_email: bool,
-    },
+    AwaitingNewPassword { identifier: String, is_email: bool },
     /// Re-prompt to verify the new password matches what the user
     /// just typed. Mismatches bounce back to `AwaitingNewPassword`.
     /// Ephemeral plaintext lives only on this stage value — gone
@@ -413,7 +557,13 @@ pub enum Stage {
         gender: &'static str,
         stats: CoreStats,
     },
-    CharSelect { user: User, characters: Vec<CharacterRow> },
+    CharSelect {
+        user: User,
+        characters: Vec<CharacterRow>,
+    },
+    /// A password verification / hash job is running on the blocking
+    /// pool. Input is ignored until `on_auth_done` resolves it.
+    Authenticating,
 }
 
 /// Gender values accepted by the `Characters.gender` column. The
@@ -427,18 +577,14 @@ const PLAYABLE_GENDERS: &[&str] = &["male", "female", "neutral"];
 /// (DRAGON, DEMON, GOBLIN, etc.) stay out of the picker. Order
 /// drives the listing the player sees.
 const PLAYABLE_RACES: &[&str] = &[
-    "HUMAN",
-    "ELF",
-    "HALF_ELF",
-    "DWARF",
-    "HALFLING",
-    "GNOME",
-    "GOLIATH",
+    "HUMAN", "ELF", "HALF_ELF", "DWARF", "HALFLING", "GNOME", "GOLIATH",
 ];
 
 pub struct LoginCtx {
     pub outbound: Outbound,
     pub stage: Stage,
+    /// Wrong passwords entered on this connection so far.
+    pub failed_attempts: u32,
 }
 
 pub struct ConnRouter {
@@ -450,6 +596,17 @@ pub struct ConnRouter {
     /// login → playing transition so commands can consult the
     /// player's actual viewport / capabilities once spawned.
     caps: HashMap<ConnId, ConnCapabilities>,
+    /// Failed-login counter for legacy characters with no `Users` row.
+    legacy_throttle: LegacyLoginThrottle,
+    /// Completion channel for off-thread password jobs. The sender is
+    /// cloned into each job; the receiver is handed to the main loop
+    /// via [`ConnRouter::take_auth_rx`].
+    auth_tx: UnboundedSender<AuthDone>,
+    auth_rx: Option<UnboundedReceiver<AuthDone>>,
+    /// Socket-close hook; `mud_net::close_connection` in production.
+    /// A field (not a direct call) so tests can observe which
+    /// connections the router asked to close.
+    close_conn: fn(ConnId) -> bool,
 }
 
 /// Per-connection capability snapshot. Updated by the telnet
@@ -460,6 +617,7 @@ pub struct ConnRouter {
 /// connection that hasn't replied to NAWS shows `cols == 0`,
 /// which calling code interprets as "fall back to 80".
 #[derive(Debug, Default, Clone)]
+#[allow(clippy::struct_excessive_bools)] // independent capability flags
 pub struct ConnCapabilities {
     pub cols: u16,
     pub rows: u16,
@@ -490,21 +648,29 @@ impl ConnCapabilities {
     #[must_use]
     #[allow(dead_code)]
     pub fn effective_cols(&self) -> u16 {
-        if self.cols == 0 {
-            80
-        } else {
-            self.cols
-        }
+        if self.cols == 0 { 80 } else { self.cols }
     }
 }
 
 impl ConnRouter {
     pub fn new() -> Self {
+        let (auth_tx, auth_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             login: HashMap::new(),
             playing: HashMap::new(),
             caps: HashMap::new(),
+            legacy_throttle: LegacyLoginThrottle::default(),
+            auth_tx,
+            auth_rx: Some(auth_rx),
+            close_conn: mud_net::close_connection,
         }
+    }
+
+    /// Hand the auth-completion receiver to the main loop (once).
+    /// The loop must `select!` on it and feed results to
+    /// [`ConnRouter::on_auth_done`].
+    pub fn take_auth_rx(&mut self) -> Option<UnboundedReceiver<AuthDone>> {
+        self.auth_rx.take()
     }
 
     pub fn live_connections(&self) -> usize {
@@ -534,13 +700,22 @@ impl ConnRouter {
     }
 
     pub fn on_connect(&mut self, conn_id: ConnId, outbound: Outbound, world: &World) {
-        let _ = outbound.try_send(login_message_bytes(world, "WELCOME_BANNER", BANNER_FALLBACK));
-        let _ = outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+        let _ = outbound.try_send(login_message_bytes(
+            world,
+            "WELCOME_BANNER",
+            BANNER_FALLBACK,
+        ));
+        let _ = outbound.try_send(login_message_bytes(
+            world,
+            "EMAIL_PROMPT",
+            IDENT_PROMPT_FALLBACK,
+        ));
         self.login.insert(
             conn_id,
             LoginCtx {
                 outbound,
                 stage: Stage::AwaitingIdentifier,
+                failed_attempts: 0,
             },
         );
     }
@@ -582,9 +757,7 @@ impl ConnRouter {
             // without this, players in the room had no signal an
             // ally just logged out / disconnected.
             if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
-                commands::broadcast_room_player_diff(
-                    world, room, entity, "RemovePlayer",
-                );
+                commands::broadcast_room_player_diff(world, room, entity, "RemovePlayer");
                 let player_name = commands::name_of(world, entity);
                 commands::broadcast_room_visual(
                     world,
@@ -621,13 +794,7 @@ impl ConnRouter {
     /// Re-fires on every resize, so the snapshot tracks the live
     /// state. Width drives table layouts (`who`, `score`, `look`)
     /// at command time via [`ConnCapabilities::effective_cols`].
-    pub fn on_window_size(
-        &mut self,
-        conn_id: ConnId,
-        cols: u16,
-        rows: u16,
-        _world: &mut World,
-    ) {
+    pub fn on_window_size(&mut self, conn_id: ConnId, cols: u16, rows: u16, _world: &mut World) {
         let entry = self.caps.entry(conn_id).or_default();
         entry.cols = cols;
         entry.rows = rows;
@@ -669,13 +836,7 @@ impl ConnRouter {
     /// matches the IRE / Mudlet idiom and gives Mudlet enough to
     /// either prompt the player to install our package or refresh
     /// an existing install.
-    pub fn on_capability(
-        &mut self,
-        conn_id: ConnId,
-        name: &str,
-        on: bool,
-        world: &mut World,
-    ) {
+    pub fn on_capability(&mut self, conn_id: ConnId, name: &str, on: bool, world: &mut World) {
         let entry = self.caps.entry(conn_id).or_default();
         let was_gmcp = entry.gmcp;
         match name {
@@ -722,7 +883,9 @@ impl ConnRouter {
     /// handshake — Mudlet treats a re-emit as a new install offer
     /// and prompts the user again.
     fn send_client_gui(&self, conn_id: ConnId, world: &World) {
-        let Some(outbound) = self.outbound_for(conn_id) else { return };
+        let Some(outbound) = self.outbound_for(conn_id) else {
+            return;
+        };
         let Some(cfg) = world.get_resource::<mud_world::RuntimeConfig>() else {
             return;
         };
@@ -741,7 +904,9 @@ impl ConnRouter {
     /// Push the `Client.Map` map-data URL frame. Empty URL =
     /// no hosted map, skip emission entirely.
     fn send_client_map(&self, conn_id: ConnId, world: &World) {
-        let Some(outbound) = self.outbound_for(conn_id) else { return };
+        let Some(outbound) = self.outbound_for(conn_id) else {
+            return;
+        };
         let Some(cfg) = world.get_resource::<mud_world::RuntimeConfig>() else {
             return;
         };
@@ -754,12 +919,14 @@ impl ConnRouter {
 
     /// Push the `External.Discord.Info` rich-presence pairing
     /// frame. Safe to re-emit: Mudlet's Discord SDK uses the
-    /// application_id to identify the right app config and treats
+    /// `application_id` to identify the right app config and treats
     /// repeats as idempotent. This is the frame the client asks for
     /// when it sends `External.Discord.Hello` (and `Get`) to start
     /// rich presence.
     fn send_external_discord_info(&self, conn_id: ConnId, world: &World) {
-        let Some(outbound) = self.outbound_for(conn_id) else { return };
+        let Some(outbound) = self.outbound_for(conn_id) else {
+            return;
+        };
         let Some(cfg) = world.get_resource::<mud_world::RuntimeConfig>() else {
             return;
         };
@@ -771,15 +938,12 @@ impl ConnRouter {
                 json_escape(app_id),
                 json_escape(invite_url),
             );
-            let _ = outbound.try_send(mud_net::gmcp_packet(
-                "External.Discord.Info",
-                &payload,
-            ));
+            let _ = outbound.try_send(mud_net::gmcp_packet("External.Discord.Info", &payload));
         }
     }
 
     /// Resolve the outbound channel for a connection regardless of
-    /// login stage. Returns the LoginCtx outbound while still
+    /// login stage. Returns the `LoginCtx` outbound while still
     /// pre-spawn; switches to the entity's `Connection` component
     /// once the player has spawned. Used by GMCP push paths that
     /// need to reach the wire from non-command code.
@@ -811,7 +975,6 @@ fn json_escape(s: &str) -> String {
 // is a free function and Rust doesn't allow free fns inside an
 // impl. The two blocks compose at compile time.
 impl ConnRouter {
-
     /// GMCP package received from the client. Dispatches based on
     /// the package name; unknown packages are logged at debug
     /// level — useful when wiring support for a new client's
@@ -822,6 +985,7 @@ impl ConnRouter {
     /// the IAC DO 201 path already sets it, but a stray client
     /// that pushes GMCP without explicit negotiation still shows
     /// up here).
+    #[allow(clippy::unused_async)] // async to match the other `on_*` handlers
     pub async fn on_gmcp(
         &mut self,
         conn_id: ConnId,
@@ -869,7 +1033,10 @@ impl ConnRouter {
             // Status refresh. The next prompt cadence will emit
             // Status anyway; for now we just log and rely on that.
             "External.Discord.Get" => {
-                tracing::debug!(conn_id, "GMCP External.Discord.Get (deferred to next prompt)");
+                tracing::debug!(
+                    conn_id,
+                    "GMCP External.Discord.Get (deferred to next prompt)"
+                );
             }
             // Char.Skills.Get — client asks for the player's
             // skill list. Handled when the connection is past
@@ -967,15 +1134,20 @@ impl ConnRouter {
                 // is false, the unknown-identifier path returns a
                 // closed-registration message instead of routing to the
                 // create-account flow. Default true (legacy permissive).
-                let registration_open = world
-                    .resource::<mud_world::RuntimeConfig>()
-                    .get_bool("security", "enable_new_player_creation", true);
+                let registration_open = world.resource::<mud_world::RuntimeConfig>().get_bool(
+                    "security",
+                    "enable_new_player_creation",
+                    true,
+                );
                 let mut routed_to_password = false;
                 if is_email {
                     let lookup = users::find_by_email(pool, trimmed).await;
                     match lookup {
                         Ok(Some(user)) => {
-                            ctx.stage = Stage::AwaitingPassword { user, preselected: None };
+                            ctx.stage = Stage::AwaitingPassword {
+                                user,
+                                preselected: None,
+                            };
                             routed_to_password = true;
                         }
                         Ok(None) => {
@@ -986,7 +1158,11 @@ impl ConnRouter {
                                         .to_vec(),
                                 );
                                 ctx.stage = Stage::AwaitingIdentifier;
-                                let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                                let _ = ctx.outbound.try_send(login_message_bytes(
+                                    world,
+                                    "EMAIL_PROMPT",
+                                    IDENT_PROMPT_FALLBACK,
+                                ));
                                 return;
                             }
                             ctx.stage = Stage::ConfirmCreate {
@@ -997,9 +1173,15 @@ impl ConnRouter {
                         }
                         Err(e) => {
                             warn!(conn_id, error = %e, "user lookup failed");
-                            let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
+                            let _ = ctx
+                                .outbound
+                                .try_send("Server error.\r\n".as_bytes().to_vec());
                             ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                            let _ = ctx.outbound.try_send(login_message_bytes(
+                                world,
+                                "EMAIL_PROMPT",
+                                IDENT_PROMPT_FALLBACK,
+                            ));
                             return;
                         }
                     }
@@ -1032,17 +1214,17 @@ impl ConnRouter {
                             // detects the empty `user.id` and runs
                             // the bcrypt + `Users`-row migration in
                             // place before completing the login.
-                            let user = match user_lookup {
-                                Some(u) => u,
-                                None => {
-                                    let mut u = sentinel_user();
-                                    if let Ok(h) = characters::load_legacy_password_hash(pool, &c.id).await {
-                                        if !h.is_empty() {
-                                            u.password_hash = Some(h);
-                                        }
-                                    }
-                                    u
+                            let user = if let Some(u) = user_lookup {
+                                u
+                            } else {
+                                let mut u = sentinel_user();
+                                if let Ok(h) =
+                                    characters::load_legacy_password_hash(pool, &c.id).await
+                                    && !h.is_empty()
+                                {
+                                    u.password_hash = Some(h);
                                 }
+                                u
                             };
                             ctx.stage = Stage::AwaitingPassword {
                                 user,
@@ -1058,7 +1240,11 @@ impl ConnRouter {
                                         .to_vec(),
                                 );
                                 ctx.stage = Stage::AwaitingIdentifier;
-                                let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                                let _ = ctx.outbound.try_send(login_message_bytes(
+                                    world,
+                                    "EMAIL_PROMPT",
+                                    IDENT_PROMPT_FALLBACK,
+                                ));
                                 return;
                             }
                             ctx.stage = Stage::ConfirmCreate {
@@ -1069,19 +1255,32 @@ impl ConnRouter {
                         }
                         Err(e) => {
                             warn!(conn_id, error = %e, "character lookup failed");
-                            let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
+                            let _ = ctx
+                                .outbound
+                                .try_send("Server error.\r\n".as_bytes().to_vec());
                             ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                            let _ = ctx.outbound.try_send(login_message_bytes(
+                                world,
+                                "EMAIL_PROMPT",
+                                IDENT_PROMPT_FALLBACK,
+                            ));
                             return;
                         }
                     }
                 }
                 if routed_to_password {
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "PASSWORD_PROMPT", PASSWORD_PROMPT_FALLBACK));
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "PASSWORD_PROMPT",
+                        PASSWORD_PROMPT_FALLBACK,
+                    ));
                 }
             }
 
-            Stage::ConfirmCreate { identifier, is_email } => {
+            Stage::ConfirmCreate {
+                identifier,
+                is_email,
+            } => {
                 let answer = trimmed.to_ascii_lowercase();
                 let yes = matches!(answer.as_str(), "y" | "yes");
                 let no = matches!(answer.as_str(), "n" | "no" | "");
@@ -1093,8 +1292,15 @@ impl ConnRouter {
                         )
                         .into_bytes(),
                     );
-                    ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "CREATE_PASSWORD", NEW_PASSWORD_PROMPT_FALLBACK));
+                    ctx.stage = Stage::AwaitingNewPassword {
+                        identifier,
+                        is_email,
+                    };
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "CREATE_PASSWORD",
+                        NEW_PASSWORD_PROMPT_FALLBACK,
+                    ));
                 } else if no {
                     let _ = ctx.outbound.try_send(
                         "Okay — please enter an existing email or character name.\r\n"
@@ -1102,16 +1308,26 @@ impl ConnRouter {
                             .to_vec(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "EMAIL_PROMPT",
+                        IDENT_PROMPT_FALLBACK,
+                    ));
                 } else {
-                    let _ = ctx.outbound.try_send(
-                        "Please answer 'yes' or 'no'.\r\n".as_bytes().to_vec(),
-                    );
-                    ctx.stage = Stage::ConfirmCreate { identifier, is_email };
+                    let _ = ctx
+                        .outbound
+                        .try_send("Please answer 'yes' or 'no'.\r\n".as_bytes().to_vec());
+                    ctx.stage = Stage::ConfirmCreate {
+                        identifier,
+                        is_email,
+                    };
                 }
             }
 
-            Stage::AwaitingNewPassword { identifier, is_email } => {
+            Stage::AwaitingNewPassword {
+                identifier,
+                is_email,
+            } => {
                 if trimmed.len() < MIN_NEW_PASSWORD_LEN {
                     let _ = ctx.outbound.try_send(
                         format!(
@@ -1120,8 +1336,15 @@ impl ConnRouter {
                         )
                         .into_bytes(),
                     );
-                    ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "CREATE_PASSWORD", NEW_PASSWORD_PROMPT_FALLBACK));
+                    ctx.stage = Stage::AwaitingNewPassword {
+                        identifier,
+                        is_email,
+                    };
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "CREATE_PASSWORD",
+                        NEW_PASSWORD_PROMPT_FALLBACK,
+                    ));
                     return;
                 }
                 ctx.stage = Stage::ConfirmNewPassword {
@@ -1129,7 +1352,11 @@ impl ConnRouter {
                     is_email,
                     first_attempt: trimmed.to_string(),
                 };
-                let _ = ctx.outbound.try_send(login_message_bytes(world, "CONFIRM_PASSWORD", CONFIRM_PASSWORD_PROMPT_FALLBACK));
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "CONFIRM_PASSWORD",
+                    CONFIRM_PASSWORD_PROMPT_FALLBACK,
+                ));
             }
 
             Stage::ConfirmNewPassword {
@@ -1143,8 +1370,15 @@ impl ConnRouter {
                             .as_bytes()
                             .to_vec(),
                     );
-                    ctx.stage = Stage::AwaitingNewPassword { identifier, is_email };
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "CREATE_PASSWORD", NEW_PASSWORD_PROMPT_FALLBACK));
+                    ctx.stage = Stage::AwaitingNewPassword {
+                        identifier,
+                        is_email,
+                    };
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "CREATE_PASSWORD",
+                        NEW_PASSWORD_PROMPT_FALLBACK,
+                    ));
                     return;
                 }
                 // Password confirmed. Email path needs to collect a
@@ -1163,9 +1397,11 @@ impl ConnRouter {
                         email: identifier,
                         password_plaintext: first_attempt,
                     };
-                    let _ = ctx
-                        .outbound
-                        .try_send(login_message_bytes(world, "CREATE_NAME_PROMPT", NEW_CHARACTER_NAME_PROMPT_FALLBACK));
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "CREATE_NAME_PROMPT",
+                        NEW_CHARACTER_NAME_PROMPT_FALLBACK,
+                    ));
                 } else {
                     // Character-name path: identifier IS the
                     // character name. Advance to race selection.
@@ -1189,9 +1425,11 @@ impl ConnRouter {
                         email,
                         password_plaintext,
                     };
-                    let _ = ctx
-                        .outbound
-                        .try_send(login_message_bytes(world, "CREATE_NAME_PROMPT", NEW_CHARACTER_NAME_PROMPT_FALLBACK));
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "CREATE_NAME_PROMPT",
+                        NEW_CHARACTER_NAME_PROMPT_FALLBACK,
+                    ));
                     return;
                 }
                 match characters::find_by_name(pool, name).await {
@@ -1207,9 +1445,11 @@ impl ConnRouter {
                             email,
                             password_plaintext,
                         };
-                        let _ = ctx
-                            .outbound
-                            .try_send(login_message_bytes(world, "CREATE_NAME_PROMPT", NEW_CHARACTER_NAME_PROMPT_FALLBACK));
+                        let _ = ctx.outbound.try_send(login_message_bytes(
+                            world,
+                            "CREATE_NAME_PROMPT",
+                            NEW_CHARACTER_NAME_PROMPT_FALLBACK,
+                        ));
                     }
                     Ok(None) => {
                         // Name is available. Advance to race
@@ -1232,9 +1472,11 @@ impl ConnRouter {
                             email,
                             password_plaintext,
                         };
-                        let _ = ctx
-                            .outbound
-                            .try_send(login_message_bytes(world, "CREATE_NAME_PROMPT", NEW_CHARACTER_NAME_PROMPT_FALLBACK));
+                        let _ = ctx.outbound.try_send(login_message_bytes(
+                            world,
+                            "CREATE_NAME_PROMPT",
+                            NEW_CHARACTER_NAME_PROMPT_FALLBACK,
+                        ));
                     }
                 }
             }
@@ -1246,8 +1488,7 @@ impl ConnRouter {
             } => {
                 let Some(race) = match_playable_race(trimmed) else {
                     let _ = ctx.outbound.try_send(
-                        format!("`{trimmed}` isn't one of the available races.\r\n")
-                            .into_bytes(),
+                        format!("`{trimmed}` isn't one of the available races.\r\n").into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingRace {
                         email,
@@ -1276,8 +1517,7 @@ impl ConnRouter {
             } => {
                 let Some((class_id, class_plain_name)) = match_base_class(world, trimmed) else {
                     let _ = ctx.outbound.try_send(
-                        format!("`{trimmed}` isn't one of the available classes.\r\n")
-                            .into_bytes(),
+                        format!("`{trimmed}` isn't one of the available classes.\r\n").into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingClass {
                         email,
@@ -1325,8 +1565,7 @@ impl ConnRouter {
                     send_gender_prompt(&ctx.outbound);
                     return;
                 };
-                let stats =
-                    roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), race);
+                let stats = roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), race);
                 send_stat_review(&ctx.outbound, &stats);
                 ctx.stage = Stage::ReviewStatRoll {
                     email,
@@ -1371,7 +1610,9 @@ impl ConnRouter {
                 }
                 if !accepted {
                     let _ = ctx.outbound.try_send(
-                        "Please answer 'accept' or 'reroll'.\r\n".as_bytes().to_vec(),
+                        "Please answer 'accept' or 'reroll'.\r\n"
+                            .as_bytes()
+                            .to_vec(),
                     );
                     ctx.stage = Stage::ReviewStatRoll {
                         email,
@@ -1393,205 +1634,22 @@ impl ConnRouter {
                 // today the player's bounced back to the identifier
                 // prompt to log in fresh and confirm the round-trip
                 // worked.
-                let effective_email = email
-                    .clone()
-                    .unwrap_or_else(|| format!("{character_name}@local.fierymud-rs"));
-                let display_name = effective_email
-                    .split('@')
-                    .next()
-                    .unwrap_or(&effective_email)
-                    .to_string();
-                let hashed = match bcrypt::hash(&password_plaintext, bcrypt::DEFAULT_COST) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        warn!(conn_id, error = %e, "bcrypt hash failed");
-                        let _ = ctx.outbound.try_send(
-                            "Server error securing your password. Please try again.\r\n"
-                                .as_bytes()
-                                .to_vec(),
-                        );
-                        drop(password_plaintext);
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                        return;
-                    }
-                };
-                drop(password_plaintext);
-                // Wrap both INSERTs in a transaction so a failure
-                // on the character side rolls the user row back —
-                // the player can retry from the identifier prompt
-                // without leaving an orphan account behind.
-                let mut tx = match pool.begin().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        warn!(conn_id, error = %e, "creation tx begin failed");
-                        let _ = ctx.outbound.try_send(
-                            "Server error opening a transaction. Please try again.\r\n"
-                                .as_bytes()
-                                .to_vec(),
-                        );
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                        return;
-                    }
-                };
-                let user_id = match users::create(
-                    &mut *tx,
-                    &effective_email,
-                    &display_name,
-                    &hashed,
-                )
-                .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        warn!(conn_id, error = %e, "user create failed");
-                        let _ = ctx.outbound.try_send(
-                            format!(
-                                "Couldn't create the account ({e}). Please try again \
-                                 with a different identifier.\r\n"
-                            )
-                            .into_bytes(),
-                        );
-                        // Drop the tx — uncommitted, so the user
-                        // INSERT (if any) gets rolled back.
-                        drop(tx);
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                        return;
-                    }
-                };
-                // Name-approval toggle: when `social.name_approval_required`
-                // is ON in the live GameConfig, fresh characters land
-                // unapproved and get the `NameApprovalPending` marker at
-                // spawn — they can play but every social channel is
-                // silenced until staff runs `approve_name`. When the
-                // toggle is OFF (the default), new characters are
-                // auto-approved on creation. Existing characters carry
-                // their column value regardless of the toggle's state.
-                let name_approval_required = world
-                    .resource::<mud_world::RuntimeConfig>()
-                    .get_bool("social", "name_approval_required", false);
-                let new_character = mud_db::characters::NewCharacter {
-                    user_id: &user_id,
-                    name: &character_name,
+                let draft = NewCharDraft {
+                    email,
+                    character_name,
                     race,
-                    gender,
                     class_id,
-                    strength: stats.strength,
-                    intelligence: stats.intelligence,
-                    wisdom: stats.wisdom,
-                    dexterity: stats.dexterity,
-                    constitution: stats.constitution,
-                    charisma: stats.charisma,
-                    name_approved: !name_approval_required,
+                    class_plain_name,
+                    gender,
+                    stats,
                 };
-                let character_id = match mud_db::characters::create(&mut *tx, &new_character).await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        warn!(conn_id, error = %e, "character create failed");
-                        let _ = ctx.outbound.try_send(
-                            format!(
-                                "Couldn't create the character ({e}). The account \
-                                 INSERT was rolled back; please try again.\r\n"
-                            )
-                            .into_bytes(),
-                        );
-                        drop(tx);
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                        return;
-                    }
-                };
-                if let Err(e) = tx.commit().await {
-                    warn!(conn_id, error = %e, "creation tx commit failed");
-                    let _ = ctx.outbound.try_send(
-                        format!(
-                            "Couldn't finalize creation ({e}). Both rows have been \
-                             rolled back; please try again.\r\n"
-                        )
-                        .into_bytes(),
-                    );
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                    return;
-                }
-                // Both rows are committed. Re-fetch the User + the
-                // freshly-INSERTed CharacterRow so we can hand them
-                // to the same `complete_login` path the password
-                // arm uses — spawns the player entity, hydrates
-                // empty inventory / aliases / etc., and migrates
-                // the conn from `login` to `playing`. Failures here
-                // are bizarre (we just wrote these rows) but stay
-                // recoverable: bounce back to the identifier prompt
-                // and the player can log in fresh.
-                let new_user = match users::find_by_id(pool, &user_id).await {
-                    Ok(Some(u)) => u,
-                    Ok(None) => {
-                        warn!(conn_id, %user_id, "fresh user vanished post-commit");
-                        let _ = ctx.outbound.try_send(
-                            "Account created but couldn't reload it. Please log in.\r\n"
-                                .as_bytes()
-                                .to_vec(),
-                        );
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                        return;
-                    }
-                    Err(e) => {
-                        warn!(conn_id, error = %e, "user reload failed");
-                        let _ = ctx.outbound.try_send(
-                            "Account created but couldn't reload it. Please log in.\r\n"
-                                .as_bytes()
-                                .to_vec(),
-                        );
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                        return;
-                    }
-                };
-                let new_char = match characters::find_by_name(pool, &character_name).await {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
-                        warn!(conn_id, %character_name, "fresh character vanished post-commit");
-                        let _ = ctx.outbound.try_send(
-                            "Character created but couldn't reload it. Please log in.\r\n"
-                                .as_bytes()
-                                .to_vec(),
-                        );
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                        return;
-                    }
-                    Err(e) => {
-                        warn!(conn_id, error = %e, "character reload failed");
-                        let _ = ctx.outbound.try_send(
-                            "Character created but couldn't reload it. Please log in.\r\n"
-                                .as_bytes()
-                                .to_vec(),
-                        );
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                        return;
-                    }
-                };
-                // Internal IDs (character_id, user_id) intentionally
-                // omitted from the player-facing welcome — they're
-                // diagnostic and live in `clientinfo` for staff.
-                let _ = character_id;
-                let _ = user_id;
-                let _ = ctx.outbound.try_send(
-                    format!(
-                        "Welcome to FieryMUD, {character_name}! Your {gender} {race} \
-                         {class_plain_name} is ready. Stepping into the world…\r\n"
-                    )
-                    .into_bytes(),
-                );
-                self.complete_login(conn_id, world, pool, new_user, new_char).await;
+                // bcrypt runs on the blocking pool; `finish_creation`
+                // resumes from `on_auth_done`.
+                ctx.stage = Stage::Authenticating;
+                self.start_hash_job(conn_id, password_plaintext, draft);
             }
 
-            Stage::AwaitingPassword { mut user, preselected } => {
+            Stage::AwaitingPassword { user, preselected } => {
                 // Lockout pre-check: if `locked_until` is set and in
                 // the future, refuse before bcrypt — both to save the
                 // CPU cost and to keep the lock effective even when
@@ -1615,221 +1673,59 @@ impl ConnRouter {
                         .into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "EMAIL_PROMPT",
+                        IDENT_PROMPT_FALLBACK,
+                    ));
                     return;
                 }
-                let ok = user
-                    .password_hash
-                    .as_ref()
-                    .is_some_and(|h| verify_password_any(trimmed, h));
-                if !ok {
-                    // Throttle: bump the failed-login counter and lock
-                    // the account once it crosses
-                    // `security.max_login_attempts`. Live config; a 0
-                    // or missing row disables the throttle (legacy
-                    // permissive behavior).
+                // Unlinked legacy characters have no `Users` row to carry
+                // `locked_until`; apply the same lockout from the
+                // in-memory per-name throttle.
+                if user.id.is_empty() {
                     let cfg = world.resource::<mud_world::RuntimeConfig>();
                     let max_attempts = cfg.get_i32("security", "max_login_attempts", 0);
                     let lock_minutes = cfg.get_i32("security", "login_timeout_minutes", 15);
-                    let attempts_after = user.failed_login_attempts.saturating_add(1);
-                    let lock_now = max_attempts > 0 && attempts_after >= max_attempts;
-                    let _ = mud_db::users::record_failed_login(
-                        pool,
-                        &user.id,
-                        if lock_now { Some(lock_minutes) } else { None },
-                    )
-                    .await;
-                    info!(
-                        conn_id,
-                        email = %user.email,
-                        attempts_after,
+                    let key = LegacyLoginThrottle::key(
+                        preselected
+                            .as_deref()
+                            .map_or(user.email.as_str(), |c| c.name.as_str()),
+                    );
+                    if let Some(remaining) = self.legacy_throttle.locked_for(
+                        &key,
+                        Instant::now(),
                         max_attempts,
-                        locked = lock_now,
-                        "auth failure"
-                    );
-                    let msg = if lock_now {
-                        format!(
-                            "Invalid credentials. Account locked for {lock_minutes} \
-                             minutes after {attempts_after} failed attempts.\r\n"
-                        )
-                    } else {
-                        "Invalid credentials.\r\n".to_string()
-                    };
-                    let _ = ctx.outbound.try_send(msg.into_bytes());
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                    return;
-                }
-                // Legacy-orphan migration: the player auth'd against
-                // a `Characters.password_hash` (imported Unix crypt(3)
-                // value) with no `Users` row backing them. Provision a
-                // fresh `Users` row with a bcrypt re-hash of the
-                // password they just typed, link the character to it,
-                // and swap the in-memory sentinel for the real row so
-                // the rest of the login pipeline (failed-login reset,
-                // ban check, account-wealth, complete_login) has a
-                // valid id to work with. Wrapped in a transaction so
-                // a mid-way crash doesn't leave an orphan `Users` row
-                // or a dangling `user_id` FK.
-                if user.id.is_empty() {
-                    let Some(char_row) = preselected.as_deref() else {
-                        // Defensive: sentinel only happens on the
-                        // character-name path, which always preselects.
-                        warn!(conn_id, "legacy migration: missing preselected character");
-                        let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
+                        lock_window(lock_minutes),
+                    ) {
+                        let secs_remaining = remaining.as_secs().max(1);
+                        info!(conn_id, character = %key, secs_remaining, "auth refused: legacy character locked");
+                        let _ = ctx.outbound.try_send(
+                            format!(
+                                "Account is temporarily locked after too many failed \
+                                 attempts. Try again in {secs_remaining}s.\r\n"
+                            )
+                            .into_bytes(),
+                        );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                        return;
-                    };
-                    let new_hash = match bcrypt::hash(trimmed, bcrypt::DEFAULT_COST) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            warn!(conn_id, error = %e, "legacy migration: bcrypt hash failed");
-                            let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
-                            ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                            return;
-                        }
-                    };
-                    // Synthetic placeholder email — character names are
-                    // unique so this collision-free by construction. The
-                    // player can change it later via a `setemail`-style
-                    // command (TODO) without affecting the auth path,
-                    // which keys on `Users.id` once linked.
-                    let synth_email = format!("{}@legacy.fierymud.local", char_row.name.to_ascii_lowercase());
-                    let display_name = char_row.name.clone();
-                    let migrate = async {
-                        let mut tx = pool.begin().await?;
-                        let new_id = mud_db::users::create(
-                            &mut *tx,
-                            &synth_email,
-                            &display_name,
-                            &new_hash,
-                        )
-                        .await?;
-                        mud_db::characters::link_to_user(&mut *tx, &char_row.id, &new_id).await?;
-                        tx.commit().await?;
-                        Ok::<String, mud_db::sqlx::Error>(new_id)
-                    };
-                    match migrate.await {
-                        Ok(new_id) => {
-                            info!(
-                                conn_id,
-                                user_id = %new_id,
-                                character = %char_row.name,
-                                "legacy login migrated to bcrypt"
-                            );
-                            user.id = new_id;
-                            user.email = synth_email;
-                            user.display_name = display_name;
-                            user.password_hash = Some(new_hash);
-                        }
-                        Err(e) => {
-                            warn!(conn_id, error = %e, "legacy migration db error");
-                            let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
-                            ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                            return;
-                        }
-                    }
-                }
-                // Auth succeeded — reset the failed-login counter so
-                // a previously-throttled account doesn't carry a
-                // partial strike count into the next session.
-                if user.failed_login_attempts > 0 || user.locked_until.is_some() {
-                    let _ = mud_db::users::clear_failed_logins(pool, &user.id).await;
-                }
-                // Wizlock: when admin has set the global gate, only
-                // Builder+ accounts may proceed. Refused after auth
-                // so we don't leak whether the gate is on
-                // pre-credential. Reset on server restart so a
-                // forgotten lock doesn't outlive the deploy.
-                let wizlock_active = world
-                    .get_resource::<mud_world::WizLock>()
-                    .is_some_and(|w| w.active);
-                if wizlock_active && !user.role.at_least(mud_db::enums::UserRole::Builder) {
-                    info!(
-                        conn_id,
-                        user_id = %user.id,
-                        "auth refused: wizlock active"
-                    );
-                    let _ = ctx.outbound.try_send(
-                        "The mud is currently locked for staff only. Please try again later.\r\n"
-                            .as_bytes()
-                            .to_vec(),
-                    );
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                    return;
-                }
-                // Ban check. Refuses post-auth so we don't leak
-                // whether an email exists pre-password. The conn
-                // stays in AwaitingIdentifier (mirrors auth-failure
-                // path); player can't proceed past the ban message.
-                if let Ok(Some(ban)) = mud_db::bans::active_for(pool, &user.id).await {
-                    info!(
-                        conn_id,
-                        user_id = %user.id,
-                        reason = %ban.reason,
-                        "auth refused: banned"
-                    );
-                    let until = ban
-                        .expires_at
-                        .map(|t| format!(" (expires {t} UTC)"))
-                        .unwrap_or_default();
-                    let _ = ctx.outbound.try_send(
-                        format!(
-                            "Your account is banned: {}{until}\r\n",
-                            ban.reason
-                        )
-                        .into_bytes(),
-                    );
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                    return;
-                }
-                info!(conn_id, user_id = %user.id, email = %user.email, "auth success");
-
-                // Character-name path: preselected character → spawn it
-                // directly without showing the CharSelect menu. The
-                // name-approval gate runs at spawn time, not at auth
-                // time — players with an unapproved character still
-                // log in and can play; social commands are silenced
-                // until staff resolves the name.
-                if let Some(char_row) = preselected {
-                    self.complete_login(conn_id, world, pool, user, *char_row).await;
-                    return;
-                }
-
-                // Email path: list all characters and show the menu.
-                let chars = match characters::list_for_user(pool, &user.id).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!(conn_id, error = %e, "character list failed");
-                        let _ = ctx.outbound.try_send("Server error.\r\n".as_bytes().to_vec());
-                        ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
+                        let _ = ctx.outbound.try_send(login_message_bytes(
+                            world,
+                            "EMAIL_PROMPT",
+                            IDENT_PROMPT_FALLBACK,
+                        ));
                         return;
                     }
-                };
-                if chars.is_empty() {
-                    let _ = ctx
-                        .outbound
-                        .try_send("No characters on this account.\r\n".as_bytes().to_vec());
-                    ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK));
-                    return;
                 }
-                let mut menu = String::from("\r\nCharacters:\r\n");
-                for (idx, c) in chars.iter().enumerate() {
-                    menu.push_str(&format!("  {}. {} (level {})\r\n", idx + 1, c.name, c.level));
-                }
-                menu.push_str("Pick a number: ");
-                let _ = ctx.outbound.try_send(menu.into_bytes());
-                ctx.stage = Stage::CharSelect {
-                    user,
-                    characters: chars,
-                };
+                // Verification (bcrypt / legacy crypt) is CPU-heavy; it
+                // runs on the blocking pool and the result comes back
+                // through `AuthDone`, so the game loop keeps ticking.
+                let password = trimmed.to_string();
+                self.start_password_check(conn_id, user, preselected, password);
+            }
+
+            Stage::Authenticating => {
+                // A job is in flight; swallow input until it resolves.
+                ctx.stage = Stage::Authenticating;
             }
 
             Stage::CharSelect { user, characters } => {
@@ -1848,9 +1744,715 @@ impl ConnRouter {
                 // Name-approval gate runs at spawn time, not here —
                 // see `complete_login` (NameApprovalPending marker
                 // attach + welcome notice).
-                self.complete_login(conn_id, world, pool, user, char_row).await;
+                self.complete_login(conn_id, world, pool, user, char_row)
+                    .await;
             }
         }
+    }
+
+    /// Continuation of the creation flow once the off-thread bcrypt
+    /// hash of the new password has completed. Persists the `Users`
+    /// + `Characters` rows and hands off to `complete_login`.
+    #[allow(clippy::too_many_lines)]
+    async fn finish_creation(
+        &mut self,
+        conn_id: ConnId,
+        draft: NewCharDraft,
+        hashed_result: Result<String, String>,
+        pool: &PgPool,
+        world: &mut World,
+    ) {
+        let NewCharDraft {
+            email,
+            character_name,
+            race,
+            class_id,
+            class_plain_name,
+            gender,
+            stats,
+        } = draft;
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            // Connection dropped while the hash was in flight.
+            return;
+        };
+        let effective_email = email
+            .clone()
+            .unwrap_or_else(|| format!("{character_name}@local.fierymud-rs"));
+        let display_name = effective_email
+            .split('@')
+            .next()
+            .unwrap_or(&effective_email)
+            .to_string();
+        let hashed = match hashed_result {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(conn_id, error = %e, "bcrypt hash failed");
+                let _ = ctx.outbound.try_send(
+                    "Server error securing your password. Please try again.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            }
+        };
+        // Wrap both INSERTs in a transaction so a failure
+        // on the character side rolls the user row back —
+        // the player can retry from the identifier prompt
+        // without leaving an orphan account behind.
+        let mut tx = match pool.begin().await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(conn_id, error = %e, "creation tx begin failed");
+                let _ = ctx.outbound.try_send(
+                    "Server error opening a transaction. Please try again.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            }
+        };
+        let user_id = match users::create(&mut *tx, &effective_email, &display_name, &hashed).await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(conn_id, error = %e, "user create failed");
+                let _ = ctx.outbound.try_send(
+                    format!(
+                        "Couldn't create the account ({e}). Please try again \
+                         with a different identifier.\r\n"
+                    )
+                    .into_bytes(),
+                );
+                // Drop the tx — uncommitted, so the user
+                // INSERT (if any) gets rolled back.
+                drop(tx);
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            }
+        };
+        // Name-approval toggle: when `social.name_approval_required`
+        // is ON in the live GameConfig, fresh characters land
+        // unapproved and get the `NameApprovalPending` marker at
+        // spawn — they can play but every social channel is
+        // silenced until staff runs `approve_name`. When the
+        // toggle is OFF (the default), new characters are
+        // auto-approved on creation. Existing characters carry
+        // their column value regardless of the toggle's state.
+        let name_approval_required = world.resource::<mud_world::RuntimeConfig>().get_bool(
+            "social",
+            "name_approval_required",
+            false,
+        );
+        let new_character = mud_db::characters::NewCharacter {
+            user_id: &user_id,
+            name: &character_name,
+            race,
+            gender,
+            class_id,
+            strength: stats.strength,
+            intelligence: stats.intelligence,
+            wisdom: stats.wisdom,
+            dexterity: stats.dexterity,
+            constitution: stats.constitution,
+            charisma: stats.charisma,
+            name_approved: !name_approval_required,
+        };
+        let character_id = match mud_db::characters::create(&mut *tx, &new_character).await {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(conn_id, error = %e, "character create failed");
+                let _ = ctx.outbound.try_send(
+                    format!(
+                        "Couldn't create the character ({e}). The account \
+                         INSERT was rolled back; please try again.\r\n"
+                    )
+                    .into_bytes(),
+                );
+                drop(tx);
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            }
+        };
+        if let Err(e) = tx.commit().await {
+            warn!(conn_id, error = %e, "creation tx commit failed");
+            let _ = ctx.outbound.try_send(
+                format!(
+                    "Couldn't finalize creation ({e}). Both rows have been \
+                     rolled back; please try again.\r\n"
+                )
+                .into_bytes(),
+            );
+            ctx.stage = Stage::AwaitingIdentifier;
+            let _ = ctx.outbound.try_send(login_message_bytes(
+                world,
+                "EMAIL_PROMPT",
+                IDENT_PROMPT_FALLBACK,
+            ));
+            return;
+        }
+        // Both rows are committed. Re-fetch the User + the
+        // freshly-INSERTed CharacterRow so we can hand them
+        // to the same `complete_login` path the password
+        // arm uses — spawns the player entity, hydrates
+        // empty inventory / aliases / etc., and migrates
+        // the conn from `login` to `playing`. Failures here
+        // are bizarre (we just wrote these rows) but stay
+        // recoverable: bounce back to the identifier prompt
+        // and the player can log in fresh.
+        let new_user = match users::find_by_id(pool, &user_id).await {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                warn!(conn_id, %user_id, "fresh user vanished post-commit");
+                let _ = ctx.outbound.try_send(
+                    "Account created but couldn't reload it. Please log in.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            }
+            Err(e) => {
+                warn!(conn_id, error = %e, "user reload failed");
+                let _ = ctx.outbound.try_send(
+                    "Account created but couldn't reload it. Please log in.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            }
+        };
+        let new_char = match characters::find_by_name(pool, &character_name).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                warn!(conn_id, %character_name, "fresh character vanished post-commit");
+                let _ = ctx.outbound.try_send(
+                    "Character created but couldn't reload it. Please log in.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            }
+            Err(e) => {
+                warn!(conn_id, error = %e, "character reload failed");
+                let _ = ctx.outbound.try_send(
+                    "Character created but couldn't reload it. Please log in.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            }
+        };
+        // Internal IDs (character_id, user_id) intentionally
+        // omitted from the player-facing welcome — they're
+        // diagnostic and live in `clientinfo` for staff.
+        let _ = character_id;
+        let _ = user_id;
+        let _ = ctx.outbound.try_send(
+            format!(
+                "Welcome to FieryMUD, {character_name}! Your {gender} {race} \
+                 {class_plain_name} is ready. Stepping into the world…\r\n"
+            )
+            .into_bytes(),
+        );
+        self.complete_login(conn_id, world, pool, new_user, new_char)
+            .await;
+    }
+
+    /// Continuation of the password stage once the off-thread
+    /// verification (and, for legacy characters, the bcrypt re-hash)
+    /// has completed. Everything past the credential check lives
+    /// here: throttle bookkeeping, legacy migration, wizlock / ban
+    /// gates, then character select or `complete_login`.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    async fn finish_password(
+        &mut self,
+        conn_id: ConnId,
+        mut user: User,
+        preselected: Option<Box<CharacterRow>>,
+        ok: bool,
+        migration_hash: Option<Result<String, String>>,
+        pool: &PgPool,
+        world: &mut World,
+    ) {
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            // Connection dropped while verification was in flight.
+            return;
+        };
+        if !ok {
+            // Throttle: bump the failed-login counter and lock the
+            // account once it crosses `security.max_login_attempts`.
+            // Live config; a 0 or missing row disables the throttle
+            // (legacy permissive behavior). Unlinked legacy characters
+            // have no `Users` row to update, so their strikes are
+            // tracked in memory, keyed on the character name.
+            let cfg = world.resource::<mud_world::RuntimeConfig>();
+            let max_attempts = cfg.get_i32("security", "max_login_attempts", 0);
+            let lock_minutes = cfg.get_i32("security", "login_timeout_minutes", 15);
+            let (attempts_after, lock_now) = if user.id.is_empty() {
+                let key = LegacyLoginThrottle::key(
+                    preselected
+                        .as_deref()
+                        .map_or(user.email.as_str(), |c| c.name.as_str()),
+                );
+                self.legacy_throttle.record_failure(
+                    &key,
+                    Instant::now(),
+                    max_attempts,
+                    lock_window(lock_minutes),
+                )
+            } else {
+                let attempts_after = user.failed_login_attempts.saturating_add(1);
+                let lock_now = max_attempts > 0 && attempts_after >= max_attempts;
+                let _ = mud_db::users::record_failed_login(
+                    pool,
+                    &user.id,
+                    if lock_now { Some(lock_minutes) } else { None },
+                )
+                .await;
+                (attempts_after, lock_now)
+            };
+            info!(
+                conn_id,
+                email = %user.email,
+                attempts_after,
+                max_attempts,
+                locked = lock_now,
+                "auth failure"
+            );
+            let msg = if lock_now {
+                format!(
+                    "Invalid credentials. Account locked for {lock_minutes} \
+                     minutes after {attempts_after} failed attempts.\r\n"
+                )
+            } else {
+                "Invalid credentials.\r\n".to_string()
+            };
+            let _ = ctx.outbound.try_send(msg.into_bytes());
+            ctx.failed_attempts = ctx.failed_attempts.saturating_add(1);
+            if ctx.failed_attempts >= MAX_FAILED_PASSWORDS_PER_CONN {
+                // Per-connection cap: stop serving this connection so
+                // an attacker can't grind passwords on one socket.
+                // (Throttling above covers reconnects.)
+                let _ = ctx.outbound.try_send(
+                    "Too many failed login attempts. Goodbye.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                info!(
+                    conn_id,
+                    "auth: per-connection failure cap reached; dropping connection"
+                );
+                self.login.remove(&conn_id);
+                self.caps.remove(&conn_id);
+                return;
+            }
+            ctx.stage = Stage::AwaitingIdentifier;
+            let _ = ctx.outbound.try_send(login_message_bytes(
+                world,
+                "EMAIL_PROMPT",
+                IDENT_PROMPT_FALLBACK,
+            ));
+            return;
+        }
+        if user.id.is_empty()
+            && let Some(c) = preselected.as_deref()
+        {
+            self.legacy_throttle
+                .clear(&LegacyLoginThrottle::key(&c.name));
+        }
+        // Legacy-orphan migration: the player auth'd against
+        // a `Characters.password_hash` (imported Unix crypt(3)
+        // value) with no `Users` row backing them. Provision a
+        // fresh `Users` row with a bcrypt re-hash of the
+        // password they just typed, link the character to it,
+        // and swap the in-memory sentinel for the real row so
+        // the rest of the login pipeline (failed-login reset,
+        // ban check, account-wealth, complete_login) has a
+        // valid id to work with. Wrapped in a transaction so
+        // a mid-way crash doesn't leave an orphan `Users` row
+        // or a dangling `user_id` FK.
+        if user.id.is_empty() {
+            let Some(char_row) = preselected.as_deref() else {
+                // Defensive: sentinel only happens on the
+                // character-name path, which always preselects.
+                warn!(conn_id, "legacy migration: missing preselected character");
+                let _ = ctx
+                    .outbound
+                    .try_send("Server error.\r\n".as_bytes().to_vec());
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            };
+            let new_hash = match migration_hash {
+                Some(Ok(h)) => h,
+                Some(Err(e)) => {
+                    warn!(conn_id, error = %e, "legacy migration: bcrypt hash failed");
+                    let _ = ctx
+                        .outbound
+                        .try_send("Server error.\r\n".as_bytes().to_vec());
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "EMAIL_PROMPT",
+                        IDENT_PROMPT_FALLBACK,
+                    ));
+                    return;
+                }
+                None => {
+                    warn!(conn_id, "legacy migration: no hash computed");
+                    let _ = ctx
+                        .outbound
+                        .try_send("Server error.\r\n".as_bytes().to_vec());
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "EMAIL_PROMPT",
+                        IDENT_PROMPT_FALLBACK,
+                    ));
+                    return;
+                }
+            };
+            // Synthetic placeholder email — character names are
+            // unique so this collision-free by construction. The
+            // player can change it later via a `setemail`-style
+            // command (TODO) without affecting the auth path,
+            // which keys on `Users.id` once linked.
+            let synth_email = format!(
+                "{}@legacy.fierymud.local",
+                char_row.name.to_ascii_lowercase()
+            );
+            let display_name = char_row.name.clone();
+            let migrate = async {
+                let mut tx = pool.begin().await?;
+                let new_id =
+                    mud_db::users::create(&mut *tx, &synth_email, &display_name, &new_hash).await?;
+                mud_db::characters::link_to_user(&mut *tx, &char_row.id, &new_id).await?;
+                tx.commit().await?;
+                Ok::<String, mud_db::sqlx::Error>(new_id)
+            };
+            match migrate.await {
+                Ok(new_id) => {
+                    info!(
+                        conn_id,
+                        user_id = %new_id,
+                        character = %char_row.name,
+                        "legacy login migrated to bcrypt"
+                    );
+                    user.id = new_id;
+                    user.email = synth_email;
+                    user.display_name = display_name;
+                    user.password_hash = Some(new_hash);
+                }
+                Err(e) => {
+                    warn!(conn_id, error = %e, "legacy migration db error");
+                    let _ = ctx
+                        .outbound
+                        .try_send("Server error.\r\n".as_bytes().to_vec());
+                    ctx.stage = Stage::AwaitingIdentifier;
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "EMAIL_PROMPT",
+                        IDENT_PROMPT_FALLBACK,
+                    ));
+                    return;
+                }
+            }
+        }
+        // Auth succeeded — reset the failed-login counter so
+        // a previously-throttled account doesn't carry a
+        // partial strike count into the next session.
+        if user.failed_login_attempts > 0 || user.locked_until.is_some() {
+            let _ = mud_db::users::clear_failed_logins(pool, &user.id).await;
+        }
+        // Wizlock: when admin has set the global gate, only
+        // Builder+ accounts may proceed. Refused after auth
+        // so we don't leak whether the gate is on
+        // pre-credential. Reset on server restart so a
+        // forgotten lock doesn't outlive the deploy.
+        let wizlock_active = world
+            .get_resource::<mud_world::WizLock>()
+            .is_some_and(|w| w.active);
+        if wizlock_active && !user.role.at_least(mud_db::enums::UserRole::Builder) {
+            info!(
+                conn_id,
+                user_id = %user.id,
+                "auth refused: wizlock active"
+            );
+            let _ = ctx.outbound.try_send(
+                "The mud is currently locked for staff only. Please try again later.\r\n"
+                    .as_bytes()
+                    .to_vec(),
+            );
+            ctx.stage = Stage::AwaitingIdentifier;
+            let _ = ctx.outbound.try_send(login_message_bytes(
+                world,
+                "EMAIL_PROMPT",
+                IDENT_PROMPT_FALLBACK,
+            ));
+            return;
+        }
+        // Ban check. Refuses post-auth so we don't leak
+        // whether an email exists pre-password. The conn
+        // stays in AwaitingIdentifier (mirrors auth-failure
+        // path); player can't proceed past the ban message.
+        if let Ok(Some(ban)) = mud_db::bans::active_for(pool, &user.id).await {
+            info!(
+                conn_id,
+                user_id = %user.id,
+                reason = %ban.reason,
+                "auth refused: banned"
+            );
+            let until = ban
+                .expires_at
+                .map(|t| format!(" (expires {t} UTC)"))
+                .unwrap_or_default();
+            let _ = ctx.outbound.try_send(
+                format!("Your account is banned: {}{until}\r\n", ban.reason).into_bytes(),
+            );
+            ctx.stage = Stage::AwaitingIdentifier;
+            let _ = ctx.outbound.try_send(login_message_bytes(
+                world,
+                "EMAIL_PROMPT",
+                IDENT_PROMPT_FALLBACK,
+            ));
+            return;
+        }
+        info!(conn_id, user_id = %user.id, email = %user.email, "auth success");
+
+        // Character-name path: preselected character → spawn it
+        // directly without showing the CharSelect menu. The
+        // name-approval gate runs at spawn time, not at auth
+        // time — players with an unapproved character still
+        // log in and can play; social commands are silenced
+        // until staff resolves the name.
+        if let Some(char_row) = preselected {
+            self.complete_login(conn_id, world, pool, user, *char_row)
+                .await;
+            return;
+        }
+
+        // Email path: list all characters and show the menu.
+        let chars = match characters::list_for_user(pool, &user.id).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(conn_id, error = %e, "character list failed");
+                let _ = ctx
+                    .outbound
+                    .try_send("Server error.\r\n".as_bytes().to_vec());
+                ctx.stage = Stage::AwaitingIdentifier;
+                let _ = ctx.outbound.try_send(login_message_bytes(
+                    world,
+                    "EMAIL_PROMPT",
+                    IDENT_PROMPT_FALLBACK,
+                ));
+                return;
+            }
+        };
+        if chars.is_empty() {
+            let _ = ctx
+                .outbound
+                .try_send("No characters on this account.\r\n".as_bytes().to_vec());
+            ctx.stage = Stage::AwaitingIdentifier;
+            let _ = ctx.outbound.try_send(login_message_bytes(
+                world,
+                "EMAIL_PROMPT",
+                IDENT_PROMPT_FALLBACK,
+            ));
+            return;
+        }
+        let mut menu = String::from("\r\nCharacters:\r\n");
+        for (idx, c) in chars.iter().enumerate() {
+            menu.push_str(&format!(
+                "  {}. {} (level {})\r\n",
+                idx + 1,
+                c.name,
+                c.level
+            ));
+        }
+        menu.push_str("Pick a number: ");
+        let _ = ctx.outbound.try_send(menu.into_bytes());
+        ctx.stage = Stage::CharSelect {
+            user,
+            characters: chars,
+        };
+    }
+
+    /// Queue a password verification on the blocking pool and park the
+    /// connection in `Authenticating`. For unlinked legacy characters a
+    /// successful verification also computes the bcrypt re-hash used by
+    /// the migration, in the same job. Result arrives via `auth_tx`.
+    fn start_password_check(
+        &mut self,
+        conn_id: ConnId,
+        user: User,
+        preselected: Option<Box<CharacterRow>>,
+        password: String,
+    ) {
+        if let Some(ctx) = self.login.get_mut(&conn_id) {
+            ctx.stage = Stage::Authenticating;
+        }
+        let tx = self.auth_tx.clone();
+        let hash = user.password_hash.clone();
+        let is_legacy = user.id.is_empty();
+        tokio::spawn(async move {
+            let ok = match hash {
+                Some(h) => verify_password_blocking(password.clone(), h).await,
+                None => false,
+            };
+            let migration_hash = if ok && is_legacy {
+                Some(hash_password_blocking(password).await)
+            } else {
+                None
+            };
+            let _ = tx.send(AuthDone {
+                conn_id,
+                kind: AuthDoneKind::Password {
+                    user,
+                    preselected,
+                    ok,
+                    migration_hash,
+                },
+            });
+        });
+    }
+
+    /// Queue the bcrypt hash for a new account on the blocking pool.
+    fn start_hash_job(&self, conn_id: ConnId, password: String, draft: NewCharDraft) {
+        let tx = self.auth_tx.clone();
+        tokio::spawn(async move {
+            let hashed = hash_password_blocking(password).await;
+            let _ = tx.send(AuthDone {
+                conn_id,
+                kind: AuthDoneKind::Create { draft, hashed },
+            });
+        });
+    }
+
+    /// Resolve a finished credential job. Drops the result silently if
+    /// the connection went away while the job was running.
+    pub async fn on_auth_done(&mut self, done: AuthDone, pool: &PgPool, world: &mut World) {
+        let AuthDone { conn_id, kind } = done;
+        if !self.login.contains_key(&conn_id) {
+            return;
+        }
+        match kind {
+            AuthDoneKind::Password {
+                user,
+                preselected,
+                ok,
+                migration_hash,
+            } => {
+                self.finish_password(conn_id, user, preselected, ok, migration_hash, pool, world)
+                    .await;
+            }
+            AuthDoneKind::Create { draft, hashed } => {
+                self.finish_creation(conn_id, draft, hashed, pool, world)
+                    .await;
+            }
+        }
+    }
+
+    /// Classic MUD "take over" for a duplicate login. If a player
+    /// entity for `character_id` is already in the world, attach the
+    /// new connection to it, tell the old connection it was replaced,
+    /// and detach the old connection from the router (so its eventual
+    /// disconnect can't save / despawn the live entity). Returns
+    /// `true` when a takeover happened — the caller must NOT spawn a
+    /// second entity (that would duplicate the inventory on save).
+    fn try_takeover(&mut self, world: &mut World, conn_id: ConnId, character_id: &str) -> bool {
+        let existing = {
+            let mut q = world.query_filtered::<(Entity, &Account), With<Player>>();
+            q.iter(world)
+                .find(|(_, a)| a.character_id == character_id)
+                .map(|(e, _)| e)
+        };
+        let Some(entity) = existing else {
+            return false;
+        };
+        let Some(LoginCtx { outbound, .. }) = self.login.remove(&conn_id) else {
+            return false;
+        };
+        let old_conn = self.find_conn(entity);
+        if let Some(old_conn) = old_conn {
+            self.playing.remove(&old_conn);
+            self.caps.remove(&old_conn);
+            info!(
+                conn_id,
+                old_conn, "login takeover: detaching previous connection"
+            );
+        }
+        if let Some(old) = world.get::<Connection>(entity) {
+            let _ = old.0.try_send(
+                "\r\nThis character has been taken over by another connection. \
+                 Disconnecting.\r\n"
+                    .as_bytes()
+                    .to_vec(),
+            );
+        }
+        // Notice is queued; now really close the old socket (the net
+        // layer flushes queued output before shutting it down).
+        if let Some(old_conn) = old_conn {
+            (self.close_conn)(old_conn);
+        }
+        let _ = outbound.try_send(
+            "You take over your own body, already in use!\r\n"
+                .as_bytes()
+                .to_vec(),
+        );
+        // Replacing the component drops the entity's handle to the old
+        // channel; the entity itself (items, state) is untouched.
+        world.entity_mut(entity).insert(Connection(outbound));
+        self.playing.insert(conn_id, entity);
+        true
     }
 
     /// Final login step: load the chosen character's saved state
@@ -1867,6 +2469,17 @@ impl ConnRouter {
         user: User,
         char_row: CharacterRow,
     ) {
+        // Duplicate session: take over the live entity instead of
+        // spawning a second copy (and a second inventory).
+        if self.try_takeover(world, conn_id, &char_row.id) {
+            if let Some(&entity) = self.playing.get(&conn_id) {
+                commands::dispatch(world, entity, "look");
+                commands::refresh_player_items_gmcp(world, entity);
+                commands::send_prompt(world, entity);
+            }
+            info!(conn_id, char_name = %char_row.name, "player reconnected (takeover)");
+            return;
+        }
         let item_rows = mud_db::character_items::list_for(pool, &char_row.id)
             .await
             .unwrap_or_else(|e| {
@@ -2118,9 +2731,8 @@ impl ConnRouter {
             // garbage/legacy shape silently (drop the data) rather
             // than rejecting login.
             if let Some(json) = script_vars_json
-                && let Ok(map) = serde_json::from_value::<
-                    std::collections::BTreeMap<String, String>,
-                >(json)
+                && let Ok(map) =
+                    serde_json::from_value::<std::collections::BTreeMap<String, String>>(json)
                 && !map.is_empty()
             {
                 e.insert(mud_world::ScriptVars(map));
@@ -2161,9 +2773,8 @@ impl ConnRouter {
             // since save, the saturating_add keeps the offset
             // non-negative.
             if let Some(json) = cooldowns_json
-                && let Ok(map) = serde_json::from_value::<
-                    std::collections::HashMap<String, i64>,
-                >(json)
+                && let Ok(map) =
+                    serde_json::from_value::<std::collections::HashMap<String, i64>>(json)
             {
                 let now_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -2178,7 +2789,8 @@ impl ConnRouter {
                     }
                     cd.ready_at.insert(
                         id,
-                        now_inst + std::time::Duration::from_secs(u64::try_from(secs_left).unwrap_or(0)),
+                        now_inst
+                            + std::time::Duration::from_secs(u64::try_from(secs_left).unwrap_or(0)),
                     );
                 }
                 if !cd.ready_at.is_empty() {
@@ -2203,8 +2815,7 @@ impl ConnRouter {
                 for row in recent_tells.iter().rev() {
                     let when = SystemTime::UNIX_EPOCH
                         + std::time::Duration::from_secs(
-                            u64::try_from(row.sent_at.and_utc().timestamp().max(0))
-                                .unwrap_or(0),
+                            u64::try_from(row.sent_at.and_utc().timestamp().max(0)).unwrap_or(0),
                         );
                     log.push_at(row.sender_name.clone(), when);
                 }
@@ -2319,7 +2930,10 @@ impl ConnRouter {
         // one-line heads-up after the MOTD so the player understands
         // why social channels refuse. The marker itself is what gates
         // the social commands; this just explains the gate.
-        if world.get::<mud_world::NameApprovalPending>(entity).is_some() {
+        if world
+            .get::<mud_world::NameApprovalPending>(entity)
+            .is_some()
+        {
             commands::send_to(
                 world,
                 entity,
@@ -2338,9 +2952,7 @@ impl ConnRouter {
         // without GMCP support also see the join — mirrors the
         // leave broadcast on disconnect.
         if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
-            commands::broadcast_room_player_diff(
-                world, room, entity, "AddPlayer",
-            );
+            commands::broadcast_room_player_diff(world, room, entity, "AddPlayer");
             let player_name = commands::name_of(world, entity);
             commands::broadcast_room_visual(
                 world,
@@ -2441,13 +3053,15 @@ pub(crate) fn build_achievement_components(
                 .unwrap_or_default();
             let total = zone_room_counts.get(&n).copied().unwrap_or(0);
             if total > 0 && visited.len() >= total {
-                ca.unlocked.insert(row.achievement_id, row.unlocked_at.and_utc());
+                ca.unlocked
+                    .insert(row.achievement_id, row.unlocked_at.and_utc());
             }
             if !visited.is_empty() {
                 zv.by_zone.insert(n, visited);
             }
         } else {
-            ca.unlocked.insert(row.achievement_id, row.unlocked_at.and_utc());
+            ca.unlocked
+                .insert(row.achievement_id, row.unlocked_at.and_utc());
         }
     }
     (ca, zv)
@@ -2459,7 +3073,12 @@ pub(crate) fn build_achievement_components(
 /// avoids the recurring "did I update both branches?" bug we hit
 /// three times before consolidating.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, outbound: Outbound) -> Entity {
+pub(crate) fn spawn_player(
+    world: &mut World,
+    user: &User,
+    c: &CharacterRow,
+    outbound: Outbound,
+) -> Entity {
     let race_start = world
         .resource::<mud_world::RaceDefaults>()
         .start_room_by_race
@@ -2480,9 +3099,7 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
     // lands with the new pool value. Source / tier round-trip
     // verbatim — they're consumed only on first XP gain (R4), never
     // on login per ADR 0001 §1.
-    let elapsed_secs = last_login_unix
-        .map(|prev| now_unix.saturating_sub(prev).max(0))
-        .unwrap_or(0);
+    let elapsed_secs = last_login_unix.map_or(0, |prev| now_unix.saturating_sub(prev).max(0));
     let new_repose = accrue_repose(c.repose, c.rest_tier, c.level, elapsed_secs);
 
     let index = world.resource::<WorldKeyIndex>();
@@ -2543,10 +3160,13 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
     // Welcome line — only when we have a room to land in.
     if let Some(room_entity) = room_entity {
         let room_name = commands::name_or(world, room_entity, "<unknown>");
-        let _ = outbound.try_send(format!(
-            "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",
-            name = c.name,
-        ).into_bytes());
+        let _ = outbound.try_send(
+            format!(
+                "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",
+                name = c.name,
+            )
+            .into_bytes(),
+        );
         // First-login guidance: a brand-new character has no prior
         // `last_login` stamp. Drop a one-line "Try: ..." pointing at
         // the most useful first commands so a fresh player isn't
@@ -2575,7 +3195,9 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         .spawn((
             Player,
             Online,
-            Named { name: c.name.clone() },
+            Named {
+                name: c.name.clone(),
+            },
             Account {
                 user_id: user.id.clone(),
                 character_id: c.id.clone(),
@@ -2671,7 +3293,11 @@ pub(crate) fn spawn_player(world: &mut World, user: &User, c: &CharacterRow, out
         if c.class_id == Some(14) {
             let num = (c.level / 10).max(1);
             let bonus = c.level / 5;
-            e.insert(mud_world::NaturalDamage { num, size: 6, bonus });
+            e.insert(mud_world::NaturalDamage {
+                num,
+                size: 6,
+                bonus,
+            });
         }
     }
     // Body metrics — height (inches) + weight (lbs). Rolled fresh
@@ -2747,11 +3373,7 @@ pub(crate) struct SaveOutcome {
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn save_player(
-    world: &mut World,
-    entity: Entity,
-    pool: &PgPool,
-) -> SaveOutcome {
+pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) -> SaveOutcome {
     let Some(account) = world.get::<Account>(entity).cloned() else {
         return SaveOutcome {
             aborted: true,
@@ -2787,16 +3409,12 @@ pub(crate) async fn save_player(
         .map_or((None, None), |wk| (Some(wk.zone), Some(wk.id)));
     // Wizinvis level — `WizInvis(level)` round-trips through
     // `Characters.invis_level`. Absent component → 0 (visible).
-    let invis_level = world
-        .get::<mud_world::WizInvis>(entity)
-        .map_or(0, |w| w.0);
+    let invis_level = world.get::<mud_world::WizInvis>(entity).map_or(0, |w| w.0);
     // Frozen marker → freeze_level. The schema column is
     // nullable; we send None when the marker is absent, so an
     // unfreeze on this session genuinely clears the lock instead
     // of leaving a stale level on the row.
-    let freeze_level: Option<i32> = world
-        .get::<mud_world::Frozen>(entity)
-        .map(|_| 1);
+    let freeze_level: Option<i32> = world.get::<mud_world::Frozen>(entity).map(|_| 1);
     // Wimpy threshold — `WimpyThreshold(pct)` round-trips through
     // the schema column. The on/off switch is the `Wimpy` PlayerFlag,
     // not this value: 0 means "no explicit override; use the 25%
@@ -2876,7 +3494,15 @@ pub(crate) async fn save_player(
                     !flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Temporary))
                 })
                 .map(|(e, l, wk, eq, pid, ch, lc, _, _)| {
-                    (e, l.0, *wk, eq.copied(), pid.copied(), ch.copied(), lc.cloned())
+                    (
+                        e,
+                        l.0,
+                        *wk,
+                        eq.copied(),
+                        pid.copied(),
+                        ch.copied(),
+                        lc.cloned(),
+                    )
                 })
                 .collect()
         };
@@ -2902,7 +3528,8 @@ pub(crate) async fn save_player(
             .map(|(e, _, _, _, pid, _, _)| (*e, pid.map(|p| p.0)))
             .collect();
 
-        let mut snaps: Vec<mud_db::character_items::CharacterItemSnap> = Vec::with_capacity(order.len());
+        let mut snaps: Vec<mud_db::character_items::CharacterItemSnap> =
+            Vec::with_capacity(order.len());
         let mut ents: Vec<Entity> = Vec::with_capacity(order.len());
         for (e, parent, wk, eq, pid, ch, lc) in &order {
             let parent_persisted_id = if *parent == entity {
@@ -2966,9 +3593,8 @@ pub(crate) async fn save_player(
     // Cooldowns: ready_at Instants → wall-clock unix seconds so the
     // value is meaningful across process restarts. Drop already-
     // expired keys so the JSON stays small.
-    let cooldowns_json: Option<serde_json::Value> = world
-        .get::<mud_world::Cooldowns>(entity)
-        .and_then(|cd| {
+    let cooldowns_json: Option<serde_json::Value> =
+        world.get::<mud_world::Cooldowns>(entity).and_then(|cd| {
             let now = std::time::Instant::now();
             let now_unix = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2981,7 +3607,10 @@ pub(crate) async fn save_player(
                         return None;
                     }
                     let secs_left = ready_at.duration_since(now).as_secs();
-                    Some((id.to_string(), now_unix.saturating_add(i64::try_from(secs_left).unwrap_or(0))))
+                    Some((
+                        id.to_string(),
+                        now_unix.saturating_add(i64::try_from(secs_left).unwrap_or(0)),
+                    ))
                 })
                 .collect();
             if map.is_empty() {
@@ -3075,10 +3704,8 @@ pub(crate) async fn save_player(
         .map(mud_world::Aliases::to_rows)
         .unwrap_or_default();
     let alias_count = alias_rows.len();
-    let core_stats_payload: Option<mud_db::characters::CoreStatsPayload> = world
-        .get::<CoreStats>(entity)
-        .copied()
-        .map(Into::into);
+    let core_stats_payload: Option<mud_db::characters::CoreStatsPayload> =
+        world.get::<CoreStats>(entity).copied().map(Into::into);
     // Time-played accumulator. We compute the deltas now, but only
     // bump the in-memory anchor AFTER the tx commits — otherwise a
     // rolled-back save would advance the local counter without the
@@ -3112,9 +3739,7 @@ pub(crate) async fn save_player(
         match world.get::<Posture>(entity).map(|p| p.0) {
             Some(PostureKind::Sleeping) => mud_db::enums::Position::Sleeping,
             Some(PostureKind::Resting) => mud_db::enums::Position::Resting,
-            Some(PostureKind::Sitting | PostureKind::Kneeling) => {
-                mud_db::enums::Position::Sitting
-            }
+            Some(PostureKind::Sitting | PostureKind::Kneeling) => mud_db::enums::Position::Sitting,
             Some(PostureKind::Standing) | None => mud_db::enums::Position::Standing,
         }
     };
@@ -3164,30 +3789,15 @@ pub(crate) async fn save_player(
         mud_db::characters::save_drunkenness(&mut *tx, &cid, drunk).await?;
         mud_db::characters::save_script_vars(&mut *tx, &cid, script_vars_json.as_ref()).await?;
         mud_db::characters::save_trophy(&mut *tx, &cid, trophy_json.as_ref()).await?;
-        mud_db::characters::save_spell_cooldowns(
-            &mut *tx,
-            &cid,
-            spell_cooldowns_json.as_ref(),
-        )
-        .await?;
+        mud_db::characters::save_spell_cooldowns(&mut *tx, &cid, spell_cooldowns_json.as_ref())
+            .await?;
         mud_db::characters::save_cooldowns(&mut *tx, &cid, cooldowns_json.as_ref()).await?;
         mud_db::characters::save_ignore_list(&mut *tx, &cid, ignore_list_json.as_ref()).await?;
-        mud_db::characters::save_effect_instances(
-            &mut *tx,
-            &cid,
-            effect_instances_json.as_ref(),
-        )
-        .await?;
+        mud_db::characters::save_effect_instances(&mut *tx, &cid, effect_instances_json.as_ref())
+            .await?;
         mud_db::characters::save_pets(&mut *tx, &cid, pets_json.as_ref()).await?;
         mud_db::characters::save_bank_wealth(&mut *tx, &cid, bank).await?;
-        mud_db::characters::save_rest_state(
-            &mut *tx,
-            &cid,
-            repose,
-            rest_source,
-            rest_tier,
-        )
-        .await?;
+        mud_db::characters::save_rest_state(&mut *tx, &cid, repose, rest_source, rest_tier).await?;
         mud_db::users::save_account_wealth(&mut *tx, &user_id, account_wealth).await?;
         if let Some(t) = new_time_played {
             mud_db::characters::save_time_played(&mut *tx, &cid, t).await?;
@@ -3259,7 +3869,11 @@ pub(crate) async fn save_player(
 /// rows whose parent never spawned (also logged). Returns total spawn
 /// count for the login info line.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[CharacterItemRow]) -> usize {
+pub(crate) fn spawn_inventory(
+    world: &mut World,
+    player: Entity,
+    rows: &[CharacterItemRow],
+) -> usize {
     use std::collections::HashMap;
     // row.id → spawned Entity. Top-level items spawn first; nested rows
     // wait for their parent to land.
@@ -3314,7 +3928,9 @@ pub(crate) fn spawn_inventory(world: &mut World, player: Entity, rows: &[Charact
                 .cloned();
             let mut bundle = world.spawn((
                 Item,
-                Named { name: proto.name.clone() },
+                Named {
+                    name: proto.name.clone(),
+                },
                 Keywords(proto.keywords.clone()),
                 WorldKey {
                     zone: proto.zone_id,
@@ -3579,10 +4195,8 @@ fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
 fn send_confirm_create_prompt(outbound: &Outbound, identifier: &str, is_email: bool) {
     let kind_label = if is_email { "account" } else { "character" };
     let _ = outbound.try_send(
-        format!(
-            "I don't see a {kind_label} for `{identifier}`. Create a new one? (yes/no): "
-        )
-        .into_bytes(),
+        format!("I don't see a {kind_label} for `{identifier}`. Create a new one? (yes/no): ")
+            .into_bytes(),
     );
 }
 
@@ -3626,7 +4240,7 @@ fn pick_starting_room(c: &CharacterRow, race_start: Option<(i32, i32)>) -> (i32,
 ///   `currentRoom`.
 ///
 /// `now_unix` and `last_login_unix` are wall-clock seconds; the
-/// difference is the offline window length. `None` last_login means
+/// difference is the offline window length. `None` `last_login` means
 /// fresh character — pretend they exited inside grace.
 fn pick_rest_starting_room(
     c: &CharacterRow,
@@ -3635,16 +4249,14 @@ fn pick_rest_starting_room(
     last_login_unix: Option<i64>,
 ) -> (i32, i32) {
     use mud_db::enums::RestSource;
-    let elapsed = last_login_unix
-        .map(|prev| now_unix.saturating_sub(prev).max(0))
-        .unwrap_or(0);
+    let elapsed = last_login_unix.map_or(0, |prev| now_unix.saturating_sub(prev).max(0));
     // CAMP / INN / HOUSE: spawn where logged off, period.
     match c.rest_source {
         RestSource::Camp | RestSource::Inn | RestSource::House => {
             if let (Some(z), Some(r)) = (c.current_room_zone_id, c.current_room_id) {
                 return (z, r);
             }
-            return pick_starting_room(c, race_start);
+            pick_starting_room(c, race_start)
         }
         RestSource::Quit | RestSource::None => {
             if elapsed >= REST_QUIT_GRACE_SECS {
@@ -3673,7 +4285,11 @@ fn pick_rest_starting_room(
 /// drive the rate / cap table. `existing_repose` is the sticky pool
 /// that survives logouts.
 #[must_use]
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn accrue_repose(existing_repose: i32, tier: i32, level: i32, elapsed_secs: i64) -> i32 {
     if !(1..=3).contains(&tier) || elapsed_secs <= 0 {
         return existing_repose;
@@ -3702,10 +4318,7 @@ fn accrue_repose(existing_repose: i32, tier: i32, level: i32, elapsed_secs: i64)
 mod tests {
     use super::*;
 
-    fn row(
-        cur: Option<(i32, i32)>,
-        recall: Option<(i32, i32)>,
-    ) -> CharacterRow {
+    fn row(cur: Option<(i32, i32)>, recall: Option<(i32, i32)>) -> CharacterRow {
         CharacterRow {
             id: "c".into(),
             name: "Tester".into(),
@@ -3893,6 +4506,7 @@ mod tests {
         // T1 cap = 10% of bracket; for L5 bracket ≈ 33k, so cap ≈ 3.3k.
         assert!(result > 0);
         let bracket = commands::experience_for_level(6) - commands::experience_for_level(5);
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
         let expected_cap = (bracket as f64 * 0.10) as i32;
         assert!(result <= expected_cap, "{result} > {expected_cap}");
     }
@@ -3911,6 +4525,7 @@ mod tests {
         // because the spec wants a deterministic per-tier ceiling.
         let r = accrue_repose(999_999_999, 1, 5, 3_600);
         let bracket = commands::experience_for_level(6) - commands::experience_for_level(5);
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
         let cap = (bracket as f64 * 0.10) as i32;
         assert_eq!(r, cap);
     }
@@ -3974,5 +4589,377 @@ mod tests {
     fn gender_match_rejects_unknown() {
         assert_eq!(match_playable_gender("nonbinary"), None);
         assert_eq!(match_playable_gender(""), None);
+    }
+    // ---- login hardening: hashing, throttle, takeover ---------------
+
+    fn legacy_hash(plaintext: &str) -> String {
+        #[allow(deprecated)]
+        let full = pwhash::unix_crypt::hash_with("Li", plaintext).unwrap();
+        full[..10].to_string()
+    }
+
+    #[test]
+    fn verify_password_any_legacy_compare_is_case_sensitive() {
+        let stored = legacy_hash("hunter2");
+        assert!(verify_password_any("hunter2", &stored));
+        // Password differing only in letter case.
+        assert!(!verify_password_any("Hunter2", &stored));
+        assert!(!verify_password_any("HUNTER2", &stored));
+        // Stored hash differing only in letter case ("Li" salt has an
+        // uppercase letter, so lowercasing always changes it).
+        let lowered = stored.to_ascii_lowercase();
+        assert_ne!(lowered, stored);
+        assert!(!verify_password_any("hunter2", &lowered));
+        let uppered = stored.to_ascii_uppercase();
+        assert_ne!(uppered, stored);
+        assert!(!verify_password_any("hunter2", &uppered));
+    }
+
+    #[test]
+    fn verify_password_any_rejects_salt_only_legacy_hash() {
+        // A stored value of just the salt would otherwise match any
+        // password (crypt output begins with the salt).
+        assert!(!verify_password_any("anything", "Li"));
+        assert!(!verify_password_any("anything", "Li1234567"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_verify_and_hash_roundtrip() {
+        let hashed = hash_password_blocking("hunter2".to_string()).await.unwrap();
+        assert!(hashed.starts_with("$2"));
+        assert!(verify_password_blocking("hunter2".into(), hashed.clone()).await);
+        assert!(!verify_password_blocking("hunter3".into(), hashed).await);
+        let legacy = legacy_hash("hunter2");
+        assert!(verify_password_blocking("hunter2".into(), legacy.clone()).await);
+        assert!(!verify_password_blocking("Hunter2".into(), legacy).await);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_verify_does_not_stall_current_thread_runtime() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        // Cost-12 hash (~250 ms+ per verify) -- the production cost.
+        let hashed = hash_password_blocking("hunter2".to_string()).await.unwrap();
+        let ticks = Arc::new(AtomicU32::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let (t2, d2) = (ticks.clone(), done.clone());
+        // Stand-in for the game tick: must keep running while the
+        // verification is in flight on the single-threaded runtime.
+        let ticker = tokio::spawn(async move {
+            while !d2.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                t2.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let ok = verify_password_blocking("hunter2".into(), hashed).await;
+        done.store(true, Ordering::SeqCst);
+        ticker.await.unwrap();
+        assert!(ok);
+        assert!(
+            ticks.load(Ordering::SeqCst) >= 3,
+            "ticker starved during verification: {} ticks",
+            ticks.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn legacy_throttle_locks_at_threshold_and_expires() {
+        let mut th = LegacyLoginThrottle::default();
+        let win = Duration::from_secs(900);
+        let t0 = Instant::now();
+        assert_eq!(th.record_failure("bob", t0, 3, win), (1, false));
+        assert_eq!(th.record_failure("bob", t0, 3, win), (2, false));
+        assert!(th.locked_for("bob", t0, 3, win).is_none());
+        assert_eq!(th.record_failure("bob", t0, 3, win), (3, true));
+        assert!(th.locked_for("bob", t0, 3, win).is_some());
+        // Other names are unaffected.
+        assert!(th.locked_for("alice", t0, 3, win).is_none());
+        // Still locked just inside the window, free just past it.
+        assert!(
+            th.locked_for("bob", t0 + Duration::from_secs(899), 3, win)
+                .is_some()
+        );
+        assert!(
+            th.locked_for("bob", t0 + Duration::from_secs(901), 3, win)
+                .is_none()
+        );
+        // A failure after expiry starts a fresh count.
+        assert_eq!(
+            th.record_failure("bob", t0 + Duration::from_secs(901), 3, win),
+            (1, false)
+        );
+        // Disabled when max <= 0.
+        assert!(th.locked_for("bob", t0, 0, win).is_none());
+        th.clear("bob");
+        assert!(th.locked_for("bob", t0, 3, win).is_none());
+    }
+
+    fn lazy_pool() -> PgPool {
+        // Never connects: the paths under test don't touch the DB.
+        mud_db::sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap()
+    }
+
+    fn auth_world(max_attempts: i64) -> World {
+        let mut world = World::new();
+        let mut cfg = mud_world::RuntimeConfig::default();
+        cfg.by_key.insert(
+            ("security".into(), "max_login_attempts".into()),
+            mud_world::ConfigValue::Int(max_attempts),
+        );
+        cfg.by_key.insert(
+            ("security".into(), "login_timeout_minutes".into()),
+            mud_world::ConfigValue::Int(15),
+        );
+        world.insert_resource(cfg);
+        world
+    }
+
+    fn legacy_sentinel(hash: &str) -> (User, Option<Box<CharacterRow>>) {
+        let user = User {
+            id: String::new(),
+            email: "Tester".into(),
+            display_name: String::new(),
+            password_hash: Some(hash.to_string()),
+            role: mud_db::enums::UserRole::Player,
+            failed_login_attempts: 0,
+            locked_until: None,
+            account_wealth: 0,
+        };
+        let mut c = row(None, None);
+        c.user_id = None;
+        (user, Some(Box::new(c)))
+    }
+
+    fn park_at_password(router: &mut ConnRouter, conn: ConnId, hash: &str) {
+        let (user, preselected) = legacy_sentinel(hash);
+        router.login.get_mut(&conn).unwrap().stage = Stage::AwaitingPassword { user, preselected };
+    }
+
+    /// Type one password at a parked connection and drive the
+    /// off-thread job to completion (the main loop's select arm).
+    async fn attempt(
+        router: &mut ConnRouter,
+        rx: &mut UnboundedReceiver<AuthDone>,
+        world: &mut World,
+        pool: &PgPool,
+        conn: ConnId,
+        pw: &str,
+    ) {
+        router.on_line(conn, pw.to_string(), pool, world).await;
+        if let Ok(done) = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
+            router.on_auth_done(done.unwrap(), pool, world).await;
+        }
+    }
+
+    fn drain(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> String {
+        let mut s = String::new();
+        while let Ok(b) = rx.try_recv() {
+            s.push_str(&String::from_utf8_lossy(&b));
+        }
+        s
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unlinked_legacy_character_is_locked_out_after_n_failures() {
+        let mut world = auth_world(3);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let mut rx = router.take_auth_rx().unwrap();
+        let hash = legacy_hash("hunter2");
+        // Fresh connection per attempt: the lock must follow the
+        // character, not the socket.
+        for conn in 1..=3 {
+            let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+            router.on_connect(conn, tx, &world);
+            park_at_password(&mut router, conn, &hash);
+            attempt(&mut router, &mut rx, &mut world, &pool, conn, "wrong").await;
+            let out = drain(&mut orx);
+            assert!(out.contains("Invalid credentials"), "attempt {conn}: {out}");
+            if conn == 3 {
+                assert!(out.contains("locked"), "3rd failure should lock: {out}");
+            }
+        }
+        // Correct password is now refused without ever verifying.
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(4, tx, &world);
+        park_at_password(&mut router, 4, &hash);
+        router.on_line(4, "hunter2".into(), &pool, &mut world).await;
+        let out = drain(&mut orx);
+        assert!(out.contains("temporarily locked"), "{out}");
+        assert!(matches!(
+            router.login.get(&4).unwrap().stage,
+            Stage::AwaitingIdentifier
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "no verification job should be queued"
+        );
+        // Window expiry releases the lock.
+        let key = LegacyLoginThrottle::key("Tester");
+        let later = Instant::now() + lock_window(15) + Duration::from_secs(1);
+        assert!(
+            router
+                .legacy_throttle
+                .locked_for(&key, later, 3, lock_window(15))
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn connection_is_dropped_after_too_many_wrong_passwords() {
+        // Throttle disabled (max 0) so only the per-connection cap acts.
+        let mut world = auth_world(0);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let mut rx = router.take_auth_rx().unwrap();
+        let hash = legacy_hash("hunter2");
+        let (tx, mut orx) = tokio::sync::mpsc::channel(256);
+        router.on_connect(1, tx, &world);
+        for i in 1..=MAX_FAILED_PASSWORDS_PER_CONN {
+            assert!(
+                router.login.contains_key(&1),
+                "dropped early at attempt {i}"
+            );
+            park_at_password(&mut router, 1, &hash);
+            attempt(&mut router, &mut rx, &mut world, &pool, 1, "wrong").await;
+        }
+        assert!(!router.login.contains_key(&1));
+        assert_eq!(router.live_connections(), 0);
+        assert!(drain(&mut orx).contains("Too many failed login attempts"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn other_connection_input_is_processed_while_verification_in_flight() {
+        let mut world = auth_world(0);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let mut rx = router.take_auth_rx().unwrap();
+        let (tx_a, _orx_a) = tokio::sync::mpsc::channel(64);
+        let (tx_b, mut orx_b) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx_a, &world);
+        router.on_connect(2, tx_b, &world);
+        drain(&mut orx_b);
+        // A: linked account with a real bcrypt hash.
+        let user = User {
+            id: "u1".into(),
+            email: "a@example.com".into(),
+            display_name: "a".into(),
+            password_hash: Some(bcrypt::hash("pw-a-long", 4).unwrap()),
+            role: mud_db::enums::UserRole::Player,
+            failed_login_attempts: 0,
+            locked_until: None,
+            account_wealth: 0,
+        };
+        router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+            user,
+            preselected: None,
+        };
+        router.login.get_mut(&2).unwrap().stage = Stage::ConfirmCreate {
+            identifier: "Newbie".into(),
+            is_email: false,
+        };
+        router
+            .on_line(1, "pw-a-long".into(), &pool, &mut world)
+            .await;
+        // A is parked, job queued but not resolved yet.
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::Authenticating
+        ));
+        assert!(rx.try_recv().is_err());
+        // B is served immediately, before A's result is applied.
+        router.on_line(2, "no".into(), &pool, &mut world).await;
+        assert!(drain(&mut orx_b).contains("existing email or character name"));
+        // A's input while authenticating is swallowed, stage preserved.
+        router.on_line(1, "junk".into(), &pool, &mut world).await;
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::Authenticating
+        ));
+        // The job resolves with the right answer.
+        let done = rx.recv().await.unwrap();
+        match done.kind {
+            AuthDoneKind::Password {
+                ok, migration_hash, ..
+            } => {
+                assert!(ok);
+                assert!(migration_hash.is_none());
+            }
+            AuthDoneKind::Create { .. } => panic!("wrong job kind"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn second_login_of_same_character_takes_over_single_entity() {
+        let mut world = World::new();
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        thread_local! {
+            static CLOSED: std::cell::RefCell<Vec<ConnId>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        router.close_conn = |c| {
+            CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        // First connection is already playing the character.
+        let entity = world
+            .spawn((
+                Player,
+                Account {
+                    user_id: "u".into(),
+                    character_id: "c".into(),
+                    role: mud_db::enums::UserRole::Player,
+                    perms: vec![],
+                },
+                Connection(tx1),
+            ))
+            .id();
+        router.playing.insert(1, entity);
+        // Second connection authenticates as the same character.
+        router.on_connect(2, tx2, &world);
+        drain(&mut rx2);
+        assert!(router.try_takeover(&mut world, 2, "c"));
+
+        // Exactly one entity for that character; it is the original.
+        let owners: Vec<Entity> = world
+            .query_filtered::<(Entity, &Account), With<Player>>()
+            .iter(&world)
+            .filter(|(_, a)| a.character_id == "c")
+            .map(|(e, _)| e)
+            .collect();
+        assert_eq!(owners, vec![entity]);
+        // First connection: told why, detached, and its channel is closed.
+        assert!(drain(&mut rx1).contains("taken over"));
+        assert!(matches!(
+            rx1.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(!router.playing.contains_key(&1));
+        // ...and the old socket was actually asked to close (only it).
+        assert_eq!(CLOSED.with(|v| v.borrow().clone()), vec![1]);
+        // Second connection owns the entity and was told so.
+        assert_eq!(router.playing.get(&2), Some(&entity));
+        assert_eq!(router.find_conn(entity), Some(2));
+        assert!(!router.login.contains_key(&2));
+        assert!(drain(&mut rx2).contains("You take over your own body, already in use!"));
+        world
+            .get::<Connection>(entity)
+            .unwrap()
+            .0
+            .try_send(b"hi".to_vec())
+            .unwrap();
+        assert_eq!(rx2.try_recv().unwrap(), b"hi");
+        // The old socket's late disconnect must not save/despawn the entity.
+        router.on_disconnect(&mut world, 1, &pool).await;
+        assert!(world.get_entity(entity).is_ok());
+        // A different character is not a takeover.
+        let (tx3, _rx3) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        router.on_connect(3, tx3, &world);
+        assert!(!router.try_takeover(&mut world, 3, "other"));
     }
 }

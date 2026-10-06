@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use crate::enums::Sector;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Room {
     pub zone_id: i32,
     pub id: i32,
@@ -37,7 +38,7 @@ pub struct Room {
     /// origin), mirroring legacy parity. Stored as `NoTeleportRoom`.
     pub allows_teleport: bool,
     /// `Room.is_death_trap` — entering immediately kills the player.
-    /// Classic CircleMUD DT semantics. Stored as `DeathTrap`.
+    /// Classic `CircleMUD` DT semantics. Stored as `DeathTrap`.
     pub is_death_trap: bool,
     /// `Room.is_indoors` — suppresses weather/sky rendering and
     /// flags the room as sheltered for sector-based heuristics.
@@ -69,7 +70,7 @@ pub struct Room {
     /// Builder-authored mapper coordinates. Nullable per axis;
     /// when any are set the runtime threads them through to the
     /// `Room.Info` GMCP frame so client-side mappers (Mudlet,
-    /// MUSHclient) can place rooms exactly where the builder
+    /// `MUSHclient`) can place rooms exactly where the builder
     /// laid them out instead of falling back to compass-walk
     /// auto-placement. Z defaults to 0 in the schema; X/Y are
     /// genuinely Option (rooms imported from legacy sources
@@ -79,7 +80,7 @@ pub struct Room {
     pub layout_z: Option<i32>,
     /// Rest / repose: true when builders have flagged this room as an
     /// inn. Gates the `rent` command — listing tiers and accepting
-    /// payment for an `INN` RestSource.
+    /// payment for an `INN` `RestSource`.
     pub is_inn: bool,
     /// Display name for the inn (e.g. "The Rusty Boar"). Used in the
     /// tier menu rendered by `rent`. Null on non-inn rooms.

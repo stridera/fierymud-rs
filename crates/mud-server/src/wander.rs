@@ -55,10 +55,12 @@ pub fn wander_tick(world: &mut World) {
     // Snapshot every eligible mob with its current room. The full
     // gate runs in Rust here; the per-step exit roll happens later.
     let candidates: Vec<(Entity, Entity)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, Option<&MobBehaviors>, Option<&AttachedTriggers>),
-            (With<Mob>, Without<Fighting>, Without<RiddenBy>),
-        >();
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Located,
+            Option<&MobBehaviors>,
+            Option<&AttachedTriggers>,
+        ), (With<Mob>, Without<Fighting>, Without<RiddenBy>)>();
         q.iter(world)
             .filter(|(_, _, beh, _)| !beh.is_some_and(|b| b.has(MobBehavior::Sentinel)))
             .map(|(e, l, _, _)| (e, l.0))
@@ -149,8 +151,9 @@ pub fn wander_tick(world: &mut World) {
         if let Some(mut l) = world.get_mut::<Located>(mob) {
             l.0 = target_room;
         }
-        let arrival_dir =
-            opposite(dir).map_or("nearby".to_string(), |d| format!("the {}", direction_name(d)));
+        let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
+            format!("the {}", direction_name(d))
+        });
         broadcast_room_except_players_rendered(
             world,
             target_room,
@@ -175,10 +178,8 @@ pub fn scavenger_tick(world: &mut World) {
         return;
     }
     let scavengers: Vec<(Entity, Entity)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &MobBehaviors),
-            (With<Mob>, Without<Fighting>),
-        >();
+        let mut q = world
+            .query_filtered::<(Entity, &Located, &MobBehaviors), (With<Mob>, Without<Fighting>)>();
         q.iter(world)
             .filter(|(_, _, beh)| beh.has(MobBehavior::Scavenger))
             .map(|(e, l, _)| (e, l.0))
@@ -192,10 +193,8 @@ pub fn scavenger_tick(world: &mut World) {
         // body still on the floor, not vanished into a mob's
         // inventory and despawned with the mob's next tick.
         let target_item: Option<(Entity, String)> = {
-            let mut q = world.query_filtered::<
-                (Entity, &Located, &Named),
-                (With<Item>, Without<Corpse>),
-            >();
+            let mut q =
+                world.query_filtered::<(Entity, &Located, &Named), (With<Item>, Without<Corpse>)>();
             q.iter(world)
                 .find(|(_, l, _)| l.0 == room)
                 .map(|(e, _, n)| (e, n.name.clone()))
@@ -261,7 +260,9 @@ mod tests {
         world
             .spawn((
                 Mob,
-                Named { name: "test mob".to_string() },
+                Named {
+                    name: "test mob".to_string(),
+                },
                 Located(room),
             ))
             .id()

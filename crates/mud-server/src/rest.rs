@@ -29,7 +29,7 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::RestSource;
 use mud_world::{
     AppliedTo, EffectCatalog, EffectInstance, EffectSource, PendingWakeAttachments, Profile,
-    RefreshedBonus, RegenBonus, RestState, WakeRow, WorldKey,
+    RefreshedBonus, RegenBonus, RestState, WakeEffectCatalog, WakeRow, WorldKey,
 };
 use tracing::warn;
 
@@ -90,7 +90,11 @@ pub fn award_experience(world: &mut World, entity: Entity, base_xp: i32) -> i32 
 /// R5: spend Repose to multiply the gain. Returns the bonus XP
 /// drawn from the pool (0 when the pool is empty). Pure mutation of
 /// `RestState.repose`; doesn't touch `Profile.experience`.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub fn apply_repose_on_xp(world: &mut World, entity: Entity, base_xp: i32) -> i32 {
     let pool = world.get::<RestState>(entity).map_or(0, |r| r.repose);
     if pool <= 0 || base_xp <= 0 {
@@ -131,11 +135,8 @@ pub fn consume_rest_source_on_xp(world: &mut World, entity: Entity) {
     }
     // Spawn the universal Refreshed Effect.
     spawn_refreshed_effect(world, entity, rest.tier);
-    // Apply source-keyed Wake Effect attachments. The DB load
-    // happens via a stashed `Pool` and the helper is sync; we keep
-    // the per-attachment EffectInstance spawn inline because the
-    // queue is tiny (~1-3 rows typical) and the alternative is a
-    // full async path through the dispatcher.
+    // Apply source-keyed Wake Effect attachments from the boot-loaded
+    // `WakeEffectCatalog` (no DB access on this path).
     match rest.source {
         RestSource::Inn => apply_inn_wake_attachments(world, entity, rest.tier),
         RestSource::Camp => apply_camp_wake_attachments(world, entity),
@@ -169,7 +170,7 @@ fn spawn_refreshed_effect(world: &mut World, entity: Entity, rest_tier: i32) {
         );
         return;
     };
-    let strength = rest_tier.max(1).min(3);
+    let strength = rest_tier.clamp(1, 3);
     let hp_bonus = REFRESHED_HP_PER_STRENGTH.saturating_mul(strength);
     let stamina_bonus = REFRESHED_STAMINA_PER_STRENGTH.saturating_mul(strength);
     // Apply the regen delta inline (R6). The on-remove unwind in
@@ -200,7 +201,7 @@ fn spawn_refreshed_effect(world: &mut World, entity: Entity, rest_tier: i32) {
     ));
 }
 
-/// Spawn one `EffectInstance` per WakeRow, attached to the waking
+/// Spawn one `EffectInstance` per `WakeRow`, attached to the waking
 /// character. The catalog lookup keys on `effect_id`; rows whose
 /// effect isn't in the live catalog log a warn and skip (a missing
 /// row is a content bug, not a runtime crash).
@@ -237,65 +238,47 @@ fn spawn_wake_rows(world: &mut World, entity: Entity, rows: Vec<WakeRow>) {
     }
 }
 
-/// INN wake attachments: query `RoomWakeEffects` for the player's
-/// current room, filtered by tier. Spec says the room where the
-/// player logged off — for v1 we use `Located` (the current room),
-/// which is the same room since `pick_rest_starting_room` lands
-/// INN-sourced players back where they rented.
+/// INN wake attachments: look up `RoomWakeEffects` for the player's
+/// current room in the boot-loaded [`WakeEffectCatalog`], filtered by
+/// tier. Spec says the room where the player logged off — for v1 we
+/// use `Located` (the current room), which is the same room since
+/// `pick_rest_starting_room` lands INN-sourced players back where
+/// they rented. Pure in-memory read: this runs inside ECS systems on
+/// a current-thread runtime and must never block on the DB.
 fn apply_inn_wake_attachments(world: &mut World, entity: Entity, rest_tier: i32) {
-    // We need the room's (zone, id) and a DB pool. Mirror the
-    // pattern in commands.rs: `DbPool` resource carries a clone of
-    // the pool we can block_on against. Wake-attachment loading is
-    // synchronous-from-the-call-site but the underlying DB op is
-    // async; we use `tokio::runtime::Handle::block_on` so we don't
-    // need to thread async through every gain site.
     let room_key = world
         .get::<mud_world::Located>(entity)
         .and_then(|l| world.get::<WorldKey>(l.0).copied());
     let Some(wk) = room_key else { return };
-    let Some(pool) = world.get_resource::<crate::commands::DbPool>().map(|p| p.0.clone()) else {
+    let Some(catalog) = world.get_resource::<WakeEffectCatalog>() else {
         return;
     };
-    let rows = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            mud_world::room_wake_effects(&pool, wk.zone, wk.id, rest_tier).await
-        })
-    });
-    match rows {
-        Ok(rows) => spawn_wake_rows(world, entity, rows),
-        Err(e) => warn!(error = %e, "room wake-effect load failed"),
-    }
+    let rows = catalog.room_rows(wk.zone, wk.id, rest_tier);
+    spawn_wake_rows(world, entity, rows);
 }
 
 /// CAMP wake attachments: read the `PendingWakeAttachments`
-/// transient component populated at camp completion, query
-/// `ObjectWakeEffects` for the kit, spawn each, then drop the
-/// component.
+/// transient component populated at camp completion, look up the kit's
+/// `ObjectWakeEffects` rows in the [`WakeEffectCatalog`], spawn each,
+/// then drop the component.
 fn apply_camp_wake_attachments(world: &mut World, entity: Entity) {
     let Some(pending) = world.get::<PendingWakeAttachments>(entity).copied() else {
         return;
     };
-    let Some(pool) = world.get_resource::<crate::commands::DbPool>().map(|p| p.0.clone()) else {
-        return;
-    };
-    let rows = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            mud_world::object_wake_effects(&pool, pending.kit_zone, pending.kit_id).await
-        })
-    });
-    match rows {
-        Ok(rows) => spawn_wake_rows(world, entity, rows),
-        Err(e) => warn!(error = %e, "object wake-effect load failed"),
-    }
+    let rows = world
+        .get_resource::<WakeEffectCatalog>()
+        .map(|c| c.object_rows(pending.kit_zone, pending.kit_id))
+        .unwrap_or_default();
+    spawn_wake_rows(world, entity, rows);
     if let Ok(mut em) = world.get_entity_mut(entity) {
         em.remove::<PendingWakeAttachments>();
     }
 }
 
 /// R6: companion to effects.rs's on-remove path. When a Refreshed
-/// EffectInstance fades, look up its `RefreshedBonus` companion and
+/// `EffectInstance` fades, look up its `RefreshedBonus` companion and
 /// subtract the same `RegenBonus` delta that the wake spawned. Called
-/// from `effects_tick`'s on_remove arm.
+/// from `effects_tick`'s `on_remove` arm.
 pub fn unwind_refreshed_bonus(world: &mut World, effect_entity: Entity, target: Entity) {
     let Some(bonus) = world.get::<RefreshedBonus>(effect_entity).copied() else {
         return;
@@ -303,5 +286,141 @@ pub fn unwind_refreshed_bonus(world: &mut World, effect_entity: Entity, target: 
     if let Some(mut r) = world.get_mut::<RegenBonus>(target) {
         r.hp = r.hp.saturating_sub(bonus.hp);
         r.stamina = r.stamina.saturating_sub(bonus.stamina);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mud_world::{EffectDef, Located, PendingWakeAttachments, RoomWakeRow, WakeEffectCatalog};
+
+    fn effect_def(id: i32, name: &str) -> EffectDef {
+        EffectDef {
+            id,
+            name: name.to_string(),
+            description: None,
+            effect_type: "status".to_string(),
+            tags: Vec::new(),
+            presence_override: None,
+            default_params: serde_json::Value::Null,
+            prevents_speaking: false,
+            prevents_casting: false,
+            prevents_movement: false,
+            on_apply: None,
+            on_tick: None,
+            on_remove: None,
+        }
+    }
+
+    fn wake_row(effect_id: i32) -> WakeRow {
+        WakeRow {
+            effect_id,
+            modifier_data: serde_json::Value::Null,
+            duration: 600,
+        }
+    }
+
+    /// Minimal world: one room, one player resting in it, a catalog with
+    /// the universal Refreshed effect (id 1) and one wake-attachment
+    /// effect (id 2), and a wake catalog authored for the room + a kit.
+    fn setup(source: RestSource, tier: i32) -> (World, Entity) {
+        let mut world = World::new();
+        let mut effects = EffectCatalog::default();
+        effects
+            .by_id
+            .insert(1, effect_def(1, REFRESHED_EFFECT_NAME));
+        effects.by_id.insert(2, effect_def(2, "Cozy"));
+        world.insert_resource(effects);
+        let mut wake = WakeEffectCatalog::default();
+        wake.by_room.insert(
+            (30, 1),
+            vec![
+                RoomWakeRow {
+                    min_tier: None,
+                    row: wake_row(2),
+                },
+                RoomWakeRow {
+                    min_tier: Some(3),
+                    row: wake_row(2),
+                },
+            ],
+        );
+        wake.by_object.insert((40, 7), vec![wake_row(2)]);
+        world.insert_resource(wake);
+        let room = world.spawn(WorldKey { zone: 30, id: 1 }).id();
+        let player = world
+            .spawn((
+                Located(room),
+                Profile {
+                    level: 5,
+                    class_id: None,
+                    race: "Human".to_string(),
+                    experience: 0,
+                    gender: "neutral".to_string(),
+                },
+                RestState {
+                    repose: 0,
+                    source,
+                    tier,
+                },
+            ))
+            .id();
+        (world, player)
+    }
+
+    fn effect_count(world: &mut World, kind: i32) -> usize {
+        world
+            .query::<&EffectInstance>()
+            .iter(world)
+            .filter(|e| e.kind == kind)
+            .count()
+    }
+
+    // current_thread flavor mirrors `#[tokio::main(flavor = "current_thread")]`
+    // in main.rs, where tokio blocking-in-place helpers would panic.
+    #[tokio::test(flavor = "current_thread")]
+    async fn inn_wake_consumed_without_blocking_runtime() {
+        let (mut world, player) = setup(RestSource::Inn, 1);
+        let gained = award_experience(&mut world, player, 100);
+        assert_eq!(gained, 100);
+        let rest = *world.get::<RestState>(player).unwrap();
+        assert!(matches!(rest.source, RestSource::None));
+        assert_eq!(rest.tier, 0);
+        assert_eq!(world.get::<Profile>(player).unwrap().experience, 100);
+        assert_eq!(effect_count(&mut world, 1), 1, "Refreshed spawned");
+        // tier 1 passes only the un-gated row; the min_tier=3 row is filtered.
+        assert_eq!(effect_count(&mut world, 2), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inn_wake_high_tier_includes_gated_rows() {
+        let (mut world, player) = setup(RestSource::Inn, 3);
+        award_experience(&mut world, player, 10);
+        assert_eq!(effect_count(&mut world, 2), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn camp_wake_consumed_without_blocking_runtime() {
+        let (mut world, player) = setup(RestSource::Camp, 1);
+        world.entity_mut(player).insert(PendingWakeAttachments {
+            kit_zone: 40,
+            kit_id: 7,
+        });
+        award_experience(&mut world, player, 50);
+        let rest = *world.get::<RestState>(player).unwrap();
+        assert!(matches!(rest.source, RestSource::None));
+        assert!(world.get::<PendingWakeAttachments>(player).is_none());
+        assert_eq!(effect_count(&mut world, 1), 1);
+        assert_eq!(effect_count(&mut world, 2), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_wake_catalog_is_not_fatal() {
+        let (mut world, player) = setup(RestSource::Inn, 1);
+        world.remove_resource::<WakeEffectCatalog>();
+        award_experience(&mut world, player, 10);
+        let rest = *world.get::<RestState>(player).unwrap();
+        assert!(matches!(rest.source, RestSource::None));
+        assert_eq!(effect_count(&mut world, 2), 0);
     }
 }

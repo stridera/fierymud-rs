@@ -23,7 +23,7 @@ use tracing::warn;
 use crate::TickCount;
 use crate::commands::DbPool;
 
-/// 10 seconds at TICK_HZ=10. Mirrors `entity_vars` cadence so the
+/// 10 seconds at `TICK_HZ=10`. Mirrors `entity_vars` cadence so the
 /// two flush systems coalesce into the same db-write spike.
 const QUEST_FLUSH_PERIOD_TICKS: u64 = 100;
 
@@ -32,7 +32,7 @@ const QUEST_FLUSH_PERIOD_TICKS: u64 = 100;
 /// DB calls run in a per-quest tokio task so they don't block the
 /// schedule.
 ///
-/// `set_quest_variable` keys by the CharacterQuest *row id*, not
+/// `set_quest_variable` keys by the `CharacterQuest` *row id*, not
 /// `(character_id, quest_zone, quest_id)`. The id is resolved per
 /// flush via `find_character_quest`. A missing row means the
 /// player hasn't accepted the quest yet (or has abandoned it); the
@@ -49,9 +49,7 @@ pub fn quest_var_flush_tick(world: &mut World) {
     if !world.contains_resource::<QuestVariableCache>() {
         return;
     }
-    let drained = world
-        .resource_mut::<QuestVariableCache>()
-        .drain_dirty();
+    let drained = world.resource_mut::<QuestVariableCache>().drain_dirty();
     if drained.is_empty() {
         return;
     }
@@ -92,9 +90,7 @@ async fn flush_one(
         }
     };
     for (key, value) in sets {
-        if let Err(e) =
-            mud_db::quests::set_quest_variable(pool, &cqid, key, value).await
-        {
+        if let Err(e) = mud_db::quests::set_quest_variable(pool, &cqid, key, value).await {
             warn!(
                 character_id,
                 quest_zone,

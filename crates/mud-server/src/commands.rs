@@ -23,13 +23,13 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Permission, PlayerFlag, Sector, UserRole};
 use mud_net::Outbound;
 use mud_world::{
-    AbilityCatalog, Account, AppliedTo, ClassCatalog, CombatStats, Cooldowns, CoreStats,
-    Description, EffectCatalog, EffectInstance, EffectSource, EquippedSlot, Exits, Fighting,
-    Follower, Frozen, Ghost, Health, Item, Keywords, KnownAbilities, LastInputAt, Located,
-    Mob, MobPrototypes, Named, ObjectPrototypes, Player, PlayerFlags, Posture,
-    PostureKind, Profile, Prompt, BankWealth, BoardDraft, MailDraft,
-    RecallPoint, RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, Wealth,
-    WearableIn, WorldKey, WorldKeyIndex,
+    AbilityCatalog, Account, AccountWealth, AppliedTo, BankWealth, BoardDraft, ClassCatalog,
+    CombatStats, Cooldowns, CoreStats, Description, EffectCatalog, EffectInstance, EffectSource,
+    EquippedSlot, Exits, Fighting, Follower, Frozen, Ghost, Health, InnRoom, Item, Keywords,
+    KnownAbilities, LastInputAt, Located, MailDraft, Mob, MobPrototypes, Named, ObjectPrototypes,
+    Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, RestState, RoomSector,
+    Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, Wealth, WearableIn, WorldKey,
+    WorldKeyIndex,
 };
 use tracing::info_span;
 
@@ -184,7 +184,9 @@ pub fn drain_player_updates(world: &mut World) {
                 for _ in 0..quantity.max(1) {
                     let mut bundle = world.spawn((
                         Item,
-                        Named { name: proto.name.clone() },
+                        Named {
+                            name: proto.name.clone(),
+                        },
                         Keywords(proto.keywords.clone()),
                         WorldKey {
                             zone: proto.zone_id,
@@ -199,11 +201,7 @@ pub fn drain_player_updates(world: &mut World) {
                 send_to(
                     world,
                     entity,
-                    format!(
-                        "You receive {} of {}.\r\n",
-                        quantity.max(1),
-                        proto.name
-                    ),
+                    format!("You receive {} of {}.\r\n", quantity.max(1), proto.name),
                 );
             }
         }
@@ -272,6 +270,9 @@ mod account_chest;
 mod admin_inspect;
 #[path = "commands/admin_management.rs"]
 mod admin_management;
+#[path = "commands/admin_reload.rs"]
+mod admin_reload;
+pub(crate) use admin_reload::shutdown_poll;
 #[path = "commands/admin_world.rs"]
 mod admin_world;
 #[path = "commands/balance.rs"]
@@ -296,10 +297,10 @@ mod game;
 mod housing;
 #[path = "commands/identity.rs"]
 mod identity;
-#[path = "commands/name_approval.rs"]
-mod name_approval;
 #[path = "commands/info.rs"]
 pub(crate) mod info;
+#[path = "commands/name_approval.rs"]
+mod name_approval;
 pub(crate) use info::{cmd_look, has_object_flag, has_restriction};
 #[path = "commands/mail.rs"]
 mod mail;
@@ -313,22 +314,40 @@ mod recall;
 #[path = "commands/rent.rs"]
 mod rent;
 pub(crate) use rent::{PendingRentConfirm, finalize_rent};
-#[path = "commands/room_chat.rs"]
-mod room_chat;
+#[path = "commands/alias_parity.rs"]
+mod alias_parity;
+#[path = "commands/economy.rs"]
+mod economy;
+#[path = "commands/followers.rs"]
+mod followers;
+#[path = "commands/magic_focus.rs"]
+mod magic_focus;
+pub(crate) use magic_focus::Concentrating;
 #[path = "commands/release.rs"]
 mod release;
+#[path = "commands/room_chat.rs"]
+mod room_chat;
 #[path = "commands/save.rs"]
 mod save;
 #[path = "commands/setrecall.rs"]
 mod setrecall;
+#[path = "commands/skills_extra.rs"]
+mod skills_extra;
 #[path = "commands/spells.rs"]
 mod spells;
 #[path = "commands/status_lists.rs"]
 mod status_lists;
+#[path = "commands/subclass.rs"]
+mod subclass;
 #[path = "commands/tells.rs"]
 mod tells;
+#[cfg(test)]
+#[path = "commands/test_support.rs"]
+pub(crate) mod test_support;
 #[path = "commands/unban.rs"]
 mod unban;
+#[path = "commands/writing.rs"]
+mod writing;
 
 /// Iterate every registered command — both the static `COMMANDS`
 /// array and any `inventory::submit!`-distributed entries. The
@@ -492,6 +511,18 @@ pub async fn try_dispatch_async(
     let head = parts.next().unwrap_or("").to_ascii_lowercase();
     let args = parts.next().unwrap_or("").trim();
 
+    // Permission gate. Async handlers are claimed before the sync
+    // dispatcher runs, so the role / permission check on the command's
+    // registry entry (every async command registers a sync stub that
+    // carries `min_role`) has to happen here or a mortal could run any
+    // async admin command.
+    if let Some(cmd) = REGISTRY.get(head.as_str())
+        && !command_permitted(world, player, cmd)
+    {
+        send_to(world, player, "You can't do that.\r\n");
+        return true;
+    }
+
     // Iterate every distributed `AsyncCommand`. The first one whose
     // dispatch fn returns `Some(future)` for this `head` claims the
     // line. Per-file modules submit AsyncCommand records the same
@@ -514,6 +545,7 @@ pub(crate) enum ComposeStep {
     BodyAdded,
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     // Whatever happens (success, error, unknown command, empty input), the
     // typing player gets a prompt at end-of-turn via flush_prompts. Marking
@@ -531,7 +563,11 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     // commands they type dispatch against the mob instead. The
     // `return` command (and `switch` with no arg) are gates that
     // we DON'T retarget — otherwise there's no escape hatch.
-    let lower_first = trimmed.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    let lower_first = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let is_escape_hatch = matches!(lower_first.as_str(), "return" | "switch");
     let player = if !is_escape_hatch
         && let Some(mud_world::SwitchedInto(mob)) =
@@ -569,7 +605,13 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
                 if let Ok(mut em) = world.get_entity_mut(player) {
                     em.remove::<PendingRentConfirm>();
                 }
-                finalize_rent(world, player, &pending.tier_name, pending.tier, pending.fee_gp);
+                finalize_rent(
+                    world,
+                    player,
+                    &pending.tier_name,
+                    pending.tier,
+                    pending.fee_gp,
+                );
                 return;
             }
             "n" | "no" => {
@@ -661,18 +703,7 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     // (regardless of min_role / required_perm) to every player. Mobs
     // still get Player-level only — DevMode is for human playtesters,
     // not Lua trigger sandboxing. See ``DevMode`` in main.rs.
-    let dev_mode_on = world.get_resource::<crate::DevMode>().is_some_and(|d| d.0);
-    let allowed = if let Some(a) = world.get::<Account>(player) {
-        dev_mode_on || (
-            a.role.at_least(cmd.min_role)
-                && cmd.required_perm.is_none_or(|p| a.perms.contains(&p))
-        )
-    } else if world.get::<Mob>(player).is_some() {
-        cmd.min_role == UserRole::Player && cmd.required_perm.is_none()
-    } else {
-        false
-    };
-    if !allowed {
+    if !command_permitted(world, player, cmd) {
         send_to(world, player, "You can't do that.\r\n");
         return;
     }
@@ -683,9 +714,11 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     // permissive). Refusal message points at the gate so an admin
     // doesn't waste time wondering why their `lua` returns nothing.
     if is_debug_command(cmd.names[0])
-        && !world
-            .resource::<mud_world::RuntimeConfig>()
-            .get_bool("security", "enable_debug_commands", true)
+        && !world.resource::<mud_world::RuntimeConfig>().get_bool(
+            "security",
+            "enable_debug_commands",
+            true,
+        )
     {
         send_to(
             world,
@@ -700,6 +733,23 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     let _g = span.enter();
     let args = skip_n_tokens(trimmed, n_consumed);
     (cmd.run)(world, player, args);
+}
+
+/// Role / permission gate shared by the sync and async dispatchers.
+/// Players check `Account.role` (+ `required_perm`); mobs (no `Account`)
+/// are allowed Player-level commands only; `DevMode` grants every command
+/// to every account holder.
+fn command_permitted(world: &World, player: Entity, cmd: &Command) -> bool {
+    let dev_mode_on = world.get_resource::<crate::DevMode>().is_some_and(|d| d.0);
+    if let Some(a) = world.get::<Account>(player) {
+        dev_mode_on
+            || (a.role.at_least(cmd.min_role)
+                && cmd.required_perm.is_none_or(|p| a.perms.contains(&p)))
+    } else if world.get::<Mob>(player).is_some() {
+        cmd.min_role == UserRole::Player && cmd.required_perm.is_none()
+    } else {
+        false
+    }
 }
 
 /// If the first whitespace-delimited token of `line` matches one of
@@ -820,25 +870,80 @@ pub(crate) fn longest_prefix_match(tokens: &[&str]) -> Option<(&'static Command,
 /// hard-coded array exists only as a bridge so `cast 'minor creation'
 /// dagger` works today.
 const MINOR_CREATION_KEYWORDS: [&str; 40] = [
-    "backpack", "sack", "robe", "hood", "lantern",
-    "torch", "waterskin", "barrel", "rations", "raft",
-    "club", "mace", "dagger", "greatsword", "longsword",
-    "staff", "shield", "shortsword", "jacket", "pants",
-    "leggings", "gauntlets", "sleeves", "gloves", "helmet",
-    "skullcap", "boots", "sandals", "cloak", "book",
-    "quill", "belt", "ring", "bracelet", "bottle",
-    "keg", "mask", "earring", "scarf", "bracer",
+    "backpack",
+    "sack",
+    "robe",
+    "hood",
+    "lantern",
+    "torch",
+    "waterskin",
+    "barrel",
+    "rations",
+    "raft",
+    "club",
+    "mace",
+    "dagger",
+    "greatsword",
+    "longsword",
+    "staff",
+    "shield",
+    "shortsword",
+    "jacket",
+    "pants",
+    "leggings",
+    "gauntlets",
+    "sleeves",
+    "gloves",
+    "helmet",
+    "skullcap",
+    "boots",
+    "sandals",
+    "cloak",
+    "book",
+    "quill",
+    "belt",
+    "ring",
+    "bracelet",
+    "bottle",
+    "keg",
+    "mask",
+    "earring",
+    "scarf",
+    "bracer",
 ];
 
 const ABBREV_DENYLIST: &[&str] = &[
     // Mortal
-    "quit", "delete", "release", "drop", "junk", "give", "remove",
+    "quit",
+    "delete",
+    "release",
+    "drop",
+    "junk",
+    "give",
+    "remove",
     // Combat lifecycle
-    "flee", "wimpy",
+    "flee",
+    "wimpy",
     // Admin / staff
-    "shutdown", "reboot", "purge", "ban", "unban", "kick", "freeze",
-    "force", "transfer", "wizlock", "demote", "promote", "wipe",
-    "deletechar", "deleteobj", "rdelete", "mdelete", "odelete", "zdelete",
+    "shutdown",
+    "reboot",
+    "purge",
+    "ban",
+    "unban",
+    "kick",
+    "freeze",
+    "force",
+    "transfer",
+    "wizlock",
+    "demote",
+    "promote",
+    "wipe",
+    "deletechar",
+    "deleteobj",
+    "rdelete",
+    "mdelete",
+    "odelete",
+    "zdelete",
 ];
 
 /// Resolve a typed verb by unique prefix among commands the player
@@ -991,7 +1096,9 @@ pub(crate) fn send_comm_channel_text(
     talker: &str,
     text: &str,
 ) {
-    let Some(conn) = world.get::<Connection>(recipient) else { return };
+    let Some(conn) = world.get::<Connection>(recipient) else {
+        return;
+    };
     let plain_speaker = render_color_tags(talker, ColorMode::Strip);
     let plain_text = render_color_tags(text, ColorMode::Strip);
     let payload = format!(
@@ -1000,7 +1107,9 @@ pub(crate) fn send_comm_channel_text(
         plain_speaker.replace('\\', "\\\\").replace('"', "\\\""),
         plain_text.replace('\\', "\\\\").replace('"', "\\\""),
     );
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Comm.Channel.Text", &payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Comm.Channel.Text", &payload));
 }
 
 /// Drain `LuaOutbox` queued by `room.send(msg)` /
@@ -1068,8 +1177,7 @@ pub(crate) fn mark_for_prompt(target: Entity) {
 /// entities are skipped via `get_entity`; entities without a Connection are
 /// no-ops via `send_prompt`.
 pub(crate) fn flush_prompts(world: &mut World) {
-    let recipients =
-        PROMPT_RECIPIENTS.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    let recipients = PROMPT_RECIPIENTS.with(|r| std::mem::take(&mut *r.borrow_mut()));
     for entity in recipients {
         if world.get_entity(entity).is_ok() {
             send_prompt(world, entity);
@@ -1092,8 +1200,8 @@ pub(crate) fn drain_syslog_to_watchers(world: &mut World) {
     // mid-fanout. Tracking the floor per-subscriber lets us skip
     // formatting work when an ERROR-only watcher won't see a WARN.
     let watchers: Vec<(Entity, mud_world::SyslogMinLevel)> = {
-        let mut q = world
-            .query_filtered::<(Entity, &mud_world::WatchingSyslog), With<mud_world::Online>>();
+        let mut q =
+            world.query_filtered::<(Entity, &mud_world::WatchingSyslog), With<mud_world::Online>>();
         q.iter(world).map(|(e, w)| (e, w.min_level)).collect()
     };
     if watchers.is_empty() {
@@ -1162,7 +1270,7 @@ pub(crate) enum ColorMode {
 ///
 /// All three are emitted unconditionally — gating on detected client
 /// capability (MTTS truecolor bit) is the renderer caller's job, not
-/// this layer's. Modern clients (Mudlet, BlightMud, MUSHclient,
+/// this layer's. Modern clients (Mudlet, `BlightMud`, `MUSHclient`,
 /// every web client) handle all three; legacy 16-color terminals
 /// will quietly down-sample 256/RGB to the nearest match. We don't
 /// try to translate server-side because the client's mapping is
@@ -1474,7 +1582,11 @@ pub(crate) fn apply_tag(tag: &str, stack: &mut Vec<StyleLayer>) -> bool {
     let mut layer = StyleLayer {
         // Single-modifier tags are named (closeable via `</name>`);
         // multi-modifier tags are anonymous (only closeable via `</>`).
-        name: if parts.len() == 1 { parts[0].to_string() } else { String::new() },
+        name: if parts.len() == 1 {
+            parts[0].to_string()
+        } else {
+            String::new()
+        },
         ..StyleLayer::default()
     };
     for p in parts {
@@ -1537,6 +1649,7 @@ pub(crate) fn apply_modifier(layer: &mut StyleLayer, m: &str) {
 /// Map a named color word to its base ANSI foreground code. Aliases
 /// (`magenta`/`purple`, `cyan`/`teal`, `brown`/`yellow`, `orange` →
 /// bright yellow) follow the `FieryMUD` `XMLLite` docs.
+#[allow(clippy::match_same_arms)] // semantic aliases stay separate from base colors
 pub(crate) fn named_color(s: &str) -> Option<u8> {
     Some(match s {
         "black" => 30,
@@ -1561,15 +1674,15 @@ pub(crate) fn named_color(s: &str) -> Option<u8> {
         "death" => 30,
         "protection" => 37,
         "enchantment" => 35,
-        "summoning" => 95, // bright magenta
+        "summoning" => 95,  // bright magenta
         "divination" => 93, // bright yellow
         "divine" => 93,
-        "holy" => 97,      // bright white
-        "unholy" => 90,    // bright black
+        "holy" => 97,   // bright white
+        "unholy" => 90, // bright black
         "arcane" => 35,
         "fire" => 31,
         "water" => 36,
-        "air" => 96,       // bright cyan
+        "air" => 96, // bright cyan
         "earth" => 33,
         _ => return None,
     })
@@ -1645,12 +1758,20 @@ fn push_color_params(params: &mut Vec<String>, color: Color, is_bg: bool) {
             params.push(emitted.to_string());
         }
         Color::Ansi256(idx) => {
-            params.push(if is_bg { "48".to_string() } else { "38".to_string() });
+            params.push(if is_bg {
+                "48".to_string()
+            } else {
+                "38".to_string()
+            });
             params.push("5".to_string());
             params.push(idx.to_string());
         }
         Color::Rgb(r, g, b) => {
-            params.push(if is_bg { "48".to_string() } else { "38".to_string() });
+            params.push(if is_bg {
+                "48".to_string()
+            } else {
+                "38".to_string()
+            });
             params.push("2".to_string());
             params.push(r.to_string());
             params.push(g.to_string());
@@ -1686,14 +1807,13 @@ pub(crate) fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 mod tests {
     use super::{
         ColorMode, FormulaCtx, PromptCtx, amount_from_blob, apply_damage, apply_heal_hp,
-        apply_heal_stamina,
-        apply_knockdown_posture, check_ability_restrictions, check_target_type, condition_label,
-        direction_name, duration_from_blob, evaluate_formula, evaluate_simple_formula,
-        format_idle, has_effect_named,
-        is_being_attacked, is_immobilized, normalize_dice_notation, parse_direction,
-        remove_effect_named, render_color_tags, render_prompt, resolve_dispel_filter,
-        resolve_dispel_scope, resolve_effect_conditions, resolve_effect_resource,
-        resolve_knockdown_posture, resolve_redirect_aggro, sector_movement_cost,
+        apply_heal_stamina, apply_knockdown_posture, check_ability_restrictions, check_target_type,
+        condition_label, direction_name, duration_from_blob, evaluate_formula,
+        evaluate_simple_formula, format_idle, has_effect_named, is_being_attacked, is_immobilized,
+        normalize_dice_notation, parse_direction, remove_effect_named, render_color_tags,
+        render_prompt, resolve_dispel_filter, resolve_dispel_scope, resolve_effect_conditions,
+        resolve_effect_resource, resolve_knockdown_posture, resolve_redirect_aggro,
+        sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -1704,6 +1824,271 @@ mod tests {
     }
     fn ansi(s: &str) -> String {
         render_color_tags(s, ColorMode::Ansi)
+    }
+
+    /// `Room.Mob.Get` against a Receptionist standing in an `InnRoom`
+    /// emits a `Room.Mob.Info` frame carrying the `inn` block: the
+    /// inn name, a tier list with per-viewer `affordable` flags, and
+    /// `current_rest` (null when the viewer holds no `RestState`).
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn room_mob_get_emits_inn_block() {
+        use super::{Connection, handle_room_mob_get};
+        use mud_world::{
+            InnRoom, InnTier, Located, Mob, MobPrototypes, Named, Player, Wealth, WorldKey,
+        };
+
+        let mut world = World::new();
+
+        // Inn room: tier 1 = 10gp (affordable), tier 2 = 50gp (not).
+        let room = world
+            .spawn((InnRoom {
+                inn_name: "the Sleepy Griffon".to_string(),
+                tiers: vec![
+                    InnTier {
+                        name: "basic".to_string(),
+                        tier: 1,
+                        fee_gp: 10,
+                    },
+                    InnTier {
+                        name: "suite".to_string(),
+                        tier: 2,
+                        fee_gp: 50,
+                    },
+                ],
+            },))
+            .id();
+
+        // Receptionist proto at (1, 1).
+        let mut protos = MobPrototypes::default();
+        protos.by_key.insert(
+            (1, 1),
+            mud_world::MobProto {
+                zone_id: 1,
+                id: 1,
+                name: "a sleepy receptionist".to_string(),
+                keywords: vec!["receptionist".to_string()],
+                room_description: String::new(),
+                examine_description: String::new(),
+                gender: "female".to_string(),
+                race: "human".to_string(),
+                level: 5,
+                alignment: 0,
+                role: mud_db::enums::MobRole::Normal,
+                hp_dice_num: 1,
+                hp_dice_size: 1,
+                hp_dice_bonus: 5,
+                damage_dice_num: 1,
+                damage_dice_size: 1,
+                damage_dice_bonus: 0,
+                accuracy: 0,
+                evasion: 0,
+                attack_power: 0,
+                spell_power: 0,
+                penetration_flat: 0,
+                penetration_percent: 0,
+                armor_rating: 0,
+                damage_reduction_percent: 0,
+                soak: 0,
+                hardness: 0,
+                perception: 0,
+                concealment: 0,
+                resistances: serde_json::json!({}),
+                ward_percent: 0,
+                wealth: 0,
+                class_id: None,
+                behaviors: Vec::new(),
+                protected_kind: mud_db::enums::ProtectedKind::Normal,
+                professions: vec![mud_db::enums::MobProfession::Receptionist],
+                size: mud_db::enums::Size::Medium,
+                life_force: mud_db::enums::LifeForce::Life,
+                damage_type: mud_db::enums::DamageType::Hit,
+                move_points: 0,
+                default_position: mud_db::enums::Position::Standing,
+                traits: Vec::new(),
+                movement_mode: mud_db::enums::MovementMode::Normal,
+                default_movement_mode: mud_db::enums::MovementMode::Normal,
+                aggression_formula: None,
+            },
+        );
+        world.insert_resource(protos);
+
+        let mob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a sleepy receptionist".to_string(),
+                },
+                Located(room),
+                WorldKey { zone: 1, id: 1 },
+            ))
+            .id();
+
+        // Viewer holds 20gp on hand (2000 copper) — covers tier 1
+        // (10gp) but not tier 2 (50gp). No RestState → current_rest null.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let viewer = world
+            .spawn((
+                Player,
+                Named {
+                    name: "Tester".to_string(),
+                },
+                Located(room),
+                Wealth(2000),
+                Connection(tx),
+            ))
+            .id();
+
+        let payload = format!(r#"{{"id":"{}"}}"#, mob.to_bits());
+        handle_room_mob_get(&world, viewer, &payload);
+
+        // Drain the channel; the inn block rides on the Room.Mob.Info
+        // frame. Raw bytes are telnet-framed but the package name +
+        // JSON are ASCII, so a lossy decode preserves them.
+        let mut seen = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            seen.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(
+            seen.contains("Room.Mob.Info"),
+            "no Room.Mob.Info frame: {seen:?}"
+        );
+        assert!(seen.contains(r#""inn""#), "inn block missing: {seen:?}");
+        assert!(
+            seen.contains("the Sleepy Griffon"),
+            "inn_name missing: {seen:?}"
+        );
+        assert!(
+            seen.contains(r#""name":"basic","tier":1,"fee_gp":10,"affordable":true"#),
+            "tier 1 should be affordable: {seen:?}"
+        );
+        assert!(
+            seen.contains(r#""name":"suite","tier":2,"fee_gp":50,"affordable":false"#),
+            "tier 2 should be unaffordable: {seen:?}"
+        );
+        assert!(
+            seen.contains(r#""current_rest":null"#),
+            "current_rest should be null: {seen:?}"
+        );
+    }
+
+    /// `Room.Mob.Get` against a Banker emits a `bank` block with all
+    /// three viewer-scoped coin pools (on-hand `Wealth`,
+    /// per-character `BankWealth`, account-shared `AccountWealth`).
+    /// The mob's room does not need an `InnRoom` — bank is purely
+    /// mob-anchored, unlike inn.
+    #[test]
+    fn room_mob_get_emits_bank_block() {
+        use super::{Connection, handle_room_mob_get};
+        use mud_world::{
+            AccountWealth, BankWealth, Located, Mob, MobPrototypes, Named, Player, Wealth, WorldKey,
+        };
+
+        let mut world = World::new();
+        let room = world.spawn(()).id();
+
+        // Banker proto at (1, 1).
+        let mut protos = MobPrototypes::default();
+        protos.by_key.insert(
+            (1, 1),
+            mud_world::MobProto {
+                zone_id: 1,
+                id: 1,
+                name: "a thin banker".to_string(),
+                keywords: vec!["banker".to_string()],
+                room_description: String::new(),
+                examine_description: String::new(),
+                gender: "male".to_string(),
+                race: "human".to_string(),
+                level: 5,
+                alignment: 0,
+                role: mud_db::enums::MobRole::Normal,
+                hp_dice_num: 1,
+                hp_dice_size: 1,
+                hp_dice_bonus: 5,
+                damage_dice_num: 1,
+                damage_dice_size: 1,
+                damage_dice_bonus: 0,
+                accuracy: 0,
+                evasion: 0,
+                attack_power: 0,
+                spell_power: 0,
+                penetration_flat: 0,
+                penetration_percent: 0,
+                armor_rating: 0,
+                damage_reduction_percent: 0,
+                soak: 0,
+                hardness: 0,
+                perception: 0,
+                concealment: 0,
+                resistances: serde_json::json!({}),
+                ward_percent: 0,
+                wealth: 0,
+                class_id: None,
+                behaviors: Vec::new(),
+                protected_kind: mud_db::enums::ProtectedKind::Normal,
+                professions: vec![mud_db::enums::MobProfession::Banker],
+                size: mud_db::enums::Size::Medium,
+                life_force: mud_db::enums::LifeForce::Life,
+                damage_type: mud_db::enums::DamageType::Hit,
+                move_points: 0,
+                default_position: mud_db::enums::Position::Standing,
+                traits: Vec::new(),
+                movement_mode: mud_db::enums::MovementMode::Normal,
+                default_movement_mode: mud_db::enums::MovementMode::Normal,
+                aggression_formula: None,
+            },
+        );
+        world.insert_resource(protos);
+
+        let mob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a thin banker".to_string(),
+                },
+                Located(room),
+                WorldKey { zone: 1, id: 1 },
+            ))
+            .id();
+
+        // Three distinct pool values so a swap between them in the
+        // emission code would fail the assertion.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let viewer = world
+            .spawn((
+                Player,
+                Named {
+                    name: "Tester".to_string(),
+                },
+                Located(room),
+                Wealth(123),
+                BankWealth(456),
+                AccountWealth(789),
+                Connection(tx),
+            ))
+            .id();
+
+        let payload = format!(r#"{{"id":"{}"}}"#, mob.to_bits());
+        handle_room_mob_get(&world, viewer, &payload);
+
+        let mut seen = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            seen.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(
+            seen.contains("Room.Mob.Info"),
+            "no Room.Mob.Info frame: {seen:?}"
+        );
+        assert!(
+            seen.contains(r#""bank":{"on_hand":123,"per_char":456,"account":789}"#),
+            "bank block missing or mis-ordered: {seen:?}"
+        );
+        // Inn block must NOT appear — Banker has no InnRoom.
+        assert!(
+            !seen.contains(r#""inn""#),
+            "inn block leaked onto banker: {seen:?}"
+        );
     }
 
     /// Smoke test: every inventory-distributed command shows up
@@ -1718,77 +2103,85 @@ mod tests {
             .collect();
         // balance / unban (steps 1 + 1.5)
         for name in ["balance", "bal", "unban"] {
-            assert!(
-                names.contains(&name),
-                "{name} not in all_commands()"
-            );
+            assert!(names.contains(&name), "{name} not in all_commands()");
         }
         // Movement category — fully migrated. Directionals from
         // movement_directions.rs, plus recall/release/enter/setrecall.
         for name in [
-            "north", "n", "south", "s", "east", "e", "west", "w",
-            "up", "u", "down", "d",
-            "northeast", "ne", "northwest", "nw",
-            "southeast", "se", "southwest", "sw",
-            "in", "out",
-            "recall", "home", "release", "enter", "setrecall",
+            "north",
+            "n",
+            "south",
+            "s",
+            "east",
+            "e",
+            "west",
+            "w",
+            "up",
+            "u",
+            "down",
+            "d",
+            "northeast",
+            "ne",
+            "northwest",
+            "nw",
+            "southeast",
+            "se",
+            "southwest",
+            "sw",
+            "in",
+            "out",
+            "recall",
+            "home",
+            "release",
+            "enter",
+            "setrecall",
         ] {
-            assert!(
-                names.contains(&name),
-                "movement command `{name}` missing"
-            );
+            assert!(names.contains(&name), "movement command `{name}` missing");
         }
         // channels.rs (broadcast comm channels)
         for name in ["gossip", "/", "music", "shout", "wiznet", ";"] {
-            assert!(
-                names.contains(&name),
-                "channel `{name}` missing"
-            );
+            assert!(names.contains(&name), "channel `{name}` missing");
         }
         // tells.rs (private comms + ignore list + history)
-        for name in ["tell", "t", "reply", "r", "ignore", "unignore", "lasttells", "lt"] {
-            assert!(
-                names.contains(&name),
-                "tells command `{name}` missing"
-            );
+        for name in [
+            "tell",
+            "t",
+            "reply",
+            "r",
+            "ignore",
+            "unignore",
+            "lasttells",
+            "lt",
+        ] {
+            assert!(names.contains(&name), "tells command `{name}` missing");
         }
         // feedback.rs (bug / idea / typo / petition)
         for name in ["bug", "idea", "typo", "petition"] {
-            assert!(
-                names.contains(&name),
-                "feedback `{name}` missing"
-            );
+            assert!(names.contains(&name), "feedback `{name}` missing");
         }
         // room_chat.rs
         for name in [
-            "say", "'", "emote", ":", "ask", "whisper", "insult",
-            "gsay", "gtell", "gecho", "gt",
+            "say", "'", "emote", ":", "ask", "whisper", "insult", "gsay", "gtell", "gecho", "gt",
         ] {
-            assert!(
-                names.contains(&name),
-                "room-chat `{name}` missing"
-            );
+            assert!(names.contains(&name), "room-chat `{name}` missing");
         }
         // clan_chat.rs
         for name in ["ctell", "ct", "clan"] {
-            assert!(
-                names.contains(&name),
-                "clan-chat `{name}` missing"
-            );
+            assert!(names.contains(&name), "clan-chat `{name}` missing");
         }
         // name_approval.rs — replaces the deleted login_approval.rs
         // commands. `approve_login` / `deny_login` / `lreqs` are
         // gone; the new commands operate on the
         // `Characters.name_approved` column.
         for name in [
-            "approve_name", "approvename",
-            "reject_name", "rejectname",
-            "name_status", "namestatus",
+            "approve_name",
+            "approvename",
+            "reject_name",
+            "rejectname",
+            "name_status",
+            "namestatus",
         ] {
-            assert!(
-                names.contains(&name),
-                "name-approval `{name}` missing"
-            );
+            assert!(names.contains(&name), "name-approval `{name}` missing");
         }
         // The retired LoginRequests commands must NOT appear in the
         // registry — guard against a stale `inventory::submit!` that
@@ -1801,105 +2194,162 @@ mod tests {
         }
         // status_lists.rs (report + socials)
         for name in ["report", "socials"] {
-            assert!(
-                names.contains(&name),
-                "status-lists `{name}` missing"
-            );
+            assert!(names.contains(&name), "status-lists `{name}` missing");
         }
         // mail.rs + boards.rs (async-dispatched stubs)
         for name in [
-            "mail", "mailbox", "readmail", "delmail",
-            "boards", "board", "post", "delpost", "editpost",
+            "mail", "mailbox", "readmail", "delmail", "boards", "board", "post", "delpost",
+            "editpost",
         ] {
-            assert!(
-                names.contains(&name),
-                "mail/board `{name}` missing"
-            );
+            assert!(names.contains(&name), "mail/board `{name}` missing");
         }
         // quests.rs (Info + Admin verbs)
         for name in [
-            "quests", "qstat", "qlist", "abandon", "innate",
-            "questinfo", "qload", "qaccept", "qgive", "qcomplete",
+            "quests",
+            "qstat",
+            "qlist",
+            "abandon",
+            "innate",
+            "questinfo",
+            "qload",
+            "qaccept",
+            "qgive",
+            "qcomplete",
         ] {
-            assert!(
-                names.contains(&name),
-                "quest verb `{name}` missing"
-            );
+            assert!(names.contains(&name), "quest verb `{name}` missing");
         }
         // admin_management.rs
         for name in [
-            "ban", "cclan", "pnote", "playernote",
-            "hinfo", "hgrant", "hrevoke",
+            "ban",
+            "cclan",
+            "pnote",
+            "playernote",
+            "hinfo",
+            "hgrant",
+            "hrevoke",
         ] {
-            assert!(
-                names.contains(&name),
-                "admin-mgmt `{name}` missing"
-            );
+            assert!(names.contains(&name), "admin-mgmt `{name}` missing");
         }
         // admin_world.rs
         for name in [
-            "where", "goto", "transfer", "teleport", "force", "freeze",
-            "summon", "apply", "restore", "slay", "purge",
-            "load", "loadobj", "loado", "dumpworld",
+            "where",
+            "goto",
+            "transfer",
+            "teleport",
+            "force",
+            "freeze",
+            "summon",
+            "apply",
+            "restore",
+            "slay",
+            "purge",
+            "load",
+            "loadobj",
+            "loado",
+            "dumpworld",
         ] {
-            assert!(
-                names.contains(&name),
-                "admin-world `{name}` missing"
-            );
+            assert!(names.contains(&name), "admin-world `{name}` missing");
         }
         // admin_inspect.rs
         for name in [
-            "zstat", "mstat", "ostat", "sstat", "tstat", "astat",
-            "rstat", "stat", "setweather", "set", "show",
-            "scripterrors", "scripterr", "syslog", "lua",
-            "triggers", "trigs", "firetrig",
+            "zstat",
+            "mstat",
+            "ostat",
+            "sstat",
+            "tstat",
+            "astat",
+            "rstat",
+            "stat",
+            "setweather",
+            "set",
+            "show",
+            "scripterrors",
+            "scripterr",
+            "syslog",
+            "lua",
+            "triggers",
+            "trigs",
+            "firetrig",
         ] {
-            assert!(
-                names.contains(&name),
-                "admin-inspect `{name}` missing"
-            );
+            assert!(names.contains(&name), "admin-inspect `{name}` missing");
         }
         // combat.rs
         for name in [
-            "attack", "kill", "k", "hit", "murder",
-            "consider", "con", "flee", "kick", "berserk",
-            "tripup", "trip", "sweep", "roundhouse", "stomp",
-            "roar", "howl", "rend", "gouge", "springleap",
-            "throatcut", "backstab", "bs", "hitall", "tantrum",
-            "disarm", "rescue", "guard", "assist",
-            "layhands", "lay", "retreat", "tame", "drag",
-            "buck", "breathe", "lure", "corner", "sneak",
-            "conceal", "firstaid", "bandage", "disengage",
-            "doorbash", "bash", "bodyslam", "maul",
+            "attack",
+            "kill",
+            "k",
+            "hit",
+            "murder",
+            "consider",
+            "con",
+            "flee",
+            "kick",
+            "berserk",
+            "tripup",
+            "trip",
+            "sweep",
+            "roundhouse",
+            "stomp",
+            "roar",
+            "howl",
+            "rend",
+            "gouge",
+            "springleap",
+            "throatcut",
+            "backstab",
+            "bs",
+            "hitall",
+            "tantrum",
+            "disarm",
+            "rescue",
+            "guard",
+            "assist",
+            "layhands",
+            "lay",
+            "retreat",
+            "tame",
+            "drag",
+            "buck",
+            "breathe",
+            "lure",
+            "corner",
+            "sneak",
+            "conceal",
+            "firstaid",
+            "bandage",
+            "disengage",
+            "doorbash",
+            "bash",
+            "bodyslam",
+            "maul",
         ] {
-            assert!(
-                names.contains(&name),
-                "combat `{name}` missing"
-            );
+            assert!(names.contains(&name), "combat `{name}` missing");
         }
         // spells.rs — `skill` / `use` removed 2026-05-17 (they
         // were a backdoor for invoking passive defensives and
         // weapon proficiencies; every active skill has its own
         // dedicated command).
         for name in [
-            "pick", "study", "memorize", "mem", "pray", "forget",
-            "cast", "c", "chant", "perform",
+            "pick", "study", "memorize", "mem", "pray", "forget", "cast", "c", "chant", "perform",
             "abort", "cancel",
         ] {
-            assert!(
-                names.contains(&name),
-                "spell/skill `{name}` missing"
-            );
+            assert!(names.contains(&name), "spell/skill `{name}` missing");
         }
     }
 
     #[test]
     fn visible_width_matches_render_strip_length() {
         // Plain text: visible_width == chars().count().
-        assert_eq!(super::visible_width("plain text"), "plain text".chars().count());
+        assert_eq!(
+            super::visible_width("plain text"),
+            "plain text".chars().count()
+        );
         // Color-wrapped: only inner text counts.
         assert_eq!(super::visible_width("<red>foo</>"), 3);
-        assert_eq!(super::visible_width("<b:yellow>warning</> ahead"), "warning ahead".len());
+        assert_eq!(
+            super::visible_width("<b:yellow>warning</> ahead"),
+            "warning ahead".len()
+        );
         // Multi-tag: each pair contributes only its inner content.
         assert_eq!(super::visible_width("<red>r</><green>g</><b>b</>"), 3);
         // Non-tag-shaped angle text: counts as literal.
@@ -2000,7 +2450,10 @@ mod tests {
         // Single tag pair.
         assert_eq!(strip("<red>red</>"), "red");
         // Multi-modifier open + full reset close.
-        assert_eq!(strip("<b:yellow>warning:</> watch out"), "warning: watch out");
+        assert_eq!(
+            strip("<b:yellow>warning:</> watch out"),
+            "warning: watch out"
+        );
         // Unterminated `<` is treated as a literal angle bracket and
         // the rest of the string passes through verbatim. (Earlier
         // behavior dropped everything after the `<`; the new shape
@@ -2094,7 +2547,10 @@ mod tests {
     fn render_color_tags_truecolor_rgb_emits_38_2_form() {
         // <#FF0000>...</> → \x1b[0m\x1b[38;2;255;0;0m text \x1b[0m\x1b[0m
         let out = ansi("<#FF0000>red</>");
-        assert!(out.contains("\x1b[38;2;255;0;0m"), "fg rgb present: {out:?}");
+        assert!(
+            out.contains("\x1b[38;2;255;0;0m"),
+            "fg rgb present: {out:?}"
+        );
         assert!(out.contains("red"));
     }
 
@@ -2102,14 +2558,20 @@ mod tests {
     fn render_color_tags_truecolor_rgb_lowercase_hex_works() {
         // hex digits are case-insensitive; both forms accepted.
         let out = ansi("<#ff8800>orange</>");
-        assert!(out.contains("\x1b[38;2;255;136;0m"), "fg rgb lowercase: {out:?}");
+        assert!(
+            out.contains("\x1b[38;2;255;136;0m"),
+            "fg rgb lowercase: {out:?}"
+        );
     }
 
     #[test]
     fn render_color_tags_truecolor_bg_emits_48_2_form() {
         // <bg#001020>... — background path uses 48 instead of 38.
         let out = ansi("<bg#001020>x</>");
-        assert!(out.contains("\x1b[48;2;0;16;32m"), "bg rgb present: {out:?}");
+        assert!(
+            out.contains("\x1b[48;2;0;16;32m"),
+            "bg rgb present: {out:?}"
+        );
     }
 
     #[test]
@@ -2204,8 +2666,14 @@ mod tests {
         // Mixed: a real tag pair around a tag-shaped-but-pseudo content.
         // <green>...</> still renders; the inner <42/100> stays literal.
         let out = ansi("<green><42/100></>");
-        assert!(out.contains("<42/100>"), "literal prompt-var preserved: {out:?}");
-        assert!(out.contains("\x1b[32m"), "outer green still renders: {out:?}");
+        assert!(
+            out.contains("<42/100>"),
+            "literal prompt-var preserved: {out:?}"
+        );
+        assert!(
+            out.contains("\x1b[32m"),
+            "outer green still renders: {out:?}"
+        );
     }
 
     #[test]
@@ -2274,7 +2742,10 @@ mod tests {
         // Color-threshold cases live in their own test below.
         let ctx = PromptCtx {
             hp: Some(Health { hp: 80, max: 100 }),
-            stamina: Some(Stamina { current: 40, max: 50 }),
+            stamina: Some(Stamina {
+                current: 40,
+                max: 50,
+            }),
             name: Some("Strider"),
             room: Some("The Void"),
             wealth: Some(12345i64),
@@ -2311,7 +2782,13 @@ mod tests {
         );
         // Missing Stamina: question marks for v/V.
         assert_eq!(
-            render_prompt("<%v/%V>", PromptCtx { stamina: None, ..ctx }),
+            render_prompt(
+                "<%v/%V>",
+                PromptCtx {
+                    stamina: None,
+                    ..ctx
+                }
+            ),
             "<?/?> "
         );
         // Missing name: question mark.
@@ -2326,7 +2803,13 @@ mod tests {
         );
         // Missing wealth: question mark.
         assert_eq!(
-            render_prompt("[%g]", PromptCtx { wealth: None, ..ctx }),
+            render_prompt(
+                "[%g]",
+                PromptCtx {
+                    wealth: None,
+                    ..ctx
+                }
+            ),
             "[?] "
         );
         // Missing hour: question mark.
@@ -2528,14 +3011,18 @@ mod tests {
         let caster = world
             .spawn((
                 Player,
-                Named { name: "Caster".to_string() },
+                Named {
+                    name: "Caster".to_string(),
+                },
                 mud_world::Located(room_a),
             ))
             .id();
         let _teammate = world
             .spawn((
                 Player,
-                Named { name: "Teammate".to_string() },
+                Named {
+                    name: "Teammate".to_string(),
+                },
                 mud_world::Located(room_a),
                 mud_world::Follower(caster),
             ))
@@ -2544,14 +3031,18 @@ mod tests {
         let _mob_a = world
             .spawn((
                 mud_world::Mob,
-                Named { name: "a stray dog".to_string() },
+                Named {
+                    name: "a stray dog".to_string(),
+                },
                 mud_world::Located(room_a),
             ))
             .id();
         let _mob_b = world
             .spawn((
                 mud_world::Mob,
-                Named { name: "a half-elven guard".to_string() },
+                Named {
+                    name: "a half-elven guard".to_string(),
+                },
                 mud_world::Located(room_a),
             ))
             .id();
@@ -2673,8 +3164,8 @@ mod tests {
         );
         world.insert_resource(bindings);
         let item = world.spawn(WorldKey { zone: 10, id: 5 }).id();
-        let line = super::render_bound_ability_line(&mut world, item)
-            .expect("bound item produces a line");
+        let line =
+            super::render_bound_ability_line(&mut world, item).expect("bound item produces a line");
         // Formatter wraps the sphere parenthetical in <red> (fire)
         // — the literal tag we're pinning is what `format_ability_with_sphere`
         // emits, not the post-render ANSI.
@@ -2682,7 +3173,10 @@ mod tests {
             line.contains("Magic Missile <red>(fire)</>"),
             "sphere parenthetical present: {line}"
         );
-        assert!(line.starts_with("<dim>It carries</>"), "lead-in dim: {line}");
+        assert!(
+            line.starts_with("<dim>It carries</>"),
+            "lead-in dim: {line}"
+        );
 
         // Item without a binding row → no follow-up line at all.
         let bare = world.spawn(WorldKey { zone: 99, id: 1 }).id();
@@ -2713,14 +3207,18 @@ mod tests {
         let caster = world
             .spawn((
                 Player,
-                Named { name: "Caster".to_string() },
+                Named {
+                    name: "Caster".to_string(),
+                },
                 mud_world::Located(room_a),
             ))
             .id();
         let _co_located_teammate = world
             .spawn((
                 Player,
-                Named { name: "Teammate".to_string() },
+                Named {
+                    name: "Teammate".to_string(),
+                },
                 mud_world::Located(room_a),
                 mud_world::Follower(caster),
             ))
@@ -2728,7 +3226,9 @@ mod tests {
         let _far_teammate = world
             .spawn((
                 Player,
-                Named { name: "FarTeammate".to_string() },
+                Named {
+                    name: "FarTeammate".to_string(),
+                },
                 mud_world::Located(room_b),
                 mud_world::Follower(caster),
             ))
@@ -2736,7 +3236,9 @@ mod tests {
         let _mob = world
             .spawn((
                 mud_world::Mob,
-                Named { name: "a stray dog".to_string() },
+                Named {
+                    name: "a stray dog".to_string(),
+                },
                 mud_world::Located(room_a),
             ))
             .id();
@@ -2771,14 +3273,18 @@ mod tests {
         let caster = world
             .spawn((
                 Player,
-                Named { name: "Caster".to_string() },
+                Named {
+                    name: "Caster".to_string(),
+                },
                 mud_world::Located(room),
             ))
             .id();
         let _teammate = world
             .spawn((
                 Player,
-                Named { name: "Teammate".to_string() },
+                Named {
+                    name: "Teammate".to_string(),
+                },
                 mud_world::Located(room),
                 mud_world::Follower(caster),
             ))
@@ -2786,7 +3292,9 @@ mod tests {
         let _mob = world
             .spawn((
                 mud_world::Mob,
-                Named { name: "a stray dog".to_string() },
+                Named {
+                    name: "a stray dog".to_string(),
+                },
                 mud_world::Located(room),
             ))
             .id();
@@ -2818,7 +3326,9 @@ mod tests {
         let caster = world
             .spawn((
                 Player,
-                Named { name: "Solo".to_string() },
+                Named {
+                    name: "Solo".to_string(),
+                },
                 mud_world::Located(room),
             ))
             .id();
@@ -2833,7 +3343,8 @@ mod tests {
         );
         let allies = aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomAllies);
         assert_eq!(
-            allies, vec!["Solo".to_string()],
+            allies,
+            vec!["Solo".to_string()],
             "RoomAllies on a solo caster targets self only"
         );
     }
@@ -2853,7 +3364,10 @@ mod tests {
         assert_eq!(parse_indexed_needle("3."), (1, "3."));
         // Non-numeric prefix: not an indexed needle, the whole
         // string is the literal target.
-        assert_eq!(parse_indexed_needle("bag.of.holding"), (1, "bag.of.holding"));
+        assert_eq!(
+            parse_indexed_needle("bag.of.holding"),
+            (1, "bag.of.holding")
+        );
         assert_eq!(parse_indexed_needle("foo"), (1, "foo"));
     }
 
@@ -2904,7 +3418,11 @@ mod tests {
         assert_eq!(parse_direction("in"), Some(Direction::In));
         assert_eq!(parse_direction("out"), Some(Direction::Out));
         // Unknown / non-direction input.
-        assert_eq!(parse_direction("portal"), None, "Direction::Portal isn't a movement direction");
+        assert_eq!(
+            parse_direction("portal"),
+            None,
+            "Direction::Portal isn't a movement direction"
+        );
         assert_eq!(parse_direction(""), None);
         assert_eq!(parse_direction("ne!"), None, "trailing punctuation rejects");
         assert_eq!(parse_direction("sword"), None);
@@ -2915,11 +3433,18 @@ mod tests {
         use mud_db::enums::Direction;
         // Every direction `direction_name` produces should parse back.
         for d in [
-            Direction::North, Direction::South, Direction::East, Direction::West,
-            Direction::Up, Direction::Down,
-            Direction::Northeast, Direction::Northwest,
-            Direction::Southeast, Direction::Southwest,
-            Direction::In, Direction::Out,
+            Direction::North,
+            Direction::South,
+            Direction::East,
+            Direction::West,
+            Direction::Up,
+            Direction::Down,
+            Direction::Northeast,
+            Direction::Northwest,
+            Direction::Southeast,
+            Direction::Southwest,
+            Direction::In,
+            Direction::Out,
         ] {
             let name = direction_name(d);
             assert_eq!(parse_direction(name), Some(d), "round-trip {name}");
@@ -2930,7 +3455,7 @@ mod tests {
     // PROMPT_RECIPIENTS set and may mutate world state through registered
     // command handlers. We focus on observable component state since
     // recipients without a Connection don't actually receive any output.
-    use crate::commands::{dispatch, Frozen};
+    use crate::commands::{Frozen, dispatch};
     use mud_db::enums::UserRole;
     use mud_world::{Account, Named, Online, Player, Posture, PostureKind};
 
@@ -2939,7 +3464,9 @@ mod tests {
             .spawn((
                 Player,
                 Online,
-                Named { name: "Tester".to_string() },
+                Named {
+                    name: "Tester".to_string(),
+                },
                 Account {
                     user_id: "u".into(),
                     character_id: "c".into(),
@@ -3022,11 +3549,11 @@ mod tests {
         // Expressions previously rejected now resolve via the recursive
         // descent parser — operator precedence and parens both work.
         assert_eq!(evaluate_simple_formula("(level)", 10, 0), Some(10));
-        assert_eq!(evaluate_simple_formula("level * 2 + skill", 10, 5), Some(25));
         assert_eq!(
-            evaluate_simple_formula("100 + skill / 5", 0, 25),
-            Some(105)
+            evaluate_simple_formula("level * 2 + skill", 10, 5),
+            Some(25)
         );
+        assert_eq!(evaluate_simple_formula("100 + skill / 5", 0, 25), Some(105));
         assert_eq!(
             evaluate_simple_formula("(level + skill) * 2", 3, 4),
             Some(14)
@@ -3039,7 +3566,10 @@ mod tests {
         // builds with base_damage=0, so `base_damage + skill` = 5.
         // The full invoke_ability path computes the real circle-based
         // value at cast time.
-        assert_eq!(evaluate_simple_formula("base_damage + skill", 10, 5), Some(5));
+        assert_eq!(
+            evaluate_simple_formula("base_damage + skill", 10, 5),
+            Some(5)
+        );
         // pow() is now supported (see formula_eval_pow_with_float_exp).
         assert_eq!(evaluate_simple_formula("foo(1, 2)", 0, 0), None);
         // Malformed: dangling operator.
@@ -3051,9 +3581,17 @@ mod tests {
     fn formula_eval_pow_with_float_exp() {
         let mut det = |_name: &str, _n: i32, _m: i32| 0;
         // Integer base, float exp: pow(8, 2) = 64
-        assert_eq!(evaluate_formula("pow(skill, 2)", &super::FormulaCtx::base(0, 8), &mut det), Some(64));
+        assert_eq!(
+            evaluate_formula("pow(skill, 2)", &super::FormulaCtx::base(0, 8), &mut det),
+            Some(64)
+        );
         // Float exp: pow(50, 1.44) ≈ 50^1.44 ≈ 297.something
-        let r = evaluate_formula("pow(skill, 1.44)", &super::FormulaCtx::base(0, 50), &mut det).unwrap();
+        let r = evaluate_formula(
+            "pow(skill, 1.44)",
+            &super::FormulaCtx::base(0, 50),
+            &mut det,
+        )
+        .unwrap();
         #[allow(clippy::cast_possible_truncation)]
         let expected = (50f64).powf(1.44).round() as i32;
         assert_eq!(r, expected);
@@ -3061,19 +3599,27 @@ mod tests {
         // deterministic dice. dice closure returns 0; 0 + pow(0, 1.44) = 0
         // (0^anything = 0 by convention).
         assert_eq!(
-            evaluate_formula("roll_dice(8, 25) + pow(skill, 1.44)", &super::FormulaCtx::base(0, 0), &mut det),
+            evaluate_formula(
+                "roll_dice(8, 25) + pow(skill, 1.44)",
+                &super::FormulaCtx::base(0, 0),
+                &mut det
+            ),
             Some(0)
         );
         // amount_from_blob uses the live RNG for roll_dice; verify it
         // returns *something* in the plausible range for skill=0
         // (8d25 = 8..200, pow(0, 1.44) = 0).
         let blob = serde_json::json!({"amount": "roll_dice(8, 25) + pow(skill, 1.44)"});
-        let v = amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0)).expect("formula resolves");
+        let v = amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0))
+            .expect("formula resolves");
         assert!((8..=200).contains(&v), "8d25 result {v} in range");
         // Float literal outside pow as a Plus operand → still
         // unsupported (parse_factor rejects Float in additive
         // position). Only the multiplicative path opens up.
-        assert_eq!(evaluate_formula("1.5 + skill", &super::FormulaCtx::base(0, 5), &mut det), None);
+        assert_eq!(
+            evaluate_formula("1.5 + skill", &super::FormulaCtx::base(0, 5), &mut det),
+            None
+        );
         // I2: float multipliers on the RHS of `*` and `/` are now
         // accepted. `skill * 0.5` with skill=10 rounds to 5;
         // `level / 0.5` with level=10 yields 20. Anything outside
@@ -3083,7 +3629,14 @@ mod tests {
             Some(5)
         );
         assert_eq!(
-            evaluate_formula("level / 0.5", &super::FormulaCtx { level: 10, ..super::FormulaCtx::base(0, 0) }, &mut det),
+            evaluate_formula(
+                "level / 0.5",
+                &super::FormulaCtx {
+                    level: 10,
+                    ..super::FormulaCtx::base(0, 0)
+                },
+                &mut det
+            ),
             Some(20)
         );
         // Mixed integer + float multipliers in a chain — legacy
@@ -3091,7 +3644,10 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "10000 * 0.0007 * level",
-                &super::FormulaCtx { level: 5, ..super::FormulaCtx::base(0, 0) },
+                &super::FormulaCtx {
+                    level: 5,
+                    ..super::FormulaCtx::base(0, 0)
+                },
                 &mut det
             ),
             // (10000 * 0.0007).round() = 7, then 7 * 5 = 35.
@@ -3103,11 +3659,18 @@ mod tests {
             None
         );
         // Malformed pow (missing exp) → None.
-        assert_eq!(evaluate_formula("pow(skill,)", &super::FormulaCtx::base(0, 5), &mut det), None);
-        assert_eq!(evaluate_formula("pow(skill", &super::FormulaCtx::base(0, 5), &mut det), None);
+        assert_eq!(
+            evaluate_formula("pow(skill,)", &super::FormulaCtx::base(0, 5), &mut det),
+            None
+        );
+        assert_eq!(
+            evaluate_formula("pow(skill", &super::FormulaCtx::base(0, 5), &mut det),
+            None
+        );
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn formula_eval_recognizes_caster_symbols() {
         use super::FormulaCtx;
         let mut zero = |_name: &str, _a: i32, _b: i32| 0;
@@ -3163,7 +3726,11 @@ mod tests {
         // FIRESTORM-style: base_damage + (skill^2 / 100). For
         // skill=30 in ctx, skill^2/100 = 9. 30 + 9 = 39.
         assert_eq!(
-            evaluate_formula("base_damage + (pow(skill, 2) / 100)", &ctx_with_base, &mut zero),
+            evaluate_formula(
+                "base_damage + (pow(skill, 2) / 100)",
+                &ctx_with_base,
+                &mut zero
+            ),
             Some(39),
         );
         // hidden symbol resolves from ctx.hidden (0/1 from Stealth marker presence).
@@ -3181,7 +3748,11 @@ mod tests {
             Some(50)
         );
         // Without Stealth marker, hidden=0.
-        let ctx_open = FormulaCtx { level: 10, skill: 50, ..FormulaCtx::default() };
+        let ctx_open = FormulaCtx {
+            level: 10,
+            skill: 50,
+            ..FormulaCtx::default()
+        };
         assert_eq!(evaluate_formula("hidden", &ctx_open, &mut zero), Some(0));
         assert_eq!(
             evaluate_formula("skill * hidden", &ctx_open, &mut zero),
@@ -3189,11 +3760,25 @@ mod tests {
         );
         // A5: spell_power is exposed as both `spell_power` and `sp`
         // for formulas that want to read it explicitly.
-        let ctx_sp = FormulaCtx { spell_power: 30, ..FormulaCtx::default() };
-        assert_eq!(evaluate_formula("spell_power", &ctx_sp, &mut zero), Some(30));
+        let ctx_sp = FormulaCtx {
+            spell_power: 30,
+            ..FormulaCtx::default()
+        };
+        assert_eq!(
+            evaluate_formula("spell_power", &ctx_sp, &mut zero),
+            Some(30)
+        );
         assert_eq!(evaluate_formula("sp", &ctx_sp, &mut zero), Some(30));
         assert_eq!(
-            evaluate_formula("base + sp / 2", &FormulaCtx { spell_power: 40, base_damage: 10, ..FormulaCtx::default() }, &mut zero),
+            evaluate_formula(
+                "base + sp / 2",
+                &FormulaCtx {
+                    spell_power: 40,
+                    base_damage: 10,
+                    ..FormulaCtx::default()
+                },
+                &mut zero
+            ),
             Some(30),
         );
         // H.5 part 1: alignment-keyed spells. caster_align /
@@ -3205,10 +3790,22 @@ mod tests {
             victim_align: -800,
             ..FormulaCtx::default()
         };
-        assert_eq!(evaluate_formula("caster_align", &ctx_align, &mut zero), Some(500));
-        assert_eq!(evaluate_formula("caster_alignment", &ctx_align, &mut zero), Some(500));
-        assert_eq!(evaluate_formula("victim_align", &ctx_align, &mut zero), Some(-800));
-        assert_eq!(evaluate_formula("target_align", &ctx_align, &mut zero), Some(-800));
+        assert_eq!(
+            evaluate_formula("caster_align", &ctx_align, &mut zero),
+            Some(500)
+        );
+        assert_eq!(
+            evaluate_formula("caster_alignment", &ctx_align, &mut zero),
+            Some(500)
+        );
+        assert_eq!(
+            evaluate_formula("victim_align", &ctx_align, &mut zero),
+            Some(-800)
+        );
+        assert_eq!(
+            evaluate_formula("target_align", &ctx_align, &mut zero),
+            Some(-800)
+        );
         // Sample "good caster boost" shape:
         //   base * (caster_align + 200) / 1000
         // At base=100, caster_align=500 → 100 * 700 / 1000 = 70
@@ -3218,16 +3815,20 @@ mod tests {
             ..FormulaCtx::default()
         };
         assert_eq!(
-            evaluate_formula("base * (caster_align + 200) / 1000", &ctx_align_base, &mut zero),
+            evaluate_formula(
+                "base * (caster_align + 200) / 1000",
+                &ctx_align_base,
+                &mut zero
+            ),
             Some(70),
         );
     }
 
-    /// I.1: target_max_hp / target_level / caster_int_raw /
-    /// caster_wis_raw / min_level symbols land in FormulaCtx so
-    /// percent-HP spells (Seed of Destruction: `target_max_hp /
-    /// 20`), level-gated branches (Exorcism: `skill - target_level
-    /// > 30`), and raw-stat-scaling spells (Flamestrike legacy
+    /// I.1: `target_max_hp` / `target_level` / `caster_int_raw` /
+    /// `caster_wis_raw` / `min_level` symbols land in `FormulaCtx` so
+    /// percent-HP spells (Seed of Destruction: `target_max_hp / 20`),
+    /// level-gated branches (Exorcism: `skill - target_level > 30`),
+    /// and raw-stat-scaling spells (Flamestrike legacy
     /// `caster_int * 0.007 + 0.8`) can express directly instead of
     /// rewriting into approximations.
     #[test]
@@ -3244,13 +3845,25 @@ mod tests {
             ..FormulaCtx::default()
         };
         // SEED_OF_DESTRUCTION style: 5% target HP per tick.
-        assert_eq!(evaluate_formula("target_max_hp / 20", &ctx, &mut zero), Some(10));
+        assert_eq!(
+            evaluate_formula("target_max_hp / 20", &ctx, &mut zero),
+            Some(10)
+        );
         // Same value under the victim_ alias for symmetry with
         // victim_align/victim_alignment shape.
-        assert_eq!(evaluate_formula("victim_max_hp / 20", &ctx, &mut zero), Some(10));
+        assert_eq!(
+            evaluate_formula("victim_max_hp / 20", &ctx, &mut zero),
+            Some(10)
+        );
         // Exorcism-style level differential: skill - target_level.
-        assert_eq!(evaluate_formula("skill - target_level", &ctx, &mut zero), Some(60));
-        assert_eq!(evaluate_formula("skill - victim_level", &ctx, &mut zero), Some(60));
+        assert_eq!(
+            evaluate_formula("skill - target_level", &ctx, &mut zero),
+            Some(60)
+        );
+        assert_eq!(
+            evaluate_formula("skill - victim_level", &ctx, &mut zero),
+            Some(60)
+        );
         // Raw-INT scaling (integer-only restatement of the legacy
         // `caster_int * 0.007 + 0.8` → `caster_int * 7 / 1000 + 4 / 5`).
         // Avoid fractional output; just verify the symbol resolves.
@@ -3258,11 +3871,14 @@ mod tests {
         assert_eq!(evaluate_formula("caster_wis", &ctx, &mut zero), Some(75));
         // min_level usable as a divisor / exponent term.
         assert_eq!(evaluate_formula("min_level", &ctx, &mut zero), Some(5));
-        assert_eq!(evaluate_formula("pow(skill, 1 + min_level / 10)", &ctx, &mut zero), Some(80));
+        assert_eq!(
+            evaluate_formula("pow(skill, 1 + min_level / 10)", &ctx, &mut zero),
+            Some(80)
+        );
     }
 
     /// Wave 2 of the per-target lifeform symbols. Used by smite-type
-    /// spells: DESTROY_UNDEAD reads `victim_is_undead`; HOLY_WORD reads
+    /// spells: `DESTROY_UNDEAD` reads `victim_is_undead`; `HOLY_WORD` reads
     /// the demonic + celestial pair to boost vs unholy / soften vs
     /// holy. Each symbol is a 0/1 flag — easy to combine into the
     /// `1000 + victim_is_X * N` multiplier shape.
@@ -3272,14 +3888,35 @@ mod tests {
         // All flags default 0 — non-tagged targets carry the
         // baseline multiplier (×1 when divided by 1000).
         let neutral = FormulaCtx::default();
-        assert_eq!(evaluate_formula("victim_is_undead", &neutral, &mut zero), Some(0));
-        assert_eq!(evaluate_formula("victim_is_demonic", &neutral, &mut zero), Some(0));
-        assert_eq!(evaluate_formula("victim_is_celestial", &neutral, &mut zero), Some(0));
-        assert_eq!(evaluate_formula("victim_is_elemental", &neutral, &mut zero), Some(0));
+        assert_eq!(
+            evaluate_formula("victim_is_undead", &neutral, &mut zero),
+            Some(0)
+        );
+        assert_eq!(
+            evaluate_formula("victim_is_demonic", &neutral, &mut zero),
+            Some(0)
+        );
+        assert_eq!(
+            evaluate_formula("victim_is_celestial", &neutral, &mut zero),
+            Some(0)
+        );
+        assert_eq!(
+            evaluate_formula("victim_is_elemental", &neutral, &mut zero),
+            Some(0)
+        );
         // Aliases.
-        let undead = FormulaCtx { victim_is_undead: 1, ..FormulaCtx::default() };
-        assert_eq!(evaluate_formula("victim_undead", &undead, &mut zero), Some(1));
-        assert_eq!(evaluate_formula("target_is_undead", &undead, &mut zero), Some(1));
+        let undead = FormulaCtx {
+            victim_is_undead: 1,
+            ..FormulaCtx::default()
+        };
+        assert_eq!(
+            evaluate_formula("victim_undead", &undead, &mut zero),
+            Some(1)
+        );
+        assert_eq!(
+            evaluate_formula("target_is_undead", &undead, &mut zero),
+            Some(1)
+        );
         // DESTROY_UNDEAD shape: 2× vs undead, 1× otherwise.
         assert_eq!(
             evaluate_formula("1000 + victim_is_undead * 1000", &undead, &mut zero),
@@ -3290,9 +3927,16 @@ mod tests {
             Some(1000),
         );
         // HOLY_WORD shape: +0.5x vs demonic+undead, -0.5x vs celestial.
-        let demon = FormulaCtx { victim_is_demonic: 1, ..FormulaCtx::default() };
-        let angel = FormulaCtx { victim_is_celestial: 1, ..FormulaCtx::default() };
-        let holy_expr = "1000 + (victim_is_demonic + victim_is_undead) * 500 - victim_is_celestial * 500";
+        let demon = FormulaCtx {
+            victim_is_demonic: 1,
+            ..FormulaCtx::default()
+        };
+        let angel = FormulaCtx {
+            victim_is_celestial: 1,
+            ..FormulaCtx::default()
+        };
+        let holy_expr =
+            "1000 + (victim_is_demonic + victim_is_undead) * 500 - victim_is_celestial * 500";
         assert_eq!(evaluate_formula(holy_expr, &demon, &mut zero), Some(1500));
         assert_eq!(evaluate_formula(holy_expr, &undead, &mut zero), Some(1500));
         assert_eq!(evaluate_formula(holy_expr, &angel, &mut zero), Some(500));
@@ -3313,19 +3957,34 @@ mod tests {
         );
         // Integer literal still works.
         assert_eq!(
-            evaluate_formula("pow(skill, 2)", &FormulaCtx { skill: 7, ..FormulaCtx::default() }, &mut zero),
+            evaluate_formula(
+                "pow(skill, 2)",
+                &FormulaCtx {
+                    skill: 7,
+                    ..FormulaCtx::default()
+                },
+                &mut zero
+            ),
             Some(49),
         );
         // Integer expression. At skill=100, level=50:
         //   exponent = 1 + 50 / 25 = 3, so 100^3 = 1_000_000.
-        let ctx = FormulaCtx { skill: 100, level: 50, ..FormulaCtx::default() };
+        let ctx = FormulaCtx {
+            skill: 100,
+            level: 50,
+            ..FormulaCtx::default()
+        };
         assert_eq!(
             evaluate_formula("pow(skill, 1 + level / 25)", &ctx, &mut zero),
             Some(1_000_000),
         );
         // Exponent expression evaluates integer-only — `level / 100`
         // for level=50 is 0 (truncating int math), so pow(skill, 0) = 1.
-        let ctx = FormulaCtx { skill: 100, level: 50, ..FormulaCtx::default() };
+        let ctx = FormulaCtx {
+            skill: 100,
+            level: 50,
+            ..FormulaCtx::default()
+        };
         assert_eq!(
             evaluate_formula("pow(skill, level / 100)", &ctx, &mut zero),
             Some(1),
@@ -3335,7 +3994,10 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "pow(skill, 1 + if(skill - 50, 1, 0))",
-                &FormulaCtx { skill: 60, ..FormulaCtx::default() },
+                &FormulaCtx {
+                    skill: 60,
+                    ..FormulaCtx::default()
+                },
                 &mut zero,
             ),
             Some(3_600),
@@ -3350,11 +4012,26 @@ mod tests {
     #[test]
     fn evaluate_formula_min_max_if_clamp_builtins() {
         let mut zero = |_: &str, _: i32, _: i32| 0i32;
-        let ctx = FormulaCtx { skill: 50, ..FormulaCtx::default() };
-        assert_eq!(evaluate_formula("min(skill, 20)", &ctx, &mut zero), Some(20));
-        assert_eq!(evaluate_formula("max(skill, 20)", &ctx, &mut zero), Some(50));
-        assert_eq!(evaluate_formula("min(skill, 200)", &ctx, &mut zero), Some(50));
-        assert_eq!(evaluate_formula("max(skill, 200)", &ctx, &mut zero), Some(200));
+        let ctx = FormulaCtx {
+            skill: 50,
+            ..FormulaCtx::default()
+        };
+        assert_eq!(
+            evaluate_formula("min(skill, 20)", &ctx, &mut zero),
+            Some(20)
+        );
+        assert_eq!(
+            evaluate_formula("max(skill, 20)", &ctx, &mut zero),
+            Some(50)
+        );
+        assert_eq!(
+            evaluate_formula("min(skill, 200)", &ctx, &mut zero),
+            Some(50)
+        );
+        assert_eq!(
+            evaluate_formula("max(skill, 200)", &ctx, &mut zero),
+            Some(200)
+        );
         // Negative numbers participate naturally.
         assert_eq!(evaluate_formula("min(-3, -5)", &ctx, &mut zero), Some(-5));
         assert_eq!(evaluate_formula("max(-3, -5)", &ctx, &mut zero), Some(-3));
@@ -3364,11 +4041,17 @@ mod tests {
         // operators land.
         assert_eq!(evaluate_formula("if(1, 10, 99)", &ctx, &mut zero), Some(10));
         assert_eq!(evaluate_formula("if(0, 10, 99)", &ctx, &mut zero), Some(99));
-        assert_eq!(evaluate_formula("if(skill - 94, 1, 0)", &ctx, &mut zero), Some(1));
+        assert_eq!(
+            evaluate_formula("if(skill - 94, 1, 0)", &ctx, &mut zero),
+            Some(1)
+        );
         assert_eq!(
             evaluate_formula(
                 "if(skill - 94, 1, 0)",
-                &FormulaCtx { skill: 50, ..FormulaCtx::default() },
+                &FormulaCtx {
+                    skill: 50,
+                    ..FormulaCtx::default()
+                },
                 &mut zero,
             ),
             Some(1),
@@ -3376,15 +4059,27 @@ mod tests {
         assert_eq!(
             evaluate_formula(
                 "if(skill - 94, 1, 0)",
-                &FormulaCtx { skill: 94, ..FormulaCtx::default() },
+                &FormulaCtx {
+                    skill: 94,
+                    ..FormulaCtx::default()
+                },
                 &mut zero,
             ),
             Some(0),
         );
         // clamp — three-arg variant.
-        assert_eq!(evaluate_formula("clamp(skill, 10, 20)", &ctx, &mut zero), Some(20));
-        assert_eq!(evaluate_formula("clamp(5, 10, 20)", &ctx, &mut zero), Some(10));
-        assert_eq!(evaluate_formula("clamp(15, 10, 20)", &ctx, &mut zero), Some(15));
+        assert_eq!(
+            evaluate_formula("clamp(skill, 10, 20)", &ctx, &mut zero),
+            Some(20)
+        );
+        assert_eq!(
+            evaluate_formula("clamp(5, 10, 20)", &ctx, &mut zero),
+            Some(10)
+        );
+        assert_eq!(
+            evaluate_formula("clamp(15, 10, 20)", &ctx, &mut zero),
+            Some(15)
+        );
         // Inverted bounds → None (silent skip; caller falls through).
         assert_eq!(evaluate_formula("clamp(5, 20, 10)", &ctx, &mut zero), None);
     }
@@ -3413,13 +4108,13 @@ mod tests {
         assert_eq!(bolts(-5), 1);
     }
 
-    /// J2: PROT_FROM_EVIL / PROT_FROM_GOOD damage factor returns
+    /// J2: `PROT_FROM_EVIL` / `PROT_FROM_GOOD` damage factor returns
     /// 0.8 only when alignments are mutually opposed AND the
     /// matching marker is present on the victim.
     #[test]
     fn alignment_protection_factor_gate_logic() {
-        use bevy_ecs::prelude::*;
         use super::alignment_protection_factor;
+        use bevy_ecs::prelude::*;
         let mut w = World::new();
         let make = |w: &mut World, align: i32, marker_evil: bool, marker_good: bool| {
             let mut e = w.spawn(mud_world::CombatStats {
@@ -3488,21 +4183,39 @@ mod tests {
         assert!(super::apply_resistance(0, 50) >= 0);
     }
 
-    /// A7: damage element string → ElementType resolver.
+    /// A7: damage element string → `ElementType` resolver.
     #[test]
     fn resolve_damage_element_picks_known_types() {
         use mud_db::enums::ElementType as E;
         let blob = |t: &str| serde_json::json!({"type": t});
-        assert_eq!(super::resolve_damage_element(Some(&blob("fire")), None), E::Fire);
-        assert_eq!(super::resolve_damage_element(Some(&blob("HOLY")), None), E::Holy);
+        assert_eq!(
+            super::resolve_damage_element(Some(&blob("fire")), None),
+            E::Fire
+        );
+        assert_eq!(
+            super::resolve_damage_element(Some(&blob("HOLY")), None),
+            E::Holy
+        );
         // Synonyms.
-        assert_eq!(super::resolve_damage_element(Some(&blob("lightning")), None), E::Shock);
-        assert_eq!(super::resolve_damage_element(Some(&blob("psychic")), None), E::Mental);
+        assert_eq!(
+            super::resolve_damage_element(Some(&blob("lightning")), None),
+            E::Shock
+        );
+        assert_eq!(
+            super::resolve_damage_element(Some(&blob("psychic")), None),
+            E::Mental
+        );
         // Unknown / missing → Physical (so we don't accidentally
         // bypass the resist step).
-        assert_eq!(super::resolve_damage_element(Some(&blob("xyzzy")), None), E::Physical);
+        assert_eq!(
+            super::resolve_damage_element(Some(&blob("xyzzy")), None),
+            E::Physical
+        );
         let no_type = serde_json::json!({"amount": "1d6"});
-        assert_eq!(super::resolve_damage_element(Some(&no_type), None), E::Physical);
+        assert_eq!(
+            super::resolve_damage_element(Some(&no_type), None),
+            E::Physical
+        );
         // Override beats default.
         let def = blob("cold");
         let over = blob("fire");
@@ -3513,7 +4226,7 @@ mod tests {
     }
 
     /// A5 regression: a magical-spell damage path scales by
-    /// spell_power. We verify the math directly (the live invoke
+    /// `spell_power`. We verify the math directly (the live invoke
     /// path is exercised by integration tests + playtest).
     #[test]
     fn spell_power_scales_magical_damage() {
@@ -3565,16 +4278,26 @@ mod tests {
         let mut stub = |name: &str, _a: i32, _b: i32| {
             if name == "random" { 42 } else { 0 }
         };
-        assert_eq!(evaluate_formula("random(1, 10)", &super::FormulaCtx::base(0, 0), &mut stub), Some(42));
+        assert_eq!(
+            evaluate_formula("random(1, 10)", &super::FormulaCtx::base(0, 0), &mut stub),
+            Some(42)
+        );
         // Composite: skill + random(1, skill*2). With skill=10:
         // 10 + 42 = 52 (stub returns 42 for any random).
         assert_eq!(
-            evaluate_formula("skill + random(1, skill * 2)", &super::FormulaCtx::base(0, 10), &mut stub),
+            evaluate_formula(
+                "skill + random(1, skill * 2)",
+                &super::FormulaCtx::base(0, 10),
+                &mut stub
+            ),
             Some(52)
         );
         // Backwards range refused → falls through.
         let mut zero = |_name: &str, _a: i32, _b: i32| 0;
-        assert_eq!(evaluate_formula("random(10, 5)", &super::FormulaCtx::base(0, 0), &mut zero), None);
+        assert_eq!(
+            evaluate_formula("random(10, 5)", &super::FormulaCtx::base(0, 0), &mut zero),
+            None
+        );
     }
 
     #[test]
@@ -3583,18 +4306,32 @@ mod tests {
         // Deterministic stub: roll_dice/random both return n * m so
         // tests are reproducible.
         let mut det = |_name: &str, n: i32, m: i32| n * m;
-        assert_eq!(evaluate_formula("roll_dice(2, 9)", &super::FormulaCtx::base(0, 0), &mut det), Some(18));
+        assert_eq!(
+            evaluate_formula("roll_dice(2, 9)", &super::FormulaCtx::base(0, 0), &mut det),
+            Some(18)
+        );
         // Precedence: roll_dice + skill / 5 with skill=25 → 18 + 5 = 23
         assert_eq!(
-            evaluate_formula("roll_dice(2, 9) + skill / 5", &super::FormulaCtx::base(0, 25), &mut det),
+            evaluate_formula(
+                "roll_dice(2, 9) + skill / 5",
+                &super::FormulaCtx::base(0, 25),
+                &mut det
+            ),
             Some(23)
         );
         // The dice-notation normalizer rewrites NdM → roll_dice(N, M)
         // before evaluation. `1d8` with the same stub is 8.
-        assert_eq!(amount_blob_eval("1d8", &super::FormulaCtx::base(0, 0), &mut det), Some(8));
+        assert_eq!(
+            amount_blob_eval("1d8", &super::FormulaCtx::base(0, 0), &mut det),
+            Some(8)
+        );
         // Constant `100 + 1d8 + skill / 5` with skill=20 is 100 + 8 + 4 = 112.
         assert_eq!(
-            amount_blob_eval("100 + 1d8 + skill / 5", &super::FormulaCtx::base(0, 20), &mut det),
+            amount_blob_eval(
+                "100 + 1d8 + skill / 5",
+                &super::FormulaCtx::base(0, 20),
+                &mut det
+            ),
             Some(112)
         );
     }
@@ -3623,13 +4360,22 @@ mod tests {
     fn amount_from_blob_reads_override_then_default() {
         // Override-priority: amount=42 wins.
         let blob = serde_json::json!({"amount": 42});
-        assert_eq!(amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0)), Some(42));
+        assert_eq!(
+            amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0)),
+            Some(42)
+        );
         // String formula with skill substitution.
         let blob = serde_json::json!({"amount": "skill / 4"});
-        assert_eq!(amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 100)), Some(25));
+        assert_eq!(
+            amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 100)),
+            Some(25)
+        );
         // Missing field → None (caller falls through).
         let blob = serde_json::json!({"duration": 5});
-        assert_eq!(amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0)), None);
+        assert_eq!(
+            amount_from_blob(Some(&blob), &super::FormulaCtx::base(0, 0)),
+            None
+        );
     }
 
     use mud_world::{AppliedTo, EffectInstance, EffectSource};
@@ -3680,9 +4426,7 @@ mod tests {
         // threshold message.
         use mud_world::Ghost;
         let mut world = World::new();
-        let target = world
-            .spawn((Health { hp: 0, max: 100 }, Ghost))
-            .id();
+        let target = world.spawn((Health { hp: 0, max: 100 }, Ghost)).id();
         let (dead, msg) = apply_damage(&mut world, target, 50);
         assert!(!dead, "Ghost target doesn't trigger a death event");
         assert_eq!(msg, None, "Ghost target doesn't get threshold messages");
@@ -3752,14 +4496,29 @@ mod tests {
         super::apply_modify_delta(&mut world, entity, "ward", 25);
         let cs = world.get::<CombatStats>(entity).copied().unwrap();
         assert_eq!(cs.ward_pct, 25, "ward modify routes to ward_pct");
-        assert_eq!(cs.armor_pct, baseline_armor_pct, "ward modify does NOT touch armor_pct");
-        assert_eq!(cs.armor_flat, baseline_armor_flat, "ward modify does NOT touch armor_flat");
+        assert_eq!(
+            cs.armor_pct, baseline_armor_pct,
+            "ward modify does NOT touch armor_pct"
+        );
+        assert_eq!(
+            cs.armor_flat, baseline_armor_flat,
+            "ward modify does NOT touch armor_flat"
+        );
         // Reverse delta (effect expiry) walks it back.
         super::reverse_modify_delta(&mut world, entity, "ward", 25);
         let cs2 = world.get::<CombatStats>(entity).copied().unwrap();
-        assert_eq!(cs2.ward_pct, 0, "reverse_modify_delta returns ward_pct to 0");
-        assert_eq!(cs2.armor_pct, baseline_armor_pct, "reverse stays clear of armor_pct");
-        assert_eq!(cs2.armor_flat, baseline_armor_flat, "reverse stays clear of armor_flat");
+        assert_eq!(
+            cs2.ward_pct, 0,
+            "reverse_modify_delta returns ward_pct to 0"
+        );
+        assert_eq!(
+            cs2.armor_pct, baseline_armor_pct,
+            "reverse stays clear of armor_pct"
+        );
+        assert_eq!(
+            cs2.armor_flat, baseline_armor_flat,
+            "reverse stays clear of armor_flat"
+        );
     }
 
     #[test]
@@ -3768,9 +4527,7 @@ mod tests {
         // back from Ghost — it sets hp = max in one shot.
         use mud_world::Ghost;
         let mut world = World::new();
-        let target = world
-            .spawn((Health { hp: 0, max: 100 }, Ghost))
-            .id();
+        let target = world.spawn((Health { hp: 0, max: 100 }, Ghost)).id();
         let healed = apply_heal_hp(&mut world, target, 50);
         assert_eq!(healed, 0, "Ghost target reports no healing applied");
         assert_eq!(
@@ -3786,7 +4543,13 @@ mod tests {
         use mud_world::Ghost;
         let mut world = World::new();
         let target = world
-            .spawn((Stamina { current: 0, max: 50 }, Ghost))
+            .spawn((
+                Stamina {
+                    current: 0,
+                    max: 50,
+                },
+                Ghost,
+            ))
             .id();
         let healed = apply_heal_stamina(&mut world, target, 25);
         assert_eq!(healed, 0, "Ghost target reports no stamina healed");
@@ -3829,7 +4592,12 @@ mod tests {
     #[test]
     fn apply_heal_stamina_caps_at_max() {
         let mut world = World::new();
-        let target = world.spawn(Stamina { current: 20, max: 50 }).id();
+        let target = world
+            .spawn(Stamina {
+                current: 20,
+                max: 50,
+            })
+            .id();
         let healed = apply_heal_stamina(&mut world, target, 100);
         assert_eq!(healed, 30);
         assert_eq!(world.get::<Stamina>(target).unwrap().current, 50);
@@ -3854,7 +4622,10 @@ mod tests {
         );
         // Unknown target name falls through to Sitting.
         let bogus = serde_json::json!({"target": "floor"});
-        assert_eq!(resolve_knockdown_posture(Some(&bogus), None), PostureKind::Sitting);
+        assert_eq!(
+            resolve_knockdown_posture(Some(&bogus), None),
+            PostureKind::Sitting
+        );
     }
 
     #[test]
@@ -3866,19 +4637,31 @@ mod tests {
         let resting = world.spawn(Posture(PostureKind::Resting)).id();
 
         // Standing → Sitting: change.
-        assert!(apply_knockdown_posture(&mut world, standing, PostureKind::Sitting));
+        assert!(apply_knockdown_posture(
+            &mut world,
+            standing,
+            PostureKind::Sitting
+        ));
         assert_eq!(
             world.get::<Posture>(standing).map(|p| p.0),
             Some(PostureKind::Sitting)
         );
         // Sitting → Sitting: no-op.
-        assert!(!apply_knockdown_posture(&mut world, already_sitting, PostureKind::Sitting));
+        assert!(!apply_knockdown_posture(
+            &mut world,
+            already_sitting,
+            PostureKind::Sitting
+        ));
         assert_eq!(
             world.get::<Posture>(already_sitting).map(|p| p.0),
             Some(PostureKind::Sitting)
         );
         // Resting → Sitting: would be an UPGRADE, refuse.
-        assert!(!apply_knockdown_posture(&mut world, resting, PostureKind::Sitting));
+        assert!(!apply_knockdown_posture(
+            &mut world,
+            resting,
+            PostureKind::Sitting
+        ));
         assert_eq!(
             world.get::<Posture>(resting).map(|p| p.0),
             Some(PostureKind::Resting)
@@ -3953,7 +4736,10 @@ mod tests {
         let mob = world.spawn(Mob).id();
         let valid: Vec<String> = vec!["ENEMY_PC".to_string()];
         // Other player → passes.
-        assert_eq!(check_target_type(&mut world, caster, other_player, &valid), None);
+        assert_eq!(
+            check_target_type(&mut world, caster, other_player, &valid),
+            None
+        );
         // Self → refused.
         assert!(check_target_type(&mut world, caster, caster, &valid).is_some());
         // Mob → refused (not a Player).
@@ -3984,7 +4770,10 @@ mod tests {
         let valid: Vec<String> = vec!["ENEMY_PC".to_string(), "ENEMY_NPC".to_string()];
         // Either passes.
         assert_eq!(check_target_type(&mut world, caster, mob, &valid), None);
-        assert_eq!(check_target_type(&mut world, caster, other_player, &valid), None);
+        assert_eq!(
+            check_target_type(&mut world, caster, other_player, &valid),
+            None
+        );
         // Self still refused (ENEMY_PC excludes self; ENEMY_NPC requires Mob).
         assert!(check_target_type(&mut world, caster, caster, &valid).is_some());
     }
@@ -4015,7 +4804,12 @@ mod tests {
     fn restriction_alignment_prohibits_evil_caster() {
         use mud_world::CombatStats;
         let mut world = World::new();
-        let evil = world.spawn(CombatStats { alignment: -500, ..Default::default() }).id();
+        let evil = world
+            .spawn(CombatStats {
+                alignment: -500,
+                ..Default::default()
+            })
+            .id();
         let neutral = world.spawn(CombatStats::default()).id();
         let dummy = world.spawn(()).id();
         let rule = serde_json::json!([{
@@ -4039,8 +4833,18 @@ mod tests {
         use mud_world::CombatStats;
         let mut world = World::new();
         let caster = world.spawn(()).id();
-        let undead = world.spawn(CombatStats { alignment: -500, ..Default::default() }).id();
-        let good = world.spawn(CombatStats { alignment: 500, ..Default::default() }).id();
+        let undead = world
+            .spawn(CombatStats {
+                alignment: -500,
+                ..Default::default()
+            })
+            .id();
+        let good = world
+            .spawn(CombatStats {
+                alignment: 500,
+                ..Default::default()
+            })
+            .id();
         let rules: Vec<serde_json::Value> = vec![serde_json::json!({
             "type": "alignment",
             "target": "victim",
@@ -4049,7 +4853,10 @@ mod tests {
             "message": "Target must be evil.",
         })];
         // Evil target: passes.
-        assert_eq!(check_ability_restrictions(&mut world, caster, undead, &rules), None);
+        assert_eq!(
+            check_ability_restrictions(&mut world, caster, undead, &rules),
+            None
+        );
         // Good target: refused.
         let r = check_ability_restrictions(&mut world, caster, good, &rules);
         assert_eq!(r.as_deref(), Some("Target must be evil."));
@@ -4156,7 +4963,11 @@ mod tests {
         let arr_blob = serde_json::json!({"condition": ["bleed", "POISON", "curse"]});
         assert_eq!(
             resolve_effect_conditions(Some(&arr_blob), None),
-            vec!["bleed".to_string(), "poison".to_string(), "curse".to_string()]
+            vec![
+                "bleed".to_string(),
+                "poison".to_string(),
+                "curse".to_string()
+            ]
         );
         // Default-only fallback still works.
         let default = serde_json::json!({"condition": "all"});
@@ -4172,7 +4983,10 @@ mod tests {
         );
         // Both missing → empty.
         let blob = serde_json::json!({});
-        assert_eq!(resolve_effect_conditions(Some(&blob), Some(&blob)), Vec::<String>::new());
+        assert_eq!(
+            resolve_effect_conditions(Some(&blob), Some(&blob)),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -4185,10 +4999,7 @@ mod tests {
             "move"
         );
         // No override → default.
-        assert_eq!(
-            resolve_effect_resource(None, Some(&default_p)),
-            "hp"
-        );
+        assert_eq!(resolve_effect_resource(None, Some(&default_p)), "hp");
         // Neither → default to "hp".
         assert_eq!(resolve_effect_resource(None, None), "hp");
     }
@@ -4308,10 +5119,7 @@ mod tests {
         assert_eq!(super::format_age(0), None);
         assert_eq!(super::format_age(-5), None);
         // Level 1 → 21 years, 3 months (placeholder formula).
-        assert_eq!(
-            super::format_age(1),
-            Some("21 years, 3 months".to_string()),
-        );
+        assert_eq!(super::format_age(1), Some("21 years, 3 months".to_string()),);
         // Level 25 → 45 years, (25*3)%12 = 75%12 = 3 months.
         assert_eq!(
             super::format_age(25),
@@ -4411,10 +5219,7 @@ mod tests {
     // includes the expected sections. These guard against a future
     // refactor accidentally dropping a section line.
 
-    fn build_smoke_score_data<'a>(
-        name: &'a str,
-        effects: &'a [String],
-    ) -> super::ScoreData<'a> {
+    fn build_smoke_score_data<'a>(name: &'a str, effects: &'a [String]) -> super::ScoreData<'a> {
         super::ScoreData {
             name,
             hp: Some(Health { hp: 95, max: 100 }),
@@ -4592,8 +5397,7 @@ mod tests {
     #[test]
     fn score_board_draft_line_only_when_in_flight() {
         let effects: Vec<String> = Vec::new();
-        let mut data =
-            build_smoke_score_data("Strider", &effects);
+        let mut data = build_smoke_score_data("Strider", &effects);
         let off = super::render_score_standard(&data);
         assert!(!off.contains("Board draft:"), "no board row: {off}");
         data.board_draft = Some(("mortal", 5));
@@ -4607,8 +5411,7 @@ mod tests {
     #[test]
     fn score_mail_draft_line_only_when_in_flight() {
         let effects: Vec<String> = Vec::new();
-        let mut data =
-            build_smoke_score_data("Strider", &effects);
+        let mut data = build_smoke_score_data("Strider", &effects);
         let off = super::render_score_standard(&data);
         assert!(!off.contains("Mail draft:"), "no draft row: {off}");
         data.mail_draft = Some(("Samui", 3));
@@ -4622,8 +5425,7 @@ mod tests {
     #[test]
     fn score_guarding_line_only_when_set() {
         let effects: Vec<String> = Vec::new();
-        let mut data =
-            build_smoke_score_data("Strider", &effects);
+        let mut data = build_smoke_score_data("Strider", &effects);
         let off = super::render_score_standard(&data);
         assert!(!off.contains("Guarding:"), "no guarding row: {off}");
         data.guarding_name = Some("Samui");
@@ -4634,12 +5436,14 @@ mod tests {
     #[test]
     fn score_motion_state_lines_only_when_active() {
         let effects: Vec<String> = Vec::new();
-        let mut data =
-            build_smoke_score_data("Strider", &effects);
+        let mut data = build_smoke_score_data("Strider", &effects);
         // Default fixture: on foot, walking → no rows.
         let grounded = super::render_score_standard(&data);
         assert!(!grounded.contains("Flying:"), "no fly row: {grounded}");
-        assert!(!grounded.contains("Mounted on:"), "no mount row: {grounded}");
+        assert!(
+            !grounded.contains("Mounted on:"),
+            "no mount row: {grounded}"
+        );
         // Toggle both.
         data.flying = true;
         data.mount_name = Some("a chestnut warhorse");
@@ -4654,8 +5458,7 @@ mod tests {
     #[test]
     fn score_stealth_line_only_when_hidden() {
         let effects: Vec<String> = Vec::new();
-        let mut data =
-            build_smoke_score_data("Strider", &effects);
+        let mut data = build_smoke_score_data("Strider", &effects);
         // Default fixture: no stealth → no line.
         let visible = super::render_score_standard(&data);
         assert!(
@@ -4808,12 +5611,20 @@ mod tests {
 
         // Non-hidden exit is visible regardless of reveal state.
         assert!(!super::exit_is_hidden_to(
-            &world, player, room, Direction::North, &visible_exit
+            &world,
+            player,
+            room,
+            Direction::North,
+            &visible_exit
         ));
 
         // Hidden exit hides from a player with no RevealedExits.
         assert!(super::exit_is_hidden_to(
-            &world, player, room, Direction::North, &hidden_exit
+            &world,
+            player,
+            room,
+            Direction::North,
+            &hidden_exit
         ));
 
         // Adding the (room, north) pair to RevealedExits flips it.
@@ -4821,19 +5632,31 @@ mod tests {
         set.insert((room, Direction::North));
         world.entity_mut(player).insert(RevealedExits { set });
         assert!(!super::exit_is_hidden_to(
-            &world, player, room, Direction::North, &hidden_exit
+            &world,
+            player,
+            room,
+            Direction::North,
+            &hidden_exit
         ));
 
         // Different direction stays hidden — reveal is per-direction.
         assert!(super::exit_is_hidden_to(
-            &world, player, room, Direction::South, &hidden_exit
+            &world,
+            player,
+            room,
+            Direction::South,
+            &hidden_exit
         ));
 
         // Different room (same direction) stays hidden — reveal is
         // per-(room, direction).
         let other_room = world.spawn(()).id();
         assert!(super::exit_is_hidden_to(
-            &world, player, other_room, Direction::North, &hidden_exit
+            &world,
+            player,
+            other_room,
+            Direction::North,
+            &hidden_exit
         ));
     }
 
@@ -4842,11 +5665,11 @@ mod tests {
     /// Build a minimal world that the drink-path queries can run
     /// against. Only the resources/components the path actually
     /// reads are populated; everything else (sessions, prototypes
-    /// for non-fountains, ConsumableEffects) stays empty.
+    /// for non-fountains, `ConsumableEffects`) stays empty.
     fn drink_test_world() -> (World, Entity, Entity) {
         use mud_world::{
-            ConsumableEffectCatalog, Drunkenness, Hunger, Item, Keywords, LiquidCatalog, LiquidDef,
-            LiquidContainer, LiquidIndex, Located, Named, ObjectPrototypes, Thirst,
+            ConsumableEffectCatalog, Drunkenness, Hunger, Item, Keywords, LiquidCatalog,
+            LiquidContainer, LiquidDef, LiquidIndex, Located, Named, ObjectPrototypes, Thirst,
         };
         let mut world = World::new();
         // Catalog with three liquids: water (no drunk), wine (alcoholic).
@@ -4885,18 +5708,15 @@ mod tests {
         // Room → player → wineskin (Located on the player).
         let room = world.spawn(()).id();
         let player = world
-            .spawn((
-                Located(room),
-                Hunger(30),
-                Thirst(30),
-                Drunkenness(0),
-            ))
+            .spawn((Located(room), Hunger(30), Thirst(30), Drunkenness(0)))
             .id();
         let item = world
             .spawn((
                 Item,
                 Located(player),
-                Named { name: "a wineskin".to_string() },
+                Named {
+                    name: "a wineskin".to_string(),
+                },
                 Keywords(vec!["wineskin".to_string(), "skin".to_string()]),
                 LiquidContainer {
                     liquid: "wine".to_string(),
@@ -4971,7 +5791,11 @@ mod tests {
         // Fallback is water-shaped: thirst -= 10*4 = 40, hunger
         // unchanged, drunkenness unchanged.
         assert_eq!(world.get::<Hunger>(player).unwrap().0, 30);
-        assert_eq!(world.get::<Thirst>(player).unwrap().0, 0, "30 - 40 clamped at 0");
+        assert_eq!(
+            world.get::<Thirst>(player).unwrap().0,
+            0,
+            "30 - 40 clamped at 0"
+        );
         assert_eq!(world.get::<Drunkenness>(player).unwrap().0, 0);
         // The swig still went through.
         assert_eq!(world.get::<LiquidContainer>(item).unwrap().remaining, 16);
@@ -5063,14 +5887,18 @@ fn compute_level_progress(world: &World, level: i32, xp: i32) -> i32 {
 /// would type to send on that channel — useful for clients that
 /// expose a "click tab → focus input with channel command"
 /// shortcut.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn send_comm_channel_list(world: &World, viewer: Entity) {
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
     let role = world
         .get::<Account>(viewer)
         .map_or(mud_db::enums::UserRole::Player, |a| a.role);
     // Channel directory. Order is the order tabs appear in the
     // Mudlet package's chat panel by default — gossip-first
     // matches the existing `consoles` array's tab order.
+    #[allow(clippy::items_after_statements)]
     struct Ch {
         name: &'static str,
         caption: &'static str,
@@ -5078,19 +5906,84 @@ pub(crate) fn send_comm_channel_list(world: &World, viewer: Entity) {
         min_role: mud_db::enums::UserRole,
     }
     let dir = [
-        Ch { name: "gossip",  caption: "Gossip",   command: "gossip",  min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "music",   caption: "Music",    command: "music",   min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "shout",   caption: "Shout",    command: "shout",   min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "quest",   caption: "Quest",    command: "qsay",    min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "tells",   caption: "Tells",    command: "tell",    min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "clan",    caption: "Clan",     command: "ctell",   min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "group",   caption: "Group",    command: "gsay",    min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "say",     caption: "Local",    command: "say",     min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "emote",   caption: "Local",    command: "emote",   min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "ask",     caption: "Local",    command: "ask",     min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "whisper", caption: "Local",    command: "whisper", min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "insult",  caption: "Local",    command: "insult",  min_role: mud_db::enums::UserRole::Player },
-        Ch { name: "wiznet",  caption: "Wiznet",   command: "wiznet",  min_role: mud_db::enums::UserRole::Immortal },
+        Ch {
+            name: "gossip",
+            caption: "Gossip",
+            command: "gossip",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "music",
+            caption: "Music",
+            command: "music",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "shout",
+            caption: "Shout",
+            command: "shout",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "quest",
+            caption: "Quest",
+            command: "qsay",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "tells",
+            caption: "Tells",
+            command: "tell",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "clan",
+            caption: "Clan",
+            command: "ctell",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "group",
+            caption: "Group",
+            command: "gsay",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "say",
+            caption: "Local",
+            command: "say",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "emote",
+            caption: "Local",
+            command: "emote",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "ask",
+            caption: "Local",
+            command: "ask",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "whisper",
+            caption: "Local",
+            command: "whisper",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "insult",
+            caption: "Local",
+            command: "insult",
+            min_role: mud_db::enums::UserRole::Player,
+        },
+        Ch {
+            name: "wiznet",
+            caption: "Wiznet",
+            command: "wiznet",
+            min_role: mud_db::enums::UserRole::Immortal,
+        },
     ];
     let entries: Vec<String> = dir
         .iter()
@@ -5103,7 +5996,9 @@ pub(crate) fn send_comm_channel_list(world: &World, viewer: Entity) {
         })
         .collect();
     let payload = format!("[{}]", entries.join(","));
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Comm.Channel.List", &payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Comm.Channel.List", &payload));
 }
 
 /// listing a container's contents. `items` is the entity set to
@@ -5123,13 +6018,12 @@ pub(crate) fn send_char_items_list(
     location: &str,
     items: &[Entity],
 ) {
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
     let mut entries: Vec<String> = Vec::with_capacity(items.len());
     for &item in items {
-        let raw_name = world
-            .get::<Named>(item)
-            .map(|n| n.name.as_str())
-            .unwrap_or("");
+        let raw_name = world.get::<Named>(item).map_or("", |n| n.name.as_str());
         let plain = render_color_tags(raw_name, ColorMode::Strip)
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
@@ -5173,7 +6067,9 @@ pub(crate) fn send_char_items_list(
         location.replace('"', "\\\""),
         entries.join(","),
     );
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Items.List", &payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Char.Items.List", &payload));
 }
 
 /// Re-emit `Char.Items.List` for both the player's inventory and
@@ -5185,10 +6081,7 @@ pub(crate) fn send_char_items_list(
 /// list) and the call site doesn't need to track which item moved.
 pub(crate) fn refresh_player_items_gmcp(world: &mut World, player: Entity) {
     let inv: Vec<Entity> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, Option<&EquippedSlot>),
-            With<Item>,
-        >();
+        let mut q = world.query_filtered::<(Entity, &Located, Option<&EquippedSlot>), With<Item>>();
         q.iter(world)
             .filter(|(_, l, eq)| l.0 == player && eq.is_none())
             .map(|(e, _, _)| e)
@@ -5196,10 +6089,7 @@ pub(crate) fn refresh_player_items_gmcp(world: &mut World, player: Entity) {
     };
     send_char_items_list(world, player, "inv", &inv);
     let worn: Vec<Entity> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &EquippedSlot),
-            With<Item>,
-        >();
+        let mut q = world.query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
         q.iter(world)
             .filter(|(_, l, _)| l.0 == player)
             .map(|(e, _, _)| e)
@@ -5223,11 +6113,10 @@ pub(crate) fn send_char_items_diff(
     location: &str,
     item: Entity,
 ) {
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
-    let raw_name = world
-        .get::<Named>(item)
-        .map(|n| n.name.as_str())
-        .unwrap_or("");
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
+    let raw_name = world.get::<Named>(item).map_or("", |n| n.name.as_str());
     let plain = render_color_tags(raw_name, ColorMode::Strip)
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
@@ -5264,9 +6153,13 @@ pub(crate) fn send_room_players_snapshot(world: &mut World, viewer: Entity) {
             }
         }
     }
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
     let payload = format!("[{}]", entries.join(","));
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Room.Players", &payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Room.Players", &payload));
 }
 
 /// Push a single `Room.AddPlayer` / `Room.RemovePlayer` diff to
@@ -5280,10 +6173,7 @@ pub(crate) fn broadcast_room_player_diff(
     subject: Entity,
     verb: &str, // "AddPlayer" or "RemovePlayer"
 ) {
-    let raw_name = world
-        .get::<Named>(subject)
-        .map(|n| n.name.as_str())
-        .unwrap_or("");
+    let raw_name = world.get::<Named>(subject).map_or("", |n| n.name.as_str());
     let plain = render_color_tags(raw_name, ColorMode::Strip)
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
@@ -5310,10 +6200,14 @@ pub(crate) fn broadcast_room_player_diff(
 /// resolve names from `AbilityCatalog` so the strings match
 /// what `spells` / `skills` print in-game.
 pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
     let Some(known) = world.get::<KnownAbilities>(viewer) else {
         let empty = "[]";
-        let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills.List", empty));
+        let _ = conn
+            .0
+            .try_send(mud_net::gmcp_packet("Char.Skills.List", empty));
         return;
     };
     let catalog = world.resource::<AbilityCatalog>();
@@ -5330,7 +6224,9 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
         }
     }
     let payload = format!("[{}]", names.join(","));
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills.List", &payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Char.Skills.List", &payload));
 }
 
 /// Push a `Char.Skills` GMCP frame to `viewer`. Drives the future
@@ -5342,19 +6238,22 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
 /// Casting costs are paid in stamina, not mana — this game has no
 /// mana pool. The shape stays MUD-client-standard (no `mp_cost`
 /// alongside skills) so generic GMCP clients render fine without
-/// special-casing FieryMUD.
+/// special-casing `FieryMUD`.
 pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
-    let Some(known) = world.get::<KnownAbilities>(viewer) else {
-        let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills", r#"{"skills":[]}"#));
+    let Some(conn) = world.get::<Connection>(viewer) else {
         return;
     };
-    let catalog = match world.get_resource::<AbilityCatalog>() {
-        Some(c) => c,
-        None => {
-            let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills", r#"{"skills":[]}"#));
-            return;
-        }
+    let Some(known) = world.get::<KnownAbilities>(viewer) else {
+        let _ = conn
+            .0
+            .try_send(mud_net::gmcp_packet("Char.Skills", r#"{"skills":[]}"#));
+        return;
+    };
+    let Some(catalog) = world.get_resource::<AbilityCatalog>() else {
+        let _ = conn
+            .0
+            .try_send(mud_net::gmcp_packet("Char.Skills", r#"{"skills":[]}"#));
+        return;
     };
     let now = std::time::Instant::now();
     let cooldowns = world.get::<Cooldowns>(viewer);
@@ -5368,21 +6267,24 @@ pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
         if !known_flag {
             continue;
         }
-        let Some(def) = by_id.get(&ability_id) else { continue };
+        let Some(def) = by_id.get(&ability_id) else {
+            continue;
+        };
         let plain = plain_for_gmcp(&def.plain_name);
         // Seconds remaining on this ability's cooldown, or 0 if
         // it's ready (no entry, or `ready_at` already passed).
         let cooldown_secs = cooldowns
             .and_then(|cd| cd.ready_at.get(&ability_id))
-            .map(|when| when.saturating_duration_since(now).as_secs())
-            .unwrap_or(0);
+            .map_or(0, |when| when.saturating_duration_since(now).as_secs());
         let available = cooldown_secs == 0;
         entries.push(format!(
             r#"{{"name":"{plain}","cooldown":{cooldown_secs},"available":{available}}}"#,
         ));
     }
     let payload = format!(r#"{{"skills":[{}]}}"#, entries.join(","));
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Skills", &payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Char.Skills", &payload));
 }
 
 /// Push a `Group` GMCP frame to `viewer`. The frame describes the
@@ -5390,7 +6292,7 @@ pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
 /// member array. Each member entry carries name, level, race,
 /// class, current room (true if same as `viewer`'s room — the
 /// `with_leader` IRE convention), and a `stats` block with
-/// hp/max_hp/mv/max_mv. The party panel renders directly off
+/// `hp/max_hp/mv/max_mv`. The party panel renders directly off
 /// this shape.
 ///
 /// Empty / solo case: no Group frame is emitted (the player isn't
@@ -5400,7 +6302,9 @@ pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
 pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
     let root = group_root(world, viewer);
     let members = group_members(world, root);
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
     if members.len() <= 1 {
         // Solo — push an empty Group frame so a previously-visible
         // panel clears.
@@ -5443,9 +6347,7 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
             (Some(a), Some(b)) => a == b,
             _ => false,
         };
-        let (hp, max_hp) = world
-            .get::<Health>(m)
-            .map_or((0, 0), |h| (h.hp, h.max));
+        let (hp, max_hp) = world.get::<Health>(m).map_or((0, 0), |h| (h.hp, h.max));
         let (mv, max_mv) = world
             .get::<Stamina>(m)
             .map_or((0, 0), |s| (s.current, s.max));
@@ -5475,15 +6377,15 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
 /// target when it differs from the group's opponent.
 ///
 /// Field-name quirk: the spec uses `tank.max_hp` (underscore) but
-/// `opponent.hp_percent` and Char.Vitals' `max_hp`. All snake_case
+/// `opponent.hp_percent` and Char.Vitals' `max_hp`. All `snake_case`
 /// — the client does no normalization, so the names below match the
 /// wire contract exactly.
 ///
 /// Shape:
 ///   {} (cleared)                          — no Fighting; client hides
-///   { tank: {name, hp, max_hp},
-///     opponent: {name, hp_percent},
-///     target?:  {name, hp_percent} }
+///   { tank: {name, hp, `max_hp`},
+///     opponent: {name, `hp_percent`},
+///     target?:  {name, `hp_percent`} }
 ///
 /// `opponent` and `target` are the same mob today (the viewer's
 /// `Fighting`); `target` is included as the explicit "my current
@@ -5493,7 +6395,9 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
 /// groupmate holding aggro. Falls back to the viewer when the mob
 /// isn't swinging at anyone yet.
 pub(crate) fn send_char_combat(world: &World, viewer: Entity) {
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
     let fighting = world.get::<Fighting>(viewer).map(|f| f.0);
     let Some(mob) = fighting else {
         // Cleared frame — client uses empty {} as a hide signal.
@@ -5511,9 +6415,7 @@ pub(crate) fn send_char_combat(world: &World, viewer: Entity) {
         .get::<Named>(mob)
         .map(|n| plain_for_gmcp(&n.name))
         .unwrap_or_default();
-    let (mob_hp, mob_max) = world
-        .get::<Health>(mob)
-        .map_or((0, 0), |h| (h.hp, h.max));
+    let (mob_hp, mob_max) = world.get::<Health>(mob).map_or((0, 0), |h| (h.hp, h.max));
     let mob_pct = if mob_max > 0 {
         ((mob_hp.max(0) * 100) / mob_max).clamp(0, 100)
     } else {
@@ -5531,22 +6433,22 @@ pub(crate) fn send_char_combat(world: &World, viewer: Entity) {
         .get::<Named>(tank)
         .map(|n| plain_for_gmcp(&n.name))
         .unwrap_or_default();
-    let (tank_hp, tank_max) = world
-        .get::<Health>(tank)
-        .map_or((0, 0), |h| (h.hp, h.max));
+    let (tank_hp, tank_max) = world.get::<Health>(tank).map_or((0, 0), |h| (h.hp, h.max));
 
     let payload = format!(
         r#"{{"tank":{{"name":"{tank_plain}","hp":{tank_hp},"max_hp":{tank_max}}},"opponent":{{"name":"{mob_plain}","hp_percent":{mob_pct}}},"target":{{"name":"{mob_plain}","hp_percent":{mob_pct}}}}}"#,
     );
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Combat", &payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Char.Combat", &payload));
 }
 
 /// Returns true when `mob` should appear with `hostile: true` in the
 /// `Room.Mobs` frame from `viewer`'s perspective. Hostility means
 /// any of:
 ///   - currently fighting someone (engaged)
-///   - has the viewer on its HateList (actively chasing)
-///   - remembers the viewer (MobMemory — lingering grudge)
+///   - has the viewer on its `HateList` (actively chasing)
+///   - remembers the viewer (`MobMemory` — lingering grudge)
 ///   - alignment is at or below the aggro threshold (auto-attacks
 ///     on arrival), per the same check `try_engage_aggressive_mob`
 ///     uses
@@ -5582,7 +6484,7 @@ fn mob_is_hostile_to(world: &World, mob: Entity, viewer: Entity) -> bool {
 ///     id:           string,    // runtime entity id (for Room.Mob.Get)
 ///     name:         string,
 ///     hostile:      boolean,
-///     hp_percent:   number,    // 0..100
+///     `hp_percent`:   number,    // 0..100
 ///     targeting:    string|null, // null when the mob isn't swinging
 ///     status?:      string,    // "stunned" (more later: casting / fleeing)
 ///     professions?: string[],  // ["shop","bank",...] from the mob's proto
@@ -5603,8 +6505,11 @@ fn mob_is_hostile_to(world: &World, mob: Entity, viewer: Entity) -> bool {
 /// otherwise require a second room walk. Insertion-stable order so
 /// the client gets a predictable display order on multi-service
 /// rooms.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
-    let Some(room) = world.get::<Located>(viewer).map(|l| l.0) else { return };
+    let Some(room) = world.get::<Located>(viewer).map(|l| l.0) else {
+        return;
+    };
     // Snapshot mob entities in the room, dropping any the viewer
     // can't see (WizInvis level above viewer's). The visibility
     // filter happens here rather than per-mob below so professions
@@ -5627,9 +6532,7 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
             .get::<Named>(mob)
             .map(|n| plain_for_gmcp(&n.name))
             .unwrap_or_default();
-        let (hp, max) = world
-            .get::<Health>(mob)
-            .map_or((0, 0), |h| (h.hp, h.max));
+        let (hp, max) = world.get::<Health>(mob).map_or((0, 0), |h| (h.hp, h.max));
         let hp_pct = if max > 0 {
             ((hp.max(0) * 100) / max).clamp(0, 100)
         } else {
@@ -5640,8 +6543,10 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
             .get::<Fighting>(mob)
             .map(|f| f.0)
             .and_then(|t| world.get::<Named>(t))
-            .map(|n| format!("\"{}\"", plain_for_gmcp(&n.name)))
-            .unwrap_or_else(|| "null".to_string());
+            .map_or_else(
+                || "null".to_string(),
+                |n| format!("\"{}\"", plain_for_gmcp(&n.name)),
+            );
         let status_field = if world.get::<Stunned>(mob).is_some() {
             r#","status":"stunned""#
         } else {
@@ -5657,7 +6562,14 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
                     .get_resource::<MobPrototypes>()
                     .and_then(|p| p.by_key.get(&k))
             })
-            .map(|proto| proto.professions.iter().copied().map(mud_db::enums::MobProfession::label).collect())
+            .map(|proto| {
+                proto
+                    .professions
+                    .iter()
+                    .copied()
+                    .map(mud_db::enums::MobProfession::label)
+                    .collect()
+            })
             .unwrap_or_default();
         // Shopkeeper derivation: if this mob is keeper of any Shops
         // row (per ShopCatalog.keeper_index), add "shop" implicitly
@@ -5694,16 +6606,22 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
             r#"{{"id":"{id_bits}","name":"{mob_plain}","hostile":{hostile},"hp_percent":{hp_pct},"targeting":{targeting_json}{status_field},"professions":{prof_json}}}"#,
         ));
     }
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
     let mobs_payload = format!("[{}]", entries.join(","));
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Room.Mobs", &mobs_payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Room.Mobs", &mobs_payload));
     let services_inner = services
         .iter()
         .map(|s| format!("\"{s}\""))
         .collect::<Vec<_>>()
         .join(",");
     let services_payload = format!(r#"{{"services":[{services_inner}]}}"#);
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Room.Services", &services_payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Room.Services", &services_payload));
 }
 
 /// Handle inbound `Room.Mob.Get { id: "<entity_bits>" }`. Resolves
@@ -5714,12 +6632,20 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
 /// Shape of the response:
 ///   {
 ///     id, name, description, professions:[],
-///     shop?: { items:[{id,name,price,stock}], accepts:[type1,...] }
+///     shop?: { items:[{id,name,price,stock}], accepts:[type1,...] },
+///     inn?:  { `inn_name`, tiers:[{`name,tier,fee_gp,affordable`}], `current_rest` },
+///     bank?: { `on_hand`, `per_char`, account }   // all copper
 ///   }
+///
+/// For Postmaster mobs, a *second* GMCP frame `Room.Mail.Inbox`
+/// arrives shortly after (async DB fetch). It carries
+/// `{mob_id, unread, total, messages: [...]}` keyed back to this
+/// mob's `id` so the client can correlate the inbox with the popup.
 ///
 /// Silently no-ops on bad id, off-world mob, wrong room, or missing
 /// player Connection — request fishing should fail silent, not leak
 /// the difference between "no such mob" and "wrong room".
+#[allow(clippy::too_many_lines)]
 pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) {
     // Accept either `{"id":"123"}` (string form, matching what
     // Room.Mobs emits) or `{"id":123}` (numeric) — the client
@@ -5739,18 +6665,30 @@ pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) 
         },
         _ => return,
     };
-    let Some(target) = Entity::try_from_bits(bits) else { return };
-    if world.get_entity(target).is_err() { return }
-    if world.get::<Mob>(target).is_none() { return }
+    let Some(target) = Entity::try_from_bits(bits) else {
+        return;
+    };
+    if world.get_entity(target).is_err() {
+        return;
+    }
+    if world.get::<Mob>(target).is_none() {
+        return;
+    }
     let viewer_room = world.get::<Located>(viewer).map(|l| l.0);
     let target_room = world.get::<Located>(target).map(|l| l.0);
-    if viewer_room != target_room || viewer_room.is_none() { return }
+    if viewer_room != target_room || viewer_room.is_none() {
+        return;
+    }
     // Anti-snoop: don't surface info about a mob the viewer can't
     // see (WizInvis above their level). Silent no-op so a viewer
     // brute-forcing entity ids can't tell "invisible" from "no
     // such mob".
-    if !can_see_player(world, viewer, target) { return }
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    if !can_see_player(world, viewer, target) {
+        return;
+    }
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
 
     let plain_name = world
         .get::<Named>(target)
@@ -5761,15 +6699,19 @@ pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) 
         .map(|d| plain_for_gmcp(&d.0))
         .unwrap_or_default();
 
-    let proto = world
-        .get::<WorldKey>(target)
-        .and_then(|k| {
-            world
-                .get_resource::<MobPrototypes>()
-                .and_then(|p| p.by_key.get(&(k.zone, k.id)))
-        });
+    let proto = world.get::<WorldKey>(target).and_then(|k| {
+        world
+            .get_resource::<MobPrototypes>()
+            .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+    });
     let professions: Vec<&'static str> = proto
-        .map(|p| p.professions.iter().copied().map(mud_db::enums::MobProfession::label).collect())
+        .map(|p| {
+            p.professions
+                .iter()
+                .copied()
+                .map(mud_db::enums::MobProfession::label)
+                .collect()
+        })
         .unwrap_or_default();
     let prof_json = professions
         .iter()
@@ -5830,10 +6772,162 @@ pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) 
     })()
     .unwrap_or_default();
 
+    // Inn block — populated only when the mob is a Receptionist and
+    // its room carries an `InnRoom`. The rental data lives on the
+    // room (where `cmd_rent` reads it), so we hop mob → Located →
+    // room → InnRoom. `affordable` is precomputed against the
+    // viewer's on-hand Wealth so the client doesn't parse coin
+    // strings; `current_rest` mirrors the viewer's RestState so the
+    // popup can show "already prepaid" instead of re-offering.
+    let inn_json: String = (|| {
+        const COPPER_PER_GOLD: i64 = 100;
+        let key = world.get::<WorldKey>(target)?;
+        let proto = world
+            .get_resource::<MobPrototypes>()?
+            .by_key
+            .get(&(key.zone, key.id))?;
+        if !proto
+            .professions
+            .contains(&mud_db::enums::MobProfession::Receptionist)
+        {
+            return None;
+        }
+        let room = world.get::<Located>(target).map(|l| l.0)?;
+        let inn = world.get::<InnRoom>(room)?;
+        let on_hand = world.get::<Wealth>(viewer).map_or(0, |w| w.0);
+        let tiers_json: Vec<String> = inn
+            .tiers
+            .iter()
+            .map(|t| {
+                let fee_copper = i64::from(t.fee_gp).saturating_mul(COPPER_PER_GOLD);
+                let affordable = on_hand >= fee_copper;
+                let name = plain_for_gmcp(&t.name);
+                format!(
+                    r#"{{"name":"{name}","tier":{tier},"fee_gp":{fee},"affordable":{affordable}}}"#,
+                    tier = t.tier,
+                    fee = t.fee_gp,
+                )
+            })
+            .collect();
+        // current_rest is null unless the viewer holds a RestState.
+        let current_rest = world.get::<RestState>(viewer).map_or_else(
+            || "null".to_string(),
+            |r| {
+                format!(
+                    r#"{{"source":"{src}","tier":{tier},"repose":{repose}}}"#,
+                    src = r.source.as_str(),
+                    tier = r.tier,
+                    repose = r.repose,
+                )
+            },
+        );
+        let inn_name = plain_for_gmcp(&inn.inn_name);
+        Some(format!(
+            r#","inn":{{"inn_name":"{inn_name}","tiers":[{tiers}],"current_rest":{current_rest}}}"#,
+            tiers = tiers_json.join(","),
+        ))
+    })()
+    .unwrap_or_default();
+
+    // Bank block — populated only when the mob carries
+    // MobProfession::Banker. All three coin pools are viewer-scoped:
+    // on-hand `Wealth`, per-character `BankWealth`, account-shared
+    // `AccountWealth`. Surfacing all three together is the popup's
+    // main value-add (today they require three separate commands:
+    // `wealth`, `balance`, `account_balance`). "Deposit/withdraw all"
+    // affordances on the client compute their amount from these
+    // pool values — no server-side "all" keyword needed.
+    let bank_json: String = (|| {
+        let key = world.get::<WorldKey>(target)?;
+        let proto = world
+            .get_resource::<MobPrototypes>()?
+            .by_key
+            .get(&(key.zone, key.id))?;
+        if !proto
+            .professions
+            .contains(&mud_db::enums::MobProfession::Banker)
+        {
+            return None;
+        }
+        let on_hand = world.get::<Wealth>(viewer).map_or(0, |w| w.0);
+        let per_char = world.get::<BankWealth>(viewer).map_or(0, |b| b.0);
+        let account = world.get::<AccountWealth>(viewer).map_or(0, |a| a.0);
+        Some(format!(
+            r#","bank":{{"on_hand":{on_hand},"per_char":{per_char},"account":{account}}}"#,
+        ))
+    })()
+    .unwrap_or_default();
+
     let payload = format!(
-        r#"{{"id":"{bits}","name":"{plain_name}","description":"{plain_desc}","professions":[{prof_json}]{shop_json}}}"#,
+        r#"{{"id":"{bits}","name":"{plain_name}","description":"{plain_desc}","professions":[{prof_json}]{shop_json}{inn_json}{bank_json}}}"#,
     );
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Room.Mob.Info", &payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Room.Mob.Info", &payload));
+
+    // Mail block ships as a *separate* `Room.Mail.Inbox` frame
+    // because the inbox is async DB work (`inbox_for`) and
+    // handle_room_mob_get is sync. The Room.Mob.Info frame above
+    // arrives immediately; this second frame lands when the DB
+    // returns, typically within one round-trip. `mob_id` on the
+    // mail frame echoes the bits we just sent so the client can
+    // tell the inbox apart from a stale push for a different mob.
+    //
+    // Gated on Postmaster profession + DbPool resource + viewer
+    // Account (any miss → silent skip; the mob popup still renders
+    // without a mail section). The Outbound is cloned into the
+    // task, so the spawned future is decoupled from the World.
+    if let Some(proto) = world.get::<WorldKey>(target).and_then(|k| {
+        world
+            .get_resource::<MobPrototypes>()
+            .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+    }) && proto
+        .professions
+        .contains(&mud_db::enums::MobProfession::Postmaster)
+        && let Some(user_id) = world.get::<Account>(viewer).map(|a| a.user_id.clone())
+        && let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone())
+    {
+        let out = conn.0.clone();
+        let mob_bits = bits;
+        tokio::spawn(async move {
+            let rows = match mud_db::mail::inbox_for(&pool, &user_id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, user_id = %user_id, "Room.Mail.Inbox fetch failed");
+                    return;
+                }
+            };
+            // Cap at 50 most recent so a power user with thousands
+            // of mails doesn't ship a megabyte of JSON per click.
+            // `inbox_for` already returns newest-first, so head-50
+            // is the right slice.
+            #[allow(clippy::items_after_statements)]
+            const MAX_ROWS: usize = 50;
+            let unread = rows.iter().filter(|r| r.read_at.is_none()).count();
+            let total = rows.len();
+            let entries: Vec<String> = rows
+                .iter()
+                .take(MAX_ROWS)
+                .enumerate()
+                .map(|(idx, r)| {
+                    let slot = idx + 1;
+                    let sender = plain_for_gmcp(&r.sender_display_name);
+                    let subject = plain_for_gmcp(&r.subject);
+                    let sent_at = r.sent_at.format("%Y-%m-%d %H:%M");
+                    let is_unread = r.read_at.is_none();
+                    format!(
+                        r#"{{"id":{id},"slot":{slot},"sender":"{sender}","subject":"{subject}","sent_at":"{sent_at}","unread":{is_unread}}}"#,
+                        id = r.id,
+                    )
+                })
+                .collect();
+            let payload = format!(
+                r#"{{"mob_id":"{mob_bits}","unread":{unread},"total":{total},"messages":[{msgs}]}}"#,
+                msgs = entries.join(","),
+            );
+            let _ = out.try_send(mud_net::gmcp_packet("Room.Mail.Inbox", &payload));
+        });
+    }
 }
 
 /// Send `Core.Goodbye` immediately before closing the connection.
@@ -5843,16 +6937,20 @@ pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) 
 /// no Connection (mob entity, switched puppet without a real
 /// client).
 pub(crate) fn send_core_goodbye(world: &World, viewer: Entity, reason: &str) {
-    let Some(conn) = world.get::<Connection>(viewer) else { return };
+    let Some(conn) = world.get::<Connection>(viewer) else {
+        return;
+    };
     let safe = reason.replace('\\', "\\\\").replace('"', "\\\"");
     let payload = format!("\"{safe}\"");
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Core.Goodbye", &payload));
+    let _ = conn
+        .0
+        .try_send(mud_net::gmcp_packet("Core.Goodbye", &payload));
 }
 
 /// Wall-clock epoch seconds at which `target` logged in. Computed
 /// from `LoggedInAt`'s monotonic [`Instant`] minus the elapsed
 /// duration since login: `now_unix - elapsed_secs`. Returns the
-/// current time as a fallback when LoggedInAt is missing — a
+/// current time as a fallback when `LoggedInAt` is missing — a
 /// rare edge case (Discord just shows 0:00 elapsed).
 fn compute_login_unix_ts(world: &World, target: Entity) -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -5895,7 +6993,13 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     let clock = world.get_resource::<mud_world::MudClock>();
     let hour = clock.map(|c| c.hour);
     let season = clock.map(|c| c.season().label());
-    let day_night = hour.map(|h| if matches!(h, 0..=4 | 22..=23) { "night" } else { "day" });
+    let day_night = hour.map(|h| {
+        if matches!(h, 0..=4 | 22..=23) {
+            "night"
+        } else {
+            "day"
+        }
+    });
     // Opponent info for the combat-style prompts. `Fighting` points
     // at the live target Entity; resolve to its name + HP. Out of
     // combat both fields stay None and the `%e`/`%N`/etc. codes
@@ -5904,7 +7008,9 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         .get::<Fighting>(target)
         .map(|f| f.0)
         .filter(|e| world.get_entity(*e).is_ok());
-    let enemy_name = enemy.and_then(|e| world.get::<Named>(e)).map(|n| n.name.as_str());
+    let enemy_name = enemy
+        .and_then(|e| world.get::<Named>(e))
+        .map(|n| n.name.as_str());
     let enemy_hp = enemy.and_then(|e| world.get::<Health>(e)).copied();
     let rendered = render_prompt(
         template,
@@ -5970,9 +7076,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         let plain = render_color_tags(name_str, ColorMode::Strip)
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
-        let payload = format!(
-            "{{\"name\":\"{plain}\",\"full_name\":\"{plain}\"}}"
-        );
+        let payload = format!("{{\"name\":\"{plain}\",\"full_name\":\"{plain}\"}}");
         let _ = conn.try_send(mud_net::gmcp_packet("Char.Name", &payload));
     }
     // Char.StatusVars — schema descriptor: maps each Char.Status
@@ -6059,10 +7163,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
                 small_image = small_image.replace('"', "\\\""),
                 small_image_text = small_image_text.replace('"', "\\\""),
             );
-            let _ = conn.try_send(mud_net::gmcp_packet(
-                "External.Discord.Status",
-                &payload,
-            ));
+            let _ = conn.try_send(mud_net::gmcp_packet("External.Discord.Status", &payload));
         }
     }
     // Char.Aggro: every mob (anywhere) that has the player on its
@@ -6072,10 +7173,11 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     {
         let mut hating: Vec<String> = Vec::new();
         let mut remembering: Vec<String> = Vec::new();
-        let mut q = world.query_filtered::<
-            (&Named, Option<&crate::combat::HateList>, Option<&crate::combat::MobMemory>),
-            With<Mob>,
-        >();
+        let mut q = world.query_filtered::<(
+            &Named,
+            Option<&crate::combat::HateList>,
+            Option<&crate::combat::MobMemory>,
+        ), With<Mob>>();
         for (n, hate, mem) in q.iter(world) {
             let in_hate = hate.is_some_and(|h| h.0.contains(&target));
             let in_mem = mem.is_some_and(|m| m.0.contains(&target));
@@ -6148,17 +7250,19 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         // up front avoids re-scanning per effect.
         let ability_names: std::collections::HashMap<i32, String> = world
             .get_resource::<AbilityCatalog>()
-            .map(|c| c.by_name.values().map(|d| (d.id, d.plain_name.clone())).collect())
+            .map(|c| {
+                c.by_name
+                    .values()
+                    .map(|d| (d.id, d.plain_name.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         let mut q = world.query::<(&EffectInstance, &Applied)>();
         for (inst, applied) in q.iter(world) {
             if applied.0 != target {
                 continue;
             }
-            let safe_name = inst
-                .name
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"");
+            let safe_name = inst.name.replace('\\', "\\\\").replace('"', "\\\"");
             let safe_ability = inst
                 .ability_id
                 .and_then(|id| ability_names.get(&id))
@@ -6223,8 +7327,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             .replace('"', "\\\"");
         let environment = world
             .get::<RoomSector>(room)
-            .map(|s| sector_label(s.0))
-            .unwrap_or("Unknown");
+            .map_or("Unknown", |s| sector_label(s.0));
         // Exits dict: direction → destination composite num. Doors
         // dict: direction → "closed" / "locked" for non-Open
         // states. Hidden exits omitted entirely (the same way
@@ -6276,14 +7379,14 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
 
 /// Encode a `(zone, id)` composite room key as a single integer
 /// for clients that expect IRE-style integer room ids. The legacy
-/// CircleMUD vnum scheme (`zone*100 + id`) maxes out around 10000;
+/// `CircleMUD` vnum scheme (`zone*100 + id`) maxes out around 10000;
 /// our (i32, i32) namespace is much larger so we use a
 /// 5-decimal-digit local-id field — `zone*100000 + id`. Reversible:
 /// `id = num % 100000`, `zone = num / 100000`. Returns `0` for
 /// missing keys, which Mudlet's mapper treats as "no destination
 /// known yet" and drops the edge gracefully.
 fn room_composite_num(zone: i32, id: i32) -> i32 {
-    if zone < 0 || id < 0 || id >= 100_000 {
+    if zone < 0 || !(0..100_000).contains(&id) {
         return 0;
     }
     zone.saturating_mul(100_000).saturating_add(id)
@@ -6390,18 +7493,14 @@ pub(crate) fn grant_achievement(world: &mut World, player: Entity, code: &str) {
         try_insert(world, player, ca);
     }
     // Fire-and-forget DB write. The character_id lives on Account.
-    let character_id = world
-        .get::<Account>(player)
-        .map(|a| a.character_id.clone());
+    let character_id = world.get::<Account>(player).map(|a| a.character_id.clone());
     if let (Some(cid), Some(pool)) = (
         character_id,
         world.get_resource::<DbPool>().map(|p| p.0.clone()),
     ) {
         let id = def.id;
         tokio::spawn(async move {
-            if let Err(e) =
-                mud_db::achievements::grant(&pool, &cid, id, None).await
-            {
+            if let Err(e) = mud_db::achievements::grant(&pool, &cid, id, None).await {
                 tracing::warn!(error = %e, achievement_id = id, "achievement grant write failed");
             }
         });
@@ -6489,9 +7588,7 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
         .get_resource::<mud_world::AchievementCatalog>()
         .and_then(|c| c.by_code.get(&format!("zone_{}_cleared", key.zone)))
         .map(|d| d.id);
-    let character_id = world
-        .get::<Account>(player)
-        .map(|a| a.character_id.clone());
+    let character_id = world.get::<Account>(player).map(|a| a.character_id.clone());
     if let (Some(ach_id), Some(cid), Some(pool)) = (
         achievement_id,
         character_id,
@@ -6526,11 +7623,7 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
 /// entity from the same source so re-entry within the duration
 /// doesn't pile duplicates. Effects decay through the normal
 /// `effects_tick` once the player leaves the room.
-pub(crate) fn apply_room_environment_at_login(
-    world: &mut World,
-    player: Entity,
-    room: Entity,
-) {
+pub(crate) fn apply_room_environment_at_login(world: &mut World, player: Entity, room: Entity) {
     apply_room_environment(world, player, room);
 }
 
@@ -6591,17 +7684,31 @@ pub(crate) fn apply_room_environment(world: &mut World, player: Entity, room: En
 /// dispatch, progress message) is shared in `bump_quest_progress`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum QuestObjectiveBump {
-    KillMob { zone: i32, id: i32 },
-    VisitRoom { zone: i32, id: i32 },
-    TalkToNpc { zone: i32, id: i32 },
-    CollectItem { zone: i32, id: i32 },
+    KillMob {
+        zone: i32,
+        id: i32,
+    },
+    VisitRoom {
+        zone: i32,
+        id: i32,
+    },
+    TalkToNpc {
+        zone: i32,
+        id: i32,
+    },
+    CollectItem {
+        zone: i32,
+        id: i32,
+    },
     DeliverItem {
         item_zone: i32,
         item_id: i32,
         mob_zone: i32,
         mob_id: i32,
     },
-    UseSkill { ability_id: i32 },
+    UseSkill {
+        ability_id: i32,
+    },
 }
 
 /// Advance any active `KILL_MOB` objectives whose target matches
@@ -6646,16 +7753,8 @@ pub(crate) fn bump_visit_quest_progress(
 /// invoked ability id. Called from the bottom of
 /// `invoke_ability_with` (post-cooldown), so failed casts don't
 /// credit. Also fires the SKILL-trigger dispatcher (Wave 4.1).
-pub(crate) fn bump_use_skill_quest_progress(
-    world: &mut World,
-    caster: Entity,
-    ability_id: i32,
-) {
-    bump_quest_progress(
-        world,
-        caster,
-        QuestObjectiveBump::UseSkill { ability_id },
-    );
+pub(crate) fn bump_use_skill_quest_progress(world: &mut World, caster: Entity, ability_id: i32) {
+    bump_quest_progress(world, caster, QuestObjectiveBump::UseSkill { ability_id });
     crate::quest_triggers::dispatch_skill_trigger(world, caster, ability_id);
 }
 
@@ -6748,9 +7847,7 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
             Some((e, cid, out))
         })
         .collect();
-    let update_tx_root = world
-        .get_resource::<PlayerUpdateTx>()
-        .map(|t| t.0.clone());
+    let update_tx_root = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
     for (entity, cid, out) in recipients {
         let is_actor = entity == actor;
         let pool = pool.clone();
@@ -6840,9 +7937,7 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                             );
                         }
                         Ok(mud_db::quest_objectives::PhaseAdvance::QuestComplete) => {
-                            let _ = out.try_send(
-                                b"*** Quest complete! ***\r\n".to_vec(),
-                            );
+                            let _ = out.try_send(b"*** Quest complete! ***\r\n".to_vec());
                             // Grant simple rewards (XP/gold/skill
                             // points/ability) via DB; announce all
                             // including ITEM/HOUSING which the
@@ -6862,12 +7957,9 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                             )
                             .await
                             .unwrap_or_default();
-                            let (deferred, rewards): (Vec<_>, Vec<_>) = all_rewards
-                                .into_iter()
-                                .partition(|r| {
-                                    r.condition
-                                        .as_deref()
-                                        .is_some_and(|c| !c.trim().is_empty())
+                            let (deferred, rewards): (Vec<_>, Vec<_>) =
+                                all_rewards.into_iter().partition(|r| {
+                                    r.condition.as_deref().is_some_and(|c| !c.trim().is_empty())
                                 });
                             if !deferred.is_empty() {
                                 let _ = out.try_send(
@@ -6880,11 +7972,10 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                                 );
                             }
                             if !rewards.is_empty() {
-                                if let Err(e) =
-                                    mud_db::quest_objectives::grant_simple_rewards(
-                                        &pool, &cid, &rewards,
-                                    )
-                                    .await
+                                if let Err(e) = mud_db::quest_objectives::grant_simple_rewards(
+                                    &pool, &cid, &rewards,
+                                )
+                                .await
                                 {
                                     tracing::warn!(error = %e, "reward grant failed");
                                 }
@@ -6894,18 +7985,18 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                                 // (without logout/login).
                                 for r in &rewards {
                                     let update = match r.reward_type.as_str() {
-                                        "EXPERIENCE" => r.amount.map(|a| {
-                                            PendingPlayerUpdate::ExperienceDelta {
+                                        "EXPERIENCE" => {
+                                            r.amount.map(|a| PendingPlayerUpdate::ExperienceDelta {
                                                 character_id: cid.clone(),
                                                 amount: a,
-                                            }
-                                        }),
-                                        "GOLD" => r.amount.map(|a| {
-                                            PendingPlayerUpdate::WealthDelta {
+                                            })
+                                        }
+                                        "GOLD" => {
+                                            r.amount.map(|a| PendingPlayerUpdate::WealthDelta {
                                                 character_id: cid.clone(),
                                                 amount: i64::from(a),
-                                            }
-                                        }),
+                                            })
+                                        }
                                         "SKILL_POINTS" => r.amount.map(|a| {
                                             PendingPlayerUpdate::SkillPointsDelta {
                                                 character_id: cid.clone(),
@@ -6940,7 +8031,8 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                                 }
                                 let mut buf = String::from("Rewards:\r\n");
                                 for r in &rewards {
-                                    let line = match (r.reward_type.as_str(), r.amount, r.quantity) {
+                                    let line = match (r.reward_type.as_str(), r.amount, r.quantity)
+                                    {
                                         ("EXPERIENCE", Some(a), _) => {
                                             format!("  +{a} experience\r\n")
                                         }
@@ -6948,15 +8040,12 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                                         ("SKILL_POINTS", Some(a), _) => {
                                             format!("  +{a} skill points\r\n")
                                         }
-                                        ("ABILITY", _, _) => {
-                                            "  +1 new ability\r\n".to_string()
+                                        ("ABILITY", _, _) => "  +1 new ability\r\n".to_string(),
+                                        ("ITEM", _, q) => {
+                                            format!("  +{q} item(s) — see questgiver\r\n")
                                         }
-                                        ("ITEM", _, q) => format!(
-                                            "  +{q} item(s) — see questgiver\r\n"
-                                        ),
                                         ("HOUSING", _, _) => {
-                                            "  +housing access — see questgiver\r\n"
-                                                .to_string()
+                                            "  +housing access — see questgiver\r\n".to_string()
                                         }
                                         _ => continue,
                                     };
@@ -7023,9 +8112,7 @@ pub(crate) fn bump_kill_count(world: &mut World, player: Entity) {
     // Persist. The shape of `kill_tracking_data` is owned by the
     // runtime; preserve any other fields the column may already
     // hold by merging into the JSON object.
-    let character_id = world
-        .get::<Account>(player)
-        .map(|a| a.character_id.clone());
+    let character_id = world.get::<Account>(player).map(|a| a.character_id.clone());
     if let (Some(cid), Some(pool)) = (
         character_id,
         world.get_resource::<DbPool>().map(|p| p.0.clone()),
@@ -7037,10 +8124,7 @@ pub(crate) fn bump_kill_count(world: &mut World, player: Entity) {
                 .flatten()
                 .unwrap_or_else(|| serde_json::json!({}));
             if let Some(obj) = data.as_object_mut() {
-                obj.insert(
-                    "total".to_string(),
-                    serde_json::Value::from(new_total),
-                );
+                obj.insert("total".to_string(), serde_json::Value::from(new_total));
             } else {
                 data = serde_json::json!({ "total": new_total });
             }
@@ -7074,10 +8158,8 @@ pub(crate) fn record_admin_action(
     // for now (the verb's actual target is in `args` and a
     // future pass can parse + index that more cleanly).
     let user_id = world.get::<Account>(actor).map(|a| a.user_id.clone());
-    if let (Some(uid), Some(pool)) = (
-        user_id,
-        world.get_resource::<DbPool>().map(|p| p.0.clone()),
-    ) {
+    if let (Some(uid), Some(pool)) = (user_id, world.get_resource::<DbPool>().map(|p| p.0.clone()))
+    {
         let args = args.to_string();
         tokio::spawn(async move {
             if let Err(e) = mud_db::audit::record(&pool, &uid, verb, &actor_name, &args).await {
@@ -7236,10 +8318,10 @@ pub(crate) fn effect_duration_color(remaining_secs: u64) -> Option<&'static str>
 #[must_use]
 pub(crate) fn idle_color(idle_secs: u64) -> Option<&'static str> {
     match idle_secs {
-        0..=299 => None,                // <5m: active enough
-        300..=1799 => Some("<cyan>"),   // 5-30m
+        0..=299 => None,                 // <5m: active enough
+        300..=1799 => Some("<cyan>"),    // 5-30m
         1800..=7199 => Some("<yellow>"), // 30m-2h
-        _ => Some("<red>"),             // 2h+
+        _ => Some("<red>"),              // 2h+
     }
 }
 
@@ -7367,8 +8449,7 @@ pub(crate) struct PromptCtx<'a> {
 #[must_use]
 pub(crate) fn sanitize_prompt_template(template: &str) -> String {
     const KNOWN: &[char] = &[
-        'h', 'H', 'v', 'V', 'B', 'M', 'n', 'r', 'g', 't', 's', 'd',
-        'N', 'e', 'E', 'p', 'K',
+        'h', 'H', 'v', 'V', 'B', 'M', 'n', 'r', 'g', 't', 's', 'd', 'N', 'e', 'E', 'p', 'K',
     ];
     let chars: Vec<char> = template.chars().collect();
     let mut out = String::with_capacity(template.len());
@@ -7390,6 +8471,7 @@ pub(crate) fn sanitize_prompt_template(template: &str) -> String {
     out
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
     let mut out = String::with_capacity(template.len() + 16);
     let mut chars = template.chars();
@@ -7552,11 +8634,7 @@ const UNKNOWN_HINT_MAX: usize = 5;
 /// starts with what the player typed. Empty trailer when there's
 /// nothing to suggest, so the original error stays terse for a
 /// truly junk input. Mirrors the `help` command's prefix-match UX.
-pub(crate) fn unknown_command_hint(
-    world: &World,
-    player: Entity,
-    typed: &str,
-) -> String {
+pub(crate) fn unknown_command_hint(world: &World, player: Entity, typed: &str) -> String {
     let needle = typed.to_ascii_lowercase();
     if needle.is_empty() {
         return String::new();
@@ -7579,11 +8657,7 @@ pub(crate) fn unknown_command_hint(
     }
     suggestions.sort_unstable();
     suggestions.dedup();
-    let shown: Vec<&str> = suggestions
-        .iter()
-        .take(UNKNOWN_HINT_MAX)
-        .copied()
-        .collect();
+    let shown: Vec<&str> = suggestions.iter().take(UNKNOWN_HINT_MAX).copied().collect();
     let trailer = if suggestions.len() > UNKNOWN_HINT_MAX {
         format!(" (+{})", suggestions.len() - UNKNOWN_HINT_MAX)
     } else {
@@ -7596,7 +8670,11 @@ pub(crate) fn unknown_command_hint(
 /// Six bands by HP percentage: 0% / 1-15 / 16-35 / 36-60 / 61-85 / 86+.
 /// `max=0` is treated as 0% (entity has been zeroed somehow).
 pub(crate) fn condition_label(hp: Health) -> &'static str {
-    let pct = if hp.max > 0 { (hp.hp * 100) / hp.max } else { 0 };
+    let pct = if hp.max > 0 {
+        (hp.hp * 100) / hp.max
+    } else {
+        0
+    };
     match pct {
         i32::MIN..=0 => "is dying",
         1..=15 => "is mortally wounded",
@@ -7633,8 +8711,16 @@ pub(crate) fn object_type_token(t: mud_db::enums::ObjectType) -> String {
 
 /// Compute the copper price of one shop offering: override wins,
 /// otherwise `proto.cost * shop.buy_profit` rounded.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub(crate) fn shop_offer_price(offer: &mud_world::ShopOffering, base_cost: i32, buy_profit: f64) -> i64 {
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub(crate) fn shop_offer_price(
+    offer: &mud_world::ShopOffering,
+    base_cost: i32,
+    buy_profit: f64,
+) -> i64 {
     if offer.price > 0 {
         i64::from(offer.price)
     } else {
@@ -7691,7 +8777,12 @@ pub(crate) fn bank_transfer(world: &mut World, player: Entity, args: &str, direc
             return;
         }
     };
-    if !require_profession_in_room(world, player, mud_db::enums::MobProfession::Banker, "banker") {
+    if !require_profession_in_room(
+        world,
+        player,
+        mud_db::enums::MobProfession::Banker,
+        "banker",
+    ) {
         return;
     }
     let on_hand = world.get::<Wealth>(player).map_or(0, |w| w.0);
@@ -7785,8 +8876,17 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
         return;
     };
     let key = name.trim().to_ascii_lowercase();
-    let Some(def) = world.resource::<AbilityCatalog>().by_name.get(&key).cloned() else {
-        send_to(world, player, format!("'{name}' isn't a known ability.\r\n"));
+    let Some(def) = world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .get(&key)
+        .cloned()
+    else {
+        send_to(
+            world,
+            player,
+            format!("'{name}' isn't a known ability.\r\n"),
+        );
         return;
     };
     let cap = world
@@ -7810,7 +8910,10 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
         send_to(
             world,
             player,
-            format!("You haven't learned {} yet — `study` it first.\r\n", def.name),
+            format!(
+                "You haven't learned {} yet — `study` it first.\r\n",
+                def.name
+            ),
         );
         return;
     };
@@ -7907,7 +9010,11 @@ pub(crate) fn format_idle(secs: u64) -> String {
     } else {
         let h = secs / 3600;
         let m = (secs % 3600) / 60;
-        if m == 0 { format!("{h}h") } else { format!("{h}h{m}m") }
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h{m}m")
+        }
     }
 }
 
@@ -8201,10 +9308,8 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         out.push_str(&format!("  Age: {age}\r\n"));
     }
     if let Some(hp) = d.hp {
-        let cur = vital_color_tag(hp.hp, hp.max).map_or_else(
-            || hp.hp.to_string(),
-            |tag| format!("{tag}{}</>", hp.hp),
-        );
+        let cur = vital_color_tag(hp.hp, hp.max)
+            .map_or_else(|| hp.hp.to_string(), |tag| format!("{tag}{}</>", hp.hp));
         out.push_str(&format!("  HP: {cur} / {}\r\n", hp.max));
     }
     if let Some(s) = d.stamina {
@@ -8302,11 +9407,12 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     if d.carry.0 > 0.0 {
         let band = encumbrance_band(d.carry.0, d.carry.1);
         let (open, close) = encumbrance_color_tag(d.carry.0, d.carry.1)
-            .map_or((String::new(), String::new()), |t| (t.to_string(), "</>".to_string()));
+            .map_or((String::new(), String::new()), |t| {
+                (t.to_string(), "</>".to_string())
+            });
         out.push_str(&format!(
             "  Load:   {open}{:.1}{close} / {:.0} lbs.  ({open}{band}{close})\r\n",
-            d.carry.0,
-            d.carry.1,
+            d.carry.0, d.carry.1,
         ));
     }
     if let Some(target) = d.fight_target {
@@ -8328,9 +9434,7 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         ));
     }
     if let Some(pct) = d.wimpy {
-        out.push_str(&format!(
-            "  Wimpy:  flee at HP < {pct}%\r\n",
-        ));
+        out.push_str(&format!("  Wimpy:  flee at HP < {pct}%\r\n",));
     }
     if d.kill_total > 0 {
         out.push_str(&format!("  Kills:  {}\r\n", d.kill_total));
@@ -8347,9 +9451,7 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     if d.cooldowns_active > 0 {
         let count = d.cooldowns_active;
         let suffix = if count == 1 { "ability" } else { "abilities" };
-        out.push_str(&format!(
-            "  Cooldowns: {count} {suffix} recharging\r\n",
-        ));
+        out.push_str(&format!("  Cooldowns: {count} {suffix} recharging\r\n",));
     }
     if let Some((to, lines)) = d.mail_draft {
         let suffix = if lines == 1 { "" } else { "s" };
@@ -8693,11 +9795,7 @@ pub(crate) fn condition_summary(
     active_effects: &[String],
 ) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
-    let has_effect = |name: &str| {
-        active_effects
-            .iter()
-            .any(|e| e.eq_ignore_ascii_case(name))
-    };
+    let has_effect = |name: &str| active_effects.iter().any(|e| e.eq_ignore_ascii_case(name));
     if has_effect("Nourished") {
         parts.push("nourished");
     }
@@ -8756,10 +9854,8 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         row(format!("Age:       {age}"));
     }
     if let Some(hp) = d.hp {
-        let cur = vital_color_tag(hp.hp, hp.max).map_or_else(
-            || hp.hp.to_string(),
-            |tag| format!("{tag}{}</>", hp.hp),
-        );
+        let cur = vital_color_tag(hp.hp, hp.max)
+            .map_or_else(|| hp.hp.to_string(), |tag| format!("{tag}{}</>", hp.hp));
         row(format!("HP:        {cur} / {}", hp.max));
     }
     if let Some(s) = d.stamina {
@@ -8772,30 +9868,34 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     if let Some(stats) = d.core_stats {
         row(format!(
             "STR {} ({})  DEX {} ({})  CON {} ({})",
-            stats.strength, CoreStats::grade(stats.strength),
-            stats.dexterity, CoreStats::grade(stats.dexterity),
-            stats.constitution, CoreStats::grade(stats.constitution),
+            stats.strength,
+            CoreStats::grade(stats.strength),
+            stats.dexterity,
+            CoreStats::grade(stats.dexterity),
+            stats.constitution,
+            CoreStats::grade(stats.constitution),
         ));
         row(format!(
             "INT {} ({})  WIS {} ({})  CHA {} ({})",
-            stats.intelligence, CoreStats::grade(stats.intelligence),
-            stats.wisdom, CoreStats::grade(stats.wisdom),
-            stats.charisma, CoreStats::grade(stats.charisma),
+            stats.intelligence,
+            CoreStats::grade(stats.intelligence),
+            stats.wisdom,
+            CoreStats::grade(stats.wisdom),
+            stats.charisma,
+            CoreStats::grade(stats.charisma),
         ));
     }
     if let Some(cs) = d.cs {
         let align_label = mud_db::enums::Alignment::from_score(cs.alignment).label();
         row(format!(
             "Acc: {}  Eva: {}  Atk: {:+}  Armor: {}%   Align: {} ({})",
-            cs.accuracy,
-            cs.evasion,
-            cs.attack_power,
-            cs.armor_pct,
-            align_label,
-            cs.alignment,
+            cs.accuracy, cs.evasion, cs.attack_power, cs.armor_pct, align_label, cs.alignment,
         ));
         if cs.ward_pct != 0 {
-            row(format!("Ward: <b:cyan>{}%</> <dim>(magical)</>", cs.ward_pct));
+            row(format!(
+                "Ward: <b:cyan>{}%</> <dim>(magical)</>",
+                cs.ward_pct
+            ));
         }
     }
     if let Some(p) = d.posture {
@@ -8830,11 +9930,12 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     if d.carry.0 > 0.0 {
         let band = encumbrance_band(d.carry.0, d.carry.1);
         let (open, close) = encumbrance_color_tag(d.carry.0, d.carry.1)
-            .map_or((String::new(), String::new()), |t| (t.to_string(), "</>".to_string()));
+            .map_or((String::new(), String::new()), |t| {
+                (t.to_string(), "</>".to_string())
+            });
         row(format!(
             "Load:      {open}{:.1}{close} / {:.0} lbs.  ({open}{band}{close})",
-            d.carry.0,
-            d.carry.1,
+            d.carry.0, d.carry.1,
         ));
     }
     if let Some(target) = d.fight_target {
@@ -8901,9 +10002,7 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
         ));
     }
     if let Some((next, hp_gain, st_gain)) = d.next_level_gains {
-        row(format!(
-            "Next #{next}:  +{hp_gain} HP, +{st_gain} Stamina",
-        ));
+        row(format!("Next #{next}:  +{hp_gain} HP, +{st_gain} Stamina",));
     }
     if let Some((name, zone, id)) = d.location {
         row(format!("Location:  {name}  [{zone}:{id}]"));
@@ -8951,10 +10050,7 @@ pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
         parts.push(format!("st:{}/{}", s.current, s.max));
     }
     if let Some(cs) = d.cs {
-        parts.push(format!(
-            "atk:{:+} armor:{}%",
-            cs.attack_power, cs.armor_pct
-        ));
+        parts.push(format!("atk:{:+} armor:{}%", cs.attack_power, cs.armor_pct));
         if cs.ward_pct != 0 {
             parts.push(format!("ward:{}%", cs.ward_pct));
         }
@@ -9035,6 +10131,7 @@ pub(crate) fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
     );
     if meditating && !allows_meditate {
         try_remove::<mud_world::Meditating>(world, player);
+        try_remove::<Concentrating>(world, player);
         send_to(world, player, "You stop meditating.\r\n");
     }
     try_insert(world, player, Posture(new));
@@ -9086,7 +10183,11 @@ pub(crate) fn toggle_player_flag(
         send_to(world, player, "You have no player flags slot.\r\n");
         return;
     };
-    send_to(world, player, format!("{}\r\n", if now_on { on_msg } else { off_msg }));
+    send_to(
+        world,
+        player,
+        format!("{}\r\n", if now_on { on_msg } else { off_msg }),
+    );
 }
 
 /// Names that would lock the player out of dispatch entirely if
@@ -9173,11 +10274,7 @@ pub(crate) fn parse_direction(s: &str) -> Option<Direction> {
 /// regardless of which direction it's on. Hidden exits the player
 /// hasn't discovered are skipped, matching the look / move gates,
 /// so puzzle exits can't be probed by guessing keywords.
-pub(crate) fn resolve_exit_arg(
-    world: &World,
-    player: Entity,
-    arg: &str,
-) -> Option<Direction> {
+pub(crate) fn resolve_exit_arg(world: &World, player: Entity, arg: &str) -> Option<Direction> {
     let trimmed = arg.trim();
     if trimmed.is_empty() {
         return None;
@@ -9237,7 +10334,10 @@ pub(crate) fn room_is_dark(world: &World, room: Entity) -> bool {
     let Some(sector) = world.get::<RoomSector>(room).map(|s| s.0) else {
         return false;
     };
-    if matches!(sector, Sector::Cave | Sector::Underdark | Sector::Underwater) {
+    if matches!(
+        sector,
+        Sector::Cave | Sector::Underdark | Sector::Underwater
+    ) {
         return true;
     }
     if !sector_is_outdoor_for_weather(sector) {
@@ -9317,8 +10417,7 @@ pub(crate) fn room_has_light(world: &mut World, room: Entity) -> bool {
     // 2. Lit items carried/worn by actors in the room. We snapshot
     // who's here, then check each as a potential carrier.
     let inhabitants: Vec<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &Located), Or<(With<Player>, With<Mob>)>>();
+        let mut q = world.query_filtered::<(Entity, &Located), Or<(With<Player>, With<Mob>)>>();
         q.iter(world)
             .filter(|(_, l)| l.0 == room)
             .map(|(e, _)| e)
@@ -9367,7 +10466,8 @@ pub(crate) fn sector_is_outdoor_for_weather(sector: Sector) -> bool {
 /// sky`, weather hint paths). Returns `None` if no Zone with
 /// that id exists.
 fn zone_climate(world: &mut World, zone_id: i32) -> Option<mud_db::enums::Climate> {
-    let mut q = world.query_filtered::<(&WorldKey, &mud_world::ZoneClimate), With<mud_world::Zone>>();
+    let mut q =
+        world.query_filtered::<(&WorldKey, &mud_world::ZoneClimate), With<mud_world::Zone>>();
     q.iter(world)
         .find(|(wk, _)| wk.zone == zone_id)
         .map(|(_, c)| c.0)
@@ -9398,15 +10498,13 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
     // an "inside" semantically. Liquid containers fall through to
     // their own examine path; corpses are containers (handled by
     // the proto's type marker too).
-    let kind = world
-        .get::<WorldKey>(container)
-        .and_then(|k| {
-            world
-                .resource::<ObjectPrototypes>()
-                .by_key
-                .get(&(k.zone, k.id))
-                .map(|p| p.r#type)
-        });
+    let kind = world.get::<WorldKey>(container).and_then(|k| {
+        world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(k.zone, k.id))
+            .map(|p| p.r#type)
+    });
     let is_corpse = world.get::<mud_world::Corpse>(container).is_some();
     let container_name = name_of(world, container);
     if !is_corpse && !matches!(kind, Some(mud_db::enums::ObjectType::Container)) {
@@ -9426,11 +10524,7 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
     };
     let coin = world.get::<mud_world::CoinPile>(container).map(|c| c.0);
     if items.is_empty() && coin.unwrap_or(0) <= 0 {
-        send_rendered(
-            world,
-            player,
-            &format!("{container_name} is empty.\r\n"),
-        );
+        send_rendered(world, player, &format!("{container_name} is empty.\r\n"));
         return;
     }
     let mut out = format!("{container_name} contains:\r\n");
@@ -9513,6 +10607,7 @@ pub(crate) fn look_at_sky(world: &mut World, player: Entity) {
 /// the exit is closed/locked, and otherwise prints the target room's
 /// name and description (no occupants — that requires actually being
 /// there).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
@@ -9551,8 +10646,7 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
             return;
         }
     }
-    if ed.state == mud_db::enums::ExitState::Closed
-        || ed.state == mud_db::enums::ExitState::Locked
+    if ed.state == mud_db::enums::ExitState::Closed || ed.state == mud_db::enums::ExitState::Locked
     {
         // Yellow when merely closed (push and walk in), red when
         // locked (need a key first) — matches the auto-exit list
@@ -9564,7 +10658,11 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
             mud_db::enums::ExitState::Locked => format!("<red>{noun} is locked.</>"),
             _ => format!("<yellow>{noun} is closed.</>"),
         };
-        send_to(world, player, format!("{}\r\n", render_color_tags(&line, mode_pre)));
+        send_to(
+            world,
+            player,
+            format!("{}\r\n", render_color_tags(&line, mode_pre)),
+        );
         return;
     }
     // Wall gate. A solid wall (block) hides the destination room
@@ -9588,7 +10686,11 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
             mud_world::WallTraversal::Passable => "shimmers across the path, oddly transparent",
         };
         let line = format!("{color}A {} {blurb}.</>", wall.kind_label);
-        send_to(world, player, format!("\r\n{}\r\n", render_color_tags(&line, mode_pre)));
+        send_to(
+            world,
+            player,
+            format!("\r\n{}\r\n", render_color_tags(&line, mode_pre)),
+        );
         if matches!(wall.traversal, mud_world::WallTraversal::Block) {
             return;
         }
@@ -9610,7 +10712,10 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
         send_to(
             world,
             player,
-            format!("\r\nYou peer {} but see only blackness.\r\n", direction_name(dir)),
+            format!(
+                "\r\nYou peer {} but see only blackness.\r\n",
+                direction_name(dir)
+            ),
         );
         return;
     }
@@ -9625,10 +10730,7 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
     // Mirror the cmd_look [peaceful] tag for the destination so a
     // player previewing a sanctuary doesn't get surprised when they
     // step in and find combat refused.
-    let peaceful_tag = if world
-        .get::<mud_world::PeacefulRoom>(target_room)
-        .is_some()
-    {
+    let peaceful_tag = if world.get::<mud_world::PeacefulRoom>(target_room).is_some() {
         render_color_tags("  <green>[peaceful]</>", mode)
     } else {
         String::new()
@@ -9673,7 +10775,12 @@ pub(crate) fn direction_order(d: mud_db::enums::Direction) -> u8 {
 /// `opposite(dir)` from the exit's `to` room). One-sided edits would
 /// drift over time as players walk through and re-open the same
 /// door from each side.
-pub(crate) fn flip_door_both_sides(world: &mut World, room: Entity, dir: Direction, new_state: ExitState) {
+pub(crate) fn flip_door_both_sides(
+    world: &mut World,
+    room: Entity,
+    dir: Direction,
+    new_state: ExitState,
+) {
     let mut other_room: Option<Entity> = None;
     if let Some(mut exits) = world.get_mut::<Exits>(room)
         && let Some(ed) = exits.0.get_mut(&dir)
@@ -9836,7 +10943,9 @@ pub(crate) fn carried_weight(world: &mut World, actor: Entity) -> f64 {
     // below doesn't reborrow the world each step.
     let all_items: Vec<(Entity, Entity, Option<WorldKey>)> = {
         let mut q = world.query_filtered::<(Entity, &Located, Option<&WorldKey>), With<Item>>();
-        q.iter(world).map(|(e, l, wk)| (e, l.0, wk.copied())).collect()
+        q.iter(world)
+            .map(|(e, l, wk)| (e, l.0, wk.copied()))
+            .collect()
     };
     let mut visited: HashSet<Entity> = HashSet::new();
     let mut frontier: Vec<Entity> = vec![actor];
@@ -9879,7 +10988,11 @@ pub(crate) fn split_from_keyword(input: &str) -> Option<(&str, &str)> {
 
 /// Find an item Located on `container` whose Named or Keywords
 /// match `needle` (case-insensitive substring).
-pub(crate) fn find_in_container(world: &mut World, needle: &str, container: Entity) -> Option<Entity> {
+pub(crate) fn find_in_container(
+    world: &mut World,
+    needle: &str,
+    container: Entity,
+) -> Option<Entity> {
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
     q.iter(world)
@@ -9909,7 +11022,13 @@ pub(crate) fn split_in_keyword(input: &str) -> Option<(&str, &str)> {
 /// follow-up — they need `ConsumableEffects` loading.
 /// Returns true when the item was actually consumed (so callers can
 /// chain post-effects like resetting Hunger after a successful eat).
-pub(crate) fn consume_item(world: &mut World, player: Entity, args: &str, expected: mud_db::enums::ObjectType, verb: &str) -> bool {
+pub(crate) fn consume_item(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    expected: mud_db::enums::ObjectType,
+    verb: &str,
+) -> bool {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
@@ -9917,17 +11036,23 @@ pub(crate) fn consume_item(world: &mut World, player: Entity, args: &str, expect
     }
     let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
     let Some(item) = item else {
-        send_to(world, player, format!("You aren't carrying '{target_word}'.\r\n"));
+        send_to(
+            world,
+            player,
+            format!("You aren't carrying '{target_word}'.\r\n"),
+        );
         return false;
     };
     let item_name = name_of(world, item);
-    let kind = world
-        .get::<WorldKey>(item)
-        .and_then(|k| world.resource::<ObjectPrototypes>().by_key.get(&(k.zone, k.id)).map(|p| p.r#type));
+    let kind = world.get::<WorldKey>(item).and_then(|k| {
+        world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(k.zone, k.id))
+            .map(|p| p.r#type)
+    });
     if kind != Some(expected) {
-        send_to(world, player, format!(
-            "You can't {verb} {item_name}.\r\n",
-        ));
+        send_to(world, player, format!("You can't {verb} {item_name}.\r\n",));
         return false;
     }
     send_rendered(world, player, &format!("You {verb} {item_name}.\r\n"));
@@ -9946,9 +11071,7 @@ pub(crate) fn consume_item(world: &mut World, player: Entity, args: &str, expect
             located.0,
             player,
             &[player],
-            &cap_sentence_start(&format!(
-                "{actor_name} {third_verb} {item_name}.\r\n"
-            )),
+            &cap_sentence_start(&format!("{actor_name} {third_verb} {item_name}.\r\n")),
         );
     }
     // Apply ConsumableEffects bound to this object proto. Per-row
@@ -9984,7 +11107,11 @@ pub(crate) fn apply_consumable_object_effects(world: &mut World, player: Entity,
 /// Same as `apply_consumable_object_effects` but for a Liquid name.
 /// Resolves the name through `LiquidIndex` to the schema's id, then
 /// fans out to the catalog's per-liquid bindings.
-pub(crate) fn apply_consumable_liquid_effects(world: &mut World, player: Entity, liquid_name: &str) {
+pub(crate) fn apply_consumable_liquid_effects(
+    world: &mut World,
+    player: Entity,
+    liquid_name: &str,
+) {
     let needle = liquid_name.to_ascii_lowercase();
     let liquid_id = world
         .resource::<mud_world::LiquidIndex>()
@@ -10048,10 +11175,15 @@ pub(crate) fn spawn_consumable_effect(
 /// container empty for next time but still completes the swig.
 /// Poisoned containers print a warning line — a real poison effect
 /// can wire later.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units: i32, verb: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
-        send_to(world, player, format!("{} from what?\r\n", capitalize(verb)));
+        send_to(
+            world,
+            player,
+            format!("{} from what?\r\n", capitalize(verb)),
+        );
         return;
     }
     // Inventory match wins over room match — players carrying a
@@ -10095,7 +11227,11 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
         send_rendered(world, player, &format!("{item_name} is empty.\r\n"));
         return;
     }
-    let drank = if is_fountain { units } else { state.remaining.min(units) };
+    let drank = if is_fountain {
+        units
+    } else {
+        state.remaining.min(units)
+    };
     // Resolve the rich `LiquidDef` for the container's contents.
     // Catalog lookup is by alias; fall back to a water-shaped def
     // for unknown aliases (legacy imports / hand-edited DB rows)
@@ -10115,9 +11251,7 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     } else {
         liquid_def.color_desc.to_ascii_lowercase()
     };
-    if !is_fountain
-        && let Some(mut lc) = world.get_mut::<mud_world::LiquidContainer>(item)
-    {
+    if !is_fountain && let Some(mut lc) = world.get_mut::<mud_world::LiquidContainer>(item) {
         lc.remaining -= drank;
     }
     send_rendered(
@@ -10140,17 +11274,13 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
             located.0,
             player,
             &[player],
-            &cap_sentence_start(&format!(
-                "{actor_name} {third_verb} from {item_name}.\r\n"
-            )),
+            &cap_sentence_start(&format!("{actor_name} {third_verb} from {item_name}.\r\n")),
         );
     }
     // Flavor description on identified containers — short paragraph
     // attached to the liquid row. Renders once per swig only when
     // the player knows what they're drinking.
-    if identified
-        && let Some(desc) = &liquid_def.description
-    {
+    if identified && let Some(desc) = &liquid_def.description {
         send_rendered(world, player, &format!("{desc}\r\n"));
     }
     if state.poisoned {
@@ -10206,11 +11336,7 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     }
     let was_last = !is_fountain && state.remaining == drank;
     if was_last {
-        send_rendered(
-            world,
-            player,
-            &format!("{item_name} is empty now.\r\n"),
-        );
+        send_rendered(world, player, &format!("{item_name} is empty now.\r\n"));
     }
 }
 
@@ -10219,6 +11345,7 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
 /// cast pipeline, then either despawn (`single_use=true`, scrolls)
 /// or decrement `Charges` (`single_use=false`, wands/staves —
 /// despawn at 0).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn invoke_object_abilities(
     world: &mut World,
     player: Entity,
@@ -10247,7 +11374,11 @@ pub(crate) fn invoke_object_abilities(
     let item_name = name_of(world, item);
     let key = world.get::<WorldKey>(item).copied();
     let Some(key) = key else {
-        send_rendered(world, player, &format!("{item_name} has no proto link.\r\n"));
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} has no proto link.\r\n"),
+        );
         return;
     };
     let kind = world
@@ -10256,11 +11387,7 @@ pub(crate) fn invoke_object_abilities(
         .get(&(key.zone, key.id))
         .map(|p| p.r#type);
     if kind != Some(expected_type) {
-        send_rendered(
-            world,
-            player,
-            &format!("You can't {verb} {item_name}.\r\n"),
-        );
+        send_rendered(world, player, &format!("You can't {verb} {item_name}.\r\n"));
         return;
     }
     // Empty Charges → refuse before any output. Without a Charges
@@ -10310,9 +11437,7 @@ pub(crate) fn invoke_object_abilities(
             located.0,
             player,
             &[player],
-            &cap_sentence_start(&format!(
-                "{actor_name} {third_verb} {item_name}.\r\n"
-            )),
+            &cap_sentence_start(&format!("{actor_name} {third_verb} {item_name}.\r\n")),
         );
     }
     // Fire USE on the item before spell dispatch — bodies may
@@ -10360,14 +11485,19 @@ pub(crate) fn invoke_object_abilities(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn wear_into(world: &mut World, player: Entity, target_word: &str, force_slot: Option<Slot>) {
+pub(crate) fn wear_into(
+    world: &mut World,
+    player: Entity,
+    target_word: &str,
+    force_slot: Option<Slot>,
+) {
     wear_into_inner(world, player, target_word, force_slot, false);
 }
 
 /// `wear_into` plus a `silent_room` flag. `cmd_wear`'s `wear all`
 /// loop calls this with `silent_room=true` and emits a single
 /// consolidated room broadcast at the end of the loop instead of
-/// the per-item line wear_into normally fires. Matches the shape
+/// the per-item line `wear_into` normally fires. Matches the shape
 /// `cmd_drop all` uses to avoid spamming bystanders.
 pub(crate) fn wear_into_silent(
     world: &mut World,
@@ -10378,6 +11508,7 @@ pub(crate) fn wear_into_silent(
     wear_into_inner(world, player, target_word, force_slot, true);
 }
 
+#[allow(clippy::too_many_lines)]
 fn wear_into_inner(
     world: &mut World,
     player: Entity,
@@ -10415,8 +11546,7 @@ fn wear_into_inner(
             Slot::Hold => "held",
             _ => "worn there",
         };
-        send_rendered(world, player, &format!("{item_name} can't be {verb}.\r\n"),
-        );
+        send_rendered(world, player, &format!("{item_name} can't be {verb}.\r\n"));
         return;
     }
 
@@ -10451,21 +11581,24 @@ fn wear_into_inner(
     };
     // B6: inclusive allow-list + size band. Loaded separately so
     // the existing tuple doesn't grow further.
-    let (allowed_races, min_size, max_size): (Vec<String>, Option<String>, Option<String>) =
-        world
-            .get::<WorldKey>(item)
-            .and_then(|k| {
-                world
-                    .resource::<ObjectPrototypes>()
-                    .by_key
-                    .get(&(k.zone, k.id))
-                    .map(|p| (p.allowed_races.clone(), p.min_size.clone(), p.max_size.clone()))
-            })
-            .unwrap_or_default();
+    let (allowed_races, min_size, max_size): (Vec<String>, Option<String>, Option<String>) = world
+        .get::<WorldKey>(item)
+        .and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| {
+                    (
+                        p.allowed_races.clone(),
+                        p.min_size.clone(),
+                        p.max_size.clone(),
+                    )
+                })
+        })
+        .unwrap_or_default();
     if !alignment_restriction.is_empty() {
-        let player_align = world
-            .get::<CombatStats>(player)
-            .map_or(0, |c| c.alignment);
+        let player_align = world.get::<CombatStats>(player).map_or(0, |c| c.alignment);
         let bucket = mud_db::enums::Alignment::from_score(player_align);
         if alignment_restriction.contains(&bucket) {
             send_rendered(
@@ -10487,9 +11620,7 @@ fn wear_into_inner(
             send_rendered(
                 world,
                 player,
-                &format!(
-                    "{item_name} won't bend to your training — your class can't use it.\r\n"
-                ),
+                &format!("{item_name} won't bend to your training — your class can't use it.\r\n"),
             );
             return;
         }
@@ -10511,6 +11642,7 @@ fn wear_into_inner(
     // so the B6 size band can compare via ordinal rather than
     // string equality. Unknown / mob-latent labels rank as
     // MEDIUM so nothing freaks out about a missing row.
+    #[allow(clippy::match_same_arms)] // explicit MEDIUM arm documents the default
     let size_rank = |label: &str| -> i32 {
         match label.to_ascii_uppercase().as_str() {
             "FINE" | "DIMINUTIVE" => 0,
@@ -10528,9 +11660,7 @@ fn wear_into_inner(
     // non-empty = wearer must be one of these.
     if !allowed_races.is_empty()
         && let Some(race) = world.get::<Profile>(player).map(|p| p.race.clone())
-        && !allowed_races
-            .iter()
-            .any(|r| r.eq_ignore_ascii_case(&race))
+        && !allowed_races.iter().any(|r| r.eq_ignore_ascii_case(&race))
     {
         send_rendered(
             world,
@@ -10582,19 +11712,14 @@ fn wear_into_inner(
     // — `remove longsword` first."). Saves a round-trip
     // through `equipment`.
     let slot_occupants: Vec<(Slot, String)> = {
-        let mut q = world.query_filtered::<
-            (&Located, &Named, &EquippedSlot),
-            With<Item>,
-        >();
+        let mut q = world.query_filtered::<(&Located, &Named, &EquippedSlot), With<Item>>();
         q.iter(world)
             .filter(|(l, _, _)| l.0 == player)
             .map(|(_, n, eq)| (eq.0, n.name.clone()))
             .collect()
     };
-    let occupied: std::collections::HashSet<Slot> = slot_occupants
-        .iter()
-        .map(|(s, _)| *s)
-        .collect();
+    let occupied: std::collections::HashSet<Slot> =
+        slot_occupants.iter().map(|(s, _)| *s).collect();
     let candidates: &[Slot] = match slot {
         Slot::LeftFinger | Slot::RightFinger => &[Slot::LeftFinger, Slot::RightFinger],
         _ => std::slice::from_ref(&slot),
@@ -10660,9 +11785,7 @@ fn wear_into_inner(
     // glowing sword goes unnoticed until they actually swing it.
     // Skipped under `silent_room` so `wear all` can emit one
     // consolidated bystander line rather than N spammy ones.
-    if !silent_room
-        && let Some(located) = world.get::<Located>(player).copied()
-    {
+    if !silent_room && let Some(located) = world.get::<Located>(player).copied() {
         let actor_name = name_of(world, player);
         let third_verb = match dest_slot {
             Slot::Wield => "wields",
@@ -10674,9 +11797,7 @@ fn wear_into_inner(
             located.0,
             player,
             &[player],
-            &cap_sentence_start(&format!(
-                "{actor_name} {third_verb} {item_name}.\r\n"
-            )),
+            &cap_sentence_start(&format!("{actor_name} {third_verb} {item_name}.\r\n")),
         );
     }
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
@@ -10711,7 +11832,10 @@ fn render_bound_ability_line(world: &mut World, item: Entity) -> Option<String> 
                 )
         })
         .collect();
-    Some(format!("<dim>It carries</> {}<dim>.</>\r\n", entries.join(", ")))
+    Some(format!(
+        "<dim>It carries</> {}<dim>.</>\r\n",
+        entries.join(", ")
+    ))
 }
 
 /// Match by Keywords substring first, falling back to Name substring.
@@ -10833,11 +11957,10 @@ pub(crate) fn find_online_player_anywhere(
     if needle.is_empty() {
         return None;
     }
-    let mut q = world
-        .query_filtered::<(Entity, &Named), (With<Player>, With<mud_world::Online>)>();
-    let mut hits = q.iter(world).filter(|(e, n)| {
-        *e != exclude && n.name.to_ascii_lowercase().contains(&needle)
-    });
+    let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<mud_world::Online>)>();
+    let mut hits = q
+        .iter(world)
+        .filter(|(e, n)| *e != exclude && n.name.to_ascii_lowercase().contains(&needle));
     let first = hits.next()?;
     // Ambiguity check — if a second match exists, refuse so the
     // caster can disambiguate by typing the full name. Cheap: stops
@@ -10848,14 +11971,14 @@ pub(crate) fn find_online_player_anywhere(
     Some(first.0)
 }
 
-
 /// Spawn ECS Room entities for every `PlayerHouseRoom` in the
 /// summary, wire their exits, drop placed items into them, and
 /// register the per-house index entries in `HousingIndex`.
 pub(crate) fn synthesize_house_rooms(world: &mut World, summary: &mud_world::HouseSummary) {
     use bevy_ecs::prelude::*;
     // Phase 1: spawn rooms, populate index.
-    let mut local_to_entity: std::collections::HashMap<i32, Entity> = std::collections::HashMap::new();
+    let mut local_to_entity: std::collections::HashMap<i32, Entity> =
+        std::collections::HashMap::new();
     let mut local_to_row_id: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
     for room in &summary.rooms {
         let entity = world
@@ -10865,7 +11988,9 @@ pub(crate) fn synthesize_house_rooms(world: &mut World, summary: &mud_world::Hou
                     house_id: summary.house_id,
                     local_index: room.local_index,
                 },
-                Named { name: room.name.clone() },
+                Named {
+                    name: room.name.clone(),
+                },
                 Description(room.description.clone()),
                 mud_world::RoomSector(mud_db::enums::Sector::Structure),
                 mud_world::Exits::default(),
@@ -10880,8 +12005,10 @@ pub(crate) fn synthesize_house_rooms(world: &mut World, summary: &mud_world::Hou
     }
     // Phase 2: wire exits. We have row IDs from the schema and
     // need to map back to local_index to set Exits properly.
-    let row_to_local: std::collections::HashMap<i32, i32> =
-        local_to_row_id.iter().map(|(local, row)| (*row, *local)).collect();
+    let row_to_local: std::collections::HashMap<i32, i32> = local_to_row_id
+        .iter()
+        .map(|(local, row)| (*row, *local))
+        .collect();
     for exit in &summary.exits {
         let Some(&from_local) = row_to_local.get(&exit.from_room_id) else {
             continue;
@@ -10931,7 +12058,13 @@ pub(crate) fn synthesize_house_rooms(world: &mut World, summary: &mud_world::Hou
         let Some(&room_entity) = local_to_entity.get(&room_local) else {
             continue;
         };
-        spawn_house_item(world, placed.id, placed.object_zone_id, placed.object_id, room_entity);
+        spawn_house_item(
+            world,
+            placed.id,
+            placed.object_zone_id,
+            placed.object_id,
+            room_entity,
+        );
     }
 }
 
@@ -10955,9 +12088,14 @@ pub(crate) fn spawn_house_item(
     let Some(proto) = proto else { return };
     let mut bundle = world.spawn((
         Item,
-        Named { name: proto.name.clone() },
+        Named {
+            name: proto.name.clone(),
+        },
         Keywords(proto.keywords.clone()),
-        WorldKey { zone: proto.zone_id, id: proto.id },
+        WorldKey {
+            zone: proto.zone_id,
+            id: proto.id,
+        },
         Located(parent),
         mud_world::HouseItem(house_item_id),
     ));
@@ -10966,11 +12104,7 @@ pub(crate) fn spawn_house_item(
     }
 }
 
-
-
 // admin management bodies moved to commands/admin_management.rs.
-
-
 
 /// Tiny helper: does the target word match the named.name token or
 /// any keyword? Mirrors what `find_carried_by` does internally but
@@ -11032,7 +12166,7 @@ pub(crate) fn resolve_queued_cast(
 }
 
 /// Entry point for item-driven casts (scroll/wand/staff). Bypasses
-/// the caster-side gates — slot pool, class circle, KnownAbilities,
+/// the caster-side gates — slot pool, class circle, `KnownAbilities`,
 /// posture-only restrictions — because the *item* is the magic
 /// source. Damage / save / target gates still apply.
 pub(crate) fn invoke_ability_from_item(
@@ -11136,17 +12270,15 @@ fn aoe_targets_in_room(
     scope: AoeScope,
 ) -> Vec<String> {
     let group_root_e = group_root(world, caster);
-    let group: std::collections::HashSet<Entity> = group_members(world, group_root_e)
-        .into_iter()
-        .collect();
+    let group: std::collections::HashSet<Entity> =
+        group_members(world, group_root_e).into_iter().collect();
     match scope {
         AoeScope::RoomEnemies => {
             // Mobs in the room, plus PK-flagged players (excluding
             // self / group members).
             let mut names: Vec<String> = Vec::new();
             {
-                let mut q = world
-                    .query_filtered::<(Entity, &Located, &Named), With<Mob>>();
+                let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Mob>>();
                 for (e, l, n) in q.iter(world) {
                     if l.0 == room && !group.contains(&e) && e != caster {
                         names.push(n.name.clone());
@@ -11172,8 +12304,7 @@ fn aoe_targets_in_room(
         AoeScope::RoomAllies => {
             // Group members in the room. Mobs aren't included
             // (no allied-mob tag today). Caster is included.
-            let mut q = world
-                .query_filtered::<(Entity, &Located, &Named), With<Player>>();
+            let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Player>>();
             q.iter(world)
                 .filter(|(e, l, _)| l.0 == room && group.contains(e))
                 .map(|(_, _, n)| n.name.clone())
@@ -11184,8 +12315,7 @@ fn aoe_targets_in_room(
             // and Mobs alike. Used by chaos / admin abilities.
             let mut names: Vec<String> = Vec::new();
             {
-                let mut q = world
-                    .query_filtered::<(Entity, &Located, &Named), With<Mob>>();
+                let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Mob>>();
                 for (e, l, n) in q.iter(world) {
                     if l.0 == room && e != caster {
                         names.push(n.name.clone());
@@ -11193,8 +12323,7 @@ fn aoe_targets_in_room(
                 }
             }
             {
-                let mut q = world
-                    .query_filtered::<(Entity, &Located, &Named), With<Player>>();
+                let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Player>>();
                 for (e, l, n) in q.iter(world) {
                     if l.0 == room && e != caster {
                         names.push(n.name.clone());
@@ -11234,10 +12363,7 @@ pub(crate) fn parse_quoted_first_token(args: &str) -> (String, Option<&str>) {
     }
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("").trim().to_string();
-    let tail = parts
-        .next()
-        .map(str::trim_start)
-        .filter(|s| !s.is_empty());
+    let tail = parts.next().map(str::trim_start).filter(|s| !s.is_empty());
     (head, tail)
 }
 
@@ -11325,6 +12451,7 @@ pub fn lua_attack_all(world: &mut World, attacker: Entity) {
 /// Used by AOE shims (`cmd_roar` today). For single-target dispatch
 /// keep using [`invoke_ability`].
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn invoke_ability_with(
     world: &mut World,
     player: Entity,
@@ -11437,8 +12564,8 @@ pub(crate) fn invoke_ability_with(
     // KnownAbilities + class-skill gates entirely — the item is the
     // magic source, the player isn't drawing on their own training.
     let bypass_known_check = is_staff_caster || is_mob_caster || from_item;
-    let needs_explicit_known = !bypass_known_check
-        && !matches!(kind, mud_db::abilities::AbilityKind::Skill);
+    let needs_explicit_known =
+        !bypass_known_check && !matches!(kind, mud_db::abilities::AbilityKind::Skill);
     if needs_explicit_known {
         let knows_it = world
             .get::<KnownAbilities>(player)
@@ -11463,9 +12590,7 @@ pub(crate) fn invoke_ability_with(
         // "empty KnownAbilities bypass" so they can try anything
         // — once Profile.class_id is enforced non-NULL by login,
         // this branch goes away.
-        let profile_data = world
-            .get::<Profile>(player)
-            .map(|p| (p.class_id, p.level));
+        let profile_data = world.get::<Profile>(player).map(|p| (p.class_id, p.level));
         if let Some((Some(class_id), level)) = profile_data {
             let csd = world.resource::<mud_world::ClassSkillsData>();
             // Defensive: a class with zero ClassSkills rows means
@@ -11488,10 +12613,7 @@ pub(crate) fn invoke_ability_with(
                             send_to(
                                 world,
                                 player,
-                                format!(
-                                    "You haven't practiced {} yet.\r\n",
-                                    def.name
-                                ),
+                                format!("You haven't practiced {} yet.\r\n", def.name),
                             );
                             return;
                         }
@@ -11511,10 +12633,7 @@ pub(crate) fn invoke_ability_with(
                         send_to(
                             world,
                             player,
-                            format!(
-                                "Your class can't use {}.\r\n",
-                                def.name
-                            ),
+                            format!("Your class can't use {}.\r\n", def.name),
                         );
                         return;
                     }
@@ -11598,9 +12717,9 @@ pub(crate) fn invoke_ability_with(
                 if let Some(mut s) = world.get_mut::<mud_world::SpellSlots>(player) {
                     s.in_flight.push(cd);
                 } else {
-                    world
-                        .entity_mut(player)
-                        .insert(mud_world::SpellSlots { in_flight: vec![cd] });
+                    world.entity_mut(player).insert(mud_world::SpellSlots {
+                        in_flight: vec![cd],
+                    });
                 }
             }
         }
@@ -11613,11 +12732,19 @@ pub(crate) fn invoke_ability_with(
     // live gates.
     let caster_in_combat = world.get::<Fighting>(player).is_some();
     if def.in_combat_only && !caster_in_combat {
-        send_to(world, player, format!("You can only {verb} {} in combat.\r\n", def.name));
+        send_to(
+            world,
+            player,
+            format!("You can only {verb} {} in combat.\r\n", def.name),
+        );
         return;
     }
     if !def.combat_ok && caster_in_combat {
-        send_to(world, player, format!("You can't {verb} {} while fighting.\r\n", def.name));
+        send_to(
+            world,
+            player,
+            format!("You can't {verb} {} while fighting.\r\n", def.name),
+        );
         return;
     }
 
@@ -11757,10 +12884,7 @@ pub(crate) fn invoke_ability_with(
         send_to(
             world,
             player,
-            format!(
-                "You begin {verb}ing {}...  (about {secs}s)\r\n",
-                def.name,
-            ),
+            format!("You begin {verb}ing {}...  (about {secs}s)\r\n", def.name,),
         );
         return;
     }
@@ -11786,23 +12910,13 @@ pub(crate) fn invoke_ability_with(
         }),
         _ => None,
     };
-    if !aoe_repeat
-        && let Some(scope) = inferred_scope
-    {
+    if !aoe_repeat && let Some(scope) = inferred_scope {
         let refusal = if matches!(scope, AoeScope::RoomEnemies | AoeScope::RoomAll) {
             format!("Nothing here to {verb} {}.\r\n", def.name)
         } else {
             format!("Nobody here for {} to reach.\r\n", def.name)
         };
-        invoke_ability_aoe(
-            world,
-            player,
-            kind,
-            verb,
-            &def.plain_name,
-            scope,
-            &refusal,
-        );
+        invoke_ability_aoe(world, player, kind, verb, &def.plain_name, scope, &refusal);
         return;
     }
 
@@ -11836,8 +12950,8 @@ pub(crate) fn invoke_ability_with(
     // the robe is in the caster's inventory. Hostile abilities
     // never get the fallback — `cast burning hands sword` would be
     // nonsensical.
-    let allows_inventory_target =
-        valid_targets.iter().any(|t| t == "OBJECT_INV") || (valid_targets.is_empty() && !def.violent);
+    let allows_inventory_target = valid_targets.iter().any(|t| t == "OBJECT_INV")
+        || (valid_targets.is_empty() && !def.violent);
     let prefers_rider_default = valid_targets.iter().any(|t| t == "RIDER");
     // Hostile abilities (any ENEMY_* / AREA_FOES targeting) refuse
     // in PeacefulRoom — same contract cmd_attack and engage_combat
@@ -11880,9 +12994,7 @@ pub(crate) fn invoke_ability_with(
     // "at the orc"), and refuse with a hint otherwise. Without the
     // Fighting fallback, the type gate below routes the cast onto
     // the caster — see the G2.1 / G2.2 bug report.
-    let default_combat_target: Option<Entity> = if is_hostile_ability
-        && target_word.is_none()
-    {
+    let default_combat_target: Option<Entity> = if is_hostile_ability && target_word.is_none() {
         let opponent = world.get::<Fighting>(player).map(|f| f.0);
         if let Some(opp) = opponent
             && world.get_entity(opp).is_ok()
@@ -11928,9 +13040,7 @@ pub(crate) fn invoke_ability_with(
         // L1.2's self-gate refuses. The summon gate set still
         // enforces same-zone, mob-NoSummon, etc. once we have a
         // candidate target.
-        let summon_remote = if in_room.is_none()
-            && def.plain_name.eq_ignore_ascii_case("SUMMON")
-        {
+        let summon_remote = if in_room.is_none() && def.plain_name.eq_ignore_ascii_case("SUMMON") {
             find_online_player_anywhere(world, word, player)
         } else {
             None
@@ -11968,8 +13078,7 @@ pub(crate) fn invoke_ability_with(
             }
         }
     } else if prefers_rider_default
-        && let Some(mud_world::Mounted(mount)) =
-            world.get::<mud_world::Mounted>(player).copied()
+        && let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(player).copied()
     {
         // RIDER target with no arg: default to the caster's mount.
         // BUCK reads "you buck *your* rider off"; without this default
@@ -11990,8 +13099,7 @@ pub(crate) fn invoke_ability_with(
         .targeting
         .get(&def.id)
         .cloned()
-        && let Some(refusal) =
-            check_target_type(world, player, target_entity, &rule.valid_targets)
+        && let Some(refusal) = check_target_type(world, player, target_entity, &rule.valid_targets)
     {
         send_to(world, player, format!("{refusal}\r\n"));
         return;
@@ -12006,8 +13114,7 @@ pub(crate) fn invoke_ability_with(
         .restriction_rules
         .get(&def.id)
         .cloned()
-        && let Some(refusal) =
-            check_ability_restrictions(world, player, target_entity, &rules)
+        && let Some(refusal) = check_ability_restrictions(world, player, target_entity, &rules)
     {
         let actor_name = name_of(world, player);
         let target_name = if target_entity == player {
@@ -12015,12 +13122,8 @@ pub(crate) fn invoke_ability_with(
         } else {
             name_or(world, target_entity, "(unknown)")
         };
-        let rendered = render_ability_template(
-            &refusal,
-            &actor_name,
-            &target_name,
-            target_entity == player,
-        );
+        let rendered =
+            render_ability_template(&refusal, &actor_name, &target_name, target_entity == player);
         send_to(world, player, format!("{rendered}\r\n"));
         return;
     }
@@ -12048,10 +13151,9 @@ pub(crate) fn invoke_ability_with(
         // EquippedSlot. Items nested in a container have a
         // different Located parent so they're naturally excluded.
         let carried: Vec<(Entity, i32)> = {
-            let mut q = world.query_filtered::<
-                (Entity, &Located, &WorldKey, Option<&EquippedSlot>),
-                With<Item>,
-            >();
+            let mut q = world
+                .query_filtered::<(Entity, &Located, &WorldKey, Option<&EquippedSlot>), With<Item>>(
+                );
             q.iter(world)
                 .filter(|(_, l, _, eq)| l.0 == player && eq.is_none())
                 .map(|(e, _, k, _)| (e, k.id))
@@ -12097,9 +13199,13 @@ pub(crate) fn invoke_ability_with(
     // `4d19 + pow(1000, 1.25)` ≈ 5660 damage. G2.2.
     let caster_skill = world
         .get::<KnownAbilities>(player)
-        .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).map(|(_, p, _)| *p))
-        .map(|raw| (raw / 10).clamp(0, 100))
-        .unwrap_or(0);
+        .and_then(|k| {
+            k.entries
+                .iter()
+                .find(|(id, _, _)| *id == def.id)
+                .map(|(_, p, _)| *p)
+        })
+        .map_or(0, |raw| (raw / 10).clamp(0, 100));
     tracing::debug!(
         ability_id = def.id,
         ability_name = def.plain_name.as_str(),
@@ -12145,7 +13251,11 @@ pub(crate) fn invoke_ability_with(
     // `pow(skill, 1.2 + 0.3*min_level/100 + ...)`. Spells the
     // catalog doesn't class-bind report 0, which folds cleanly
     // into formulas that read it.
-    let min_level = if spell_circle > 0 { spell_circle * 2 + 1 } else { 0 };
+    let min_level = if spell_circle > 0 {
+        spell_circle * 2 + 1
+    } else {
+        0
+    };
     let formula_ctx = FormulaCtx {
         level: caster_level,
         skill: caster_skill,
@@ -12261,10 +13371,7 @@ pub(crate) fn invoke_ability_with(
             send_rendered(
                 world,
                 target_entity,
-                &format!(
-                    "You resist {}'s {}.\r\n",
-                    actor_name_pre, def.name,
-                ),
+                &format!("You resist {}'s {}.\r\n", actor_name_pre, def.name,),
             );
         }
         return;
@@ -12299,7 +13406,9 @@ pub(crate) fn invoke_ability_with(
     let render_header = || {
         let caster_template = messages_pre.as_ref().and_then(|m| {
             if target_entity == player {
-                m.success_to_self.as_deref().or(m.success_to_caster.as_deref())
+                m.success_to_self
+                    .as_deref()
+                    .or(m.success_to_caster.as_deref())
             } else {
                 m.success_to_caster.as_deref()
             }
@@ -12330,10 +13439,12 @@ pub(crate) fn invoke_ability_with(
     // suppresses it when `applied_msgs` only contains absorbs.
     // Non-absorb cases keep the pre-loop emit so death broadcasts
     // still slot in after the cast confirmation.
-    let absorb_threshold = if target_entity != player {
-        world.get::<mud_world::MaxAbsorbCircle>(target_entity).map(|m| m.0)
-    } else {
+    let absorb_threshold = if target_entity == player {
         None
+    } else {
+        world
+            .get::<mud_world::MaxAbsorbCircle>(target_entity)
+            .map(|m| m.0)
     };
     let damage_will_be_absorbed = has_damage_effect && {
         if let Some(threshold) = absorb_threshold {
@@ -12377,8 +13488,9 @@ pub(crate) fn invoke_ability_with(
                 // (a caster's own AoE shouldn't be absorbed by
                 // their own globe).
                 if target_entity != player
-                    && let Some(threshold) =
-                        world.get::<mud_world::MaxAbsorbCircle>(target_entity).map(|m| m.0)
+                    && let Some(threshold) = world
+                        .get::<mud_world::MaxAbsorbCircle>(target_entity)
+                        .map(|m| m.0)
                     && let Some(spell_circle) = world
                         .resource::<mud_world::SpellSlotData>()
                         .min_circle_for_ability(def.id)
@@ -12460,13 +13572,11 @@ pub(crate) fn invoke_ability_with(
                 // single-spec and per-component paths can apply
                 // them (A7). Default to empty so non-physical
                 // characters/mobs pass through unchanged.
-                let target_resists: std::collections::HashMap<
-                    mud_db::enums::ElementType,
-                    i32,
-                > = world
-                    .get::<mud_world::Resistances>(target_entity)
-                    .map(|r| r.0.clone())
-                    .unwrap_or_default();
+                let target_resists: std::collections::HashMap<mud_db::enums::ElementType, i32> =
+                    world
+                        .get::<mud_world::Resistances>(target_entity)
+                        .map(|r| r.0.clone())
+                        .unwrap_or_default();
                 // H.5 part 1: populate victim_align from the
                 // resolved target so alignment-keyed spells
                 // (smite-good / smite-evil shapes) can read it
@@ -12475,12 +13585,8 @@ pub(crate) fn invoke_ability_with(
                 let target_align = world
                     .get::<CombatStats>(target_entity)
                     .map_or(0, |cs| cs.alignment);
-                let target_max_hp = world
-                    .get::<Health>(target_entity)
-                    .map_or(0, |h| h.max);
-                let target_level = world
-                    .get::<Profile>(target_entity)
-                    .map_or(0, |p| p.level);
+                let target_max_hp = world.get::<Health>(target_entity).map_or(0, |h| h.max);
+                let target_level = world.get::<Profile>(target_entity).map_or(0, |p| p.level);
                 let target_life_force = world
                     .get::<mud_world::LifeForceTag>(target_entity)
                     .map(|l| l.0);
@@ -12573,10 +13679,8 @@ pub(crate) fn invoke_ability_with(
                 // literal int or a formula string (e.g. `hidden * 0.5`).
                 // Skipped when caster.hidden == 0.
                 if formula_ctx.hidden > 0
-                    && let Some(bonus) = bonus_if_hidden_from_blob(
-                        spec.override_params.as_ref(),
-                        &formula_ctx,
-                    )
+                    && let Some(bonus) =
+                        bonus_if_hidden_from_blob(spec.override_params.as_ref(), &formula_ctx)
                 {
                     amount = amount.saturating_add(bonus);
                 }
@@ -12594,8 +13698,7 @@ pub(crate) fn invoke_ability_with(
                         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
                         q.iter(world)
                             .filter(|(_, inst, applied)| {
-                                applied.0 == player
-                                    && inst.name.eq_ignore_ascii_case("empowered")
+                                applied.0 == player && inst.name.eq_ignore_ascii_case("empowered")
                             })
                             .map(|(e, _, _)| e)
                             .collect()
@@ -12631,8 +13734,7 @@ pub(crate) fn invoke_ability_with(
                     .and_then(serde_json::Value::as_array)
                 {
                     for m in multipliers {
-                        let Some(expr) = m.get("expr").and_then(serde_json::Value::as_str)
-                        else {
+                        let Some(expr) = m.get("expr").and_then(serde_json::Value::as_str) else {
                             continue;
                         };
                         let Some(scaled_int) = evaluate_simple_formula_ctx(
@@ -12645,16 +13747,10 @@ pub(crate) fn invoke_ability_with(
                         // float coefficient. Authors who want a literal
                         // 0.8 multiplier write `800` in the expr.
                         let mut factor = f64::from(scaled_int) / 1000.0;
-                        if let Some(min) = m
-                            .get("min")
-                            .and_then(serde_json::Value::as_f64)
-                        {
+                        if let Some(min) = m.get("min").and_then(serde_json::Value::as_f64) {
                             factor = factor.max(min);
                         }
-                        if let Some(max) = m
-                            .get("max")
-                            .and_then(serde_json::Value::as_f64)
-                        {
+                        if let Some(max) = m.get("max").and_then(serde_json::Value::as_f64) {
                             factor = factor.min(max);
                         }
                         if !factor.is_finite() {
@@ -12711,12 +13807,14 @@ pub(crate) fn invoke_ability_with(
                     // mutually opposed. Runs after ward / resist so
                     // it stacks on the magical pipeline rather than
                     // replacing it.
-                    let align_mult =
-                        alignment_protection_factor(world, player, target_entity);
+                    let align_mult = alignment_protection_factor(world, player, target_entity);
                     if (align_mult - 1.0).abs() > f32::EPSILON {
                         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         {
-                            amount = ((amount as f32) * align_mult) as i32;
+                            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                            {
+                                amount = ((amount as f32) * align_mult) as i32;
+                            }
                         }
                         amount = amount.max(1);
                     }
@@ -12765,7 +13863,7 @@ pub(crate) fn invoke_ability_with(
                     if lifesteal {
                         let actual_dmg = (pre_hp
                             - world.get::<Health>(target_entity).map_or(0, |h| h.hp))
-                            .max(0);
+                        .max(0);
                         if actual_dmg > 0
                             && let Some(mut h) = world.get_mut::<Health>(player)
                         {
@@ -12776,7 +13874,9 @@ pub(crate) fn invoke_ability_with(
                                 send_to(
                                     world,
                                     player,
-                                    format!("You drain {real_heal} life force from your victim.\r\n"),
+                                    format!(
+                                        "You drain {real_heal} life force from your victim.\r\n"
+                                    ),
                                 );
                             } else {
                                 // Above-max spillover per legacy
@@ -12790,8 +13890,7 @@ pub(crate) fn invoke_ability_with(
                                 )]
                                 let bonus = {
                                     let ratio = h.hp as f32 / h.max.max(1) as f32;
-                                    let poly =
-                                        -0.0457 * ratio * ratio - 0.0171 * ratio + 1.066;
+                                    let poly = -0.0457 * ratio * ratio - 0.0171 * ratio + 1.066;
                                     let raw = ((actual_dmg as f32) * poly) as i32;
                                     if raw > 10 {
                                         raw
@@ -12814,9 +13913,7 @@ pub(crate) fn invoke_ability_with(
                     // feedback melee combat already provides.
                     // Always to the target — even for self-cast damage,
                     // the caster benefits from the threshold cue.
-                    if !dead
-                        && let Some(line) = threshold_msg
-                    {
+                    if !dead && let Some(line) = threshold_msg {
                         send_to(world, target_entity, line.to_string());
                     }
                     // Engage combat. Without this a sorc lobbing
@@ -12833,16 +13930,9 @@ pub(crate) fn invoke_ability_with(
                     {
                         engage_combat(world, player, target_entity, room);
                     }
-                    if dead
-                        && let Some(located) = world.get::<Located>(target_entity).copied()
-                    {
+                    if dead && let Some(located) = world.get::<Located>(target_entity).copied() {
                         let target_name = name_or(world, target_entity, "(unknown)");
-                        crate::combat::handle_death(
-                            world,
-                            target_entity,
-                            &target_name,
-                            located.0,
-                        );
+                        crate::combat::handle_death(world, target_entity, &target_name, located.0);
                     }
                 }
                 if crate::combat::show_dice_for(world, player) {
@@ -12869,19 +13959,15 @@ pub(crate) fn invoke_ability_with(
                     }
                     if bolt_count > 1 {
                         applied_msgs.push(format!(
-                            "{} {detail} → -{} HP ×{} bolts",
-                            pretty, amount, bolt_count
+                            "{pretty} {detail} → -{amount} HP ×{bolt_count} bolts"
                         ));
                     } else {
-                        applied_msgs.push(format!("{} {detail} → -{} HP", pretty, amount));
+                        applied_msgs.push(format!("{pretty} {detail} → -{amount} HP"));
                     }
                 } else if bolt_count > 1 {
-                    applied_msgs.push(format!(
-                        "{} (-{} HP ×{} bolts)",
-                        pretty, amount, bolt_count
-                    ));
+                    applied_msgs.push(format!("{pretty} (-{amount} HP ×{bolt_count} bolts)"));
                 } else {
-                    applied_msgs.push(format!("{} (-{} HP)", pretty, amount));
+                    applied_msgs.push(format!("{pretty} (-{amount} HP)"));
                 }
             }
             "heal" => {
@@ -12891,7 +13977,7 @@ pub(crate) fn invoke_ability_with(
                     &formula_ctx,
                 );
                 let Some(mut amount) = amount else {
-                    applied_msgs.push(format!("{} (no amount resolved)", pretty));
+                    applied_msgs.push(format!("{pretty} (no amount resolved)"));
                     continue;
                 };
                 // A5: spell_power scales magical heals too — high-SP
@@ -12939,10 +14025,10 @@ pub(crate) fn invoke_ability_with(
                         format!("<dim>{n}'s {resource_word} is already full.</>\r\n")
                     };
                     send_to(world, player, msg);
-                    applied_msgs.push(format!("{} (no-op)", pretty));
+                    applied_msgs.push(format!("{pretty} (no-op)"));
                     continue;
                 }
-                applied_msgs.push(format!("{} (+{healed} {resource_label})", pretty));
+                applied_msgs.push(format!("{pretty} (+{healed} {resource_label})"));
             }
             "cleanse" => {
                 let conditions = resolve_effect_conditions(
@@ -12950,7 +14036,7 @@ pub(crate) fn invoke_ability_with(
                     Some(&spec.default_params),
                 );
                 if conditions.is_empty() {
-                    applied_msgs.push(format!("{} (no condition specified)", pretty));
+                    applied_msgs.push(format!("{pretty} (no condition specified)"));
                     continue;
                 }
                 let removed: usize = if conditions.iter().any(|c| c == "all") {
@@ -12963,9 +14049,9 @@ pub(crate) fn invoke_ability_with(
                     total
                 };
                 applied_msgs.push(if removed == 0 {
-                    format!("{} (nothing to cleanse)", pretty)
+                    format!("{pretty} (nothing to cleanse)")
                 } else {
-                    format!("{} (cleansed {removed} effect(s))", pretty)
+                    format!("{pretty} (cleansed {removed} effect(s))")
                 });
             }
             "stun" => {
@@ -12999,7 +14085,7 @@ pub(crate) fn invoke_ability_with(
                     AppliedTo(target_entity),
                 ));
                 spawn_count += 1;
-                applied_msgs.push(format!("{} (stunned)", pretty));
+                applied_msgs.push(format!("{pretty} (stunned)"));
             }
             "dispel" => {
                 // Remove EffectInstances on the target whose source
@@ -13012,19 +14098,17 @@ pub(crate) fn invoke_ability_with(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
                 );
-                let scope = resolve_dispel_scope(
-                    spec.override_params.as_ref(),
-                    Some(&spec.default_params),
-                );
+                let scope =
+                    resolve_dispel_scope(spec.override_params.as_ref(), Some(&spec.default_params));
                 if filter.is_empty() {
-                    applied_msgs.push(format!("{} (no filter specified)", pretty));
+                    applied_msgs.push(format!("{pretty} (no filter specified)"));
                     continue;
                 }
                 let removed = remove_effects_by_tag(world, target_entity, &filter, scope);
                 applied_msgs.push(if removed == 0 {
-                    format!("{} (nothing to dispel)", pretty)
+                    format!("{pretty} (nothing to dispel)")
                 } else {
-                    format!("{} (dispelled {removed} effect(s))", pretty)
+                    format!("{pretty} (dispelled {removed} effect(s))")
                 });
             }
             "redirect" => {
@@ -13039,30 +14123,25 @@ pub(crate) fn invoke_ability_with(
                     Some(&spec.default_params),
                 );
                 if !aggro {
-                    applied_msgs.push(format!(
-                        "{} (damage-redirect not implemented)",
-                        pretty
-                    ));
+                    applied_msgs.push(format!("{pretty} (damage-redirect not implemented)"));
                     continue;
                 }
                 if target_entity == player {
-                    applied_msgs.push(format!("{} (can't rescue yourself)", pretty));
+                    applied_msgs.push(format!("{pretty} (can't rescue yourself)"));
                     continue;
                 }
-                let Some(Fighting(attacker)) =
-                    world.get::<Fighting>(target_entity).copied()
-                else {
-                    applied_msgs.push(format!("{} (target isn't being attacked)", pretty));
+                let Some(Fighting(attacker)) = world.get::<Fighting>(target_entity).copied() else {
+                    applied_msgs.push(format!("{pretty} (target isn't being attacked)"));
                     continue;
                 };
                 if world.get_entity(attacker).is_err() {
-                    applied_msgs.push(format!("{} (attacker has vanished)", pretty));
+                    applied_msgs.push(format!("{pretty} (attacker has vanished)"));
                     continue;
                 }
                 crate::commands::try_remove::<Fighting>(world, target_entity);
                 crate::commands::try_insert(world, attacker, Fighting(player));
                 crate::commands::try_insert(world, player, Fighting(attacker));
-                applied_msgs.push(format!("{} (drew attacker's aggro)", pretty));
+                applied_msgs.push(format!("{pretty} (drew attacker's aggro)"));
             }
             "stop_combat" => {
                 // Remove `Fighting` from the target so it disengages.
@@ -13072,9 +14151,9 @@ pub(crate) fn invoke_ability_with(
                 let was_fighting = world.get::<Fighting>(target_entity).is_some();
                 if was_fighting {
                     crate::commands::try_remove::<Fighting>(world, target_entity);
-                    applied_msgs.push(format!("{} (combat ended)", pretty));
+                    applied_msgs.push(format!("{pretty} (combat ended)"));
                 } else {
-                    applied_msgs.push(format!("{} (not in combat)", pretty));
+                    applied_msgs.push(format!("{pretty} (not in combat)"));
                 }
             }
             "create" => {
@@ -13153,8 +14232,7 @@ pub(crate) fn invoke_ability_with(
                             .by_key
                             .iter()
                             .filter(|((zid, _), p)| {
-                                *zid == base_zone
-                                    && p.r#type == mud_db::enums::ObjectType::Food
+                                *zid == base_zone && p.r#type == mud_db::enums::ObjectType::Food
                             })
                             .map(|((zid, iid), _)| (*zid, *iid))
                             .collect();
@@ -13172,9 +14250,8 @@ pub(crate) fn invoke_ability_with(
                             // half of the foods list; a small random
                             // shift keeps repeated casts varied.
                             let n = foods.len();
-                            let base_idx = (caster_skill as usize)
-                                .saturating_mul(n)
-                                / 101; // 0..n-1
+                            #[allow(clippy::cast_sign_loss)]
+                            let base_idx = (caster_skill as usize).saturating_mul(n) / 101; // 0..n-1
                             let jitter = rand::random_range(0..=2);
                             let idx = (base_idx + jitter).min(n - 1);
                             let (fz, fi) = foods[idx];
@@ -13185,7 +14262,7 @@ pub(crate) fn invoke_ability_with(
                     (z, i)
                 };
                 let (Some(proto_zone), Some(proto_id)) = (proto_zone, proto_id) else {
-                    applied_msgs.push(format!("{} (no object proto specified)", pretty));
+                    applied_msgs.push(format!("{pretty} (no object proto specified)"));
                     continue;
                 };
                 let proto = world
@@ -13195,8 +14272,7 @@ pub(crate) fn invoke_ability_with(
                     .cloned();
                 let Some(proto) = proto else {
                     applied_msgs.push(format!(
-                        "{} (object proto ({proto_zone}, {proto_id}) not loaded)",
-                        pretty
+                        "{pretty} (object proto ({proto_zone}, {proto_id}) not loaded)"
                     ));
                     continue;
                 };
@@ -13206,7 +14282,9 @@ pub(crate) fn invoke_ability_with(
                 // room-spawn path below).
                 let mut bundle = world.spawn((
                     Item,
-                    Named { name: proto.name.clone() },
+                    Named {
+                        name: proto.name.clone(),
+                    },
                     Keywords(proto.keywords.clone()),
                     WorldKey {
                         zone: proto.zone_id,
@@ -13239,7 +14317,7 @@ pub(crate) fn invoke_ability_with(
                     .and_then(serde_json::Value::as_i64)
                     .map(|v| i32::try_from(v).unwrap_or(0));
                 let (Some(proto_zone), Some(proto_id)) = (proto_zone, proto_id) else {
-                    applied_msgs.push(format!("{} (no object proto specified)", pretty));
+                    applied_msgs.push(format!("{pretty} (no object proto specified)"));
                     continue;
                 };
                 let proto = world
@@ -13249,18 +14327,19 @@ pub(crate) fn invoke_ability_with(
                     .cloned();
                 let Some(proto) = proto else {
                     applied_msgs.push(format!(
-                        "{} (object proto ({proto_zone}, {proto_id}) not loaded)",
-                        pretty
+                        "{pretty} (object proto ({proto_zone}, {proto_id}) not loaded)"
                     ));
                     continue;
                 };
                 let Some(located) = world.get::<Located>(player).copied() else {
-                    applied_msgs.push(format!("{} (caster has no room)", pretty));
+                    applied_msgs.push(format!("{pretty} (caster has no room)"));
                     continue;
                 };
                 let mut bundle = world.spawn((
                     Item,
-                    Named { name: proto.name.clone() },
+                    Named {
+                        name: proto.name.clone(),
+                    },
                     Keywords(proto.keywords.clone()),
                     WorldKey {
                         zone: proto.zone_id,
@@ -13349,9 +14428,7 @@ pub(crate) fn invoke_ability_with(
                 // so Enhance Ability doesn't stack into +28 cha after
                 // two casts (the helper reverse-applies the prior
                 // ModifyDelta before despawning).
-                let display_name = target_stat
-                    .clone()
-                    .unwrap_or_else(|| spec.name.clone());
+                let display_name = target_stat.clone().unwrap_or_else(|| spec.name.clone());
                 refresh_existing_effect(world, target_entity, &display_name, def.id);
                 let mut bundle = world.spawn((
                     EffectInstance {
@@ -13392,10 +14469,10 @@ pub(crate) fn invoke_ability_with(
                 applied_msgs.push(match (target_stat.as_deref(), applied_amount) {
                     (Some(t), Some(a)) => {
                         let sign = if a >= 0 { "+" } else { "" };
-                        format!("{} ({sign}{a} {t})", pretty)
+                        format!("{pretty} ({sign}{a} {t})")
                     }
-                    (Some(t), None) => format!("{} ({t}: unsupported target)", pretty),
-                    (None, _) => format!("{} (no target specified)", pretty),
+                    (Some(t), None) => format!("{pretty} ({t}: unsupported target)"),
+                    (None, _) => format!("{pretty} (no target specified)"),
                 });
             }
             "intercept" => {
@@ -13405,15 +14482,19 @@ pub(crate) fn invoke_ability_with(
                 // caster. Refuses self-target — guarding yourself is
                 // a no-op the schema doesn't model.
                 if target_entity == player {
-                    applied_msgs.push(format!("{} (can't guard yourself)", pretty));
+                    applied_msgs.push(format!("{pretty} (can't guard yourself)"));
                     continue;
                 }
                 if world.get_entity(target_entity).is_err() {
-                    applied_msgs.push(format!("{} (target has vanished)", pretty));
+                    applied_msgs.push(format!("{pretty} (target has vanished)"));
                     continue;
                 }
                 try_insert(world, player, mud_world::Guarding(target_entity));
-                applied_msgs.push(format!("{} (guarding {})", pretty, name_of(world, target_entity)));
+                applied_msgs.push(format!(
+                    "{} (guarding {})",
+                    pretty,
+                    name_of(world, target_entity)
+                ));
             }
             "extract" => {
                 // Remove the target from the world. Used by Banish
@@ -13424,11 +14505,11 @@ pub(crate) fn invoke_ability_with(
                 // outright; their effects, equipment, and triggers
                 // get the same cleanup as mob death.
                 if world.get::<Player>(target_entity).is_some() {
-                    applied_msgs.push(format!("{} (can't extract a player)", pretty));
+                    applied_msgs.push(format!("{pretty} (can't extract a player)"));
                     continue;
                 }
                 if world.get::<Mob>(target_entity).is_none() {
-                    applied_msgs.push(format!("{} (target isn't a creature)", pretty));
+                    applied_msgs.push(format!("{pretty} (target isn't a creature)"));
                     continue;
                 }
                 // Snapshot target name + room BEFORE the despawn
@@ -13453,7 +14534,7 @@ pub(crate) fn invoke_ability_with(
                     );
                     broadcast_room_visual(world, room, player, &[player], &line);
                 }
-                applied_msgs.push(format!("{} (banished {banished_name})", pretty));
+                applied_msgs.push(format!("{pretty} (banished {banished_name})"));
             }
             "dismount" => {
                 // Force-end the rider/mount relationship on the
@@ -13479,9 +14560,9 @@ pub(crate) fn invoke_ability_with(
                     cleared = true;
                 }
                 applied_msgs.push(if cleared {
-                    format!("{} (dismounted)", pretty)
+                    format!("{pretty} (dismounted)")
                 } else {
-                    format!("{} (not mounted)", pretty)
+                    format!("{pretty} (not mounted)")
                 });
             }
             "teleport" => {
@@ -13507,8 +14588,7 @@ pub(crate) fn invoke_ability_with(
                 if is_summon_spell {
                     let caster_room_opt = world.get::<Located>(player).map(|l| l.0);
                     let target_room_opt = world.get::<Located>(target_entity).map(|l| l.0);
-                    let (Some(caster_room), Some(target_room)) =
-                        (caster_room_opt, target_room_opt)
+                    let (Some(caster_room), Some(target_room)) = (caster_room_opt, target_room_opt)
                     else {
                         applied_msgs.push(format!("{pretty} (no room)"));
                         continue;
@@ -13531,10 +14611,8 @@ pub(crate) fn invoke_ability_with(
                     // superset of that test in practice (zones are
                     // small enough), so we use it as the cheap
                     // single-check proxy. BFS proper is a follow-up.
-                    let caster_zone =
-                        world.get::<WorldKey>(caster_room).map(|w| w.zone);
-                    let target_zone =
-                        world.get::<WorldKey>(target_room).map(|w| w.zone);
+                    let caster_zone = world.get::<WorldKey>(caster_room).map(|w| w.zone);
+                    let target_zone = world.get::<WorldKey>(target_room).map(|w| w.zone);
                     if caster_zone != target_zone {
                         send_to(world, player, "That person is too far away.\r\n");
                         applied_msgs.push(format!("{pretty} (different zone)"));
@@ -13546,28 +14624,24 @@ pub(crate) fn invoke_ability_with(
                     // formula_ctx already evaluates skill scaling
                     // elsewhere; a per-spell skill lookup is a
                     // follow-up). Legacy: target_level > skill + 3.
-                    let target_level = world
-                        .get::<Profile>(target_entity)
-                        .map_or(1, |p| p.level);
-                    let caster_level = world
-                        .get::<Profile>(player)
-                        .map_or(1, |p| p.level);
+                    let target_level = world.get::<Profile>(target_entity).map_or(1, |p| p.level);
+                    let caster_level = world.get::<Profile>(player).map_or(1, |p| p.level);
                     if target_level > caster_level + 3 {
                         send_to(
                             world,
                             player,
                             "You aren't proficient enough to summon such a powerful being.\r\n",
                         );
-                        applied_msgs
-                            .push(format!("{pretty} (level cap {target_level}>{caster_level}+3)"));
+                        applied_msgs.push(format!(
+                            "{pretty} (level cap {target_level}>{caster_level}+3)"
+                        ));
                         continue;
                     }
 
                     // Gate 3: mob NoSummon. Legacy also rejects on
                     // MOB_NOCHARM; modern schema has no NoCharm
                     // mob-behavior, so NoSummon is the sole flag.
-                    if let Some(behaviors) =
-                        world.get::<mud_world::MobBehaviors>(target_entity)
+                    if let Some(behaviors) = world.get::<mud_world::MobBehaviors>(target_entity)
                         && behaviors.has(mud_db::enums::MobBehavior::NoSummon)
                     {
                         let tname = world
@@ -13586,11 +14660,7 @@ pub(crate) fn invoke_ability_with(
 
                     // Gate 4: destination room blocks summons.
                     if world.get::<mud_world::NoSummonRoom>(caster_room).is_some() {
-                        send_to(
-                            world,
-                            player,
-                            "A negating force blocks your spell.\r\n",
-                        );
+                        send_to(world, player, "A negating force blocks your spell.\r\n");
                         applied_msgs.push(format!("{pretty} (room NoSummon)"));
                         continue;
                     }
@@ -13627,17 +14697,13 @@ pub(crate) fn invoke_ability_with(
                     //     toggle.
                     if world.get::<Player>(target_entity).is_some() {
                         let pf = world.get::<PlayerFlags>(target_entity);
-                        let opted_out = pf.is_some_and(|pf| {
-                            pf.has(mud_db::enums::PlayerFlag::NoSummon)
-                        });
-                        let pker = pf.is_some_and(|pf| {
-                            pf.has(mud_db::enums::PlayerFlag::PkEnabled)
-                        });
+                        let opted_out =
+                            pf.is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::NoSummon));
+                        let pker =
+                            pf.is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::PkEnabled));
                         let staff_bypass = world
                             .get::<Account>(player)
-                            .is_some_and(|a| {
-                                a.perms.contains(&mud_db::enums::Permission::Summon)
-                            });
+                            .is_some_and(|a| a.perms.contains(&mud_db::enums::Permission::Summon));
 
                         if opted_out && !pker && !staff_bypass {
                             let tname = world
@@ -13653,7 +14719,10 @@ pub(crate) fn invoke_ability_with(
                         }
 
                         if !pker && !staff_bypass {
-                            if world.get::<mud_world::PendingSummon>(target_entity).is_some() {
+                            if world
+                                .get::<mud_world::PendingSummon>(target_entity)
+                                .is_some()
+                            {
                                 send_to(
                                     world,
                                     player,
@@ -13721,19 +14790,27 @@ pub(crate) fn invoke_ability_with(
                         // Explicit recall point wins; fall back to the
                         // race's start room so a new player without a
                         // bound touchstone still has somewhere to land.
-                        world.get::<RecallPoint>(target_entity).map(|r| r.0).or_else(|| {
-                            let race = world.get::<Profile>(target_entity).map(|p| p.race.clone());
-                            let start = race.and_then(|r| {
-                                world
-                                    .resource::<mud_world::RaceDefaults>()
-                                    .start_room_by_race
-                                    .get(&r)
-                                    .copied()
-                            });
-                            start.and_then(|(z, i)| {
-                                world.resource::<WorldKeyIndex>().rooms.get(&(z, i)).copied()
+                        world
+                            .get::<RecallPoint>(target_entity)
+                            .map(|r| r.0)
+                            .or_else(|| {
+                                let race =
+                                    world.get::<Profile>(target_entity).map(|p| p.race.clone());
+                                let start = race.and_then(|r| {
+                                    world
+                                        .resource::<mud_world::RaceDefaults>()
+                                        .start_room_by_race
+                                        .get(&r)
+                                        .copied()
+                                });
+                                start.and_then(|(z, i)| {
+                                    world
+                                        .resource::<WorldKeyIndex>()
+                                        .rooms
+                                        .get(&(z, i))
+                                        .copied()
+                                })
                             })
-                        })
                     }
                     Some("caster") => world.get::<Located>(player).map(|l| l.0),
                     Some("target") => {
@@ -13759,7 +14836,11 @@ pub(crate) fn invoke_ability_with(
                             Some(&spec.default_params),
                         );
                         if let (Some(z), Some(i)) = (z, i) {
-                            world.resource::<WorldKeyIndex>().rooms.get(&(z, i)).copied()
+                            world
+                                .resource::<WorldKeyIndex>()
+                                .rooms
+                                .get(&(z, i))
+                                .copied()
                         } else {
                             None
                         }
@@ -13800,8 +14881,7 @@ pub(crate) fn invoke_ability_with(
                 };
                 let Some(dest_room) = dest_room else {
                     applied_msgs.push(format!(
-                        "{} (destination {:?} not resolvable)",
-                        pretty, destination
+                        "{pretty} (destination {destination:?} not resolvable)"
                     ));
                     continue;
                 };
@@ -13810,12 +14890,8 @@ pub(crate) fn invoke_ability_with(
                     // Surface a player-facing line — the bare success
                     // template ("You vanish in a flash of light!")
                     // is misleading when nothing actually moved.
-                    send_to(
-                        world,
-                        target_entity,
-                        "You are already there.\r\n",
-                    );
-                    applied_msgs.push(format!("{} (already there)", pretty));
+                    send_to(world, target_entity, "You are already there.\r\n");
+                    applied_msgs.push(format!("{pretty} (already there)"));
                     continue;
                 }
                 if let Some(mut l) = world.get_mut::<Located>(target_entity) {
@@ -13827,7 +14903,7 @@ pub(crate) fn invoke_ability_with(
                 // {scroll}" and "you cast Recall (Blue)", which reads
                 // out of order.
                 auto_look_after_cast = true;
-                applied_msgs.push(format!("{} (teleported)", pretty));
+                applied_msgs.push(format!("{pretty} (teleported)"));
 
                 // Summon-specific aftermath: depart/arrive broadcasts,
                 // a private "X has summoned you!" line to the target,
@@ -13838,8 +14914,7 @@ pub(crate) fn invoke_ability_with(
                 // can't be spammed; cleaner than bumping cooldown_ms
                 // on the ability row since only the *successful* path
                 // pays the wait.
-                if is_summon_spell && cur_room.is_some() {
-                    let old_room = cur_room.unwrap();
+                if is_summon_spell && let Some(old_room) = cur_room {
                     let tname = world
                         .get::<Named>(target_entity)
                         .map_or("Someone".to_string(), |n| n.name.clone());
@@ -13874,8 +14949,7 @@ pub(crate) fn invoke_ability_with(
                         engage_combat(world, target_entity, player, dest_room);
                     }
                     // 4 combat rounds = 16 s post-summon cooldown.
-                    let ready_at = std::time::Instant::now()
-                        + std::time::Duration::from_secs(16);
+                    let ready_at = std::time::Instant::now() + std::time::Duration::from_secs(16);
                     let mut cd = world
                         .get_mut::<Cooldowns>(player)
                         .map(|mut c| std::mem::take(&mut *c))
@@ -13908,7 +14982,7 @@ pub(crate) fn invoke_ability_with(
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 let Some(caster_room) = world.get::<Located>(player).map(|l| l.0) else {
-                    applied_msgs.push(format!("{} (no room)", pretty));
+                    applied_msgs.push(format!("{pretty} (no room)"));
                     continue;
                 };
                 let mut dur_secs = resolve_effect_duration(
@@ -13951,7 +15025,9 @@ pub(crate) fn invoke_ability_with(
                     try_insert(
                         world,
                         caster_room,
-                        mud_world::RoomBurningEffect { damage_per_move: dmg_per_move },
+                        mud_world::RoomBurningEffect {
+                            damage_per_move: dmg_per_move,
+                        },
                     );
                 }
                 // Zone weather override (CONTROL_WEATHER / RAIN):
@@ -13997,14 +15073,17 @@ pub(crate) fn invoke_ability_with(
                             send_to(
                                 world,
                                 player,
-                                format!("Unknown weather '{other}' — try clear / rain / storm / snow.\r\n"),
+                                format!(
+                                    "Unknown weather '{other}' — try clear / rain / storm / snow.\r\n"
+                                ),
                             );
                             applied_msgs.push(format!("{pretty} (unknown weather '{other}')"));
                             continue;
                         }
                     };
-                    let Some(zone) =
-                        world.get::<mud_world::WorldKey>(caster_room).map(|w| w.zone)
+                    let Some(zone) = world
+                        .get::<mud_world::WorldKey>(caster_room)
+                        .map(|w| w.zone)
                     else {
                         applied_msgs.push(format!("{pretty} (room not in a weather-tracked zone)"));
                         continue;
@@ -14017,12 +15096,9 @@ pub(crate) fn invoke_ability_with(
                         // WeatherCatalog entry. Don't force-insert —
                         // the spell legitimately can't do anything
                         // in metaphysical rooms.
-                        applied_msgs.push(format!(
-                            "{pretty} (no weather here to control)"
-                        ));
+                        applied_msgs.push(format!("{pretty} (no weather here to control)"));
                         continue;
                     }
-                    drop(catalog);
                     // Hold the override for the cast's full duration —
                     // weather_tick consults WeatherDriftLocks and
                     // skips the drift step for any zone whose lock is
@@ -14030,7 +15106,9 @@ pub(crate) fn invoke_ability_with(
                     // tick would erase the player's "storm" pick.
                     if dur_secs > 0 {
                         let expiry = std::time::Instant::now()
-                            + std::time::Duration::from_secs(u64::from(dur_secs.max(0) as u32));
+                            + std::time::Duration::from_secs(u64::from(
+                                dur_secs.max(0).cast_unsigned(),
+                            ));
                         world
                             .resource_mut::<mud_world::WeatherDriftLocks>()
                             .by_zone
@@ -14052,9 +15130,7 @@ pub(crate) fn invoke_ability_with(
                         AppliedTo(caster_room),
                     ));
                     spawn_count += 1;
-                    applied_msgs.push(format!(
-                        "{pretty} (zone {zone} weather → {precip_str})"
-                    ));
+                    applied_msgs.push(format!("{pretty} (zone {zone} weather → {precip_str})"));
                     continue;
                 }
 
@@ -14091,14 +15167,15 @@ pub(crate) fn invoke_ability_with(
                     _ => None,
                 };
                 if let Some(traversal) = wall_traversal {
-                    let arg = target_word.map(str::trim).unwrap_or("");
+                    let arg = target_word.map_or("", str::trim);
                     let Some(dir) = parse_direction(arg) else {
                         send_to(
                             world,
                             player,
                             format!(
                                 "{} needs a direction (e.g. `cast '{}' north`).\r\n",
-                                def.name, def.plain_name.to_ascii_lowercase().replace('_', " ")
+                                def.name,
+                                def.plain_name.to_ascii_lowercase().replace('_', " ")
                             ),
                         );
                         applied_msgs.push(format!("{pretty} (no direction)"));
@@ -14123,17 +15200,20 @@ pub(crate) fn invoke_ability_with(
                     // (e.g. a scaled spell variant). Fog and
                     // illusion walls have no HP gate — they expire
                     // by duration or (illusion) on first traversal.
+                    #[allow(clippy::cast_possible_truncation)]
                     let wall_hp = match traversal {
                         mud_world::WallTraversal::Block => spec
                             .override_params
                             .as_ref()
                             .and_then(|v| v.get("hp"))
                             .and_then(serde_json::Value::as_i64)
-                            .map(|n| n as i32)
-                            .unwrap_or_else(|| match type_str.as_str() {
-                                "stone" => 200,
-                                _ => 100,
-                            })
+                            .map_or_else(
+                                || match type_str.as_str() {
+                                    "stone" => 200,
+                                    _ => 100,
+                                },
+                                |n| n as i32,
+                            )
                             .max(1),
                         // Sentinel — `cmd_doorbash` skips the bash
                         // path for non-Block walls, so this value
@@ -14222,7 +15302,8 @@ pub(crate) fn invoke_ability_with(
                         // EffectInstance so `effects` lists it and
                         // future consumers can hang gates on the
                         // backing instance.
-                        applied_msgs.push(format!("{} (room effect '{other}' not yet consumed)", pretty));
+                        applied_msgs
+                            .push(format!("{pretty} (room effect '{other}' not yet consumed)"));
                         world.spawn((
                             EffectInstance {
                                 kind: spec.id,
@@ -14275,23 +15356,28 @@ pub(crate) fn invoke_ability_with(
                     send_to(
                         world,
                         player,
-                        format!("{} isn't a wandering spirit.\r\n",
-                            cap_sentence_start(&target_name)),
+                        format!(
+                            "{} isn't a wandering spirit.\r\n",
+                            cap_sentence_start(&target_name)
+                        ),
                     );
-                    applied_msgs.push(format!("{} (target not dead)", pretty));
+                    applied_msgs.push(format!("{pretty} (target not dead)"));
                     continue;
                 }
-                let target_max = world.get::<Health>(target_entity).map_or(1, |h| h.max).max(1);
+                let target_max = world
+                    .get::<Health>(target_entity)
+                    .map_or(1, |h| h.max)
+                    .max(1);
                 let new_hp = (target_max / 2).max(1);
                 if let Some(mut h) = world.get_mut::<Health>(target_entity) {
                     h.hp = new_hp;
                 }
                 try_remove::<mud_world::Ghost>(world, target_entity);
                 // Drop the ghost in the caster's room.
-                if let Some(caster_room) = world.get::<Located>(player).map(|l| l.0) {
-                    if let Some(mut l) = world.get_mut::<Located>(target_entity) {
-                        l.0 = caster_room;
-                    }
+                if let Some(caster_room) = world.get::<Located>(player).map(|l| l.0)
+                    && let Some(mut l) = world.get_mut::<Located>(target_entity)
+                {
+                    l.0 = caster_room;
                 }
                 let target_name = name_or(world, target_entity, "(unknown)");
                 // Corpse-equipment transfer. Walk every Item-Corpse
@@ -14302,20 +15388,16 @@ pub(crate) fn invoke_ability_with(
                 // then despawn the (now-empty) corpse.
                 let target_name_lower = target_name.to_ascii_lowercase();
                 let corpses: Vec<Entity> = {
-                    let mut q = world
-                        .query_filtered::<(Entity, &Named), With<mud_world::Corpse>>();
+                    let mut q = world.query_filtered::<(Entity, &Named), With<mud_world::Corpse>>();
                     q.iter(world)
-                        .filter(|(_, n)| {
-                            n.name.to_ascii_lowercase().contains(&target_name_lower)
-                        })
+                        .filter(|(_, n)| n.name.to_ascii_lowercase().contains(&target_name_lower))
                         .map(|(e, _)| e)
                         .collect()
                 };
                 let mut items_returned = 0;
                 for corpse_e in corpses {
                     let items_in_corpse: Vec<Entity> = {
-                        let mut q = world
-                            .query_filtered::<(Entity, &Located), With<Item>>();
+                        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
                         q.iter(world)
                             .filter(|(_, l)| l.0 == corpse_e)
                             .map(|(e, _)| e)
@@ -14352,8 +15434,10 @@ pub(crate) fn invoke_ability_with(
                 send_to(
                     world,
                     player,
-                    format!("{}'s spirit returns to flesh.\r\n",
-                        cap_sentence_start(&target_name)),
+                    format!(
+                        "{}'s spirit returns to flesh.\r\n",
+                        cap_sentence_start(&target_name)
+                    ),
                 );
                 // Room broadcast — resurrection is a high-impact
                 // moment; bystanders see the spirit return rather
@@ -14376,8 +15460,7 @@ pub(crate) fn invoke_ability_with(
                     );
                 }
                 applied_msgs.push(format!(
-                    "{} ({new_hp}/{target_max} HP restored, {items_returned} items returned)",
-                    pretty
+                    "{pretty} ({new_hp}/{target_max} HP restored, {items_returned} items returned)"
                 ));
             }
             "inspect" => {
@@ -14393,11 +15476,11 @@ pub(crate) fn invoke_ability_with(
                     .unwrap_or("");
                 if item_word.is_empty() {
                     send_to(world, player, "Identify what?\r\n");
-                    applied_msgs.push(format!("{} (no target)", pretty));
+                    applied_msgs.push(format!("{pretty} (no target)"));
                     continue;
                 }
                 crate::commands::info::cmd_identify(world, player, item_word);
-                applied_msgs.push(format!("{} (identified)", pretty));
+                applied_msgs.push(format!("{pretty} (identified)"));
             }
             "reveal" => {
                 // Utility scry / locate. params shape:
@@ -14416,7 +15499,7 @@ pub(crate) fn invoke_ability_with(
                     .unwrap_or_default();
                 if keyword.is_empty() {
                     send_to(world, player, "Locate what?\r\n");
-                    applied_msgs.push(format!("{} (no keyword)", pretty));
+                    applied_msgs.push(format!("{pretty} (no keyword)"));
                     continue;
                 }
                 // Cap at 8 matches; the legacy used a skill-scaled
@@ -14425,10 +15508,13 @@ pub(crate) fn invoke_ability_with(
                 // output legible.
                 let max_results: usize = 8;
                 let hits: Vec<(Entity, String, Entity)> = {
-                    let mut q = world.query_filtered::<
-                        (Entity, &Located, &Named, Option<&Keywords>, Option<&mud_world::ObjectRestrictions>),
-                        With<Item>,
-                    >();
+                    let mut q = world.query_filtered::<(
+                        Entity,
+                        &Located,
+                        &Named,
+                        Option<&Keywords>,
+                        Option<&mud_world::ObjectRestrictions>,
+                    ), With<Item>>();
                     q.iter(world)
                         .filter(|(_, _, n, kw, restr)| {
                             let nolocate = restr
@@ -14441,7 +15527,7 @@ pub(crate) fn invoke_ability_with(
                 };
                 if hits.is_empty() {
                     send_to(world, player, "You sense nothing.\r\n");
-                    applied_msgs.push(format!("{} (no matches for '{keyword}')", pretty));
+                    applied_msgs.push(format!("{pretty} (no matches for '{keyword}')"));
                     continue;
                 }
                 let mut buf = String::new();
@@ -14485,9 +15571,12 @@ pub(crate) fn invoke_ability_with(
                         // item, not on the root walk.
                         let actor_name = name_of(world, cur);
                         let item_e = hits.iter().find(|h| h.1 == *item_name).map(|h| h.0);
-                        let worn = item_e
-                            .is_some_and(|e| world.get::<EquippedSlot>(e).is_some());
-                        let verb = if worn { "being worn by" } else { "being carried by" };
+                        let worn = item_e.is_some_and(|e| world.get::<EquippedSlot>(e).is_some());
+                        let verb = if worn {
+                            "being worn by"
+                        } else {
+                            "being carried by"
+                        };
                         if let Some(container) = inside {
                             buf.push_str(&format!(
                                 "{cap} is in {container} (carried by {actor_name}).\r\n",
@@ -14500,9 +15589,9 @@ pub(crate) fn invoke_ability_with(
                         // isn't an actor or item).
                         let room_name = name_or(world, cur, "(somewhere)");
                         if let Some(container) = inside {
-                            buf.push_str(&format!(
-                                "{cap} is in {container} (in {room_name}).\r\n",
-                            ));
+                            buf.push_str(
+                                &format!("{cap} is in {container} (in {room_name}).\r\n",),
+                            );
                         } else {
                             buf.push_str(&format!("{cap} is in {room_name}.\r\n"));
                         }
@@ -14599,8 +15688,8 @@ pub(crate) fn invoke_ability_with(
                     // but they share the "summon" effect_type and need a
                     // default mob proto. Disambiguate by ability name.
                     "" => match def.plain_name.to_ascii_uppercase().as_str() {
-                        "ANIMATE_DEAD" => Some((54, 20)),  // the Large Skeleton
-                        "CLONE" => Some((163, 8)),         // the Knight Errant (placeholder)
+                        "ANIMATE_DEAD" => Some((54, 20)), // the Large Skeleton
+                        "CLONE" => Some((163, 8)),        // the Knight Errant (placeholder)
                         _ => None,
                     },
                     _ => None,
@@ -14616,12 +15705,9 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{pretty} (unknown mobType '{mob_type}')"));
                     continue;
                 };
-                let caster_room = match world.get::<Located>(player).map(|l| l.0) {
-                    Some(r) => r,
-                    None => {
-                        applied_msgs.push(format!("{pretty} (caster has no room)"));
-                        continue;
-                    }
+                let Some(caster_room) = world.get::<Located>(player).map(|l| l.0) else {
+                    applied_msgs.push(format!("{pretty} (caster has no room)"));
+                    continue;
                 };
                 // ANIMATE_DEAD: if the caster named a corpse target,
                 // find and consume it. The corpse must be a Corpse
@@ -14643,7 +15729,13 @@ pub(crate) fn invoke_ability_with(
                     // pointed refusal rather than the generic "no
                     // corpse here" line.
                     let matches: Vec<(Entity, bool)> = {
-                        let mut q = world.query_filtered::<(Entity, &Located, Option<&Keywords>, &Named, Option<&mud_world::PlayerCorpse>), With<mud_world::Corpse>>();
+                        let mut q = world.query_filtered::<(
+                            Entity,
+                            &Located,
+                            Option<&Keywords>,
+                            &Named,
+                            Option<&mud_world::PlayerCorpse>,
+                        ), With<mud_world::Corpse>>();
                         q.iter(world)
                             .filter(|(_, l, kw, n, _)| {
                                 l.0 == caster_room
@@ -14689,7 +15781,9 @@ pub(crate) fn invoke_ability_with(
                     send_to(
                         world,
                         player,
-                        format!("You weave necromantic energy into {corpse_name}, raising it as your servant.\r\n"),
+                        format!(
+                            "You weave necromantic energy into {corpse_name}, raising it as your servant.\r\n"
+                        ),
                     );
                 }
                 let proto = world
@@ -14731,16 +15825,10 @@ pub(crate) fn invoke_ability_with(
                 let mob_description;
                 if is_clone {
                     let caster_display = actor_name_pre.clone();
-                    let caster_max_hp = world
-                        .get::<Health>(player)
-                        .map(|h| h.max)
-                        .unwrap_or(base_hp);
+                    let caster_max_hp = world.get::<Health>(player).map_or(base_hp, |h| h.max);
                     hp = caster_max_hp.max(1);
                     mob_name = format!("a clone of {caster_display}");
-                    mob_keywords = vec![
-                        "clone".to_string(),
-                        caster_display.to_ascii_lowercase(),
-                    ];
+                    mob_keywords = vec!["clone".to_string(), caster_display.to_ascii_lowercase()];
                     mob_description =
                         format!("A flickering clone of {caster_display} stands here.");
                 } else if is_simulacrum {
@@ -14757,26 +15845,25 @@ pub(crate) fn invoke_ability_with(
                         .map(str::trim)
                         .filter(|w| !w.is_empty())
                         .and_then(|w| find_online_player_anywhere(world, w, player))
-                        .map(|e| name_of(world, e))
-                        .unwrap_or_else(|| actor_name_pre.clone());
+                        .map_or_else(|| actor_name_pre.clone(), |e| name_of(world, e));
                     mob_name = format!("a simulacrum of {mirrored_name}");
-                    mob_keywords = vec![
-                        "simulacrum".to_string(),
-                        mirrored_name.to_ascii_lowercase(),
-                    ];
-                    mob_description =
-                        format!("A wavering simulacrum of {mirrored_name} stands here, eyes vacant.");
+                    mob_keywords =
+                        vec!["simulacrum".to_string(), mirrored_name.to_ascii_lowercase()];
+                    mob_description = format!(
+                        "A wavering simulacrum of {mirrored_name} stands here, eyes vacant."
+                    );
                 } else {
                     mob_name = proto.name.clone();
                     mob_keywords = proto.keywords.clone();
                     mob_description = proto.room_description.clone();
                 }
-                let spawn_posture =
-                    Posture::from_default_position(proto.default_position);
+                let spawn_posture = Posture::from_default_position(proto.default_position);
                 let mob = world
                     .spawn((
                         Mob,
-                        Named { name: mob_name.clone() },
+                        Named {
+                            name: mob_name.clone(),
+                        },
                         Keywords(mob_keywords),
                         Description(mob_description),
                         WorldKey {
@@ -15118,7 +16205,8 @@ pub(crate) fn invoke_ability_with(
                     {
                         // Apply the bump to the target's Resistances
                         // map (auto-create the component if needed).
-                        if let Some(mut r) = world.get_mut::<mud_world::Resistances>(target_entity) {
+                        if let Some(mut r) = world.get_mut::<mud_world::Resistances>(target_entity)
+                        {
                             let entry = r.0.entry(elem).or_insert(0);
                             *entry = entry.saturating_add(amt);
                         } else {
@@ -15248,7 +16336,9 @@ pub(crate) fn invoke_ability_with(
     }
     // Target-side: templated success_to_victim → terse default.
     if target_entity != player && !applied_msgs.is_empty() {
-        let target_template = messages.as_ref().and_then(|m| m.success_to_victim.as_deref());
+        let target_template = messages
+            .as_ref()
+            .and_then(|m| m.success_to_victim.as_deref());
         let line = if let Some(t) = target_template {
             // success_to_victim is rendered for the *victim* — they're
             // never the actor, so reflexive collapse doesn't apply.
@@ -15306,9 +16396,7 @@ pub(crate) fn invoke_ability_with(
             send_to(
                 world,
                 player,
-                format!(
-                    "Reagents flare ({count}); the cast surges by {reagent_boost_pct}%.\r\n"
-                ),
+                format!("Reagents flare ({count}); the cast surges by {reagent_boost_pct}%.\r\n"),
             );
         }
     }
@@ -15391,9 +16479,7 @@ pub(crate) fn save_action_for(
     let Some(dc) = evaluate_simple_formula_ctx(&save.dc_formula, formula_ctx) else {
         return SaveOutcome::Failed;
     };
-    let target_level = world
-        .get::<Profile>(target)
-        .map_or(1, |p| p.level.max(1));
+    let target_level = world.get::<Profile>(target).map_or(1, |p| p.level.max(1));
     // Roll a d20 plus target's level. Save succeeds if total ≥ DC.
     let roll = rand::random_range(1..=20);
     let total = roll + target_level;
@@ -15516,15 +16602,27 @@ pub(crate) fn check_ability_restrictions(
             // POV). An explicit `"target": "victim"` overrides via
             // `resolved_target`.
             "not_blind" => {
-                let who = if target_kind == Some("victim") { target } else { caster };
+                let who = if target_kind == Some("victim") {
+                    target
+                } else {
+                    caster
+                };
                 !has_effect_named(world, who, "blind")
             }
             "in_combat" => {
-                let who = if target_kind == Some("victim") { target } else { caster };
+                let who = if target_kind == Some("victim") {
+                    target
+                } else {
+                    caster
+                };
                 world.get::<Fighting>(who).is_some()
             }
             "not_in_combat" => {
-                let who = if target_kind == Some("victim") { target } else { caster };
+                let who = if target_kind == Some("victim") {
+                    target
+                } else {
+                    caster
+                };
                 world.get::<Fighting>(who).is_none()
             }
             "not_tanking" => !is_being_attacked(world, caster),
@@ -15553,7 +16651,11 @@ pub(crate) fn check_ability_restrictions(
 /// "neutral". Rule semantics: `prohibited=true` refuses when target
 /// matches the value; `required=true` (or unset) refuses when target
 /// doesn't match. Returns true when the rule passes.
-pub(crate) fn check_rule_alignment(world: &World, target: Entity, rule: &serde_json::Value) -> bool {
+pub(crate) fn check_rule_alignment(
+    world: &World,
+    target: Entity,
+    rule: &serde_json::Value,
+) -> bool {
     let Some(value) = rule.get("value").and_then(serde_json::Value::as_str) else {
         return true;
     };
@@ -15568,11 +16670,7 @@ pub(crate) fn check_rule_alignment(world: &World, target: Entity, rule: &serde_j
         .get("prohibited")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    if prohibited {
-        !matches
-    } else {
-        matches
-    }
+    if prohibited { !matches } else { matches }
 }
 
 /// `target_standing` / `position` — target is upright.
@@ -15713,8 +16811,8 @@ pub(crate) fn resolve_effect_resource(
 }
 
 /// Parse the `type` field of a damage effect blob into an
-/// `ElementType`. Schema values are SCREAMING_SNAKE_CASE but
-/// AbilityEffect params authored in JSON are usually lowercase
+/// `ElementType`. Schema values are `SCREAMING_SNAKE_CASE` but
+/// `AbilityEffect` params authored in JSON are usually lowercase
 /// ("fire" / "holy"). Falls back to PHYSICAL when nothing matches —
 /// most legitimate spells specify a type, but we don't want
 /// blobs missing a `type` to silently bypass the resistance step
@@ -15732,27 +16830,27 @@ pub(crate) fn resolve_damage_element(
     let raw = pick(override_params).or_else(|| pick(default_params));
     match raw.as_deref() {
         Some("slash") => E::Slash,
-        Some("pierce") | Some("piercing") => E::Pierce,
-        Some("crush") | Some("crushing") | Some("bludgeon") | Some("bludgeoning") => E::Crush,
+        Some("pierce" | "piercing") => E::Pierce,
+        Some("crush" | "crushing" | "bludgeon" | "bludgeoning") => E::Crush,
         Some("force") => E::Force,
         Some("sonic") => E::Sonic,
-        Some("bleed") | Some("bleeding") => E::Bleed,
+        Some("bleed" | "bleeding") => E::Bleed,
         Some("fire") => E::Fire,
         Some("cold") => E::Cold,
         Some("water") => E::Water,
         Some("earth") => E::Earth,
         Some("air") => E::Air,
-        Some("shock") | Some("lightning") | Some("electric") => E::Shock,
+        Some("shock" | "lightning" | "electric") => E::Shock,
         Some("acid") => E::Acid,
-        Some("poison") | Some("toxic") => E::Poison,
-        Some("radiant") | Some("light") => E::Radiant,
-        Some("shadow") | Some("dark") => E::Shadow,
-        Some("holy") | Some("divine") => E::Holy,
-        Some("unholy") | Some("evil") => E::Unholy,
-        Some("heal") | Some("healing") => E::Heal,
-        Some("necrotic") | Some("death") => E::Necrotic,
-        Some("mental") | Some("psychic") | Some("magic") => E::Mental,
-        Some("nature") | Some("natural") => E::Nature,
+        Some("poison" | "toxic") => E::Poison,
+        Some("radiant" | "light") => E::Radiant,
+        Some("shadow" | "dark") => E::Shadow,
+        Some("holy" | "divine") => E::Holy,
+        Some("unholy" | "evil") => E::Unholy,
+        Some("heal" | "healing") => E::Heal,
+        Some("necrotic" | "death") => E::Necrotic,
+        Some("mental" | "psychic" | "magic") => E::Mental,
+        Some("nature" | "natural") => E::Nature,
         _ => E::Physical,
     }
 }
@@ -15845,7 +16943,10 @@ pub(crate) fn resolve_dispel_scope(
             .and_then(serde_json::Value::as_str)
             .map(str::to_ascii_lowercase)
     };
-    match pick(override_params).or_else(|| pick(default_params)).as_deref() {
+    match pick(override_params)
+        .or_else(|| pick(default_params))
+        .as_deref()
+    {
         Some("first") => DispelScope::First,
         _ => DispelScope::All,
     }
@@ -15949,7 +17050,10 @@ pub(crate) fn resolve_knockdown_posture(
             .and_then(serde_json::Value::as_str)
             .map(str::to_ascii_lowercase)
     };
-    match pick(override_params).or_else(|| pick(default_params)).as_deref() {
+    match pick(override_params)
+        .or_else(|| pick(default_params))
+        .as_deref()
+    {
         Some("resting") => PostureKind::Resting,
         _ => PostureKind::Sitting,
     }
@@ -15960,7 +17064,11 @@ pub(crate) fn resolve_knockdown_posture(
 /// knockdown posture). Returns true on actual change. No-op if
 /// the target lacks a Posture component (mobs without one stay
 /// implicit).
-pub(crate) fn apply_knockdown_posture(world: &mut World, target: Entity, posture: PostureKind) -> bool {
+pub(crate) fn apply_knockdown_posture(
+    world: &mut World,
+    target: Entity,
+    posture: PostureKind,
+) -> bool {
     let current = world
         .get::<Posture>(target)
         .map_or(PostureKind::Standing, |p| p.0);
@@ -16011,7 +17119,13 @@ pub(crate) fn resolve_effect_conditions(
 /// uses the bool to decide whether to record a `ModifyDelta` for
 /// later reversal. Pairs with `reverse_modify_delta` (same mapping
 /// flipped).
-pub(crate) fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, amount: i32) -> bool {
+#[allow(clippy::too_many_lines)]
+pub(crate) fn apply_modify_delta(
+    world: &mut World,
+    target: Entity,
+    stat: &str,
+    amount: i32,
+) -> bool {
     match stat {
         // `_bonus` aliases (str_bonus, dex_bonus, ...) match the
         // formula-context naming convention used by `FormulaCtx::lookup`
@@ -16135,10 +17249,7 @@ pub(crate) fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, 
         }
         "armor_pct" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.armor_pct = cs
-                    .armor_pct
-                    .saturating_add(amount)
-                    .clamp(0, 100);
+                cs.armor_pct = cs.armor_pct.saturating_add(amount).clamp(0, 100);
             }
             true
         }
@@ -16208,12 +17319,7 @@ pub(crate) fn apply_modify_delta(world: &mut World, target: Entity, stat: &str, 
 /// Inverse of `apply_modify_delta` — subtracts the recorded delta
 /// from the same stat. Used by `effects_tick` when a `ModifyDelta`
 /// companion records a stat change made on spawn.
-pub(crate) fn reverse_modify_delta(
-    world: &mut World,
-    target: Entity,
-    stat: &str,
-    amount: i32,
-) {
+pub(crate) fn reverse_modify_delta(world: &mut World, target: Entity, stat: &str, amount: i32) {
     apply_modify_delta(world, target, stat, -amount);
 }
 
@@ -16278,9 +17384,8 @@ pub(crate) fn apply_heal_stamina(world: &mut World, target: Entity, amount: i32)
 /// active effects; cheap at typical world scale (low hundreds).
 pub(crate) fn has_effect_named(world: &mut World, target: Entity, name: &str) -> bool {
     let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-    q.iter(world).any(|(eff, applied)| {
-        applied.0 == target && eff.name.eq_ignore_ascii_case(name)
-    })
+    q.iter(world)
+        .any(|(eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case(name))
 }
 
 /// Which prevent-flag the caller is checking on a target's active
@@ -16337,8 +17442,16 @@ fn flag_prevents(flag: &str, kind: Prevent) -> bool {
     match kind {
         Prevent::Movement => matches!(
             f.as_str(),
-            "webbed" | "held" | "hold_person" | "paralyzed" | "asleep" | "sleeping" | "rooted"
-                | "entangled" | "stunned" | "stun"
+            "webbed"
+                | "held"
+                | "hold_person"
+                | "paralyzed"
+                | "asleep"
+                | "sleeping"
+                | "rooted"
+                | "entangled"
+                | "stunned"
+                | "stun"
         ),
         Prevent::Casting => matches!(
             f.as_str(),
@@ -16359,9 +17472,7 @@ pub(crate) fn remove_effect_named(world: &mut World, target: Entity, name: &str)
     let to_remove: Vec<Entity> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
-            .filter(|(_, eff, applied)| {
-                applied.0 == target && eff.name.eq_ignore_ascii_case(name)
-            })
+            .filter(|(_, eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case(name))
             .map(|(e, _, _)| e)
             .collect()
     };
@@ -16457,7 +17568,10 @@ pub(crate) fn resolve_effect_amount(
 /// can be an integer literal, a formula string the evaluator
 /// understands (e.g. `"roll_dice(2,9) + skill / 5"`), or a plain dice
 /// notation like `"1d8"` which is normalized to `roll_dice(N, M)`.
-pub(crate) fn amount_from_blob(params: Option<&serde_json::Value>, ctx: &FormulaCtx) -> Option<i32> {
+pub(crate) fn amount_from_blob(
+    params: Option<&serde_json::Value>,
+    ctx: &FormulaCtx,
+) -> Option<i32> {
     let p = params?;
     let v = p.get("amount")?;
     numeric_or_formula(v, ctx)
@@ -16531,9 +17645,7 @@ pub(crate) fn normalize_dice_notation(expr: &str) -> String {
             if idx < bytes.len() && (bytes[idx] == b'd' || bytes[idx] == b'D') {
                 let after_d = idx + 1;
                 let mut sides_end = after_d;
-                while sides_end < bytes.len()
-                    && (bytes[sides_end] as char).is_ascii_digit()
-                {
+                while sides_end < bytes.len() && (bytes[sides_end] as char).is_ascii_digit() {
                     sides_end += 1;
                 }
                 if sides_end > after_d {
@@ -16563,7 +17675,10 @@ pub(crate) fn normalize_dice_notation(expr: &str) -> String {
 /// Returns None if the blob is missing, has no `duration`, or the
 /// formula is too complex for the simple evaluator (parens, multi-op,
 /// `pow()`, etc.) — caller falls through to the next fallback.
-pub(crate) fn duration_from_blob(params: Option<&serde_json::Value>, ctx: &FormulaCtx) -> Option<i32> {
+pub(crate) fn duration_from_blob(
+    params: Option<&serde_json::Value>,
+    ctx: &FormulaCtx,
+) -> Option<i32> {
     const SECS_PER_MUD_HOUR: i32 = 75;
     let p = params?;
     let d = p.get("duration")?;
@@ -16620,7 +17735,7 @@ pub(crate) struct FormulaCtx {
     /// step. Mirrors how `attack_power` boosts melee swings.
     spell_power: i32,
     /// Caster's `CombatStats.alignment` (-1000..=+1000). Read by
-    /// alignment-keyed spells (DIVINE_RAY, HELL_BOLT, EXORCISM)
+    /// alignment-keyed spells (`DIVINE_RAY`, `HELL_BOLT`, EXORCISM)
     /// whose damage multiplier scales with the caster's morality.
     /// Formulas typically use `(caster_align + 200) / 1000` shape
     /// for "good casters get a boost"; negative results clamp to
@@ -16645,10 +17760,10 @@ pub(crate) struct FormulaCtx {
     /// to 0 when no resolved target (e.g. compute-side queries).
     target_max_hp: i32,
     /// Target's level. Read by spells that need a relative-level
-    /// gate — Exorcism's "skill - victim_level > 30 → instant
+    /// gate — Exorcism's "skill - `victim_level` > 30 → instant
     /// kill" branch is the canonical use.
     target_level: i32,
-    /// Raw `CoreStats.intelligence` (3..=99, FieryMUD's 1-100
+    /// Raw `CoreStats.intelligence` (3..=99, `FieryMUD`'s 1-100
     /// scale). The `int_bonus` field above is the derived modifier;
     /// some legacy spells scale on the raw score
     /// (Flamestrike: `dam *= (caster_INT * 0.007 + 0.8)`).
@@ -16667,10 +17782,10 @@ pub(crate) struct FormulaCtx {
     /// defaults to 0 elsewhere.
     victim_is_undead: i32,
     /// 1 when the target carries `LifeForceTag(Demonic)`. Used by
-    /// holy / banish / demon-bane spells (HOLY_WORD, BANISH).
+    /// holy / banish / demon-bane spells (`HOLY_WORD`, BANISH).
     victim_is_demonic: i32,
     /// 1 when the target carries `LifeForceTag(Celestial)`. Used
-    /// by unholy / smite-good spells (UNHOLY_WORD).
+    /// by unholy / smite-good spells (`UNHOLY_WORD`).
     victim_is_celestial: i32,
     /// 1 when the target carries `LifeForceTag(Elemental)`. Used
     /// by abjuration / dispel-elemental spells.
@@ -16769,10 +17884,7 @@ pub(crate) fn roll_dice(num: i32, sides: i32) -> i32 {
 /// checks live in one place.
 fn scale_by_float(lhs: i32, f: f64) -> Option<i32> {
     let scaled = (f64::from(lhs) * f).round();
-    if !scaled.is_finite()
-        || scaled > f64::from(i32::MAX)
-        || scaled < f64::from(i32::MIN)
-    {
+    if !scaled.is_finite() || scaled > f64::from(i32::MAX) || scaled < f64::from(i32::MIN) {
         return None;
     }
     #[allow(clippy::cast_possible_truncation)]
@@ -16785,7 +17897,10 @@ pub(crate) fn evaluate_formula(
     rng_call: &mut dyn FnMut(&str, i32, i32) -> i32,
 ) -> Option<i32> {
     let tokens = tokenize_formula(expr)?;
-    let mut p = FormulaParser { tokens: &tokens, idx: 0 };
+    let mut p = FormulaParser {
+        tokens: &tokens,
+        idx: 0,
+    };
     let v = p.parse_expr(ctx, rng_call)?;
     if p.idx != tokens.len() {
         return None;
@@ -17068,9 +18183,7 @@ impl FormulaParser<'_> {
                         ("roll_dice", [num, sides]) if *num > 0 && *sides > 0 => {
                             Some(rng_call("roll_dice", *num, *sides))
                         }
-                        ("random", [lo, hi]) if lo <= hi => {
-                            Some(rng_call("random", *lo, *hi))
-                        }
+                        ("random", [lo, hi]) if lo <= hi => Some(rng_call("random", *lo, *hi)),
                         // Min / max bounded combinators. Lets legacy
                         // bonus caps like `min(sd_bonus, skill/4)`
                         // round-trip without reshaping into divisions.
@@ -17084,9 +18197,7 @@ impl FormulaParser<'_> {
                         // side effect to short-circuit and the cost
                         // is negligible against the parser overhead.
                         ("if", [cond, a, b]) => Some(if *cond != 0 { *a } else { *b }),
-                        ("clamp", [v, lo, hi]) if lo <= hi => {
-                            Some((*v).clamp(*lo, *hi))
-                        }
+                        ("clamp", [v, lo, hi]) if lo <= hi => Some((*v).clamp(*lo, *hi)),
                         _ => None,
                     }
                 } else {
@@ -17178,11 +18289,13 @@ pub(crate) fn capitalize(s: &str) -> String {
 
 /// Try to dispatch `verb` as a social. Returns true if a matching social was
 /// found (regardless of outcome — includes cases where target wasn't found).
-pub(crate) fn try_dispatch_social(world: &mut World, player: Entity, verb: &str, args: &str) -> bool {
-    let social = world
-        .resource::<SocialRegistry>()
-        .get(verb)
-        .cloned();
+pub(crate) fn try_dispatch_social(
+    world: &mut World,
+    player: Entity,
+    verb: &str,
+    args: &str,
+) -> bool {
+    let social = world.resource::<SocialRegistry>().get(verb).cloned();
     let Some(social) = social else {
         return false;
     };
@@ -17317,7 +18430,7 @@ pub(crate) fn name_or(world: &World, e: Entity, fallback: &str) -> String {
 /// (combat re-aggro skip, casting bypasses); collected in one
 /// helper so adding a new bypass is a single call rather than
 /// re-deriving the role check.
-/// Set of effect_type strings the dispatcher has explicit arms for.
+/// Set of `effect_type` strings the dispatcher has explicit arms for.
 /// Anything outside this list ends up in the `_` catchall, which
 /// only handles flag-driven status effects — other types
 /// (transform / drag / enchant / etc.) silently no-op even though
@@ -17354,16 +18467,15 @@ pub(crate) const KNOWN_EFFECT_TYPE_ARMS: &[&str] = &[
 ];
 
 /// Walk the loaded ability catalog and warn-log every SPELL with a
-/// known content gap: either zero AbilityEffect rows (cast emits the
+/// known content gap: either zero `AbilityEffect` rows (cast emits the
 /// success line but applies nothing) or at least one effect whose
-/// effect_type isn't in `KNOWN_EFFECT_TYPE_ARMS`. Runs once at boot,
+/// `effect_type` isn't in `KNOWN_EFFECT_TYPE_ARMS`. Runs once at boot,
 /// after all catalogs are populated. The output is grouped so the
 /// content owner can scan the list at a glance.
 pub fn audit_dead_spells(world: &World) {
     let catalog = world.resource::<AbilityCatalog>();
     let effects = world.resource::<mud_world::EffectCatalog>();
-    let known: std::collections::HashSet<&str> =
-        KNOWN_EFFECT_TYPE_ARMS.iter().copied().collect();
+    let known: std::collections::HashSet<&str> = KNOWN_EFFECT_TYPE_ARMS.iter().copied().collect();
     let mut no_effects: Vec<String> = Vec::new();
     let mut dead_arms: Vec<(String, Vec<String>)> = Vec::new();
     let mut sorted_defs: Vec<&mud_world::AbilityDef> = catalog
@@ -17415,7 +18527,9 @@ pub fn audit_dead_spells(world: &World) {
         );
     }
     if no_effects.is_empty() && dead_arms.is_empty() {
-        tracing::info!("dead-spell audit: clean — every SPELL has authored effects and a dispatcher arm");
+        tracing::info!(
+            "dead-spell audit: clean — every SPELL has authored effects and a dispatcher arm"
+        );
     }
 }
 
@@ -17458,19 +18572,15 @@ pub(crate) fn exit_is_hidden_to(
 /// the entity has been despawned. Mid-tick mutations frequently target
 /// an entity that may have been removed earlier in the same tick — this
 /// is the safe-by-default version of `world.entity_mut(e).insert(c)`.
-pub(crate) fn try_insert<C: bevy_ecs::component::Component>(
-    world: &mut World,
-    e: Entity,
-    c: C,
-) {
+pub(crate) fn try_insert<C: bevy_ecs::component::Component>(world: &mut World, e: Entity, c: C) {
     if let Ok(mut em) = world.get_entity_mut(e) {
         em.insert(c);
     }
 }
 
-/// Render an effect identifier ("detect_magic" / "DETECT_MAGIC" /
+/// Render an effect identifier ("`detect_magic`" / "`DETECT_MAGIC`" /
 /// "stunned") as a player-facing label ("Detect Magic" / "Stunned").
-/// `capitalize` joins on `-` (right for race names like HALF_ELF);
+/// `capitalize` joins on `-` (right for race names like `HALF_ELF`);
 /// effect labels use spaces.
 pub(crate) fn pretty_effect_label(raw: &str) -> String {
     raw.split('_')
@@ -17518,9 +18628,7 @@ pub(crate) fn refresh_existing_effect(
         // Reverse any stat-delta companion before despawning. The
         // expiry tick normally handles undo via the same component;
         // we shortcut here because the despawn skips that path.
-        let delta = world
-            .get::<mud_world::ModifyDelta>(matched)
-            .cloned();
+        let delta = world.get::<mud_world::ModifyDelta>(matched).cloned();
         if let Some(d) = delta {
             apply_modify_delta(world, target, &d.target, -d.amount);
         }
@@ -17602,9 +18710,7 @@ pub(crate) fn broadcast_room_visible(
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
             .filter(|(e, l)| {
-                l.0 == room
-                    && !except.contains(e)
-                    && can_see_player(world, *e, sender)
+                l.0 == room && !except.contains(e) && can_see_player(world, *e, sender)
             })
             .map(|(e, _)| e)
             .collect()
@@ -17635,9 +18741,7 @@ pub(crate) fn broadcast_room_visual(
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
             .filter(|(e, l)| {
-                l.0 == room
-                    && !except.contains(e)
-                    && can_see_player(world, *e, sender)
+                l.0 == room && !except.contains(e) && can_see_player(world, *e, sender)
             })
             .map(|(e, _)| e)
             .collect()
@@ -17680,11 +18784,7 @@ pub(crate) fn check_stamina(world: &World, player: Entity, cost: i32, verb: &str
     if let Some(s) = world.get::<Stamina>(player).copied()
         && s.current < cost
     {
-        send_to(
-            world,
-            player,
-            format!("You're too winded to {verb}.\r\n"),
-        );
+        send_to(world, player, format!("You're too winded to {verb}.\r\n"));
         return false;
     }
     true
@@ -17750,7 +18850,7 @@ pub(crate) fn send_char_vitals(world: &World, target: Entity) {
 }
 
 /// Mitigation multiplier for the alignment-protect family
-/// (PROT_FROM_EVIL / PROT_FROM_GOOD). Returns 0.8 when the attacker
+/// (`PROT_FROM_EVIL` / `PROT_FROM_GOOD`). Returns 0.8 when the attacker
 /// matches the protected-against alignment AND the victim itself
 /// is strongly aligned in the opposed direction — mirrors legacy
 /// `fight.cpp:1639`. Both conditions are required so a neutral
@@ -17758,11 +18858,7 @@ pub(crate) fn send_char_vitals(world: &World, target: Entity) {
 /// Returns 1.0 for anything else; caller multiplies the raw damage
 /// before dispatch.
 #[must_use]
-pub(crate) fn alignment_protection_factor(
-    world: &World,
-    attacker: Entity,
-    victim: Entity,
-) -> f32 {
+pub(crate) fn alignment_protection_factor(world: &World, attacker: Entity, victim: Entity) -> f32 {
     let attacker_align = world
         .get::<CombatStats>(attacker)
         .map_or(0, |c| c.alignment);
@@ -17894,7 +18990,11 @@ pub(crate) fn require_alert_posture(world: &mut World, player: Entity, action: &
     let posture = world.get::<Posture>(player).copied();
     match posture.map(|p| p.0) {
         Some(PostureKind::Sleeping) => {
-            send_to(world, player, format!("You can't {action} while sleeping.\r\n"));
+            send_to(
+                world,
+                player,
+                format!("You can't {action} while sleeping.\r\n"),
+            );
             false
         }
         Some(PostureKind::Sitting | PostureKind::Kneeling | PostureKind::Resting) => {
@@ -17922,7 +19022,12 @@ pub(crate) fn require_alert_posture(world: &mut World, player: Entity, action: &
 /// fires from the same call site (`cmd_attack`). Skips mobs already
 /// in combat — they don't switch targets just because someone
 /// nearby is being attacked.
-pub(crate) fn mob_helpers_engage(world: &mut World, defender: Entity, attacker: Entity, room: Entity) {
+pub(crate) fn mob_helpers_engage(
+    world: &mut World,
+    defender: Entity,
+    attacker: Entity,
+    room: Entity,
+) {
     // PeacefulRoom blocks helper aggro — same contract as
     // `engage_combat` and `cmd_attack`. cmd_attack already
     // refuses, so this guard mostly catches the case where
@@ -17932,10 +19037,12 @@ pub(crate) fn mob_helpers_engage(world: &mut World, defender: Entity, attacker: 
         return;
     }
     let helpers: Vec<Entity> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &mud_world::MobBehaviors, Option<&Fighting>),
-            With<Mob>,
-        >();
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Located,
+            &mud_world::MobBehaviors,
+            Option<&Fighting>,
+        ), With<Mob>>();
         q.iter(world)
             .filter(|(e, l, beh, fighting)| {
                 *e != defender
@@ -17964,7 +19071,9 @@ pub(crate) fn mob_helpers_engage(world: &mut World, defender: Entity, attacker: 
             world,
             room,
             &[attacker],
-            &format!("{helper_name} leaps to {defender_name}'s defense against {attacker_name}!\r\n"),
+            &format!(
+                "{helper_name} leaps to {defender_name}'s defense against {attacker_name}!\r\n"
+            ),
         );
     }
 }
@@ -17980,8 +19089,13 @@ pub(crate) fn auto_assist_followers_of(
     room: Entity,
 ) {
     let helpers: Vec<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &Follower, &Located, Option<&PlayerFlags>, Option<&Fighting>), With<Player>>();
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Follower,
+            &Located,
+            Option<&PlayerFlags>,
+            Option<&Fighting>,
+        ), With<Player>>();
         q.iter(world)
             .filter(|(e, f, l, flags, fighting)| {
                 *e != attacker
@@ -18001,16 +19115,12 @@ pub(crate) fn auto_assist_followers_of(
         send_rendered(
             world,
             helper,
-            &format!(
-                "You auto-assist and engage {attacker_name}!\r\n",
-            ),
+            &format!("You auto-assist and engage {attacker_name}!\r\n",),
         );
         send_rendered(
             world,
             attacker,
-            &format!(
-                "{helper_name} auto-assists and joins the fight against you!\r\n",
-            ),
+            &format!("{helper_name} auto-assists and joins the fight against you!\r\n",),
         );
     }
 }
@@ -18189,11 +19299,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // springleap) for a controlled break. Without this gate a
     // melee'd player can just step away with full HP intact.
     if world.get::<mud_world::Fighting>(player).is_some() {
-        send_to(
-            world,
-            player,
-            "No way!  You're fighting for your life!\r\n",
-        );
+        send_to(world, player, "No way!  You're fighting for your life!\r\n");
         return;
     }
     // Casting lock: walking breaks concentration. The cast is
@@ -18233,10 +19339,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 // on the actual move below; this is the additional
                 // fog drag.
                 const FOG_DRAG: i32 = 5;
-                let stamina = world
-                    .get::<Stamina>(player)
-                    .map(|s| s.current)
-                    .unwrap_or(0);
+                let stamina = world.get::<Stamina>(player).map_or(0, |s| s.current);
                 if stamina < FOG_DRAG {
                     send_to(
                         world,
@@ -18254,7 +19357,10 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 send_to(
                     world,
                     player,
-                    format!("You push through the {}, gasping in its choking mist.\r\n", block.kind_label),
+                    format!(
+                        "You push through the {}, gasping in its choking mist.\r\n",
+                        block.kind_label
+                    ),
                 );
                 // Fall through to normal movement.
             }
@@ -18272,7 +19378,10 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 send_to(
                     world,
                     player,
-                    format!("You step through the {} — it ripples and dissolves into nothing.\r\n", block.kind_label),
+                    format!(
+                        "You step through the {} — it ripples and dissolves into nothing.\r\n",
+                        block.kind_label
+                    ),
                 );
                 let player_name = name_of(world, player);
                 broadcast_room_visual(
@@ -18280,7 +19389,10 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                     from_room,
                     player,
                     &[player],
-                    &format!("The {} ripples and dissolves as {player_name} steps through.\r\n", block.kind_label),
+                    &format!(
+                        "The {} ripples and dissolves as {player_name} steps through.\r\n",
+                        block.kind_label
+                    ),
                 );
                 // Fall through to normal movement.
             }
@@ -18292,23 +19404,23 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // entering OR leaving touches the flames. Skipped for staff so
     // builders walking through a hazard zone don't get pelted.
     if !is_staff(world, player)
-        && let Some(burn) = world.get::<mud_world::RoomBurningEffect>(from_room).copied()
+        && let Some(burn) = world
+            .get::<mud_world::RoomBurningEffect>(from_room)
+            .copied()
     {
         send_to(
             world,
             player,
-            format!("Flames lash you as you push through! ({} dmg)\r\n", burn.damage_per_move),
+            format!(
+                "Flames lash you as you push through! ({} dmg)\r\n",
+                burn.damage_per_move
+            ),
         );
         let (dead, _) = apply_damage(world, player, burn.damage_per_move);
         if dead {
             // Death broadcast handled by handle_death; bail before
             // attempting the actual move.
-            crate::combat::handle_death(
-                world,
-                player,
-                &name_of(world, player),
-                from_room,
-            );
+            crate::combat::handle_death(world, player, &name_of(world, player), from_room);
             return;
         }
     }
@@ -18417,9 +19529,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         let new_followers: Vec<Entity> = {
             let mut q = world.query::<(Entity, &Located, &Follower)>();
             q.iter(world)
-                .filter(|(e, l, f)| {
-                    f.0 == leader && l.0 == from_room && !movers.contains(e)
-                })
+                .filter(|(e, l, f)| f.0 == leader && l.0 == from_room && !movers.contains(e))
                 .map(|(e, _, _)| e)
                 .collect()
         };
@@ -18446,10 +19556,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             from_room,
             mover,
             &movers,
-            &format!(
-                "{} {verb} {dir_name}.\r\n",
-                cap_sentence_start(&mover_name),
-            ),
+            &format!("{} {verb} {dir_name}.\r\n", cap_sentence_start(&mover_name),),
         );
     }
 
@@ -18457,12 +19564,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // movers' Located is updated. Bodies can read `actor` to inspect
     // the entering player and emit flavor / gating text.
     for &mover in &movers {
-        crate::triggers::fire_room_entry(
-            world,
-            target,
-            mover,
-            mud_world::TriggerEvent::Preentry,
-        );
+        crate::triggers::fire_room_entry(world, target, mover, mud_world::TriggerEvent::Preentry);
     }
 
     // Move everyone — and any mounts they're riding go with them.
@@ -18544,9 +19646,9 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         .copied()
         .filter(|&m| {
             world.get::<Player>(m).is_some()
-                && !world
+                && world
                     .get::<Account>(m)
-                    .is_some_and(|a| a.role.rank() > UserRole::Player.rank())
+                    .is_none_or(|a| a.role.rank() <= UserRole::Player.rank())
         })
         .collect();
     if !dt_victims.is_empty() && world.get::<mud_world::DeathTrap>(target).is_some() {
@@ -18598,12 +19700,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // `self` = room, `actor` = mover. Bodies typically run delayed
     // flavor (the WORLD-trigger equivalent of "as you arrive...").
     for &mover in &movers {
-        crate::triggers::fire_room_entry(
-            world,
-            target,
-            mover,
-            mud_world::TriggerEvent::Postentry,
-        );
+        crate::triggers::fire_room_entry(world, target, mover, mud_world::TriggerEvent::Postentry);
     }
 
     // Aggressive-mob check: after the player has seen the room and
@@ -18668,10 +19765,11 @@ pub(crate) const DEFAULT_AGGRO_ALIGNMENT: i32 = -800;
 /// pass fall through to the default.
 #[must_use]
 pub(crate) fn aggro_alignment(world: &World) -> i32 {
-    world.get_resource::<mud_world::RuntimeConfig>().map_or(
-        DEFAULT_AGGRO_ALIGNMENT,
-        |cfg| cfg.get_i32("combat", "aggro_alignment", DEFAULT_AGGRO_ALIGNMENT),
-    )
+    world
+        .get_resource::<mud_world::RuntimeConfig>()
+        .map_or(DEFAULT_AGGRO_ALIGNMENT, |cfg| {
+            cfg.get_i32("combat", "aggro_alignment", DEFAULT_AGGRO_ALIGNMENT)
+        })
 }
 
 /// Read a per-skill stamina cost from `RuntimeConfig`. Skill names
@@ -18683,19 +19781,16 @@ pub(crate) fn aggro_alignment(world: &World) -> i32 {
 pub(crate) fn skill_stamina_cost(world: &World, skill: &str, default: i32) -> i32 {
     world
         .get_resource::<mud_world::RuntimeConfig>()
-        .map_or(default, |cfg| cfg.get_i32("combat.stamina_cost", skill, default))
+        .map_or(default, |cfg| {
+            cfg.get_i32("combat.stamina_cost", skill, default)
+        })
 }
 
 /// Bidirectional `Fighting` + announcement on both sides + the
 /// rest of the room. Shared between the on-entry aggro check and
 /// any other path that wants to start hostilities programmatically
 /// (respawn into an occupied room, scripted ambush, etc).
-pub(crate) fn engage_combat(
-    world: &mut World,
-    attacker: Entity,
-    defender: Entity,
-    room: Entity,
-) {
+pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entity, room: Entity) {
     // PeacefulRoom blocks every auto-engage path that routes
     // through this helper — remembered grudges, alignment aggro,
     // scripted ambushes. The defender doesn't even see a swing
@@ -18747,6 +19842,7 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
     // Two-pass aggro check: first the cheap mob-alignment threshold
     // (legacy behavior — evil mobs auto-attack), then the per-mob
     // aggression_formula (engine §B3). Either match engages.
+    #[allow(clippy::type_complexity)]
     let candidates: Vec<(Entity, i32, Option<(i32, i32)>)> = {
         let mut q = world.query_filtered::<
             (Entity, &Located, &CombatStats, Option<&WorldKey>),
@@ -18793,6 +19889,17 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
                 }
             }
         }
+    }
+    if crate::aggression::debug_enabled(world) {
+        tracing::info!(
+            target: "aggression",
+            player = %name_of(world, player),
+            candidates = candidates.len(),
+            threshold,
+            player_align,
+            chosen = ?chosen.map(|m| name_of(world, m)),
+            "aggro check on room entry"
+        );
     }
     let Some(mob) = chosen else { return };
     engage_combat(world, mob, player, room);
@@ -18841,19 +19948,12 @@ pub(crate) fn sector_movement_cost(s: Sector) -> i32 {
 /// Returns an owned `String` because the override comes from the
 /// catalog (`Option<String>`) and the caller needs the result by
 /// value anyway.
-pub(crate) fn race_movement_verb(
-    world: &World,
-    mover: Entity,
-    is_arrival: bool,
-) -> String {
+pub(crate) fn race_movement_verb(world: &World, mover: Entity, is_arrival: bool) -> String {
     let default: &str = if is_arrival { "arrives" } else { "leaves" };
     let Some(prof) = world.get::<mud_world::Profile>(mover) else {
         return default.to_string();
     };
-    let Some(def) = world
-        .resource::<mud_world::RaceCatalog>()
-        .get(&prof.race)
-    else {
+    let Some(def) = world.resource::<mud_world::RaceCatalog>().get(&prof.race) else {
         return default.to_string();
     };
     let verb = if is_arrival {

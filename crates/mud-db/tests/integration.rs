@@ -1,5 +1,5 @@
 use mud_db::{
-    character_items::{list_for, save_inventory_diff, CharacterItemSnap},
+    character_items::{CharacterItemSnap, list_for, save_inventory_diff},
     connect,
     effects::list_effects,
     help::list_all as list_help_entries,
@@ -32,14 +32,22 @@ async fn lists_zones() {
 #[ignore = "requires live fierydev DB"]
 async fn lists_rooms() {
     let rooms = list_rooms(&pool().await).await.expect("list rooms");
-    assert!(rooms.len() > 1000, "expected many rooms, got {}", rooms.len());
+    assert!(
+        rooms.len() > 1000,
+        "expected many rooms, got {}",
+        rooms.len()
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires live fierydev DB"]
 async fn lists_exits() {
     let exits = list_exits(&pool().await).await.expect("list exits");
-    assert!(exits.len() > 1000, "expected many exits, got {}", exits.len());
+    assert!(
+        exits.len() > 1000,
+        "expected many exits, got {}",
+        exits.len()
+    );
 }
 
 #[tokio::test]
@@ -83,12 +91,21 @@ async fn lists_help_entries() {
 #[tokio::test]
 #[ignore = "requires live fierydev DB"]
 async fn lists_mob_resets() {
-    let resets = list_mob_resets(&pool().await).await.expect("list mob resets");
+    let resets = list_mob_resets(&pool().await)
+        .await
+        .expect("list mob resets");
     // Imported world has thousands of mob resets.
-    assert!(resets.len() > 1000, "expected many mob resets, got {}", resets.len());
+    assert!(
+        resets.len() > 1000,
+        "expected many mob resets, got {}",
+        resets.len()
+    );
     // Probability is a fraction in [0, 1].
     for r in &resets {
-        assert!(r.probability >= 0.0 && r.probability <= 1.0, "probability oob: {r:?}");
+        assert!(
+            r.probability >= 0.0 && r.probability <= 1.0,
+            "probability oob: {r:?}"
+        );
         assert!(r.max_instances >= 1, "max_instances < 1: {r:?}");
     }
 }
@@ -96,7 +113,9 @@ async fn lists_mob_resets() {
 #[tokio::test]
 #[ignore = "requires live fierydev DB"]
 async fn lists_object_resets() {
-    let resets = list_object_resets(&pool().await).await.expect("list object resets");
+    let resets = list_object_resets(&pool().await)
+        .await
+        .expect("list object resets");
     assert!(!resets.is_empty(), "expected some object resets");
     for r in &resets {
         assert!(r.probability >= 0.0 && r.probability <= 1.0);
@@ -117,25 +136,22 @@ async fn round_trips_character_items() {
     let pool = pool().await;
 
     // Find TestWarrior's character_id.
-    let row = sqlx::query!(
-        r#"SELECT id FROM "Characters" WHERE name = 'TestWarrior' LIMIT 1"#
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("query")
-    .expect("seed user TestWarrior must exist");
+    let row = sqlx::query!(r#"SELECT id FROM "Characters" WHERE name = 'TestWarrior' LIMIT 1"#)
+        .fetch_optional(&pool)
+        .await
+        .expect("query")
+        .expect("seed user TestWarrior must exist");
     let cid = row.id;
 
     // Pick two real Object keys we can FK to.
-    let keys: Vec<(i32, i32)> = sqlx::query!(
-        r#"SELECT zone_id, id FROM "Objects" ORDER BY zone_id, id LIMIT 2"#
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("query")
-    .into_iter()
-    .map(|r| (r.zone_id, r.id))
-    .collect();
+    let keys: Vec<(i32, i32)> =
+        sqlx::query!(r#"SELECT zone_id, id FROM "Objects" ORDER BY zone_id, id LIMIT 2"#)
+            .fetch_all(&pool)
+            .await
+            .expect("query")
+            .into_iter()
+            .map(|r| (r.zone_id, r.id))
+            .collect();
     assert_eq!(keys.len(), 2, "expected at least two Objects in the DB");
 
     // Snapshot whatever's already on TestWarrior so we restore at end.
@@ -169,14 +185,22 @@ async fn round_trips_character_items() {
         },
     ];
     let mut conn = pool.acquire().await.expect("acquire conn");
-    let assigned = save_inventory_diff(&mut conn, &cid, &payload).await.expect("save");
+    let assigned = save_inventory_diff(&mut conn, &cid, &payload)
+        .await
+        .expect("save");
     assert_eq!(assigned.len(), 2, "both rows INSERTed → both ids returned");
 
     let after = list_for(&pool, &cid).await.expect("list after");
     assert_eq!(after.len(), 2, "two rows after save");
-    let worn: Vec<_> = after.iter().filter(|r| r.equipped_location.as_deref() == Some("BODY")).collect();
+    let worn: Vec<_> = after
+        .iter()
+        .filter(|r| r.equipped_location.as_deref() == Some("BODY"))
+        .collect();
     assert_eq!(worn.len(), 1, "one worn-on-body row");
-    let carried: Vec<_> = after.iter().filter(|r| r.equipped_location.is_none()).collect();
+    let carried: Vec<_> = after
+        .iter()
+        .filter(|r| r.equipped_location.is_none())
+        .collect();
     assert_eq!(carried.len(), 1, "one carried row");
 
     // Restore the original set so re-runs are idempotent. Treat each
@@ -191,12 +215,18 @@ async fn round_trips_character_items() {
             equipped_location: r.equipped_location.clone(),
             parent_persisted_id: None,
             parent_idx: None,
-            charges: if r.charges >= 0 { Some(r.charges) } else { None },
+            charges: if r.charges >= 0 {
+                Some(r.charges)
+            } else {
+                None
+            },
             liquid_remaining: r.liquid_type.as_ref().map(|_| r.liquid_remaining),
             liquid_type: r.liquid_type.clone(),
         })
         .collect();
-    save_inventory_diff(&mut conn, &cid, &restore).await.expect("restore");
+    save_inventory_diff(&mut conn, &cid, &restore)
+        .await
+        .expect("restore");
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +253,7 @@ async fn testplayer_user_id(pool: &PgPool) -> String {
         .id
 }
 
-/// Round-trip a Discord link: create → lookup → mark_verified → unlink.
+/// Round-trip a Discord link: create → lookup → `mark_verified` → unlink.
 #[tokio::test]
 #[ignore = "requires live fierydev DB"]
 async fn discord_link_round_trip() {
@@ -341,7 +371,7 @@ async fn google_link_round_trip() {
     );
 }
 
-/// Character name-approval gate (replaces the legacy LoginRequests
+/// Character name-approval gate (replaces the legacy `LoginRequests`
 /// row-based approval flow). Verifies the three runtime paths:
 /// 1. `create` honors the caller-supplied `name_approved = false`.
 /// 2. `find_by_name` / `list_for_user` round-trip the column.
@@ -385,7 +415,10 @@ async fn character_name_approval_round_trip() {
         .expect("find")
         .expect("present");
     assert_eq!(row.id, char_id);
-    assert!(!row.name_approved, "fresh char with toggle ON starts unapproved");
+    assert!(
+        !row.name_approved,
+        "fresh char with toggle ON starts unapproved"
+    );
 
     // And through list_for_user.
     let listed = mud_db::characters::list_for_user(&pool, &user_id)
@@ -406,13 +439,19 @@ async fn character_name_approval_round_trip() {
         .await
         .expect("find post-approve")
         .expect("present");
-    assert!(row.name_approved, "set_name_approved(true) flipped the flag");
+    assert!(
+        row.name_approved,
+        "set_name_approved(true) flipped the flag"
+    );
 
     // Re-approve is idempotent (1 row touched, no error).
     let reapproved = mud_db::characters::set_name_approved(&pool, &char_id, true)
         .await
         .expect("re-approve");
-    assert_eq!(reapproved, 1, "UPDATE always touches the row even when value matches");
+    assert_eq!(
+        reapproved, 1,
+        "UPDATE always touches the row even when value matches"
+    );
 
     // Flip back to unapproved for the next assertion.
     let unapproved = mud_db::characters::set_name_approved(&pool, &char_id, false)
@@ -423,7 +462,10 @@ async fn character_name_approval_round_trip() {
         .await
         .expect("find post-unapprove")
         .expect("present");
-    assert!(!row.name_approved, "set_name_approved(false) clears the flag");
+    assert!(
+        !row.name_approved,
+        "set_name_approved(false) clears the flag"
+    );
 
     // Unknown id → 0 rows touched.
     let missing = mud_db::characters::set_name_approved(&pool, "no-such-id", true)
@@ -474,7 +516,10 @@ async fn character_name_approval_defaults_true() {
         .await
         .expect("find")
         .expect("present");
-    assert!(row.name_approved, "default path lands at name_approved = true");
+    assert!(
+        row.name_approved,
+        "default path lands at name_approved = true"
+    );
 
     sqlx::query!(r#"DELETE FROM "Characters" WHERE id = $1"#, char_id)
         .execute(&pool)

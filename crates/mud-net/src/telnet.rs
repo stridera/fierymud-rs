@@ -354,7 +354,7 @@ pub fn mccp2_start() -> Vec<u8> {
 
 /// Decode an MTTS bitmap response per the standard. Clients
 /// reply to the third TTYPE SEND with `"MTTS <decimal-bitmap>"`.
-/// Bits we care about (per Mudlet's TermType doc):
+/// Bits we care about (per Mudlet's `TermType` doc):
 ///   * 0 = ANSI 16-color
 ///   * 1 = VT100 / xterm capabilities
 ///   * 2 = UTF-8
@@ -365,6 +365,7 @@ pub fn mccp2_start() -> Vec<u8> {
 ///   * 7 = proxy reported
 ///   * 8 = truecolor (24-bit)
 ///   * 9 = MNES (MUD New-Environ Standard)
+///
 /// Returns the parsed bitmap, or `None` if the payload doesn't
 /// match the `MTTS <num>` shape.
 #[must_use]
@@ -407,14 +408,26 @@ mod tests {
         let input = [b'h', b'i', IAC, DO, opt::GMCP];
         let (data, events) = p.feed(&input);
         assert_eq!(data, b"hi");
-        assert_eq!(events, vec![Event::Negotiate { command: DO, option: opt::GMCP }]);
+        assert_eq!(
+            events,
+            vec![Event::Negotiate {
+                command: DO,
+                option: opt::GMCP
+            }]
+        );
     }
 
     #[test]
     fn parses_iac_will_naws() {
         let mut p = Parser::new();
         let (_, events) = p.feed(&[IAC, WILL, opt::NAWS]);
-        assert_eq!(events, vec![Event::Negotiate { command: WILL, option: opt::NAWS }]);
+        assert_eq!(
+            events,
+            vec![Event::Negotiate {
+                command: WILL,
+                option: opt::NAWS
+            }]
+        );
     }
 
     #[test]

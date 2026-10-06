@@ -40,11 +40,11 @@ struct CorpseSnapshot {
     contents: Vec<ContentSnapshot>,
     /// True for player corpses (the ones carrying a `PlayerCorpse`
     /// marker). Saved/restored so the consent gates on looting and
-    /// ANIMATE_DEAD survive a restart. Defaults to false for
+    /// `ANIMATE_DEAD` survive a restart. Defaults to false for
     /// backward-compat with pre-marker snapshots.
     #[serde(default)]
     is_player: bool,
-    /// Dead actor's level at spawn time — read by ANIMATE_DEAD's
+    /// Dead actor's level at spawn time — read by `ANIMATE_DEAD`'s
     /// HP-scaling pass. Defaults to 1 on legacy snapshots (matches
     /// the lowest spawn tier, so old corpses still raise a basic
     /// skeleton without crashing).
@@ -73,9 +73,17 @@ pub fn save_snapshot(world: &mut World) {
     let mut snapshots: Vec<CorpseSnapshot> = Vec::new();
     // Snapshot corpses first, holding their entity IDs so we can
     // do the contents lookup outside the borrow.
+    #[allow(clippy::type_complexity)]
     let corpses: Vec<(Entity, String, Vec<String>, Entity, i32, bool, i32)> = {
-        let mut q = world
-            .query_filtered::<(Entity, &Named, &Keywords, &Located, &CorpseDecay, Option<&mud_world::PlayerCorpse>, Option<&mud_world::CorpseOriginLevel>), With<Corpse>>();
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Named,
+            &Keywords,
+            &Located,
+            &CorpseDecay,
+            Option<&mud_world::PlayerCorpse>,
+            Option<&mud_world::CorpseOriginLevel>,
+        ), With<Corpse>>();
         q.iter(world)
             .map(|(e, n, k, l, d, pc, ol)| {
                 (
@@ -99,7 +107,10 @@ pub fn save_snapshot(world: &mut World) {
             let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
             q.iter(world)
                 .filter(|(l, _)| l.0 == corpse)
-                .map(|(_, wk)| ContentSnapshot { proto_zone: wk.zone, proto_id: wk.id })
+                .map(|(_, wk)| ContentSnapshot {
+                    proto_zone: wk.zone,
+                    proto_id: wk.id,
+                })
                 .collect()
         };
         snapshots.push(CorpseSnapshot {
@@ -166,8 +177,11 @@ pub fn load_snapshot(world: &mut World) {
     let mut skipped_rooms = 0;
     let mut skipped_protos = 0;
     for snap in file.corpses {
-        let Some(room_entity) =
-            world.resource::<WorldKeyIndex>().rooms.get(&(snap.room_zone, snap.room_id)).copied()
+        let Some(room_entity) = world
+            .resource::<WorldKeyIndex>()
+            .rooms
+            .get(&(snap.room_zone, snap.room_id))
+            .copied()
         else {
             skipped_rooms += 1;
             continue;
@@ -179,7 +193,9 @@ pub fn load_snapshot(world: &mut World) {
                 Named { name: snap.name },
                 Keywords(snap.keywords),
                 Located(room_entity),
-                CorpseDecay { remaining_secs: snap.decay_secs.max(1) },
+                CorpseDecay {
+                    remaining_secs: snap.decay_secs.max(1),
+                },
             ))
             .id();
         if let Ok(mut em) = world.get_entity_mut(corpse) {
@@ -230,9 +246,14 @@ fn spawn_item_into(world: &mut World, proto_zone: i32, proto_id: i32, parent: En
     let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
     let mut bundle = world.spawn((
         Item,
-        Named { name: proto.name.clone() },
+        Named {
+            name: proto.name.clone(),
+        },
         Keywords(proto.keywords.clone()),
-        WorldKey { zone: proto.zone_id, id: proto.id },
+        WorldKey {
+            zone: proto.zone_id,
+            id: proto.id,
+        },
         Located(parent),
     ));
     if let Some(desc) = proto.examine_description.clone() {
@@ -268,7 +289,6 @@ fn spawn_item_into(world: &mut World, proto_zone: i32, proto_id: i32, parent: En
         bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
     }
     let item_entity = bundle.id();
-    drop(bundle);
     crate::item_decay::attach_timer_if_decaying(world, item_entity, &proto);
     true
 }
@@ -287,8 +307,14 @@ mod tests {
                 room_id: 45,
                 decay_secs: 480,
                 contents: vec![
-                    ContentSnapshot { proto_zone: 12, proto_id: 7 },
-                    ContentSnapshot { proto_zone: 12, proto_id: 8 },
+                    ContentSnapshot {
+                        proto_zone: 12,
+                        proto_id: 7,
+                    },
+                    ContentSnapshot {
+                        proto_zone: 12,
+                        proto_id: 8,
+                    },
                 ],
                 is_player: true,
                 origin_level: 47,
@@ -311,9 +337,7 @@ mod tests {
         // Forward-compat: a fresh boot with an empty array shouldn't
         // crash, and the load path should treat it the same as a
         // missing file.
-        let parsed: SnapshotFile =
-            serde_json::from_str(r#"{"corpses":[]}"#).expect("parse");
+        let parsed: SnapshotFile = serde_json::from_str(r#"{"corpses":[]}"#).expect("parse");
         assert!(parsed.corpses.is_empty());
     }
 }
-

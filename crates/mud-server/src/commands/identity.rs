@@ -94,13 +94,18 @@ async fn cmd_discord_router(
 /// calls `discord_links::link` + `mark_verified`. We don't write to
 /// `discord_links` here so an attacker who guesses someone's
 /// `discord-id` can't squat the binding.
+#[allow(clippy::unused_async)] // dispatch table expects async handlers
 async fn cmd_discord_link(world: &mut World, player: Entity, args: &str) {
     let discord_id = args.trim();
     if discord_id.is_empty() {
         send_to(world, player, "Usage: discord link <discord-id>\r\n");
         return;
     }
-    if discord_id.len() > 64 || !discord_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+    if discord_id.len() > 64
+        || !discord_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
         send_to(
             world,
             player,
@@ -159,11 +164,7 @@ async fn cmd_discord_link(world: &mut World, player: Entity, args: &str) {
 
 /// Drop the player's existing Discord link. Idempotent — running it
 /// against a user without a link prints a friendly "no link" line.
-async fn cmd_discord_unlink(
-    world: &mut World,
-    player: Entity,
-    pool: &mud_db::sqlx::PgPool,
-) {
+async fn cmd_discord_unlink(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
     let Some(account) = world.get::<Account>(player).cloned() else {
         send_to(world, player, "You don't have an account.\r\n");
         return;
@@ -187,13 +188,13 @@ async fn cmd_discord_unlink(
     }
 }
 
-/// 6-digit verification code derived from the user_id + the
+/// 6-digit verification code derived from the `user_id` + the
 /// monotonic clock. Not cryptographic — its job is to keep one
 /// player's code from collisioning with another's in a 10-minute
 /// window, not to resist offline guessing. The pending-map check
-/// at consume time also asserts the discord_id matches the row
+/// at consume time also asserts the `discord_id` matches the row
 /// that minted the code, so brute-forcing the 6-digit space still
-/// requires knowing the target's claimed discord_id.
+/// requires knowing the target's claimed `discord_id`.
 fn generate_verification_code(user_id: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

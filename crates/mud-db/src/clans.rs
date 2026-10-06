@@ -37,10 +37,7 @@ pub async fn list_clans(pool: &PgPool) -> sqlx::Result<Vec<ClanRow>> {
 
 /// All members of a clan, joined against Characters so the
 /// `clan` info readout can show names + levels in one query.
-pub async fn members_of(
-    pool: &PgPool,
-    clan_id: i32,
-) -> sqlx::Result<Vec<ClanRosterRow>> {
+pub async fn members_of(pool: &PgPool, clan_id: i32) -> sqlx::Result<Vec<ClanRosterRow>> {
     sqlx::query_as!(
         ClanRosterRow,
         r#"
@@ -77,10 +74,7 @@ pub struct ClanRosterRow {
 }
 
 /// Look up a clan by case-insensitive abbreviation.
-pub async fn get_by_abbrev(
-    pool: &PgPool,
-    abbrev: &str,
-) -> sqlx::Result<Option<ClanRow>> {
+pub async fn get_by_abbrev(pool: &PgPool, abbrev: &str) -> sqlx::Result<Option<ClanRow>> {
     sqlx::query_as!(
         ClanRow,
         r#"SELECT id, name, abbrev, motd FROM clan WHERE LOWER(abbrev) = LOWER($1)"#,
@@ -93,11 +87,7 @@ pub async fn get_by_abbrev(
 /// Create a new clan. The unique constraints on name and abbrev
 /// are enforced by the schema; on conflict the caller gets an
 /// `Err(_)` they can surface as "name/abbrev already taken."
-pub async fn create_clan(
-    pool: &PgPool,
-    name: &str,
-    abbrev: &str,
-) -> sqlx::Result<i32> {
+pub async fn create_clan(pool: &PgPool, name: &str, abbrev: &str) -> sqlx::Result<i32> {
     let row = sqlx::query!(
         r#"INSERT INTO clan (name, abbrev) VALUES ($1, $2) RETURNING id"#,
         name,
@@ -109,18 +99,10 @@ pub async fn create_clan(
 }
 
 /// Update a clan's MOTD. Empty string clears it (NULL in DB).
-pub async fn set_motd(
-    pool: &PgPool,
-    clan_id: i32,
-    motd: Option<&str>,
-) -> sqlx::Result<u64> {
-    let res = sqlx::query!(
-        r#"UPDATE clan SET motd = $1 WHERE id = $2"#,
-        motd,
-        clan_id,
-    )
-    .execute(pool)
-    .await?;
+pub async fn set_motd(pool: &PgPool, clan_id: i32, motd: Option<&str>) -> sqlx::Result<u64> {
+    let res = sqlx::query!(r#"UPDATE clan SET motd = $1 WHERE id = $2"#, motd, clan_id,)
+        .execute(pool)
+        .await?;
     Ok(res.rows_affected())
 }
 
@@ -152,10 +134,7 @@ pub async fn assign_member(
 }
 
 /// Remove a character from their clan (if any).
-pub async fn remove_member(
-    pool: &PgPool,
-    character_id: &str,
-) -> sqlx::Result<u64> {
+pub async fn remove_member(pool: &PgPool, character_id: &str) -> sqlx::Result<u64> {
     let res = sqlx::query!(
         r#"DELETE FROM clan_member WHERE character_id = $1"#,
         character_id,
@@ -171,12 +150,9 @@ pub async fn remove_member(
 /// after the membership delete leaves a clean state.
 pub async fn delete_clan(pool: &PgPool, clan_id: i32) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
-    let members = sqlx::query!(
-        r#"DELETE FROM clan_member WHERE clan_id = $1"#,
-        clan_id,
-    )
-    .execute(&mut *tx)
-    .await?;
+    let members = sqlx::query!(r#"DELETE FROM clan_member WHERE clan_id = $1"#, clan_id,)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query!(r#"DELETE FROM clan WHERE id = $1"#, clan_id)
         .execute(&mut *tx)
         .await?;

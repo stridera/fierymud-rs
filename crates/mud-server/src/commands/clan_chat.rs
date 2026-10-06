@@ -32,7 +32,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["clan"],
+        names: &["clan", "cl"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Communication,
@@ -72,8 +72,8 @@ fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
     };
     let player_name = name_of(world, player);
     let targets: Vec<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &ClanMembership), (With<Player>, With<Online>)>();
+        let mut q =
+            world.query_filtered::<(Entity, &ClanMembership), (With<Player>, With<Online>)>();
         q.iter(world)
             .filter(|(_, c)| c.clan_id == clan_id)
             .map(|(e, _)| e)
@@ -89,13 +89,9 @@ fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
         // the score sheet's clan line). Speaker name highlighted
         // bright yellow against the dimmer message body.
         let line = if t == player {
-            format!(
-                "<b:yellow>[{abbrev}]</> <b:white>You:</> {message}\r\n"
-            )
+            format!("<b:yellow>[{abbrev}]</> <b:white>You:</> {message}\r\n")
         } else {
-            format!(
-                "<b:yellow>[{abbrev}]</> <b:white>{player_name}:</> {message}\r\n"
-            )
+            format!("<b:yellow>[{abbrev}]</> <b:white>{player_name}:</> {message}\r\n")
         };
         send_to(world, t, line);
         send_comm_channel_text(world, t, "clan", &player_name, &gmcp_text);
@@ -104,17 +100,14 @@ fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
 
 #[allow(clippy::too_many_lines)]
 fn cmd_clan(world: &mut World, player: Entity, args: &str) {
-    let Some((clan_id, name, abbrev, rank)) = world
-        .get::<ClanMembership>(player)
-        .map(|c| {
-            (
-                c.clan_id,
-                c.clan_name.clone(),
-                c.clan_abbrev.clone(),
-                c.rank.clone(),
-            )
-        })
-    else {
+    let Some((clan_id, name, abbrev, rank)) = world.get::<ClanMembership>(player).map(|c| {
+        (
+            c.clan_id,
+            c.clan_name.clone(),
+            c.clan_abbrev.clone(),
+            c.rank.clone(),
+        )
+    }) else {
         send_to(world, player, "You aren't in a clan.\r\n");
         return;
     };
@@ -136,11 +129,10 @@ fn cmd_clan(world: &mut World, player: Entity, args: &str) {
         let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
         let Some(out) = outbound else { return };
         tokio::spawn(async move {
-            let Ok(Some(target)) =
-                mud_db::characters::find_by_name(&pool, &target_name).await
+            let Ok(Some(target)) = mud_db::characters::find_by_name(&pool, &target_name).await
             else {
-                let _ = out
-                    .try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
+                let _ =
+                    out.try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
                 return;
             };
             let in_clan = mud_db::clans::membership_for(&pool, &target.id)
@@ -149,15 +141,14 @@ fn cmd_clan(world: &mut World, player: Entity, args: &str) {
                 .flatten()
                 .is_some_and(|m| m.clan_id == clan_id);
             if !in_clan {
-                let _ = out
-                    .try_send(format!("{} isn't in your clan.\r\n", target.name).into_bytes());
+                let _ =
+                    out.try_send(format!("{} isn't in your clan.\r\n", target.name).into_bytes());
                 return;
             }
             match mud_db::clans::remove_member(&pool, &target.id).await {
                 Ok(_) => {
                     let _ = out.try_send(
-                        format!("{} kicked from {}.\r\n", target.name, abbrev)
-                            .into_bytes(),
+                        format!("{} kicked from {}.\r\n", target.name, abbrev).into_bytes(),
                     );
                 }
                 Err(e) => {
@@ -192,9 +183,8 @@ fn cmd_clan(world: &mut World, player: Entity, args: &str) {
             };
             match mud_db::clans::set_motd(&pool, clan_id, new_motd).await {
                 Ok(_) => {
-                    let _ = out.try_send(
-                        format!("MOTD updated on {abbrev_for_msg}.\r\n").into_bytes(),
-                    );
+                    let _ =
+                        out.try_send(format!("MOTD updated on {abbrev_for_msg}.\r\n").into_bytes());
                 }
                 Err(e) => {
                     let _ = out.try_send(format!("MOTD set failed: {e}\r\n").into_bytes());
@@ -206,8 +196,8 @@ fn cmd_clan(world: &mut World, player: Entity, args: &str) {
     let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
     let pool = world.get_resource::<DbPool>().map(|p| p.0.clone());
     let online_cids: std::collections::HashSet<String> = {
-        let mut q = world
-            .query_filtered::<(&Account, &ClanMembership), (With<Player>, With<Online>)>();
+        let mut q =
+            world.query_filtered::<(&Account, &ClanMembership), (With<Player>, With<Online>)>();
         q.iter(world)
             .filter(|(_, c)| c.clan_id == clan_id)
             .map(|(a, _)| a.character_id.clone())

@@ -6,13 +6,12 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use tracing::info;
 use mud_world::{
-    Account, AppliedTo, Description, EffectCatalog, EffectInstance,
-    EffectSource, Fighting, Frozen, Health, Item, Keywords, Located, Mob, MobPrototypes,
-    Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, Profile, Stamina, Wealth,
-    WearableIn, WorldKey, WorldKeyIndex,
+    Account, AppliedTo, Description, EffectCatalog, EffectInstance, EffectSource, Fighting, Frozen,
+    Health, Item, Keywords, Located, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player,
+    PlayerFlags, Posture, Profile, Stamina, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
+use tracing::info;
 
 use crate::TickCount;
 use crate::commands::{
@@ -41,7 +40,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["goto"],
+        names: &["goto", "go"],
         min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Admin,
@@ -742,8 +741,7 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
             return;
         }
         let mut rows: Vec<(String, String)> = {
-            let mut q = world
-                .query_filtered::<(&Named, &Located), (With<Player>, With<Online>)>();
+            let mut q = world.query_filtered::<(&Named, &Located), (With<Player>, With<Online>)>();
             q.iter(world)
                 .map(|(n, l)| {
                     let room_name = name_or(world, l.0, "(unknown)");
@@ -768,8 +766,8 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
     // disclosing their last-known room.
     let needle = arg.to_ascii_lowercase();
     let target = {
-        let mut q = world
-            .query_filtered::<(Entity, &Named, &Located), (With<Player>, With<Online>)>();
+        let mut q =
+            world.query_filtered::<(Entity, &Named, &Located), (With<Player>, With<Online>)>();
         q.iter(world)
             .find(|(_, n, _)| n.name.eq_ignore_ascii_case(&needle))
             .map(|(e, _, l)| (e, l.0))
@@ -846,7 +844,10 @@ pub(crate) fn cmd_slay(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{admin_name} extends a hand and {target_name} crumbles to dust.\r\n"),
     );
-    send_rendered(world, player, &format!("{target_name} crumbles to dust at your gesture.\r\n"),
+    send_rendered(
+        world,
+        player,
+        &format!("{target_name} crumbles to dust at your gesture.\r\n"),
     );
 
     // Briefly point the admin at the target so the kill payout's
@@ -874,18 +875,15 @@ pub(crate) fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
 
     // Online players roster.
     let players: Vec<serde_json::Value> = {
-        let mut q = world.query_filtered::<
-            (
-                &Named,
-                &Account,
-                Option<&Profile>,
-                &Located,
-                Option<&Health>,
-                Option<&Stamina>,
-                Option<&Wealth>,
-            ),
-            (With<Player>, With<Online>),
-        >();
+        let mut q = world.query_filtered::<(
+            &Named,
+            &Account,
+            Option<&Profile>,
+            &Located,
+            Option<&Health>,
+            Option<&Stamina>,
+            Option<&Wealth>,
+        ), (With<Player>, With<Online>)>();
         q.iter(world)
             .map(|(name, acct, prof, loc, hp, st, wealth)| {
                 let room_name = name_or(world, loc.0, "(unknown)");
@@ -974,9 +972,7 @@ pub(crate) fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
     send_to(
         world,
         player,
-        format!(
-            "World dumped to {path} ({bytes} bytes, {player_count} player(s)).\r\n"
-        ),
+        format!("World dumped to {path} ({bytes} bytes, {player_count} player(s)).\r\n"),
     );
     info!(path = %path, bytes, "dumpworld checkpoint written");
 }
@@ -1009,7 +1005,10 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
         // container contents) goes too.
         let nested: Vec<Entity> = {
             let mut q = world.query::<(Entity, &Located)>();
-            q.iter(world).filter(|(_, l)| l.0 == target).map(|(e, _)| e).collect()
+            q.iter(world)
+                .filter(|(_, l)| l.0 == target)
+                .map(|(e, _)| e)
+                .collect()
         };
         for n in nested {
             if let Ok(e) = world.get_entity_mut(n) {
@@ -1026,11 +1025,17 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
     // No-arg form: every mob + every item in the room.
     let mobs: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
-        q.iter(world).filter(|(_, l)| l.0 == room).map(|(e, _)| e).collect()
+        q.iter(world)
+            .filter(|(_, l)| l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
     };
     let items: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
-        q.iter(world).filter(|(_, l)| l.0 == room).map(|(e, _)| e).collect()
+        q.iter(world)
+            .filter(|(_, l)| l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
     };
     let mob_count = mobs.len();
     let item_count = items.len();
@@ -1043,7 +1048,11 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     let nested_count = nested_of_mobs.len();
-    for e in nested_of_mobs.into_iter().chain(mobs.into_iter()).chain(items.into_iter()) {
+    for e in nested_of_mobs
+        .into_iter()
+        .chain(mobs.into_iter())
+        .chain(items.into_iter())
+    {
         if let Ok(em) = world.get_entity_mut(e) {
             em.despawn();
         }
@@ -1051,28 +1060,25 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
     send_to(
         world,
         player,
-        format!(
-            "Purged {mob_count} mob(s), {item_count} item(s), and {nested_count} nested.\r\n"
-        ),
+        format!("Purged {mob_count} mob(s), {item_count} item(s), and {nested_count} nested.\r\n"),
     );
 }
 pub(crate) fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
-    let target = if arg.is_empty() || arg.eq_ignore_ascii_case("me")
-        || arg.eq_ignore_ascii_case("self")
-    {
-        player
-    } else {
-        let Some(located) = world.get::<Located>(player).copied() else {
-            send_to(world, player, "You are nowhere.\r\n");
-            return;
+    let target =
+        if arg.is_empty() || arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+            player
+        } else {
+            let Some(located) = world.get::<Located>(player).copied() else {
+                send_to(world, player, "You are nowhere.\r\n");
+                return;
+            };
+            let Some(found) = find_actor_in_room(world, arg, located.0, player) else {
+                send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+                return;
+            };
+            found
         };
-        let Some(found) = find_actor_in_room(world, arg, located.0, player) else {
-            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
-            return;
-        };
-        found
-    };
     if let Some(mut h) = world.get_mut::<Health>(target) {
         h.hp = h.max;
     }
@@ -1086,7 +1092,10 @@ pub(crate) fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     }
     let admin_name = name_of(world, player);
     send_rendered(world, player, &format!("You restore {target_name}.\r\n"));
-    send_rendered(world, target, &format!("{admin_name} restores you. You feel completely refreshed.\r\n"),
+    send_rendered(
+        world,
+        target,
+        &format!("{admin_name} restores you. You feel completely refreshed.\r\n"),
     );
 }
 pub(crate) fn cmd_apply(world: &mut World, player: Entity, args: &str) {
@@ -1115,24 +1124,22 @@ pub(crate) fn cmd_apply(world: &mut World, player: Entity, args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
-    let target = if target_word.eq_ignore_ascii_case("me")
-        || target_word.eq_ignore_ascii_case("self")
-    {
-        Some(player)
-    } else {
-        let target_lower = target_word.to_ascii_lowercase();
-        let mut q = world.query::<(Entity, &Located, &Named)>();
-        q.iter(world)
-            .find(|(e, l, n)| {
-                *e != player
-                    && l.0 == located.0
-                    && n.name.to_ascii_lowercase().contains(&target_lower)
-            })
-            .map(|(e, _, _)| e)
-    };
+    let target =
+        if target_word.eq_ignore_ascii_case("me") || target_word.eq_ignore_ascii_case("self") {
+            Some(player)
+        } else {
+            let target_lower = target_word.to_ascii_lowercase();
+            let mut q = world.query::<(Entity, &Located, &Named)>();
+            q.iter(world)
+                .find(|(e, l, n)| {
+                    *e != player
+                        && l.0 == located.0
+                        && n.name.to_ascii_lowercase().contains(&target_lower)
+                })
+                .map(|(e, _, _)| e)
+        };
     let Some(target) = target else {
-        send_rendered(world, player, &format!("No '{target_word}' here.\r\n"),
-        );
+        send_rendered(world, player, &format!("No '{target_word}' here.\r\n"));
         return;
     };
 
@@ -1176,11 +1183,7 @@ pub(crate) fn cmd_load(world: &mut World, player: Entity, args: &str) {
     let kind = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
     if rest.is_empty() {
-        send_to(
-            world,
-            player,
-            "Usage: load <obj|mob> <zone> <id>\r\n",
-        );
+        send_to(world, player, "Usage: load <obj|mob> <zone> <id>\r\n");
         return;
     }
     match kind.to_ascii_lowercase().as_str() {
@@ -1196,8 +1199,7 @@ pub(crate) fn cmd_load(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "loadobj", args);
     let parts: Vec<&str> = args.split_whitespace().collect();
-    let Some((zone, obj_id)) =
-        super::admin_inspect::try_parse_zone_id(world, player, &parts)
+    let Some((zone, obj_id)) = super::admin_inspect::try_parse_zone_id(world, player, &parts)
     else {
         send_to(world, player, "Usage: loadobj [<zone_id>] <obj_id>\r\n");
         return;
@@ -1234,9 +1236,14 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     // the admin actually wants it on the floor.
     let mut bundle = world.spawn((
         Item,
-        Named { name: proto_name.clone() },
+        Named {
+            name: proto_name.clone(),
+        },
         Keywords(proto_keywords),
-        WorldKey { zone: proto.zone_id, id: proto.id },
+        WorldKey {
+            zone: proto.zone_id,
+            id: proto.id,
+        },
         Located(player),
     ));
     if let Some(desc) = examine {
@@ -1286,9 +1293,7 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     send_rendered(
         world,
         player,
-        &format!(
-            "Loaded {proto_name} (entity {item:?}) into your inventory.\r\n"
-        ),
+        &format!("Loaded {proto_name} (entity {item:?}) into your inventory.\r\n"),
     );
     let player_name = name_of(world, player);
     broadcast_room_except_players_rendered(
@@ -1298,11 +1303,11 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} produces {proto_name} from thin air.\r\n"),
     );
 }
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "summon", args);
     let parts: Vec<&str> = args.split_whitespace().collect();
-    let Some((zone, mob_id)) =
-        super::admin_inspect::try_parse_zone_id(world, player, &parts)
+    let Some((zone, mob_id)) = super::admin_inspect::try_parse_zone_id(world, player, &parts)
     else {
         send_to(world, player, "Usage: summon [<zone_id>] <mob_id>\r\n");
         return;
@@ -1314,7 +1319,10 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         .get(&(zone, mob_id))
         .cloned();
     let Some(proto) = proto else {
-        send_rendered(world, player, &format!("No mob prototype ({zone}, {mob_id}).\r\n"),
+        send_rendered(
+            world,
+            player,
+            &format!("No mob prototype ({zone}, {mob_id}).\r\n"),
         );
         return;
     };
@@ -1367,7 +1375,9 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     let mob_entity = world
         .spawn((
             Mob,
-            Named { name: proto_name.clone() },
+            Named {
+                name: proto_name.clone(),
+            },
             Keywords(proto_keywords),
             Description(proto_room_desc),
             Located(room),
@@ -1409,9 +1419,7 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
     send_rendered(
         world,
         player,
-        &format!(
-            "Summoned {proto_name} (entity {mob_entity:?}) — HP {hp}, dmg avg {dmg}.\r\n"
-        ),
+        &format!("Summoned {proto_name} (entity {mob_entity:?}) — HP {hp}, dmg avg {dmg}.\r\n"),
     );
     let player_name = name_of(world, player);
     broadcast_room_except_players_rendered(
@@ -1459,9 +1467,7 @@ pub(crate) fn cmd_switch(world: &mut World, player: Entity, args: &str) {
     send_rendered(
         world,
         player,
-        &format!(
-            "<dim>You slip into {mob_name}. Type `return` to come back.</>\r\n"
-        ),
+        &format!("<dim>You slip into {mob_name}. Type `return` to come back.</>\r\n"),
     );
 }
 
@@ -1519,9 +1525,7 @@ pub(crate) fn cmd_pain(world: &mut World, player: Entity, args: &str) {
             world,
             located.0,
             &[player, target],
-            &format!(
-                "<red>{target_name} writhes as divine pain courses through them.</>\r\n"
-            ),
+            &format!("<red>{target_name} writhes as divine pain courses through them.</>\r\n"),
         );
     }
 }
@@ -1675,11 +1679,7 @@ pub(crate) fn cmd_dc(world: &mut World, player: Entity, args: &str) {
     if let Ok(mut em) = world.get_entity_mut(target) {
         em.remove::<Connection>();
     }
-    send_to(
-        world,
-        player,
-        format!("Disconnected {target_name}.\r\n"),
-    );
+    send_to(world, player, format!("Disconnected {target_name}.\r\n"));
 }
 
 pub(crate) fn cmd_send(world: &mut World, player: Entity, args: &str) {
@@ -1797,16 +1797,14 @@ pub(crate) fn cmd_zreset(world: &mut World, player: Entity, args: &str) {
     // and get preserved. Players (not Mob / Item) are also
     // skipped by the With<Mob>/With<Item> filters.
     let mob_targets: Vec<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &WorldKey, &FromMobReset), With<Mob>>();
+        let mut q = world.query_filtered::<(Entity, &WorldKey, &FromMobReset), With<Mob>>();
         q.iter(world)
             .filter(|(_, k, _)| k.zone == zone)
             .map(|(e, _, _)| e)
             .collect()
     };
     let item_targets: Vec<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &WorldKey, &FromObjectReset), With<Item>>();
+        let mut q = world.query_filtered::<(Entity, &WorldKey, &FromObjectReset), With<Item>>();
         q.iter(world)
             .filter(|(_, k, _)| k.zone == zone)
             .map(|(e, _, _)| e)
@@ -1946,7 +1944,11 @@ pub(crate) fn cmd_skillset(world: &mut World, player: Entity, args: &str) {
         em.insert(mud_world::KnownAbilities::default());
     }
     if let Some(mut known) = world.get_mut::<mud_world::KnownAbilities>(target) {
-        if let Some(entry) = known.entries.iter_mut().find(|(id, _, _)| *id == ability_id) {
+        if let Some(entry) = known
+            .entries
+            .iter_mut()
+            .find(|(id, _, _)| *id == ability_id)
+        {
             entry.1 = prof;
             entry.2 = prof > 0;
         } else {
@@ -1957,9 +1959,7 @@ pub(crate) fn cmd_skillset(world: &mut World, player: Entity, args: &str) {
     send_rendered(
         world,
         player,
-        &format!(
-            "Set {target_name}'s {ability_word} proficiency to {prof}.\r\n"
-        ),
+        &format!("Set {target_name}'s {ability_word} proficiency to {prof}.\r\n"),
     );
 }
 
@@ -1980,9 +1980,8 @@ pub(crate) fn cmd_reroll(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("'{arg}' isn't online.\r\n"));
         return;
     };
-    let roll_3d6 = || {
-        rand::random_range(1..=6) + rand::random_range(1..=6) + rand::random_range(1..=6)
-    };
+    let roll_3d6 =
+        || rand::random_range(1..=6) + rand::random_range(1..=6) + rand::random_range(1..=6);
     let new_stats = mud_world::CoreStats {
         strength: roll_3d6(),
         dexterity: roll_3d6(),
@@ -2011,7 +2010,8 @@ pub(crate) fn cmd_reroll(world: &mut World, player: Entity, args: &str) {
         send_rendered(
             world,
             target,
-            &format!("Your stats were rerolled by an admin: STR {} DEX {} CON {} INT {} WIS {} CHA {}.\r\n",
+            &format!(
+                "Your stats were rerolled by an admin: STR {} DEX {} CON {} INT {} WIS {} CHA {}.\r\n",
                 new_stats.strength,
                 new_stats.dexterity,
                 new_stats.constitution,
@@ -2134,7 +2134,11 @@ pub(crate) fn cmd_wizinvis(world: &mut World, player: Entity, args: &str) {
     // Resolve the target invis level from the arg.
     let new_level: Option<i32> = if arg.is_empty() {
         // Toggle: if currently invis, clear; else go invis at own level.
-        if current.is_some() { Some(0) } else { Some(own_level) }
+        if current.is_some() {
+            Some(0)
+        } else {
+            Some(own_level)
+        }
     } else if arg.eq_ignore_ascii_case("off") || arg == "0" {
         Some(0)
     } else if let Ok(n) = arg.parse::<i32>() {
@@ -2161,11 +2165,7 @@ pub(crate) fn cmd_wizinvis(world: &mut World, player: Entity, args: &str) {
     };
     if level == 0 {
         try_remove::<WizInvis>(world, player);
-        send_rendered(
-            world,
-            player,
-            "<dim>You fade back into view.</>\r\n",
-        );
+        send_rendered(world, player, "<dim>You fade back into view.</>\r\n");
     } else {
         try_insert(world, player, WizInvis(level));
         send_rendered(
@@ -2295,8 +2295,10 @@ pub(crate) fn cmd_peace(world: &mut World, player: Entity, args: &str) {
     send_rendered(
         world,
         player,
-        &format!("You quell the violence — {count} combatant{suffix} disengage{}.\r\n",
-            if count == 1 { "s" } else { "" }),
+        &format!(
+            "You quell the violence — {count} combatant{suffix} disengage{}.\r\n",
+            if count == 1 { "s" } else { "" }
+        ),
     );
     broadcast_room_except_players_rendered(
         world,
@@ -2431,9 +2433,7 @@ pub(crate) fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             target,
-            format!(
-                "{admin_name} freezes you in place. You cannot act until thawed.\r\n"
-            ),
+            format!("{admin_name} freezes you in place. You cannot act until thawed.\r\n"),
         );
         info!(admin = %admin_name, target = %target_name, action = "freeze", "freeze toggle");
     }
@@ -2460,9 +2460,15 @@ pub(crate) fn cmd_force(world: &mut World, player: Entity, args: &str) {
     let admin_name = name_of(world, player);
     let target_name = name_of(world, target);
 
-    send_rendered(world, player, &format!("You force {target_name} to: {cmd_text}\r\n"),
+    send_rendered(
+        world,
+        player,
+        &format!("You force {target_name} to: {cmd_text}\r\n"),
     );
-    send_rendered(world, target, &format!("{admin_name} forces you to: {cmd_text}\r\n"),
+    send_rendered(
+        world,
+        target,
+        &format!("{admin_name} forces you to: {cmd_text}\r\n"),
     );
     info!(
         admin = %admin_name,
@@ -2497,7 +2503,11 @@ pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let Some(src_loc) = world.get::<Located>(target).copied() else {
-        send_to(world, player, "They're nowhere; nothing to transfer from.\r\n");
+        send_to(
+            world,
+            player,
+            "They're nowhere; nothing to transfer from.\r\n",
+        );
         return;
     };
     if src_loc.0 == dest_loc.0 {
@@ -2517,7 +2527,10 @@ pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     for b in src_bystanders {
-        send_rendered(world, b, &format!("{target_name} vanishes in a puff of smoke.\r\n"),
+        send_rendered(
+            world,
+            b,
+            &format!("{target_name} vanishes in a puff of smoke.\r\n"),
         );
     }
 
@@ -2535,23 +2548,21 @@ pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     for b in dest_bystanders {
-        send_rendered(world, b, &format!("{target_name} appears, summoned by {admin_name}.\r\n"),
+        send_rendered(
+            world,
+            b,
+            &format!("{target_name} appears, summoned by {admin_name}.\r\n"),
         );
     }
 
     send_rendered(world, player, &format!("You summon {target_name}.\r\n"));
-    send_rendered(world, target, &format!("{admin_name} summons you.\r\n"),
-    );
+    send_rendered(world, target, &format!("{admin_name} summons you.\r\n"));
     cmd_look(world, target, "");
 }
 pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() != 3 {
-        send_to(
-            world,
-            player,
-            "Usage: teleport <player> <zone> <room>\r\n",
-        );
+        send_to(world, player, "Usage: teleport <player> <zone> <room>\r\n");
         return;
     }
     let target_word = parts[0];
@@ -2590,7 +2601,7 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            &format!("Room ({zone}, {room_id}) refuses inbound teleports.\r\n"),
+            format!("Room ({zone}, {room_id}) refuses inbound teleports.\r\n"),
         );
         return;
     }
@@ -2639,7 +2650,11 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
     };
     let target_capped = crate::commands::cap_sentence_start(&target_name);
     for b in dest_bystanders {
-        send_rendered(world, b, &format!("{target_capped} arrives in a swirl of light.\r\n"));
+        send_rendered(
+            world,
+            b,
+            &format!("{target_capped} arrives in a swirl of light.\r\n"),
+        );
     }
 
     send_rendered(
@@ -2654,6 +2669,7 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
     );
     cmd_look(world, target, "");
 }
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     let target: Option<Entity> = match parts.as_slice() {
@@ -2734,12 +2750,18 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
                 q.iter(world)
                     .find(|(_, n, kw)| {
                         n.name.to_ascii_lowercase().contains(&needle_lc)
-                            || kw.is_some_and(|k| k.0.iter().any(|w| w.eq_ignore_ascii_case(&needle)))
+                            || kw.is_some_and(|k| {
+                                k.0.iter().any(|w| w.eq_ignore_ascii_case(&needle))
+                            })
                     })
                     .map(|(e, _, _)| e)
             };
             let Some(actor) = player_target.or(mob_target) else {
-                send_to(world, player, format!("No one named '{needle}' here or anywhere.\r\n"));
+                send_to(
+                    world,
+                    player,
+                    format!("No one named '{needle}' here or anywhere.\r\n"),
+                );
                 return;
             };
             world.get::<Located>(actor).map(|l| l.0)
@@ -2754,11 +2776,7 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
     // `cmd_teleport`. The gate honors staff: builders must clear
     // the flag before they can `goto` into a no-teleport room.
     if world.get::<mud_world::NoTeleportRoom>(target).is_some() {
-        send_to(
-            world,
-            player,
-            "That room refuses inbound teleports.\r\n",
-        );
+        send_to(world, player, "That room refuses inbound teleports.\r\n");
         return;
     }
     let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);

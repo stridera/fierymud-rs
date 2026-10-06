@@ -6,9 +6,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::Climate;
-use mud_world::{
-    PrecipKind, TempBand, WeatherCatalog, WeatherState, ZoneClimate,
-};
+use mud_world::{PrecipKind, TempBand, WeatherCatalog, WeatherState, ZoneClimate};
 
 use crate::TickCount;
 
@@ -51,7 +49,8 @@ pub fn weather_tick(world: &mut World) {
     // hint and `look sky` cleanly read "no weather" via a missing
     // map key, with no per-call zone lookup.
     let climates: Vec<(i32, Climate)> = {
-        let mut q = world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
+        let mut q =
+            world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
         q.iter(world)
             .filter(|(_, c)| !matches!(c.0, Climate::None))
             .map(|(wk, c)| (wk.zone, c.0))
@@ -166,13 +165,7 @@ pub fn ambient_tick(world: &mut World) {
             continue;
         }
         let zone = world.get::<mud_world::WorldKey>(room).map(|k| k.zone);
-        let state = zone.and_then(|z| {
-            world
-                .resource::<WeatherCatalog>()
-                .by_zone
-                .get(&z)
-                .copied()
-        });
+        let state = zone.and_then(|z| world.resource::<WeatherCatalog>().by_zone.get(&z).copied());
         let Some(state) = state else { continue };
         // Cascade: precip first (the most vivid cue when present),
         // then temperature extreme on quiet-sky days, then terrain
@@ -314,11 +307,7 @@ fn transition_line(new_precip: PrecipKind) -> &'static str {
     }
 }
 
-fn drift_temp(
-    current: TempBand,
-    climate: Climate,
-    season: mud_world::Season,
-) -> TempBand {
+fn drift_temp(current: TempBand, climate: Climate, season: mud_world::Season) -> TempBand {
     let (lo, hi) = seasonal_temp_range(climate, season);
     let lo_idx = i32::try_from(temp_idx(lo)).unwrap_or(0);
     let hi_idx = i32::try_from(temp_idx(hi)).unwrap_or(6);
@@ -338,10 +327,7 @@ fn drift_temp(
 /// equinox seasons leave the climate alone. Bands clamp to
 /// [Frigid, Sweltering] so subarctic in summer doesn't escape to a
 /// nonsense `idx_to_temp(8)`.
-fn seasonal_temp_range(
-    climate: Climate,
-    season: mud_world::Season,
-) -> (TempBand, TempBand) {
+fn seasonal_temp_range(climate: Climate, season: mud_world::Season) -> (TempBand, TempBand) {
     let (lo, hi) = temp_range(climate);
     if matches!(climate, Climate::None) {
         // No climate = no seasonal swing. Static dungeons / planes.
@@ -352,10 +338,8 @@ fn seasonal_temp_range(
         mud_world::Season::Summer => 2,
         mud_world::Season::Spring | mud_world::Season::Autumn => 0,
     };
-    let lo_idx =
-        (i32::try_from(temp_idx(lo)).unwrap_or(0) + shift).clamp(0, 6);
-    let hi_idx =
-        (i32::try_from(temp_idx(hi)).unwrap_or(6) + shift).clamp(0, 6);
+    let lo_idx = (i32::try_from(temp_idx(lo)).unwrap_or(0) + shift).clamp(0, 6);
+    let hi_idx = (i32::try_from(temp_idx(hi)).unwrap_or(6) + shift).clamp(0, 6);
     // Preserve invariant: lo <= hi after clamping (a single-band climate
     // shifted off the edge becomes a single-band climate at the edge).
     let (lo_idx, hi_idx) = if lo_idx <= hi_idx {
@@ -426,14 +410,12 @@ fn temp_range(climate: Climate) -> (TempBand, TempBand) {
 }
 
 fn precip_pool(climate: Climate) -> &'static [PrecipKind] {
-    use PrecipKind::{Blizzard, Cloudy, Clear, Drizzle, Rain, Snow, Storm};
+    use PrecipKind::{Blizzard, Clear, Cloudy, Drizzle, Rain, Snow, Storm};
     match climate {
         Climate::None => &[Clear],
         Climate::Arid | Climate::Semiarid => &[Clear, Cloudy],
         Climate::Tropical => &[Clear, Cloudy, Rain, Storm],
-        Climate::Subtropical | Climate::Temperate => {
-            &[Clear, Cloudy, Drizzle, Rain, Storm]
-        }
+        Climate::Subtropical | Climate::Temperate => &[Clear, Cloudy, Drizzle, Rain, Storm],
         Climate::Oceanic => &[Cloudy, Drizzle, Rain, Storm],
         Climate::Subarctic => &[Cloudy, Snow, Blizzard],
         Climate::Arctic => &[Snow, Blizzard, Cloudy],
@@ -552,7 +534,8 @@ pub fn load_snapshot(world: &mut World) {
     // legacy on-disk entry for zone 0 (the Void) needs to drop on
     // restore rather than re-poison the runtime.
     let none_zones: std::collections::HashSet<i32> = {
-        let mut q = world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
+        let mut q =
+            world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
         q.iter(world)
             .filter(|(_, c)| matches!(c.0, Climate::None))
             .map(|(wk, _)| wk.zone)

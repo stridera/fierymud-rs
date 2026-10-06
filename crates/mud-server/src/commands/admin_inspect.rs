@@ -15,9 +15,9 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{
-    AdminAuditLog, Category, Command, Connection, DbPool, Help, cap_sentence_start,
-    direction_name, direction_rank, drain_lua_outbox, find_actor_in_room, find_in_room, matches,
-    name_of, name_or, send_to,
+    AdminAuditLog, Category, Command, Connection, DbPool, Help, cap_sentence_start, direction_name,
+    direction_rank, drain_lua_outbox, find_actor_in_room, find_in_room, matches, name_of, name_or,
+    send_to,
 };
 
 inventory::submit! {
@@ -474,7 +474,6 @@ inventory::submit! {
     }
 }
 
-
 // ---- handler bodies ----
 
 pub(crate) fn cmd_lua(world: &mut World, player: Entity, args: &str) {
@@ -516,10 +515,7 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
     // delegate to tstat so builders can poke a trigger by id
     // without remembering a separate command.
     let parts: Vec<&str> = arg.split_whitespace().collect();
-    if parts.len() == 2
-        && parts[0].parse::<i32>().is_ok()
-        && parts[1].parse::<i32>().is_ok()
-    {
+    if parts.len() == 2 && parts[0].parse::<i32>().is_ok() && parts[1].parse::<i32>().is_ok() {
         cmd_tstat(world, player, arg);
         return;
     }
@@ -527,10 +523,13 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
     // `triggers full [<name>|here]` — same listing as the default,
     // but also dumps the trigger body inline so the builder doesn't
     // have to chase down (zone, id) → tstat for each one.
-    let (verbose, body_arg) = if let Some(rest) = arg
-        .strip_prefix("full ")
-        .or_else(|| if arg.eq_ignore_ascii_case("full") { Some("") } else { None })
-    {
+    let (verbose, body_arg) = if let Some(rest) = arg.strip_prefix("full ").or_else(|| {
+        if arg.eq_ignore_ascii_case("full") {
+            Some("")
+        } else {
+            None
+        }
+    }) {
         (true, rest.trim())
     } else {
         (false, arg)
@@ -603,7 +602,9 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
         if at.0.is_empty() {
             continue;
         }
-        let label = world.get::<Named>(e).map_or("(unnamed)", |n| n.name.as_str());
+        let label = world
+            .get::<Named>(e)
+            .map_or("(unnamed)", |n| n.name.as_str());
         let kind = if e == room {
             "room"
         } else if world.get::<Mob>(e).is_some() {
@@ -654,39 +655,49 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        send_to(world, player, "Usage: firetrig [<zone>] <id> [<keyword>]\r\n");
+        send_to(
+            world,
+            player,
+            "Usage: firetrig [<zone>] <id> [<keyword>]\r\n",
+        );
         return;
     }
     // Disambiguate `firetrig <zone> <id> [actor]` from
     // `firetrig <id> [actor]`. If the first two tokens are both
     // ints, treat as zone+id; otherwise treat the first as id and
     // use the current zone, leaving the rest as actor keyword.
-    let (zone, id, actor_start) =
-        if parts.len() >= 2
-            && let (Ok(z), Ok(i)) =
-                (parts[0].parse::<i32>(), parts[1].parse::<i32>())
-        {
-            (z, i, 2)
-        } else if let Ok(i) = parts[0].parse::<i32>() {
-            let Some(z) = world
-                .get::<Located>(player)
-                .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone))
-            else {
-                send_to(world, player, "Can't resolve current zone.\r\n");
-                return;
-            };
-            (z, i, 1)
-        } else {
-            send_to(world, player, "Usage: firetrig [<zone>] <id> [<keyword>]\r\n");
+    let (zone, id, actor_start) = if parts.len() >= 2
+        && let (Ok(z), Ok(i)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+    {
+        (z, i, 2)
+    } else if let Ok(i) = parts[0].parse::<i32>() {
+        let Some(z) = world
+            .get::<Located>(player)
+            .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone))
+        else {
+            send_to(world, player, "Can't resolve current zone.\r\n");
             return;
         };
+        (z, i, 1)
+    } else {
+        send_to(
+            world,
+            player,
+            "Usage: firetrig [<zone>] <id> [<keyword>]\r\n",
+        );
+        return;
+    };
     let body = world
         .resource::<TriggerCatalog>()
         .by_key
         .get(&(zone, id))
         .map(|d| d.commands.clone());
     let Some(code) = body else {
-        send_to(world, player, format!("No trigger ({zone}, {id}) in catalog.\r\n"));
+        send_to(
+            world,
+            player,
+            format!("No trigger ({zone}, {id}) in catalog.\r\n"),
+        );
         return;
     };
 
@@ -740,8 +751,8 @@ fn resolve_var_target(world: &mut World, player: Entity, arg: &str) -> Option<En
     if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
         return Some(player);
     }
-    if let Some(e) = find_in_room(world, arg, room)
-        .or_else(|| find_actor_in_room(world, arg, room, player))
+    if let Some(e) =
+        find_in_room(world, arg, room).or_else(|| find_actor_in_room(world, arg, room, player))
     {
         return Some(e);
     }
@@ -753,11 +764,7 @@ pub(crate) fn cmd_varset(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     let mut parts = trimmed.splitn(3, char::is_whitespace);
     let Some(target_word) = parts.next().filter(|s| !s.is_empty()) else {
-        send_to(
-            world,
-            player,
-            "Usage: varset <target> <key> <value...>\r\n",
-        );
+        send_to(world, player, "Usage: varset <target> <key> <value...>\r\n");
         return;
     };
     let Some(key) = parts.next().filter(|s| !s.is_empty()) else {
@@ -793,17 +800,16 @@ pub(crate) fn cmd_varlist(world: &mut World, player: Entity, args: &str) {
     let target_name = name_of(world, target);
     let entries: Vec<(String, String)> = world
         .get::<mud_world::ScriptVars>(target)
-        .map(|v| {
-            v.0.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        })
+        .map(|v| v.0.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
     if entries.is_empty() {
         send_to(
             world,
             player,
-            format!("{} has no script vars.\r\n", cap_sentence_start(&target_name)),
+            format!(
+                "{} has no script vars.\r\n",
+                cap_sentence_start(&target_name)
+            ),
         );
         return;
     }
@@ -1009,20 +1015,14 @@ pub(crate) fn cmd_trighistory(world: &mut World, player: Entity, args: &str) {
     if entries.is_empty() {
         if let Some(t) = target {
             let n = name_of(world, t);
-            send_to(
-                world,
-                player,
-                format!("No recorded fires for {n}.\r\n"),
-            );
+            send_to(world, player, format!("No recorded fires for {n}.\r\n"));
         } else {
             send_to(world, player, "No trigger fires recorded yet.\r\n");
         }
         return;
     }
-    let header_target = target.map_or_else(
-        || String::from("(all entities)"),
-        |t| name_of(world, t),
-    );
+    let header_target =
+        target.map_or_else(|| String::from("(all entities)"), |t| name_of(world, t));
     let mut out = format!(
         "\r\n<b:cyan>Last {} trigger fire(s) for {header_target}:</>\r\n",
         entries.len(),
@@ -1153,11 +1153,7 @@ pub(crate) fn cmd_zstat(world: &mut World, player: Entity, args: &str) {
 /// zone. Names match against `name` first, then keywords —
 /// case-insensitive substring. Sends an error and returns `None`
 /// when the lookup fails.
-fn resolve_mob_target(
-    world: &mut World,
-    player: Entity,
-    args: &str,
-) -> Option<(i32, i32)> {
+fn resolve_mob_target(world: &mut World, player: Entity, args: &str) -> Option<(i32, i32)> {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
         send_to(world, player, "Usage: <zone> <id> | <id> | <name>\r\n");
@@ -1188,7 +1184,9 @@ fn resolve_mob_target(
         .iter()
         .find(|(_, p)| {
             p.name.to_ascii_lowercase().contains(&needle)
-                || p.keywords.iter().any(|k| k.to_ascii_lowercase().contains(&needle))
+                || p.keywords
+                    .iter()
+                    .any(|k| k.to_ascii_lowercase().contains(&needle))
         })
         .map(|(k, _)| *k);
     if hit.is_none() {
@@ -1201,11 +1199,7 @@ fn resolve_mob_target(
     hit
 }
 
-fn resolve_object_target(
-    world: &mut World,
-    player: Entity,
-    args: &str,
-) -> Option<(i32, i32)> {
+fn resolve_object_target(world: &mut World, player: Entity, args: &str) -> Option<(i32, i32)> {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
         send_to(world, player, "Usage: <zone> <id> | <id> | <name>\r\n");
@@ -1235,7 +1229,9 @@ fn resolve_object_target(
         .iter()
         .find(|(_, p)| {
             p.name.to_ascii_lowercase().contains(&needle)
-                || p.keywords.iter().any(|k| k.to_ascii_lowercase().contains(&needle))
+                || p.keywords
+                    .iter()
+                    .any(|k| k.to_ascii_lowercase().contains(&needle))
         })
         .map(|(k, _)| *k);
     if hit.is_none() {
@@ -1302,6 +1298,7 @@ fn resolve_zone_id(world: &mut World, player: Entity, args: &str) -> Option<(i32
     None
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     let Some((zone, id)) = resolve_mob_target(world, player, args) else {
         return;
@@ -1388,7 +1385,10 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     out.push_str(&format!("attack_power:  {}\r\n", p.attack_power));
     out.push_str(&format!("spell_power:   {}\r\n", p.spell_power));
     out.push_str(&format!("armor_rating:  {}\r\n", p.armor_rating));
-    out.push_str(&format!("dmg_reduction: {}%\r\n", p.damage_reduction_percent));
+    out.push_str(&format!(
+        "dmg_reduction: {}%\r\n",
+        p.damage_reduction_percent
+    ));
     out.push_str(&format!("soak:          {}\r\n", p.soak));
     out.push_str(&format!("hardness:      {}\r\n", p.hardness));
     out.push_str(&format!("ward_pct:      {}%\r\n", p.ward_percent));
@@ -1403,7 +1403,10 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
             world
                 .get_resource::<mud_world::ClassCatalog>()
                 .and_then(|c| c.by_id.get(&id).map(|d| d.plain_name.clone()))
-                .map_or_else(|| format!("id {id} (unknown)"), |name| format!("{name} (id {id})"))
+                .map_or_else(
+                    || format!("id {id} (unknown)"),
+                    |name| format!("{name} (id {id})"),
+                )
         },
     );
     out.push_str(&format!("class:         {class_label}\r\n"));
@@ -1458,12 +1461,17 @@ pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
         p.accuracy,
         p.evasion,
         p.attack_power,
-        p.armor_rating.saturating_add(p.damage_reduction_percent).clamp(0, 100),
+        p.armor_rating
+            .saturating_add(p.damage_reduction_percent)
+            .clamp(0, 100),
     ));
 
     // Class-driven AI: a mob with a class id and without NoClassAi
     // runs the class kit (warrior swings, mage casts) at runtime.
-    let no_class_ai = p.behaviors.iter().any(|b| matches!(b, MobBehavior::NoClassAi));
+    let no_class_ai = p
+        .behaviors
+        .iter()
+        .any(|b| matches!(b, MobBehavior::NoClassAi));
     let class_label = p.class_id.and_then(|cid| {
         world
             .get_resource::<mud_world::ClassCatalog>()
@@ -1494,11 +1502,7 @@ pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
     // dedicated interactions; surface them so the brief is
     // complete for "what does this mob do?" questions.
     if !p.professions.is_empty() {
-        let labels: Vec<String> = p
-            .professions
-            .iter()
-            .map(|pr| format!("{pr:?}"))
-            .collect();
+        let labels: Vec<String> = p.professions.iter().map(|pr| format!("{pr:?}")).collect();
         out.push_str(&format!("Service role:  {}\r\n", labels.join(", ")));
     }
 
@@ -1516,7 +1520,10 @@ pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
     // Triggers override or layer on top of the inferred behavior.
     // Note: NoScript flag suppresses dispatch, so flag that
     // explicitly when both are set.
-    let no_script = p.behaviors.iter().any(|b| matches!(b, MobBehavior::NoScript));
+    let no_script = p
+        .behaviors
+        .iter()
+        .any(|b| matches!(b, MobBehavior::NoScript));
     match (trig_count, no_script) {
         (0, _) => out.push_str("Triggers:      <none> — behavior is purely from the flags above.\r\n"),
         (n, false) => out.push_str(&format!(
@@ -1540,7 +1547,11 @@ pub(crate) fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
         .get(&(zone, id))
         .cloned();
     let Some(p) = proto else {
-        send_to(world, player, format!("No object proto ({zone}, {id}).\r\n"));
+        send_to(
+            world,
+            player,
+            format!("No object proto ({zone}, {id}).\r\n"),
+        );
         return;
     };
     let live = world
@@ -1648,9 +1659,7 @@ pub(crate) fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
     if let Some(mut zc) = world.get_mut::<ZoneClimate>(zone_entity) {
         zc.0 = climate;
     } else {
-        world
-            .entity_mut(zone_entity)
-            .insert(ZoneClimate(climate));
+        world.entity_mut(zone_entity).insert(ZoneClimate(climate));
     }
     let zone_name = name_of(world, zone_entity);
     send_to(
@@ -1665,12 +1674,24 @@ pub(crate) fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
 /// the match arms below.
 const SET_FIELDS: &[(&str, &[&str], &str)] = &[
     ("level", &[], "Profile.level (clamped >= 1)"),
-    ("xp", &["exp", "experience"], "Profile.experience (clamped >= 0)"),
+    (
+        "xp",
+        &["exp", "experience"],
+        "Profile.experience (clamped >= 0)",
+    ),
     ("hp", &[], "Health.hp (clamped 0..=max)"),
     ("maxhp", &[], "Health.max (current hp pinned to new max)"),
     ("stamina", &["stam"], "Stamina.current (clamped 0..=max)"),
-    ("maxstamina", &["maxstam"], "Stamina.max (current stamina pinned)"),
-    ("gold", &["copper", "wealth"], "Wealth in copper (clamped >= 0)"),
+    (
+        "maxstamina",
+        &["maxstam"],
+        "Stamina.max (current stamina pinned)",
+    ),
+    (
+        "gold",
+        &["copper", "wealth"],
+        "Wealth in copper (clamped >= 0)",
+    ),
     ("alignment", &["align"], "CombatStats.alignment (signed)"),
 ];
 
@@ -1680,7 +1701,11 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     if trimmed.eq_ignore_ascii_case("fields") || trimmed.eq_ignore_ascii_case("list") {
         let mut out = String::from("\r\n<b:cyan>Writable fields for `set`:</>\r\n");
-        let widest_canonical = SET_FIELDS.iter().map(|(c, _, _)| c.len()).max().unwrap_or(0);
+        let widest_canonical = SET_FIELDS
+            .iter()
+            .map(|(c, _, _)| c.len())
+            .max()
+            .unwrap_or(0);
         for (canonical, aliases, desc) in SET_FIELDS {
             let alias_str = if aliases.is_empty() {
                 String::new()
@@ -1691,7 +1716,9 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
                 "  <cyan>{canonical:<widest_canonical$}</>{alias_str}  <dim>—</> {desc}\r\n",
             ));
         }
-        out.push_str("\r\n  <dim>Pair with `stat <player>` for the read-only component dump.</>\r\n");
+        out.push_str(
+            "\r\n  <dim>Pair with `stat <player>` for the read-only component dump.</>\r\n",
+        );
         crate::commands::send_rendered(world, player, &out);
         return;
     }
@@ -1743,28 +1770,24 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
             .get_mut::<Health>(target)
             .map(|mut h| h.hp = value_i32.max(0).min(h.max))
             .is_some(),
-        "maxhp" => {
-            world
-                .get_mut::<Health>(target)
-                .map(|mut h| {
-                    h.max = value_i32.max(1);
-                    h.hp = h.hp.min(h.max);
-                })
-                .is_some()
-        }
+        "maxhp" => world
+            .get_mut::<Health>(target)
+            .map(|mut h| {
+                h.max = value_i32.max(1);
+                h.hp = h.hp.min(h.max);
+            })
+            .is_some(),
         "stamina" | "stam" => world
             .get_mut::<Stamina>(target)
             .map(|mut s| s.current = value_i32.max(0).min(s.max))
             .is_some(),
-        "maxstamina" | "maxstam" => {
-            world
-                .get_mut::<Stamina>(target)
-                .map(|mut s| {
-                    s.max = value_i32.max(1);
-                    s.current = s.current.min(s.max);
-                })
-                .is_some()
-        }
+        "maxstamina" | "maxstam" => world
+            .get_mut::<Stamina>(target)
+            .map(|mut s| {
+                s.max = value_i32.max(1);
+                s.current = s.current.min(s.max);
+            })
+            .is_some(),
         "gold" | "copper" | "wealth" => {
             if let Some(mut w) = world.get_mut::<Wealth>(target) {
                 w.0 = value_i64.max(0);
@@ -1820,7 +1843,9 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
             out.push_str("  resets    mob/object reset catalog counts\r\n");
             out.push_str("  corpses   active corpses + decay timers + item counts\r\n");
             out.push_str("  audit     recent admin-mutating actions\r\n");
-            out.push_str("  rooms     world room totals + peaceful / light / hidden / extras counts\r\n");
+            out.push_str(
+                "  rooms     world room totals + peaceful / light / hidden / extras counts\r\n",
+            );
         }
         "players" => {
             let mut rows: Vec<(String, String, i32, String)> = {
@@ -1838,9 +1863,7 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
             rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
             out.push_str(&format!("{} player(s) online:\r\n", rows.len()));
             for (name, role, level, room) in &rows {
-                out.push_str(&format!(
-                    "  {name:<24} L{level:>3} {role:<12} @ {room}\r\n"
-                ));
+                out.push_str(&format!("  {name:<24} L{level:>3} {role:<12} @ {room}\r\n"));
             }
         }
         "triggers" => {
@@ -1951,10 +1974,7 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
                     out.push_str("Audit log empty (no admin actions yet).\r\n");
                 }
                 Some(l) => {
-                    out.push_str(&format!(
-                        "Last {} admin action(s):\r\n",
-                        l.entries.len(),
-                    ));
+                    out.push_str(&format!("Last {} admin action(s):\r\n", l.entries.len(),));
                     for e in l.entries.iter().rev().take(40) {
                         let secs_ago = std::time::SystemTime::now()
                             .duration_since(e.at)
@@ -1987,8 +2007,7 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
                     .map(|(corpse, name, decay, room)| {
                         let room_name = name_or(world, room, "(unknown)");
                         let item_count = {
-                            let mut q = world
-                                .query_filtered::<&Located, With<Item>>();
+                            let mut q = world.query_filtered::<&Located, With<Item>>();
                             q.iter(world).filter(|l| l.0 == corpse).count()
                         };
                         (name, decay, room_name, item_count)
@@ -2016,8 +2035,8 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
                 .iter(world)
                 .count();
             let (lit_override, dark_override) = {
-                let mut q = world
-                    .query_filtered::<&mud_world::BaseLightLevel, With<mud_world::Room>>();
+                let mut q =
+                    world.query_filtered::<&mud_world::BaseLightLevel, With<mud_world::Room>>();
                 let mut lit = 0_usize;
                 let mut dark = 0_usize;
                 for level in q.iter(world) {
@@ -2030,8 +2049,7 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
                 (lit, dark)
             };
             let (extras_rooms, extras_entries) = {
-                let mut q = world
-                    .query_filtered::<&mud_world::RoomExtras, With<mud_world::Room>>();
+                let mut q = world.query_filtered::<&mud_world::RoomExtras, With<mud_world::Room>>();
                 let mut rooms_with = 0_usize;
                 let mut total_entries = 0_usize;
                 for extras in q.iter(world) {
@@ -2043,8 +2061,7 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
                 (rooms_with, total_entries)
             };
             let hidden_exits = {
-                let mut q = world
-                    .query_filtered::<&Exits, With<mud_world::Room>>();
+                let mut q = world.query_filtered::<&Exits, With<mud_world::Room>>();
                 let mut count = 0_usize;
                 for exits in q.iter(world) {
                     count += exits.0.values().filter(|ed| ed.is_hidden).count();
@@ -2053,7 +2070,9 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
             };
             out.push_str(&format!("Rooms loaded:        {total}\r\n"));
             out.push_str(&format!("  peaceful:          {peaceful}\r\n"));
-            out.push_str(&format!("  light overrides:   {lit_override} lit / {dark_override} dark\r\n"));
+            out.push_str(&format!(
+                "  light overrides:   {lit_override} lit / {dark_override} dark\r\n"
+            ));
             out.push_str(&format!("  hidden exits:      {hidden_exits}\r\n"));
             out.push_str(&format!(
                 "  extras:            {extras_rooms} rooms / {extras_entries} entries\r\n"
@@ -2113,7 +2132,11 @@ pub(crate) fn cmd_scripterrors(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_trace(world: &mut World, player: Entity, args: &str) {
     use mud_world::ScriptErrorLog;
     let Ok(n) = args.trim().parse::<usize>() else {
-        send_to(world, player, "Usage: trace <N>  (N is the entry number from `scripterrors`)\r\n");
+        send_to(
+            world,
+            player,
+            "Usage: trace <N>  (N is the entry number from `scripterrors`)\r\n",
+        );
         return;
     };
     if n == 0 {
@@ -2132,7 +2155,11 @@ pub(crate) fn cmd_trace(world: &mut World, player: Entity, args: &str) {
         .nth(n - 1)
         .cloned();
     let Some(entry) = entry else {
-        send_to(world, player, format!("No entry #{n} in the error log.\r\n"));
+        send_to(
+            world,
+            player,
+            format!("No entry #{n} in the error log.\r\n"),
+        );
         return;
     };
     let secs_ago = std::time::SystemTime::now()
@@ -2167,6 +2194,7 @@ pub(crate) fn cmd_trace(world: &mut World, player: Entity, args: &str) {
     }
     crate::commands::send_rendered(world, player, &out);
 }
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
     // `syslog watch [warn|error|off]` — subscribe / unsubscribe path.
     // Routed before the count/filter parser so a leading `watch` token
@@ -2219,9 +2247,7 @@ pub(crate) fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
                 send_to(
                     world,
                     player,
-                    format!(
-                        "Unknown level '{other}'. Use `warn`, `error`, or `off`.\r\n",
-                    ),
+                    format!("Unknown level '{other}'. Use `warn`, `error`, or `off`.\r\n",),
                 );
             }
         }
@@ -2242,7 +2268,9 @@ pub(crate) fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
     }
 
     let matches = |e: &crate::syslog::SyslogEntry| -> bool {
-        let Some(f) = filter.as_deref() else { return true };
+        let Some(f) = filter.as_deref() else {
+            return true;
+        };
         e.level.as_str().eq_ignore_ascii_case(f)
             || e.target.to_ascii_uppercase().contains(f)
             || e.message.to_ascii_uppercase().contains(f)
@@ -2323,13 +2351,8 @@ pub(crate) fn cmd_astat(world: &mut World, player: Entity, args: &str) {
         // description text (G2.7 — a player who can't tell what
         // `webbed` does should see "Creates sticky webs that
         // immobilize..." right under the affect line).
-        let ability = ability_id.and_then(|id| {
-            catalog
-                .by_name
-                .values()
-                .find(|d| d.id == id)
-                .cloned()
-        });
+        let ability =
+            ability_id.and_then(|id| catalog.by_name.values().find(|d| d.id == id).cloned());
         let from_str = ability
             .as_ref()
             .map(|d| format!(" from {}", d.name))
@@ -2354,7 +2377,11 @@ pub(crate) fn cmd_sstat(world: &mut World, player: Entity, args: &str) {
     let Some((zone, id)) = resolve_zone_id(world, player, args) else {
         return;
     };
-    let shop = world.resource::<ShopCatalog>().by_key.get(&(zone, id)).cloned();
+    let shop = world
+        .resource::<ShopCatalog>()
+        .by_key
+        .get(&(zone, id))
+        .cloned();
     let Some(s) = shop else {
         send_to(world, player, format!("No shop ({zone}, {id}).\r\n"));
         return;
@@ -2520,7 +2547,10 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
         if extras.entries.is_empty() {
             out.push_str("extras:        <none>\r\n");
         } else {
-            out.push_str(&format!("extras:        {} entries\r\n", extras.entries.len()));
+            out.push_str(&format!(
+                "extras:        {} entries\r\n",
+                extras.entries.len()
+            ));
             for (kws, _) in &extras.entries {
                 out.push_str(&format!("               keywords: {}\r\n", kws.join(", ")));
             }
@@ -2609,7 +2639,14 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
         ), With<Item>>()
         .iter(world)
         .filter(|(_, l, _, _, _)| l.0 == room)
-        .map(|(e, _, n, wk, fr)| (e, n.name.clone(), wk.map(|w| (w.zone, w.id)), fr.map(|f| f.0)))
+        .map(|(e, _, n, wk, fr)| {
+            (
+                e,
+                n.name.clone(),
+                wk.map(|w| (w.zone, w.id)),
+                fr.map(|f| f.0),
+            )
+        })
         .collect();
     items.sort_by(|a, b| a.1.cmp(&b.1));
     out.push_str(&format!(
@@ -2628,7 +2665,9 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
     for (e, name, wk, reset_id) in &items {
         let key_str = wk.map_or(String::new(), |(z, i)| format!("  ({z}, {i})"));
         let reset_str = reset_id.map_or(String::new(), |r| format!("  reset={r}"));
-        out.push_str(&format!("  item:        {e:?}  {name}{key_str}{reset_str}\r\n"));
+        out.push_str(&format!(
+            "  item:        {e:?}  {name}{key_str}{reset_str}\r\n"
+        ));
     }
     // EffectInstances applied to this room (environmental auras).
     let effects: Vec<(String, i32)> = {
@@ -2660,33 +2699,32 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         cmd_rstat(world, player, &rest);
         return;
     }
-    let target = if arg.is_empty() || arg.eq_ignore_ascii_case("me")
-        || arg.eq_ignore_ascii_case("self")
-    {
-        player
-    } else {
-        let Some(located) = world.get::<Located>(player).copied() else {
-            send_to(world, player, "You are nowhere.\r\n");
-            return;
+    let target =
+        if arg.is_empty() || arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+            player
+        } else {
+            let Some(located) = world.get::<Located>(player).copied() else {
+                send_to(world, player, "You are nowhere.\r\n");
+                return;
+            };
+            // Try actor (mob/player) first, then item (room or carried).
+            let needle = arg.to_ascii_lowercase();
+            let actor = find_actor_in_room(world, arg, located.0, player);
+            let item = actor.or_else(|| {
+                let mut q = world
+                    .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+                q.iter(world)
+                    .find(|(_, l, n, kw)| {
+                        (l.0 == located.0 || l.0 == player) && matches(&needle, n, *kw)
+                    })
+                    .map(|(e, _, _, _)| e)
+            });
+            let Some(found) = item else {
+                send_to(world, player, format!("No '{arg}' here.\r\n"));
+                return;
+            };
+            found
         };
-        // Try actor (mob/player) first, then item (room or carried).
-        let needle = arg.to_ascii_lowercase();
-        let actor = find_actor_in_room(world, arg, located.0, player);
-        let item = actor.or_else(|| {
-            let mut q = world
-                .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-            q.iter(world)
-                .find(|(_, l, n, kw)| {
-                    (l.0 == located.0 || l.0 == player) && matches(&needle, n, *kw)
-                })
-                .map(|(e, _, _, _)| e)
-        });
-        let Some(found) = item else {
-            send_to(world, player, format!("No '{arg}' here.\r\n"));
-            return;
-        };
-        found
-    };
 
     let mut out = String::from("\r\n");
     out.push_str(&format!("entity:        {target:?}\r\n"));
@@ -2734,7 +2772,9 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             {
                 out.push_str(&format!(
                     "proto:         weight {:.1}, level {}, type {}\r\n",
-                    proto.weight, proto.level, proto.r#type.label(),
+                    proto.weight,
+                    proto.level,
+                    proto.r#type.label(),
                 ));
             }
             // Bound abilities (scrolls / wands / staves).
@@ -2830,10 +2870,8 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             match mud_db::characters::load_staff_notes(&pool, &cid).await {
                 Ok(Some(notes)) if !notes.trim().is_empty() => {
                     let _ = out_chan.try_send(
-                        format!(
-                            "\r\n=== Staff notes for {target_name_owned} ===\r\n{notes}\r\n",
-                        )
-                        .into_bytes(),
+                        format!("\r\n=== Staff notes for {target_name_owned} ===\r\n{notes}\r\n",)
+                            .into_bytes(),
                     );
                 }
                 Ok(_) => {}
@@ -3190,11 +3228,7 @@ pub(crate) fn cmd_snum(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let lc = needle.to_ascii_lowercase();
-    match world
-        .resource::<AbilityCatalog>()
-        .by_name
-        .get(&lc)
-    {
+    match world.resource::<AbilityCatalog>().by_name.get(&lc) {
         Some(d) => {
             crate::commands::send_rendered(
                 world,
@@ -3231,11 +3265,7 @@ pub(crate) fn cmd_ssearch(world: &mut World, player: Entity, args: &str) {
         .collect();
     hits.sort_by(|a, b| a.1.cmp(&b.1));
     if hits.is_empty() {
-        send_to(
-            world,
-            player,
-            format!("No abilities match '{needle}'.\r\n"),
-        );
+        send_to(world, player, format!("No abilities match '{needle}'.\r\n"));
         return;
     }
     let total = hits.len();
@@ -3245,9 +3275,7 @@ pub(crate) fn cmd_ssearch(world: &mut World, player: Entity, args: &str) {
         if total == 1 { "y" } else { "ies" },
     );
     for (id, name, kind) in hits.iter().take(SEARCH_RESULT_LIMIT) {
-        out.push_str(&format!(
-            "  <dim>[{id:>4}]</> {name}  <dim>({kind})</>\r\n",
-        ));
+        out.push_str(&format!("  <dim>[{id:>4}]</> {name}  <dim>({kind})</>\r\n",));
     }
     if total > SEARCH_RESULT_LIMIT {
         out.push_str(&format!(
@@ -3359,7 +3387,9 @@ pub(crate) fn cmd_vitem(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("Unknown object type '{needle}'. Run with no args for the list of valid kinds.\r\n"),
+            format!(
+                "Unknown object type '{needle}'. Run with no args for the list of valid kinds.\r\n"
+            ),
         );
         return;
     };
@@ -3408,7 +3438,9 @@ pub(crate) fn cmd_vwear(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_zlist(world: &mut World, player: Entity, _args: &str) {
     let mut rows: Vec<(i32, String)> = {
         let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Zone>>();
-        q.iter(world).map(|(k, n)| (k.zone, n.name.clone())).collect()
+        q.iter(world)
+            .map(|(k, n)| (k.zone, n.name.clone()))
+            .collect()
     };
     rows.sort_by_key(|(id, _)| *id);
     if rows.is_empty() {
@@ -3432,10 +3464,8 @@ pub(crate) fn cmd_znum(world: &mut World, player: Entity, args: &str) {
         let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Zone>>();
         q.iter(world)
             .find(|(_, n)| {
-                let plain = crate::commands::render_color_tags(
-                    &n.name,
-                    crate::commands::ColorMode::Strip,
-                );
+                let plain =
+                    crate::commands::render_color_tags(&n.name, crate::commands::ColorMode::Strip);
                 plain.eq_ignore_ascii_case(needle)
             })
             .map(|(k, n)| (k.zone, n.name.clone()))
@@ -3467,10 +3497,8 @@ pub(crate) fn cmd_zsearch(world: &mut World, player: Entity, args: &str) {
         let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Zone>>();
         q.iter(world)
             .filter(|(_, n)| {
-                let plain = crate::commands::render_color_tags(
-                    &n.name,
-                    crate::commands::ColorMode::Strip,
-                );
+                let plain =
+                    crate::commands::render_color_tags(&n.name, crate::commands::ColorMode::Strip);
                 plain.to_ascii_lowercase().contains(&needle_lc)
             })
             .map(|(k, n)| (k.zone, n.name.clone()))
@@ -3478,18 +3506,12 @@ pub(crate) fn cmd_zsearch(world: &mut World, player: Entity, args: &str) {
     };
     hits.sort_by_key(|(id, _)| *id);
     if hits.is_empty() {
-        send_to(
-            world,
-            player,
-            format!("No zones match '{needle}'.\r\n"),
-        );
+        send_to(world, player, format!("No zones match '{needle}'.\r\n"));
         return;
     }
     let total = hits.len();
     let shown = total.min(SEARCH_RESULT_LIMIT);
-    let mut out = format!(
-        "\r\n<b:cyan>{shown} of {total} zone(s) for '{needle}':</>\r\n",
-    );
+    let mut out = format!("\r\n<b:cyan>{shown} of {total} zone(s) for '{needle}':</>\r\n",);
     for (id, name) in hits.iter().take(SEARCH_RESULT_LIMIT) {
         out.push_str(&format!("  <dim>[{id:>3}]</> {name}\r\n"));
     }
@@ -3643,9 +3665,7 @@ fn render_search_results(
     let total = hits.len();
     let shown = total.min(SEARCH_RESULT_LIMIT);
     let plural = if total == 1 { "match" } else { "matches" };
-    let mut out = format!(
-        "\r\n<b:cyan>{shown} of {total} {kind} {plural} for '{needle}':</>\r\n",
-    );
+    let mut out = format!("\r\n<b:cyan>{shown} of {total} {kind} {plural} for '{needle}':</>\r\n",);
     for ((z, id), name) in hits.iter().take(SEARCH_RESULT_LIMIT) {
         out.push_str(&format!("  <dim>({z:>3}, {id:>4})</> {name}\r\n"));
     }

@@ -58,8 +58,7 @@ pub(crate) struct DialogueCatalog {
     /// `tree_id` → id of the root node.
     pub root_node_by_tree: HashMap<i32, i32>,
     /// Per-objective dialogue binding.
-    pub by_objective:
-        HashMap<(i32, i32, i32, i32), mud_db::dialogue::QuestDialogueRow>,
+    pub by_objective: HashMap<(i32, i32, i32, i32), mud_db::dialogue::QuestDialogueRow>,
 }
 
 impl DialogueCatalog {
@@ -104,19 +103,11 @@ pub(crate) struct ActiveQuestDialogues {
 /// semantic applies; invalid patterns log a warning and fall through
 /// to CONTAINS for that keyword (a typo in the regex shouldn't be
 /// silently no-match-everything for the player).
-pub(crate) fn matches(
-    utterance: &str,
-    match_type: &str,
-    keywords: &[String],
-) -> bool {
+pub(crate) fn matches(utterance: &str, match_type: &str, keywords: &[String]) -> bool {
     let u = utterance.to_ascii_lowercase();
     match match_type {
-        "EXACT" => keywords
-            .iter()
-            .any(|k| u == k.to_ascii_lowercase()),
-        "CONTAINS" => keywords
-            .iter()
-            .any(|k| u.contains(&k.to_ascii_lowercase())),
+        "EXACT" => keywords.iter().any(|k| u == k.to_ascii_lowercase()),
+        "CONTAINS" => keywords.iter().any(|k| u.contains(&k.to_ascii_lowercase())),
         "STARTS_WITH" => keywords
             .iter()
             .any(|k| u.starts_with(&k.to_ascii_lowercase())),
@@ -127,7 +118,7 @@ pub(crate) fn matches(
             let tokens: Vec<String> = u.split_whitespace().map(str::to_string).collect();
             keywords.iter().any(|k| {
                 let lk = k.to_ascii_lowercase();
-                tokens.iter().any(|t| *t == lk)
+                tokens.contains(&lk)
             })
         }
         "REGEX" => keywords.iter().any(|k| {
@@ -187,9 +178,7 @@ pub(crate) fn try_advance_active_tree(
                 if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
                     a.by_player.remove(&player_bits);
                 }
-            } else if let Some(mut a) =
-                world.get_resource_mut::<ActiveQuestDialogues>()
-            {
+            } else if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
                 a.by_player.insert(player_bits, (tree_id, next.id));
             }
             return Some(next.npc_message.clone());
@@ -243,14 +232,10 @@ pub(crate) fn try_advance_dialogue(
                     && let Some(next) = catalog.node(tree_id, next_id)
                 {
                     if next.is_terminal {
-                        if let Some(mut a) =
-                            world.get_resource_mut::<ActiveQuestDialogues>()
-                        {
+                        if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
                             a.by_player.remove(&player_bits);
                         }
-                    } else if let Some(mut a) =
-                        world.get_resource_mut::<ActiveQuestDialogues>()
-                    {
+                    } else if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
                         a.by_player.insert(player_bits, (tree_id, next.id));
                     }
                     return Some(next.npc_message.clone());
@@ -300,18 +285,23 @@ pub(crate) async fn load_catalog(
     // Index responses by node_id.
     let mut resp_by_node: HashMap<i32, Vec<DialogueResponse>> = HashMap::new();
     for r in responses {
-        resp_by_node.entry(r.node_id).or_default().push(DialogueResponse {
-            next_node_id: r.next_node_id,
-            match_type: r.match_type,
-            match_keywords: r.match_keywords,
-            display_hint: r.display_hint,
-        });
+        resp_by_node
+            .entry(r.node_id)
+            .or_default()
+            .push(DialogueResponse {
+                next_node_id: r.next_node_id,
+                match_type: r.match_type,
+                match_keywords: r.match_keywords,
+                display_hint: r.display_hint,
+            });
     }
     // Group nodes by tree.
     for node in nodes {
         let resps = resp_by_node.remove(&node.id).unwrap_or_default();
         if node.is_root {
-            catalog.root_node_by_tree.insert(node.dialogue_tree_id, node.id);
+            catalog
+                .root_node_by_tree
+                .insert(node.dialogue_tree_id, node.id);
         }
         catalog
             .nodes_by_tree
@@ -330,10 +320,9 @@ pub(crate) async fn load_catalog(
     let _ = trees;
 
     for d in dialogues {
-        catalog.by_objective.insert(
-            (d.quest_zone_id, d.quest_id, d.phase_id, d.objective_id),
-            d,
-        );
+        catalog
+            .by_objective
+            .insert((d.quest_zone_id, d.quest_id, d.phase_id, d.objective_id), d);
     }
     world.insert_resource(catalog);
     Ok(())
@@ -357,7 +346,11 @@ mod tests {
 
     #[test]
     fn matches_contains_substring() {
-        assert!(matches("tell me about paladin oaths", "CONTAINS", &kw(&["paladin"])));
+        assert!(matches(
+            "tell me about paladin oaths",
+            "CONTAINS",
+            &kw(&["paladin"])
+        ));
         assert!(!matches("druid lore", "CONTAINS", &kw(&["paladin"])));
         // Case-insensitive too.
         assert!(matches("THE Paladin Code", "CONTAINS", &kw(&["paladin"])));
@@ -365,7 +358,11 @@ mod tests {
 
     #[test]
     fn matches_starts_with() {
-        assert!(matches("paladin tell me more", "STARTS_WITH", &kw(&["paladin"])));
+        assert!(matches(
+            "paladin tell me more",
+            "STARTS_WITH",
+            &kw(&["paladin"])
+        ));
         assert!(!matches("about paladin", "STARTS_WITH", &kw(&["paladin"])));
     }
 
@@ -373,7 +370,11 @@ mod tests {
     fn matches_any_of_tokens() {
         // "yes" is a whole word in the utterance.
         assert!(matches("yes please", "ANY_OF", &kw(&["yes", "no"])));
-        assert!(matches("absolutely no thanks", "ANY_OF", &kw(&["yes", "no"])));
+        assert!(matches(
+            "absolutely no thanks",
+            "ANY_OF",
+            &kw(&["yes", "no"])
+        ));
         // Substring inside another word does NOT count for ANY_OF.
         assert!(!matches("noisy", "ANY_OF", &kw(&["no"])));
     }
@@ -481,6 +482,6 @@ mod tests {
         assert_eq!(a.by_player.get(&123).copied(), Some((1, 5)));
         assert_eq!(a.by_player.get(&456).copied(), Some((2, 7)));
         a.by_player.remove(&123);
-        assert!(a.by_player.get(&123).is_none());
+        assert!(!a.by_player.contains_key(&123));
     }
 }

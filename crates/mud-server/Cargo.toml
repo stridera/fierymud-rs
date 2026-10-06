@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 bcrypt = "0.19.0"
 pwhash = "1.0"
+subtle = "2.6"
 bevy_ecs = "0.18.1"
 chrono = "0.4.44"
 dotenvy = "0.15.7"
@@ -15,6 +16,7 @@ mud-db = { version = "0.1.0", path = "../mud-db" }
 mud-net = { version = "0.1.0", path = "../mud-net" }
 mud-script = { version = "0.1.0", path = "../mud-script" }
 mud-world = { version = "0.1.0", path = "../mud-world" }
+mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
 axum = "0.8"
 inventory = "0.3"
 rand = "0.10.1"

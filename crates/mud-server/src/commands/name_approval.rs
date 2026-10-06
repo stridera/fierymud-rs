@@ -1,6 +1,6 @@
 //! Character name-approval admin commands.
 //!
-//! When the live `social.name_approval_required` GameConfig flag is
+//! When the live `social.name_approval_required` `GameConfig` flag is
 //! ON, fresh characters are created with `Characters.name_approved =
 //! false` and spawn carrying the `NameApprovalPending` marker. The
 //! player can move / look / fight normally; every social command
@@ -225,8 +225,7 @@ async fn cmd_reject_name_async(
     // as `cmd_rename`).
     let online = {
         let mut q = world.query_filtered::<&Named, (With<Player>, With<Online>)>();
-        q.iter(world)
-            .any(|n| n.name.eq_ignore_ascii_case(old_name))
+        q.iter(world).any(|n| n.name.eq_ignore_ascii_case(old_name))
     };
     if online {
         send_to(
@@ -302,9 +301,7 @@ async fn cmd_reject_name_async(
     send_rendered(
         world,
         player,
-        &format!(
-            "Force-renamed <b:cyan>{old_name}</> → <b:cyan>{new_name}</> and approved.\r\n"
-        ),
+        &format!("Force-renamed <b:cyan>{old_name}</> → <b:cyan>{new_name}</> and approved.\r\n"),
     );
     tracing::info!(
         admin = %admin_name,

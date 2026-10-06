@@ -14,17 +14,17 @@ mod idle;
 mod item_decay;
 mod login;
 mod memorize;
-mod regen;
-mod rest;
-mod respawn;
-mod shops;
-mod sleep;
-mod syslog;
-mod wander;
 mod quest_dialogue;
 mod quest_triggers;
 mod quest_vars;
+mod regen;
+mod respawn;
+mod rest;
+mod shops;
+mod sleep;
+mod syslog;
 mod triggers;
+mod wander;
 mod weather;
 
 use std::time::{Duration, Instant};
@@ -54,7 +54,8 @@ pub(crate) struct ServerStart(pub(crate) Instant);
 ///   - Every connected player is treated as Implementor for permission
 ///     checks (``is_staff`` returns true regardless of account role).
 ///   - ``show_dice_for`` returns true regardless of the per-player
-///     SHOW_DICE_ROLLS flag — every swing surfaces its dice tail.
+///     `SHOW_DICE_ROLLS` flag — every swing surfaces its dice tail.
+///
 /// Enabled at boot via env var ``MUD_DEV_MODE=1``; flipped at runtime
 /// via the ``devmode`` admin command. NEVER ship to prod with this on.
 #[derive(Resource, Default)]
@@ -90,7 +91,7 @@ fn mud_clock_tick(tick: Res<TickCount>, mut clock: ResMut<mud_world::MudClock>) 
     // position so a 75-second game hour resolves into 60 minute
     // boundaries (12.5 ticks per game minute averaged). The hour
     // advance below pins this back to 0 at the boundary.
-    let within_hour = (tick.0 % 750) as i64;
+    let within_hour = i64::try_from(tick.0 % 750).unwrap_or(0);
     clock.minute = i32::try_from(within_hour * 60 / 750).unwrap_or(0);
     if !tick.0.is_multiple_of(750) {
         return;
@@ -172,7 +173,9 @@ async fn main() {
     world.insert_resource(mud_script::SpellExecutor(Some(commands::lua_invoke_spell)));
     world.insert_resource(mud_script::ChantExecutor(Some(commands::lua_invoke_chant)));
     world.insert_resource(mud_script::SongExecutor(Some(commands::lua_invoke_song)));
-    world.insert_resource(mud_script::AttackAllExecutor(Some(commands::lua_attack_all)));
+    world.insert_resource(mud_script::AttackAllExecutor(Some(
+        commands::lua_attack_all,
+    )));
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
         error!(error = %e, "world load failed");
@@ -203,7 +206,8 @@ async fn main() {
     // onto its mob. Without this, an L99 mob wielding a +5 sword
     // wouldn't get the +5 hitroll.
     let mob_entities: Vec<bevy_ecs::prelude::Entity> = {
-        let mut q = world.query_filtered::<bevy_ecs::prelude::Entity, bevy_ecs::prelude::With<mud_world::Mob>>();
+        let mut q = world
+            .query_filtered::<bevy_ecs::prelude::Entity, bevy_ecs::prelude::With<mud_world::Mob>>();
         q.iter(&world).collect()
     };
     for mob in mob_entities {
@@ -310,12 +314,23 @@ async fn main() {
             usize::MAX
         }
     };
+    // Per-source-IP open-connection cap so one host can't fill every
+    // slot above. `server.max_connections_per_ip` (default 5); non-
+    // positive means unlimited.
+    let max_per_ip = {
+        let cfg = world.resource::<mud_world::RuntimeConfig>();
+        let raw = cfg.get_i32("server", "max_connections_per_ip", 5);
+        if raw > 0 {
+            usize::try_from(raw).unwrap_or(usize::MAX)
+        } else {
+            usize::MAX
+        }
+    };
+    let net_limits = mud_net::Limits::new(max_connections, max_per_ip);
     let listen_addr_for_task = listen_addr.clone();
     let inbound_tx_plain = inbound_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) =
-            mud_net::serve(&listen_addr_for_task, inbound_tx_plain, max_connections).await
-        {
+        if let Err(e) = mud_net::serve(&listen_addr_for_task, inbound_tx_plain, net_limits).await {
             error!(addr = %listen_addr_for_task, error = %e, "listener stopped");
         }
     });
@@ -324,14 +339,16 @@ async fn main() {
     // TLS_KEY_PATH point at PEM files AND `security.enable_tls` isn't
     // explicitly false. Cert is a chain (server cert first, then
     // intermediates); key is PKCS#8 / RSA / SEC1 PEM.
-    let enable_tls = world
-        .resource::<mud_world::RuntimeConfig>()
-        .get_bool("security", "enable_tls", true);
+    let enable_tls =
+        world
+            .resource::<mud_world::RuntimeConfig>()
+            .get_bool("security", "enable_tls", true);
     if !enable_tls {
         info!("TLS listener disabled by `security.enable_tls=false`");
-    } else if let (Ok(cert_path), Ok(key_path)) =
-        (std::env::var("TLS_CERT_PATH"), std::env::var("TLS_KEY_PATH"))
-    {
+    } else if let (Ok(cert_path), Ok(key_path)) = (
+        std::env::var("TLS_CERT_PATH"),
+        std::env::var("TLS_KEY_PATH"),
+    ) {
         // TLS port: same precedence chain as plain telnet.
         let tls_addr = {
             let cfg = world.resource::<mud_world::RuntimeConfig>();
@@ -339,8 +356,7 @@ async fn main() {
             if port > 0 {
                 format!("0.0.0.0:{port}")
             } else {
-                std::env::var("MUD_TLS_LISTEN_ADDR")
-                    .unwrap_or_else(|_| "0.0.0.0:4443".into())
+                std::env::var("MUD_TLS_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4443".into())
             }
         };
         // Required by rustls 0.23+: install a default crypto provider
@@ -357,7 +373,7 @@ async fn main() {
                 &cert_path_for_task,
                 &key_path_for_task,
                 inbound_tx_tls,
-                max_connections,
+                net_limits,
             )
             .await
             {
@@ -399,6 +415,11 @@ async fn main() {
     )));
 
     let mut router = ConnRouter::new();
+    // Completion channel for off-thread password hashing / verification
+    // (bcrypt runs on the blocking pool; see login.rs `AuthDone`).
+    let mut auth_rx = router
+        .take_auth_rx()
+        .expect("auth receiver is taken exactly once");
     let mut schedule = Schedule::default();
     // drain_admin_requests is intentionally OUTSIDE the schedule so
     // pause/unpause/tick admin requests can still flow through while
@@ -447,6 +468,7 @@ async fn main() {
     );
 
     let mut ticker = interval(Duration::from_millis(1000 / TICK_HZ));
+    let mut last_auth_sync = std::time::Instant::now();
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     info!(
@@ -465,6 +487,15 @@ async fn main() {
                 // frozen. The drain consumes any forced-tick budget
                 // posted by /api/admin/world/tick.
                 admin::drain_admin_requests(&mut world);
+                // Tell mud-net which connections have finished login
+                // so they leave the pre-login timeout. Wall-clock
+                // paced (not tick-paced) so a paused world still
+                // syncs; once a second is far inside the 120s
+                // pre-login idle window.
+                if last_auth_sync.elapsed() >= Duration::from_secs(1) {
+                    last_auth_sync = std::time::Instant::now();
+                    idle::sync_authenticated(&mut world, &router);
+                }
                 let run_world = {
                     let mut p = world.resource_mut::<admin::WorldPause>();
                     if !p.paused {
@@ -552,26 +583,7 @@ async fn main() {
                     // so the kick notice lands ahead of the prompt
                     // refresh and the disconnect path runs cleanly
                     // through the canonical on_disconnect save flow.
-                    let pending: Vec<Entity> = {
-                        let mut q = world
-                            .query_filtered::<Entity, With<idle::IdleKickPending>>();
-                        q.iter(&world).collect()
-                    };
-                    for entity in pending {
-                        if let Some(conn_id) = router.find_conn(entity) {
-                            commands::send_to(
-                                &world,
-                                entity,
-                                "\r\nYou have been idle for too long. Disconnecting.\r\n",
-                            );
-                            router.on_disconnect(&mut world, conn_id, &pool).await;
-                        } else if let Ok(mut e) = world.get_entity_mut(entity) {
-                            // Orphaned marker (e.g. the player despawned
-                            // mid-tick somehow) — drop it so the next
-                            // pass doesn't keep retrying.
-                            e.remove::<idle::IdleKickPending>();
-                        }
-                    }
+                    idle::drain_idle_kicks(&mut world, &mut router, &pool).await;
                 }
                 // Drain real-time syslog WARN+ events to subscribers
                 // before the prompt flush so any pushed lines land
@@ -583,6 +595,16 @@ async fn main() {
                 // prompts for anyone who received output (combat hits,
                 // effect fades, broadcasts, etc.).
                 commands::flush_prompts(&mut world);
+                // Admin `shutdown`: announce the countdown and, once it
+                // expires, leave the loop so the save-everyone path below
+                // runs before the process exits.
+                if commands::shutdown_poll(&mut world) {
+                    info!("admin shutdown requested; leaving tick loop");
+                    break;
+                }
+            }
+            Some(done) = auth_rx.recv() => {
+                router.on_auth_done(done, &pool, &mut world).await;
             }
             msg = inbound_rx.recv() => {
                 let Some(msg) = msg else {
@@ -628,6 +650,9 @@ async fn main() {
     // on `on_disconnect` meant Ctrl-C dropped the process without
     // ever firing the save and players lost progress.
     router.save_all_online(&mut world, &pool).await;
+    // Give connection writer tasks a moment to flush the last
+    // announcements (e.g. the shutdown notice) before the process exits.
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     // Persist weather state so the next boot picks up where we
     // left off instead of snapping back to climate defaults.

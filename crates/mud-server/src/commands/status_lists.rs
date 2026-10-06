@@ -53,10 +53,7 @@ fn cmd_report(world: &mut World, player: Entity, _args: &str) {
     };
     let speaker = name_of(world, player);
     let body = match (hp, stamina) {
-        (Some(h), Some(s)) => format!(
-            "HP {}/{}, stamina {}/{}",
-            h.hp, h.max, s.current, s.max
-        ),
+        (Some(h), Some(s)) => format!("HP {}/{}, stamina {}/{}", h.hp, h.max, s.current, s.max),
         (Some(h), None) => format!("HP {}/{}", h.hp, h.max),
         (None, Some(s)) => format!("stamina {}/{}", s.current, s.max),
         (None, None) => "(no vital stats)".to_string(),

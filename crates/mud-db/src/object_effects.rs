@@ -4,7 +4,7 @@
 //! `wear_location` optionally restricts the grant to a specific slot
 //! (a "ring of haste" only fires when worn on a finger, not when
 //! held). `modifier_data` is free-form per-effect parameters merged
-//! into the spawned EffectInstance.
+//! into the spawned `EffectInstance`.
 
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;

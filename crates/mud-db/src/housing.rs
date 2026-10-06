@@ -255,12 +255,9 @@ pub async fn create_house(
 /// via the FK constraints. Returns rows-affected on the parent
 /// (0 if the house didn't exist).
 pub async fn delete_house(pool: &PgPool, house_id: i32) -> sqlx::Result<u64> {
-    let res = sqlx::query!(
-        r#"DELETE FROM player_houses WHERE id = $1"#,
-        house_id,
-    )
-    .execute(pool)
-    .await?;
+    let res = sqlx::query!(r#"DELETE FROM player_houses WHERE id = $1"#, house_id,)
+        .execute(pool)
+        .await?;
     Ok(res.rows_affected())
 }
 
@@ -373,11 +370,7 @@ pub async fn add_guest(
 
 /// Remove a guest from a house's access list. Returns the number
 /// of rows deleted (0 if the character wasn't on the list).
-pub async fn remove_guest(
-    pool: &PgPool,
-    house_id: i32,
-    character_id: &str,
-) -> sqlx::Result<u64> {
+pub async fn remove_guest(pool: &PgPool, house_id: i32, character_id: &str) -> sqlx::Result<u64> {
     let res = sqlx::query!(
         r#"
         DELETE FROM player_house_guests

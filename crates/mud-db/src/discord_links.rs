@@ -22,10 +22,7 @@ pub struct DiscordLinkRow {
 
 /// Look up the Discord link for `user_id`, or `None` if the user
 /// hasn't linked yet. One link per user (unique on `user_id`).
-pub async fn for_user(
-    pool: &PgPool,
-    user_id: &str,
-) -> sqlx::Result<Option<DiscordLinkRow>> {
+pub async fn for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Option<DiscordLinkRow>> {
     sqlx::query_as!(
         DiscordLinkRow,
         r#"
@@ -115,7 +112,7 @@ pub async fn mark_verified(pool: &PgPool, user_id: &str) -> sqlx::Result<u64> {
 
 /// Reverse lookup — find the link by its Discord-side identifier.
 /// Used by the bot ingress path: an incoming Discord message tags
-/// the discord_id, and we want the linked Muditor user_id.
+/// the `discord_id`, and we want the linked Muditor `user_id`.
 pub async fn for_discord_id(
     pool: &PgPool,
     discord_id: &str,

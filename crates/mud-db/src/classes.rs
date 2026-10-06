@@ -60,3 +60,19 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<ClassRow>> {
     .fetch_all(pool)
     .await
 }
+
+/// Persist a character's new class (used by the `subclass` command).
+pub async fn set_character_class(
+    pool: &PgPool,
+    character_id: &str,
+    class_id: i32,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET class_id = $1 WHERE id = $2"#,
+        class_id,
+        character_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}

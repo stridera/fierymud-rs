@@ -18,7 +18,7 @@ use crate::commands::{
 
 inventory::submit! {
     Command {
-        names: &["gossip", "/"],
+        names: &["gossip", "/", "."],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Communication,
@@ -53,7 +53,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["shout"],
+        names: &["shout", "sh"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Communication,
@@ -246,9 +246,7 @@ fn broadcast_global(
         let line = if t == player {
             format!("{channel_tag}You {verb_self}, \"{message}\"</>\r\n")
         } else {
-            format!(
-                "{channel_tag}{player_name} {verb_other}, \"{message}\"</>\r\n"
-            )
+            format!("{channel_tag}{player_name} {verb_other}, \"{message}\"</>\r\n")
         };
         send_to(world, t, line);
         // GMCP companion frame — listeners see it in their chat
@@ -302,7 +300,14 @@ fn cmd_music(world: &mut World, player: Entity, args: &str) {
 
 fn cmd_shout(world: &mut World, player: Entity, args: &str) {
     broadcast_global(
-        world, player, args, "shout", "shouts", "Shout what?\r\n", "<b:red>", "shout",
+        world,
+        player,
+        args,
+        "shout",
+        "shouts",
+        "Shout what?\r\n",
+        "<b:red>",
+        "shout",
     );
 }
 
@@ -381,9 +386,7 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
         let line = if t == player {
             format!("<b:cyan>[wiznet]</> <b:white>You:</> {message}\r\n")
         } else {
-            format!(
-                "<b:cyan>[wiznet]</> <b:white>{player_name}:</> {message}\r\n"
-            )
+            format!("<b:cyan>[wiznet]</> <b:white>{player_name}:</> {message}\r\n")
         };
         send_to(world, t, line);
         send_comm_channel_text(world, t, "wiznet", &player_name, &gmcp_text);
@@ -427,17 +430,17 @@ fn show_channel_history(
         send_to(world, player, format!("No recent {plural_label}.\r\n"));
         return;
     }
-    let mut out = format!(
-        "\r\n<b:cyan>Last {} {plural_label}:</>\r\n",
-        entries.len(),
-    );
+    let mut out = format!("\r\n<b:cyan>Last {} {plural_label}:</>\r\n", entries.len(),);
     let now = std::time::SystemTime::now();
     // Render oldest-first so the player reads chronologically;
     // recent_on returns reverse-chronological. Reverse our take().
     let mut chrono: Vec<&mud_world::ChannelEntry> = entries.into_iter().collect();
     chrono.reverse();
     for entry in chrono {
-        let secs_ago = now.duration_since(entry.at).map(|d| d.as_secs()).unwrap_or(0);
+        let secs_ago = now
+            .duration_since(entry.at)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         out.push_str(&format!(
             "  <dim>{ago:>4}s ago</>  {channel_tag}{speaker}: \"{body}\"</>\r\n",
             ago = secs_ago,

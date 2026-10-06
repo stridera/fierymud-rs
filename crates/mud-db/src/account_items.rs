@@ -13,7 +13,7 @@
 //!
 //! `custom_data` is the per-instance state worth preserving across
 //! deposit/withdraw. v1 stores a small JSON envelope with the
-//! mutable runtime fields the character_items path also persists:
+//! mutable runtime fields the `character_items` path also persists:
 //! `charges`, `liquid_remaining`, `liquid_type`. Future passes can
 //! extend the shape — `serde_json::Value` keeps that open without a
 //! schema change.

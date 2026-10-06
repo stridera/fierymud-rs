@@ -20,10 +20,7 @@ pub struct RaceAbilityRow {
 }
 
 /// Race-innate abilities for a single race, sorted by ability name.
-pub async fn list_for_race(
-    pool: &PgPool,
-    race: &str,
-) -> sqlx::Result<Vec<RaceAbilityRow>> {
+pub async fn list_for_race(pool: &PgPool, race: &str) -> sqlx::Result<Vec<RaceAbilityRow>> {
     sqlx::query_as!(
         RaceAbilityRow,
         r#"

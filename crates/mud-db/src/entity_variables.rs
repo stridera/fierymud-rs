@@ -1,5 +1,5 @@
 //! Persistent K/V backing for Lua trigger entity variables.
-//! Keyed on (entity_type, zone, id, key). Values are arbitrary JSON.
+//! Keyed on `(entity_type, zone, id, key)`. Values are arbitrary JSON.
 //!
 //! Read path: at world boot we pull every row via `list_all` and hydrate
 //! the in-memory `EntityVariableCache` resource. Spawned mobs / objects /
@@ -234,9 +234,11 @@ mod tests {
             .expect("list2");
         assert_eq!(rows.len(), 1, "upsert must not duplicate");
         assert_eq!(rows[0].value, new_val);
-        assert!(delete(&p, EntityType::Mob, TEST_ZONE, id, "hello")
-            .await
-            .expect("del"));
+        assert!(
+            delete(&p, EntityType::Mob, TEST_ZONE, id, "hello")
+                .await
+                .expect("del")
+        );
         let rows = list_for_entity(&p, EntityType::Mob, TEST_ZONE, id)
             .await
             .expect("list3");

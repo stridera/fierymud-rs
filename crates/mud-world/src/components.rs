@@ -217,7 +217,7 @@ pub struct LifeForceTag(pub mud_db::enums::LifeForce);
 pub struct NaturalAttackType(pub mud_db::enums::DamageType);
 
 /// Identity flags on a mob instance — what the mob IS
-/// (ILLUSION / ANIMATED / PLAYER_PHANTASM / AQUATIC / MOUNT /
+/// (ILLUSION / ANIMATED / `PLAYER_PHANTASM` / AQUATIC / MOUNT /
 /// SUMMONED / PET). Orthogonal to `MobBehaviors` (how the mob
 /// ACTS). Consumed by wander gates (AQUATIC stays in water),
 /// the dispel-illusion path (ILLUSION), and mount management.
@@ -244,7 +244,7 @@ impl MobTraits {
 pub struct MovementModeTag(pub mud_db::enums::MovementMode);
 
 /// Movement-point pool (legacy "move"). Mob's stamina equivalent
-/// for long wanders; restored by regen, drained by wander_tick.
+/// for long wanders; restored by regen, drained by `wander_tick`.
 /// Optional component — mobs whose proto has `move_points == 0`
 /// don't carry one and remain unconstrained (the legacy default).
 #[derive(Component, Debug, Clone, Copy)]
@@ -279,7 +279,7 @@ impl ObjectFlags {
 
 /// Per-instance copy of the proto's `restrictions` list. Each
 /// variant gates one specific command (`drop` / `get` / `sell` /
-/// `locate` / etc.) so a quest item flagged NO_DROP never lands on
+/// `locate` / etc.) so a quest item flagged `NO_DROP` never lands on
 /// the floor by accident. Mirrors `ObjectFlags` in shape; kept
 /// separate so the two attribute kinds can evolve independently.
 #[derive(Component, Debug, Clone, Default)]
@@ -607,7 +607,7 @@ pub struct CombatStats {
     /// legacy `hit_roll` adds 2 here.
     pub accuracy: i32,
     /// Defender's side of the d100 contest. 50 = baseline. Each
-    /// point of dex_bonus adds 5 here.
+    /// point of `dex_bonus` adds 5 here.
     pub evasion: i32,
     /// Physical damage multiplier as additive percent:
     /// `attack_power = 25` adds +25% to weapon damage. Legacy
@@ -763,7 +763,7 @@ pub struct Ghost;
 pub struct Corpse;
 
 /// Companion marker on player corpses (distinct from mob corpses)
-/// so spells like ANIMATE_DEAD can refuse them outright — raising
+/// so spells like `ANIMATE_DEAD` can refuse them outright — raising
 /// a fellow adventurer as your undead servant is a hard no even
 /// for the most committed necromancer. Also useful for the
 /// resurrect path's "yours vs theirs" lookups; today the
@@ -773,7 +773,7 @@ pub struct Corpse;
 pub struct PlayerCorpse;
 
 /// Records the dead actor's level at corpse-spawn time. Read by
-/// ANIMATE_DEAD to scale the spawned skeleton's HP — animating a
+/// `ANIMATE_DEAD` to scale the spawned skeleton's HP — animating a
 /// high-level mob's corpse should yield a beefier undead than
 /// animating a goblin's. Round-tripped through the corpse snapshot
 /// so the level survives a restart. Defaults to 1 on legacy
@@ -866,7 +866,7 @@ pub struct NoSummonRoom;
 pub struct NoTeleportRoom;
 
 /// Marker on rooms with `Room.is_death_trap = true`. Players who
-/// enter are killed immediately on arrival — classic CircleMUD
+/// enter are killed immediately on arrival — classic `CircleMUD`
 /// DT semantics. Staff (Builder+) bypass.
 #[derive(Component, Default, Debug, Clone, Copy)]
 pub struct DeathTrap;
@@ -1150,7 +1150,7 @@ pub struct Camping {
 }
 
 /// Rest / repose: the sticky **Repose** pool, the queued
-/// **RestSource**, and the quality tier. All three round-trip
+/// **`RestSource`**, and the quality tier. All three round-trip
 /// through `Characters.repose` / `Characters.restSource` /
 /// `Characters.restTier`. The component is attached at login (R3)
 /// and mutated by:
@@ -1306,7 +1306,7 @@ pub struct Sanctuary;
 pub struct Haste;
 
 /// Marker on a Room entity: the room is magically lit (ILLUMINATION,
-/// MAGIC_TORCH). `room_is_dark` returns false while the marker is
+/// `MAGIC_TORCH`). `room_is_dark` returns false while the marker is
 /// present; `room_has_light` returns true. Installed by the room-
 /// effect arm of `invoke_ability_with` when an effect's
 /// `params.type` is `"light"`. Removed by `effects_tick` when the
@@ -1316,7 +1316,7 @@ pub struct RoomMagicalLight;
 
 /// Room hazard: leaving or entering the room burns the mover for
 /// `damage_per_move` HP. Installed by the room-effect arm when an
-/// effect's `params.type` is `"burning"` (CIRCLE_OF_FIRE).
+/// effect's `params.type` is `"burning"` (`CIRCLE_OF_FIRE`).
 /// Removed by `effects_tick` when the last backing `"burning"`
 /// instance fades.
 #[derive(Component, Debug, Clone, Copy)]
@@ -1337,7 +1337,7 @@ pub struct RoomMagicalDarkness;
 /// Marker: the bearer's next damage spell lands at +50% amount.
 /// Installed by the HARNESS catchall flag (`empowered` +
 /// `consumeOnCast`); consumed by the damage arm on the next cast
-/// (marker removed + the matching EffectInstance despawned so
+/// (marker removed + the matching `EffectInstance` despawned so
 /// `effects` no longer lists it). `effects_tick` is the
 /// duration-based fallback removal — for the rare case where the
 /// player never casts a damage spell before the wind-up expires.
@@ -1345,7 +1345,7 @@ pub struct RoomMagicalDarkness;
 pub struct Empowered;
 
 /// Marker: the target is magically invisible (INVISIBLE,
-/// MASS_INVIS). Read in `can_see_player`: an observer without
+/// `MASS_INVIS`). Read in `can_see_player`: an observer without
 /// `DetectInvis` (or admin `HolyLight`) sees nothing where the
 /// target stands. Pair with `DetectInvis` for the see-through.
 #[derive(Component, Debug, Clone, Copy)]
@@ -1360,7 +1360,7 @@ pub struct DetectInvis;
 /// Tag component on an `EffectInstance` entity: this effect is
 /// what's keeping its target `Invisible`. Used by `effects_tick`
 /// to decide whether the `Invisible` marker on the target should
-/// survive after one INVISIBLE / MASS_INVIS effect expires — if
+/// survive after one INVISIBLE / `MASS_INVIS` effect expires — if
 /// another tagged effect is still in flight, the target stays
 /// invisible.
 #[derive(Component, Debug, Clone, Copy)]
@@ -1369,7 +1369,7 @@ pub struct InvisibleSource;
 /// Tag component on an `EffectInstance` entity: records the
 /// `(element, percent)` resistance delta this effect added to its
 /// target's `Resistances` map. `effects_tick` reads it on expiry
-/// and subtracts the same delta, so stacked PROT_*/STONE_SKIN
+/// and subtracts the same delta, so stacked PROT_*/`STONE_SKIN`
 /// effects unwind cleanly without leaving phantom resistance.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct SpellResistanceDelta {
@@ -1407,13 +1407,13 @@ pub struct GroupInvite {
 }
 
 /// Per-room map of magical walls blocking specific exits. Installed
-/// by WALL_OF_STONE / WALL_OF_ICE (and any future opaque barriers);
+/// by `WALL_OF_STONE` / `WALL_OF_ICE` (and any future opaque barriers);
 /// consulted by `cmd_move` before a player can leave the room
-/// through the matching direction. Stored as a HashMap keyed on
+/// through the matching direction. Stored as a `HashMap` keyed on
 /// `Direction` so multiple walls across different exits coexist;
-/// the value carries the EffectInstance entity that backs each
+/// the value carries the `EffectInstance` entity that backs each
 /// wall so the teardown path can remove exactly the expiring
-/// entry (multiple WALL_OF_STONE casts on the same direction
+/// entry (multiple `WALL_OF_STONE` casts on the same direction
 /// stack, and only the most recent is removed when one fades).
 #[derive(Component, Debug, Default)]
 pub struct RoomBlockedExits {
@@ -1422,7 +1422,7 @@ pub struct RoomBlockedExits {
 
 /// One blocked-exit entry. `kind_label` is rendered in the refusal
 /// line ("A wall of stone blocks your path." / "A wall of ice
-/// blocks your path."); `backed_by` is the EffectInstance entity
+/// blocks your path."); `backed_by` is the `EffectInstance` entity
 /// for teardown lookup. `hp` is the remaining hit-point pool for
 /// bash mechanics — when a player `doorbash`es into a wall'd
 /// direction the swing deducts STR-scaled damage; on hp ≤ 0 the
@@ -1432,7 +1432,7 @@ pub struct RoomBlockedExits {
 /// - `Block` — solid (stone/ice). Refuse all movement; bashable.
 /// - `Slow` — fog. Pass through but charge extra stamina; no bash.
 /// - `Passable` — illusion. Pass silently AND consume the wall on
-///   the first traversal (mirrors legacy ILLUSORY_WALL: once a
+///   the first traversal (mirrors legacy `ILLUSORY_WALL`: once a
 ///   traveler steps through, the illusion shatters for everyone).
 #[derive(Debug, Clone)]
 pub struct RoomBlockedExit {
@@ -1450,7 +1450,7 @@ pub enum WallTraversal {
     Passable,
 }
 
-/// Spell-absorb marker installed by MINOR_GLOBE / MAJOR_GLOBE (and
+/// Spell-absorb marker installed by `MINOR_GLOBE` / `MAJOR_GLOBE` (and
 /// any equipped item granting the "globe" effect). Hostile spell
 /// damage targeting this entity is *consumed without effect* when
 /// the cast spell's minimum circle is ≤ this value. Legacy:
@@ -1464,7 +1464,7 @@ pub enum WallTraversal {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct MaxAbsorbCircle(pub i32);
 
-/// Alignment-protect marker installed by PROT_FROM_EVIL (or items
+/// Alignment-protect marker installed by `PROT_FROM_EVIL` (or items
 /// granting the same effect). Combat-side hook reduces incoming
 /// damage by 20% when the attacker is strongly evil-aligned
 /// (≤ -500) AND the victim is strongly good-aligned (≥ +500) —
@@ -1482,11 +1482,11 @@ pub struct ProtectFromGood;
 
 /// Companion tag on the `EffectInstance` entity for an
 /// alignment-protect spell. The "resistance" flag covers many
-/// flavors (PROT_FROM_FIRE, PROT_FROM_EVIL, ...) and they all
+/// flavors (`PROT_FROM_FIRE`, `PROT_FROM_EVIL`, ...) and they all
 /// land with `EffectInstance.name = "resistance"`, so the
 /// teardown can't disambiguate by name alone. This tag tells
-/// `effects_tick` which marker (ProtectFromEvil or
-/// ProtectFromGood) corresponds to the expiring instance.
+/// `effects_tick` which marker (`ProtectFromEvil` or
+/// `ProtectFromGood`) corresponds to the expiring instance.
 #[derive(Component, Debug, Clone, Copy)]
 pub enum AlignmentProtectionTag {
     Evil,
@@ -1533,7 +1533,7 @@ pub struct LiquidContainer {
 /// from the basic description to the full proto stat block, and
 /// drives the `identified` flag in the `Char.Items.List` GMCP frame.
 ///
-/// Lifecycle, mirroring the legacy C++ ItemInstanceFlag::Identified
+/// Lifecycle, mirroring the legacy C++ `ItemInstanceFlag::Identified`
 /// + LiquidInfo.identified semantics:
 ///
 /// * Cast `identify` → component inserted on the item entity.
@@ -1860,8 +1860,7 @@ impl SpellSlots {
     /// Number of slots in `circle` currently in cooldown.
     #[must_use]
     pub fn used_in_circle(&self, circle: i32) -> i32 {
-        i32::try_from(self.in_flight.iter().filter(|c| c.circle == circle).count())
-            .unwrap_or(0)
+        i32::try_from(self.in_flight.iter().filter(|c| c.circle == circle).count()).unwrap_or(0)
     }
 }
 
@@ -1909,11 +1908,13 @@ impl KnownAbilities {
     pub fn to_rows(&self) -> Vec<mud_db::character_abilities::CharacterAbilityRow> {
         self.entries
             .iter()
-            .map(|(id, prof, known)| mud_db::character_abilities::CharacterAbilityRow {
-                ability_id: *id,
-                known: *known,
-                proficiency: *prof,
-            })
+            .map(
+                |(id, prof, known)| mud_db::character_abilities::CharacterAbilityRow {
+                    ability_id: *id,
+                    known: *known,
+                    proficiency: *prof,
+                },
+            )
             .collect()
     }
 }
@@ -1956,10 +1957,12 @@ impl Aliases {
     pub fn to_rows(&self) -> Vec<mud_db::character_aliases::CharacterAliasRow> {
         self.entries
             .iter()
-            .map(|(alias, command)| mud_db::character_aliases::CharacterAliasRow {
-                alias: alias.clone(),
-                command: command.clone(),
-            })
+            .map(
+                |(alias, command)| mud_db::character_aliases::CharacterAliasRow {
+                    alias: alias.clone(),
+                    command: command.clone(),
+                },
+            )
             .collect()
     }
 
@@ -1982,8 +1985,7 @@ impl Aliases {
     /// Remove an alias. Returns true if it existed.
     pub fn remove(&mut self, alias: &str) -> bool {
         let before = self.entries.len();
-        self.entries
-            .retain(|(a, _)| !a.eq_ignore_ascii_case(alias));
+        self.entries.retain(|(a, _)| !a.eq_ignore_ascii_case(alias));
         before != self.entries.len()
     }
 }
@@ -2128,7 +2130,7 @@ pub struct Posture(pub PostureKind);
 impl Posture {
     /// Map a schema `Position` onto the runtime `PostureKind`. The
     /// active subset (SLEEPING / RESTING / SITTING / STANDING)
-    /// round-trips; DEAD / GHOST / MORTALLY_WOUNDED / INCAPACITATED
+    /// round-trips; DEAD / GHOST / `MORTALLY_WOUNDED` / INCAPACITATED
     /// / STUNNED fall back to STANDING (they aren't valid spawn
     /// postures). Used by the mob-spawn paths to derive
     /// `proto.default_position → Posture` at boot and respawn.
@@ -2433,11 +2435,7 @@ mod tests {
         // future refactor can't drift the field order.
         use mud_db::character_abilities::CharacterAbilityRow;
         let original = KnownAbilities {
-            entries: vec![
-                (1, 850, true),
-                (42, 0, false),
-                (100, 1000, true),
-            ],
+            entries: vec![(1, 850, true), (42, 0, false), (100, 1000, true)],
         };
         let rows = original.to_rows();
         // Each row carries the proficiency in `proficiency`, the

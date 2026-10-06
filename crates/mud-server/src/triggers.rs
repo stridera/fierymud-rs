@@ -94,14 +94,7 @@ fn record_fire(
 /// Push a fire failure into the in-memory `ScriptErrorLog` and emit
 /// the matching tracing warn. Called from every event dispatcher's
 /// error arm.
-fn record_failure(
-    world: &mut World,
-    zone: i32,
-    id: i32,
-    name: &str,
-    event: &str,
-    message: &str,
-) {
+fn record_failure(world: &mut World, zone: i32, id: i32, name: &str, event: &str, message: &str) {
     warn!(zone, id, name = %name, event = %event, error = %message, "trigger fire failed");
     if !world.contains_resource::<ScriptErrorLog>() {
         world.insert_resource(ScriptErrorLog::default());
@@ -127,15 +120,9 @@ fn record_failure(
         });
         let message_owned = message.to_string();
         tokio::spawn(async move {
-            if let Err(e) = mud_db::script_errors::record(
-                &pool,
-                zone,
-                id,
-                "runtime",
-                &message_owned,
-                &context,
-            )
-            .await
+            if let Err(e) =
+                mud_db::script_errors::record(&pool, zone, id, "runtime", &message_owned, &context)
+                    .await
             {
                 tracing::warn!(error = %e, "script_error_log persist failed");
             }
@@ -231,7 +218,14 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
             )
         });
         drain_lua_outbox(world);
-        record_fire(world, listener, zone, id, TriggerEvent::Speech, result.is_ok());
+        record_fire(
+            world,
+            listener,
+            zone,
+            id,
+            TriggerEvent::Speech,
+            result.is_ok(),
+        );
         if let Err(e) = result {
             record_failure(world, zone, id, &name, "SPEECH", &e);
         }
@@ -270,15 +264,17 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
         };
         for (zone, id, name, body) in to_fire {
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-                host.exec_for_actor_with_extras(
-                    world,
-                    listener,
-                    &body,
-                    &[("speech", &lowered)],
-                )
+                host.exec_for_actor_with_extras(world, listener, &body, &[("speech", &lowered)])
             });
             drain_lua_outbox(world);
-            record_fire(world, listener, zone, id, TriggerEvent::Speech, result.is_ok());
+            record_fire(
+                world,
+                listener,
+                zone,
+                id,
+                TriggerEvent::Speech,
+                result.is_ok(),
+            );
             if let Err(e) = result {
                 record_failure(world, zone, id, &name, "SPEECH", &e);
             }
@@ -364,7 +360,14 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
                 host.exec_for_listener_with_extras(world, listener, entering, &body, &[])
             });
             drain_lua_outbox(world);
-            record_fire(world, listener, zone, id, TriggerEvent::Greet, result.is_ok());
+            record_fire(
+                world,
+                listener,
+                zone,
+                id,
+                TriggerEvent::Greet,
+                result.is_ok(),
+            );
             if let Err(e) = result {
                 record_failure(world, zone, id, &name, "GREET", &e);
             }
@@ -377,12 +380,7 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
 /// Used by GET / DROP / WEAR / REMOVE / USE / CONSUME — every
 /// object-attached event whose dispatch shape is "the item observed
 /// the actor doing X to it."
-pub fn fire_item_event(
-    world: &mut World,
-    item: Entity,
-    actor: Entity,
-    event: TriggerEvent,
-) {
+pub fn fire_item_event(world: &mut World, item: Entity, actor: Entity, event: TriggerEvent) {
     let to_fire: Vec<(i32, i32, String, String)> = {
         let Some(at) = world.get::<AttachedTriggers>(item) else {
             return;
@@ -486,7 +484,14 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
             host.exec_for_event(world, recipient, giver, Some(item), &body, &[])
         });
         drain_lua_outbox(world);
-        record_fire(world, recipient, zone, id, TriggerEvent::Receive, result.is_ok());
+        record_fire(
+            world,
+            recipient,
+            zone,
+            id,
+            TriggerEvent::Receive,
+            result.is_ok(),
+        );
         if let Err(e) = result {
             record_failure(world, zone, id, &name, "RECEIVE", &e);
         }
@@ -547,7 +552,14 @@ pub fn fire_command_in_room(
                 )
             });
             drain_lua_outbox(world);
-            record_fire(world, listener, zone, id, TriggerEvent::Command, result.is_ok());
+            record_fire(
+                world,
+                listener,
+                zone,
+                id,
+                TriggerEvent::Command,
+                result.is_ok(),
+            );
             match result {
                 Ok((_out, Some(false))) => {
                     consumed = true;
@@ -744,4 +756,104 @@ pub fn lua_coroutine_tick(world: &mut World) {
         tracing::info!(resumed, parked, "lua_coroutine_tick resumed parked threads");
     }
     drain_deferred_room_triggers(world);
+}
+
+/// One trigger whose body failed to compile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptFailure {
+    pub zone_id: i32,
+    pub id: i32,
+    pub name: String,
+    pub error: String,
+}
+
+/// Result of a syntax-only pass over the trigger catalog.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ScriptValidation {
+    pub total: usize,
+    pub failures: Vec<ScriptFailure>,
+}
+
+/// Compile-check every trigger body in `catalog` (optionally limited to one
+/// zone) without running it. Uses a throwaway Lua state, so no trigger side
+/// effects and no interaction with the live `LuaHost`. Failures are sorted by
+/// `(zone, id)`.
+#[must_use]
+pub fn validate_catalog(catalog: &TriggerCatalog, zone: Option<i32>) -> ScriptValidation {
+    let lua = mlua::Lua::new();
+    let mut keys: Vec<&(i32, i32)> = catalog
+        .by_key
+        .keys()
+        .filter(|(z, _)| zone.is_none_or(|only| only == *z))
+        .collect();
+    keys.sort();
+    let mut out = ScriptValidation {
+        total: keys.len(),
+        failures: Vec::new(),
+    };
+    for key in keys {
+        let def = &catalog.by_key[key];
+        let chunk_name = format!("={}:{}", key.0, key.1);
+        if let Err(e) = lua
+            .load(def.commands.as_str())
+            .set_name(chunk_name)
+            .into_function()
+        {
+            out.failures.push(ScriptFailure {
+                zone_id: key.0,
+                id: key.1,
+                name: def.name.clone(),
+                error: e.to_string(),
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+    use mud_world::{TriggerAttach, TriggerDef};
+
+    fn def(zone: i32, id: i32, body: &str) -> TriggerDef {
+        TriggerDef {
+            zone_id: zone,
+            id,
+            name: format!("t{zone}_{id}"),
+            attach_type: TriggerAttach::Mob,
+            commands: body.to_string(),
+            flags: vec![],
+            arg_list: vec![],
+            num_args: 0,
+        }
+    }
+
+    #[test]
+    fn validate_catalog_reports_only_syntax_failures() {
+        let mut cat = TriggerCatalog::default();
+        cat.by_key
+            .insert((1, 1), def(1, 1, "local x = 1\nreturn x"));
+        cat.by_key.insert((1, 2), def(1, 2, "if then end end"));
+        cat.by_key.insert((2, 1), def(2, 1, "x = = 2"));
+        let all = validate_catalog(&cat, None);
+        assert_eq!(all.total, 3);
+        assert_eq!(all.failures.len(), 2);
+        assert_eq!((all.failures[0].zone_id, all.failures[0].id), (1, 2));
+        assert!(!all.failures[0].error.is_empty());
+        let z2 = validate_catalog(&cat, Some(2));
+        assert_eq!(z2.total, 1);
+        assert_eq!(z2.failures.len(), 1);
+        let z3 = validate_catalog(&cat, Some(3));
+        assert_eq!(z3.total, 0);
+        assert!(z3.failures.is_empty());
+    }
+
+    #[test]
+    fn validate_catalog_does_not_execute_bodies() {
+        // A body that would error at runtime (nil call) but compiles fine.
+        let mut cat = TriggerCatalog::default();
+        cat.by_key
+            .insert((1, 1), def(1, 1, "undefined_function_xyz()"));
+        assert!(validate_catalog(&cat, None).failures.is_empty());
+    }
 }

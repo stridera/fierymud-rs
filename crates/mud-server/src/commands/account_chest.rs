@@ -19,21 +19,21 @@
 //!   from the proto + `custom_data`.
 //!
 //! Refusals match the rest of the wave 2.B gating: SOULBOUND items
-//! refuse to leave the original owner, and NO_DROP items refuse to
+//! refuse to leave the original owner, and `NO_DROP` items refuse to
 //! be transferred at all. No silent loss — the player gets a clear
 //! "can't deposit" line and the item stays in their inventory.
 //!
 //! Dispatch shape: these are `AsyncCommand`s because the DB
 //! roundtrips need `await`. The sync `Command` entries each register
-//! a `cmd_mail_stub` placeholder — the AsyncCommand wins dispatch
+//! a `cmd_mail_stub` placeholder — the `AsyncCommand` wins dispatch
 //! order, mirroring `cmd_save` / `cmd_mail` etc.
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{
-    Account, AttachedTriggers, BoardLink, Charges, Description, Item, Keywords,
-    LightFuel, LiquidContainer, Located, Named, ObjectFlags, ObjectPrototypes,
-    ObjectRestrictions, TriggerCatalog, WorldKey,
+    Account, AttachedTriggers, BoardLink, Charges, Description, Item, Keywords, LightFuel,
+    LiquidContainer, Located, Named, ObjectFlags, ObjectPrototypes, ObjectRestrictions,
+    TriggerCatalog, WorldKey,
 };
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +44,7 @@ use crate::commands::{
 
 inventory::submit! {
     Command {
-        names: &["chest", "accountchest", "achest"],
+        names: &["chest", "accountchest", "achest", "storage", "vault"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Banking,
@@ -98,7 +98,7 @@ inventory::submit! {
 inventory::submit! {
     AsyncCommand {
         dispatch: |world, player, pool, head, args| match head {
-            "chest" | "accountchest" | "achest" => {
+            "chest" | "accountchest" | "achest" | "storage" | "vault" => {
                 Some(Box::pin(cmd_account_chest(world, player, pool)))
             }
             "chest_deposit" | "chestdeposit" => {
@@ -130,11 +130,7 @@ pub(crate) struct ChestItemState {
     pub light_remaining: Option<i32>,
 }
 
-async fn cmd_account_chest(
-    world: &mut World,
-    player: Entity,
-    pool: &mud_db::sqlx::PgPool,
-) {
+async fn cmd_account_chest(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
     let Some(account) = world.get::<Account>(player).cloned() else {
         send_to(world, player, "You don't have an account chest.\r\n");
         return;
@@ -157,17 +153,16 @@ async fn cmd_account_chest(
         let proto_name = protos
             .by_key
             .get(&(row.object_zone_id, row.object_id))
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| format!("[{}:{}]", row.object_zone_id, row.object_id));
+            .map_or_else(
+                || format!("[{}:{}]", row.object_zone_id, row.object_id),
+                |p| p.name.clone(),
+            );
         let qty = if row.quantity > 1 {
             format!(" x{}", row.quantity)
         } else {
             String::new()
         };
-        let stored_by = row
-            .stored_by_character_id
-            .as_deref()
-            .unwrap_or("unknown");
+        let stored_by = row.stored_by_character_id.as_deref().unwrap_or("unknown");
         let stamp = row.stored_at.format("%Y-%m-%d %H:%M");
         out.push_str(&format!(
             "  [{slot}] {name}{qty}  <dim>(by {stored_by}, {stamp})</>\r\n",
@@ -228,9 +223,7 @@ async fn cmd_chest_deposit(
     let state = ChestItemState {
         charges: world.get::<Charges>(item).map(|c| c.0),
         liquid_remaining: world.get::<LiquidContainer>(item).map(|l| l.remaining),
-        liquid_type: world
-            .get::<LiquidContainer>(item)
-            .map(|l| l.liquid.clone()),
+        liquid_type: world.get::<LiquidContainer>(item).map(|l| l.liquid.clone()),
         light_remaining: world.get::<LightFuel>(item).map(|f| f.remaining),
     };
     let custom_data = serde_json::to_value(&state).ok();
@@ -292,21 +285,19 @@ async fn cmd_chest_withdraw(
         send_to(world, player, "Your account chest is empty.\r\n");
         return;
     }
-    let chosen = match target.parse::<i32>() {
-        Ok(slot) => rows.iter().find(|r| r.slot == slot).cloned(),
-        Err(_) => {
-            let needle = target.to_ascii_lowercase();
-            let protos = world.resource::<ObjectPrototypes>();
-            rows.iter()
-                .find(|r| {
-                    protos
-                        .by_key
-                        .get(&(r.object_zone_id, r.object_id))
-                        .map(|p| p.name.to_ascii_lowercase().contains(&needle))
-                        .unwrap_or(false)
-                })
-                .cloned()
-        }
+    let chosen = if let Ok(slot) = target.parse::<i32>() {
+        rows.iter().find(|r| r.slot == slot).cloned()
+    } else {
+        let needle = target.to_ascii_lowercase();
+        let protos = world.resource::<ObjectPrototypes>();
+        rows.iter()
+            .find(|r| {
+                protos
+                    .by_key
+                    .get(&(r.object_zone_id, r.object_id))
+                    .is_some_and(|p| p.name.to_ascii_lowercase().contains(&needle))
+            })
+            .cloned()
     };
     let Some(row) = chosen else {
         send_to(
@@ -374,9 +365,14 @@ pub(crate) fn spawn_withdrawn_item(
     let item_entity = {
         let mut bundle = world.spawn((
             Item,
-            Named { name: proto.name.clone() },
+            Named {
+                name: proto.name.clone(),
+            },
             Keywords(proto.keywords.clone()),
-            WorldKey { zone: proto.zone_id, id: proto.id },
+            WorldKey {
+                zone: proto.zone_id,
+                id: proto.id,
+            },
             Located(player),
         ));
         if let Some(desc) = proto.examine_description.clone() {

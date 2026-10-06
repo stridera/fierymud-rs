@@ -14,8 +14,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AttachedTriggers, Description, Health, Item, Keywords, LiquidContainer, Located,
-    Mob, MobPrototypes, MobResetCatalog, Mountable, Named, ObjectPrototypes, ObjectResetCatalog,
+    AttachedTriggers, Description, Health, Item, Keywords, LiquidContainer, Located, Mob,
+    MobPrototypes, MobResetCatalog, Mountable, Named, ObjectPrototypes, ObjectResetCatalog,
     Posture, ShopCatalog, Shopkeeper, TriggerCatalog, WorldKey,
 };
 use mud_world::{FromMobReset, FromObjectReset};
@@ -34,7 +34,7 @@ const RESPAWN_PERIOD_TICKS: u64 = 60;
 /// respawn through the same `MobResets` row (G3.4). Defaults to
 /// 1800 ticks = 180 s = 3 min so trash mobs don't pop the moment
 /// the player turns around. Overridable at runtime via
-/// `world.mob_respawn_delay_seconds` GameConfig. Boss-tier delays
+/// `world.mob_respawn_delay_seconds` `GameConfig`. Boss-tier delays
 /// could later be authored per-row; for now this is a global floor.
 const MOB_RESPAWN_DELAY_TICKS_DEFAULT: u64 = 1800;
 
@@ -99,6 +99,7 @@ pub fn respawn_tick(world: &mut World) {
     // dungeons that need snappy refills.
     let delay_ticks: u64 = {
         let cfg = world.resource::<mud_world::RuntimeConfig>();
+        #[allow(clippy::cast_possible_truncation)]
         let raw = cfg.get_i32(
             "world",
             "mob_respawn_delay_seconds",
@@ -129,7 +130,11 @@ pub fn respawn_tick(world: &mut World) {
         if live >= cap {
             continue;
         }
-        let proto = world.resource::<MobPrototypes>().by_key.get(&proto_key).cloned();
+        let proto = world
+            .resource::<MobPrototypes>()
+            .by_key
+            .get(&proto_key)
+            .cloned();
         let Some(proto) = proto else { continue };
         let hp = proto.rolled_hp();
         let shop_key = world
@@ -149,10 +154,15 @@ pub fn respawn_tick(world: &mut World) {
         let spawn_posture = Posture::from_default_position(proto.default_position);
         let mut em = world.spawn((
             Mob,
-            Named { name: proto.name.clone() },
+            Named {
+                name: proto.name.clone(),
+            },
             Keywords(proto.keywords.clone()),
             Description(proto.room_description.clone()),
-            WorldKey { zone: proto.zone_id, id: proto.id },
+            WorldKey {
+                zone: proto.zone_id,
+                id: proto.id,
+            },
             Located(entry.room_entity),
             Health { hp, max: hp },
             proto.derived_combat_stats(),
@@ -179,7 +189,10 @@ pub fn respawn_tick(world: &mut World) {
             });
         }
         if let Some((shop_zone_id, shop_id)) = shop_key {
-            em.insert(Shopkeeper { shop_zone_id, shop_id });
+            em.insert(Shopkeeper {
+                shop_zone_id,
+                shop_id,
+            });
         }
         if let Some(ref keys) = trigger_keys {
             em.insert(AttachedTriggers(keys.clone()));
@@ -229,7 +242,10 @@ pub fn respawn_tick(world: &mut World) {
             world,
             room,
             &[],
-            &format!("{} arrives.\r\n", crate::commands::cap_sentence_start(&name)),
+            &format!(
+                "{} arrives.\r\n",
+                crate::commands::cap_sentence_start(&name)
+            ),
         );
     }
 
@@ -239,10 +255,12 @@ pub fn respawn_tick(world: &mut World) {
     // semantic, since each respawn iteration owns at most one mob.
     for (mob, room) in aggro_queue {
         let defender: Option<Entity> = {
-            let mut q = world.query_filtered::<
-                (Entity, &Located, Option<&mud_world::Account>, Option<&mud_world::Fighting>),
-                (With<mud_world::Player>, With<mud_world::Online>),
-            >();
+            let mut q = world.query_filtered::<(
+                Entity,
+                &Located,
+                Option<&mud_world::Account>,
+                Option<&mud_world::Fighting>,
+            ), (With<mud_world::Player>, With<mud_world::Online>)>();
             q.iter(world)
                 .filter(|(_, l, account, fighting)| {
                     l.0 == room
@@ -316,9 +334,14 @@ pub fn respawn_tick(world: &mut World) {
         let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
         let mut bundle = world.spawn((
             Item,
-            Named { name: proto.name.clone() },
+            Named {
+                name: proto.name.clone(),
+            },
             Keywords(proto.keywords.clone()),
-            WorldKey { zone: proto.zone_id, id: proto.id },
+            WorldKey {
+                zone: proto.zone_id,
+                id: proto.id,
+            },
             Located(entry.room_entity),
             FromObjectReset(entry.reset_id),
         ));

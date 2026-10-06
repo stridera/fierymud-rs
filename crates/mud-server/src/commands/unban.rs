@@ -47,25 +47,20 @@ fn cmd_unban(world: &mut World, player: Entity, args: &str) {
     tokio::spawn(async move {
         let Some(out) = outbound else { return };
         let Some(admin_uid) = admin_uid else { return };
-        let Ok(Some(target)) =
-            mud_db::characters::find_by_name(&pool, &target_name).await
-        else {
-            let _ = out
-                .try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
+        let Ok(Some(target)) = mud_db::characters::find_by_name(&pool, &target_name).await else {
+            let _ = out.try_send(format!("No character named '{target_name}'.\r\n").into_bytes());
             return;
         };
         let Some(uid) = target.user_id else {
             let _ = out.try_send(
-                format!("{} has no associated user account.\r\n", target.name)
-                    .into_bytes(),
+                format!("{} has no associated user account.\r\n", target.name).into_bytes(),
             );
             return;
         };
         match mud_db::bans::unban(&pool, &uid, &admin_uid).await {
             Ok(0) => {
-                let _ = out.try_send(
-                    format!("{} has no active ban.\r\n", target.name).into_bytes(),
-                );
+                let _ =
+                    out.try_send(format!("{} has no active ban.\r\n", target.name).into_bytes());
             }
             Ok(_) => {
                 let _ = out.try_send(format!("Unbanned {}.\r\n", target.name).into_bytes());

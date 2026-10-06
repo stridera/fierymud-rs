@@ -18,9 +18,9 @@ const PLAYER_CORPSE_DECAY_SECS: i32 = 7 * 24 * 60 * 60;
 /// claim window rather than piling up. 10 minutes.
 const MOB_CORPSE_DECAY_SECS: i32 = 600;
 use crate::commands::{
-    apply_damage, broadcast_room_except_players_rendered, broadcast_room_except_rendered,
-    cmd_flee, damage_color_tag, direction_name, disengage_attackers_of, drain_stamina, name_of,
-    opposite, send_to, try_insert, try_remove,
+    apply_damage, broadcast_room_except_players_rendered, broadcast_room_except_rendered, cmd_flee,
+    damage_color_tag, direction_name, disengage_attackers_of, drain_stamina, name_of, opposite,
+    send_to, try_insert, try_remove,
 };
 
 const COMBAT_PERIOD_TICKS: u64 = 40;
@@ -97,7 +97,10 @@ pub fn seed_test_mobs(world: &mut World) {
                 name: "a training dummy".to_string(),
             },
             Keywords(vec!["dummy".into(), "training".into()]),
-            Description("A scarecrow-like training dummy stands here, patiently waiting to be punched.".into()),
+            Description(
+                "A scarecrow-like training dummy stands here, patiently waiting to be punched."
+                    .into(),
+            ),
             Located(room),
             Health { hp: 30, max: 30 },
             Posture(PostureKind::Standing),
@@ -149,7 +152,7 @@ pub fn seed_test_items(world: &mut World) {
 /// Exclusive system: every `COMBAT_PERIOD_TICKS` world ticks, every entity with
 /// Fighting takes a swing at its target.
 /// Four real-time seconds per swing (40 ticks at 10Hz) — matches legacy
-/// PULSE_VIOLENCE so the DB-authored damage values stay calibrated. Decrements
+/// `PULSE_VIOLENCE` so the DB-authored damage values stay calibrated. Decrements
 /// every `CorpseDecay.remaining_secs`; on hitting 0 re-Locates any
 /// items inside the corpse to the corpse's room, broadcasts a decay
 /// line, and despawns the corpse entity. Ephemeral — corpses don't
@@ -161,7 +164,8 @@ pub fn corpse_decay_tick(world: &mut World) {
     }
     // Snapshot so we can mutate freely.
     let corpses: Vec<(Entity, Entity, i32, String)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &CorpseDecay, &Named), With<Corpse>>();
+        let mut q =
+            world.query_filtered::<(Entity, &Located, &CorpseDecay, &Named), With<Corpse>>();
         q.iter(world)
             .map(|(e, l, d, n)| (e, l.0, d.remaining_secs, n.name.clone()))
             .collect()
@@ -393,8 +397,9 @@ fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
     if let Some(mut l) = world.get_mut::<Located>(mob) {
         l.0 = target_room;
     }
-    let arrival_dir =
-        opposite(dir).map_or("nearby".to_string(), |d| format!("the {}", direction_name(d)));
+    let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
+        format!("the {}", direction_name(d))
+    });
     broadcast_room_except_players_rendered(
         world,
         target_room,
@@ -429,7 +434,13 @@ fn resolve_swing_acc_ev(accuracy: i32, evasion: i32, crit_chance: i32) -> SwingD
     } else {
         (SwingOutcome::Miss, 0)
     };
-    SwingDetail { outcome, roll, chance, crit_roll, crit_chance }
+    SwingDetail {
+        outcome,
+        roll,
+        chance,
+        crit_roll,
+        crit_chance,
+    }
 }
 
 /// Roll details surfaced by `resolve_swing` so the showdice toggle
@@ -451,17 +462,17 @@ pub(crate) struct SwingDetail {
 /// ``combat_tick``; ignored for misses.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct SwingMitigation {
-    pub weapon_roll: i32,     // raw dice (weapon or natural attack)
-    pub attack_power: i32,    // attacker's CombatStats.attack_power (%)
-    pub base_pre_crit: i32,   // weapon × (1 + AP/100) — the snapshot value
-    pub after_crit: i32,      // × 1.5 if crit, else unchanged
+    pub weapon_roll: i32,       // raw dice (weapon or natural attack)
+    pub attack_power: i32,      // attacker's CombatStats.attack_power (%)
+    pub base_pre_crit: i32,     // weapon × (1 + AP/100) — the snapshot value
+    pub after_crit: i32,        // × 1.5 if crit, else unchanged
     pub stealth_bonus_pct: i32, // A6 hidden-attacker damage % bonus (0 if not hidden)
-    pub variance_delta: i32,  // signed delta applied (-band..=+band)
+    pub variance_delta: i32,    // signed delta applied (-band..=+band)
     pub after_variance: i32,
-    pub armor_pct: i32,       // effective_armor_pct (after pen)
-    pub armor_k: i32,         // ARMOR_K constant
+    pub armor_pct: i32, // effective_armor_pct (after pen)
+    pub armor_k: i32,   // ARMOR_K constant
     pub after_armor_pct: i32,
-    pub armor_flat: i32,      // effective_armor_flat (after pen)
+    pub armor_flat: i32, // effective_armor_flat (after pen)
     pub after_armor_flat: i32,
     pub resist_pct: i32,
     pub after_resist: i32,
@@ -529,18 +540,16 @@ fn show_dice_swing(detail: SwingDetail, mit: SwingMitigation) -> String {
     };
     // Show "wpn 18 ×AP+5%=19" so the raw dice roll + AP step are visible.
     // For crits, append the ×1.5 promotion.
-    let ap_step = if mit.attack_power == 0 {
-        format!("  wpn={} ", mit.weapon_roll)
-    } else if mit.attack_power > 0 {
-        format!(
+    let ap_step = match mit.attack_power.cmp(&0) {
+        std::cmp::Ordering::Equal => format!("  wpn={} ", mit.weapon_roll),
+        std::cmp::Ordering::Greater => format!(
             "  wpn={} ×AP+{}%={} ",
             mit.weapon_roll, mit.attack_power, mit.base_pre_crit
-        )
-    } else {
-        format!(
+        ),
+        std::cmp::Ordering::Less => format!(
             "  wpn={} ×AP{}%={} ",
             mit.weapon_roll, mit.attack_power, mit.base_pre_crit
-        )
+        ),
     };
     let crit_step = if matches!(detail.outcome, SwingOutcome::Crit) {
         format!("×1.5crit={} ", mit.after_crit)
@@ -550,19 +559,20 @@ fn show_dice_swing(detail: SwingDetail, mit: SwingMitigation) -> String {
     // A6 stealth opening-strike — surface the % bonus on the
     // same line so a rogue can see why their backstab hit
     // harder than expected.
-    let stealth_step = if mit.stealth_bonus_pct > 0
-        && !matches!(detail.outcome, SwingOutcome::Miss)
+    let stealth_step = if mit.stealth_bonus_pct > 0 && !matches!(detail.outcome, SwingOutcome::Miss)
     {
         format!("×stealth+{}%={} ", mit.stealth_bonus_pct, mit.after_crit)
     } else {
         String::new()
     };
-    let variance_step = if mit.variance_delta == 0 {
-        format!("±var(0) ={} ", mit.after_variance)
-    } else if mit.variance_delta > 0 {
-        format!("±var(+{}) ={} ", mit.variance_delta, mit.after_variance)
-    } else {
-        format!("±var({}) ={} ", mit.variance_delta, mit.after_variance)
+    let variance_step = match mit.variance_delta.cmp(&0) {
+        std::cmp::Ordering::Equal => format!("±var(0) ={} ", mit.after_variance),
+        std::cmp::Ordering::Greater => {
+            format!("±var(+{}) ={} ", mit.variance_delta, mit.after_variance)
+        }
+        std::cmp::Ordering::Less => {
+            format!("±var({}) ={} ", mit.variance_delta, mit.after_variance)
+        }
     };
     let armor_pct_step = format!(
         "armor×K{}/({}+{})={} ",
@@ -641,10 +651,8 @@ pub fn combat_tick(world: &mut World) {
     // pinned-to-1 HP still passes the `hp > 0` check, producing a
     // damage loop on the corpse.
     let to_reengage: Vec<(Entity, Entity)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &HateList),
-            (With<Mob>, Without<Fighting>),
-        >();
+        let mut q =
+            world.query_filtered::<(Entity, &Located, &HateList), (With<Mob>, Without<Fighting>)>();
         q.iter(world)
             .filter_map(|(mob, loc, hate)| {
                 hate.0
@@ -765,17 +773,14 @@ pub fn combat_tick(world: &mut World) {
     // frozen entity, they can't swing. Stunned is checked
     // explicitly below for parity with the existing semantics.
     let swings: Vec<Swing> = {
-        let mut q = world.query_filtered::<
-            (
-                Entity,
-                &Fighting,
-                &CombatStats,
-                &Named,
-                Option<&Posture>,
-                Option<&Stunned>,
-            ),
-            (Without<Ghost>, Without<mud_world::Frozen>),
-        >();
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Fighting,
+            &CombatStats,
+            &Named,
+            Option<&Posture>,
+            Option<&Stunned>,
+        ), (Without<Ghost>, Without<mud_world::Frozen>)>();
         q.iter(world)
             .filter(|(_, _, _, _, posture, stunned)| {
                 stunned.is_none()
@@ -812,9 +817,7 @@ pub fn combat_tick(world: &mut World) {
                     Some(if race_factor == 100 {
                         raw
                     } else {
-                        raw.saturating_mul(race_factor)
-                            .saturating_div(100)
-                            .max(1)
+                        raw.saturating_mul(race_factor).saturating_div(100).max(1)
                     })
                 };
                 let roll_weapon = || -> Option<i32> {
@@ -827,15 +830,11 @@ pub fn combat_tick(world: &mut World) {
                     let w = roll_weapon().unwrap_or(0);
                     let n = roll_natural().unwrap_or(0);
                     w.max(n).max(1)
-                } else if let Some(w) = roll_weapon() {
-                    w
-                } else if let Some(n) = roll_natural() {
-                    n
                 } else {
-                    1 // unarmed floor — keeps swings non-zero
+                    // unarmed floor — keeps swings non-zero
+                    roll_weapon().or_else(roll_natural).unwrap_or(1)
                 };
-                let scaled =
-                    (weapon_roll.saturating_mul(100 + cs.attack_power)) / 100;
+                let scaled = (weapon_roll.saturating_mul(100 + cs.attack_power)) / 100;
                 let base = scaled.max(1);
                 let damage = if berserk_attackers.contains(&attacker) {
                     (base * 3) / 2
@@ -847,7 +846,9 @@ pub fn combat_tick(world: &mut World) {
                 // self-guard (guarder == target) is filtered out.
                 let target = guards
                     .iter()
-                    .find(|(g, defended)| *defended == fighting.0 && *g != fighting.0 && *g != attacker)
+                    .find(|(g, defended)| {
+                        *defended == fighting.0 && *g != fighting.0 && *g != attacker
+                    })
                     .map_or(fighting.0, |(g, _)| *g);
                 Swing {
                     attacker,
@@ -872,9 +873,7 @@ pub fn combat_tick(world: &mut World) {
         if world.get::<mud_world::Haste>(s.attacker).is_none() {
             continue;
         }
-        if world.get_entity(s.attacker).is_err()
-            || world.get_entity(s.target).is_err()
-        {
+        if world.get_entity(s.attacker).is_err() || world.get_entity(s.target).is_err() {
             continue;
         }
         // Skip the second swing if the first dropped the target
@@ -910,8 +909,8 @@ pub fn combat_tick(world: &mut World) {
 struct Swing {
     attacker: Entity,
     target: Entity,
-    damage: i32,            // post-AP, pre-crit base damage
-    weapon_roll: i32,       // raw dice roll (pre-AP) — surfaced by show_dice
+    damage: i32,      // post-AP, pre-crit base damage
+    weapon_roll: i32, // raw dice roll (pre-AP) — surfaced by show_dice
     attacker_name: String,
 }
 
@@ -923,7 +922,7 @@ struct Swing {
 /// per-attacker math in [`combat_tick`] but does per-entity lookups
 /// instead of using snapshot maps — fine for one swing.
 ///
-/// Skips the FIGHT trigger fire (combat_tick will fire it on the
+/// Skips the FIGHT trigger fire (`combat_tick` will fire it on the
 /// next regular cadence; firing twice on engage would be a behavior
 /// change).
 pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Entity) {
@@ -990,23 +989,17 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
         Some(if race_factor == 100 {
             raw
         } else {
-            raw.saturating_mul(race_factor)
-                .saturating_div(100)
-                .max(1)
+            raw.saturating_mul(race_factor).saturating_div(100).max(1)
         })
     };
-    let roll_weapon =
-        || -> Option<i32> { weapon_dice.map(|(n, s, b)| roll_dice(n, s, b)) };
+    let roll_weapon = || -> Option<i32> { weapon_dice.map(|(n, s, b)| roll_dice(n, s, b)) };
     let weapon_roll = if is_mob {
         let w = roll_weapon().unwrap_or(0);
         let n = roll_natural().unwrap_or(0);
         w.max(n).max(1)
-    } else if let Some(w) = roll_weapon() {
-        w
-    } else if let Some(n) = roll_natural() {
-        n
     } else {
-        1
+        // unarmed floor — keeps swings non-zero
+        roll_weapon().or_else(roll_natural).unwrap_or(1)
     };
     let scaled = (weapon_roll.saturating_mul(100 + cs.attack_power)) / 100;
     let base = scaled.max(1);
@@ -1024,8 +1017,7 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
         q.iter(world)
             .find_map(|(g, guarded, loc)| {
                 let tloc = world.get::<Located>(guarded.0).map(|l| l.0)?;
-                if tloc != loc.0 || guarded.0 != target || g == target || g == attacker
-                {
+                if tloc != loc.0 || guarded.0 != target || g == target || g == attacker {
                     None
                 } else {
                     Some(g)
@@ -1084,13 +1076,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
         try_remove::<Fighting>(world, s.attacker);
         return;
     }
-    let was_sleeping =
-        world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
+    let was_sleeping = world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
     // posture-and-lifestate.md: a defender attacked while RESTING
     // auto-stands on the hit. Sleeping has its own jolt-awake path
     // (different visual), so the two stay separate flags.
-    let was_resting =
-        world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Resting);
+    let was_resting = world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Resting);
 
     // Mob memory: any swing initiated by a player at a mob lands
     // them in that mob's grudge book, regardless of hit/miss/crit.
@@ -1147,9 +1137,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // separate d100 vs the attacker's `crit_chance`.
     // Bless: +5 accuracy when the attacker is blessed. Mirrors the
     // legacy +1 hit-roll bump scaled to the modern 100-point band.
-    let bless_acc_bonus = i32::from(
-        world.get::<mud_world::Bless>(s.attacker).is_some(),
-    ) * 5;
+    let bless_acc_bonus = i32::from(world.get::<mud_world::Bless>(s.attacker).is_some()) * 5;
     let attacker_accuracy = world
         .get::<CombatStats>(s.attacker)
         .map_or(50, |cs| cs.accuracy)
@@ -1166,7 +1154,13 @@ fn apply_swing(world: &mut World, s: &Swing) {
         .map_or(0, |p| posture_evasion_penalty(p.0));
     let target_evasion = base_evasion - posture_evasion_penalty;
     let detail = if was_sleeping {
-        SwingDetail { outcome: SwingOutcome::Hit, roll: 0, chance: 100, crit_roll: 0, crit_chance: 0 }
+        SwingDetail {
+            outcome: SwingOutcome::Hit,
+            roll: 0,
+            chance: 100,
+            crit_roll: 0,
+            crit_chance: 0,
+        }
     } else {
         resolve_swing_acc_ev(attacker_accuracy, target_evasion, attacker_crit_chance)
     };
@@ -1184,8 +1178,16 @@ fn apply_swing(world: &mut World, s: &Swing) {
     let dice_on = show_dice_for(world, s.attacker);
     let target_dice_on = show_dice_for(world, s.target);
     if let Some(via) = evaded_via {
-        let tail = if dice_on { show_dice_evade(via) } else { String::new() };
-        let target_tail = if target_dice_on { show_dice_evade(via) } else { String::new() };
+        let tail = if dice_on {
+            show_dice_evade(via)
+        } else {
+            String::new()
+        };
+        let target_tail = if target_dice_on {
+            show_dice_evade(via)
+        } else {
+            String::new()
+        };
         let target_cap = crate::commands::cap_sentence_start(&target_name);
         let attacker_cap = crate::commands::cap_sentence_start(&s.attacker_name);
         send_to(
@@ -1211,8 +1213,16 @@ fn apply_swing(world: &mut World, s: &Swing) {
         // Misses skip the damage pipeline entirely; the formatter
         // only reads the d100/threshold for the miss branch.
         let miss_mit = SwingMitigation::default();
-        let tail = if dice_on { show_dice_swing(detail, miss_mit) } else { String::new() };
-        let target_tail = if target_dice_on { show_dice_swing(detail, miss_mit) } else { String::new() };
+        let tail = if dice_on {
+            show_dice_swing(detail, miss_mit)
+        } else {
+            String::new()
+        };
+        let target_tail = if target_dice_on {
+            show_dice_swing(detail, miss_mit)
+        } else {
+            String::new()
+        };
         // Misses dim slightly — visible but recedes vs the hit
         // lines below, which carry the actual gameplay info.
         send_to(
@@ -1231,9 +1241,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
             world,
             room,
             &[s.attacker, s.target],
-            &format!(
-                "<dim>{attacker_cap} swings at {target_cap_for_room} but misses.</>\r\n",
-            ),
+            &format!("<dim>{attacker_cap} swings at {target_cap_for_room} but misses.</>\r\n",),
         );
         // Stamina still drains — you swung, you spent the breath.
         drain_stamina(world, s.attacker, 1);
@@ -1284,9 +1292,6 @@ fn apply_swing(world: &mut World, s: &Swing) {
             .saturating_div(100)
             .max(1);
     }
-    // Snapshot the post-crit, pre-variance value so showdice can
-    // render the "× 1.5 ±var = N" math without re-deriving it.
-    let _damage_pre_variance = damage;
     // Per-swing damage variance: ±25% of the post-crit base, integer
     // floor. Bigger swings get a wider band; sub-4 damage swings
     // pin at variance=0. Floor at 1 so a low roll never zeroes out
@@ -1319,6 +1324,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // prior linear "clamp(0,100)" feel mid-tier); at armor=200 → 67%; at
     // armor=400 → 80%. Penetration subtracts from armor before the
     // formula. See gear-curves §7 + post-real-loadout audit (May 2026).
+    #[allow(clippy::items_after_statements)]
     const ARMOR_K: i32 = 100;
     let effective_armor_pct = (def_armor_pct - atk_pen_pct).max(0);
     mit.armor_pct = effective_armor_pct;
@@ -1334,7 +1340,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // engages it).
     // Step 6: type resistance against PHYSICAL.
     if let Some(res) = world.get::<mud_world::Resistances>(s.target) {
-        let pct = res.0.get(&mud_db::enums::ElementType::Physical).copied().unwrap_or(0);
+        let pct = res
+            .0
+            .get(&mud_db::enums::ElementType::Physical)
+            .copied()
+            .unwrap_or(0);
         // capped at +100 immunity; negative is unbounded vulnerability per docs.
         let pct = pct.min(100);
         mit.resist_pct = pct;
@@ -1353,12 +1363,14 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // mitigation stacks on whatever the physical pipeline produces;
     // sits before MAX_DAMAGE_PER_SWING so the cap still bounds the
     // worst case.
-    let align_mult =
-        crate::commands::alignment_protection_factor(world, s.attacker, s.target);
+    let align_mult = crate::commands::alignment_protection_factor(world, s.attacker, s.target);
     if (align_mult - 1.0).abs() > f32::EPSILON {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         {
-            damage = ((damage as f32) * align_mult) as i32;
+            #[allow(clippy::cast_precision_loss)]
+            {
+                damage = ((damage as f32) * align_mult) as i32;
+            }
         }
         damage = damage.max(0);
     }
@@ -1382,8 +1394,16 @@ fn apply_swing(world: &mut World, s: &Swing) {
         Some(open) => format!("{open}{damage}</>"),
         None => damage.to_string(),
     };
-    let tail = if dice_on { show_dice_swing(detail, mit) } else { String::new() };
-    let target_tail = if target_dice_on { show_dice_swing(detail, mit) } else { String::new() };
+    let tail = if dice_on {
+        show_dice_swing(detail, mit)
+    } else {
+        String::new()
+    };
+    let target_tail = if target_dice_on {
+        show_dice_swing(detail, mit)
+    } else {
+        String::new()
+    };
     // Mob-natural-attack flavor: when the attacker carries a
     // `NaturalAttackType` (i.e. unarmed mob swing), pull the verb
     // from the proto's `DamageType::verb()` so a wolf bites and an
@@ -1401,16 +1421,14 @@ fn apply_swing(world: &mut World, s: &Swing) {
     send_to(
         world,
         s.attacker,
-        format!(
-            "You hit <b:cyan>{target_name}</> for {damage_label} damage{crit_tag}.\r\n{tail}"
-        ),
+        format!("You hit <b:cyan>{target_name}</> for {damage_label} damage{crit_tag}.\r\n{tail}"),
     );
-    let attacker_cap = crate::commands::cap_sentence_start(&s.attacker_name);
+    let attacker_name_cap = crate::commands::cap_sentence_start(&s.attacker_name);
     send_to(
         world,
         s.target,
         format!(
-            "{attacker_cap} {attacker_verb_third} you for {damage_label} damage{crit_tag}.\r\n{target_tail}",
+            "{attacker_name_cap} {attacker_verb_third} you for {damage_label} damage{crit_tag}.\r\n{target_tail}",
         ),
     );
     if was_sleeping && !dead {
@@ -1452,7 +1470,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         world,
         room,
         &[s.attacker, s.target],
-        &format!("{attacker_cap} {attacker_verb_third} {target_name}{room_crit_tag}.\r\n"),
+        &format!("{attacker_name_cap} {attacker_verb_third} {target_name}{room_crit_tag}.\r\n"),
     );
 
     // Sustained-combat stamina drain: 1 per swing on the attacker. No-op
@@ -1504,7 +1522,8 @@ fn apply_swing(world: &mut World, s: &Swing) {
         mob_flee(world, s.target, room);
         return;
     }
-    if target_is_player && wimpy_set
+    if target_is_player
+        && wimpy_set
         && let Some(hp) = world.get::<Health>(s.target).copied()
         && hp.hp > 0
         && hp.hp * 100 < hp.max * wimpy_pct
@@ -1512,12 +1531,10 @@ fn apply_swing(world: &mut World, s: &Swing) {
         // Look for any open exit before announcing the panic — otherwise
         // we'd print "You panic!" and then immediately "There's nowhere
         // to run!" from cmd_flee, which reads as a contradiction.
-        let has_exit = world
-            .get::<Exits>(room)
-            .is_some_and(|e| {
-                e.0.values()
-                    .any(|ed| ed.state == mud_db::enums::ExitState::Open && ed.to.is_some())
-            });
+        let has_exit = world.get::<Exits>(room).is_some_and(|e| {
+            e.0.values()
+                .any(|ed| ed.state == mud_db::enums::ExitState::Open && ed.to.is_some())
+        });
         if has_exit {
             send_to(world, s.target, "You panic!\r\n");
             cmd_flee(world, s.target, "");
@@ -1532,12 +1549,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn handle_death(
-    world: &mut World,
-    victim: Entity,
-    victim_name: &str,
-    room: Entity,
-) {
+pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Entity) {
     let is_player = world.get::<Player>(victim).is_some();
 
     if is_player {
@@ -1580,15 +1592,13 @@ pub(crate) fn handle_death(
         // so a bound weapon doesn't end up un-wielded after the ghost
         // releases. Looters get the rest.
         let owned_items: Vec<(Entity, bool)> = {
-            let mut q = world.query_filtered::<
-                (Entity, &Located, Option<&mud_world::ObjectFlags>),
-                With<Item>,
-            >();
+            let mut q = world
+                .query_filtered::<(Entity, &Located, Option<&mud_world::ObjectFlags>), With<Item>>(
+                );
             q.iter(world)
                 .filter(|(_, l, _)| l.0 == victim)
                 .map(|(e, _, f)| {
-                    let bound = f
-                        .is_some_and(|ff| ff.has(mud_db::enums::ObjectFlag::Soulbound));
+                    let bound = f.is_some_and(|ff| ff.has(mud_db::enums::ObjectFlag::Soulbound));
                     (e, bound)
                 })
                 .collect()
@@ -1599,12 +1609,11 @@ pub(crate) fn handle_death(
                 Item,
                 Corpse,
                 Named { name: corpse_name },
-                Keywords(vec![
-                    "corpse".to_string(),
-                    victim_name.to_ascii_lowercase(),
-                ]),
+                Keywords(vec!["corpse".to_string(), victim_name.to_ascii_lowercase()]),
                 Located(room),
-                CorpseDecay { remaining_secs: PLAYER_CORPSE_DECAY_SECS },
+                CorpseDecay {
+                    remaining_secs: PLAYER_CORPSE_DECAY_SECS,
+                },
             ))
             .id();
         // Tag as a player corpse separately so ANIMATE_DEAD /
@@ -1614,7 +1623,9 @@ pub(crate) fn handle_death(
         // Bevy version (verified empirically; the second insert
         // attaches cleanly). Snapshot save/load round-trips this
         // marker so it survives a restart.
-        let victim_level = world.get::<mud_world::Profile>(victim).map_or(1, |p| p.level);
+        let victim_level = world
+            .get::<mud_world::Profile>(victim)
+            .map_or(1, |p| p.level);
         if let Ok(mut em) = world.get_entity_mut(corpse) {
             em.insert(mud_world::PlayerCorpse);
             em.insert(mud_world::CorpseOriginLevel(victim_level));
@@ -1661,7 +1672,9 @@ pub(crate) fn handle_death(
         // a Player.
         let pvp_killer: Option<Entity> = {
             let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
-            q.iter(world).find(|(e, f)| f.0 == victim && *e != victim).map(|(e, _)| e)
+            q.iter(world)
+                .find(|(e, f)| f.0 == victim && *e != victim)
+                .map(|(e, _)| e)
         };
         if let Some(killer) = pvp_killer
             && let Some(mut cs) = world.get_mut::<CombatStats>(killer)
@@ -1790,20 +1803,23 @@ pub(crate) fn handle_death(
             .spawn((
                 Item,
                 Corpse,
-                Named { name: format!("the corpse of {victim_name}") },
-                Keywords(vec![
-                    "corpse".to_string(),
-                    victim_name.to_ascii_lowercase(),
-                ]),
+                Named {
+                    name: format!("the corpse of {victim_name}"),
+                },
+                Keywords(vec!["corpse".to_string(), victim_name.to_ascii_lowercase()]),
                 Located(room),
-                CorpseDecay { remaining_secs: MOB_CORPSE_DECAY_SECS },
+                CorpseDecay {
+                    remaining_secs: MOB_CORPSE_DECAY_SECS,
+                },
             ))
             .id();
         // Record the dead mob's level on the corpse for downstream
         // mechanics — ANIMATE_DEAD reads it to scale the spawned
         // skeleton's HP. Profile is the canonical source for mob
         // levels (Mob protos seed it at spawn).
-        let mob_level = world.get::<mud_world::Profile>(victim).map_or(1, |p| p.level);
+        let mob_level = world
+            .get::<mud_world::Profile>(victim)
+            .map_or(1, |p| p.level);
         if let Ok(mut em) = world.get_entity_mut(corpse) {
             em.insert(mud_world::CorpseOriginLevel(mob_level));
         }
@@ -1813,11 +1829,13 @@ pub(crate) fn handle_death(
         // another mob; the killer lookup above filters to Player
         // entities).
         if let Some(k) = killer {
-            world.get_entity_mut(corpse).unwrap().insert(mud_world::LootClaim {
-                owner: k,
-                expires_at: std::time::Instant::now()
-                    + std::time::Duration::from_secs(300),
-            });
+            world
+                .get_entity_mut(corpse)
+                .unwrap()
+                .insert(mud_world::LootClaim {
+                    owner: k,
+                    expires_at: std::time::Instant::now() + std::time::Duration::from_secs(300),
+                });
         }
         for it in &owned_items {
             if let Some(mut l) = world.get_mut::<Located>(*it) {
@@ -1851,9 +1869,7 @@ pub(crate) fn handle_death(
                 send_to(
                     world,
                     killer,
-                    format!(
-                        "You loot {moved} item(s) from the corpse of {victim_name}.\r\n"
-                    ),
+                    format!("You loot {moved} item(s) from the corpse of {victim_name}.\r\n"),
                 );
             }
         }
@@ -1863,9 +1879,7 @@ pub(crate) fn handle_death(
         // BEFORE despawn or the FromMobReset component vanishes.
         if let Some(reset_id) = world.get::<FromMobReset>(victim).map(|f| f.0) {
             let now = world.resource::<TickCount>().0;
-            if let Some(mut timers) =
-                world.get_resource_mut::<crate::respawn::MobRespawnTimers>()
-            {
+            if let Some(mut timers) = world.get_resource_mut::<crate::respawn::MobRespawnTimers>() {
                 timers.last_death_tick.insert(reset_id, now);
             }
         }
@@ -1881,12 +1895,7 @@ pub(crate) fn handle_death(
 /// (`AUTO_GOLD` on, default) or the freshly-spawned corpse via
 /// `CoinPile` (`AUTO_GOLD` off — claimed via `get all from corpse`).
 /// No-op when the mob has no wealth, no proto, or no player attacker.
-fn award_kill_coin(
-    world: &mut World,
-    victim: Entity,
-    victim_name: &str,
-    corpse: Entity,
-) {
+fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str, corpse: Entity) {
     let coin = world
         .get::<WorldKey>(victim)
         .and_then(|k| {
@@ -1976,9 +1985,7 @@ fn award_kill_coin(
         let share = if copper_factor == 100 {
             base_share
         } else {
-            (base_share.saturating_mul(i64::from(copper_factor))
-                / 100)
-                .max(1)
+            (base_share.saturating_mul(i64::from(copper_factor)) / 100).max(1)
         };
         if let Some(mut w) = world.get_mut::<Wealth>(*r) {
             w.0 = w.0.saturating_add(share);
@@ -1992,9 +1999,7 @@ fn award_kill_coin(
         } else {
             let msg =
                 crate::commands::format_wealth(share).unwrap_or_else(|| "no coin".to_string());
-            format!(
-                "You collect {msg} (group share) from the corpse of {victim_name}.\r\n"
-            )
+            format!("You collect {msg} (group share) from the corpse of {victim_name}.\r\n")
         };
         send_to(world, *r, line);
     }
@@ -2044,15 +2049,14 @@ fn apply_protected_kill_penalty(world: &mut World, killer: Entity, victim: Entit
     send_to(world, killer, line);
 }
 
+#[allow(clippy::too_many_lines)]
 fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
     use mud_db::enums::MobRole;
-    let proto = world
-        .get::<WorldKey>(victim)
-        .and_then(|k| {
-            world
-                .get_resource::<MobPrototypes>()
-                .and_then(|p| p.by_key.get(&(k.zone, k.id)).cloned())
-        });
+    let proto = world.get::<WorldKey>(victim).and_then(|k| {
+        world
+            .get_resource::<MobPrototypes>()
+            .and_then(|p| p.by_key.get(&(k.zone, k.id)).cloned())
+    });
     let Some(proto) = proto else { return };
     let multiplier_pct = match proto.role {
         MobRole::Trash => 50,
@@ -2129,7 +2133,11 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
         // f32 round-trip on the XP value — share fits comfortably
         // in f32 mantissa for any sane player level, and we floor
         // at 1 so heavy penalty bands still award a token amount.
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let pre_race = ((share as f32) * modifier).max(1.0) as i32;
         // Per-race XP scaling from `Races.exp_factor` (percent).
         // 100 = unchanged; 120 → +20% XP for this race.
@@ -2176,9 +2184,7 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
         let line = if *entity == killer && recipients.len() == 1 {
             format!("You gain {scaled} experience for the kill of {victim_name}.\r\n")
         } else {
-            format!(
-                "You gain {scaled} experience (group share) for the kill of {victim_name}.\r\n"
-            )
+            format!("You gain {scaled} experience (group share) for the kill of {victim_name}.\r\n")
         };
         send_to(world, *entity, line);
         check_level_up(world, *entity);
@@ -2211,6 +2217,7 @@ pub fn trophy_xp_modifier(prior_kills: f32) -> f32 {
 /// levels in one call) — incrementing `Profile.level`, expanding
 /// `Health.max` and `Stamina.max` by the row's gain values, and
 /// emitting a "you advanced to level N" line per step.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
     use mud_world::{LevelTable, Profile};
     let table = world.resource::<LevelTable>().clone_rows();
@@ -2238,9 +2245,8 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
         let race = world
             .get::<Profile>(entity)
             .map(|p| (p.race.clone(), p.class_id));
-        let (hp_factor, class_hp_per_level, class_hit_dice_roll) = race
-            .as_ref()
-            .map(|(r, cid)| {
+        let (hp_factor, class_hp_per_level, class_hit_dice_roll) =
+            race.as_ref().map_or((100, 0, 0), |(r, cid)| {
                 let race_factor = world
                     .get_resource::<mud_world::RaceCatalog>()
                     .and_then(|c| c.get(r))
@@ -2256,8 +2262,7 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
                         (c.hp_per_level, roll_dice(n, m, b))
                     });
                 (race_factor, class_hp, hit_dice_roll)
-            })
-            .unwrap_or((100, 0, 0));
+            });
         let race_scaled = next_row
             .hp_gain
             .saturating_mul(hp_factor)
@@ -2278,13 +2283,11 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
         // levels, plus the better of the INT or WIS bonus (capped
         // at +10 by CoreStats::bonus on the 0..100 scale). Floor at
         // 1 so a level-up always grants something.
-        let mental_bonus = world
-            .get::<mud_world::CoreStats>(entity)
-            .map_or(0, |s| {
-                let int_b = mud_world::CoreStats::bonus(s.intelligence);
-                let wis_b = mud_world::CoreStats::bonus(s.wisdom);
-                int_b.max(wis_b).max(0)
-            });
+        let mental_bonus = world.get::<mud_world::CoreStats>(entity).map_or(0, |s| {
+            let int_b = mud_world::CoreStats::bonus(s.intelligence);
+            let wis_b = mud_world::CoreStats::bonus(s.wisdom);
+            int_b.max(wis_b).max(0)
+        });
         let granted = (1 + (level / 10) + mental_bonus).max(1);
         if let Some(mut sp) = world.get_mut::<mud_world::SkillPoints>(entity) {
             sp.0 = sp.0.saturating_add(granted);
@@ -2394,21 +2397,18 @@ mod tests {
     /// Damage modeling under the new acc/ev pipeline: tests still want
     /// raw "does ~N damage per swing" semantics. The new swing formula
     /// is `weapon_dice * (1 + attack_power/100)`, so an unarmed
-    /// attacker rolls 1 by default — multiplying that by attack_power
+    /// attacker rolls 1 by default — multiplying that by `attack_power`
     /// can't reproduce a band like "7 ± 1". Instead we attach a
     /// `NaturalDamage { 1d1 + (dmg_roll - 1) }` so the rolled base is
-    /// exactly `dmg_roll`, then leave attack_power at 0. This keeps
+    /// exactly `dmg_roll`, then leave `attack_power` at 0. This keeps
     /// the existing per-test damage assertions (variance bands, crit
     /// promotion math) intact across the rewrite.
-    fn make_attacker(
-        world: &mut World,
-        room: Entity,
-        target: Entity,
-        dmg_roll: i32,
-    ) -> Entity {
+    fn make_attacker(world: &mut World, room: Entity, target: Entity, dmg_roll: i32) -> Entity {
         world
             .spawn((
-                Named { name: "Attacker".to_string() },
+                Named {
+                    name: "Attacker".to_string(),
+                },
                 Located(room),
                 Fighting(target),
                 CombatStats {
@@ -2421,7 +2421,11 @@ mod tests {
                     accuracy: 200,
                     ..Default::default()
                 },
-                NaturalDamage { num: 1, size: 1, bonus: dmg_roll - 1 },
+                NaturalDamage {
+                    num: 1,
+                    size: 1,
+                    bonus: dmg_roll - 1,
+                },
                 Posture(PostureKind::Standing),
             ))
             .id()
@@ -2430,7 +2434,9 @@ mod tests {
     fn make_target(world: &mut World, room: Entity, hp: i32) -> Entity {
         world
             .spawn((
-                Named { name: "Target".to_string() },
+                Named {
+                    name: "Target".to_string(),
+                },
                 Located(room),
                 Health { hp, max: hp },
             ))
@@ -2445,7 +2451,7 @@ mod tests {
 
     /// A6: a hidden attacker's swing applies an opening-strike
     /// bonus and Stealth is cleared after — verify the marker
-    /// is gone after one apply_swing. Damage delta is hard to
+    /// is gone after one `apply_swing`. Damage delta is hard to
     /// assert deterministically with variance / armor in play,
     /// so the test only confirms the marker drop.
     #[test]
@@ -2490,8 +2496,7 @@ mod tests {
         for w in ladder.windows(2) {
             assert!(
                 w[0] <= w[1],
-                "posture penalty ladder must be non-decreasing, got {:?}",
-                ladder,
+                "posture penalty ladder must be non-decreasing, got {ladder:?}",
             );
         }
     }
@@ -2505,7 +2510,9 @@ mod tests {
 
         run_combat_tick(&mut world);
 
-        let hp = world.get::<Health>(target).expect("target still has Health");
+        let hp = world
+            .get::<Health>(target)
+            .expect("target still has Health");
         // Damage = 7 ± (7/4 = 1) for normal, or 10 ± (10/4 = 2)
         // on the 1% crit branch. So hp lands in [50-12 .. 50-6],
         // i.e. 38..=44. Anything else means the swing didn't
@@ -2527,7 +2534,9 @@ mod tests {
         // Off-period: nothing should happen.
         world.insert_resource(TickCount(COMBAT_PERIOD_TICKS - 1));
         combat_tick(&mut world);
-        let hp = world.get::<Health>(target).expect("target still has Health");
+        let hp = world
+            .get::<Health>(target)
+            .expect("target still has Health");
         assert_eq!(hp.hp, 50, "no swing fires off-period");
     }
 
@@ -2579,7 +2588,9 @@ mod tests {
         let target = world
             .spawn((
                 Mob,
-                Named { name: "Target".to_string() },
+                Named {
+                    name: "Target".to_string(),
+                },
                 Located(room),
                 Health { hp: 5, max: 5 },
             ))
@@ -2601,6 +2612,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn mob_kill_spawns_corpse_with_coin_pile() {
         // Regression for the playtest "no corpse / no gold" bug:
         // killing an itemless mob with a coin proto must (a) spawn
@@ -2673,7 +2685,9 @@ mod tests {
         let target = world
             .spawn((
                 Mob,
-                Named { name: "a stray dog".to_string() },
+                Named {
+                    name: "a stray dog".to_string(),
+                },
                 Located(room),
                 Health { hp: 5, max: 5 },
                 mud_world::WorldKey { zone: 1, id: 1 },
@@ -2682,7 +2696,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "Tester".to_string() },
+                Named {
+                    name: "Tester".to_string(),
+                },
                 Located(room),
                 Health { hp: 100, max: 100 },
                 CombatStats {
@@ -2693,7 +2709,11 @@ mod tests {
                 },
                 // 1d1 + 99 = 100 baseline damage; one-shots the
                 // 5-HP dog regardless of crit/variance branch.
-                NaturalDamage { num: 1, size: 1, bonus: 99 },
+                NaturalDamage {
+                    num: 1,
+                    size: 1,
+                    bonus: 99,
+                },
                 Posture(PostureKind::Standing),
                 Fighting(target),
             ))
@@ -2702,23 +2722,22 @@ mod tests {
         run_combat_tick(&mut world);
 
         // Mob is dead, corpse exists in the room.
-        assert!(
-            world.get_entity(target).is_err(),
-            "target despawned"
-        );
+        assert!(world.get_entity(target).is_err(), "target despawned");
         let corpse = world
             .query_filtered::<(Entity, &Located, &CoinPile), With<Corpse>>()
             .iter(&world)
             .find(|(_, l, _)| l.0 == room)
             .map(|(e, _, p)| (e, p.0));
-        let (_corpse_entity, coin) = corpse
-            .expect("corpse with CoinPile spawned in room (no AutoGold)");
-        assert_eq!(coin, 75, "coin amount lands on corpse for non-AutoGold killer");
+        let (_corpse_entity, coin) =
+            corpse.expect("corpse with CoinPile spawned in room (no AutoGold)");
+        assert_eq!(
+            coin, 75,
+            "coin amount lands on corpse for non-AutoGold killer"
+        );
         // Player wealth is still zero — coin is on the corpse,
         // claimed via `get all from corpse`.
         assert!(
-            world.get::<Wealth>(player).is_none()
-                || world.get::<Wealth>(player).unwrap().0 == 0,
+            world.get::<Wealth>(player).is_none() || world.get::<Wealth>(player).unwrap().0 == 0,
             "no AutoGold means no wealth deposited yet"
         );
     }
@@ -2733,7 +2752,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "Tester".to_string() },
+                Named {
+                    name: "Tester".to_string(),
+                },
                 Located(room),
                 Health { hp: 0, max: 100 },
                 Posture(PostureKind::Standing),
@@ -2743,7 +2764,9 @@ mod tests {
         let _carried = world
             .spawn((
                 Item,
-                Named { name: "a stick".to_string() },
+                Named {
+                    name: "a stick".to_string(),
+                },
                 Keywords(vec!["stick".to_string()]),
                 Located(player),
             ))
@@ -2751,7 +2774,9 @@ mod tests {
         let _worn = world
             .spawn((
                 Item,
-                Named { name: "a robe".to_string() },
+                Named {
+                    name: "a robe".to_string(),
+                },
                 Keywords(vec!["robe".to_string()]),
                 Located(player),
                 mud_world::EquippedSlot(Slot::Body),
@@ -2774,7 +2799,10 @@ mod tests {
             .find(|(_, l, _, _)| l.0 == room)
             .map(|(e, _, n, d)| (e, n.name.clone(), d.remaining_secs));
         let (corpse_entity, corpse_name, decay) = corpse.expect("corpse spawned in room");
-        assert!(corpse_name.contains("Tester"), "corpse names the dead player");
+        assert!(
+            corpse_name.contains("Tester"),
+            "corpse names the dead player"
+        );
         assert!(decay > 0, "corpse has positive decay timer");
         // Both items should now be Located on the corpse, not the player.
         let on_corpse: Vec<String> = world
@@ -2805,7 +2833,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "Tester".to_string() },
+                Named {
+                    name: "Tester".to_string(),
+                },
                 Located(room),
                 Health { hp: 0, max: 100 },
                 Posture(PostureKind::Standing),
@@ -2814,7 +2844,9 @@ mod tests {
         let mob = world
             .spawn((
                 Mob,
-                Named { name: "Guard".to_string() },
+                Named {
+                    name: "Guard".to_string(),
+                },
                 Located(room),
                 Health { hp: 50, max: 50 },
                 MobMemory({
@@ -2855,7 +2887,9 @@ mod tests {
         let room = make_room(&mut world);
         let target = world
             .spawn((
-                Named { name: "Sleeper".to_string() },
+                Named {
+                    name: "Sleeper".to_string(),
+                },
                 Located(room),
                 Health { hp: 50, max: 50 },
                 // Default defender — accuracy/evasion both 0,
@@ -2900,7 +2934,9 @@ mod tests {
         let room = make_room(&mut world);
         let target = world
             .spawn((
-                Named { name: "Resting".to_string() },
+                Named {
+                    name: "Resting".to_string(),
+                },
                 Located(room),
                 Health { hp: 50, max: 50 },
                 // Default defender — see sleeping-jolt test.
@@ -2910,7 +2946,9 @@ mod tests {
             .id();
         let attacker = world
             .spawn((
-                Named { name: "Attacker".to_string() },
+                Named {
+                    name: "Attacker".to_string(),
+                },
                 Located(room),
                 Fighting(target),
                 CombatStats {
@@ -2921,7 +2959,11 @@ mod tests {
                     ..Default::default()
                 },
                 // dmg_roll: 7 → 1d1 + 6 = exactly 7 base damage.
-                NaturalDamage { num: 1, size: 1, bonus: 6 },
+                NaturalDamage {
+                    num: 1,
+                    size: 1,
+                    bonus: 6,
+                },
                 Posture(PostureKind::Standing),
             ))
             .id();
@@ -2961,7 +3003,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "Tester".to_string() },
+                Named {
+                    name: "Tester".to_string(),
+                },
                 Located(room_b), // already fled
                 Health { hp: 100, max: 100 },
                 Posture(PostureKind::Standing),
@@ -2971,7 +3015,9 @@ mod tests {
         let mob = world
             .spawn((
                 Mob,
-                Named { name: "Guard".to_string() },
+                Named {
+                    name: "Guard".to_string(),
+                },
                 Located(room_a),
                 Health { hp: 50, max: 50 },
                 CombatStats {
@@ -3018,7 +3064,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "Tester".to_string() },
+                Named {
+                    name: "Tester".to_string(),
+                },
                 Located(room),
                 Health { hp: 5, max: 100 }, // one swing kills
                 Posture(PostureKind::Standing),
@@ -3088,7 +3136,9 @@ mod tests {
         let mob = world
             .spawn((
                 Mob,
-                Named { name: "Target".to_string() },
+                Named {
+                    name: "Target".to_string(),
+                },
                 Located(room),
                 Health { hp: 5, max: 5 }, // one swing kills
             ))
@@ -3133,10 +3183,7 @@ mod tests {
         let hp = world
             .get::<Health>(target)
             .expect("target still has Health");
-        assert_eq!(
-            hp.hp, 50,
-            "Frozen attacker doesn't generate a swing"
-        );
+        assert_eq!(hp.hp, 50, "Frozen attacker doesn't generate a swing");
     }
 
     #[test]
@@ -3151,7 +3198,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "Tester".to_string() },
+                Named {
+                    name: "Tester".to_string(),
+                },
                 Located(room),
                 Health { hp: 100, max: 100 },
                 Posture(PostureKind::Standing),
@@ -3161,7 +3210,9 @@ mod tests {
         let mob = world
             .spawn((
                 Mob,
-                Named { name: "Guard".to_string() },
+                Named {
+                    name: "Guard".to_string(),
+                },
                 Located(room),
                 Health { hp: 50, max: 50 },
                 CombatStats {
@@ -3201,7 +3252,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "Tester".to_string() },
+                Named {
+                    name: "Tester".to_string(),
+                },
                 Located(room),
                 Health { hp: 100, max: 100 },
                 Posture(PostureKind::Standing),
@@ -3211,7 +3264,9 @@ mod tests {
         let mob = world
             .spawn((
                 Mob,
-                Named { name: "Guard".to_string() },
+                Named {
+                    name: "Guard".to_string(),
+                },
                 Located(room),
                 Health { hp: 50, max: 50 },
                 CombatStats {
@@ -3246,7 +3301,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "Tester".to_string() },
+                Named {
+                    name: "Tester".to_string(),
+                },
                 Located(room),
                 Health { hp: 0, max: 100 },
                 Posture(PostureKind::Standing),
@@ -3256,7 +3313,9 @@ mod tests {
         let mob = world
             .spawn((
                 Mob,
-                Named { name: "Guard".to_string() },
+                Named {
+                    name: "Guard".to_string(),
+                },
                 Located(room),
                 Health { hp: 50, max: 50 },
                 CombatStats {
@@ -3341,9 +3400,9 @@ mod tests {
     // ---------------------------------------------------------------
 
     /// `DeathTrap` marker plus `handle_death` together implement the
-    /// "step into the room and die" contract. cmd_move's gate just
-    /// asks "is there a DeathTrap here?" and routes to handle_death;
-    /// this test pins handle_death's effect on a player so the
+    /// "step into the room and die" contract. `cmd_move`'s gate just
+    /// asks "is there a `DeathTrap` here?" and routes to `handle_death`;
+    /// this test pins `handle_death`'s effect on a player so the
     /// composition stands. The loader test (mud-world side) verifies
     /// the marker lands; this verifies the consumer's outcome.
     #[test]
@@ -3359,7 +3418,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "DTVictim".to_string() },
+                Named {
+                    name: "DTVictim".to_string(),
+                },
                 Located(room),
                 Health { hp: 100, max: 100 },
                 Posture(PostureKind::Standing),
@@ -3386,7 +3447,7 @@ mod tests {
     /// peaceful-room gate (which would cause combat in an arena to
     /// be refused). Pin that compatibility: combat between two
     /// players in an arena room is not blocked by any sibling
-    /// PeacefulRoom marker.
+    /// `PeacefulRoom` marker.
     #[test]
     fn arena_room_marker_does_not_imply_peaceful_room() {
         let mut world = World::new();
@@ -3398,7 +3459,9 @@ mod tests {
         let _p1 = world
             .spawn((
                 Player,
-                Named { name: "ArenaA".to_string() },
+                Named {
+                    name: "ArenaA".to_string(),
+                },
                 Located(room),
                 Health { hp: 100, max: 100 },
                 Posture(PostureKind::Standing),
@@ -3407,7 +3470,9 @@ mod tests {
         let _p2 = world
             .spawn((
                 Player,
-                Named { name: "ArenaB".to_string() },
+                Named {
+                    name: "ArenaB".to_string(),
+                },
                 Located(room),
                 Health { hp: 100, max: 100 },
                 Posture(PostureKind::Standing),
@@ -3452,7 +3517,7 @@ mod tests {
     /// marker stores correctly so the broadcast loop's predicate
     /// fires; the loop itself can't be unit-tested without a
     /// Connection apparatus, so the contract here is "marker is
-    /// present, broadcast skips it" — broadcast_global reads
+    /// present, broadcast skips it" — `broadcast_global` reads
     /// `world.get::<SoundproofRoom>` directly.
     #[test]
     fn soundproof_room_marker_classifies_room() {
@@ -3462,7 +3527,9 @@ mod tests {
         let player = world
             .spawn((
                 Player,
-                Named { name: "Listener".to_string() },
+                Named {
+                    name: "Listener".to_string(),
+                },
                 Located(booth),
             ))
             .id();
@@ -3472,9 +3539,7 @@ mod tests {
         // Re-execute that here so a future change to the gate
         // wording is caught by this test.
         let located = world.get::<Located>(player).copied().expect("Located set");
-        let is_soundproof = world
-            .get::<mud_world::SoundproofRoom>(located.0)
-            .is_some();
+        let is_soundproof = world.get::<mud_world::SoundproofRoom>(located.0).is_some();
         assert!(
             is_soundproof,
             "listener's room reports as soundproof — broadcast skips them",

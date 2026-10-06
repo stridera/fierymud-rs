@@ -27,11 +27,11 @@ use mud_world::{Casting, Fighting, Health, Located};
 use crate::commands::send_to;
 
 /// One combat round in ticks. Combat round = 4s (per
-/// `GameConfig.combat.round_seconds`), TICK_HZ = 10, so 40 ticks.
+/// `GameConfig.combat.round_seconds`), `TICK_HZ` = 10, so 40 ticks.
 /// Cast wind-up = `cast_time_rounds * COMBAT_ROUND_TICKS`.
 ///
 /// Kept in code as the conversion is a runtime invariant — the
-/// GameConfig row tunes the *seconds* per round, not the tick rate.
+/// `GameConfig` row tunes the *seconds* per round, not the tick rate.
 pub(crate) const COMBAT_ROUND_TICKS: i32 = 40;
 
 /// Decrement `Casting.ticks_remaining` for every active wind-up,
@@ -71,9 +71,7 @@ pub(crate) fn casting_tick(world: &mut World) {
             world,
             caster,
             &snap.args,
-            mud_db::abilities::AbilityKind::from_label(
-                &snap.kind_label.to_ascii_uppercase(),
-            ),
+            mud_db::abilities::AbilityKind::from_label(&snap.kind_label.to_ascii_uppercase()),
             &snap.verb,
         );
     }
@@ -106,11 +104,7 @@ pub(crate) fn interrupt_cast(world: &mut World, caster: Entity, reason: &str) ->
 /// Concentration break on incoming damage. Damage > 30% of caster
 /// max HP forces a save; for now any spike that big simply
 /// interrupts. Lower-impact hits leave the cast intact.
-pub(crate) fn check_concentration_on_damage(
-    world: &mut World,
-    caster: Entity,
-    damage_taken: i32,
-) {
+pub(crate) fn check_concentration_on_damage(world: &mut World, caster: Entity, damage_taken: i32) {
     if world.get::<Casting>(caster).is_none() {
         return;
     }

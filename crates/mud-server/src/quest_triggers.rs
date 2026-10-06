@@ -169,7 +169,8 @@ pub(crate) fn dispatch_event_trigger(world: &mut World, event_id: i32) {
     // Snapshot every online player so the spawn doesn't have to walk
     // ECS state from the tokio task.
     let recipients: Vec<(String, mud_net::Outbound, i32)> = {
-        let mut q = world.query_filtered::<(&Account, &Connection, &Profile), (With<Player>, With<Online>)>();
+        let mut q = world
+            .query_filtered::<(&Account, &Connection, &Profile), (With<Player>, With<Online>)>();
         q.iter(world)
             .map(|(a, c, p)| (a.character_id.clone(), c.0.clone(), p.level))
             .collect()
@@ -250,11 +251,8 @@ pub(crate) fn dispatch_dialogue_attempt(
                 continue;
             };
             // Match against the binding's keywords.
-            if !crate::quest_dialogue::matches(
-                &topic,
-                &binding.match_type,
-                &binding.match_keywords,
-            ) {
+            if !crate::quest_dialogue::matches(&topic, &binding.match_type, &binding.match_keywords)
+            {
                 continue;
             }
             // Emit the NPC's response. If the binding has a linked
@@ -264,9 +262,7 @@ pub(crate) fn dispatch_dialogue_attempt(
             // the active tracker, which is mutated here too via
             // a pending update.
             let reply = match binding.dialogue_tree_id {
-                Some(tree_id) => catalog
-                    .root_of(tree_id)
-                    .map(|n| n.npc_message.clone()),
+                Some(tree_id) => catalog.root_of(tree_id).map(|n| n.npc_message.clone()),
                 None => Some(binding.npc_message.clone()),
             };
             if let Some(msg) = reply {
@@ -291,11 +287,8 @@ pub(crate) fn dispatch_dialogue_attempt(
                 continue;
             }
             if completed {
-                let _ = mud_db::quest_objectives::try_advance_phase(
-                    &pool,
-                    &row.character_quest_id,
-                )
-                .await;
+                let _ = mud_db::quest_objectives::try_advance_phase(&pool, &row.character_quest_id)
+                    .await;
                 let _ = out.try_send(
                     format!("Quest objective complete: {}\r\n", row.player_description)
                         .into_bytes(),
@@ -451,12 +444,7 @@ pub(crate) fn quest_custom_lua_tick(world: &mut World) {
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
-    let players: Vec<(u32, String)> = {
-        let mut q = world.query_filtered::<(Entity, &Account), (With<Player>, With<Online>)>();
-        q.iter(world)
-            .map(|(e, a)| (e.to_bits() as u32, a.character_id.clone()))
-            .collect()
-    };
+    let players = online_players(world);
     // Tokio tasks can't hold `&World` to push directly into a Bevy
     // resource, so the sync inbox is an mpsc channel that the
     // drain (running on the world thread) pulls from.
@@ -466,52 +454,55 @@ pub(crate) fn quest_custom_lua_tick(world: &mut World) {
     let Some(sender) = sender else {
         return;
     };
-    for (bits, cid) in players {
+    for (entity, cid) in players {
         let pool = pool.clone();
         let sender = sender.clone();
         tokio::spawn(async move {
-            let rows = match mud_db::quest_objectives::list_custom_lua_for_character(
-                &pool, &cid,
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "CUSTOM_LUA list failed");
-                    return;
-                }
-            };
+            let rows =
+                match mud_db::quest_objectives::list_custom_lua_for_character(&pool, &cid).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "CUSTOM_LUA list failed");
+                        return;
+                    }
+                };
             for row in rows {
-                let _ = sender.send((bits, row)).await;
+                let _ = sender.send((entity, row)).await;
             }
         });
     }
+}
+
+/// `(entity, character_id)` for every online player. Carries the full
+/// `Entity` (index + generation) — truncating to 32 bits would drop the
+/// generation and resolve to a stale/wrong entity after slot reuse.
+fn online_players(world: &mut World) -> Vec<(Entity, String)> {
+    let mut q = world.query_filtered::<(Entity, &Account), (With<Player>, With<Online>)>();
+    q.iter(world)
+        .map(|(e, a)| (e, a.character_id.clone()))
+        .collect()
 }
 
 /// Sender side of the CUSTOM_LUA sweep channel. Set up at startup
 /// alongside `CustomLuaSweepRx`.
 #[derive(Resource, Clone)]
 pub(crate) struct CustomLuaSweepSender(
-    pub(crate)
-        tokio::sync::mpsc::Sender<(u32, mud_db::quest_objectives::CustomLuaObjective)>,
+    pub(crate) tokio::sync::mpsc::Sender<(Entity, mud_db::quest_objectives::CustomLuaObjective)>,
 );
 
 /// Receiver side of the CUSTOM_LUA sweep channel.
 #[derive(Resource)]
 pub(crate) struct CustomLuaSweepRx(
-    pub(crate)
-        std::sync::Mutex<
-            tokio::sync::mpsc::Receiver<(u32, mud_db::quest_objectives::CustomLuaObjective)>,
-        >,
+    pub(crate)  std::sync::Mutex<
+        tokio::sync::mpsc::Receiver<(Entity, mud_db::quest_objectives::CustomLuaObjective)>,
+    >,
 );
 
 /// One-time setup helper. Call from main.rs after `World::new()`
 /// to wire the channel + inbox.
 pub(crate) fn init_resources(world: &mut World) {
-    let (tx, rx) = tokio::sync::mpsc::channel::<(
-        u32,
-        mud_db::quest_objectives::CustomLuaObjective,
-    )>(1024);
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<(Entity, mud_db::quest_objectives::CustomLuaObjective)>(1024);
     world.insert_resource(CustomLuaSweepSender(tx));
     world.insert_resource(CustomLuaSweepRx(std::sync::Mutex::new(rx)));
     // Wire the dialogue catalog (Wave 4.11) if not present. The
@@ -525,7 +516,7 @@ pub(crate) fn init_resources(world: &mut World) {
 /// host can borrow `&mut World`. Truthy expr → bump progress and
 /// (when complete) advance the phase asynchronously.
 pub(crate) fn quest_custom_lua_drain(world: &mut World) {
-    let pending: Vec<(u32, mud_db::quest_objectives::CustomLuaObjective)> = {
+    let pending: Vec<(Entity, mud_db::quest_objectives::CustomLuaObjective)> = {
         let Some(rx) = world.get_resource::<CustomLuaSweepRx>() else {
             return;
         };
@@ -542,11 +533,16 @@ pub(crate) fn quest_custom_lua_drain(world: &mut World) {
         return;
     }
     let pool = world.get_resource::<DbPool>().map(|p| p.0.clone());
-    for (entity_bits, row) in pending {
-        let entity = Entity::from_bits(u64::from(entity_bits));
+    for (entity, row) in pending {
+        // The sweep carries the full `Entity` (index + generation). If
+        // the player despawned between sweep and drain, the generation
+        // no longer matches and this skips instead of hitting a reused
+        // slot.
+        if world.get::<Account>(entity).is_none() {
+            continue;
+        }
         let body = format!("return ({})", row.lua_expression);
-        let vars_text = serde_json::to_string(&row.variables)
-            .unwrap_or_else(|_| "{}".to_string());
+        let vars_text = serde_json::to_string(&row.variables).unwrap_or_else(|_| "{}".to_string());
         let extras: Vec<(&str, &str)> = vec![("quest_vars_json", &vars_text)];
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             host.exec_for_event_with_value(world, entity, entity, None, &body, &extras)
@@ -587,15 +583,94 @@ pub(crate) fn quest_custom_lua_drain(world: &mut World) {
             }
             if completed {
                 let _ = mud_db::quest_objectives::try_advance_phase(&pool, &cqid).await;
-                let _ = out.try_send(
-                    format!("Quest objective complete: {desc}\r\n").into_bytes(),
-                );
+                let _ = out.try_send(format!("Quest objective complete: {desc}\r\n").into_bytes());
             } else if show {
                 let _ = out.try_send(
-                    format!("Quest objective: {desc} ({new_count}/{req})\r\n")
-                        .into_bytes(),
+                    format!("Quest objective: {desc} ({new_count}/{req})\r\n").into_bytes(),
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mud_world::Account;
+
+    fn account(cid: &str) -> Account {
+        Account {
+            user_id: "u".to_string(),
+            character_id: cid.to_string(),
+            role: mud_db::enums::UserRole::Player,
+            perms: Vec::new(),
+        }
+    }
+
+    fn objective(cid: &str) -> mud_db::quest_objectives::CustomLuaObjective {
+        mud_db::quest_objectives::CustomLuaObjective {
+            character_id: cid.to_string(),
+            character_quest_id: "cq".to_string(),
+            quest_zone_id: 1,
+            quest_id: 1,
+            phase_id: 1,
+            objective_id: 1,
+            required_count: 1,
+            current_count: 0,
+            lua_expression: "true".to_string(),
+            player_description: "d".to_string(),
+            show_progress: false,
+            variables: serde_json::Value::Null,
+        }
+    }
+
+    /// Spawn + despawn until a slot is reused with generation > 0, then
+    /// return a live online player occupying it.
+    fn reused_slot_player(world: &mut World) -> Entity {
+        let first = world.spawn_empty().id();
+        world.despawn(first);
+        let reused = world.spawn((Player, Online, account("reused"))).id();
+        assert_eq!(reused.index(), first.index(), "slot should be reused");
+        assert_ne!(reused.generation(), first.generation());
+        assert!(
+            reused.to_bits() > u64::from(u32::MAX),
+            "generation in high bits"
+        );
+        reused
+    }
+
+    #[test]
+    fn online_players_keeps_generation() {
+        let mut world = World::new();
+        let reused = reused_slot_player(&mut world);
+        let players = online_players(&mut world);
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].0, reused);
+        // The old truncating round-trip pointed at a different entity.
+        #[allow(clippy::cast_possible_truncation)]
+        let truncated = Entity::from_bits(u64::from(reused.to_bits() as u32));
+        assert_ne!(truncated, reused);
+        assert!(world.get::<Account>(truncated).is_none());
+    }
+
+    #[test]
+    fn sweep_channel_round_trip_resolves_correct_entity() {
+        let mut world = World::new();
+        init_resources(&mut world);
+        let reused = reused_slot_player(&mut world);
+        let tx = world.resource::<CustomLuaSweepSender>().0.clone();
+        tx.try_send((reused, objective("reused"))).unwrap();
+        let received = {
+            let rx = world.resource::<CustomLuaSweepRx>();
+            let mut rx = rx.0.lock().unwrap();
+            rx.try_recv().unwrap()
+        };
+        assert_eq!(received.0, reused);
+        assert_eq!(
+            world
+                .get::<Account>(received.0)
+                .map(|a| a.character_id.as_str()),
+            Some("reused")
+        );
     }
 }

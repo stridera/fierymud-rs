@@ -33,7 +33,7 @@ use crate::TickCount;
 use crate::commands::DbPool;
 use crate::quest_triggers::dispatch_event_trigger;
 
-/// 60s at TICK_HZ=10. Operators flip `active` from the Muditor UI;
+/// 60s at `TICK_HZ=10`. Operators flip `active` from the Muditor UI;
 /// 60s is the slowest "noticeable to the player" cadence — fast
 /// enough to feel responsive when staff turns an event on, slow
 /// enough that the DB poll stays in the noise.
@@ -57,9 +57,7 @@ pub(crate) struct EventsCatalog {
 /// row state back to the world thread. The tokio task can't borrow
 /// `&mut World` to mutate the catalog directly.
 #[derive(Resource, Clone)]
-pub(crate) struct EventPollSender(
-    pub(crate) tokio::sync::mpsc::Sender<Vec<(i32, bool)>>,
-);
+pub(crate) struct EventPollSender(pub(crate) tokio::sync::mpsc::Sender<Vec<(i32, bool)>>);
 
 #[derive(Resource)]
 pub(crate) struct EventPollRx(
@@ -113,7 +111,7 @@ pub(crate) fn events_poll_tick(world: &mut World) {
 
 /// Drain the events inbox and reconcile edges. Runs on the world
 /// thread so `dispatch_event_trigger` can borrow `&mut World`.
-/// Cheap when no batch is pending — single try_recv.
+/// Cheap when no batch is pending — single `try_recv`.
 pub(crate) fn drain_events_inbox(world: &mut World) {
     let batches: Vec<Vec<(i32, bool)>> = {
         let Some(rx) = world.get_resource::<EventPollRx>() else {
@@ -159,7 +157,10 @@ pub(crate) fn drain_events_inbox(world: &mut World) {
         }
     }
     for id in fired {
-        tracing::info!(event_id = id, "world event activated; dispatching EVENT-trigger quests");
+        tracing::info!(
+            event_id = id,
+            "world event activated; dispatching EVENT-trigger quests"
+        );
         dispatch_event_trigger(world, id);
     }
 }

@@ -15,7 +15,7 @@ use crate::commands::*;
 inventory::submit! {
     AsyncCommand {
         dispatch: |world, player, pool, head, args| match head {
-            "quests" | "qstat" | "qlist" => Some(Box::pin(cmd_quests(world, player, pool))),
+            "quests" | "qstat" | "qlist" | "questlog" => Some(Box::pin(cmd_quests(world, player, pool))),
             "abandon" => Some(Box::pin(cmd_abandon(world, player, pool, args))),
             "questinfo" => Some(Box::pin(cmd_questinfo(world, player, pool, args))),
             "innate" => Some(Box::pin(cmd_innate(world, player, pool))),
@@ -50,7 +50,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["quests", "qstat", "qlist"],
+        names: &["quests", "qstat", "qlist", "questlog"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Quest,
@@ -196,11 +196,7 @@ inventory::submit! {
 /// accepted, in-progress first then recently completed. Active rows
 /// show the quest name + short description; completed rows show
 /// completion count. Empty inbox = "no quests accepted."
-pub(crate) async fn cmd_quests(
-    world: &mut World,
-    player: Entity,
-    pool: &mud_db::sqlx::PgPool,
-) {
+pub(crate) async fn cmd_quests(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
     let character_id = world.get::<Account>(player).map(|a| a.character_id.clone());
     let Some(character_id) = character_id else {
         send_to(world, player, "No account info; can't fetch quests.\r\n");
@@ -214,17 +210,17 @@ pub(crate) async fn cmd_quests(
         }
     };
     if rows.is_empty() {
-        send_to(world, player, "\r\nYou have no active or completed quests.\r\n");
+        send_to(
+            world,
+            player,
+            "\r\nYou have no active or completed quests.\r\n",
+        );
         return;
     }
-    let active: Vec<&mud_db::quests::CharacterQuestRow> = rows
-        .iter()
-        .filter(|r| r.status == "IN_PROGRESS")
-        .collect();
-    let other: Vec<&mud_db::quests::CharacterQuestRow> = rows
-        .iter()
-        .filter(|r| r.status != "IN_PROGRESS")
-        .collect();
+    let active: Vec<&mud_db::quests::CharacterQuestRow> =
+        rows.iter().filter(|r| r.status == "IN_PROGRESS").collect();
+    let other: Vec<&mud_db::quests::CharacterQuestRow> =
+        rows.iter().filter(|r| r.status != "IN_PROGRESS").collect();
     let mut out = String::from("\r\n");
     if !active.is_empty() {
         out.push_str(&format!("In progress ({}):\r\n", active.len()));
@@ -248,8 +244,7 @@ pub(crate) async fn cmd_quests(
             // objective for Builder+ viewers only.
             let viewer_role = world
                 .get::<Account>(player)
-                .map(|a| a.role)
-                .unwrap_or(UserRole::Player);
+                .map_or(UserRole::Player, |a| a.role);
             let show_internal_notes = viewer_role.at_least(UserRole::Builder);
             match mud_db::quest_objectives::list_for_quest(pool, &q.id).await {
                 Ok(rows) => {
@@ -286,10 +281,7 @@ pub(crate) async fn cmd_quests(
                         } else {
                             "[ ]".to_string()
                         };
-                        out.push_str(&format!(
-                            "          {status} {}\r\n",
-                            r.player_description
-                        ));
+                        out.push_str(&format!("          {status} {}\r\n", r.player_description));
                         if show_internal_notes
                             && let Some(note) = &r.internal_note
                             && !note.trim().is_empty()
@@ -359,32 +351,27 @@ pub(crate) async fn cmd_qaccept(
     // this because it needs the live world. Quest row is re-read
     // there anyway, so the double-fetch cost is negligible.
     if let Ok(Some(qrow)) = mud_db::quests::get_quest(pool, zone, id).await
-        && let Some(expr) = qrow.availability_requirement.as_ref().filter(|s| !s.trim().is_empty())
+        && let Some(expr) = qrow
+            .availability_requirement
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        && !eval_quest_availability(world, player, expr)
     {
-        if !eval_quest_availability(world, player, expr) {
-            send_to(
-                world,
-                player,
-                "You can't take that quest — you don't meet the requirements.\r\n",
-            );
-            return;
-        }
+        send_to(
+            world,
+            player,
+            "You can't take that quest — you don't meet the requirements.\r\n",
+        );
+        return;
     }
-    let outcome = match mud_db::quests::accept_for_player(
-        pool,
-        &character_id,
-        level,
-        zone,
-        id,
-    )
-    .await
-    {
-        Ok(o) => o,
-        Err(e) => {
-            send_to(world, player, format!("DB error: {e}\r\n"));
-            return;
-        }
-    };
+    let outcome =
+        match mud_db::quests::accept_for_player(pool, &character_id, level, zone, id).await {
+            Ok(o) => o,
+            Err(e) => {
+                send_to(world, player, format!("DB error: {e}\r\n"));
+                return;
+            }
+        };
     let line = match outcome {
         mud_db::quests::AcceptOutcome::Accepted => {
             format!("Quest ({zone}, {id}) accepted.\r\n")
@@ -405,8 +392,7 @@ pub(crate) async fn cmd_qaccept(
             "You're already on that quest.\r\n".to_string()
         }
         mud_db::quests::AcceptOutcome::AlreadyCompletedNonRepeatable => {
-            "You've already finished that quest and it can't be repeated.\r\n"
-                .to_string()
+            "You've already finished that quest and it can't be repeated.\r\n".to_string()
         }
         mud_db::quests::AcceptOutcome::PrerequisiteIncomplete { zone, id } => {
             format!("You need to finish quest ({zone}, {id}) first.\r\n")
@@ -427,8 +413,7 @@ pub(crate) async fn cmd_qaccept(
         mud_db::quests::AcceptOutcome::RequirementNotMet { .. } => {
             // Stripped of the raw expression for players. Builders
             // see the expression in syslog via `eval_quest_availability`.
-            "You can't take that quest — you don't meet the requirements.\r\n"
-                .to_string()
+            "You can't take that quest — you don't meet the requirements.\r\n".to_string()
         }
     };
     send_to(world, player, line);
@@ -440,11 +425,7 @@ pub(crate) async fn cmd_qaccept(
 /// player out of an entire quest line; the error lands in syslog).
 /// The expression is wrapped in `return (...)` so builders can author
 /// raw boolean expressions like `character.class == 'PALADIN'`.
-pub(crate) fn eval_quest_availability(
-    world: &mut World,
-    player: Entity,
-    expr: &str,
-) -> bool {
+pub(crate) fn eval_quest_availability(world: &mut World, player: Entity, expr: &str) -> bool {
     let body = format!("return ({expr})");
     let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
         host.exec_for_event_with_value(world, player, player, None, &body, &[])
@@ -521,11 +502,7 @@ pub(crate) async fn cmd_qload(
 }
 
 /// `innate`: list the caller race's innate abilities (`RaceAbilities`).
-pub(crate) async fn cmd_innate(
-    world: &mut World,
-    player: Entity,
-    pool: &mud_db::sqlx::PgPool,
-) {
+pub(crate) async fn cmd_innate(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
     let race = world.get::<Profile>(player).map(|p| p.race.clone());
     let Some(race) = race else {
         send_to(world, player, "You have no race assigned.\r\n");
@@ -637,8 +614,7 @@ pub(crate) async fn cmd_questinfo(
     // staff do for debugging and content review.
     let viewer_role = world
         .get::<Account>(player)
-        .map(|a| a.role)
-        .unwrap_or(UserRole::Player);
+        .map_or(UserRole::Player, |a| a.role);
     if viewer_role.at_least(UserRole::Builder) {
         out.push_str("\r\nBuilder info:\r\n");
         if let Some(t) = row.time_limit_minutes {
@@ -773,10 +749,8 @@ pub(crate) async fn cmd_qcomplete(
             return;
         }
     };
-    let active: Vec<&mud_db::quests::CharacterQuestRow> = rows
-        .iter()
-        .filter(|r| r.status == "IN_PROGRESS")
-        .collect();
+    let active: Vec<&mud_db::quests::CharacterQuestRow> =
+        rows.iter().filter(|r| r.status == "IN_PROGRESS").collect();
     let Some(target) = active.get(slot - 1) else {
         send_to(
             world,
@@ -841,10 +815,8 @@ pub(crate) async fn cmd_abandon(
             return;
         }
     };
-    let active: Vec<&mud_db::quests::CharacterQuestRow> = rows
-        .iter()
-        .filter(|r| r.status == "IN_PROGRESS")
-        .collect();
+    let active: Vec<&mud_db::quests::CharacterQuestRow> =
+        rows.iter().filter(|r| r.status == "IN_PROGRESS").collect();
     let Some(target) = active.get(slot - 1) else {
         send_to(
             world,
@@ -909,7 +881,11 @@ pub(crate) async fn cmd_qreward(
             let (Ok(zone), Ok(id), Ok(reward_id)) =
                 (z.parse::<i32>(), i.parse::<i32>(), r.parse::<i32>())
             else {
-                send_to(world, player, "Zone, id, and reward-id must be integers.\r\n");
+                send_to(
+                    world,
+                    player,
+                    "Zone, id, and reward-id must be integers.\r\n",
+                );
                 return;
             };
             qreward_claim(world, player, pool, &character_id, zone, id, reward_id).await;
@@ -927,6 +903,7 @@ pub(crate) async fn cmd_qreward(
 /// Pull the `claimed_rewards: [i32]` array out of the per-quest
 /// variables JSON. Missing key → empty Vec. Permissive parse:
 /// non-array or non-integer entries are silently dropped.
+#[allow(clippy::cast_possible_truncation)]
 fn claimed_rewards_from(vars: &serde_json::Value) -> Vec<i32> {
     vars.get("claimed_rewards")
         .and_then(|v| v.as_array())
@@ -961,26 +938,23 @@ async fn qreward_list_all(
         if q.status != "COMPLETED" {
             continue;
         }
-        let choices = mud_db::quest_objectives::list_choice_rewards(
-            pool,
-            q.quest_zone_id,
-            q.quest_id,
-        )
-        .await
-        .unwrap_or_default();
-        let conditionals = mud_db::quest_objectives::list_conditional_rewards(
-            pool,
-            q.quest_zone_id,
-            q.quest_id,
-        )
-        .await
-        .unwrap_or_default();
+        let choices =
+            mud_db::quest_objectives::list_choice_rewards(pool, q.quest_zone_id, q.quest_id)
+                .await
+                .unwrap_or_default();
+        let conditionals =
+            mud_db::quest_objectives::list_conditional_rewards(pool, q.quest_zone_id, q.quest_id)
+                .await
+                .unwrap_or_default();
         if choices.is_empty() && conditionals.is_empty() {
             continue;
         }
         let claimed = claimed_rewards_from(&q.variables);
         // Choice-group section.
-        let mut groups: std::collections::BTreeMap<i32, Vec<&mud_db::quest_objectives::QuestRewardRow>> = std::collections::BTreeMap::new();
+        let mut groups: std::collections::BTreeMap<
+            i32,
+            Vec<&mud_db::quest_objectives::QuestRewardRow>,
+        > = std::collections::BTreeMap::new();
         for r in &choices {
             if let Some(g) = r.choice_group {
                 groups.entry(g).or_default().push(r);
@@ -996,11 +970,7 @@ async fn qreward_list_all(
                 q.quest_zone_id, q.quest_id, q.quest_name, g
             ));
             for r in rs {
-                buf.push_str(&format!(
-                    "    [{}] {}\r\n",
-                    r.id,
-                    describe_reward(r)
-                ));
+                buf.push_str(&format!("    [{}] {}\r\n", r.id, describe_reward(r)));
             }
             buf.push_str(&format!(
                 "    (pick one: qreward {} {} <id>)\r\n",
@@ -1019,11 +989,7 @@ async fn qreward_list_all(
                 q.quest_zone_id, q.quest_id, q.quest_name
             ));
             for r in &unclaimed {
-                buf.push_str(&format!(
-                    "    [{}] {}\r\n",
-                    r.id,
-                    describe_reward(r)
-                ));
+                buf.push_str(&format!("    [{}] {}\r\n", r.id, describe_reward(r)));
             }
             buf.push_str(&format!(
                 "    (claim: qreward {} {} <id>)\r\n",
@@ -1072,20 +1038,15 @@ async fn qreward_list_one(
         return;
     };
     if status != "COMPLETED" {
-        send_to(
-            world,
-            player,
-            "That quest isn't complete yet.\r\n",
-        );
+        send_to(world, player, "That quest isn't complete yet.\r\n");
         return;
     }
     let choices = mud_db::quest_objectives::list_choice_rewards(pool, zone, id)
         .await
         .unwrap_or_default();
-    let conditionals =
-        mud_db::quest_objectives::list_conditional_rewards(pool, zone, id)
-            .await
-            .unwrap_or_default();
+    let conditionals = mud_db::quest_objectives::list_conditional_rewards(pool, zone, id)
+        .await
+        .unwrap_or_default();
     if choices.is_empty() && conditionals.is_empty() {
         send_to(
             world,
@@ -1096,7 +1057,10 @@ async fn qreward_list_one(
     }
     let claimed = claimed_rewards_from(&vars);
     let mut buf = format!("\r\nRewards for quest ({zone}, {id}):\r\n");
-    let mut groups: std::collections::BTreeMap<i32, Vec<&mud_db::quest_objectives::QuestRewardRow>> = std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<
+        i32,
+        Vec<&mud_db::quest_objectives::QuestRewardRow>,
+    > = std::collections::BTreeMap::new();
     for r in &choices {
         if let Some(g) = r.choice_group {
             groups.entry(g).or_default().push(r);
@@ -1177,19 +1141,16 @@ async fn qreward_claim(
     let all_choices = mud_db::quest_objectives::list_choice_rewards(pool, zone, id)
         .await
         .unwrap_or_default();
-    let all_conditionals =
-        mud_db::quest_objectives::list_conditional_rewards(pool, zone, id)
-            .await
-            .unwrap_or_default();
+    let all_conditionals = mud_db::quest_objectives::list_conditional_rewards(pool, zone, id)
+        .await
+        .unwrap_or_default();
     let is_choice = all_choices.iter().any(|r| r.id == reward.id);
     let is_conditional = all_conditionals.iter().any(|r| r.id == reward.id);
     if !is_choice && !is_conditional {
         send_to(
             world,
             player,
-            format!(
-                "Reward {reward_id} isn't a claimable reward of quest ({zone}, {id}).\r\n"
-            ),
+            format!("Reward {reward_id} isn't a claimable reward of quest ({zone}, {id}).\r\n"),
         );
         return;
     }
@@ -1211,11 +1172,7 @@ async fn qreward_claim(
             return;
         }
     } else if claimed.contains(&reward.id) {
-        send_to(
-            world,
-            player,
-            "You've already claimed that reward.\r\n",
-        );
+        send_to(world, player, "You've already claimed that reward.\r\n");
         return;
     }
     // Condition gate (Wave 4.10). Treat empty / missing as truthy.
@@ -1230,9 +1187,7 @@ async fn qreward_claim(
         send_to(
             world,
             player,
-            format!(
-                "You don't currently meet that reward's condition: {expr}\r\n"
-            ),
+            format!("You don't currently meet that reward's condition: {expr}\r\n"),
         );
         return;
     }
@@ -1259,14 +1214,18 @@ async fn qreward_claim(
                 character_id: character_id.to_string(),
                 amount: i64::from(a),
             }),
-            "SKILL_POINTS" => reward.amount.map(|a| PendingPlayerUpdate::SkillPointsDelta {
-                character_id: character_id.to_string(),
-                amount: a,
-            }),
-            "ABILITY" => reward.ability_id.map(|aid| PendingPlayerUpdate::AbilityKnown {
-                character_id: character_id.to_string(),
-                ability_id: aid,
-            }),
+            "SKILL_POINTS" => reward
+                .amount
+                .map(|a| PendingPlayerUpdate::SkillPointsDelta {
+                    character_id: character_id.to_string(),
+                    amount: a,
+                }),
+            "ABILITY" => reward
+                .ability_id
+                .map(|aid| PendingPlayerUpdate::AbilityKnown {
+                    character_id: character_id.to_string(),
+                    ability_id: aid,
+                }),
             "ITEM" => match (reward.object_zone_id, reward.object_id) {
                 (Some(oz), Some(oid)) => Some(PendingPlayerUpdate::SpawnItem {
                     character_id: character_id.to_string(),
@@ -1287,8 +1246,7 @@ async fn qreward_claim(
     new_claimed.push(reward.id);
     let array =
         serde_json::Value::Array(new_claimed.iter().map(|n| serde_json::json!(n)).collect());
-    if let Err(e) =
-        mud_db::quests::set_quest_variable(pool, &cqid, "claimed_rewards", &array).await
+    if let Err(e) = mud_db::quests::set_quest_variable(pool, &cqid, "claimed_rewards", &array).await
     {
         tracing::warn!(error = %e, "qreward: persist claim failed");
     }
@@ -1297,8 +1255,7 @@ async fn qreward_claim(
     // Cheap-ish (one DB pass per completed quest) but bounded by
     // content size, which is small relative to a single combat round.
     let remaining = count_pending_claims(pool, character_id, &new_claimed).await;
-    let mut msg =
-        format!("You claim your reward: {}.\r\n", describe_reward(&reward));
+    let mut msg = format!("You claim your reward: {}.\r\n", describe_reward(&reward));
     msg.push_str(&match remaining {
         0 => "All your conditional / choice rewards are now claimed.\r\n".to_string(),
         1 => "1 reward still pending — type `qreward` to view.\r\n".to_string(),
@@ -1316,29 +1273,22 @@ async fn count_pending_claims(
     character_id: &str,
     _latest_claimed_for_this_quest: &[i32],
 ) -> usize {
-    let quests = match mud_db::quests::list_for_character(pool, character_id).await {
-        Ok(r) => r,
-        Err(_) => return 0,
+    let Ok(quests) = mud_db::quests::list_for_character(pool, character_id).await else {
+        return 0;
     };
     let mut total = 0usize;
     for q in &quests {
         if q.status != "COMPLETED" {
             continue;
         }
-        let choices = mud_db::quest_objectives::list_choice_rewards(
-            pool,
-            q.quest_zone_id,
-            q.quest_id,
-        )
-        .await
-        .unwrap_or_default();
-        let conditionals = mud_db::quest_objectives::list_conditional_rewards(
-            pool,
-            q.quest_zone_id,
-            q.quest_id,
-        )
-        .await
-        .unwrap_or_default();
+        let choices =
+            mud_db::quest_objectives::list_choice_rewards(pool, q.quest_zone_id, q.quest_id)
+                .await
+                .unwrap_or_default();
+        let conditionals =
+            mud_db::quest_objectives::list_conditional_rewards(pool, q.quest_zone_id, q.quest_id)
+                .await
+                .unwrap_or_default();
         if choices.is_empty() && conditionals.is_empty() {
             continue;
         }
@@ -1352,7 +1302,7 @@ async fn count_pending_claims(
                 groups.entry(g).or_default().push(r.id);
             }
         }
-        for (_g, ids) in &groups {
+        for ids in groups.values() {
             if !ids.iter().any(|id| claimed.contains(id)) {
                 total += 1;
             }
@@ -1375,7 +1325,9 @@ async fn find_character_quest_with_vars(
     zone: i32,
     quest_id: i32,
 ) -> Option<(String, String, serde_json::Value)> {
-    let rows = mud_db::quests::list_for_character(pool, character_id).await.ok()?;
+    let rows = mud_db::quests::list_for_character(pool, character_id)
+        .await
+        .ok()?;
     let row = rows
         .into_iter()
         .find(|r| r.quest_zone_id == zone && r.quest_id == quest_id)?;

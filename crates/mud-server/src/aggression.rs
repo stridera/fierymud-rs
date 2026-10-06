@@ -22,7 +22,7 @@
 //!
 //! `ALIGN.EVIL` = -350, `ALIGN.GOOD` = 350 (matches
 //! `mud_db::enums::Alignment::from_score`'s thresholds — the bare
-//! integers in the schema's classic CircleMUD model).
+//! integers in the schema's classic `CircleMUD` model).
 //!
 //! Parsing happens once per distinct formula string and gets cached
 //! in `AggressionFormulaCache`. Evaluation against a player is a
@@ -76,6 +76,17 @@ enum Expr {
 pub struct EvalCtx {
     pub alignment: i32,
     pub race_alignment: Alignment,
+}
+
+/// Server-wide toggle for aggression-check debug logging, flipped by the
+/// `aggrodebug on|off` admin command. Absent resource means off.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct AggroDebug(pub bool);
+
+/// True when `aggrodebug on` is in effect.
+#[must_use]
+pub fn debug_enabled(world: &bevy_ecs::world::World) -> bool {
+    world.get_resource::<AggroDebug>().is_some_and(|d| d.0)
 }
 
 /// Parsed-formula cache keyed by the verbatim formula string from
@@ -179,7 +190,9 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
             };
             out.push(Tok::Op(op));
             i += len;
-        } else if c.is_ascii_digit() || (c == b'-' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit)) {
+        } else if c.is_ascii_digit()
+            || (c == b'-' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
+        {
             // Signed integer literal.
             let start = i;
             if c == b'-' {
@@ -298,9 +311,8 @@ impl Parser {
             Tok::RaceAlignLhs => LhsKind::RaceAlignment,
             _ => return None,
         };
-        let op = match self.bump()? {
-            Tok::Op(o) => o,
-            _ => return None,
+        let Tok::Op(op) = self.bump()? else {
+            return None;
         };
         let rhs = match self.bump()? {
             Tok::AlignConstEvil => Rhs::Int(ALIGN_EVIL_THRESHOLD),
@@ -362,9 +374,17 @@ mod tests {
 
     #[test]
     fn evil_target_threshold_engages_evil_aggro() {
-        assert!(ev("target.alignment <= ALIGN.EVIL", -500, Alignment::Neutral));
+        assert!(ev(
+            "target.alignment <= ALIGN.EVIL",
+            -500,
+            Alignment::Neutral
+        ));
         assert!(!ev("target.alignment <= ALIGN.EVIL", 0, Alignment::Neutral));
-        assert!(!ev("target.alignment <= ALIGN.EVIL", -349, Alignment::Neutral));
+        assert!(!ev(
+            "target.alignment <= ALIGN.EVIL",
+            -349,
+            Alignment::Neutral
+        ));
     }
 
     #[test]

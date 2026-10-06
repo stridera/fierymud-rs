@@ -79,9 +79,7 @@ inventory::submit! {
 }
 
 fn cmd_account_balance(world: &mut World, player: Entity, _args: &str) {
-    let pool = world
-        .get::<AccountWealth>(player)
-        .map_or(0, |a| a.0);
+    let pool = world.get::<AccountWealth>(player).map_or(0, |a| a.0);
     let line = format_wealth(pool).map_or_else(
         || "Your account chest is empty.".to_string(),
         |parts| format!("Your account shares hold {parts}."),
@@ -131,9 +129,7 @@ fn account_transfer(world: &mut World, player: Entity, args: &str, direction: Ac
         }
     };
     let bank = world.get::<BankWealth>(player).map_or(0, |b| b.0);
-    let account_pool = world
-        .get::<AccountWealth>(player)
-        .map_or(0, |a| a.0);
+    let account_pool = world.get::<AccountWealth>(player).map_or(0, |a| a.0);
     match direction {
         AccountDir::Deposit if bank < amount => {
             send_to(
@@ -171,9 +167,7 @@ fn account_transfer(world: &mut World, player: Entity, args: &str, direction: Ac
     // online shares the same id and needs the AccountWealth
     // component refreshed. Skip fanout when the player has no
     // Account component (shouldn't happen for a real player).
-    let user_id = world
-        .get::<Account>(player)
-        .map(|a| a.user_id.clone());
+    let user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
     if let Some(uid) = user_id.clone() {
         fanout_account_wealth(world, &uid, new_account_pool, Some(player));
     }
@@ -181,15 +175,11 @@ fn account_transfer(world: &mut World, player: Entity, args: &str, direction: Ac
     // reflects the transfer, so the player sees an immediate
     // response. If the DB write fails the next save tick covers it
     // because save_player also persists account_wealth.
-    if let (Some(uid), Some(pool)) = (
-        user_id,
-        world.get_resource::<DbPool>().map(|p| p.0.clone()),
-    ) {
+    if let (Some(uid), Some(pool)) = (user_id, world.get_resource::<DbPool>().map(|p| p.0.clone()))
+    {
         let new_pool = new_account_pool;
         tokio::spawn(async move {
-            if let Err(e) =
-                mud_db::users::save_account_wealth(&pool, &uid, new_pool).await
-            {
+            if let Err(e) = mud_db::users::save_account_wealth(&pool, &uid, new_pool).await {
                 tracing::warn!(error = %e, user_id = %uid, "account_wealth save failed");
             }
         });
@@ -231,9 +221,7 @@ pub(crate) fn fanout_account_wealth(
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Account), (With<Player>, With<Online>)>();
         q.iter(world)
-            .filter(|(e, acc)| {
-                acc.user_id == user_id && Some(*e) != except
-            })
+            .filter(|(e, acc)| acc.user_id == user_id && Some(*e) != except)
             .map(|(e, _)| e)
             .collect()
     };
@@ -253,8 +241,8 @@ mod tests {
     use mud_world::Named;
 
     /// Helper: spawn two characters on the same account, both online,
-    /// each with their own BankWealth and AccountWealth. Returns
-    /// (world, char_a, char_b, user_id).
+    /// each with their own `BankWealth` and `AccountWealth`. Returns
+    /// (world, `char_a`, `char_b`, `user_id`).
     fn make_two_char_world() -> (World, Entity, Entity, String) {
         let mut world = World::new();
         let user_id = "user-123".to_string();
@@ -262,7 +250,9 @@ mod tests {
             .spawn((
                 Player,
                 Online,
-                Named { name: "Alpha".to_string() },
+                Named {
+                    name: "Alpha".to_string(),
+                },
                 Account {
                     user_id: user_id.clone(),
                     character_id: "char-a".to_string(),
@@ -277,7 +267,9 @@ mod tests {
             .spawn((
                 Player,
                 Online,
-                Named { name: "Beta".to_string() },
+                Named {
+                    name: "Beta".to_string(),
+                },
                 Account {
                     user_id: user_id.clone(),
                     character_id: "char-b".to_string(),
@@ -346,7 +338,9 @@ mod tests {
             .spawn((
                 Player,
                 Online,
-                Named { name: "Other".to_string() },
+                Named {
+                    name: "Other".to_string(),
+                },
                 Account {
                     user_id: "different-user".to_string(),
                     character_id: "char-c".to_string(),

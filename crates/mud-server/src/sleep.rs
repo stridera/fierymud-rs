@@ -50,10 +50,7 @@ pub fn mob_sleep_tick(world: &mut World) {
         }
         MORNING_HOUR => {
             wake_night_sleepers(world);
-            announce_to_outdoor_players(
-                world,
-                "The sky pales and the sun begins to rise.\r\n",
-            );
+            announce_to_outdoor_players(world, "The sky pales and the sun begins to rise.\r\n");
         }
         _ => {}
     }
@@ -131,8 +128,7 @@ fn wake_night_sleepers(world: &mut World) {
         q.iter(world).collect()
     };
     for mob in to_wake {
-        let was_sleeping =
-            world.get::<Posture>(mob).map(|p| p.0) == Some(PostureKind::Sleeping);
+        let was_sleeping = world.get::<Posture>(mob).map(|p| p.0) == Some(PostureKind::Sleeping);
         let in_combat = world.get::<Fighting>(mob).is_some();
         let room = world.get::<Located>(mob).map(|l| l.0);
         if let Ok(mut em) = world.get_entity_mut(mob) {
@@ -141,7 +137,8 @@ fn wake_night_sleepers(world: &mut World) {
                 em.insert(Posture(PostureKind::Standing));
             }
         }
-        if was_sleeping && !in_combat
+        if was_sleeping
+            && !in_combat
             && let Some(room) = room
         {
             let name = world
@@ -186,7 +183,9 @@ mod tests {
         let mob = world
             .spawn((
                 Mob,
-                Named { name: "a wolf".into() },
+                Named {
+                    name: "a wolf".into(),
+                },
                 Located(room),
                 Posture(PostureKind::Standing),
             ))
@@ -236,7 +235,9 @@ mod tests {
         let mob = world
             .spawn((
                 Mob,
-                Named { name: "a goblin".into() },
+                Named {
+                    name: "a goblin".into(),
+                },
                 Located(room),
                 Posture(PostureKind::Standing),
             ))

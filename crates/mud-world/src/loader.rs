@@ -6,27 +6,25 @@ use mud_db::{
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
     discord_config, effects, game_config, help, levels, liquids, login_message,
     mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
-    objects, races, room_exits, rooms, shops, socials, spell_slots,
-    sqlx::PgPool, system_text, triggers, zones,
+    objects, races, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool, system_text,
+    triggers, zones,
 };
 use tracing::{info, warn};
 
 use crate::components::{
-    AttachedTriggers, BoardLink, Description, EquippedSlot, ExitData, Exits,
-    FromMobReset, FromObjectReset, Health, Item, Keywords, LiquidContainer, Located, Mob,
-    Mountable, Named, Posture,
-    Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
+    AttachedTriggers, BoardLink, Description, EquippedSlot, ExitData, Exits, FromMobReset,
+    FromObjectReset, Health, Item, Keywords, LiquidContainer, Located, Mob, Mountable, Named,
+    Posture, Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog, DamageComponent, EffectCatalog,
     EffectDef, HelpCatalog, HelpEntry as HelpEntryDef, LiquidCatalog, LiquidDef, LiquidIndex,
-    LiquidProto, MobProto,
-    MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto,
-    ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry, RaceCatalog, RaceDef, RaceStatCaps,
-    SavingThrow, ShopAcceptRule,
-    ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, TargetingRule,
-    TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, WorldKeyIndex,
+    LiquidProto, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog,
+    ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry, RaceCatalog, RaceDef,
+    RaceStatCaps, SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering,
+    SocialDef, SocialRegistry, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef,
+    TriggerEvent, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -57,7 +55,7 @@ pub struct LoadStats {
     pub object_contents_skipped: usize,
     /// Lua trigger rows in the `Triggers` table.
     pub triggers_loaded: usize,
-    /// `HelpEntry` rows loaded into the HelpCatalog. 0 with a fresh DB
+    /// `HelpEntry` rows loaded into the `HelpCatalog`. 0 with a fresh DB
     /// (builder content not yet imported); the `help` command surfaces
     /// "no help available" rather than crashing.
     pub help_entries_loaded: usize,
@@ -83,10 +81,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         let entity = world
             .spawn((
                 Zone,
-                WorldKey {
-                    zone: z.id,
-                    id: 0,
-                },
+                WorldKey { zone: z.id, id: 0 },
                 Named {
                     name: z.name.clone(),
                 },
@@ -130,114 +125,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 Exits::default(),
             ))
             .id();
-        if r.is_peaceful {
-            world.entity_mut(entity).insert(crate::PeacefulRoom);
-        }
-        // 13-flag room-boolean wiring. Negative-polarity flags
-        // (`allows_*`) only attach when false; positive-polarity
-        // flags (`is_*`) only attach when true. This keeps the
-        // common case (a normal room) component-free and lets a
-        // gate-check read "absent component = default behavior."
-        if !r.allows_magic {
-            world.entity_mut(entity).insert(crate::NoMagicRoom);
-        }
-        if !r.allows_recall {
-            world.entity_mut(entity).insert(crate::NoRecallRoom);
-        }
-        if !r.allows_summon {
-            world.entity_mut(entity).insert(crate::NoSummonRoom);
-        }
-        if !r.allows_teleport {
-            world.entity_mut(entity).insert(crate::NoTeleportRoom);
-        }
-        if r.is_death_trap {
-            world.entity_mut(entity).insert(crate::DeathTrap);
-        }
-        if r.is_indoors {
-            world.entity_mut(entity).insert(crate::IndoorRoom);
-        }
-        if r.is_soundproof {
-            world.entity_mut(entity).insert(crate::SoundproofRoom);
-        }
-        if r.is_arena {
-            world.entity_mut(entity).insert(crate::ArenaRoom);
-        }
-        if r.is_guildhall {
-            world.entity_mut(entity).insert(crate::GuildhallRoom);
-        }
-        if !r.allows_mobs {
-            world.entity_mut(entity).insert(crate::NoMobsRoom);
-        }
-        if !r.allows_tracking {
-            world.entity_mut(entity).insert(crate::NoTrackingRoom);
-        }
-        if !r.allows_portals {
-            world.entity_mut(entity).insert(crate::NoPortalsRoom);
-        }
-        if !r.allows_scanning {
-            world.entity_mut(entity).insert(crate::NoScanningRoom);
-        }
-        if r.base_light_level != 0 {
-            world
-                .entity_mut(entity)
-                .insert(crate::BaseLightLevel(r.base_light_level));
-        }
-        // Attach RoomLayout only when the builder authored at
-        // least one coordinate. Missing axes default to 0 (which
-        // matches the schema's z default and is a sensible
-        // "centered" fallback for x/y on partial-layout zones).
-        // Rooms without any layout authored stay component-free
-        // so the GMCP emit can detect "no server-side layout"
-        // and let the client auto-place.
-        if r.layout_x.is_some() || r.layout_y.is_some() || r.layout_z.is_some() {
-            world.entity_mut(entity).insert(crate::RoomLayout {
-                x: r.layout_x.unwrap_or(0),
-                y: r.layout_y.unwrap_or(0),
-                z: r.layout_z.unwrap_or(0),
-            });
-        }
-        // Rest / repose: parse the inn config when this room is
-        // flagged `is_inn`. Tier rows that fail to parse are skipped
-        // with a warn so a single bad authored row doesn't break the
-        // whole inn. Empty tier list after filtering = no rentable
-        // rooms; we still attach the marker so `rent` can render the
-        // inn name in an "out of rooms" message.
-        if r.is_inn {
-            let tiers = r
-                .inn_tiers
-                .as_ref()
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|entry| {
-                            let name = entry.get("name").and_then(|v| v.as_str())?;
-                            let tier = entry.get("tier").and_then(serde_json::Value::as_i64)?;
-                            let fee = entry.get("fee").and_then(serde_json::Value::as_i64)?;
-                            let tier_i32 = i32::try_from(tier).ok()?;
-                            let fee_i32 = i32::try_from(fee).ok()?;
-                            if !(1..=3).contains(&tier_i32) {
-                                warn!(
-                                    zone = r.zone_id,
-                                    id = r.id,
-                                    tier_value = tier_i32,
-                                    "InnRoom tier out of 1..=3 range; skipping entry",
-                                );
-                                return None;
-                            }
-                            Some(crate::InnTier {
-                                name: name.to_string(),
-                                tier: tier_i32,
-                                fee_gp: fee_i32,
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            world.entity_mut(entity).insert(crate::InnRoom {
-                inn_name: r.inn_name.clone().unwrap_or_else(|| "the inn".to_string()),
-                tiers,
-            });
-        }
+        apply_room_flags(world, entity, r);
         room_index.insert((r.zone_id, r.id), entity);
     }
     stats.rooms = room_index.len();
@@ -260,36 +148,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         // Composite `key_zone_id` + `key_id` columns. Both NULL means
         // no key required; both Some means the (zone, id) of the
         // required Object proto.
-        let key = match (e.key_zone_id, e.key_id) {
-            (Some(z), Some(i)) => Some((z, i)),
-            _ => None,
-        };
-        let is_hidden = e.flags.contains(&mud_db::enums::ExitFlag::Hidden);
-        let is_pickproof = e.flags.contains(&mud_db::enums::ExitFlag::Pickproof);
-        let is_bashable = e.flags.contains(&mud_db::enums::ExitFlag::Bashable);
-        // Bashable exits use the seeded HP if present, otherwise
-        // the engine default (50). Non-bashable exits leave the
-        // field None so doorbash refuses outright.
-        let hit_points = if is_bashable {
-            Some(e.hit_points.unwrap_or(50))
-        } else {
-            None
-        };
+        let direction = e.direction;
+        let data = exit_data_from_row(e, target);
         if let Some(mut exits) = world.get_mut::<Exits>(source) {
-            exits.0.insert(
-                e.direction,
-                ExitData {
-                    to: target,
-                    state: e.default_state,
-                    key,
-                    description: e.description,
-                    keywords: e.keywords,
-                    is_hidden,
-                    is_pickproof,
-                    is_bashable,
-                    hit_points,
-                },
-            );
+            exits.0.insert(direction, data);
         }
     }
 
@@ -299,8 +161,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // each room gets its own RoomExtras component.
     let extra_rows = mud_db::room_extra_descriptions::list_extras(pool).await?;
     #[allow(clippy::type_complexity)]
-    let mut extras_by_room: HashMap<(i32, i32), Vec<(Vec<String>, String)>> =
-        HashMap::new();
+    let mut extras_by_room: HashMap<(i32, i32), Vec<(Vec<String>, String)>> = HashMap::new();
     for r in extra_rows {
         extras_by_room
             .entry((r.room_zone_id, r.room_id))
@@ -317,209 +178,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
 
     // Pass 4: catalog data. Mob, Object, Effect, and Social catalogs all
     // become Resources since commands look them up by name/key.
-    let mob_rows = mobs::list_mobs(pool).await?;
-    let mut mob_prototypes = MobPrototypes::default();
-    for row in mob_rows {
-        mob_prototypes.by_key.insert(
-            (row.zone_id, row.id),
-            MobProto {
-                zone_id: row.zone_id,
-                id: row.id,
-                name: row.name,
-                keywords: row.keywords,
-                room_description: row.room_description,
-                examine_description: row.examine_description,
-                gender: row.gender.to_ascii_lowercase(),
-                race: row.race.to_ascii_lowercase(),
-                level: row.level,
-                alignment: row.alignment,
-                role: row.role,
-                hp_dice_num: row.hp_dice_num,
-                hp_dice_size: row.hp_dice_size,
-                hp_dice_bonus: row.hp_dice_bonus,
-                damage_dice_num: row.damage_dice_num,
-                damage_dice_size: row.damage_dice_size,
-                damage_dice_bonus: row.damage_dice_bonus,
-                accuracy: row.accuracy,
-                evasion: row.evasion,
-                attack_power: row.attack_power,
-                spell_power: row.spell_power,
-                penetration_flat: row.penetration_flat,
-                penetration_percent: row.penetration_percent,
-                armor_rating: row.armor_rating,
-                damage_reduction_percent: row.damage_reduction_percent,
-                soak: row.soak,
-                hardness: row.hardness,
-                perception: row.perception,
-                concealment: row.concealment,
-                resistances: row.resistances,
-                ward_percent: row.ward_percent,
-                wealth: row.wealth,
-                class_id: row.class_id,
-                behaviors: row.behaviors,
-                protected_kind: row.protected_kind,
-                professions: row.professions,
-                size: row.size,
-                life_force: row.life_force,
-                damage_type: row.damage_type,
-                move_points: row.move_points,
-                default_position: row.default_position,
-                traits: row.traits,
-                movement_mode: row.movement_mode,
-                default_movement_mode: row.default_movement_mode,
-                aggression_formula: row
-                    .aggression_formula
-                    .filter(|s| !s.trim().is_empty()),
-            },
-        );
-    }
+    let mob_prototypes = load_mob_prototypes(pool).await?;
     stats.mobs_listed = mob_prototypes.by_key.len();
 
-    let object_rows = objects::list_objects(pool).await?;
-    // Extras are loaded once and bucketed by (zone_id, object_id)
-    // so each proto can claim its rows in O(1).
-    let object_extra_rows =
-        mud_db::object_extra_descriptions::list_extras(pool).await?;
-    #[allow(clippy::type_complexity)]
-    let mut object_extras_by_key: HashMap<(i32, i32), Vec<(Vec<String>, String)>> =
-        HashMap::new();
-    for r in object_extra_rows {
-        object_extras_by_key
-            .entry((r.object_zone_id, r.object_id))
-            .or_default()
-            .push((r.keywords, r.description));
-    }
-    // ObjectResistance: per-element resistance % from worn gear.
-    let object_resistance_rows = mud_db::object_resistance::list_all(pool).await?;
-    let mut object_resistance_by_key: HashMap<
-        (i32, i32),
-        Vec<(mud_db::enums::ElementType, i32, bool)>,
-    > = HashMap::new();
-    for r in object_resistance_rows {
-        object_resistance_by_key
-            .entry((r.object_zone_id, r.object_id))
-            .or_default()
-            .push((r.element, r.value, r.allow_absorption));
-    }
-    // ObjectEffects: spell-like effects spawned on the wearer for as
-    // long as the item is equipped (slot-restricted when
-    // `wear_location` is set).
-    let object_effect_rows = mud_db::object_effects::list_all(pool).await?;
-    let mut object_effects_by_key: HashMap<
-        (i32, i32),
-        Vec<crate::resources::ObjectGrantedEffect>,
-    > = HashMap::new();
-    for r in object_effect_rows {
-        object_effects_by_key
-            .entry((r.object_zone_id, r.object_id))
-            .or_default()
-            .push(crate::resources::ObjectGrantedEffect {
-                effect_id: r.effect_id,
-                strength: r.strength,
-                modifier_data: r.modifier_data,
-                wear_location: r.wear_location,
-            });
-    }
-    let mut object_prototypes = ObjectPrototypes::default();
-    for row in object_rows {
-        // Combat-critical fields come from typed columns now —
-        // armor_pct, weapon_dice_*, weapon_damage_type. fierylib
-        // pre-scales legacy values at import time so the loader has
-        // no JSONB extraction or sign-flip on the hot path.
-        let weapon_damage_type = row.weapon_damage_type.as_ref().map(|d| d.label().to_string());
-        let portal_destination_vnum = if matches!(row.r#type, mud_db::enums::ObjectType::Portal) {
-            parse_portal_destination(&row.values)
-        } else {
-            None
-        };
-        let board_id = if matches!(row.r#type, mud_db::enums::ObjectType::Board) {
-            parse_board_id(&row.values)
-        } else {
-            None
-        };
-        let liquid = if matches!(
-            row.r#type,
-            mud_db::enums::ObjectType::Drinkcontainer | mud_db::enums::ObjectType::Fountain
-        ) {
-            parse_liquid(&row.values)
-        } else {
-            None
-        };
-        let light_fuel = if matches!(row.r#type, mud_db::enums::ObjectType::Light) {
-            Some(parse_light_fuel(&row.values))
-        } else {
-            None
-        };
-        object_prototypes.by_key.insert(
-            (row.zone_id, row.id),
-            ObjectProto {
-                zone_id: row.zone_id,
-                id: row.id,
-                r#type: row.r#type,
-                name: strip_ansi(&row.name),
-                keywords: row.keywords,
-                room_description: strip_ansi(&row.room_description),
-                examine_description: row.examine_description.as_deref().map(strip_ansi),
-                weight: row.weight,
-                level: row.level,
-                wear_flags: row.wear_flags,
-                weapon_dice_num: row.weapon_dice_num,
-                weapon_dice_size: row.weapon_dice_size,
-                weapon_dice_bonus: row.weapon_dice_bonus,
-                weapon_damage_type,
-                armor_pct: row.armor_pct,
-                cost: row.cost,
-                portal_destination_vnum,
-                board_id,
-                liquid,
-                light_fuel,
-                restricted_alignments: row.restricted_alignments,
-                restricted_class_ids: row.restricted_class_ids,
-                restricted_races: row.restricted_races,
-                extras: object_extras_by_key
-                    .remove(&(row.zone_id, row.id))
-                    .unwrap_or_default(),
-                resistances: object_resistance_by_key
-                    .remove(&(row.zone_id, row.id))
-                    .unwrap_or_default(),
-                granted_effects: object_effects_by_key
-                    .remove(&(row.zone_id, row.id))
-                    .unwrap_or_default(),
-                flags: row.flags,
-                restrictions: row.restrictions,
-                timer_hours: row.timer,
-                decompose_timer: row.decompose_timer,
-                allowed_races: row.allowed_races,
-                min_size: row.min_size,
-                max_size: row.max_size,
-                camp_kit_tier: row.camp_kit_tier,
-            },
-        );
-    }
+    let object_prototypes = load_object_prototypes(pool).await?;
     stats.objects_listed = object_prototypes.by_key.len();
 
-    let effect_rows = effects::list_effects(pool).await?;
-    let mut effect_catalog = EffectCatalog::default();
-    for row in effect_rows {
-        effect_catalog.by_id.insert(
-            row.id,
-            EffectDef {
-                id: row.id,
-                name: row.name,
-                description: row.description,
-                effect_type: row.effect_type,
-                tags: row.tags,
-                presence_override: row.presence_override,
-                default_params: row.default_params,
-                prevents_speaking: row.prevents_speaking,
-                prevents_casting: row.prevents_casting,
-                prevents_movement: row.prevents_movement,
-                on_apply: row.on_apply.filter(|s| !s.trim().is_empty()),
-                on_tick: row.on_tick.filter(|s| !s.trim().is_empty()),
-                on_remove: row.on_remove.filter(|s| !s.trim().is_empty()),
-            },
-        );
-    }
+    let effect_catalog = load_effect_catalog(pool).await?;
     stats.effects_listed = effect_catalog.by_id.len();
 
     // Achievement catalog. Hooks reference rows by their stable
@@ -570,161 +235,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     stats.socials_listed = social_registry.by_name.len();
 
     // Pass 4b: ability catalog (every spell / chant / song / skill).
-    let ability_rows = abilities::list_all(pool).await?;
-    let mut ability_catalog = AbilityCatalog::default();
-    for row in ability_rows {
-        let key = row.plain_name.to_ascii_lowercase();
-        let min_posture_rank = position_rank(&row.min_position);
-        ability_catalog.by_name.insert(
-            key,
-            AbilityDef {
-                id: row.id,
-                name: row.name,
-                plain_name: row.plain_name,
-                description: row.description,
-                kind: abilities::AbilityKind::from_label(&row.ability_type),
-                violent: row.violent,
-                combat_ok: row.combat_ok,
-                in_combat_only: row.in_combat_only,
-                cast_time_rounds: row.cast_time_rounds,
-                cooldown_ms: row.cooldown_ms,
-                is_area: row.is_area,
-                min_position_label: row.min_position,
-                min_posture_rank,
-                target_scope: row.target_scope,
-                is_magical: row.is_magical,
-                sphere: row.sphere,
-                damage_type: row.damage_type,
-                memorization_time: row.memorization_time,
-            },
-        );
-    }
+    let ability_catalog = load_ability_catalog(pool).await?;
     stats.abilities_loaded = ability_catalog.by_name.len();
-
-    // Restriction messages: only the `message` field per rule, indexed
-    // by ability_id. Rule type/parameters parse on demand once real
-    // gating lands.
-    let restriction_rows = ability_restrictions::list_all(pool).await?;
-    for row in restriction_rows {
-        let messages: Vec<String> = row
-            .requirements
-            .iter()
-            .filter_map(|v| v.get("message").and_then(serde_json::Value::as_str).map(String::from))
-            .collect();
-        if !messages.is_empty() {
-            ability_catalog
-                .restriction_messages
-                .insert(row.ability_id, messages);
-        }
-        // Stash the full rule list so the runtime evaluator
-        // (commands::check_ability_restrictions) can interpret
-        // type-specific rules at cast time.
-        if !row.requirements.is_empty() {
-            ability_catalog
-                .restriction_rules
-                .insert(row.ability_id, row.requirements);
-        }
-    }
-
-    // Effect mappings: ordered list of (effect_id, override_params)
-    // per ability_id. Rows are returned ORDER BY ability_id, "order"
-    // so push order matches schema order.
-    let ability_effect_rows = ability_effects::list_all(pool).await?;
-    for row in ability_effect_rows {
-        ability_catalog
-            .effects_for
-            .entry(row.ability_id)
-            .or_default()
-            .push((row.effect_id, row.override_params));
-    }
-
-    // Per-ability targeting rules (valid target types, scope,
-    // range, LOS). Keyed by ability_id; UNIQUE per ability.
-    let targeting_rows = ability_targeting::list_all(pool).await?;
-    for row in targeting_rows {
-        ability_catalog.targeting.insert(
-            row.ability_id,
-            TargetingRule {
-                valid_targets: row.valid_targets,
-                scope: row.scope,
-                max_targets: row.max_targets,
-                require_los: row.require_los,
-            },
-        );
-    }
-
-    // Per-ability saving-throw rules. UNIQUE per ability_id.
-    let save_rows = ability_saving_throw::list_all(pool).await?;
-    for row in save_rows {
-        ability_catalog.saves.insert(
-            row.ability_id,
-            SavingThrow {
-                save_type: row.save_type,
-                dc_formula: row.dc_formula,
-                on_save_action: row.on_save_action,
-            },
-        );
-    }
-
-    // Material reagent rows. `invoke_ability` checks every
-    // `required` row against the caster's carried items before
-    // applying effects; on success it removes one instance per
-    // `consumed` row.
-    let comp_rows = ability_components::list_all(pool).await?;
-    for row in comp_rows {
-        ability_catalog
-            .components
-            .entry(row.ability_id)
-            .or_default()
-            .push(crate::resources::AbilityComponentReq {
-                object_id: row.object_id,
-                consumed: row.consumed,
-                required: row.required,
-            });
-    }
-
-    // Multi-element damage components — append per-ability
-    // ordered by sequence. The damage arm sums these when present
-    // and otherwise falls back to override_params.amount.
-    let dc_rows = ability_damage_components::list_all(pool).await?;
-    for row in dc_rows {
-        ability_catalog
-            .damage_components
-            .entry(row.ability_id)
-            .or_default()
-            .push(DamageComponent {
-                element: row.element,
-                damage_formula: row.damage_formula,
-                percentage: row.percentage,
-                sequence: row.sequence,
-            });
-    }
-
-    // Templated message strings (success/fail/wearoff text). Keyed by
-    // ability_id; per-row UNIQUE in the schema so each ability has
-    // at most one message set.
-    let message_rows = ability_messages::list_all(pool).await?;
-    for row in message_rows {
-        ability_catalog.messages.insert(
-            row.ability_id,
-            AbilityMessageSet {
-                start_to_caster: row.start_to_caster,
-                start_to_victim: row.start_to_victim,
-                start_to_room: row.start_to_room,
-                success_to_caster: row.success_to_caster,
-                success_to_victim: row.success_to_victim,
-                success_to_room: row.success_to_room,
-                success_to_self: row.success_to_self,
-                success_self_room: row.success_self_room,
-                fail_to_caster: row.fail_to_caster,
-                fail_to_victim: row.fail_to_victim,
-                fail_to_room: row.fail_to_room,
-                wearoff_to_target: row.wearoff_to_target,
-                wearoff_to_room: row.wearoff_to_room,
-                look_message: row.look_message,
-            },
-        );
-    }
 
     // Pass 4c: class catalog. Identity for the score / who readouts
     // plus the legacy-parity detail columns (`description` /
@@ -782,7 +294,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let class_ability_rows = spell_slots::list_class_abilities(pool).await?;
     let mut spell_slot_data = crate::resources::SpellSlotData::default();
     for r in progression_rows {
-        spell_slot_data.progression.insert((r.level, r.circle), r.slots);
+        spell_slot_data
+            .progression
+            .insert((r.level, r.circle), r.slots);
     }
     for r in class_circle_rows {
         spell_slot_data
@@ -901,12 +415,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 .ok()
                 .map(crate::resources::ConfigValue::Int),
             "BOOL" => match row.value.to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => {
-                    Some(crate::resources::ConfigValue::Bool(true))
-                }
-                "false" | "0" | "no" | "off" => {
-                    Some(crate::resources::ConfigValue::Bool(false))
-                }
+                "true" | "1" | "yes" | "on" => Some(crate::resources::ConfigValue::Bool(true)),
+                "false" | "0" | "no" | "off" => Some(crate::resources::ConfigValue::Bool(false)),
                 _ => None,
             },
             "FLOAT" => row
@@ -1114,10 +624,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             description: row.description,
         });
     }
-    info!(
-        liquids = liquid_catalog.len(),
-        "liquid catalog loaded"
-    );
+    info!(liquids = liquid_catalog.len(), "liquid catalog loaded");
 
     // RoomEnvironmentalEffect: per-room link to Effect rows. The
     // runtime applies these on arrival (short duration so leaving
@@ -1165,7 +672,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         );
     }
     for row in &item_rows {
-        if let Some(def) = shop_catalog.by_key.get_mut(&(row.shop_zone_id, row.shop_id)) {
+        if let Some(def) = shop_catalog
+            .by_key
+            .get_mut(&(row.shop_zone_id, row.shop_id))
+        {
             def.items.push(ShopOffering {
                 object_zone_id: row.object_zone_id,
                 object_id: row.object_id,
@@ -1175,7 +685,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
     }
     for row in &accept_rows {
-        if let Some(def) = shop_catalog.by_key.get_mut(&(row.shop_zone_id, row.shop_id)) {
+        if let Some(def) = shop_catalog
+            .by_key
+            .get_mut(&(row.shop_zone_id, row.shop_id))
+        {
             def.accepts.push(ShopAcceptRule {
                 object_type: row.object_type.clone(),
                 keywords: row.keywords.clone(),
@@ -1183,7 +696,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
     }
     for row in &pet_rows {
-        if let Some(def) = shop_catalog.by_key.get_mut(&(row.shop_zone_id, row.shop_id)) {
+        if let Some(def) = shop_catalog
+            .by_key
+            .get_mut(&(row.shop_zone_id, row.shop_id))
+        {
             def.pets.push(ShopPetOffering {
                 mob_zone_id: row.mob_zone_id,
                 mob_id: row.mob_id,
@@ -1223,6 +739,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(class_catalog);
     world.insert_resource(object_ability_catalog);
     world.insert_resource(consumable_catalog);
+    world.insert_resource(crate::wake_effects::load_wake_effect_catalog(pool).await?);
     world.insert_resource(liquid_index);
     world.insert_resource(liquid_catalog);
     world.insert_resource(room_env_effects);
@@ -1433,8 +950,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // Track each spawned mob entity by its reset_id so the equipment
     // pass below can attach gear to the right instances.
     let mob_reset_rows = mob_resets::list_all(pool).await?;
-    let mut mobs_by_reset: HashMap<i32, Vec<Entity>> =
-        HashMap::with_capacity(mob_reset_rows.len());
+    let mut mobs_by_reset: HashMap<i32, Vec<Entity>> = HashMap::with_capacity(mob_reset_rows.len());
     let mut reset_catalog_entries: Vec<MobResetEntry> = Vec::with_capacity(mob_reset_rows.len());
     let mut mob_world_count: HashMap<(i32, i32), i32> = HashMap::new();
     for r in &mob_reset_rows {
@@ -1492,10 +1008,15 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         let spawn_posture = Posture::from_default_position(proto.default_position);
         let mut em = world.spawn((
             Mob,
-            Named { name: proto.name.clone() },
+            Named {
+                name: proto.name.clone(),
+            },
             Keywords(proto.keywords.clone()),
             Description(proto.room_description.clone()),
-            WorldKey { zone: proto.zone_id, id: proto.id },
+            WorldKey {
+                zone: proto.zone_id,
+                id: proto.id,
+            },
             Located(room_entity),
             Health { hp, max: hp },
             // Derive accuracy/evasion/armor_pct/etc. from the
@@ -1536,7 +1057,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             });
         }
         if let Some((shop_zone_id, shop_id)) = shop_key {
-            em.insert(Shopkeeper { shop_zone_id, shop_id });
+            em.insert(Shopkeeper {
+                shop_zone_id,
+                shop_id,
+            });
         }
         if let Some(ref keys) = trigger_keys {
             em.insert(AttachedTriggers(keys.clone()));
@@ -1573,7 +1097,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         *mob_world_count.entry(proto_key).or_insert(0) += 1;
         stats.mob_resets_spawned += 1;
     }
-    world.insert_resource(MobResetCatalog { entries: reset_catalog_entries });
+    world.insert_resource(MobResetCatalog {
+        entries: reset_catalog_entries,
+    });
 
     let object_reset_rows = object_resets::list_all(pool).await?;
     // Mirrors mobs_by_reset: for ObjectResetContents to find which container
@@ -1629,9 +1155,14 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         {
             let mut bundle = world.spawn((
                 Item,
-                Named { name: proto.name.clone() },
+                Named {
+                    name: proto.name.clone(),
+                },
                 Keywords(proto.keywords.clone()),
-                WorldKey { zone: proto.zone_id, id: proto.id },
+                WorldKey {
+                    zone: proto.zone_id,
+                    id: proto.id,
+                },
                 Located(room_entity),
                 FromObjectReset(r.id),
             ));
@@ -1670,7 +1201,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 bundle.insert(crate::components::ObjectFlags(proto.flags.clone()));
             }
             if !proto.restrictions.is_empty() {
-                bundle.insert(crate::components::ObjectRestrictions(proto.restrictions.clone()));
+                bundle.insert(crate::components::ObjectRestrictions(
+                    proto.restrictions.clone(),
+                ));
             }
             objects_by_reset.insert(r.id, vec![bundle.id()]);
             stats.object_resets_spawned += 1;
@@ -1709,9 +1242,14 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         for &mob in &mob_entities {
             let mut bundle = world.spawn((
                 Item,
-                Named { name: proto.name.clone() },
+                Named {
+                    name: proto.name.clone(),
+                },
                 Keywords(proto.keywords.clone()),
-                WorldKey { zone: proto.zone_id, id: proto.id },
+                WorldKey {
+                    zone: proto.zone_id,
+                    id: proto.id,
+                },
                 Located(mob),
             ));
             if let Some(desc) = proto.examine_description.clone() {
@@ -1727,7 +1265,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 bundle.insert(crate::components::ObjectFlags(proto.flags.clone()));
             }
             if !proto.restrictions.is_empty() {
-                bundle.insert(crate::components::ObjectRestrictions(proto.restrictions.clone()));
+                bundle.insert(crate::components::ObjectRestrictions(
+                    proto.restrictions.clone(),
+                ));
             }
             stats.mob_equipment_spawned += 1;
         }
@@ -1778,15 +1318,19 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 .object_attachments
                 .get(&(proto.zone_id, proto.id))
                 .cloned();
-            let mut spawned_for_content: Vec<Entity> =
-                Vec::with_capacity(parents.len() * qty);
+            let mut spawned_for_content: Vec<Entity> = Vec::with_capacity(parents.len() * qty);
             for parent in parents {
                 for _ in 0..qty {
                     let mut bundle = world.spawn((
                         Item,
-                        Named { name: proto.name.clone() },
+                        Named {
+                            name: proto.name.clone(),
+                        },
                         Keywords(proto.keywords.clone()),
-                        WorldKey { zone: proto.zone_id, id: proto.id },
+                        WorldKey {
+                            zone: proto.zone_id,
+                            id: proto.id,
+                        },
                         Located(parent),
                     ));
                     if let Some(desc) = proto.examine_description.clone() {
@@ -1833,6 +1377,535 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     );
 
     Ok(stats)
+}
+
+/// Load every `Mobs` row into a fresh [`MobPrototypes`]. Shared by the boot
+/// loader and the `reloadzone` / `reloadallzones` admin paths.
+pub async fn load_mob_prototypes(pool: &PgPool) -> sqlx::Result<MobPrototypes> {
+    let mob_rows = mobs::list_mobs(pool).await?;
+    let mut mob_prototypes = MobPrototypes::default();
+    for row in mob_rows {
+        mob_prototypes.by_key.insert(
+            (row.zone_id, row.id),
+            MobProto {
+                zone_id: row.zone_id,
+                id: row.id,
+                name: row.name,
+                keywords: row.keywords,
+                room_description: row.room_description,
+                examine_description: row.examine_description,
+                gender: row.gender.to_ascii_lowercase(),
+                race: row.race.to_ascii_lowercase(),
+                level: row.level,
+                alignment: row.alignment,
+                role: row.role,
+                hp_dice_num: row.hp_dice_num,
+                hp_dice_size: row.hp_dice_size,
+                hp_dice_bonus: row.hp_dice_bonus,
+                damage_dice_num: row.damage_dice_num,
+                damage_dice_size: row.damage_dice_size,
+                damage_dice_bonus: row.damage_dice_bonus,
+                accuracy: row.accuracy,
+                evasion: row.evasion,
+                attack_power: row.attack_power,
+                spell_power: row.spell_power,
+                penetration_flat: row.penetration_flat,
+                penetration_percent: row.penetration_percent,
+                armor_rating: row.armor_rating,
+                damage_reduction_percent: row.damage_reduction_percent,
+                soak: row.soak,
+                hardness: row.hardness,
+                perception: row.perception,
+                concealment: row.concealment,
+                resistances: row.resistances,
+                ward_percent: row.ward_percent,
+                wealth: row.wealth,
+                class_id: row.class_id,
+                behaviors: row.behaviors,
+                protected_kind: row.protected_kind,
+                professions: row.professions,
+                size: row.size,
+                life_force: row.life_force,
+                damage_type: row.damage_type,
+                move_points: row.move_points,
+                default_position: row.default_position,
+                traits: row.traits,
+                movement_mode: row.movement_mode,
+                default_movement_mode: row.default_movement_mode,
+                aggression_formula: row.aggression_formula.filter(|s| !s.trim().is_empty()),
+            },
+        );
+    }
+    Ok(mob_prototypes)
+}
+
+/// Load every `Objects` row (plus extras / resistances / granted effects)
+/// into a fresh [`ObjectPrototypes`]. Shared by the boot loader and the
+/// reload admin paths.
+#[allow(clippy::too_many_lines)]
+pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototypes> {
+    let object_rows = objects::list_objects(pool).await?;
+    // Extras are loaded once and bucketed by (zone_id, object_id)
+    // so each proto can claim its rows in O(1).
+    let object_extra_rows = mud_db::object_extra_descriptions::list_extras(pool).await?;
+    #[allow(clippy::type_complexity)]
+    let mut object_extras_by_key: HashMap<(i32, i32), Vec<(Vec<String>, String)>> = HashMap::new();
+    for r in object_extra_rows {
+        object_extras_by_key
+            .entry((r.object_zone_id, r.object_id))
+            .or_default()
+            .push((r.keywords, r.description));
+    }
+    // ObjectResistance: per-element resistance % from worn gear.
+    let object_resistance_rows = mud_db::object_resistance::list_all(pool).await?;
+    #[allow(clippy::type_complexity)]
+    let mut object_resistance_by_key: HashMap<
+        (i32, i32),
+        Vec<(mud_db::enums::ElementType, i32, bool)>,
+    > = HashMap::new();
+    for r in object_resistance_rows {
+        object_resistance_by_key
+            .entry((r.object_zone_id, r.object_id))
+            .or_default()
+            .push((r.element, r.value, r.allow_absorption));
+    }
+    // ObjectEffects: spell-like effects spawned on the wearer for as
+    // long as the item is equipped (slot-restricted when
+    // `wear_location` is set).
+    let object_effect_rows = mud_db::object_effects::list_all(pool).await?;
+    let mut object_effects_by_key: HashMap<(i32, i32), Vec<crate::resources::ObjectGrantedEffect>> =
+        HashMap::new();
+    for r in object_effect_rows {
+        object_effects_by_key
+            .entry((r.object_zone_id, r.object_id))
+            .or_default()
+            .push(crate::resources::ObjectGrantedEffect {
+                effect_id: r.effect_id,
+                strength: r.strength,
+                modifier_data: r.modifier_data,
+                wear_location: r.wear_location,
+            });
+    }
+    let mut object_prototypes = ObjectPrototypes::default();
+    for row in object_rows {
+        // Combat-critical fields come from typed columns now —
+        // armor_pct, weapon_dice_*, weapon_damage_type. fierylib
+        // pre-scales legacy values at import time so the loader has
+        // no JSONB extraction or sign-flip on the hot path.
+        let weapon_damage_type = row
+            .weapon_damage_type
+            .as_ref()
+            .map(|d| d.label().to_string());
+        let portal_destination_vnum = if matches!(row.r#type, mud_db::enums::ObjectType::Portal) {
+            parse_portal_destination(&row.values)
+        } else {
+            None
+        };
+        let board_id = if matches!(row.r#type, mud_db::enums::ObjectType::Board) {
+            parse_board_id(&row.values)
+        } else {
+            None
+        };
+        let liquid = if matches!(
+            row.r#type,
+            mud_db::enums::ObjectType::Drinkcontainer | mud_db::enums::ObjectType::Fountain
+        ) {
+            parse_liquid(&row.values)
+        } else {
+            None
+        };
+        let light_fuel = if matches!(row.r#type, mud_db::enums::ObjectType::Light) {
+            Some(parse_light_fuel(&row.values))
+        } else {
+            None
+        };
+        object_prototypes.by_key.insert(
+            (row.zone_id, row.id),
+            ObjectProto {
+                zone_id: row.zone_id,
+                id: row.id,
+                r#type: row.r#type,
+                name: strip_ansi(&row.name),
+                keywords: row.keywords,
+                room_description: strip_ansi(&row.room_description),
+                examine_description: row.examine_description.as_deref().map(strip_ansi),
+                weight: row.weight,
+                level: row.level,
+                wear_flags: row.wear_flags,
+                weapon_dice_num: row.weapon_dice_num,
+                weapon_dice_size: row.weapon_dice_size,
+                weapon_dice_bonus: row.weapon_dice_bonus,
+                weapon_damage_type,
+                armor_pct: row.armor_pct,
+                cost: row.cost,
+                portal_destination_vnum,
+                board_id,
+                liquid,
+                light_fuel,
+                restricted_alignments: row.restricted_alignments,
+                restricted_class_ids: row.restricted_class_ids,
+                restricted_races: row.restricted_races,
+                extras: object_extras_by_key
+                    .remove(&(row.zone_id, row.id))
+                    .unwrap_or_default(),
+                resistances: object_resistance_by_key
+                    .remove(&(row.zone_id, row.id))
+                    .unwrap_or_default(),
+                granted_effects: object_effects_by_key
+                    .remove(&(row.zone_id, row.id))
+                    .unwrap_or_default(),
+                flags: row.flags,
+                restrictions: row.restrictions,
+                timer_hours: row.timer,
+                decompose_timer: row.decompose_timer,
+                allowed_races: row.allowed_races,
+                min_size: row.min_size,
+                max_size: row.max_size,
+                camp_kit_tier: row.camp_kit_tier,
+            },
+        );
+    }
+    Ok(object_prototypes)
+}
+
+/// Load every `Effect` row into a fresh [`EffectCatalog`]. Shared by the boot
+/// loader and the `areload` admin command.
+pub async fn load_effect_catalog(pool: &PgPool) -> sqlx::Result<EffectCatalog> {
+    let effect_rows = effects::list_effects(pool).await?;
+    let mut effect_catalog = EffectCatalog::default();
+    for row in effect_rows {
+        effect_catalog.by_id.insert(
+            row.id,
+            EffectDef {
+                id: row.id,
+                name: row.name,
+                description: row.description,
+                effect_type: row.effect_type,
+                tags: row.tags,
+                presence_override: row.presence_override,
+                default_params: row.default_params,
+                prevents_speaking: row.prevents_speaking,
+                prevents_casting: row.prevents_casting,
+                prevents_movement: row.prevents_movement,
+                on_apply: row.on_apply.filter(|s| !s.trim().is_empty()),
+                on_tick: row.on_tick.filter(|s| !s.trim().is_empty()),
+                on_remove: row.on_remove.filter(|s| !s.trim().is_empty()),
+            },
+        );
+    }
+    Ok(effect_catalog)
+}
+
+/// Load the full ability catalog (abilities plus restrictions, effects,
+/// targeting, saves, components, damage components, messages). Shared by the
+/// boot loader and the `areload` admin command.
+#[allow(clippy::too_many_lines)]
+pub async fn load_ability_catalog(pool: &PgPool) -> sqlx::Result<AbilityCatalog> {
+    let ability_rows = abilities::list_all(pool).await?;
+    let mut ability_catalog = AbilityCatalog::default();
+    for row in ability_rows {
+        let key = row.plain_name.to_ascii_lowercase();
+        let min_posture_rank = position_rank(&row.min_position);
+        ability_catalog.by_name.insert(
+            key,
+            AbilityDef {
+                id: row.id,
+                name: row.name,
+                plain_name: row.plain_name,
+                description: row.description,
+                kind: abilities::AbilityKind::from_label(&row.ability_type),
+                violent: row.violent,
+                combat_ok: row.combat_ok,
+                in_combat_only: row.in_combat_only,
+                cast_time_rounds: row.cast_time_rounds,
+                cooldown_ms: row.cooldown_ms,
+                is_area: row.is_area,
+                min_position_label: row.min_position,
+                min_posture_rank,
+                target_scope: row.target_scope,
+                is_magical: row.is_magical,
+                sphere: row.sphere,
+                damage_type: row.damage_type,
+                memorization_time: row.memorization_time,
+            },
+        );
+    }
+
+    // Restriction messages: only the `message` field per rule, indexed
+    // by ability_id. Rule type/parameters parse on demand once real
+    // gating lands.
+    let restriction_rows = ability_restrictions::list_all(pool).await?;
+    for row in restriction_rows {
+        let messages: Vec<String> = row
+            .requirements
+            .iter()
+            .filter_map(|v| {
+                v.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(String::from)
+            })
+            .collect();
+        if !messages.is_empty() {
+            ability_catalog
+                .restriction_messages
+                .insert(row.ability_id, messages);
+        }
+        // Stash the full rule list so the runtime evaluator
+        // (commands::check_ability_restrictions) can interpret
+        // type-specific rules at cast time.
+        if !row.requirements.is_empty() {
+            ability_catalog
+                .restriction_rules
+                .insert(row.ability_id, row.requirements);
+        }
+    }
+
+    // Effect mappings: ordered list of (effect_id, override_params)
+    // per ability_id. Rows are returned ORDER BY ability_id, "order"
+    // so push order matches schema order.
+    let ability_effect_rows = ability_effects::list_all(pool).await?;
+    for row in ability_effect_rows {
+        ability_catalog
+            .effects_for
+            .entry(row.ability_id)
+            .or_default()
+            .push((row.effect_id, row.override_params));
+    }
+
+    // Per-ability targeting rules (valid target types, scope,
+    // range, LOS). Keyed by ability_id; UNIQUE per ability.
+    let targeting_rows = ability_targeting::list_all(pool).await?;
+    for row in targeting_rows {
+        ability_catalog.targeting.insert(
+            row.ability_id,
+            TargetingRule {
+                valid_targets: row.valid_targets,
+                scope: row.scope,
+                max_targets: row.max_targets,
+                require_los: row.require_los,
+            },
+        );
+    }
+
+    // Per-ability saving-throw rules. UNIQUE per ability_id.
+    let save_rows = ability_saving_throw::list_all(pool).await?;
+    for row in save_rows {
+        ability_catalog.saves.insert(
+            row.ability_id,
+            SavingThrow {
+                save_type: row.save_type,
+                dc_formula: row.dc_formula,
+                on_save_action: row.on_save_action,
+            },
+        );
+    }
+
+    // Material reagent rows. `invoke_ability` checks every
+    // `required` row against the caster's carried items before
+    // applying effects; on success it removes one instance per
+    // `consumed` row.
+    let comp_rows = ability_components::list_all(pool).await?;
+    for row in comp_rows {
+        ability_catalog
+            .components
+            .entry(row.ability_id)
+            .or_default()
+            .push(crate::resources::AbilityComponentReq {
+                object_id: row.object_id,
+                consumed: row.consumed,
+                required: row.required,
+            });
+    }
+
+    // Multi-element damage components — append per-ability
+    // ordered by sequence. The damage arm sums these when present
+    // and otherwise falls back to override_params.amount.
+    let dc_rows = ability_damage_components::list_all(pool).await?;
+    for row in dc_rows {
+        ability_catalog
+            .damage_components
+            .entry(row.ability_id)
+            .or_default()
+            .push(DamageComponent {
+                element: row.element,
+                damage_formula: row.damage_formula,
+                percentage: row.percentage,
+                sequence: row.sequence,
+            });
+    }
+
+    // Templated message strings (success/fail/wearoff text). Keyed by
+    // ability_id; per-row UNIQUE in the schema so each ability has
+    // at most one message set.
+    let message_rows = ability_messages::list_all(pool).await?;
+    for row in message_rows {
+        ability_catalog.messages.insert(
+            row.ability_id,
+            AbilityMessageSet {
+                start_to_caster: row.start_to_caster,
+                start_to_victim: row.start_to_victim,
+                start_to_room: row.start_to_room,
+                success_to_caster: row.success_to_caster,
+                success_to_victim: row.success_to_victim,
+                success_to_room: row.success_to_room,
+                success_to_self: row.success_to_self,
+                success_self_room: row.success_self_room,
+                fail_to_caster: row.fail_to_caster,
+                fail_to_victim: row.fail_to_victim,
+                fail_to_room: row.fail_to_room,
+                wearoff_to_target: row.wearoff_to_target,
+                wearoff_to_room: row.wearoff_to_room,
+                look_message: row.look_message,
+            },
+        );
+    }
+    Ok(ability_catalog)
+}
+
+/// Attach the room-boolean / layout / inn components implied by a `Rooms` row.
+/// Negative-polarity flags (`allows_*`) attach only when false; positive-polarity
+/// flags (`is_*`) attach only when true. Shared by the boot loader and reload.
+fn apply_room_flags(world: &mut World, entity: Entity, r: &rooms::Room) {
+    if r.is_peaceful {
+        world.entity_mut(entity).insert(crate::PeacefulRoom);
+    }
+    // 13-flag room-boolean wiring. Negative-polarity flags
+    // (`allows_*`) only attach when false; positive-polarity
+    // flags (`is_*`) only attach when true. This keeps the
+    // common case (a normal room) component-free and lets a
+    // gate-check read "absent component = default behavior."
+    if !r.allows_magic {
+        world.entity_mut(entity).insert(crate::NoMagicRoom);
+    }
+    if !r.allows_recall {
+        world.entity_mut(entity).insert(crate::NoRecallRoom);
+    }
+    if !r.allows_summon {
+        world.entity_mut(entity).insert(crate::NoSummonRoom);
+    }
+    if !r.allows_teleport {
+        world.entity_mut(entity).insert(crate::NoTeleportRoom);
+    }
+    if r.is_death_trap {
+        world.entity_mut(entity).insert(crate::DeathTrap);
+    }
+    if r.is_indoors {
+        world.entity_mut(entity).insert(crate::IndoorRoom);
+    }
+    if r.is_soundproof {
+        world.entity_mut(entity).insert(crate::SoundproofRoom);
+    }
+    if r.is_arena {
+        world.entity_mut(entity).insert(crate::ArenaRoom);
+    }
+    if r.is_guildhall {
+        world.entity_mut(entity).insert(crate::GuildhallRoom);
+    }
+    if !r.allows_mobs {
+        world.entity_mut(entity).insert(crate::NoMobsRoom);
+    }
+    if !r.allows_tracking {
+        world.entity_mut(entity).insert(crate::NoTrackingRoom);
+    }
+    if !r.allows_portals {
+        world.entity_mut(entity).insert(crate::NoPortalsRoom);
+    }
+    if !r.allows_scanning {
+        world.entity_mut(entity).insert(crate::NoScanningRoom);
+    }
+    if r.base_light_level != 0 {
+        world
+            .entity_mut(entity)
+            .insert(crate::BaseLightLevel(r.base_light_level));
+    }
+    // Attach RoomLayout only when the builder authored at
+    // least one coordinate. Missing axes default to 0 (which
+    // matches the schema's z default and is a sensible
+    // "centered" fallback for x/y on partial-layout zones).
+    // Rooms without any layout authored stay component-free
+    // so the GMCP emit can detect "no server-side layout"
+    // and let the client auto-place.
+    if r.layout_x.is_some() || r.layout_y.is_some() || r.layout_z.is_some() {
+        world.entity_mut(entity).insert(crate::RoomLayout {
+            x: r.layout_x.unwrap_or(0),
+            y: r.layout_y.unwrap_or(0),
+            z: r.layout_z.unwrap_or(0),
+        });
+    }
+    // Rest / repose: parse the inn config when this room is
+    // flagged `is_inn`. Tier rows that fail to parse are skipped
+    // with a warn so a single bad authored row doesn't break the
+    // whole inn. Empty tier list after filtering = no rentable
+    // rooms; we still attach the marker so `rent` can render the
+    // inn name in an "out of rooms" message.
+    if r.is_inn {
+        let tiers = r
+            .inn_tiers
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| {
+                        let name = entry.get("name").and_then(|v| v.as_str())?;
+                        let tier = entry.get("tier").and_then(serde_json::Value::as_i64)?;
+                        let fee = entry.get("fee").and_then(serde_json::Value::as_i64)?;
+                        let tier_i32 = i32::try_from(tier).ok()?;
+                        let fee_i32 = i32::try_from(fee).ok()?;
+                        if !(1..=3).contains(&tier_i32) {
+                            warn!(
+                                zone = r.zone_id,
+                                id = r.id,
+                                tier_value = tier_i32,
+                                "InnRoom tier out of 1..=3 range; skipping entry",
+                            );
+                            return None;
+                        }
+                        Some(crate::InnTier {
+                            name: name.to_string(),
+                            tier: tier_i32,
+                            fee_gp: fee_i32,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        world.entity_mut(entity).insert(crate::InnRoom {
+            inn_name: r.inn_name.clone().unwrap_or_else(|| "the inn".to_string()),
+            tiers,
+        });
+    }
+}
+
+/// Build the runtime [`ExitData`] for one `RoomExits` row whose target (if any)
+/// has already been resolved to an entity. Shared by the boot loader and the
+/// zone reload path.
+fn exit_data_from_row(e: room_exits::RoomExit, target: Option<Entity>) -> ExitData {
+    let key = match (e.key_zone_id, e.key_id) {
+        (Some(z), Some(i)) => Some((z, i)),
+        _ => None,
+    };
+    let is_hidden = e.flags.contains(&mud_db::enums::ExitFlag::Hidden);
+    let is_pickproof = e.flags.contains(&mud_db::enums::ExitFlag::Pickproof);
+    let is_bashable = e.flags.contains(&mud_db::enums::ExitFlag::Bashable);
+    // Bashable exits use the seeded HP if present, otherwise
+    // the engine default (50). Non-bashable exits leave the
+    // field None so doorbash refuses outright.
+    let hit_points = if is_bashable {
+        Some(e.hit_points.unwrap_or(50))
+    } else {
+        None
+    };
+    ExitData {
+        to: target,
+        state: e.default_state,
+        key,
+        description: e.description,
+        keywords: e.keywords,
+        is_hidden,
+        is_pickproof,
+        is_bashable,
+        hit_points,
+    }
 }
 
 /// Initial weather state for a zone given its `Climate`. Picks a
@@ -2027,7 +2100,9 @@ pub fn default_weather_for_climate(
 /// have several (e.g. ring on FINGER + neck-pendant on NECK) we
 /// prefer the more common-use slot.
 #[must_use]
-pub fn wear_flags_primary_slot(flags: &[mud_db::enums::WearFlag]) -> Option<crate::components::Slot> {
+pub fn wear_flags_primary_slot(
+    flags: &[mud_db::enums::WearFlag],
+) -> Option<crate::components::Slot> {
     use crate::components::Slot;
     use mud_db::enums::WearFlag::{
         About, Arms, Badge, Belt, Body, Disguise, Ear, Eyes, Face, Feet, Finger, Hands, Head,
@@ -2101,14 +2176,23 @@ fn parse_light_fuel(values: &serde_json::Value) -> crate::resources::LightFuelPr
     };
     let capacity = parse_int(values.get("Capacity"));
     let remaining = parse_int(values.get("Remaining"));
-    crate::resources::LightFuelProto { capacity, remaining }
+    crate::resources::LightFuelProto {
+        capacity,
+        remaining,
+    }
 }
 
 fn parse_liquid(values: &serde_json::Value) -> Option<LiquidProto> {
-    let liquid = values.get("Liquid")?.as_str().unwrap_or("WATER").to_string();
+    let liquid = values
+        .get("Liquid")?
+        .as_str()
+        .unwrap_or("WATER")
+        .to_string();
     let parse_int = |v: Option<&serde_json::Value>| -> i32 {
         match v {
-            Some(serde_json::Value::Number(n)) => i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0),
+            Some(serde_json::Value::Number(n)) => {
+                i32::try_from(n.as_i64().unwrap_or(0)).unwrap_or(0)
+            }
             Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
             _ => 0,
         }
@@ -2158,5 +2242,371 @@ fn position_rank(label: &str) -> i32 {
         "SITTING" => 8,
         "STANDING" => 9,
         _ => 0,
+    }
+}
+
+/// Counts reported by [`reload_zones`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReloadStats {
+    pub zones_updated: usize,
+    pub zones_added: usize,
+    pub rooms_updated: usize,
+    pub rooms_added: usize,
+    /// Rooms present in the live world but no longer in the DB. They are
+    /// left in place (players may be standing in them) until restart.
+    pub rooms_orphaned: usize,
+    pub mob_protos: usize,
+    pub object_protos: usize,
+    pub mob_resets: usize,
+    pub object_resets: usize,
+}
+
+/// Swap freshly loaded prototypes into `existing`. With `zone = Some(z)`
+/// only entries whose key zone is `z` are replaced (removed ones disappear,
+/// new ones appear); with `None` the whole map is replaced. Returns the
+/// number of entries now present in scope.
+#[allow(clippy::implicit_hasher)]
+pub fn merge_prototypes<T>(
+    existing: &mut HashMap<(i32, i32), T>,
+    fresh: HashMap<(i32, i32), T>,
+    zone: Option<i32>,
+) -> usize {
+    match zone {
+        None => {
+            *existing = fresh;
+            existing.len()
+        }
+        Some(z) => {
+            existing.retain(|(kz, _), _| *kz != z);
+            let mut n = 0;
+            for (k, v) in fresh {
+                if k.0 == z {
+                    existing.insert(k, v);
+                    n += 1;
+                }
+            }
+            n
+        }
+    }
+}
+
+/// Strip every component [`apply_room_flags`] may have attached so it can be
+/// re-applied from a fresh `Rooms` row.
+fn clear_room_flags(world: &mut World, entity: Entity) {
+    let mut em = world.entity_mut(entity);
+    em.remove::<(
+        crate::PeacefulRoom,
+        crate::NoMagicRoom,
+        crate::NoRecallRoom,
+        crate::NoSummonRoom,
+        crate::NoTeleportRoom,
+        crate::DeathTrap,
+        crate::IndoorRoom,
+        crate::SoundproofRoom,
+        crate::ArenaRoom,
+    )>();
+    em.remove::<(
+        crate::GuildhallRoom,
+        crate::NoMobsRoom,
+        crate::NoTrackingRoom,
+        crate::NoPortalsRoom,
+        crate::NoScanningRoom,
+        crate::BaseLightLevel,
+        crate::RoomLayout,
+        crate::InnRoom,
+    )>();
+}
+
+/// Re-pull world data for one zone (`Some(id)`) or every zone (`None`)
+/// from the database without touching live instances. Prototypes
+/// (`MobPrototypes` / `ObjectPrototypes`), zone and room definitions
+/// (name, description, flags, exits, extra descriptions) and reset
+/// catalogs are replaced; mobs/items already in the world keep their
+/// current state and new prototypes apply to future spawns. Rooms removed
+/// from the DB are left in place and reported as orphaned. Exit door state
+/// of reloaded rooms resets to the authored default.
+#[allow(clippy::too_many_lines)]
+pub async fn reload_zones(
+    world: &mut World,
+    pool: &PgPool,
+    zone: Option<i32>,
+) -> sqlx::Result<ReloadStats> {
+    let in_scope = |z: i32| zone.is_none_or(|only| only == z);
+    let mut stats = ReloadStats::default();
+
+    // Fetch everything first so a DB error leaves the world untouched.
+    let fresh_mobs = load_mob_prototypes(pool).await?;
+    let fresh_objects = load_object_prototypes(pool).await?;
+    let zone_rows = zones::list_zones(pool).await?;
+    let room_rows = rooms::list_rooms(pool).await?;
+    let exit_rows = room_exits::list_exits(pool).await?;
+    let extra_rows = mud_db::room_extra_descriptions::list_extras(pool).await?;
+    let mob_reset_rows = mob_resets::list_all(pool).await?;
+    let object_reset_rows = object_resets::list_all(pool).await?;
+
+    if let Some(z) = zone
+        && !zone_rows.iter().any(|r| r.id == z)
+    {
+        return Err(sqlx::Error::RowNotFound);
+    }
+
+    // Prototypes.
+    stats.mob_protos = merge_prototypes(
+        &mut world.resource_mut::<MobPrototypes>().by_key,
+        fresh_mobs.by_key,
+        zone,
+    );
+    stats.object_protos = merge_prototypes(
+        &mut world.resource_mut::<ObjectPrototypes>().by_key,
+        fresh_objects.by_key,
+        zone,
+    );
+
+    // Zones.
+    for z in zone_rows.iter().filter(|z| in_scope(z.id)) {
+        let existing = world.resource::<WorldKeyIndex>().zones.get(&z.id).copied();
+        if let Some(entity) = existing {
+            let mut em = world.entity_mut(entity);
+            em.insert((
+                Named {
+                    name: z.name.clone(),
+                },
+                ZoneClimate(z.climate),
+            ));
+            stats.zones_updated += 1;
+        } else {
+            let entity = world
+                .spawn((
+                    Zone,
+                    WorldKey { zone: z.id, id: 0 },
+                    Named {
+                        name: z.name.clone(),
+                    },
+                    ZoneClimate(z.climate),
+                ))
+                .id();
+            world
+                .resource_mut::<WorldKeyIndex>()
+                .zones
+                .insert(z.id, entity);
+            if let Some(mut w) = world.get_resource_mut::<crate::resources::WeatherCatalog>() {
+                w.by_zone
+                    .insert(z.id, default_weather_for_climate(z.climate));
+            }
+            stats.zones_added += 1;
+        }
+    }
+
+    // Rooms: update in place, spawn new ones.
+    let mut seen_rooms: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+    for r in room_rows.iter().filter(|r| in_scope(r.zone_id)) {
+        let key = (r.zone_id, r.id);
+        let Some(zone_entity) = world
+            .resource::<WorldKeyIndex>()
+            .zones
+            .get(&r.zone_id)
+            .copied()
+        else {
+            warn!(
+                zone_id = r.zone_id,
+                room_id = r.id,
+                "room references missing zone; skipping"
+            );
+            continue;
+        };
+        seen_rooms.insert(key);
+        let existing = world.resource::<WorldKeyIndex>().rooms.get(&key).copied();
+        if let Some(entity) = existing {
+            clear_room_flags(world, entity);
+            world.entity_mut(entity).insert((
+                Named {
+                    name: r.name.clone(),
+                },
+                Description(r.room_description.clone()),
+                RoomSector(r.sector),
+            ));
+            apply_room_flags(world, entity, r);
+            stats.rooms_updated += 1;
+        } else {
+            let entity = world
+                .spawn((
+                    Room,
+                    WorldKey {
+                        zone: r.zone_id,
+                        id: r.id,
+                    },
+                    Named {
+                        name: r.name.clone(),
+                    },
+                    Description(r.room_description.clone()),
+                    Located(zone_entity),
+                    RoomSector(r.sector),
+                    Exits::default(),
+                ))
+                .id();
+            apply_room_flags(world, entity, r);
+            let mut idx = world.resource_mut::<WorldKeyIndex>();
+            idx.rooms.insert(key, entity);
+            idx.legacy_vnums.insert(r.zone_id * 100 + r.id, key);
+            stats.rooms_added += 1;
+        }
+    }
+    {
+        let mut q = world.query_filtered::<&WorldKey, With<Room>>();
+        stats.rooms_orphaned = q
+            .iter(world)
+            .filter(|k| in_scope(k.zone) && !seen_rooms.contains(&(k.zone, k.id)))
+            .count();
+    }
+
+    // Exits: rebuild for every in-scope room (targets resolve against the
+    // updated index, so exits into freshly added rooms connect).
+    let room_index: HashMap<(i32, i32), Entity> = world.resource::<WorldKeyIndex>().rooms.clone();
+    for key in &seen_rooms {
+        if let Some(&entity) = room_index.get(key)
+            && let Some(mut exits) = world.get_mut::<Exits>(entity)
+        {
+            exits.0.clear();
+        }
+    }
+    for e in exit_rows.into_iter().filter(|e| in_scope(e.room_zone_id)) {
+        let Some(&source) = room_index.get(&(e.room_zone_id, e.room_id)) else {
+            continue;
+        };
+        let target = match (e.to_zone_id, e.to_room_id) {
+            (Some(tz), Some(tr)) => room_index.get(&(tz, tr)).copied(),
+            _ => None,
+        };
+        let direction = e.direction;
+        let data = exit_data_from_row(e, target);
+        if let Some(mut exits) = world.get_mut::<Exits>(source) {
+            exits.0.insert(direction, data);
+        }
+    }
+
+    // Room extra descriptions.
+    #[allow(clippy::type_complexity)]
+    let mut extras_by_room: HashMap<(i32, i32), Vec<(Vec<String>, String)>> = HashMap::new();
+    for r in extra_rows.into_iter().filter(|r| in_scope(r.room_zone_id)) {
+        extras_by_room
+            .entry((r.room_zone_id, r.room_id))
+            .or_default()
+            .push((r.keywords, r.description));
+    }
+    for key in &seen_rooms {
+        let Some(&entity) = room_index.get(key) else {
+            continue;
+        };
+        match extras_by_room.remove(key) {
+            Some(entries) => {
+                world
+                    .entity_mut(entity)
+                    .insert(crate::RoomExtras { entries });
+            }
+            None => {
+                world.entity_mut(entity).remove::<crate::RoomExtras>();
+            }
+        }
+    }
+
+    // Reset catalogs: drop entries targeting in-scope rooms, re-add from DB.
+    let room_in_scope =
+        |world: &World, e: Entity| world.get::<WorldKey>(e).is_some_and(|k| in_scope(k.zone));
+    let kept_mob: Vec<MobResetEntry> = world
+        .resource::<MobResetCatalog>()
+        .entries
+        .iter()
+        .filter(|e| !room_in_scope(world, e.room_entity))
+        .cloned()
+        .collect();
+    let kept_obj: Vec<ObjectResetEntry> = world
+        .resource::<ObjectResetCatalog>()
+        .entries
+        .iter()
+        .filter(|e| !room_in_scope(world, e.room_entity))
+        .cloned()
+        .collect();
+    let mut mob_entries = kept_mob;
+    for r in mob_reset_rows
+        .iter()
+        .filter(|r| in_scope(r.room_zone_id) && r.probability > 0.0)
+    {
+        let proto_ok = world
+            .resource::<MobPrototypes>()
+            .by_key
+            .contains_key(&(r.mob_zone_id, r.mob_id));
+        let Some(&room_entity) = room_index.get(&(r.room_zone_id, r.room_id)) else {
+            continue;
+        };
+        if !proto_ok {
+            continue;
+        }
+        mob_entries.push(MobResetEntry {
+            reset_id: r.id,
+            mob_zone_id: r.mob_zone_id,
+            mob_id: r.mob_id,
+            room_entity,
+            max_instances: r.max_instances,
+        });
+        stats.mob_resets += 1;
+    }
+    let mut obj_entries = kept_obj;
+    for r in object_reset_rows
+        .iter()
+        .filter(|r| in_scope(r.room_zone_id) && r.probability > 0.0)
+    {
+        let proto_ok = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .contains_key(&(r.object_zone_id, r.object_id));
+        let Some(&room_entity) = room_index.get(&(r.room_zone_id, r.room_id)) else {
+            continue;
+        };
+        if !proto_ok {
+            continue;
+        }
+        obj_entries.push(ObjectResetEntry {
+            reset_id: r.id,
+            object_zone_id: r.object_zone_id,
+            object_id: r.object_id,
+            room_entity,
+            max_instances: r.max_instances,
+        });
+        stats.object_resets += 1;
+    }
+    world.resource_mut::<MobResetCatalog>().entries = mob_entries;
+    world.resource_mut::<ObjectResetCatalog>().entries = obj_entries;
+
+    info!(?zone, ?stats, "zone data reloaded from DB");
+    Ok(stats)
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+
+    fn map(keys: &[(i32, i32)], tag: &'static str) -> HashMap<(i32, i32), &'static str> {
+        keys.iter().map(|k| (*k, tag)).collect()
+    }
+
+    #[test]
+    fn merge_prototypes_replaces_only_requested_zone() {
+        let mut existing = map(&[(1, 1), (1, 2), (2, 1)], "old");
+        let fresh = map(&[(1, 2), (1, 3), (2, 1)], "new");
+        let n = merge_prototypes(&mut existing, fresh, Some(1));
+        assert_eq!(n, 2);
+        assert!(!existing.contains_key(&(1, 1)), "removed proto dropped");
+        assert_eq!(existing[&(1, 2)], "new");
+        assert_eq!(existing[&(1, 3)], "new");
+        assert_eq!(existing[&(2, 1)], "old", "other zone untouched");
+    }
+
+    #[test]
+    fn merge_prototypes_all_zones_replaces_everything() {
+        let mut existing = map(&[(1, 1), (2, 1)], "old");
+        let n = merge_prototypes(&mut existing, map(&[(3, 1)], "new"), None);
+        assert_eq!(n, 1);
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[&(3, 1)], "new");
     }
 }

@@ -85,9 +85,11 @@ pub fn load_snapshot(world: &mut World) {
             item_skipped += 1;
             continue;
         };
-        let Some(offer) = shop.items.iter_mut().find(|o| {
-            o.object_zone_id == stock.object_zone && o.object_id == stock.object_id
-        }) else {
+        let Some(offer) = shop
+            .items
+            .iter_mut()
+            .find(|o| o.object_zone_id == stock.object_zone && o.object_id == stock.object_id)
+        else {
             item_skipped += 1;
             continue;
         };
@@ -108,9 +110,11 @@ pub fn load_snapshot(world: &mut World) {
             pet_skipped += 1;
             continue;
         };
-        let Some(offer) = shop.pets.iter_mut().find(|o| {
-            o.mob_zone_id == stock.mob_zone && o.mob_id == stock.mob_id
-        }) else {
+        let Some(offer) = shop
+            .pets
+            .iter_mut()
+            .find(|o| o.mob_zone_id == stock.mob_zone && o.mob_id == stock.mob_id)
+        else {
             pet_skipped += 1;
             continue;
         };
@@ -190,4 +194,3 @@ pub fn save_snapshot(world: &World) {
         "shop snapshot saved",
     );
 }
-

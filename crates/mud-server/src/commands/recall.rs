@@ -4,10 +4,7 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{Fighting, Located, Mounted, RecallPoint};
 
-use crate::commands::{
-    Category, Command, Help, cmd_look, name_of,
-    send_to, try_remove,
-};
+use crate::commands::{Category, Command, Help, cmd_look, name_of, send_to, try_remove};
 
 inventory::submit! {
     Command {
@@ -40,11 +37,7 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
     if let Some(located) = world.get::<Located>(player)
         && world.get::<mud_world::NoRecallRoom>(located.0).is_some()
     {
-        send_to(
-            world,
-            player,
-            "Some power blocks your recall.\r\n",
-        );
+        send_to(world, player, "Some power blocks your recall.\r\n");
         return;
     }
     let Some(target) = world.get::<RecallPoint>(player).map(|r| r.0) else {

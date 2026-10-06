@@ -5,8 +5,8 @@ use mud_db::enums::UserRole;
 use mud_world::{Ghost, Health, Located, Profile, RaceDefaults, RecallPoint, WorldKeyIndex};
 
 use crate::commands::{
-    Category, Command, Help, broadcast_room_visual, cap_sentence_start, cmd_look, name_of,
-    send_to, try_insert, try_remove,
+    Category, Command, Help, broadcast_room_visual, cap_sentence_start, cmd_look, name_of, send_to,
+    try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -29,11 +29,7 @@ inventory::submit! {
 
 fn cmd_release(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Ghost>(player).is_none() {
-        send_to(
-            world,
-            player,
-            "You aren't dead. Nothing to release.\r\n",
-        );
+        send_to(world, player, "You aren't dead. Nothing to release.\r\n");
         return;
     }
     // Stamina is intentionally left at whatever it was when they died —

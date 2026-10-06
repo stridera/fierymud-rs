@@ -1,12 +1,15 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AbilityCatalog, AppliedTo, EffectCatalog, EffectInstance, Item, Located, ModifyDelta,
-    Stealth, Stunned,
+    AbilityCatalog, AppliedTo, EffectCatalog, EffectInstance, Item, Located, ModifyDelta, Stealth,
+    Stunned,
 };
 use tracing::{info, warn};
 
 use crate::TickCount;
-use crate::commands::{apply_damage, drain_lua_outbox, name_of, name_or, send_rendered, send_to, try_insert, try_remove};
+use crate::commands::{
+    apply_damage, drain_lua_outbox, name_of, name_or, send_rendered, send_to, try_insert,
+    try_remove,
+};
 
 /// Marker added to an `EffectInstance` after its `on_apply` Lua
 /// hook has fired. Lets the lifecycle scan distinguish "freshly
@@ -49,12 +52,7 @@ impl EffectHook {
 /// to the target inside the Lua body. Logs failures via tracing
 /// rather than the script error log — these are runtime hooks not
 /// dispatched triggers, and the catalog has no (zone, id).
-fn run_effect_hook(
-    world: &mut World,
-    hook: EffectHook,
-    target: Entity,
-    effect_name: &str,
-) {
+fn run_effect_hook(world: &mut World, hook: EffectHook, target: Entity, effect_name: &str) {
     let body = {
         let Some(catalog) = world.get_resource::<EffectCatalog>() else {
             return;
@@ -126,7 +124,13 @@ pub fn effects_tick(world: &mut World) {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
             .map(|(eff, inst, applied)| {
-                (eff, applied.0, inst.remaining_secs, inst.name.clone(), inst.ability_id)
+                (
+                    eff,
+                    applied.0,
+                    inst.remaining_secs,
+                    inst.name.clone(),
+                    inst.ability_id,
+                )
             })
             .collect()
     };
@@ -148,7 +152,11 @@ pub fn effects_tick(world: &mut World) {
         // so we short-circuit the rest of this iteration.
         if name.eq_ignore_ascii_case("bleed") {
             let (dead, _) = apply_damage(world, target, BLEED_DPS);
-            send_to(world, target, format!("You bleed for {BLEED_DPS} damage.\r\n"));
+            send_to(
+                world,
+                target,
+                format!("You bleed for {BLEED_DPS} damage.\r\n"),
+            );
             if dead {
                 let target_name = name_or(world, target, "<unknown>");
                 let room = world.get::<Located>(target).copied().map(|l| l.0);
@@ -225,12 +233,7 @@ pub fn effects_tick(world: &mut World) {
             if let Some(delta) = world.get::<ModifyDelta>(eff_entity).cloned()
                 && world.get_entity(target).is_ok()
             {
-                crate::commands::reverse_modify_delta(
-                    world,
-                    target,
-                    &delta.target,
-                    delta.amount,
-                );
+                crate::commands::reverse_modify_delta(world, target, &delta.target, delta.amount);
             }
             // Rest / repose R6: when the Refreshed Effect fades,
             // subtract the RegenBonus delta the wake path stamped.
@@ -243,16 +246,16 @@ pub fn effects_tick(world: &mut World) {
             // ModifyDelta unwinds. Stacked PROT_*/STONE_SKIN cleanly
             // peel back to whatever the underlying item-resistance
             // value was.
-            if let Some(delta) =
-                world.get::<mud_world::SpellResistanceDelta>(eff_entity).copied()
+            if let Some(delta) = world
+                .get::<mud_world::SpellResistanceDelta>(eff_entity)
+                .copied()
                 && world.get_entity(target).is_ok()
+                && let Some(mut r) = world.get_mut::<mud_world::Resistances>(target)
             {
-                if let Some(mut r) = world.get_mut::<mud_world::Resistances>(target) {
-                    let entry = r.0.entry(delta.element).or_insert(0);
-                    *entry = entry.saturating_sub(delta.percent);
-                    if *entry == 0 {
-                        r.0.remove(&delta.element);
-                    }
+                let entry = r.0.entry(delta.element).or_insert(0);
+                *entry = entry.saturating_sub(delta.percent);
+                if *entry == 0 {
+                    r.0.remove(&delta.element);
                 }
             }
             if let Ok(e) = world.get_entity_mut(eff_entity) {
@@ -265,10 +268,9 @@ pub fn effects_tick(world: &mut World) {
             if name.eq_ignore_ascii_case("stun") {
                 let still_stunned = {
                     let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world)
-                        .any(|(eff, applied)| {
-                            applied.0 == target && eff.name.eq_ignore_ascii_case("stun")
-                        })
+                    q.iter(world).any(|(eff, applied)| {
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("stun")
+                    })
                 };
                 if !still_stunned {
                     try_remove::<Stunned>(world, target);
@@ -371,12 +373,17 @@ pub fn effects_tick(world: &mut World) {
             // expiring entity carries that tag, drop the marker only
             // when no remaining EffectInstance shares the same tag —
             // mirrors the bless/sanctuary refcount pattern.
-            if let Some(tag) =
-                world.get::<mud_world::AlignmentProtectionTag>(eff_entity).copied()
+            if let Some(tag) = world
+                .get::<mud_world::AlignmentProtectionTag>(eff_entity)
+                .copied()
             {
                 let still_protected = {
-                    let mut q = world
-                        .query::<(Entity, &EffectInstance, &AppliedTo, &mud_world::AlignmentProtectionTag)>();
+                    let mut q = world.query::<(
+                        Entity,
+                        &EffectInstance,
+                        &AppliedTo,
+                        &mud_world::AlignmentProtectionTag,
+                    )>();
                     q.iter(world).any(|(e, _, applied, t)| {
                         e != eff_entity
                             && applied.0 == target
@@ -412,9 +419,7 @@ pub fn effects_tick(world: &mut World) {
             // so observers see the dispel, then despawn the mob and
             // anything it was carrying.
             if name.starts_with("summoned-") {
-                if let Some(mob_room) =
-                    world.get::<mud_world::Located>(target).map(|l| l.0)
-                {
+                if let Some(mob_room) = world.get::<mud_world::Located>(target).map(|l| l.0) {
                     let mob_name = world
                         .get::<mud_world::Named>(target)
                         .map_or("the summoned creature".to_string(), |n| n.name.clone());
@@ -455,9 +460,7 @@ pub fn effects_tick(world: &mut World) {
                             .find(|(_, e)| e.backed_by == eff_entity)
                             .map(|(d, e)| (*d, e.kind_label.clone()))
                     });
-                if let Some(mut blocked) =
-                    world.get_mut::<mud_world::RoomBlockedExits>(target)
-                {
+                if let Some(mut blocked) = world.get_mut::<mud_world::RoomBlockedExits>(target) {
                     blocked
                         .by_direction
                         .retain(|_, entry| entry.backed_by != eff_entity);
@@ -598,8 +601,7 @@ pub fn effects_tick(world: &mut World) {
                 let still_seeing = {
                     let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
                     q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target
-                            && eff.name.eq_ignore_ascii_case("detect_invisible")
+                        applied.0 == target && eff.name.eq_ignore_ascii_case("detect_invisible")
                     })
                 };
                 if !still_seeing {
@@ -666,7 +668,9 @@ mod tests {
 
         run_effects_tick(&mut world);
 
-        let inst = world.get::<EffectInstance>(eff).expect("effect still alive");
+        let inst = world
+            .get::<EffectInstance>(eff)
+            .expect("effect still alive");
         assert_eq!(inst.remaining_secs, 4);
     }
 

@@ -30,9 +30,11 @@ fn idle_kick_secs(world: &World) -> u64 {
     // GameConfig row wins so operators can re-tune at runtime
     // without restart. A non-positive value falls through to the
     // env var / hardcoded default.
-    let cfg_secs = world
-        .resource::<mud_world::RuntimeConfig>()
-        .get_i32("server", "connection_timeout_seconds", 0);
+    let cfg_secs = world.resource::<mud_world::RuntimeConfig>().get_i32(
+        "server",
+        "connection_timeout_seconds",
+        0,
+    );
     if cfg_secs > 0 {
         return u64::try_from(cfg_secs).unwrap_or(DEFAULT_IDLE_KICK_SECS);
     }
@@ -78,6 +80,50 @@ pub fn idle_kick_tick(world: &mut World) {
     for entity in to_kick {
         if let Ok(mut e) = world.get_entity_mut(entity) {
             e.insert(IdleKickPending);
+        }
+    }
+}
+
+/// Mark every connection that owns a logged-in player as authenticated
+/// in `mud-net`, which otherwise closes connections that never finish
+/// login (pre-login idle / total timeouts). Cheap: linear in online
+/// players, run about once a second.
+pub fn sync_authenticated(world: &mut World, router: &crate::login::ConnRouter) {
+    let mut q = world.query_filtered::<Entity, With<Player>>();
+    for entity in q.iter(world) {
+        if let Some(conn_id) = router.find_conn(entity) {
+            mud_net::mark_authenticated(conn_id);
+        }
+    }
+}
+
+/// Drain `IdleKickPending` markers: tell each player they're being
+/// kicked, run the canonical `on_disconnect` save flow, then close the
+/// socket via `mud_net::close_connection` (queued notice is flushed
+/// before the FIN). Without the close the session would be detached
+/// but the TCP connection would linger until the client dropped it.
+pub async fn drain_idle_kicks(
+    world: &mut World,
+    router: &mut crate::login::ConnRouter,
+    pool: &mud_db::sqlx::PgPool,
+) {
+    let pending: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<IdleKickPending>>();
+        q.iter(world).collect()
+    };
+    for entity in pending {
+        if let Some(conn_id) = router.find_conn(entity) {
+            crate::commands::send_to(
+                world,
+                entity,
+                "\r\nYou have been idle for too long. Disconnecting.\r\n",
+            );
+            router.on_disconnect(world, conn_id, pool).await;
+            mud_net::close_connection(conn_id);
+        } else if let Ok(mut e) = world.get_entity_mut(entity) {
+            // Orphaned marker (e.g. the player despawned mid-tick
+            // somehow) — drop it so the next pass doesn't keep retrying.
+            e.remove::<IdleKickPending>();
         }
     }
 }

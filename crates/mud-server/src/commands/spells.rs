@@ -204,8 +204,6 @@ inventory::submit! {
     }
 }
 
-
-
 // ---- handler bodies ----
 
 #[allow(clippy::too_many_lines)]
@@ -222,12 +220,13 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let Some((state, key_req, is_pickproof)) = world
         .get::<Exits>(room)
-        .and_then(|e| {
-            e.0.get(&dir)
-                .map(|ed| (ed.state, ed.key, ed.is_pickproof))
-        })
+        .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key, ed.is_pickproof)))
     else {
-        send_to(world, player, format!("No exit {}.\r\n", direction_name(dir)));
+        send_to(
+            world,
+            player,
+            format!("No exit {}.\r\n", direction_name(dir)),
+        );
         return;
     };
     if state != ExitState::Locked {
@@ -263,11 +262,7 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
         .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == 272).copied())
         .map(|(_, p, _)| p);
     let Some(proficiency) = proficiency else {
-        send_to(
-            world,
-            player,
-            "You don't know how to pick locks.\r\n",
-        );
+        send_to(world, player, "You don't know how to pick locks.\r\n");
         return;
     };
 
@@ -320,7 +315,10 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
             world,
             room,
             &[player],
-            &format!("{player_name} fumbles with the lock {}.\r\n", direction_name(dir)),
+            &format!(
+                "{player_name} fumbles with the lock {}.\r\n",
+                direction_name(dir)
+            ),
         );
     }
 }
@@ -334,6 +332,7 @@ pub(crate) fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
         "You aren't casting anything. (Use `cancel <effect>` to drop an active buff.)\r\n",
     );
 }
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     let needle = args.trim().to_ascii_lowercase();
     // Snapshot every effect on the player + its source-ability
@@ -378,11 +377,7 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     if cancellable.is_empty() {
-        send_to(
-            world,
-            player,
-            "You have no effects you can cancel.\r\n",
-        );
+        send_to(world, player, "You have no effects you can cancel.\r\n");
         return;
     }
     if needle.is_empty() {
@@ -427,10 +422,9 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     // get the same "wall is gone" signal `effects_tick` would
     // emit on a natural expiry.
     if removed_name.starts_with("wall-") {
-        let target_room = world
-            .get::<AppliedTo>(target_effect)
-            .map(|a| a.0);
-        let mut dissolved: Option<(mud_db::enums::Direction, String, bevy_ecs::entity::Entity)> = None;
+        let target_room = world.get::<AppliedTo>(target_effect).map(|a| a.0);
+        let mut dissolved: Option<(mud_db::enums::Direction, String, bevy_ecs::entity::Entity)> =
+            None;
         if let Some(room) = target_room {
             // Capture (dir, kind_label) for the broadcast before
             // the retain mutates the map.
@@ -447,10 +441,7 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
                     .by_direction
                     .retain(|_, entry| entry.backed_by != target_effect);
                 let empty = blocked.by_direction.is_empty();
-                drop(blocked);
-                if empty
-                    && let Ok(mut em) = world.get_entity_mut(room)
-                {
+                if empty && let Ok(mut em) = world.get_entity_mut(room) {
                     em.remove::<mud_world::RoomBlockedExits>();
                 }
             }
@@ -479,11 +470,7 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     if let Ok(e) = world.get_entity_mut(target_effect) {
         e.despawn();
     }
-    send_to(
-        world,
-        player,
-        format!("You cancel {removed_name}.\r\n"),
-    );
+    send_to(world, player, format!("You cancel {removed_name}.\r\n"));
 }
 pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
     use mud_world::SpellSlotData;
@@ -500,7 +487,12 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Study what?\r\n");
         return;
     }
-    let Some(def) = world.resource::<AbilityCatalog>().by_name.get(&key).cloned() else {
+    let Some(def) = world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .get(&key)
+        .cloned()
+    else {
         send_to(world, player, format!("'{key}' isn't a known ability.\r\n"));
         return;
     };
@@ -519,11 +511,7 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
     if let Some(known) = world.get::<KnownAbilities>(player)
         && known.has_any(def.id)
     {
-        send_to(
-            world,
-            player,
-            format!("You already know {}.\r\n", def.name),
-        );
+        send_to(world, player, format!("You already know {}.\r\n", def.name));
         return;
     }
     if let Some(mut known) = world.get_mut::<KnownAbilities>(player) {
@@ -537,10 +525,7 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
     send_to(
         world,
         player,
-        format!(
-            "You commit {} to memory. (proficiency 1)\r\n",
-            def.name
-        ),
+        format!("You commit {} to memory. (proficiency 1)\r\n", def.name),
     );
 }
 pub(crate) fn cmd_memorize(world: &mut World, player: Entity, _args: &str) {
@@ -563,11 +548,29 @@ pub(crate) fn cmd_forget(world: &mut World, player: Entity, _args: &str) {
     crate::commands::info::cmd_slots(world, player, "");
 }
 pub(crate) fn cmd_cast(world: &mut World, player: Entity, args: &str) {
-    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Spell, "cast");
+    invoke_ability(
+        world,
+        player,
+        args,
+        mud_db::abilities::AbilityKind::Spell,
+        "cast",
+    );
 }
 pub(crate) fn cmd_chant(world: &mut World, player: Entity, args: &str) {
-    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Chant, "chant");
+    invoke_ability(
+        world,
+        player,
+        args,
+        mud_db::abilities::AbilityKind::Chant,
+        "chant",
+    );
 }
 pub(crate) fn cmd_perform(world: &mut World, player: Entity, args: &str) {
-    invoke_ability(world, player, args, mud_db::abilities::AbilityKind::Song, "perform");
+    invoke_ability(
+        world,
+        player,
+        args,
+        mud_db::abilities::AbilityKind::Song,
+        "perform",
+    );
 }

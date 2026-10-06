@@ -41,7 +41,7 @@ use crate::commands::{apply_modify_delta, reverse_modify_delta, try_insert};
 #[derive(Component, Debug, Clone, Default)]
 pub struct GrantedDeltas {
     pub deltas: Vec<(String, i32)>,
-    /// EffectInstance entities spawned from spell-like grants while
+    /// `EffectInstance` entities spawned from spell-like grants while
     /// this item was worn. Despawned on remove.
     pub effects: Vec<Entity>,
     /// `(element, value)` rolled into the wearer's `Resistances` map.
@@ -60,13 +60,13 @@ pub struct GrantedDeltas {
 /// No-op when the item lacks a `WorldKey` (synthetic items),
 /// when the proto is missing from the catalog (skipped at load
 /// time), or when the wearer no longer exists.
+#[allow(clippy::too_many_lines)]
 pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
     if world.get_entity(wearer).is_err() || world.get_entity(item).is_err() {
         return;
     }
-    let key = match world.get::<WorldKey>(item).copied() {
-        Some(k) => k,
-        None => return,
+    let Some(key) = world.get::<WorldKey>(item).copied() else {
+        return;
     };
     let proto = world
         .get_resource::<ObjectPrototypes>()
@@ -123,9 +123,7 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
     // the item type itself provides, pre-scaled at fierylib import
     // time. Recorded in `applied_deltas` so unequip reverses it
     // through the same path apply-block deltas use.
-    if proto.armor_pct != 0
-        && apply_modify_delta(world, wearer, "armor_pct", proto.armor_pct)
-    {
+    if proto.armor_pct != 0 && apply_modify_delta(world, wearer, "armor_pct", proto.armor_pct) {
         applied_deltas.push(("armor_pct".to_string(), proto.armor_pct));
     }
     for grant in granted_effects_to_spawn {
@@ -152,6 +150,7 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
                 .get("target")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            #[allow(clippy::cast_possible_truncation)]
             let amount = grant
                 .modifier_data
                 .get("amount")
@@ -273,7 +272,9 @@ pub fn unapply_object_from_wearer(world: &mut World, item: Entity, wearer: Entit
 /// shouldn't double-stack stats).
 pub fn recompute_equipped_for(world: &mut World, wearer: Entity) {
     let equipped: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &mud_world::Located, &EquippedSlot), With<mud_world::Item>>();
+        let mut q = world
+            .query_filtered::<(Entity, &mud_world::Located, &EquippedSlot), With<mud_world::Item>>(
+            );
         q.iter(world)
             .filter(|(_, l, _)| l.0 == wearer)
             .map(|(e, _, _)| e)
@@ -289,34 +290,37 @@ pub fn recompute_equipped_for(world: &mut World, wearer: Entity) {
 
 /// Best-effort match between an `ObjectEffects.wear_location`
 /// `WearFlag` and the runtime `Slot` an item is occupying. The
-/// schema's WearFlag is finer-grained than the runtime Slot
-/// (Mainhand/Offhand/Twohand all collapse onto Slot::Wield in
+/// schema's `WearFlag` is finer-grained than the runtime Slot
+/// (Mainhand/Offhand/Twohand all collapse onto `Slot::Wield` in
 /// the runtime), so we collapse on the Slot side. Returns true
 /// when the worn slot satisfies the grant's restriction.
 #[must_use]
 pub fn wear_flag_matches_slot(flag: mud_db::enums::WearFlag, slot: mud_world::Slot) -> bool {
-    use mud_db::enums::WearFlag::*;
+    use mud_db::enums::WearFlag::{
+        About, Arms, Badge, Belt, Body, Ear, Eyes, Face, Feet, Finger, Hands, Head, Hover, Legs,
+        Mainhand, Neck, Offhand, Twohand, Waist, Wrist,
+    };
     use mud_world::Slot;
-    match (flag, slot) {
-        (Finger, Slot::LeftFinger | Slot::RightFinger) => true,
-        (Neck, Slot::Neck) => true,
-        (Ear, Slot::Ears) => true,
-        (Wrist, Slot::Wrist) => true,
-        (Head, Slot::Head) => true,
-        (Eyes, Slot::Eyes) => true,
-        (Face, Slot::Face) => true,
-        (Body, Slot::Body) => true,
-        (About, Slot::About) => true,
-        (Arms, Slot::Arms) => true,
-        (Hands, Slot::Hands) => true,
-        (Waist | Belt, Slot::Waist) => true,
-        (Legs, Slot::Legs) => true,
-        (Feet, Slot::Feet) => true,
-        (Mainhand | Offhand | Twohand, Slot::Wield | Slot::Hold) => true,
-        (Badge, Slot::Badge) => true,
-        (Hover, Slot::Hover) => true,
-        _ => false,
-    }
+    matches!(
+        (flag, slot),
+        (Finger, Slot::LeftFinger | Slot::RightFinger)
+            | (Neck, Slot::Neck)
+            | (Ear, Slot::Ears)
+            | (Wrist, Slot::Wrist)
+            | (Head, Slot::Head)
+            | (Eyes, Slot::Eyes)
+            | (Face, Slot::Face)
+            | (Body, Slot::Body)
+            | (About, Slot::About)
+            | (Arms, Slot::Arms)
+            | (Hands, Slot::Hands)
+            | (Waist | Belt, Slot::Waist)
+            | (Legs, Slot::Legs)
+            | (Feet, Slot::Feet)
+            | (Mainhand | Offhand | Twohand, Slot::Wield | Slot::Hold)
+            | (Badge, Slot::Badge)
+            | (Hover, Slot::Hover)
+    )
 }
 
 #[cfg(test)]
@@ -327,7 +331,7 @@ mod tests {
         ObjectProto, ObjectPrototypes, Slot, Stamina, WorldKey,
     };
 
-    /// Build a minimal EffectCatalog containing the "modify" effect
+    /// Build a minimal `EffectCatalog` containing the "modify" effect
     /// (id=3 in the live DB; arbitrary here as long as it matches
     /// what the test proto references).
     fn make_catalog_with_modify(modify_id: i32) -> EffectCatalog {
@@ -359,6 +363,7 @@ mod tests {
     /// wearer's stats moved by exactly those deltas, then unequip and
     /// confirm they returned to baseline.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn apply_then_unapply_round_trips_stats_modify() {
         let mut world = World::new();
         let modify_id = 3;
@@ -439,9 +444,14 @@ mod tests {
 
         let wearer = world
             .spawn((
-                Named { name: "Wearer".into() },
+                Named {
+                    name: "Wearer".into(),
+                },
                 Health { hp: 100, max: 100 },
-                Stamina { current: 100, max: 100 },
+                Stamina {
+                    current: 100,
+                    max: 100,
+                },
                 CombatStats::default(),
                 CoreStats {
                     strength: 13,
@@ -456,7 +466,9 @@ mod tests {
         let item = world
             .spawn((
                 Item,
-                Named { name: "test ring".into() },
+                Named {
+                    name: "test ring".into(),
+                },
                 Located(wearer),
                 WorldKey { zone: 1, id: 1 },
                 mud_world::EquippedSlot(Slot::LeftFinger),
@@ -553,9 +565,14 @@ mod tests {
 
         let wearer = world
             .spawn((
-                Named { name: "Wearer".into() },
+                Named {
+                    name: "Wearer".into(),
+                },
                 Health { hp: 100, max: 100 },
-                Stamina { current: 100, max: 100 },
+                Stamina {
+                    current: 100,
+                    max: 100,
+                },
                 CombatStats::default(),
                 CoreStats {
                     strength: 13,
@@ -570,7 +587,9 @@ mod tests {
         let item = world
             .spawn((
                 Item,
-                Named { name: "ring of accuracy".into() },
+                Named {
+                    name: "ring of accuracy".into(),
+                },
                 Located(wearer),
                 WorldKey { zone: 1, id: 2 },
                 mud_world::EquippedSlot(Slot::LeftFinger),

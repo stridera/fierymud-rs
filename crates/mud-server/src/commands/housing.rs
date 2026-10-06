@@ -53,12 +53,7 @@ const DEFAULT_HOUSE_EXPAND_BASE_COST: i64 = 50_000;
 const DEFAULT_HOUSE_EXPAND_PER_ROOM: i64 = 25_000;
 
 #[allow(clippy::too_many_lines)]
-async fn cmd_visit(
-    world: &mut World,
-    player: Entity,
-    pool: &mud_db::sqlx::PgPool,
-    args: &str,
-) {
+async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool, args: &str) {
     let name = args.trim();
     if name.is_empty() {
         send_to(world, player, "Usage: visit <player>\r\n");
@@ -66,10 +61,7 @@ async fn cmd_visit(
     }
     // Visitor's own character_id — the guest-list check looks for
     // it in the owner's PlayerHouseGuests rows.
-    let Some(visitor_cid) = world
-        .get::<Account>(player)
-        .map(|a| a.character_id.clone())
-    else {
+    let Some(visitor_cid) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
         send_to(world, player, "You aren't logged in as a character.\r\n");
         return;
     };
@@ -109,10 +101,7 @@ async fn cmd_visit(
         send_to(
             world,
             player,
-            format!(
-                "{} hasn't added you to their guest list.\r\n",
-                target.name,
-            ),
+            format!("{} hasn't added you to their guest list.\r\n", target.name,),
         );
         return;
     }
@@ -219,11 +208,7 @@ async fn cmd_visit(
 /// entity is synthesized + the foyer's exit gets wired so the
 /// owner can walk into it immediately.
 #[allow(clippy::too_many_lines)]
-async fn cmd_house_expand(
-    world: &mut World,
-    player: Entity,
-    pool: &mud_db::sqlx::PgPool,
-) {
+async fn cmd_house_expand(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
     let summary = world.get::<HouseSummary>(player).cloned();
     let Some(summary) = summary else {
         send_to(
@@ -234,7 +219,11 @@ async fn cmd_house_expand(
         return;
     };
     let Some(foyer) = summary.rooms.iter().find(|r| r.local_index == 0).cloned() else {
-        send_to(world, player, "Your house has no foyer — that shouldn't happen.\r\n");
+        send_to(
+            world,
+            player,
+            "Your house has no foyer — that shouldn't happen.\r\n",
+        );
         return;
     };
     let foyer_north_taken = summary
@@ -251,11 +240,7 @@ async fn cmd_house_expand(
         return;
     }
     let cfg = world.resource::<mud_world::RuntimeConfig>();
-    let per_room = cfg.get_i64(
-        "housing",
-        "expand_per_room",
-        DEFAULT_HOUSE_EXPAND_PER_ROOM,
-    );
+    let per_room = cfg.get_i64("housing", "expand_per_room", DEFAULT_HOUSE_EXPAND_PER_ROOM);
     let base = cfg.get_i64(
         "housing",
         "expand_base_cost",
@@ -272,9 +257,7 @@ async fn cmd_house_expand(
         send_to(
             world,
             player,
-            format!(
-                "You need {cost} copper on hand to expand (you have {on_hand}).\r\n"
-            ),
+            format!("You need {cost} copper on hand to expand (you have {on_hand}).\r\n"),
         );
         return;
     }
@@ -339,13 +322,7 @@ async fn cmd_house_expand(
         .by_key
         .contains_key(&(summary.house_id, 0));
     if foyer_already_spawned {
-        synthesize_single_room(
-            world,
-            summary.house_id,
-            local_index,
-            &new_name,
-            &new_desc,
-        );
+        synthesize_single_room(world, summary.house_id, local_index, &new_name, &new_desc);
     } else {
         // Cheap path — first call into this house since boot.
         // Re-read the summary (we just mutated it) and synth all.
@@ -379,8 +356,13 @@ fn synthesize_single_room(
     let new_entity = world
         .spawn((
             Room,
-            mud_world::HouseRoom { house_id, local_index },
-            Named { name: name.to_string() },
+            mud_world::HouseRoom {
+                house_id,
+                local_index,
+            },
+            Named {
+                name: name.to_string(),
+            },
             Description(description.to_string()),
             RoomSector(mud_db::enums::Sector::Structure),
             Exits::default(),

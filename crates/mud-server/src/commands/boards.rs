@@ -179,7 +179,10 @@ pub(crate) async fn compose_board_step(
             return;
         };
         let mut out = String::from("\r\n--- DRAFT ---\r\n");
-        out.push_str(&format!("Board:   {} ({})\r\n", draft.board_title, draft.board_alias));
+        out.push_str(&format!(
+            "Board:   {} ({})\r\n",
+            draft.board_title, draft.board_alias
+        ));
         out.push_str(&format!(
             "Subject: {}\r\n",
             draft.subject.as_deref().unwrap_or("(none yet)"),
@@ -221,20 +224,17 @@ pub(crate) async fn compose_board_step(
                 .await
                 .map(|_| edit_id)
         } else {
-            mud_db::boards::post_message(
-                pool,
-                draft.board_id,
-                &poster,
-                level,
-                &subject,
-                &body,
-            )
-            .await
+            mud_db::boards::post_message(pool, draft.board_id, &poster, level, &subject, &body)
+                .await
         };
         match result {
             Ok(_id) => {
                 try_remove::<BoardDraft>(world, player);
-                let verb = if draft.edit_message_id.is_some() { "Updated" } else { "Posted" };
+                let verb = if draft.edit_message_id.is_some() {
+                    "Updated"
+                } else {
+                    "Posted"
+                };
                 send_to(
                     world,
                     player,
@@ -559,11 +559,7 @@ pub(crate) async fn cmd_editpost(
     }
     // Seed the draft with the existing body, line-split. Subject is
     // pre-set so the first input line goes straight to the body.
-    let body_lines: Vec<String> = msg
-        .content
-        .split('\n')
-        .map(str::to_string)
-        .collect();
+    let body_lines: Vec<String> = msg.content.split('\n').map(str::to_string).collect();
     try_insert(
         world,
         player,
@@ -638,11 +634,19 @@ pub(crate) async fn cmd_read_board_msg(
     };
     let mut out = format!(
         "\r\n[{}] message {}/{}\r\n",
-        summary.title, slot, messages.len()
+        summary.title,
+        slot,
+        messages.len()
     );
-    out.push_str(&format!("From:    {} (level {})\r\n", msg.poster, msg.poster_level));
+    out.push_str(&format!(
+        "From:    {} (level {})\r\n",
+        msg.poster, msg.poster_level
+    ));
     out.push_str(&format!("Subject: {}\r\n", msg.subject));
-    out.push_str(&format!("Posted:  {}\r\n", msg.posted_at.format("%Y-%m-%d %H:%M")));
+    out.push_str(&format!(
+        "Posted:  {}\r\n",
+        msg.posted_at.format("%Y-%m-%d %H:%M")
+    ));
     if msg.sticky {
         out.push_str("(sticky)\r\n");
     }
@@ -761,10 +765,7 @@ fn local_board_ids(world: &mut World, player: Entity) -> Option<std::collections
 fn in_room_board_alias(world: &mut World, player: Entity) -> Option<(i32, String)> {
     let room = world.get::<Located>(player).map(|l| l.0)?;
     let mut q = world.query_filtered::<(&Located, &BoardLink), With<Item>>();
-    let board_id = q
-        .iter(world)
-        .find(|(l, _)| l.0 == room)
-        .map(|(_, b)| b.0)?;
+    let board_id = q.iter(world).find(|(l, _)| l.0 == room).map(|(_, b)| b.0)?;
     let catalog = world.get_resource::<BoardCatalog>()?;
     catalog
         .by_id
@@ -849,10 +850,21 @@ pub(crate) async fn cmd_board(
             );
             return;
         };
-        let mut out = format!("\r\n[{}] message {}/{}\r\n", board.title, slot, messages.len());
-        out.push_str(&format!("From:    {} (level {})\r\n", msg.poster, msg.poster_level));
+        let mut out = format!(
+            "\r\n[{}] message {}/{}\r\n",
+            board.title,
+            slot,
+            messages.len()
+        );
+        out.push_str(&format!(
+            "From:    {} (level {})\r\n",
+            msg.poster, msg.poster_level
+        ));
         out.push_str(&format!("Subject: {}\r\n", msg.subject));
-        out.push_str(&format!("Posted:  {}\r\n", msg.posted_at.format("%Y-%m-%d %H:%M")));
+        out.push_str(&format!(
+            "Posted:  {}\r\n",
+            msg.posted_at.format("%Y-%m-%d %H:%M")
+        ));
         if msg.sticky {
             out.push_str("(sticky)\r\n");
         }
@@ -887,6 +899,8 @@ pub(crate) async fn cmd_board(
             msg.subject,
         ));
     }
-    out.push_str(&format!("\r\nUse `board {alias} <#>` to read a message.\r\n"));
+    out.push_str(&format!(
+        "\r\nUse `board {alias} <#>` to read a message.\r\n"
+    ));
     send_to(world, player, out);
 }

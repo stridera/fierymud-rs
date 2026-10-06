@@ -28,7 +28,7 @@ pub struct CharacterQuestRow {
 ///
 /// Wave 4 added every column past `auto_accept`: trigger discriminator
 /// + per-type FK targets (4.1), time/cooldown gates (4.2), exclusive
-/// group (4.3), availability Lua (4.4).
+///   group (4.3), availability Lua (4.4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct QuestRow {
@@ -44,7 +44,7 @@ pub struct QuestRow {
     pub shareable: bool,
     pub hidden: bool,
     pub auto_accept: bool,
-    /// QuestTriggerType enum text — `MOB` / `LEVEL` / `ITEM` /
+    /// `QuestTriggerType` enum text — `MOB` / `LEVEL` / `ITEM` /
     /// `ROOM` / `SKILL` / `EVENT` / `AUTO` / `MANUAL`.
     pub trigger_type: String,
     pub trigger_mob_zone_id: Option<i32>,
@@ -64,11 +64,7 @@ pub struct QuestRow {
 
 /// Read one Quest row by composite key. Returns None when the row
 /// doesn't exist.
-pub async fn get_quest(
-    pool: &PgPool,
-    zone_id: i32,
-    id: i32,
-) -> sqlx::Result<Option<QuestRow>> {
+pub async fn get_quest(pool: &PgPool, zone_id: i32, id: i32) -> sqlx::Result<Option<QuestRow>> {
     sqlx::query_as!(
         QuestRow,
         r#"
@@ -114,10 +110,7 @@ pub async fn get_quest(
 /// to auto-grant any quest the player just qualified for. Returns
 /// only `hidden = false` quests by default — admin-only level
 /// triggers stay invisible.
-pub async fn list_by_trigger_level(
-    pool: &PgPool,
-    level: i32,
-) -> sqlx::Result<Vec<QuestRow>> {
+pub async fn list_by_trigger_level(pool: &PgPool, level: i32) -> sqlx::Result<Vec<QuestRow>> {
     sqlx::query_as!(
         QuestRow,
         r#"
@@ -302,10 +295,7 @@ pub async fn list_by_trigger_ability(
 }
 
 /// Quests with `trigger_type = EVENT` whose event id matches.
-pub async fn list_by_trigger_event(
-    pool: &PgPool,
-    event_id: i32,
-) -> sqlx::Result<Vec<QuestRow>> {
+pub async fn list_by_trigger_event(pool: &PgPool, event_id: i32) -> sqlx::Result<Vec<QuestRow>> {
     sqlx::query_as!(
         QuestRow,
         r#"
@@ -416,7 +406,10 @@ pub enum AcceptOutcome {
     LevelTooHigh(i32),
     AlreadyInProgress,
     AlreadyCompletedNonRepeatable,
-    PrerequisiteIncomplete { zone: i32, id: i32 },
+    PrerequisiteIncomplete {
+        zone: i32,
+        id: i32,
+    },
     /// Mutually-exclusive group already has a non-abandoned member
     /// (Wave 4.3). The held quest's `(zone, id)` is reported so the
     /// command layer can name it.
@@ -427,12 +420,16 @@ pub enum AcceptOutcome {
     },
     /// Cooldown after last completion has not elapsed (Wave 4.2).
     /// `remaining_secs` is what to surface to the player.
-    Cooldown { remaining_secs: i64 },
+    Cooldown {
+        remaining_secs: i64,
+    },
     /// `availabilityRequirement` Lua returned non-truthy
     /// (Wave 4.4). String is the raw expression for builder
     /// debugging — players see a fixed "you can't take that quest"
     /// line.
-    RequirementNotMet { expression: String },
+    RequirementNotMet {
+        expression: String,
+    },
 }
 
 /// Player-initiated quest acceptance. Validates level + prereqs +
@@ -442,8 +439,9 @@ pub enum AcceptOutcome {
 ///
 /// On success, stamps `expires_at = NOW() + time_limit_minutes`
 /// when the quest has a time limit (Wave 4.2). Existing rows are
-/// revived in-place: status flips back to IN_PROGRESS, accepted_at
+/// revived in-place: status flips back to `IN_PROGRESS`, `accepted_at`
 /// gets a fresh stamp, `variables` resets to `{}`.
+#[allow(clippy::too_many_lines)]
 pub async fn accept_for_player(
     pool: &PgPool,
     character_id: &str,
@@ -759,7 +757,7 @@ pub async fn fail_expired_quests(pool: &PgPool) -> sqlx::Result<Vec<ExpiredQuest
 
 /// Per-character per-quest variable JSON read (Wave 4.10). Returns
 /// the raw JSON object — the `quest:getvar` Lua binding navigates
-/// it. Returns `None` when the CharacterQuest row is missing.
+/// it. Returns `None` when the `CharacterQuest` row is missing.
 pub async fn get_quest_variables(
     pool: &PgPool,
     character_quest_id: &str,
@@ -815,7 +813,7 @@ pub async fn set_quest_variable(
     Ok(result.rows_affected())
 }
 
-/// Find a CharacterQuest row by `(character_id, quest_zone, quest_id)`.
+/// Find a `CharacterQuest` row by `(character_id, quest_zone, quest_id)`.
 /// Returns the row id + status. Used by trigger dispatchers
 /// (Wave 4.1) to detect whether the player is already on this quest
 /// before re-prompting them.
@@ -855,10 +853,7 @@ mod tests {
         let level_high = AcceptOutcome::LevelTooHigh(50);
         let already_in = AcceptOutcome::AlreadyInProgress;
         let already_done = AcceptOutcome::AlreadyCompletedNonRepeatable;
-        let prereq = AcceptOutcome::PrerequisiteIncomplete {
-            zone: 30,
-            id: 1,
-        };
+        let prereq = AcceptOutcome::PrerequisiteIncomplete { zone: 30, id: 1 };
         let cooldown = AcceptOutcome::Cooldown {
             remaining_secs: 120,
         };
@@ -879,7 +874,9 @@ mod tests {
 
         // Equality on identical payload.
         assert_eq!(
-            AcceptOutcome::Cooldown { remaining_secs: 120 },
+            AcceptOutcome::Cooldown {
+                remaining_secs: 120
+            },
             cooldown
         );
         assert_eq!(

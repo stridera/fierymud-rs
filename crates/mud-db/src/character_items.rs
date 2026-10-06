@@ -96,10 +96,7 @@ pub struct OwnerHit {
 /// Returns one row per match — same character can show up
 /// multiple times if they're carrying duplicates. Capped at
 /// 200 rows server-side to avoid surprising big-result floods.
-pub async fn pscan_owners_by_item(
-    pool: &PgPool,
-    needle: &str,
-) -> sqlx::Result<Vec<OwnerHit>> {
+pub async fn pscan_owners_by_item(pool: &PgPool, needle: &str) -> sqlx::Result<Vec<OwnerHit>> {
     let pattern = format!("%{}%", needle.to_lowercase());
     sqlx::query_as!(
         OwnerHit,

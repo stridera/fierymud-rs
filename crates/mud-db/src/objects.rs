@@ -18,7 +18,7 @@ pub struct Object {
     pub wear_flags: Vec<WearFlag>,
     /// Schema's free-form `values` JSONB — type-specific niche fields
     /// (portal destination, light fuel, food values, spell values,
-    /// liquid container info). Combat-critical fields (armor_pct,
+    /// liquid container info). Combat-critical fields (`armor_pct`,
     /// weapon dice, weapon damage type) live as typed columns below
     /// — fierylib pre-scales them at import time so the runtime
     /// never sees legacy values.
@@ -51,7 +51,7 @@ pub struct Object {
     /// them via component lookup rather than walking the proto.
     pub flags: Vec<ObjectFlag>,
     /// "Can't do that" restrictions from `Objects.restrictions` —
-    /// NO_DROP / NO_TAKE / NO_SELL / etc. Same per-instance
+    /// `NO_DROP` / `NO_TAKE` / `NO_SELL` / etc. Same per-instance
     /// stamping as `flags`; command handlers consult the component
     /// before mutating world state.
     pub restrictions: Vec<ObjectRestriction>,
@@ -61,7 +61,7 @@ pub struct Object {
     /// lifetime (lasts until destroyed by other means).
     pub timer: i32,
     /// Decompose-after-timer mode. >0 puts the item into a
-    /// post-timer destruction window (legacy ITEM_DECOMPOSING
+    /// post-timer destruction window (legacy `ITEM_DECOMPOSING`
     /// flag behavior). Read alongside `timer` at spawn time.
     pub decompose_timer: i32,
     /// Inclusive race allow-list (B6). Empty = any race may

@@ -7,9 +7,7 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 
-use crate::commands::{
-    AsyncCommand, Category, Command, Help, cmd_mail_stub, send_to,
-};
+use crate::commands::{AsyncCommand, Category, Command, Help, cmd_mail_stub, send_to};
 use crate::login::save_player;
 
 inventory::submit! {
@@ -47,11 +45,7 @@ inventory::submit! {
     }
 }
 
-async fn cmd_save(
-    world: &mut World,
-    player: Entity,
-    pool: &mud_db::sqlx::PgPool,
-) {
+async fn cmd_save(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
     let outcome = save_player(world, player, pool).await;
     if outcome.aborted {
         // The aborted path means the entity isn't a Player at all

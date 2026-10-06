@@ -54,7 +54,11 @@ inventory::submit! {
 
 fn cmd_setrecall(world: &mut World, player: Entity, _args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
-        send_to(world, player, "You are nowhere; can't bind a recall point.\r\n");
+        send_to(
+            world,
+            player,
+            "You are nowhere; can't bind a recall point.\r\n",
+        );
         return;
     };
     try_insert(world, player, RecallPoint(located.0));

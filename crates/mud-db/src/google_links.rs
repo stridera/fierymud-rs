@@ -23,10 +23,7 @@ pub struct GoogleLinkRow {
 
 /// Look up the Google link for `user_id`, or `None` if absent.
 /// One link per user (unique on `user_id`).
-pub async fn for_user(
-    pool: &PgPool,
-    user_id: &str,
-) -> sqlx::Result<Option<GoogleLinkRow>> {
+pub async fn for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Option<GoogleLinkRow>> {
     sqlx::query_as!(
         GoogleLinkRow,
         r#"

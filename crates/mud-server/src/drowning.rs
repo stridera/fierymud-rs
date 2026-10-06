@@ -26,16 +26,13 @@ pub fn drowning_tick(world: &mut World) {
     // who isn't Flying. Ghosts / Frozen players skip — death isn't
     // re-entered, and frozen players are admin-protected.
     let drowners: Vec<(Entity, Entity, String)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &mud_world::Named),
-            (
-                With<Player>,
-                With<Online>,
-                Without<Ghost>,
-                Without<Frozen>,
-                Without<Flying>,
-            ),
-        >();
+        let mut q = world.query_filtered::<(Entity, &Located, &mud_world::Named), (
+            With<Player>,
+            With<Online>,
+            Without<Ghost>,
+            Without<Frozen>,
+            Without<Flying>,
+        )>();
         q.iter(world)
             .filter(|(_, l, _)| {
                 world

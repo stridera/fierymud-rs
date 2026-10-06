@@ -4,14 +4,14 @@
 //! an `ItemTimer` component at spawn time. The `item_decay_tick`
 //! decrements every game-second and destroys the entity at zero.
 //!
-//! The DECOMPOSING two-phase mode (decompose_window_secs > 0) is
+//! The DECOMPOSING two-phase mode (`decompose_window_secs` > 0) is
 //! plumbed through the component but not yet activated — today the
 //! tick just destroys at zero. A follow-up can split into "expired"
 //! + "decomposing" states with separate flavor lines.
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::ObjectFlag;
-use mud_world::{ItemTimer, Item, Located, Named, ObjectProto};
+use mud_world::{Item, ItemTimer, Located, Named, ObjectProto};
 
 use crate::commands::{broadcast_room_except_rendered, send_to};
 
@@ -56,9 +56,7 @@ pub fn item_decay_tick(world: &mut World) {
     // without re-borrowing the query.
     let snapshots: Vec<(Entity, i32)> = {
         let mut q = world.query_filtered::<(Entity, &ItemTimer), With<Item>>();
-        q.iter(world)
-            .map(|(e, t)| (e, t.remaining_secs))
-            .collect()
+        q.iter(world).map(|(e, t)| (e, t.remaining_secs)).collect()
     };
     let mut destroyed: Vec<Entity> = Vec::new();
     for (entity, current) in snapshots {
@@ -79,8 +77,7 @@ pub fn item_decay_tick(world: &mut World) {
         let (holder_entity, holder_kind) = location_kind(world, entity);
         let item_name = world
             .get::<Named>(entity)
-            .map(|n| n.name.clone())
-            .unwrap_or_else(|| String::from("an item"));
+            .map_or_else(|| String::from("an item"), |n| n.name.clone());
         match holder_kind {
             HolderKind::Player => {
                 send_to(

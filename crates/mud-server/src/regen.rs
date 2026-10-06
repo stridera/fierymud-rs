@@ -53,10 +53,13 @@ pub fn regen_tick(world: &mut World) {
     // gradually healing a corpse over time would be wrong both
     // mechanically (`release` becomes pointless) and thematically.
     let updates: Vec<(Entity, Option<i32>, Option<i32>)> = {
-        let mut q = world.query_filtered::<
-            (Entity, Option<&Stamina>, Option<&Health>, &Posture, Option<&mud_world::RegenBonus>),
-            (With<Online>, Without<Fighting>, Without<Ghost>),
-        >();
+        let mut q = world.query_filtered::<(
+            Entity,
+            Option<&Stamina>,
+            Option<&Health>,
+            &Posture,
+            Option<&mud_world::RegenBonus>,
+        ), (With<Online>, Without<Fighting>, Without<Ghost>)>();
         q.iter(world)
             .map(|(e, stamina, hp, posture, bonus)| {
                 // Rest / repose R6: flat RegenBonus (from the
@@ -146,9 +149,8 @@ pub fn hunger_thirst_tick(world: &mut World) {
     // the snapshot uses the same values. `get_resource` so test
     // worlds without the GameConfig loader pass fall through to
     // the legacy defaults instead of panicking.
-    let (hungry_at, thirsty_at, starving_at, parched_at) = world
-        .get_resource::<mud_world::RuntimeConfig>()
-        .map_or(
+    let (hungry_at, thirsty_at, starving_at, parched_at) =
+        world.get_resource::<mud_world::RuntimeConfig>().map_or(
             (
                 DEFAULT_HUNGRY_AT,
                 DEFAULT_THIRSTY_AT,
@@ -172,9 +174,7 @@ pub fn hunger_thirst_tick(world: &mut World) {
             (Entity, &Hunger, &Thirst),
             (With<Player>, With<Online>, Without<Ghost>, Without<Frozen>),
         >();
-        q.iter(world)
-            .map(|(e, h, t)| (e, h.0, t.0))
-            .collect()
+        q.iter(world).map(|(e, h, t)| (e, h.0, t.0)).collect()
     };
 
     for (entity, old_hunger, old_thirst) in snapshot {
@@ -281,8 +281,7 @@ pub fn drunkenness_tick(world: &mut World) {
         return;
     }
     let snapshot: Vec<(Entity, i32)> = {
-        let mut q = world
-            .query_filtered::<(Entity, &Drunkenness), (With<Player>, With<Online>)>();
+        let mut q = world.query_filtered::<(Entity, &Drunkenness), (With<Player>, With<Online>)>();
         q.iter(world)
             .filter(|(_, d)| d.0 > 0)
             .map(|(e, d)| (e, d.0))
@@ -292,7 +291,11 @@ pub fn drunkenness_tick(world: &mut World) {
         let new = old - 1;
         // Threshold crossings (going down).
         if old >= 80 && new < 80 {
-            send_to(world, entity, "The room steadies — the worst is passing.\r\n");
+            send_to(
+                world,
+                entity,
+                "The room steadies — the worst is passing.\r\n",
+            );
         }
         if old >= 40 && new < 40 {
             send_to(world, entity, "Your head clears a little.\r\n");
@@ -359,7 +362,11 @@ mod tests {
         let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Standing);
         run_regen_tick(&mut world);
         assert_eq!(world.get::<Stamina>(p).unwrap().current, 31);
-        assert_eq!(world.get::<Health>(p).unwrap().hp, 50, "standing doesn't auto-heal");
+        assert_eq!(
+            world.get::<Health>(p).unwrap().hp,
+            50,
+            "standing doesn't auto-heal"
+        );
     }
 
     #[test]
@@ -381,8 +388,16 @@ mod tests {
         run_regen_tick(&mut world);
         assert_eq!(world.get::<Stamina>(at_max).unwrap().current, 50);
         assert_eq!(world.get::<Health>(at_max).unwrap().hp, 100);
-        assert_eq!(world.get::<Stamina>(near_max).unwrap().current, 50, "+8 clamped to 50");
-        assert_eq!(world.get::<Health>(near_max).unwrap().hp, 100, "+4 clamped to 100");
+        assert_eq!(
+            world.get::<Stamina>(near_max).unwrap().current,
+            50,
+            "+8 clamped to 50"
+        );
+        assert_eq!(
+            world.get::<Health>(near_max).unwrap().hp,
+            100,
+            "+4 clamped to 100"
+        );
     }
 
     #[test]
@@ -436,10 +451,7 @@ mod tests {
         // recovering" reads as a contradiction.
         let mut world = World::new();
         let p = make_player(&mut world, 0, 100, 0, 50, PostureKind::Sleeping);
-        world
-            .get_entity_mut(p)
-            .unwrap()
-            .insert(Ghost);
+        world.get_entity_mut(p).unwrap().insert(Ghost);
         run_regen_tick(&mut world);
         assert_eq!(
             world.get::<Health>(p).unwrap().hp,
@@ -458,13 +470,18 @@ mod tests {
         let mut world = World::new();
         let dummy = world.spawn_empty().id();
         let p = make_player(&mut world, 50, 100, 30, 50, PostureKind::Resting);
-        world
-            .get_entity_mut(p)
-            .unwrap()
-            .insert(Fighting(dummy));
+        world.get_entity_mut(p).unwrap().insert(Fighting(dummy));
         run_regen_tick(&mut world);
-        assert_eq!(world.get::<Stamina>(p).unwrap().current, 30, "no stamina regen while fighting");
-        assert_eq!(world.get::<Health>(p).unwrap().hp, 50, "no hp regen while fighting");
+        assert_eq!(
+            world.get::<Stamina>(p).unwrap().current,
+            30,
+            "no stamina regen while fighting"
+        );
+        assert_eq!(
+            world.get::<Health>(p).unwrap().hp,
+            50,
+            "no hp regen while fighting"
+        );
     }
 
     #[test]
@@ -474,7 +491,10 @@ mod tests {
         let p = world
             .spawn((
                 Health { hp: 50, max: 100 },
-                Stamina { current: 30, max: 50 },
+                Stamina {
+                    current: 30,
+                    max: 50,
+                },
                 Posture(PostureKind::Sleeping),
             ))
             .id();

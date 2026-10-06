@@ -43,4 +43,4 @@ mv!(cmd_northwest, Northwest, "northwest", "nw");
 mv!(cmd_southeast, Southeast, "southeast", "se");
 mv!(cmd_southwest, Southwest, "southwest", "sw");
 mv!(cmd_in_dir, In, "in");
-mv!(cmd_out_dir, Out, "out");
+mv!(cmd_out_dir, Out, "out", "o");

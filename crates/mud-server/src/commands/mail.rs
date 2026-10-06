@@ -16,8 +16,8 @@ inventory::submit! {
     AsyncCommand {
         dispatch: |world, player, pool, head, args| match head {
             "mail" => Some(Box::pin(cmd_mail(world, player, pool, args))),
-            "mailbox" | "mailboxes" => Some(Box::pin(cmd_mailbox(world, player, pool))),
-            "readmail" => Some(Box::pin(cmd_readmail(world, player, pool, args))),
+            "mailbox" | "mailboxes" | "check" => Some(Box::pin(cmd_mailbox(world, player, pool))),
+            "readmail" | "receive" | "getmail" => Some(Box::pin(cmd_readmail(world, player, pool, args))),
             "delmail" => Some(Box::pin(cmd_delmail(world, player, pool, args))),
             _ => None,
         },
@@ -45,7 +45,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["mailbox"],
+        names: &["mailbox", "check"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Mail,
@@ -62,7 +62,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["readmail"],
+        names: &["readmail", "receive", "getmail"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Mail,
@@ -165,9 +165,7 @@ pub(crate) async fn compose_mail_step(
             return;
         }
         let body = draft.body.join("\n");
-        let sender_user_id = world
-            .get::<Account>(player)
-            .map(|a| a.user_id.clone());
+        let sender_user_id = world.get::<Account>(player).map(|a| a.user_id.clone());
         let Some(sender_user_id) = sender_user_id else {
             send_to(world, player, "No account info; can't send.\r\n");
             return;
@@ -379,7 +377,10 @@ pub(crate) async fn cmd_readmail(
     let mut out = String::from("\r\n");
     out.push_str(&format!("From:    {}\r\n", row.sender_display_name));
     out.push_str(&format!("Subject: {}\r\n", row.subject));
-    out.push_str(&format!("Sent:    {}\r\n", row.sent_at.format("%Y-%m-%d %H:%M")));
+    out.push_str(&format!(
+        "Sent:    {}\r\n",
+        row.sent_at.format("%Y-%m-%d %H:%M")
+    ));
     out.push_str("---\r\n");
     out.push_str(row.body.trim_end());
     out.push_str("\r\n---\r\n");

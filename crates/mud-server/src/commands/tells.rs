@@ -7,9 +7,8 @@ use mud_db::enums::{PlayerFlag, UserRole};
 use mud_world::{IgnoreList, LastTeller, Named, Online, Player, TellLog};
 
 use crate::commands::{
-    Account, Category, Command, DbPool, Help, Prevent, effect_prevents, format_idle,
-    has_flag, name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to,
-    try_insert,
+    Account, Category, Command, DbPool, Help, Prevent, effect_prevents, format_idle, has_flag,
+    name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to, try_insert,
 };
 
 inventory::submit! {
@@ -229,9 +228,7 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
         let sender_name = player_name.clone();
         let body = message.to_string();
         tokio::spawn(async move {
-            if let Err(e) =
-                mud_db::tell_messages::record(&pool, &rid, &sender_name, &body).await
-            {
+            if let Err(e) = mud_db::tell_messages::record(&pool, &rid, &sender_name, &body).await {
                 tracing::warn!(error = %e, "tell persist failed");
             }
         });
@@ -343,7 +340,11 @@ fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {
     }
     let mut out = format!("\r\nRecent tells ({}):\r\n", entries.len());
     for (name, secs_ago) in &entries {
-        out.push_str(&format!("  {:<20} ({} ago)\r\n", name, format_idle(*secs_ago)));
+        out.push_str(&format!(
+            "  {:<20} ({} ago)\r\n",
+            name,
+            format_idle(*secs_ago)
+        ));
     }
     send_to(world, player, out);
 }

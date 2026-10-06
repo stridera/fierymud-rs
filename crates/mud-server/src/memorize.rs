@@ -22,7 +22,7 @@ use bevy_ecs::prelude::*;
 use mud_world::{Fighting, Focus, Meditating, Online, Posture, PostureKind, SpellSlots};
 
 use crate::TickCount;
-use crate::commands::send_to;
+use crate::commands::{Concentrating, send_to};
 
 /// Tick once per second.
 const RECOVER_PERIOD_TICKS: u64 = 10;
@@ -72,11 +72,18 @@ pub fn memorize_tick(world: &mut World) {
     // "slot restored" line after the World mutation.
     let mut restored: Vec<(Entity, Vec<i32>)> = Vec::new();
     {
-        let mut q = world.query_filtered::<
-            (Entity, &Posture, &mut SpellSlots, Option<&Meditating>, Option<&Focus>, Option<&Fighting>),
-            With<Online>,
-        >();
-        for (entity, posture, mut slots, meditating, focus, fighting) in q.iter_mut(world) {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Posture,
+            &mut SpellSlots,
+            Option<&Meditating>,
+            Option<&Focus>,
+            Option<&Fighting>,
+            Option<&Concentrating>,
+        ), With<Online>>();
+        for (entity, posture, mut slots, meditating, focus, fighting, concentrating) in
+            q.iter_mut(world)
+        {
             if slots.in_flight.is_empty() {
                 continue;
             }
@@ -84,7 +91,10 @@ pub fn memorize_tick(world: &mut World) {
             let delta = effective_delta(
                 base,
                 meditating.is_some(),
-                focus.map_or(0, |f| f.0),
+                focus.map_or(0, |f| f.0)
+                    + concentrating
+                        .filter(|_| meditating.is_some())
+                        .map_or(0, |c| c.0),
                 fighting.is_some(),
             );
             // Sequential per-circle recovery — see the head-of-file

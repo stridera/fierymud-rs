@@ -219,8 +219,16 @@ pub(crate) fn cmd_game(world: &mut World, player: Entity, args: &str) {
     }
     let current = current_state(world, toggle);
     if arg.is_empty() || arg == "status" {
-        let state = if current { "<b:green>ON</>" } else { "<dim>off</>" };
-        let label = if current { toggle.on_msg } else { toggle.off_msg };
+        let state = if current {
+            "<b:green>ON</>"
+        } else {
+            "<dim>off</>"
+        };
+        let label = if current {
+            toggle.on_msg
+        } else {
+            toggle.off_msg
+        };
         send_to(
             world,
             player,
@@ -232,7 +240,11 @@ pub(crate) fn cmd_game(world: &mut World, player: Entity, args: &str) {
         "on" | "true" | "1" | "enable" | "yes" => true,
         "off" | "false" | "0" | "disable" | "no" => false,
         _ => {
-            send_to(world, player, format!("Usage: game {} [on|off]\r\n", toggle.name));
+            send_to(
+                world,
+                player,
+                format!("Usage: game {} [on|off]\r\n", toggle.name),
+            );
             return;
         }
     };
@@ -255,14 +267,20 @@ pub(crate) fn cmd_game(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("<b:green>game {} ENABLED</> — {}\r\n", toggle.name, toggle.on_msg),
+            format!(
+                "<b:green>game {} ENABLED</> — {}\r\n",
+                toggle.name, toggle.on_msg
+            ),
         );
     } else {
         tracing::warn!(by = %actor, toggle = %toggle.name, "game toggle disabled");
         send_to(
             world,
             player,
-            format!("<dim>game {} disabled</> — {}\r\n", toggle.name, toggle.off_msg),
+            format!(
+                "<dim>game {} disabled</> — {}\r\n",
+                toggle.name, toggle.off_msg
+            ),
         );
     }
 }

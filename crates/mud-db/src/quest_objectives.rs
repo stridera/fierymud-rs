@@ -607,10 +607,7 @@ pub async fn list_choice_rewards(
 
 /// Fetch a single reward row by primary key (Wave 4.6). Used by
 /// `qreward` to validate the player-supplied selection.
-pub async fn get_reward(
-    pool: &PgPool,
-    reward_id: i32,
-) -> sqlx::Result<Option<QuestRewardRow>> {
+pub async fn get_reward(pool: &PgPool, reward_id: i32) -> sqlx::Result<Option<QuestRewardRow>> {
     sqlx::query_as!(
         QuestRewardRow,
         r#"

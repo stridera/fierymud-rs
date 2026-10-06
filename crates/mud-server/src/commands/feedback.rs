@@ -189,11 +189,7 @@ fn cmd_petition(world: &mut World, player: Entity, args: &str) {
                 .map(|(e, _)| e)
         };
         if let Some(t) = target {
-            send_to(
-                world,
-                t,
-                format!("[STAFF REPLY] {player_name}: {rest}\r\n"),
-            );
+            send_to(world, t, format!("[STAFF REPLY] {player_name}: {rest}\r\n"));
             send_to(
                 world,
                 player,
