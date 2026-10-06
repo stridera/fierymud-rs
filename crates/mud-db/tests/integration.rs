@@ -404,6 +404,7 @@ async fn character_name_approval_round_trip() {
         constitution: 13,
         charisma: 13,
         name_approved: false,
+        password_hash: "",
     };
     let char_id = mud_db::characters::create(&pool, &new_char)
         .await
@@ -508,6 +509,7 @@ async fn character_name_approval_defaults_true() {
         constitution: 13,
         charisma: 13,
         name_approved: true,
+        password_hash: "",
     };
     let char_id = mud_db::characters::create(&pool, &new_char)
         .await
@@ -552,4 +554,17 @@ async fn discord_config_get_shape() {
         .expect("get")
         .expect("PK 1 row present");
     assert!(!row.guild_id.is_empty(), "guild_id is NOT NULL in schema");
+}
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn pool_sessions_use_utc_for_naive_now() {
+    let pool = pool().await;
+    let db_now: chrono::NaiveDateTime = sqlx::query_scalar("SELECT NOW()::timestamp")
+        .fetch_one(&pool)
+        .await
+        .expect("select now");
+    let rust_now = chrono::Utc::now().naive_utc();
+    let skew = (db_now - rust_now).num_seconds().abs();
+    assert!(skew <= 5, "NOW()::timestamp is {skew}s off naive UTC");
 }

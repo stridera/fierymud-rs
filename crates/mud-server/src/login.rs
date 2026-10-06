@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use bevy_ecs::prelude::*;
@@ -66,6 +67,111 @@ const CONFIRM_PASSWORD_PROMPT_FALLBACK: &str = "Re-enter password to confirm: ";
 const MIN_NEW_PASSWORD_LEN: usize = 6;
 const NEW_CHARACTER_NAME_PROMPT_FALLBACK: &str = "Character name: ";
 
+/// Notice shown once, before the first password prompt, on plain
+/// (unencrypted) telnet connections. Compile-time fallback for the
+/// `PLAIN_TELNET_NOTICE` `LoginMessage` row; `{tls_port}` is replaced
+/// with the configured TLS port.
+const PLAIN_TELNET_NOTICE_FALLBACK: &str = "\r\n\
+<c220>Security notice:</> this connection is unencrypted, so anything you type \
+(including your password) can be read in transit. If your client supports TLS, \
+connect to port <c220>{tls_port}</> instead. Or type <c220>code</> at the \
+password prompt to log in by approving a short code on the website - no \
+password is sent.\r\n\r\n";
+
+/// Default for `server.tls_port` when the row is unset (matches the
+/// listener's own default in `main.rs`).
+const DEFAULT_TLS_PORT: i32 = 4443;
+/// Default for `security.web_approval_timeout_secs`.
+const DEFAULT_WEB_APPROVAL_TIMEOUT_SECS: i64 = 120;
+/// Default for `security.website_url`.
+const DEFAULT_WEBSITE_URL: &str = "https://muditor.utaboshi.com";
+/// How often a pending device code is polled in the database.
+const WEB_APPROVAL_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Device-code alphabet: uppercase letters and digits minus the
+/// look-alikes `0 O 1 I` (32 symbols, so `random_range` is unbiased).
+const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const CODE_LEN: usize = 8;
+
+/// Generate a fresh random device code (8 chars, no hyphen).
+fn generate_login_code() -> String {
+    (0..CODE_LEN)
+        .map(|_| char::from(CODE_ALPHABET[rand::random_range(0..CODE_ALPHABET.len())]))
+        .collect()
+}
+
+/// `ABCDEFGH` -> `ABCD-EFGH` for display and for the website URL.
+fn format_login_code(code: &str) -> String {
+    let (a, b) = code.split_at(code.len() / 2);
+    format!("{a}-{b}")
+}
+
+/// Max device codes one IP may request per [`CODE_RATE_WINDOW`].
+const CODE_RATE_MAX: usize = 5;
+const CODE_RATE_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// In-memory per-IP limiter for device-code generation: at most
+/// [`CODE_RATE_MAX`] codes per [`CODE_RATE_WINDOW`]. Connections with
+/// no known peer address share one bucket.
+#[derive(Debug, Default)]
+pub struct CodeRateLimiter {
+    hits: HashMap<IpAddr, VecDeque<Instant>>,
+}
+
+impl CodeRateLimiter {
+    /// Record a code request from `ip` at `now`. Returns `false`
+    /// (and records nothing) when the IP is over its quota.
+    fn try_acquire(&mut self, ip: IpAddr, now: Instant) -> bool {
+        // Opportunistic sweep so one-off visitors don't accumulate.
+        if self.hits.len() > 1024 {
+            self.hits.retain(|_, q| {
+                q.back()
+                    .is_some_and(|t| now.duration_since(*t) < CODE_RATE_WINDOW)
+            });
+        }
+        let q = self.hits.entry(ip).or_default();
+        while q
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= CODE_RATE_WINDOW)
+        {
+            q.pop_front();
+        }
+        if q.len() >= CODE_RATE_MAX {
+            return false;
+        }
+        q.push_back(now);
+        true
+    }
+}
+
+/// Aborts the wrapped poll task when dropped, so any path that drops
+/// the `AwaitingWebApproval` stage (disconnect, cancel, resolution)
+/// also stops its database poller.
+pub struct PollGuard(tokio::task::AbortHandle);
+
+impl Drop for PollGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// State of a pending website-approval (device code) login.
+pub struct WebLogin {
+    /// Code without the hyphen, as stored in `GameLoginCode.code`.
+    code: String,
+    /// `GameLoginCode.id`.
+    code_id: String,
+    expires_at: Instant,
+    /// Website account that must approve the code. Never empty:
+    /// unlinked legacy characters cannot use code login.
+    user_id: String,
+    user: User,
+    /// Character picked at the identifier prompt (character-name
+    /// path); `None` for the email path, which lands in `CharSelect`.
+    preselected: Option<Box<CharacterRow>>,
+    _poller: PollGuard,
+}
+
 /// Look up a `LoginMessage` row by stage, render its XML-Lite
 /// markup to ANSI, and return the bytes ready to write to an
 /// `Outbound` channel. Stage names match the schema's
@@ -85,6 +191,32 @@ fn login_message_bytes(world: &World, stage: &str, fallback: &str) -> Vec<u8> {
         .map_or(fallback, |m| m.get_or(stage, "default", fallback));
     crate::commands::render_color_tags(raw, crate::commands::ColorMode::Ansi).into_bytes()
 }
+/// Rendered plain-telnet security notice (`PLAIN_TELNET_NOTICE` row or
+/// the compiled fallback) with `{tls_port}` substituted from
+/// `server.tls_port`.
+fn plain_telnet_notice_bytes(world: &World) -> Vec<u8> {
+    let port =
+        world
+            .get_resource::<mud_world::RuntimeConfig>()
+            .map_or(DEFAULT_TLS_PORT, |c| {
+                match c.get_i32("server", "tls_port", 0) {
+                    p if p > 0 => p,
+                    _ => DEFAULT_TLS_PORT,
+                }
+            });
+    let raw = world
+        .get_resource::<mud_world::LoginMessages>()
+        .map_or(PLAIN_TELNET_NOTICE_FALLBACK, |m| {
+            m.get_or(
+                "PLAIN_TELNET_NOTICE",
+                "default",
+                PLAIN_TELNET_NOTICE_FALLBACK,
+            )
+        })
+        .replace("{tls_port}", &port.to_string());
+    crate::commands::render_color_tags(&raw, crate::commands::ColorMode::Ansi).into_bytes()
+}
+
 /// Verify a plaintext password against a stored hash, transparently
 /// handling both bcrypt (new accounts + migrated legacy accounts) and
 /// the original `FieryMUD` `CircleMUD` `crypt(3)` hash format (legacy
@@ -279,6 +411,9 @@ enum AuthDoneKind {
         draft: NewCharDraft,
         hashed: Result<String, String>,
     },
+    /// The poller saw the device-code row leave PENDING (or reach its
+    /// deadline); the main loop re-reads it and resolves the login.
+    WebApprovalWake { code_id: String },
 }
 
 /// Inclusive length window for a new character name. Lower bound
@@ -490,12 +625,23 @@ pub enum Stage {
     /// character-name path skips the menu and lands directly in the
     /// world after the password check.
     AwaitingIdentifier,
+    /// GAME-password prompt for the character chosen at the
+    /// identifier prompt. `game_hash` is that character's
+    /// `Characters.password_hash` (bcrypt or legacy `crypt(3)`); the
+    /// website `Users.password_hash` is never loaded. Typing `code`
+    /// switches to [`Stage::AwaitingWebApproval`].
     AwaitingPassword {
         user: User,
         /// Character chosen at the identifier prompt (character-name
         /// path). When `Some`, the menu is skipped on auth success.
         preselected: Option<Box<CharacterRow>>,
+        game_hash: String,
     },
+    /// Device-code login: the player must approve the displayed code
+    /// on the website. A background poller wakes the main loop when
+    /// the row leaves PENDING; Enter re-checks immediately and
+    /// `cancel` abandons the code.
+    AwaitingWebApproval(Box<WebLogin>),
     /// Identifier didn't match anything in the database. Ask the
     /// user whether they want to create a new account / character
     /// rather than silently bouncing them through a doomed
@@ -601,6 +747,18 @@ pub struct LoginCtx {
     pub stage: Stage,
     /// Wrong passwords entered on this connection so far.
     pub failed_attempts: u32,
+    /// Remote address from `Inbound::Connected` (device-code rows
+    /// record it; the rate limiter keys on its IP).
+    pub peer: Option<SocketAddr>,
+    /// Arrived over the TLS listener.
+    pub tls: bool,
+    /// Plain-telnet security notice already shown on this connection.
+    pub notice_shown: bool,
+}
+
+/// TLS connection ids carry bit 40 (see `mud_net::serve_tls`).
+fn conn_is_tls(conn_id: ConnId) -> bool {
+    conn_id & (1u64 << 40) != 0
 }
 
 pub struct ConnRouter {
@@ -614,6 +772,8 @@ pub struct ConnRouter {
     caps: HashMap<ConnId, ConnCapabilities>,
     /// Failed-login counter for legacy characters with no `Users` row.
     legacy_throttle: LegacyLoginThrottle,
+    /// Per-IP quota for device-code generation.
+    code_limiter: CodeRateLimiter,
     /// Completion channel for off-thread password jobs. The sender is
     /// cloned into each job; the receiver is handed to the main loop
     /// via [`ConnRouter::take_auth_rx`].
@@ -668,6 +828,27 @@ impl ConnCapabilities {
     }
 }
 
+/// Lock notice for an account whose `locked_until` is in the future.
+fn locked_hint(user: &User, now: chrono::NaiveDateTime) -> Option<String> {
+    let until = user.locked_until.filter(|t| *t > now)?;
+    Some(format!(
+        "This account is locked until {} UTC after too many failed passwords. \
+         You can still log in by typing `code` and approving it on the \
+         website, or clear the lock there.\r\n",
+        until.format("%Y-%m-%d %H:%M")
+    ))
+}
+
+/// Send the identifier prompt and park the connection there.
+fn reprompt_identifier(ctx: &mut LoginCtx, world: &World) {
+    ctx.stage = Stage::AwaitingIdentifier;
+    let _ = ctx.outbound.try_send(login_message_bytes(
+        world,
+        "EMAIL_PROMPT",
+        IDENT_PROMPT_FALLBACK,
+    ));
+}
+
 impl ConnRouter {
     pub fn new() -> Self {
         let (auth_tx, auth_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -676,6 +857,7 @@ impl ConnRouter {
             playing: HashMap::new(),
             caps: HashMap::new(),
             legacy_throttle: LegacyLoginThrottle::default(),
+            code_limiter: CodeRateLimiter::default(),
             auth_tx,
             auth_rx: Some(auth_rx),
             close_conn: mud_net::close_connection,
@@ -715,7 +897,13 @@ impl ConnRouter {
             .find_map(|(cid, e)| if *e == entity { Some(*cid) } else { None })
     }
 
-    pub fn on_connect(&mut self, conn_id: ConnId, outbound: Outbound, world: &World) {
+    pub fn on_connect(
+        &mut self,
+        conn_id: ConnId,
+        outbound: Outbound,
+        peer: Option<SocketAddr>,
+        world: &World,
+    ) {
         let _ = outbound.try_send(login_message_bytes(
             world,
             "WELCOME_BANNER",
@@ -732,6 +920,9 @@ impl ConnRouter {
                 outbound,
                 stage: Stage::AwaitingIdentifier,
                 failed_attempts: 0,
+                peer,
+                tls: conn_is_tls(conn_id),
+                notice_shown: false,
             },
         );
     }
@@ -756,7 +947,15 @@ impl ConnRouter {
     }
 
     pub async fn on_disconnect(&mut self, world: &mut World, conn_id: ConnId, pool: &PgPool) {
-        self.login.remove(&conn_id);
+        // A device code whose connection vanished must not stay approvable.
+        if let Some(LoginCtx {
+            stage: Stage::AwaitingWebApproval(web),
+            ..
+        }) = self.login.remove(&conn_id)
+            && let Err(e) = mud_db::game_login_code::expire_pending(pool, &web.code_id).await
+        {
+            warn!(conn_id, error = %e, "login code expire on disconnect failed");
+        }
         self.caps.remove(&conn_id);
         if let Some(entity) = self.playing.remove(&conn_id) {
             // Send Core.Goodbye before any teardown so the client
@@ -1140,7 +1339,6 @@ impl ConnRouter {
                     id: String::new(),
                     email: trimmed.to_string(),
                     display_name: String::new(),
-                    password_hash: None,
                     role: mud_db::enums::UserRole::Player,
                     failed_login_attempts: 0,
                     locked_until: None,
@@ -1160,11 +1358,20 @@ impl ConnRouter {
                     let lookup = users::find_by_email(pool, trimmed).await;
                     match lookup {
                         Ok(Some(user)) => {
-                            ctx.stage = Stage::AwaitingPassword {
-                                user,
-                                preselected: None,
-                            };
-                            routed_to_password = true;
+                            // The website password is never accepted by
+                            // the game, and an email doesn't name a
+                            // character (so no game password to check).
+                            // Email login is therefore device-code only;
+                            // approval leads to the usual `CharSelect`.
+                            let _ = ctx.outbound.try_send(
+                                "The game does not accept your website password. \
+                                 Approve a login code on the website instead.\r\n"
+                                    .as_bytes()
+                                    .to_vec(),
+                            );
+                            self.begin_web_approval(conn_id, user, None, pool, world)
+                                .await;
+                            return;
                         }
                         Ok(None) => {
                             if !registration_open {
@@ -1220,31 +1427,38 @@ impl ConnRouter {
                                 },
                                 None => None,
                             };
-                            // Legacy-orphan path: imported CircleMUD
-                            // characters land with no `user_id` and
-                            // their original Unix crypt(3) hash on
-                            // the `Characters.password_hash` column.
-                            // Fold that hash onto a sentinel user so
-                            // `verify_password_any` can authenticate
-                            // them once; `AwaitingPassword` then
-                            // detects the empty `user.id` and runs
-                            // the bcrypt + `Users`-row migration in
-                            // place before completing the login.
-                            let user = if let Some(u) = user_lookup {
-                                u
-                            } else {
-                                let mut u = sentinel_user();
-                                if let Ok(h) =
-                                    characters::load_legacy_password_hash(pool, &c.id).await
-                                    && !h.is_empty()
-                                {
-                                    u.password_hash = Some(h);
+                            // The GAME password is always the character's own
+                            // `Characters.password_hash` (bcrypt or legacy
+                            // crypt(3)); `Users.password_hash` (the website
+                            // password) is never loaded or checked.
+                            let game_hash = match characters::load_password_hash(pool, &c.id).await
+                            {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    warn!(conn_id, error = %e, "character password lookup failed");
+                                    let _ = ctx
+                                        .outbound
+                                        .try_send("Server error.\r\n".as_bytes().to_vec());
+                                    ctx.stage = Stage::AwaitingIdentifier;
+                                    let _ = ctx.outbound.try_send(login_message_bytes(
+                                        world,
+                                        "EMAIL_PROMPT",
+                                        IDENT_PROMPT_FALLBACK,
+                                    ));
+                                    return;
                                 }
-                                u
                             };
+                            // Legacy-orphan path: imported CircleMUD
+                            // characters land with no `user_id`. A sentinel
+                            // user (empty id) marks them so that after the
+                            // game password verifies, `finish_password`
+                            // provisions a `Users` row, links the character
+                            // and upgrades the hash to bcrypt in place.
+                            let user = user_lookup.unwrap_or_else(sentinel_user);
                             ctx.stage = Stage::AwaitingPassword {
                                 user,
                                 preselected: Some(Box::new(c)),
+                                game_hash,
                             };
                             routed_to_password = true;
                         }
@@ -1285,6 +1499,15 @@ impl ConnRouter {
                     }
                 }
                 if routed_to_password {
+                    if !ctx.tls && !ctx.notice_shown {
+                        ctx.notice_shown = true;
+                        let _ = ctx.outbound.try_send(plain_telnet_notice_bytes(world));
+                    }
+                    if let Stage::AwaitingPassword { user, .. } = &ctx.stage
+                        && let Some(msg) = locked_hint(user, chrono::Utc::now().naive_utc())
+                    {
+                        let _ = ctx.outbound.try_send(msg.into_bytes());
+                    }
                     let _ = ctx.outbound.try_send(login_message_bytes(
                         world,
                         "PASSWORD_PROMPT",
@@ -1665,34 +1888,55 @@ impl ConnRouter {
                 self.start_hash_job(conn_id, password_plaintext, draft);
             }
 
-            Stage::AwaitingPassword { user, preselected } => {
-                // Lockout pre-check: if `locked_until` is set and in
-                // the future, refuse before bcrypt — both to save the
-                // CPU cost and to keep the lock effective even when
-                // an attacker stops typing the right password.
-                let now = chrono::Utc::now().naive_utc();
-                if let Some(locked_until) = user.locked_until
-                    && locked_until > now
-                {
-                    let secs_remaining = (locked_until - now).num_seconds().max(1);
-                    info!(
-                        conn_id,
-                        email = %user.email,
-                        secs_remaining,
-                        "auth refused: account locked"
-                    );
-                    let _ = ctx.outbound.try_send(
-                        format!(
-                            "Account is temporarily locked after too many failed \
-                             attempts. Try again in {secs_remaining}s.\r\n"
-                        )
-                        .into_bytes(),
-                    );
-                    ctx.stage = Stage::AwaitingIdentifier;
+            Stage::AwaitingPassword {
+                user,
+                preselected,
+                game_hash,
+            } => {
+                // `code` instead of a password: log in by approving a
+                // short code on the website (no password is sent).
+                if trimmed.eq_ignore_ascii_case("code") {
+                    if user.id.is_empty() {
+                        // Unlinked legacy character: no website account
+                        // exists that could approve the code.
+                        let _ = ctx.outbound.try_send(
+                            "This character is not linked to a website account yet, so \
+                             website login is unavailable. Enter its game password \
+                             instead.\r\n"
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        ctx.stage = Stage::AwaitingPassword {
+                            user,
+                            preselected,
+                            game_hash,
+                        };
+                        let _ = ctx.outbound.try_send(login_message_bytes(
+                            world,
+                            "PASSWORD_PROMPT",
+                            PASSWORD_PROMPT_FALLBACK,
+                        ));
+                        return;
+                    }
+                    self.begin_web_approval(conn_id, user, preselected, pool, world)
+                        .await;
+                    return;
+                }
+                // Account lockout (website users): password attempts are
+                // rejected without verifying and without touching the
+                // failure counters; only `code` gets through.
+                if let Some(msg) = locked_hint(&user, chrono::Utc::now().naive_utc()) {
+                    info!(conn_id, email = %user.email, "password refused: account locked");
+                    let _ = ctx.outbound.try_send(msg.into_bytes());
+                    ctx.stage = Stage::AwaitingPassword {
+                        user,
+                        preselected,
+                        game_hash,
+                    };
                     let _ = ctx.outbound.try_send(login_message_bytes(
                         world,
-                        "EMAIL_PROMPT",
-                        IDENT_PROMPT_FALLBACK,
+                        "PASSWORD_PROMPT",
+                        PASSWORD_PROMPT_FALLBACK,
                     ));
                     return;
                 }
@@ -1736,7 +1980,24 @@ impl ConnRouter {
                 // runs on the blocking pool and the result comes back
                 // through `AuthDone`, so the game loop keeps ticking.
                 let password = trimmed.to_string();
-                self.start_password_check(conn_id, user, preselected, password);
+                self.start_password_check(conn_id, user, preselected, game_hash, password);
+            }
+
+            Stage::AwaitingWebApproval(web) => {
+                if trimmed.eq_ignore_ascii_case("cancel") {
+                    if let Err(e) =
+                        mud_db::game_login_code::expire_pending(pool, &web.code_id).await
+                    {
+                        warn!(conn_id, error = %e, "login code cancel failed");
+                    }
+                    let _ = ctx
+                        .outbound
+                        .try_send("Login code cancelled.\r\n".as_bytes().to_vec());
+                    reprompt_identifier(ctx, world);
+                    return;
+                }
+                // Anything else (usually just Enter): check right now.
+                self.resolve_web_approval(conn_id, *web, pool, world).await;
             }
 
             Stage::Authenticating => {
@@ -1839,8 +2100,9 @@ impl ConnRouter {
                 return;
             }
         };
-        let user_id = match users::create(&mut *tx, &effective_email, &display_name, &hashed).await
-        {
+        // `Users.password_hash` (website password) stays NULL; the game
+        // password is stored on the character below.
+        let user_id = match users::create(&mut *tx, &effective_email, &display_name).await {
             Ok(id) => id,
             Err(e) => {
                 warn!(conn_id, error = %e, "user create failed");
@@ -1889,6 +2151,7 @@ impl ConnRouter {
             constitution: stats.constitution,
             charisma: stats.charisma,
             name_approved: !name_approval_required,
+            password_hash: &hashed,
         };
         let character_id = match mud_db::characters::create(&mut *tx, &new_character).await {
             Ok(id) => id,
@@ -2068,15 +2331,17 @@ impl ConnRouter {
                     lock_window(lock_minutes),
                 )
             } else {
-                let attempts_after = user.failed_login_attempts.saturating_add(1);
-                let lock_now = max_attempts > 0 && attempts_after >= max_attempts;
-                let _ = mud_db::users::record_failed_login(
-                    pool,
-                    &user.id,
-                    if lock_now { Some(lock_minutes) } else { None },
-                )
-                .await;
-                (attempts_after, lock_now)
+                // The count (and lock decision) comes from the row itself,
+                // atomically, not from the snapshot read at name entry.
+                match mud_db::users::record_failed_login(pool, &user.id, max_attempts, lock_minutes)
+                    .await
+                {
+                    Ok(f) => (f.attempts, f.locked),
+                    Err(e) => {
+                        warn!(conn_id, error = %e, "record_failed_login failed");
+                        (user.failed_login_attempts.saturating_add(1), false)
+                    }
+                }
             };
             info!(
                 conn_id,
@@ -2127,6 +2392,17 @@ impl ConnRouter {
         {
             self.legacy_throttle
                 .clear(&LegacyLoginThrottle::key(&c.name));
+        }
+        // Linked character still on a legacy crypt(3) game hash: upgrade it
+        // to bcrypt now that the plaintext was verified.
+        if !user.id.is_empty()
+            && let Some(Ok(new_hash)) = &migration_hash
+            && let Some(c) = preselected.as_deref()
+        {
+            match characters::set_password_hash(pool, &c.id, new_hash).await {
+                Ok(()) => info!(conn_id, character = %c.name, "game password upgraded to bcrypt"),
+                Err(e) => warn!(conn_id, error = %e, "game password bcrypt upgrade failed"),
+            }
         }
         // Legacy-orphan migration: the player auth'd against
         // a `Characters.password_hash` (imported Unix crypt(3)
@@ -2196,9 +2472,11 @@ impl ConnRouter {
             let display_name = char_row.name.clone();
             let migrate = async {
                 let mut tx = pool.begin().await?;
-                let new_id =
-                    mud_db::users::create(&mut *tx, &synth_email, &display_name, &new_hash).await?;
+                let new_id = mud_db::users::create(&mut *tx, &synth_email, &display_name).await?;
                 mud_db::characters::link_to_user(&mut *tx, &char_row.id, &new_id).await?;
+                // The bcrypt upgrade of the GAME password lives on the
+                // character; the new account has no website password.
+                mud_db::characters::set_password_hash(&mut *tx, &char_row.id, &new_hash).await?;
                 tx.commit().await?;
                 Ok::<String, mud_db::sqlx::Error>(new_id)
             };
@@ -2213,7 +2491,6 @@ impl ConnRouter {
                     user.id = new_id;
                     user.email = synth_email;
                     user.display_name = display_name;
-                    user.password_hash = Some(new_hash);
                 }
                 Err(e) => {
                     warn!(conn_id, error = %e, "legacy migration db error");
@@ -2267,7 +2544,22 @@ impl ConnRouter {
         // whether an email exists pre-password. The conn
         // stays in AwaitingIdentifier (mirrors auth-failure
         // path); player can't proceed past the ban message.
-        if let Ok(Some(ban)) = mud_db::bans::active_for(pool, &user.id).await {
+        let active_ban = match mud_db::bans::active_for(pool, &user.id).await {
+            Ok(b) => b,
+            Err(e) => {
+                // Fail closed: never let someone in because the ban
+                // lookup failed.
+                warn!(conn_id, user_id = %user.id, error = %e, "ban check failed");
+                let _ = ctx.outbound.try_send(
+                    "Server error, please try again later.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                reprompt_identifier(ctx, world);
+                return;
+            }
+        };
+        if let Some(ban) = active_ban {
             info!(
                 conn_id,
                 user_id = %user.id,
@@ -2358,20 +2650,24 @@ impl ConnRouter {
         conn_id: ConnId,
         user: User,
         preselected: Option<Box<CharacterRow>>,
+        game_hash: String,
         password: String,
     ) {
         if let Some(ctx) = self.login.get_mut(&conn_id) {
             ctx.stage = Stage::Authenticating;
         }
         let tx = self.auth_tx.clone();
-        let hash = user.password_hash.clone();
         let is_legacy = user.id.is_empty();
+        // Anything that isn't bcrypt is a legacy crypt(3) hash that gets
+        // upgraded on a successful login.
+        let needs_upgrade = !game_hash.starts_with("$2");
         tokio::spawn(async move {
-            let ok = match hash {
-                Some(h) => verify_password_blocking(password.clone(), h).await,
-                None => false,
+            let ok = if game_hash.is_empty() {
+                false
+            } else {
+                verify_password_blocking(password.clone(), game_hash).await
             };
-            let migration_hash = if ok && is_legacy {
+            let migration_hash = if ok && (is_legacy || needs_upgrade) {
                 Some(hash_password_blocking(password).await)
             } else {
                 None
@@ -2420,6 +2716,313 @@ impl ConnRouter {
             AuthDoneKind::Create { draft, hashed } => {
                 self.finish_creation(conn_id, draft, hashed, pool, world)
                     .await;
+            }
+            AuthDoneKind::WebApprovalWake { code_id } => {
+                let Some(ctx) = self.login.get_mut(&conn_id) else {
+                    return;
+                };
+                // Stale wake (cancelled / replaced code): ignore.
+                let current = matches!(
+                    &ctx.stage,
+                    Stage::AwaitingWebApproval(w) if w.code_id == code_id
+                );
+                if !current {
+                    return;
+                }
+                if let Stage::AwaitingWebApproval(web) =
+                    std::mem::replace(&mut ctx.stage, Stage::AwaitingIdentifier)
+                {
+                    self.resolve_web_approval(conn_id, *web, pool, world).await;
+                }
+            }
+        }
+    }
+
+    /// Start a device-code login for `user` (and, on the character-name
+    /// path, `preselected`): rate-limit, insert the `GameLoginCode`
+    /// row, spawn its poller, tell the player where to approve it.
+    /// `user.id` must be non-empty (callers refuse unlinked legacy
+    /// characters first).
+    #[allow(clippy::too_many_lines)]
+    async fn begin_web_approval(
+        &mut self,
+        conn_id: ConnId,
+        user: User,
+        preselected: Option<Box<CharacterRow>>,
+        pool: &PgPool,
+        world: &mut World,
+    ) {
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            return;
+        };
+        if user.id.is_empty() {
+            warn!(conn_id, "web approval requested without a linked account");
+            let _ = ctx
+                .outbound
+                .try_send("Server error.\r\n".as_bytes().to_vec());
+            reprompt_identifier(ctx, world);
+            return;
+        }
+        let ip = ctx.peer.map_or(IpAddr::from([0u8, 0, 0, 0]), |a| a.ip());
+        if !self.code_limiter.try_acquire(ip, Instant::now()) {
+            info!(conn_id, %ip, "login code rate limit hit");
+            let _ = ctx.outbound.try_send(
+                "Too many login codes requested; try again later.\r\n"
+                    .as_bytes()
+                    .to_vec(),
+            );
+            reprompt_identifier(ctx, world);
+            return;
+        }
+        let (timeout_secs, website_url) = {
+            let cfg = world.resource::<mud_world::RuntimeConfig>();
+            let secs = cfg
+                .get_i64(
+                    "security",
+                    "web_approval_timeout_secs",
+                    DEFAULT_WEB_APPROVAL_TIMEOUT_SECS,
+                )
+                .clamp(10, 3600);
+            let url = cfg
+                .get_string("security", "website_url", DEFAULT_WEBSITE_URL)
+                .trim_end_matches('/')
+                .to_string();
+            (u64::try_from(secs).unwrap_or(120), url)
+        };
+        let character_name = preselected.as_deref().map_or("", |c| c.name.as_str());
+        let created_at = chrono::Utc::now().naive_utc();
+        let expires_naive =
+            created_at + chrono::Duration::seconds(i64::try_from(timeout_secs).unwrap_or(120));
+        let ip_text = ctx
+            .peer
+            .map_or_else(|| "unknown".to_string(), |a| a.ip().to_string());
+        let client_port = ctx.peer.map(|a| i32::from(a.port()));
+        let mut inserted: Option<(String, String)> = None;
+        for _ in 0..5 {
+            let code = generate_login_code();
+            let new = mud_db::game_login_code::NewGameLoginCode {
+                code: &code,
+                character_name,
+                user_id: Some(&user.id),
+                client_ip: &ip_text,
+                client_port,
+                tls: ctx.tls,
+                created_at,
+                expires_at: expires_naive,
+            };
+            match mud_db::game_login_code::insert(pool, &new).await {
+                Ok(id) => {
+                    inserted = Some((id, code));
+                    break;
+                }
+                Err(e)
+                    if e.as_database_error()
+                        .is_some_and(mud_db::sqlx::error::DatabaseError::is_unique_violation) =>
+                {
+                    // Code collision: draw another.
+                }
+                Err(e) => {
+                    warn!(conn_id, error = %e, "login code insert failed");
+                    break;
+                }
+            }
+        }
+        let Some((code_id, code)) = inserted else {
+            let _ = ctx
+                .outbound
+                .try_send("Server error.\r\n".as_bytes().to_vec());
+            reprompt_identifier(ctx, world);
+            return;
+        };
+        let expires_at = Instant::now() + Duration::from_secs(timeout_secs);
+        // Poller: wakes the main loop once the row leaves PENDING (or
+        // the deadline passes). Aborted by `PollGuard` on any stage exit.
+        let poller = {
+            let tx = self.auth_tx.clone();
+            let pool = pool.clone();
+            let id = code_id.clone();
+            let deadline = expires_at + Duration::from_secs(1);
+            let handle = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(WEB_APPROVAL_POLL_INTERVAL).await;
+                    let changed = match mud_db::game_login_code::state(&pool, &id).await {
+                        Ok(Some(s)) => s.status != "PENDING",
+                        Ok(None) => true,
+                        Err(_) => false,
+                    };
+                    if changed || Instant::now() >= deadline {
+                        let _ = tx.send(AuthDone {
+                            conn_id,
+                            kind: AuthDoneKind::WebApprovalWake { code_id: id },
+                        });
+                        return;
+                    }
+                }
+            });
+            PollGuard(handle.abort_handle())
+        };
+        let shown = format_login_code(&code);
+        let within = if timeout_secs % 60 == 0 {
+            let m = timeout_secs / 60;
+            format!("{m} minute{}", if m == 1 { "" } else { "s" })
+        } else {
+            format!("{timeout_secs} seconds")
+        };
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            return;
+        };
+        let _ = ctx.outbound.try_send(
+            format!(
+                "Your login code is {shown}. Approve it at {website_url}/verify?code={shown} \
+                 within {within}. Press Enter to check, or type cancel.\r\n"
+            )
+            .into_bytes(),
+        );
+        ctx.stage = Stage::AwaitingWebApproval(Box::new(WebLogin {
+            code,
+            code_id,
+            expires_at,
+            user_id: user.id.clone(),
+            user,
+            preselected,
+            _poller: poller,
+        }));
+    }
+
+    /// Re-read a pending device code and act on its status: keep
+    /// waiting, fail back to the identifier prompt, or (APPROVED by the
+    /// right account, atomically consumed) finish exactly like a
+    /// successful password login.
+    #[allow(clippy::too_many_lines)]
+    async fn resolve_web_approval(
+        &mut self,
+        conn_id: ConnId,
+        web: WebLogin,
+        pool: &PgPool,
+        world: &mut World,
+    ) {
+        let state = mud_db::game_login_code::state(pool, &web.code_id).await;
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            return;
+        };
+        let state = match state {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                let _ = ctx.outbound.try_send(
+                    "Your login code is no longer valid.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                reprompt_identifier(ctx, world);
+                return;
+            }
+            Err(e) => {
+                warn!(conn_id, error = %e, "login code check failed");
+                // Best effort: close the code so it can't be approved later.
+                let _ = mud_db::game_login_code::expire_pending(pool, &web.code_id).await;
+                let _ = ctx.outbound.try_send(
+                    "Couldn't check your login code. Please try again.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                reprompt_identifier(ctx, world);
+                return;
+            }
+        };
+        match state.status.as_str() {
+            "PENDING" => {
+                let now = Instant::now();
+                if now >= web.expires_at {
+                    let _ = mud_db::game_login_code::expire_pending(pool, &web.code_id).await;
+                    let _ = ctx.outbound.try_send(
+                        "Your login code expired. Please try again.\r\n"
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                    reprompt_identifier(ctx, world);
+                } else {
+                    let left = (web.expires_at - now).as_secs().max(1);
+                    let _ = ctx.outbound.try_send(
+                        format!(
+                            "Code {} is still waiting for approval ({left}s left). \
+                             Press Enter to check, or type cancel.\r\n",
+                            format_login_code(&web.code)
+                        )
+                        .into_bytes(),
+                    );
+                    ctx.stage = Stage::AwaitingWebApproval(Box::new(web));
+                }
+            }
+            "APPROVED" => {
+                if state.approved_by_user_id.as_deref() != Some(web.user_id.as_str()) {
+                    warn!(
+                        conn_id,
+                        "login code approved by a different account; refusing"
+                    );
+                    let _ = ctx.outbound.try_send(
+                        "That code was approved by a different account. Login refused.\r\n"
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                    reprompt_identifier(ctx, world);
+                    return;
+                }
+                let consumed = mud_db::game_login_code::consume(
+                    pool,
+                    &web.code_id,
+                    &web.user_id,
+                    chrono::Utc::now().naive_utc(),
+                )
+                .await;
+                if matches!(consumed, Ok(true)) {
+                    // Device-code approval lifts any password lockout.
+                    if let Err(e) = mud_db::users::clear_failed_logins(pool, &web.user_id).await {
+                        warn!(conn_id, error = %e, "clear_failed_logins after code login failed");
+                    }
+                    let _ = ctx
+                        .outbound
+                        .try_send("Code approved. Logging in...\r\n".as_bytes().to_vec());
+                    let WebLogin {
+                        user, preselected, ..
+                    } = web;
+                    self.finish_password(conn_id, user, preselected, true, None, pool, world)
+                        .await;
+                } else {
+                    if let Err(e) = &consumed {
+                        warn!(conn_id, error = %e, "login code consume failed");
+                    }
+                    let _ = ctx.outbound.try_send(
+                        "That login code could not be used. Please try again.\r\n"
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                    reprompt_identifier(ctx, world);
+                }
+            }
+            "DENIED" => {
+                let _ = ctx.outbound.try_send(
+                    "Your login code was denied on the website.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                reprompt_identifier(ctx, world);
+            }
+            "EXPIRED" => {
+                let _ = ctx.outbound.try_send(
+                    "Your login code expired. Please try again.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                reprompt_identifier(ctx, world);
+            }
+            _ => {
+                // CONSUMED (already used) or anything unexpected.
+                let _ = ctx.outbound.try_send(
+                    "That login code has already been used.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                reprompt_identifier(ctx, world);
             }
         }
     }
@@ -4739,12 +5342,11 @@ mod tests {
         world
     }
 
-    fn legacy_sentinel(hash: &str) -> (User, Option<Box<CharacterRow>>) {
+    fn legacy_sentinel() -> (User, Option<Box<CharacterRow>>) {
         let user = User {
             id: String::new(),
             email: "Tester".into(),
             display_name: String::new(),
-            password_hash: Some(hash.to_string()),
             role: mud_db::enums::UserRole::Player,
             failed_login_attempts: 0,
             locked_until: None,
@@ -4756,8 +5358,12 @@ mod tests {
     }
 
     fn park_at_password(router: &mut ConnRouter, conn: ConnId, hash: &str) {
-        let (user, preselected) = legacy_sentinel(hash);
-        router.login.get_mut(&conn).unwrap().stage = Stage::AwaitingPassword { user, preselected };
+        let (user, preselected) = legacy_sentinel();
+        router.login.get_mut(&conn).unwrap().stage = Stage::AwaitingPassword {
+            user,
+            preselected,
+            game_hash: hash.to_string(),
+        };
     }
 
     /// Type one password at a parked connection and drive the
@@ -4798,7 +5404,7 @@ mod tests {
         let legacy_max = ConnId::try_from(DEFAULT_LEGACY_MAX_LOGIN_ATTEMPTS).unwrap();
         for conn in 1..=legacy_max {
             let (tx, mut orx) = tokio::sync::mpsc::channel(64);
-            router.on_connect(conn, tx, &world);
+            router.on_connect(conn, tx, None, &world);
             park_at_password(&mut router, conn, &hash);
             attempt(&mut router, &mut rx, &mut world, &pool, conn, "wrong").await;
             let out = drain(&mut orx);
@@ -4815,7 +5421,7 @@ mod tests {
         // Correct password is now refused without ever verifying.
         let (tx, mut orx) = tokio::sync::mpsc::channel(64);
         let next = legacy_max + 1;
-        router.on_connect(next, tx, &world);
+        router.on_connect(next, tx, None, &world);
         park_at_password(&mut router, next, &hash);
         router
             .on_line(next, "hunter2".into(), &pool, &mut world)
@@ -4863,7 +5469,7 @@ mod tests {
         let mut rx = router.take_auth_rx().unwrap();
         let hash = legacy_hash("hunter2");
         let (tx, mut orx) = tokio::sync::mpsc::channel(256);
-        router.on_connect(1, tx, &world);
+        router.on_connect(1, tx, None, &world);
         for i in 1..=MAX_FAILED_PASSWORDS_PER_CONN {
             assert!(
                 router.login.contains_key(&1),
@@ -4887,15 +5493,14 @@ mod tests {
         let mut rx = router.take_auth_rx().unwrap();
         let (tx_a, _orx_a) = tokio::sync::mpsc::channel(64);
         let (tx_b, mut orx_b) = tokio::sync::mpsc::channel(64);
-        router.on_connect(1, tx_a, &world);
-        router.on_connect(2, tx_b, &world);
+        router.on_connect(1, tx_a, None, &world);
+        router.on_connect(2, tx_b, None, &world);
         drain(&mut orx_b);
         // A: linked account with a real bcrypt hash.
         let user = User {
             id: "u1".into(),
             email: "a@example.com".into(),
             display_name: "a".into(),
-            password_hash: Some(bcrypt::hash("pw-a-long", 4).unwrap()),
             role: mud_db::enums::UserRole::Player,
             failed_login_attempts: 0,
             locked_until: None,
@@ -4904,6 +5509,7 @@ mod tests {
         router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
             user,
             preselected: None,
+            game_hash: bcrypt::hash("pw-a-long", 4).unwrap(),
         };
         router.login.get_mut(&2).unwrap().stage = Stage::ConfirmCreate {
             identifier: "Newbie".into(),
@@ -4936,7 +5542,7 @@ mod tests {
                 assert!(ok);
                 assert!(migration_hash.is_none());
             }
-            AuthDoneKind::Create { .. } => panic!("wrong job kind"),
+            _ => panic!("wrong job kind"),
         }
     }
 
@@ -4970,7 +5576,7 @@ mod tests {
             .id();
         router.playing.insert(1, entity);
         // Second connection authenticates as the same character.
-        router.on_connect(2, tx2, &world);
+        router.on_connect(2, tx2, None, &world);
         drain(&mut rx2);
         assert!(router.try_takeover(&mut world, 2, "c"));
 
@@ -5008,7 +5614,772 @@ mod tests {
         assert!(world.get_entity(entity).is_ok());
         // A different character is not a takeover.
         let (tx3, _rx3) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
-        router.on_connect(3, tx3, &world);
+        router.on_connect(3, tx3, None, &world);
         assert!(!router.try_takeover(&mut world, 3, "other"));
+    }
+
+    // ---- device-code / game-password-only login ----
+
+    #[test]
+    fn login_code_alphabet_and_format() {
+        assert_eq!(CODE_ALPHABET.len(), 32);
+        for banned in [b'0', b'O', b'1', b'I'] {
+            assert!(!CODE_ALPHABET.contains(&banned));
+        }
+        for _ in 0..500 {
+            let code = generate_login_code();
+            assert_eq!(code.len(), CODE_LEN);
+            assert!(
+                code.bytes().all(|b| CODE_ALPHABET.contains(&b)),
+                "bad code {code}"
+            );
+            assert!(!code.contains('-'));
+        }
+        assert_eq!(format_login_code("ABCDEFGH"), "ABCD-EFGH");
+        assert_eq!(
+            format_login_code(&generate_login_code())
+                .matches('-')
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn code_rate_limiter_caps_per_ip_per_window() {
+        let mut rl = CodeRateLimiter::default();
+        let a = IpAddr::from([10, 0, 0, 1]);
+        let b = IpAddr::from([10, 0, 0, 2]);
+        let t0 = Instant::now();
+        for i in 0..CODE_RATE_MAX {
+            assert!(rl.try_acquire(a, t0 + Duration::from_secs(i as u64)), "{i}");
+        }
+        assert!(!rl.try_acquire(a, t0 + Duration::from_secs(30)));
+        // Another IP has its own quota.
+        assert!(rl.try_acquire(b, t0 + Duration::from_secs(30)));
+        // A refused attempt isn't recorded: once the first hit ages out
+        // of the window exactly one slot frees up.
+        let later = t0 + CODE_RATE_WINDOW;
+        assert!(rl.try_acquire(a, later));
+        assert!(!rl.try_acquire(a, later));
+        // Long after, everything has expired.
+        assert!(rl.try_acquire(a, t0 + CODE_RATE_WINDOW * 3));
+    }
+
+    #[test]
+    fn tls_detection_uses_conn_id_bit() {
+        assert!(!conn_is_tls(7));
+        assert!(conn_is_tls((1u64 << 40) | 7));
+    }
+
+    #[test]
+    fn plain_telnet_notice_mentions_tls_port_and_code() {
+        let world = auth_world(0);
+        let text = String::from_utf8(plain_telnet_notice_bytes(&world)).unwrap();
+        assert!(text.contains("unencrypted"), "{text}");
+        assert!(text.contains("4443"), "{text}");
+        assert!(text.contains("code"), "{text}");
+        let mut world = auth_world(0);
+        world
+            .resource_mut::<mud_world::RuntimeConfig>()
+            .by_key
+            .insert(
+                ("server".into(), "tls_port".into()),
+                mud_world::ConfigValue::Int(5555),
+            );
+        let text = String::from_utf8(plain_telnet_notice_bytes(&world)).unwrap();
+        assert!(text.contains("5555"), "{text}");
+    }
+
+    fn linked_user() -> User {
+        User {
+            id: "u1".into(),
+            email: "a@example.com".into(),
+            display_name: "a".into(),
+            role: mud_db::enums::UserRole::Player,
+            failed_login_attempts: 0,
+            locked_until: None,
+            account_wealth: 0,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn website_password_is_rejected_and_game_password_accepted() {
+        // The linked account's website password is not even loadable
+        // (`User` has no password field); the only hash in play is the
+        // character's game hash.
+        let mut world = auth_world(0);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let mut rx = router.take_auth_rx().unwrap();
+        let (tx, _orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        let game_hash = bcrypt::hash("game-pass", 4).unwrap();
+        let park = |router: &mut ConnRouter| {
+            let mut c = row(None, None);
+            c.user_id = Some("u1".into());
+            router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+                user: linked_user(),
+                preselected: Some(Box::new(c)),
+                game_hash: game_hash.clone(),
+            };
+        };
+        park(&mut router);
+        router
+            .on_line(1, "website-pass".into(), &pool, &mut world)
+            .await;
+        match rx.recv().await.unwrap().kind {
+            AuthDoneKind::Password { ok, .. } => assert!(!ok, "website password accepted"),
+            _ => panic!("wrong job kind"),
+        }
+        park(&mut router);
+        router
+            .on_line(1, "game-pass".into(), &pool, &mut world)
+            .await;
+        match rx.recv().await.unwrap().kind {
+            AuthDoneKind::Password {
+                ok, migration_hash, ..
+            } => {
+                assert!(ok, "game password rejected");
+                assert!(migration_hash.is_none(), "bcrypt hash needs no upgrade");
+            }
+            _ => panic!("wrong job kind"),
+        }
+        // A character with no game password at all can't be entered
+        // with any typed password.
+        router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+            user: linked_user(),
+            preselected: None,
+            game_hash: String::new(),
+        };
+        router.on_line(1, String::new(), &pool, &mut world).await;
+        match rx.recv().await.unwrap().kind {
+            AuthDoneKind::Password { ok, .. } => assert!(!ok),
+            _ => panic!("wrong job kind"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_crypt_game_hash_is_accepted_and_flagged_for_upgrade() {
+        let mut world = auth_world(0);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let mut rx = router.take_auth_rx().unwrap();
+        let (tx, _orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        let mut c = row(None, None);
+        c.user_id = Some("u1".into());
+        router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+            user: linked_user(),
+            preselected: Some(Box::new(c)),
+            game_hash: legacy_hash("hunter2"),
+        };
+        router.on_line(1, "hunter2".into(), &pool, &mut world).await;
+        match rx.recv().await.unwrap().kind {
+            AuthDoneKind::Password {
+                ok, migration_hash, ..
+            } => {
+                assert!(ok);
+                assert!(matches!(migration_hash, Some(Ok(h)) if h.starts_with("$2")));
+            }
+            _ => panic!("wrong job kind"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_is_refused_for_unlinked_legacy_character() {
+        let mut world = auth_world(0);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        drain(&mut orx);
+        park_at_password(&mut router, 1, "irrelevant");
+        router.on_line(1, "CoDe".into(), &pool, &mut world).await;
+        let out = drain(&mut orx);
+        assert!(out.contains("not linked to a website account"), "{out}");
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::AwaitingPassword { .. }
+        ));
+    }
+
+    /// Connect to the dev database for the flow tests that exercise
+    /// the real `GameLoginCode` table; `None` (test skipped) when it
+    /// isn't reachable.
+    async fn live_pool() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
+        let pool = tokio::time::timeout(Duration::from_secs(3), mud_db::connect(&url))
+            .await
+            .ok()?
+            .ok()?;
+        mud_db::sqlx::query("SELECT 1 FROM \"GameLoginCode\" LIMIT 1")
+            .execute(&pool)
+            .await
+            .ok()?;
+        Some(pool)
+    }
+
+    fn pending_web(router: &ConnRouter, conn: ConnId) -> (String, String) {
+        match &router.login.get(&conn).unwrap().stage {
+            Stage::AwaitingWebApproval(w) => (w.code_id.clone(), w.code.clone()),
+            _ => panic!("not awaiting web approval"),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_at_password_prompt_enters_web_approval_and_resolves() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Ok(Some(uid)) = mud_db::sqlx::query_scalar::<_, String>(
+            "SELECT id FROM \"Users\" WHERE deleted_at IS NULL \
+             AND email NOT LIKE '%@example.invalid' ORDER BY id LIMIT 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        else {
+            eprintln!("skipping: no Users row");
+            return;
+        };
+        let mut world = auth_world(0);
+        let mut router = ConnRouter::new();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, Some("127.0.0.1:40123".parse().unwrap()), &world);
+        drain(&mut orx);
+        let mut user = linked_user();
+        user.id = uid.clone();
+        let c = row(None, None);
+        let char_name = c.name.clone();
+        router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+            user,
+            preselected: Some(Box::new(c)),
+            game_hash: String::new(),
+        };
+        router.on_line(1, "code".into(), &pool, &mut world).await;
+        let out = drain(&mut orx);
+        let (code_id, code) = pending_web(&router, 1);
+        let shown = format_login_code(&code);
+        assert!(
+            out.contains(&format!("Your login code is {shown}.")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "https://muditor.utaboshi.com/verify?code={shown} within 2 minutes"
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("Press Enter to check, or type cancel."),
+            "{out}"
+        );
+        // Row contents.
+        let (status, user_id, ip, port, tls, name): (
+            String,
+            Option<String>,
+            String,
+            Option<i32>,
+            bool,
+            String,
+        ) = mud_db::sqlx::query_as(
+            "SELECT status::text, \"userId\", \"clientIp\", \"clientPort\", tls, \"characterName\" \
+             FROM \"GameLoginCode\" WHERE id = $1",
+        )
+        .bind(&code_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "PENDING");
+        assert_eq!(user_id.as_deref(), Some(uid.as_str()));
+        assert_eq!((ip.as_str(), port, tls), ("127.0.0.1", Some(40123), false));
+        assert_eq!(name, char_name);
+
+        // Still pending: Enter keeps waiting.
+        router.on_line(1, String::new(), &pool, &mut world).await;
+        assert!(drain(&mut orx).contains("still waiting"));
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::AwaitingWebApproval(_)
+        ));
+
+        // Approved by somebody else: refused, never consumed.
+        mud_db::sqlx::query(
+            "UPDATE \"GameLoginCode\" SET status = 'APPROVED', \"approvedByUserId\" = 'someone-else' \
+             WHERE id = $1",
+        )
+        .bind(&code_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        router.on_line(1, String::new(), &pool, &mut world).await;
+        assert!(drain(&mut orx).contains("different account"));
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::AwaitingIdentifier
+        ));
+        let st = mud_db::game_login_code::state(&pool, &code_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(st.status, "APPROVED");
+        // ...and the consume SQL itself enforces the approver.
+        assert!(
+            !mud_db::game_login_code::consume(
+                &pool,
+                &code_id,
+                &uid,
+                chrono::Utc::now().naive_utc()
+            )
+            .await
+            .unwrap()
+        );
+        mud_db::game_login_code::delete(&pool, &code_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn web_approval_denied_cancel_and_wake() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Ok(Some(uid)) = mud_db::sqlx::query_scalar::<_, String>(
+            "SELECT id FROM \"Users\" WHERE deleted_at IS NULL \
+             AND email NOT LIKE '%@example.invalid' ORDER BY id LIMIT 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        else {
+            eprintln!("skipping: no Users row");
+            return;
+        };
+        let mut world = auth_world(0);
+        let mut router = ConnRouter::new();
+        let mut rx = router.take_auth_rx().unwrap();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        // TLS connection id, no peer address.
+        let conn: ConnId = (1u64 << 40) | 1;
+        router.on_connect(conn, tx, None, &world);
+        drain(&mut orx);
+        let mut user = linked_user();
+        user.id = uid.clone();
+
+        // Denied while waiting: the poller wakes the loop.
+        router.login.get_mut(&conn).unwrap().stage = Stage::AwaitingPassword {
+            user: user.clone(),
+            preselected: None,
+            game_hash: String::new(),
+        };
+        router.on_line(conn, "CODE".into(), &pool, &mut world).await;
+        let (code_id, _) = pending_web(&router, conn);
+        assert!(
+            !drain(&mut orx).contains("Security notice"),
+            "no notice on TLS"
+        );
+        mud_db::sqlx::query("UPDATE \"GameLoginCode\" SET status = 'DENIED' WHERE id = $1")
+            .bind(&code_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let done = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("poller should wake on status change")
+            .unwrap();
+        router.on_auth_done(done, &pool, &mut world).await;
+        assert!(drain(&mut orx).contains("denied"));
+        assert!(matches!(
+            router.login.get(&conn).unwrap().stage,
+            Stage::AwaitingIdentifier
+        ));
+        let st = mud_db::game_login_code::state(&pool, &code_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(st.status, "DENIED");
+        mud_db::game_login_code::delete(&pool, &code_id)
+            .await
+            .unwrap();
+
+        // Cancel marks the row EXPIRED and returns to the identifier.
+        router.login.get_mut(&conn).unwrap().stage = Stage::AwaitingPassword {
+            user,
+            preselected: None,
+            game_hash: String::new(),
+        };
+        router.on_line(conn, "code".into(), &pool, &mut world).await;
+        let (code_id, _) = pending_web(&router, conn);
+        router
+            .on_line(conn, "Cancel".into(), &pool, &mut world)
+            .await;
+        assert!(matches!(
+            router.login.get(&conn).unwrap().stage,
+            Stage::AwaitingIdentifier
+        ));
+        let st = mud_db::game_login_code::state(&pool, &code_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(st.status, "EXPIRED");
+        mud_db::game_login_code::delete(&pool, &code_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn code_requests_are_rate_limited_per_ip() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Ok(Some(uid)) = mud_db::sqlx::query_scalar::<_, String>(
+            "SELECT id FROM \"Users\" WHERE deleted_at IS NULL \
+             AND email NOT LIKE '%@example.invalid' ORDER BY id LIMIT 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        else {
+            eprintln!("skipping: no Users row");
+            return;
+        };
+        let mut world = auth_world(0);
+        let mut router = ConnRouter::new();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(256);
+        router.on_connect(1, tx, Some("203.0.113.9:1000".parse().unwrap()), &world);
+        drain(&mut orx);
+        let mut user = linked_user();
+        user.id = uid;
+        let mut ids = Vec::new();
+        for i in 0..=CODE_RATE_MAX {
+            router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+                user: user.clone(),
+                preselected: None,
+                game_hash: String::new(),
+            };
+            router.on_line(1, "code".into(), &pool, &mut world).await;
+            let out = drain(&mut orx);
+            if i < CODE_RATE_MAX {
+                ids.push(pending_web(&router, 1).0);
+            } else {
+                assert!(
+                    out.contains("Too many login codes requested; try again later."),
+                    "{out}"
+                );
+                assert!(matches!(
+                    router.login.get(&1).unwrap().stage,
+                    Stage::AwaitingIdentifier
+                ));
+            }
+        }
+        for id in ids {
+            mud_db::game_login_code::delete(&pool, &id).await.unwrap();
+        }
+    }
+
+    // ---- lockout interplay with device-code login ----
+
+    fn locked_user(failed: i32) -> User {
+        let mut u = linked_user();
+        u.failed_login_attempts = failed;
+        u.locked_until = Some(chrono::Utc::now().naive_utc() + chrono::Duration::minutes(10));
+        u
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn locked_account_password_is_rejected_with_hint_and_no_counting() {
+        let mut world = auth_world(3);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let mut rx = router.take_auth_rx().unwrap();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(256);
+        router.on_connect(1, tx, None, &world);
+        drain(&mut orx);
+        let game_hash = bcrypt::hash("game-pass", 4).unwrap();
+        // Well past the per-connection failure cap: none of these count.
+        for _ in 0..(MAX_FAILED_PASSWORDS_PER_CONN * 2) {
+            router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+                user: locked_user(3),
+                preselected: None,
+                game_hash: game_hash.clone(),
+            };
+            // Even the CORRECT game password is refused while locked.
+            router
+                .on_line(1, "game-pass".into(), &pool, &mut world)
+                .await;
+            let out = drain(&mut orx);
+            assert!(out.contains("This account is locked until"), "{out}");
+            assert!(
+                out.contains("UTC after too many failed passwords."),
+                "{out}"
+            );
+            assert!(out.contains("typing `code`"), "{out}");
+            assert!(out.contains("Password: "), "re-prompts: {out}");
+            let ctx = router.login.get(&1).expect("connection must stay open");
+            assert_eq!(ctx.failed_attempts, 0);
+            match &ctx.stage {
+                Stage::AwaitingPassword { user, .. } => {
+                    assert_eq!(user.failed_login_attempts, 3, "counter untouched");
+                }
+                _ => panic!("should stay at the password prompt"),
+            }
+            assert!(rx.try_recv().is_err(), "no verification job queued");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn locked_account_code_proceeds_and_ignores_connection_failure_cap() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Ok(Some(uid)) = mud_db::sqlx::query_scalar::<_, String>(
+            "SELECT id FROM \"Users\" WHERE deleted_at IS NULL \
+             AND email NOT LIKE '%@example.invalid' ORDER BY id LIMIT 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        else {
+            eprintln!("skipping: no Users row");
+            return;
+        };
+        let mut world = auth_world(3);
+        let mut router = ConnRouter::new();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, Some("198.51.100.7:2000".parse().unwrap()), &world);
+        drain(&mut orx);
+        // One more wrong password would drop the connection...
+        router.login.get_mut(&1).unwrap().failed_attempts = MAX_FAILED_PASSWORDS_PER_CONN - 1;
+        let mut user = locked_user(3);
+        user.id = uid;
+        router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+            user,
+            preselected: None,
+            game_hash: String::new(),
+        };
+        // ...but `code` neither counts nor is blocked.
+        router.on_line(1, "code".into(), &pool, &mut world).await;
+        let (code_id, _) = pending_web(&router, 1);
+        let ctx = router.login.get(&1).expect("connection still open");
+        assert_eq!(ctx.failed_attempts, MAX_FAILED_PASSWORDS_PER_CONN - 1);
+        assert!(drain(&mut orx).contains("Your login code is "));
+        mud_db::game_login_code::delete(&pool, &code_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn consumed_code_clears_account_lockout() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let Ok(uid) = mud_db::users::create(
+            &pool,
+            &format!("locktest{suffix}@example.invalid"),
+            &format!("locktest{suffix}"),
+        )
+        .await
+        else {
+            eprintln!("skipping: could not create temp user");
+            return;
+        };
+        mud_db::sqlx::query(
+            "UPDATE \"Users\" SET failed_login_attempts = 4, \
+             locked_until = (NOW() AT TIME ZONE 'UTC') + interval '10 minutes' WHERE id = $1",
+        )
+        .bind(&uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let user = mud_db::users::find_by_id(&pool, &uid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.failed_login_attempts, 4);
+        assert!(user.locked_until.is_some());
+
+        let mut world = auth_world(3);
+        let mut router = ConnRouter::new();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, Some("198.51.100.8:2001".parse().unwrap()), &world);
+        drain(&mut orx);
+        router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
+            user,
+            preselected: None,
+            game_hash: String::new(),
+        };
+        router.on_line(1, "code".into(), &pool, &mut world).await;
+        let (code_id, _) = pending_web(&router, 1);
+        mud_db::sqlx::query(
+            "UPDATE \"GameLoginCode\" SET status = 'APPROVED', \"approvedByUserId\" = $2 \
+             WHERE id = $1",
+        )
+        .bind(&code_id)
+        .bind(&uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Enter re-checks: consume succeeds, lock is lifted. The temp
+        // account has no characters, so the flow ends back at the prompt.
+        router.on_line(1, String::new(), &pool, &mut world).await;
+        let out = drain(&mut orx);
+        assert!(out.contains("Code approved"), "{out}");
+        let (attempts, locked): (i32, Option<chrono::NaiveDateTime>) = mud_db::sqlx::query_as(
+            "SELECT failed_login_attempts, locked_until FROM \"Users\" WHERE id = $1",
+        )
+        .bind(&uid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let st = mud_db::game_login_code::state(&pool, &code_id)
+            .await
+            .unwrap()
+            .unwrap();
+        mud_db::game_login_code::delete(&pool, &code_id)
+            .await
+            .unwrap();
+        mud_db::sqlx::query("DELETE FROM \"Users\" WHERE id = $1")
+            .bind(&uid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(st.status, "CONSUMED");
+        assert_eq!(attempts, 0);
+        assert!(locked.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn freshly_recorded_lock_and_ban_read_back_as_naive_utc() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let Ok(uid) = mud_db::users::create(
+            &pool,
+            &format!("tztest{suffix}@example.invalid"),
+            &format!("tztest{suffix}"),
+        )
+        .await
+        else {
+            eprintln!("skipping: could not create temp user");
+            return;
+        };
+        let f = mud_db::users::record_failed_login(&pool, &uid, 1, 15)
+            .await
+            .unwrap();
+        assert_eq!(
+            f,
+            mud_db::users::FailedLogin {
+                attempts: 1,
+                locked: true
+            }
+        );
+        let user = mud_db::users::find_by_id(&pool, &uid)
+            .await
+            .unwrap()
+            .unwrap();
+        let now = chrono::Utc::now().naive_utc();
+        let ban = mud_db::bans::ban(&pool, &uid, &uid, "tz test", Some(600)).await;
+        let active = mud_db::bans::active_for(&pool, &uid).await;
+        let _ = mud_db::sqlx::query("DELETE FROM \"BanRecords\" WHERE user_id = $1")
+            .bind(&uid)
+            .execute(&pool)
+            .await;
+        mud_db::sqlx::query("DELETE FROM \"Users\" WHERE id = $1")
+            .bind(&uid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(user.failed_login_attempts, 1);
+        let locked_until = user.locked_until.expect("lock recorded");
+        assert!(locked_until > now, "{locked_until} !> {now}");
+        assert!(
+            locked_until < now + chrono::Duration::minutes(16),
+            "lock too far ahead: {locked_until} vs {now}"
+        );
+        assert!(locked_hint(&user, now).is_some());
+        if ban.is_ok() {
+            assert!(active.unwrap().is_some(), "10-minute ban must be active");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pool_now_is_naive_utc() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let db_now: chrono::NaiveDateTime = mud_db::sqlx::query_scalar("SELECT NOW()::timestamp")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let skew = (db_now - chrono::Utc::now().naive_utc())
+            .num_seconds()
+            .abs();
+        assert!(skew <= 5, "NOW()::timestamp is {skew}s off naive UTC");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_failed_login_counts_in_row_and_resets_after_expired_lock() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let Ok(uid) = mud_db::users::create(
+            &pool,
+            &format!("rfl{suffix}@example.invalid"),
+            &format!("rfl{suffix}"),
+        )
+        .await
+        else {
+            eprintln!("skipping: could not create temp user");
+            return;
+        };
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(mud_db::users::record_failed_login(&pool, &uid, 3, 15).await);
+        }
+        // Lock expires; the next failure restarts the count at 1 and
+        // doesn't re-lock.
+        mud_db::sqlx::query(
+            "UPDATE \"Users\" SET locked_until = (NOW() AT TIME ZONE 'UTC') - interval '1 minute' \
+             WHERE id = $1",
+        )
+        .bind(&uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let after_expiry = mud_db::users::record_failed_login(&pool, &uid, 3, 15).await;
+        let row = mud_db::users::find_by_id(&pool, &uid)
+            .await
+            .unwrap()
+            .unwrap();
+        mud_db::sqlx::query("DELETE FROM \"Users\" WHERE id = $1")
+            .bind(&uid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let f = |attempts, locked| Some(mud_db::users::FailedLogin { attempts, locked });
+        assert_eq!(seen[0].as_ref().ok().copied(), f(1, false));
+        assert_eq!(seen[1].as_ref().ok().copied(), f(2, false));
+        assert_eq!(seen[2].as_ref().ok().copied(), f(3, true));
+        assert_eq!(after_expiry.ok(), f(1, false));
+        assert_eq!(row.failed_login_attempts, 1);
+        assert!(row.locked_until.is_none());
     }
 }

@@ -633,7 +633,7 @@ async fn main() {
                 match msg.kind {
                     InboundKind::Connected { peer, outbound } => {
                         info!(conn_id = msg.conn, %peer, "client connected");
-                        router.on_connect(msg.conn, outbound, &world);
+                        router.on_connect(msg.conn, outbound, Some(peer), &world);
                     }
                     InboundKind::Line(text) => {
                         router.on_line(msg.conn, text, &pool, &mut world).await;

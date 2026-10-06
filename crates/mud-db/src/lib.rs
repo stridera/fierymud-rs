@@ -1,4 +1,4 @@
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
 pub mod abilities;
 pub mod ability_components;
@@ -28,6 +28,7 @@ pub mod entity_variables;
 pub mod enums;
 pub mod events;
 pub mod game_config;
+pub mod game_login_code;
 pub mod google_links;
 pub mod help;
 pub mod housing;
@@ -66,9 +67,16 @@ pub mod zones;
 
 pub use sqlx;
 
+/// Connect the shared pool. Every session runs with `timezone = UTC`
+/// (startup option), so `NOW()` written into `timestamp without time
+/// zone` columns is naive UTC, matching the `Utc::now().naive_utc()`
+/// values the Rust side binds and compares against.
 pub async fn connect(database_url: &str) -> sqlx::Result<PgPool> {
+    let opts = database_url
+        .parse::<PgConnectOptions>()?
+        .options([("timezone", "UTC")]);
     PgPoolOptions::new()
         .max_connections(8)
-        .connect(database_url)
+        .connect_with(opts)
         .await
 }

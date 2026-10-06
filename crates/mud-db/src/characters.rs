@@ -184,14 +184,18 @@ pub struct NewCharacter<'a> {
     /// then attaches the `NameApprovalPending` marker at spawn and
     /// staff resolves via `approve_name` / `reject_name`.
     pub name_approved: bool,
+    /// bcrypt hash of the GAME password, stored in
+    /// `Characters.password_hash`. This is never the website
+    /// (`Users.password_hash`) password.
+    pub password_hash: &'a str,
 }
 
 /// INSERT a fresh `Characters` row. Generates the id via
 /// `gen_random_uuid()`; sets only the columns the player chose +
-/// `password_hash = ''` (legacy column kept until the
-/// account-side hash supplants it for live verification — auth
-/// goes through `Users.password_hash` already, so this is
-/// vestigial). Returns the new id so callers can store / log it.
+/// the per-character GAME password hash (`Characters.password_hash`,
+/// bcrypt). The website password (`Users.password_hash`) is never
+/// consulted by the game. Returns the new id so callers can store /
+/// log it.
 ///
 /// Name uniqueness is enforced by the table's index — duplicate
 /// names surface as `sqlx::Error::Database`. Callers should
@@ -230,7 +234,7 @@ pub async fn create<'e, E: PgExecutor<'e>>(
         VALUES (
             gen_random_uuid()::text, $1, $2, $3::"Race", $4, $5,
             $6, $7, $8, $9, $10, $11,
-            '', NOW(), $12
+            $13, NOW(), $12
         )
         RETURNING id
         "#,
@@ -247,6 +251,7 @@ pub async fn create<'e, E: PgExecutor<'e>>(
     .bind(new.constitution)
     .bind(new.charisma)
     .bind(new.name_approved)
+    .bind(new.password_hash)
     .fetch_one(executor)
     .await?;
     Ok(row)
@@ -432,7 +437,7 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
     Ok(())
 }
 
-/// Stamp `last_login = NOW()` exactly once per session at successful
+/// Stamp `last_login` (naive UTC) exactly once per session at successful
 /// login. Split out from `save_state` so generic autosave doesn't
 /// keep resetting the column to "the most recent autosave" — the
 /// prior behavior made the column mean "last save," which broke the
@@ -440,8 +445,9 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
 /// detection.
 pub async fn update_last_login(pool: &PgPool, character_id: &str) -> sqlx::Result<()> {
     sqlx::query!(
-        r#"UPDATE "Characters" SET last_login = NOW() WHERE id = $1"#,
+        r#"UPDATE "Characters" SET last_login = $2 WHERE id = $1"#,
         character_id,
+        chrono::Utc::now().naive_utc(),
     )
     .execute(pool)
     .await?;
@@ -847,16 +853,15 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
     .await
 }
 
-/// Read the per-character `password_hash` column. Imported legacy
-/// `CircleMUD` characters land in the DB with no `user_id` and their
-/// original Unix `crypt(3)` hash stored here; the login flow uses
-/// this to authenticate the player exactly once, then provisions a
-/// real `Users` row + bcrypt hash and links the character. After
-/// migration this column stays as the legacy value (vestigial — see
-/// the `create` doc), but the live verification path goes through
-/// `Users.password_hash` instead. Returns an empty string for
-/// post-creation rows that wrote `''` at INSERT time.
-pub async fn load_legacy_password_hash(pool: &PgPool, character_id: &str) -> sqlx::Result<String> {
+/// Read the per-character GAME password hash
+/// (`Characters.password_hash`): bcrypt for characters created or
+/// migrated by this server, or the original Unix `crypt(3)` value for
+/// imported legacy characters that haven't logged in yet. This is the
+/// only credential the telnet login ever verifies; the website
+/// password (`Users.password_hash`) is never read by the game.
+/// Returns an empty string for characters with no game password set
+/// (they can only log in via a website-approved device code).
+pub async fn load_password_hash(pool: &PgPool, character_id: &str) -> sqlx::Result<String> {
     let row = sqlx::query!(
         r#"SELECT password_hash FROM "Characters" WHERE id = $1"#,
         character_id,
@@ -864,6 +869,23 @@ pub async fn load_legacy_password_hash(pool: &PgPool, character_id: &str) -> sql
     .fetch_one(pool)
     .await?;
     Ok(row.password_hash)
+}
+
+/// Overwrite the GAME password hash on a character (legacy
+/// `crypt(3)` -> bcrypt migration after a successful login).
+pub async fn set_password_hash<'e, E: PgExecutor<'e>>(
+    executor: E,
+    character_id: &str,
+    password_hash: &str,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET password_hash = $1, updated_at = NOW() WHERE id = $2"#,
+        password_hash,
+        character_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Set `Characters.user_id` after legacy-login auto-migration. Pairs
