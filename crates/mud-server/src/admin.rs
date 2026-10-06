@@ -31,10 +31,10 @@ use mud_db::{
 };
 use mud_net::Outbound;
 use mud_world::{
-    AppliedTo, AttachedTriggers, BoardLink, CombatStats, Description, EffectInstance, Exits,
-    Health, Item, Keywords, LiquidContainer, Located, Mob, MobPrototypes, Named, ObjectPrototypes,
-    Online, Player, Posture, PostureKind, Profile, Stamina, TriggerCatalog, WearableIn, WorldKey,
-    WorldKeyIndex, wear_flags_primary_slot,
+    Account, AppliedTo, AttachedTriggers, BoardLink, ClassCatalog, CombatStats, Description,
+    EffectInstance, Exits, Health, Item, Keywords, LastInputAt, LiquidContainer, Located,
+    LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player, Posture, PostureKind,
+    Profile, Stamina, TriggerCatalog, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -89,6 +89,7 @@ pub struct AdminCommand {
 #[allow(clippy::large_enum_variant)]
 pub enum AdminRequest {
     WorldStatus,
+    Players,
     LookRoom {
         zone_id: i32,
         id: i32,
@@ -249,6 +250,7 @@ pub fn spawn_admin_server(pool: PgPool) -> mpsc::Receiver<AdminCommand> {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/admin/world/status", get(handle_world_status))
+        .route("/api/admin/players", get(handle_players))
         .route("/api/admin/room/{zone_id}/{id}", get(handle_look_room))
         .route("/api/admin/actor/{name}", get(handle_inspect_actor))
         .route("/api/admin/mob/{zone_id}/{id}", get(handle_inspect_mob))
@@ -349,6 +351,13 @@ async fn handle_world_status(
         return json_err(e);
     }
     json_ok(enqueue(&state, AdminRequest::WorldStatus).await)
+}
+
+async fn handle_players(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    json_ok(enqueue(&state, AdminRequest::Players).await)
 }
 
 async fn handle_look_room(
@@ -909,6 +918,7 @@ pub fn drain_admin_requests(world: &mut World) {
 fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
     match req {
         AdminRequest::WorldStatus => Ok(world_status(world)),
+        AdminRequest::Players => Ok(online_players(world)),
         AdminRequest::LookRoom { zone_id, id } => look_room(world, zone_id, id),
         AdminRequest::InspectActor { name } => inspect_actor(world, &name),
         AdminRequest::SessionCreate {
@@ -1434,6 +1444,71 @@ fn world_status(world: &mut World) -> Value {
         "mobs": mobs,
         "items": items,
     })
+}
+
+/// Every logged-in player session (`Player` + `Online` + `Account`).
+/// Pre-login connections have no player entity, so they never appear.
+fn online_players(world: &mut World) -> Value {
+    type Row<'a> = (
+        &'a Named,
+        &'a Profile,
+        Option<&'a Located>,
+        Option<&'a LastInputAt>,
+        Option<&'a LoggedInAt>,
+    );
+    struct Snap {
+        name: String,
+        level: i32,
+        class_id: Option<i32>,
+        race: String,
+        room: Option<Entity>,
+        idle: u64,
+        connected: u64,
+    }
+    let rows: Vec<Snap> = {
+        let mut q = world.query_filtered::<Row<'_>, (With<Player>, With<Online>, With<Account>)>();
+        q.iter(world)
+            .map(|(named, profile, located, last, login)| {
+                let connected = login.map_or(0, |l| l.0.elapsed().as_secs());
+                let idle = last.map_or(connected, |l| l.0.elapsed().as_secs());
+                Snap {
+                    name: named.name.clone(),
+                    level: profile.level,
+                    class_id: profile.class_id,
+                    race: profile.race.clone(),
+                    room: located.map(|l| l.0),
+                    idle,
+                    connected,
+                }
+            })
+            .collect()
+    };
+    let mut players: Vec<Value> = rows
+        .into_iter()
+        .map(|snap| {
+            let class = snap.class_id.and_then(|id| {
+                world
+                    .get_resource::<ClassCatalog>()
+                    .and_then(|c| c.by_id.get(&id))
+                    .map(|c| c.plain_name.clone())
+            });
+            let room = snap
+                .room
+                .and_then(|r| world.get::<WorldKey>(r).copied())
+                .map(|wk| json!({"zone_id": wk.zone, "id": wk.id}));
+            json!({
+                "name": snap.name,
+                "level": snap.level,
+                "class": class,
+                "race": snap.race,
+                "room": room,
+                "idle_seconds": snap.idle,
+                "connected_seconds": snap.connected,
+            })
+        })
+        .collect();
+    players.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    json!({ "count": players.len(), "players": players })
 }
 
 fn look_room(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
@@ -2141,5 +2216,112 @@ mod validate_tests {
         assert_eq!(v["failures"][0]["id"], 2);
         let none = validate_triggers(&world, Some(8));
         assert_eq!(none["total"], 0);
+    }
+}
+
+#[cfg(test)]
+mod players_tests {
+    use super::*;
+    use mud_db::enums::UserRole;
+    use mud_world::{ClassDef, Room};
+
+    fn account(tag: &str) -> Account {
+        Account {
+            user_id: format!("u-{tag}"),
+            character_id: format!("c-{tag}"),
+            role: UserRole::Player,
+            perms: vec![],
+        }
+    }
+
+    fn profile(level: i32, class_id: Option<i32>) -> Profile {
+        Profile {
+            level,
+            class_id,
+            race: "HUMAN".to_string(),
+            experience: 0,
+            gender: "neutral".to_string(),
+        }
+    }
+
+    #[test]
+    fn players_lists_only_live_sessions() {
+        let mut world = World::new();
+        let mut classes = ClassCatalog::default();
+        classes.by_id.insert(
+            3,
+            ClassDef {
+                id: 3,
+                name: "<b>Warrior</b>".to_string(),
+                plain_name: "Warrior".to_string(),
+                is_subclass: false,
+                parent_class_id: None,
+                description: None,
+                hit_dice: "1d10".to_string(),
+                primary_stat: None,
+                hp_per_level: 10,
+                resistances: HashMap::new(),
+            },
+        );
+        world.insert_resource(classes);
+        let room = world.spawn((Room, WorldKey { zone: 30, id: 45 })).id();
+        world.spawn((
+            Player,
+            Online,
+            account("bob"),
+            Named {
+                name: "Bob".to_string(),
+            },
+            profile(25, Some(3)),
+            Located(room),
+            LoggedInAt(std::time::Instant::now()),
+        ));
+        world.spawn((
+            Player,
+            Online,
+            account("alice"),
+            Named {
+                name: "Alice".to_string(),
+            },
+            profile(10, None),
+        ));
+        // Offline player entity (no Online marker) and a mob must not appear.
+        world.spawn((
+            Player,
+            account("ghost"),
+            Named {
+                name: "Ghost".to_string(),
+            },
+            profile(5, None),
+        ));
+        world.spawn((
+            Mob,
+            Named {
+                name: "rat".to_string(),
+            },
+        ));
+
+        let v = online_players(&mut world);
+        assert_eq!(v["count"], 2);
+        let players = v["players"].as_array().expect("players array");
+        assert_eq!(players[0]["name"], "Alice");
+        assert!(players[0]["class"].is_null());
+        assert!(players[0]["room"].is_null());
+        assert_eq!(players[1]["name"], "Bob");
+        assert_eq!(players[1]["level"], 25);
+        assert_eq!(players[1]["class"], "Warrior");
+        assert_eq!(players[1]["race"], "HUMAN");
+        assert_eq!(players[1]["room"]["zone_id"], 30);
+        assert_eq!(players[1]["room"]["id"], 45);
+        assert!(players[1]["idle_seconds"].is_u64());
+        assert!(players[1]["connected_seconds"].is_u64());
+    }
+
+    #[test]
+    fn players_empty_when_nobody_online() {
+        let mut world = World::new();
+        let v = online_players(&mut world);
+        assert_eq!(v["count"], 0);
+        assert_eq!(v["players"].as_array().map(Vec::len), Some(0));
     }
 }

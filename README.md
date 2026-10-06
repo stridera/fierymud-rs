@@ -56,7 +56,7 @@ DATABASE_URL=postgres://user@localhost/fierydev ./target/release/mud-server
 
 The admin HTTP API (localhost-only by default; bearer auth via `ADMIN_TOKEN`)
 exposes `/api/admin/*` endpoints for world inspection and manipulation —
-status, room/actor/mob rendering, virtual sessions, command execution,
+status, live player list (`GET /api/admin/players`), room/actor/mob rendering, virtual sessions, command execution,
 teleport/spawn, sim pause/tick, and trigger reload/fire.
 
 ## Related projects
