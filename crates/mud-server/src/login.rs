@@ -171,11 +171,27 @@ fn lock_window(lock_minutes: i32) -> Duration {
     Duration::from_secs(u64::try_from(lock_minutes.max(0)).unwrap_or(0) * 60)
 }
 
+/// Default for `security.legacy_max_login_attempts`.
+const DEFAULT_LEGACY_MAX_LOGIN_ATTEMPTS: i32 = 10;
+
+/// Strike threshold for the in-memory per-name lockout of unlinked
+/// legacy characters. Deliberately separate from (and looser than)
+/// `security.max_login_attempts`: those characters are lockable by
+/// anyone who knows the name, so a tight threshold would let a
+/// griefer lock out thousands of them. `<= 0` disables.
+fn legacy_max_attempts(cfg: &mud_world::RuntimeConfig) -> i32 {
+    cfg.get_i32(
+        "security",
+        "legacy_max_login_attempts",
+        DEFAULT_LEGACY_MAX_LOGIN_ATTEMPTS,
+    )
+}
+
 /// In-memory failed-login counter for imported legacy characters that
 /// have no linked `Users` row (so `record_failed_login` has nothing to
 /// update). Keyed on the lower-cased character name; same
 /// threshold / window semantics as the account path
-/// (`security.max_login_attempts`, `security.login_timeout_minutes`).
+/// (`security.legacy_max_login_attempts`, `security.login_timeout_minutes`).
 /// Entry value is `(consecutive failures, time of last failure)`.
 #[derive(Debug, Default)]
 pub struct LegacyLoginThrottle {
@@ -1685,7 +1701,7 @@ impl ConnRouter {
                 // in-memory per-name throttle.
                 if user.id.is_empty() {
                     let cfg = world.resource::<mud_world::RuntimeConfig>();
-                    let max_attempts = cfg.get_i32("security", "max_login_attempts", 0);
+                    let max_attempts = legacy_max_attempts(cfg);
                     let lock_minutes = cfg.get_i32("security", "login_timeout_minutes", 15);
                     let key = LegacyLoginThrottle::key(
                         preselected
@@ -2031,8 +2047,14 @@ impl ConnRouter {
             // have no `Users` row to update, so their strikes are
             // tracked in memory, keyed on the character name.
             let cfg = world.resource::<mud_world::RuntimeConfig>();
-            let max_attempts = cfg.get_i32("security", "max_login_attempts", 0);
+            let account_max_attempts = cfg.get_i32("security", "max_login_attempts", 0);
+            let legacy_max = legacy_max_attempts(cfg);
             let lock_minutes = cfg.get_i32("security", "login_timeout_minutes", 15);
+            let max_attempts = if user.id.is_empty() {
+                legacy_max
+            } else {
+                account_max_attempts
+            };
             let (attempts_after, lock_now) = if user.id.is_empty() {
                 let key = LegacyLoginThrottle::key(
                     preselected
@@ -2089,6 +2111,7 @@ impl ConnRouter {
                 );
                 self.login.remove(&conn_id);
                 self.caps.remove(&conn_id);
+                (self.close_conn)(conn_id);
                 return;
             }
             ctx.stage = Stage::AwaitingIdentifier;
@@ -4768,28 +4791,39 @@ mod tests {
         let mut router = ConnRouter::new();
         let mut rx = router.take_auth_rx().unwrap();
         let hash = legacy_hash("hunter2");
+        // Account threshold is 3 but the legacy one is separate (default
+        // 10), so attempts 3..9 must NOT lock the character.
         // Fresh connection per attempt: the lock must follow the
         // character, not the socket.
-        for conn in 1..=3 {
+        let legacy_max = ConnId::try_from(DEFAULT_LEGACY_MAX_LOGIN_ATTEMPTS).unwrap();
+        for conn in 1..=legacy_max {
             let (tx, mut orx) = tokio::sync::mpsc::channel(64);
             router.on_connect(conn, tx, &world);
             park_at_password(&mut router, conn, &hash);
             attempt(&mut router, &mut rx, &mut world, &pool, conn, "wrong").await;
             let out = drain(&mut orx);
             assert!(out.contains("Invalid credentials"), "attempt {conn}: {out}");
-            if conn == 3 {
-                assert!(out.contains("locked"), "3rd failure should lock: {out}");
+            if conn < legacy_max {
+                assert!(
+                    !out.contains("locked"),
+                    "attempt {conn} must not lock: {out}"
+                );
+            } else {
+                assert!(out.contains("locked"), "last failure should lock: {out}");
             }
         }
         // Correct password is now refused without ever verifying.
         let (tx, mut orx) = tokio::sync::mpsc::channel(64);
-        router.on_connect(4, tx, &world);
-        park_at_password(&mut router, 4, &hash);
-        router.on_line(4, "hunter2".into(), &pool, &mut world).await;
+        let next = legacy_max + 1;
+        router.on_connect(next, tx, &world);
+        park_at_password(&mut router, next, &hash);
+        router
+            .on_line(next, "hunter2".into(), &pool, &mut world)
+            .await;
         let out = drain(&mut orx);
         assert!(out.contains("temporarily locked"), "{out}");
         assert!(matches!(
-            router.login.get(&4).unwrap().stage,
+            router.login.get(&next).unwrap().stage,
             Stage::AwaitingIdentifier
         ));
         assert!(
@@ -4802,7 +4836,12 @@ mod tests {
         assert!(
             router
                 .legacy_throttle
-                .locked_for(&key, later, 3, lock_window(15))
+                .locked_for(
+                    &key,
+                    later,
+                    DEFAULT_LEGACY_MAX_LOGIN_ATTEMPTS,
+                    lock_window(15)
+                )
                 .is_none()
         );
     }
@@ -4813,6 +4852,14 @@ mod tests {
         let mut world = auth_world(0);
         let pool = lazy_pool();
         let mut router = ConnRouter::new();
+        thread_local! {
+            static CLOSED: std::cell::RefCell<Vec<ConnId>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        router.close_conn = |c| {
+            CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
         let mut rx = router.take_auth_rx().unwrap();
         let hash = legacy_hash("hunter2");
         let (tx, mut orx) = tokio::sync::mpsc::channel(256);
@@ -4828,6 +4875,8 @@ mod tests {
         assert!(!router.login.contains_key(&1));
         assert_eq!(router.live_connections(), 0);
         assert!(drain(&mut orx).contains("Too many failed login attempts"));
+        // ...and the socket was actually asked to close.
+        assert_eq!(CLOSED.with(|v| v.borrow().clone()), vec![1]);
     }
 
     #[tokio::test(flavor = "current_thread")]

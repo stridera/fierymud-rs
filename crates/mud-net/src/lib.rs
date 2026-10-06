@@ -117,7 +117,7 @@ pub struct Limits {
 }
 
 /// Default per-IP open-connection cap.
-pub const DEFAULT_MAX_PER_IP: usize = 5;
+pub const DEFAULT_MAX_PER_IP: usize = 10;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_PRE_LOGIN_IDLE: Duration = Duration::from_secs(120);
 const DEFAULT_PRE_LOGIN_TOTAL: Duration = Duration::from_secs(15 * 60);
@@ -393,6 +393,36 @@ fn throttle_allow(st: &mut GateState, ip: IpAddr, now: Instant) -> Throttle {
     Throttle::Allow
 }
 
+/// Why a freshly accepted socket was turned away.
+enum Refusal {
+    /// Dropped silently (banned or rate-throttled peers get no courtesy).
+    Silent,
+    /// Dropped after a one-line explanation of a capacity limit.
+    Notice(&'static str),
+}
+
+const NOTICE_PER_IP: &str =
+    "Too many connections from your address. Please close other sessions and try again.\r\n";
+const NOTICE_FULL: &str = "The server is full. Please try again later.\r\n";
+/// Budget for writing a refusal notice before the socket is dropped.
+const REFUSAL_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Best-effort write of a refusal notice, then close. Runs detached so
+/// a slow peer can't stall the accept loop; bounded by
+/// [`REFUSAL_WRITE_TIMEOUT`].
+fn send_refusal<S>(mut stream: S, notice: &'static str)
+where
+    S: AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(REFUSAL_WRITE_TIMEOUT, async {
+            let _ = stream.write_all(notice.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        })
+        .await;
+    });
+}
+
 /// Ban + admission check for a freshly accepted socket, logging the
 /// refusal reason. `kind` is `""` or `" TLS"` for log text.
 fn admit_or_log(
@@ -401,28 +431,28 @@ fn admit_or_log(
     conn_id: ConnId,
     limits: &Limits,
     kind: &str,
-) -> Option<ConnGuard> {
+) -> Result<ConnGuard, Refusal> {
     if banned(peer.ip()) {
         warn!(%peer, "banlist: refusing{kind} connection");
-        return None;
+        return Err(Refusal::Silent);
     }
     match gate.admit(peer.ip(), conn_id, limits, Instant::now()) {
-        Ok(guard) => Some(guard),
+        Ok(guard) => Ok(guard),
         Err(Reject::Throttled { first: true }) => {
             warn!(%peer, "throttle: rejecting{kind} connection — over rate limit");
-            None
+            Err(Refusal::Silent)
         }
         Err(Reject::Throttled { first: false }) => {
             debug!(%peer, "throttle: rejecting{kind} connection (continuing flood)");
-            None
+            Err(Refusal::Silent)
         }
         Err(Reject::MaxConnections) => {
             warn!(%peer, max = limits.max_connections, "max_connections reached; refusing{kind}");
-            None
+            Err(Refusal::Notice(NOTICE_FULL))
         }
         Err(Reject::PerIp) => {
             warn!(%peer, max = limits.max_per_ip, "per-IP connection cap reached; refusing{kind}");
-            None
+            Err(Refusal::Notice(NOTICE_PER_IP))
         }
     }
 }
@@ -458,9 +488,15 @@ async fn accept_plain(
         let (stream, peer) = listener.accept().await?;
         let conn_id = next_id;
         next_id += 1;
-        // On refusal `stream` is dropped, closing the socket.
-        let Some(guard) = admit_or_log(&gate, peer, conn_id, &limits, "") else {
-            continue;
+        // On refusal the socket is closed (after a short notice for
+        // capacity limits).
+        let guard = match admit_or_log(&gate, peer, conn_id, &limits, "") {
+            Ok(g) => g,
+            Err(Refusal::Notice(n)) => {
+                send_refusal(stream, n);
+                continue;
+            }
+            Err(Refusal::Silent) => continue,
         };
         let inbound = inbound.clone();
         tokio::spawn(async move {
@@ -539,8 +575,14 @@ pub async fn serve_tls(
         let (stream, peer) = listener.accept().await?;
         let conn_id = next_id;
         next_id += 1;
-        let Some(guard) = admit_or_log(&gate, peer, conn_id, &limits, " TLS") else {
-            continue;
+        // The notice goes out in plaintext, before any TLS handshake.
+        let guard = match admit_or_log(&gate, peer, conn_id, &limits, " TLS") {
+            Ok(g) => g,
+            Err(Refusal::Notice(n)) => {
+                send_refusal(stream, n);
+                continue;
+            }
+            Err(Refusal::Silent) => continue,
         };
         let acceptor = acceptor.clone();
         let inbound = inbound.clone();
@@ -1358,7 +1400,7 @@ mod limit_tests {
     fn fast_limits() -> Limits {
         Limits {
             max_connections: usize::MAX,
-            max_per_ip: DEFAULT_MAX_PER_IP,
+            max_per_ip: 5,
             handshake_timeout: Duration::from_millis(100),
             pre_login_idle: Duration::from_millis(200),
             pre_login_total: Duration::from_secs(30),
@@ -1490,7 +1532,11 @@ mod limit_tests {
 
     #[tokio::test]
     async fn sixth_connection_from_one_ip_refused_other_ip_allowed() {
-        let (addr, gate, _rx) = start(fast_limits()).await;
+        let (addr, gate, _rx) = start(Limits {
+            max_per_ip: 5,
+            ..fast_limits()
+        })
+        .await;
         let mut held = Vec::new();
         for _ in 0..5 {
             let mut c = connect_from("127.0.0.2", addr).await;
@@ -1502,9 +1548,16 @@ mod limit_tests {
         wait_active(&gate, 5).await;
 
         let mut sixth = connect_from("127.0.0.2", addr).await;
+        let mut notice = Vec::new();
         assert!(
-            closed_by_peer(&mut sixth).await,
+            tokio::time::timeout(WAIT, sixth.read_to_end(&mut notice))
+                .await
+                .is_ok(),
             "6th connection from same IP must be refused"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&notice),
+            "Too many connections from your address. Please close other sessions and try again.\r\n"
         );
 
         let mut other = connect_from("127.0.0.3", addr).await;

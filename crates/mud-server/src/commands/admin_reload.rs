@@ -382,6 +382,13 @@ fn format_reload(label: &str, s: &mud_world::ReloadStats) -> String {
             s.rooms_orphaned
         ));
     }
+    if s.mob_protos_orphaned + s.object_protos_orphaned > 0 {
+        out.push_str(&format!(
+            "Note: {} mob and {} object prototype(s) no longer exist in the database; \
+             they stay loaded for existing instances (see the log for keys).\r\n",
+            s.mob_protos_orphaned, s.object_protos_orphaned
+        ));
+    }
     out.push_str("Live mobs and items are unchanged; new prototypes apply to future spawns.\r\n");
     out
 }

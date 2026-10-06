@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
 use mud_db::{
@@ -2257,37 +2257,46 @@ pub struct ReloadStats {
     pub rooms_orphaned: usize,
     pub mob_protos: usize,
     pub object_protos: usize,
+    /// Prototypes present in the live catalogs but no longer in the DB.
+    /// Kept so existing instances keep their lookup; not spawnable from
+    /// new resets (resets resolve against the DB rows).
+    pub mob_protos_orphaned: usize,
+    pub object_protos_orphaned: usize,
     pub mob_resets: usize,
     pub object_resets: usize,
 }
 
 /// Swap freshly loaded prototypes into `existing`. With `zone = Some(z)`
-/// only entries whose key zone is `z` are replaced (removed ones disappear,
-/// new ones appear); with `None` the whole map is replaced. Returns the
-/// number of entries now present in scope.
+/// only entries whose key zone is `z` are considered; with `None` every
+/// zone is. In-scope entries present in `fresh` are inserted or
+/// overwritten. In-scope entries that vanished from the DB are KEPT so
+/// instances already spawned from them keep their lookup (names,
+/// stats, descriptions); their keys are returned as orphans. Returns the
+/// number of in-scope entries loaded from `fresh` and the orphaned keys
+/// (sorted).
 #[allow(clippy::implicit_hasher)]
 pub fn merge_prototypes<T>(
     existing: &mut HashMap<(i32, i32), T>,
     fresh: HashMap<(i32, i32), T>,
     zone: Option<i32>,
-) -> usize {
-    match zone {
-        None => {
-            *existing = fresh;
-            existing.len()
-        }
-        Some(z) => {
-            existing.retain(|(kz, _), _| *kz != z);
-            let mut n = 0;
-            for (k, v) in fresh {
-                if k.0 == z {
-                    existing.insert(k, v);
-                    n += 1;
-                }
-            }
-            n
+) -> (usize, Vec<(i32, i32)>) {
+    let in_scope = |k: &(i32, i32)| zone.is_none_or(|z| k.0 == z);
+    let mut loaded = 0;
+    let mut seen: HashSet<(i32, i32)> = HashSet::new();
+    for (k, v) in fresh {
+        if in_scope(&k) {
+            seen.insert(k);
+            existing.insert(k, v);
+            loaded += 1;
         }
     }
+    let mut orphaned: Vec<(i32, i32)> = existing
+        .keys()
+        .filter(|k| in_scope(k) && !seen.contains(k))
+        .copied()
+        .collect();
+    orphaned.sort_unstable();
+    (loaded, orphaned)
 }
 
 /// Strip every component [`apply_room_flags`] may have attached so it can be
@@ -2322,9 +2331,12 @@ fn clear_room_flags(world: &mut World, entity: Entity) {
 /// (`MobPrototypes` / `ObjectPrototypes`), zone and room definitions
 /// (name, description, flags, exits, extra descriptions) and reset
 /// catalogs are replaced; mobs/items already in the world keep their
-/// current state and new prototypes apply to future spawns. Rooms removed
-/// from the DB are left in place and reported as orphaned. Exit door state
-/// of reloaded rooms resets to the authored default.
+/// current state and new prototypes apply to future spawns. Rooms and
+/// prototypes removed from the DB are left in place and reported as
+/// orphaned. The `WakeEffectCatalog` is refreshed for the affected zones. Exit door state
+/// of reloaded rooms resets to the authored default; for a single-zone
+/// reload the exits of other zones' rooms that lead into it are
+/// re-resolved (and reset) as well so cross-zone doors stay consistent.
 #[allow(clippy::too_many_lines)]
 pub async fn reload_zones(
     world: &mut World,
@@ -2343,6 +2355,7 @@ pub async fn reload_zones(
     let extra_rows = mud_db::room_extra_descriptions::list_extras(pool).await?;
     let mob_reset_rows = mob_resets::list_all(pool).await?;
     let object_reset_rows = object_resets::list_all(pool).await?;
+    let fresh_wake = crate::load_wake_effect_catalog(pool).await?;
 
     if let Some(z) = zone
         && !zone_rows.iter().any(|r| r.id == z)
@@ -2350,17 +2363,55 @@ pub async fn reload_zones(
         return Err(sqlx::Error::RowNotFound);
     }
 
-    // Prototypes.
-    stats.mob_protos = merge_prototypes(
+    // Prototypes. Ones that vanished from the DB stay in the catalogs
+    // (live instances still look them up) and are logged as orphans.
+    let (loaded, mob_orphans) = merge_prototypes(
         &mut world.resource_mut::<MobPrototypes>().by_key,
         fresh_mobs.by_key,
         zone,
     );
-    stats.object_protos = merge_prototypes(
+    stats.mob_protos = loaded;
+    stats.mob_protos_orphaned = mob_orphans.len();
+    let (loaded, object_orphans) = merge_prototypes(
         &mut world.resource_mut::<ObjectPrototypes>().by_key,
         fresh_objects.by_key,
         zone,
     );
+    stats.object_protos = loaded;
+    stats.object_protos_orphaned = object_orphans.len();
+    if !mob_orphans.is_empty() {
+        warn!(
+            ?mob_orphans,
+            "mob prototypes no longer in DB; kept as orphaned"
+        );
+    }
+    if !object_orphans.is_empty() {
+        warn!(
+            ?object_orphans,
+            "object prototypes no longer in DB; kept as orphaned"
+        );
+    }
+
+    // Wake-effect junction rows: replace the in-scope slice so removed
+    // or edited attachments take effect (rooms keyed by room zone,
+    // objects by prototype zone).
+    {
+        let mut cat = world.get_resource_or_insert_with(crate::WakeEffectCatalog::default);
+        cat.by_room.retain(|(z, _), _| !in_scope(*z));
+        cat.by_object.retain(|(z, _), _| !in_scope(*z));
+        cat.by_room.extend(
+            fresh_wake
+                .by_room
+                .into_iter()
+                .filter(|(k, _)| in_scope(k.0)),
+        );
+        cat.by_object.extend(
+            fresh_wake
+                .by_object
+                .into_iter()
+                .filter(|(k, _)| in_scope(k.0)),
+        );
+    }
 
     // Zones.
     for z in zone_rows.iter().filter(|z| in_scope(z.id)) {
@@ -2469,7 +2520,17 @@ pub async fn reload_zones(
             exits.0.clear();
         }
     }
-    for e in exit_rows.into_iter().filter(|e| in_scope(e.room_zone_id)) {
+    // Exits from rooms in OTHER zones that point into the reloaded zone
+    // are re-resolved too (overwriting just that direction), so links to
+    // newly added rooms connect and both sides of a cross-zone door share
+    // the freshly reset state instead of leaving a one-sided door.
+    let enters_scope = |e: &room_exits::RoomExit| {
+        zone.is_some_and(|z| e.room_zone_id != z && e.to_zone_id == Some(z))
+    };
+    for e in exit_rows
+        .into_iter()
+        .filter(|e| in_scope(e.room_zone_id) || enters_scope(e))
+    {
         let Some(&source) = room_index.get(&(e.room_zone_id, e.room_id)) else {
             continue;
         };
@@ -2590,23 +2651,27 @@ mod reload_tests {
     }
 
     #[test]
-    fn merge_prototypes_replaces_only_requested_zone() {
+    fn merge_prototypes_replaces_only_requested_zone_and_keeps_orphans() {
         let mut existing = map(&[(1, 1), (1, 2), (2, 1)], "old");
         let fresh = map(&[(1, 2), (1, 3), (2, 1)], "new");
-        let n = merge_prototypes(&mut existing, fresh, Some(1));
-        assert_eq!(n, 2);
-        assert!(!existing.contains_key(&(1, 1)), "removed proto dropped");
+        let (n, orphaned) = merge_prototypes(&mut existing, fresh, Some(1));
+        assert_eq!(n, 2, "only zone-1 entries count as loaded");
+        assert_eq!(orphaned, vec![(1, 1)]);
+        assert_eq!(existing[&(1, 1)], "old", "vanished proto kept for lookup");
         assert_eq!(existing[&(1, 2)], "new");
         assert_eq!(existing[&(1, 3)], "new");
         assert_eq!(existing[&(2, 1)], "old", "other zone untouched");
     }
 
     #[test]
-    fn merge_prototypes_all_zones_replaces_everything() {
+    fn merge_prototypes_all_zones_overwrites_and_keeps_orphans() {
         let mut existing = map(&[(1, 1), (2, 1)], "old");
-        let n = merge_prototypes(&mut existing, map(&[(3, 1)], "new"), None);
-        assert_eq!(n, 1);
-        assert_eq!(existing.len(), 1);
+        let (n, orphaned) = merge_prototypes(&mut existing, map(&[(2, 1), (3, 1)], "new"), None);
+        assert_eq!(n, 2);
+        assert_eq!(orphaned, vec![(1, 1)]);
+        assert_eq!(existing.len(), 3);
+        assert_eq!(existing[&(1, 1)], "old");
+        assert_eq!(existing[&(2, 1)], "new");
         assert_eq!(existing[&(3, 1)], "new");
     }
 }

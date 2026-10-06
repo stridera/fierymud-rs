@@ -27,12 +27,13 @@ mod triggers;
 mod wander;
 mod weather;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bevy_ecs::prelude::*;
 use mud_net::{Inbound, InboundKind};
-use tokio::signal;
-use tokio::sync::mpsc;
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{error, info, info_span};
 use tracing_subscriber::EnvFilter;
@@ -315,11 +316,11 @@ async fn main() {
         }
     };
     // Per-source-IP open-connection cap so one host can't fill every
-    // slot above. `server.max_connections_per_ip` (default 5); non-
+    // slot above. `server.max_connections_per_ip` (default 10); non-
     // positive means unlimited.
     let max_per_ip = {
         let cfg = world.resource::<mud_world::RuntimeConfig>();
-        let raw = cfg.get_i32("server", "max_connections_per_ip", 5);
+        let raw = cfg.get_i32("server", "max_connections_per_ip", 10);
         if raw > 0 {
             usize::try_from(raw).unwrap_or(usize::MAX)
         } else {
@@ -471,10 +472,28 @@ async fn main() {
     let mut last_auth_sync = std::time::Instant::now();
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    // One long-lived listener for SIGINT and SIGTERM. Handlers are
+    // installed here (before the loop) and `Notify::notify_one` stores
+    // a permit, so a signal that lands mid-tick is still seen the next
+    // time the loop polls `shutdown.notified()`.
+    let shutdown = Arc::new(Notify::new());
+    {
+        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let shutdown = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sigint.recv() => info!("SIGINT received"),
+                _ = sigterm.recv() => info!("SIGTERM received"),
+            }
+            shutdown.notify_one();
+        });
+    }
+
     info!(
         rate_hz = TICK_HZ,
         listen_addr = %listen_addr,
-        "tick loop running; Ctrl-C to stop"
+        "tick loop running; Ctrl-C / SIGTERM to stop"
     );
 
     loop {
@@ -637,7 +656,7 @@ async fn main() {
                     }
                 }
             }
-            _ = signal::ctrl_c() => {
+            () = shutdown.notified() => {
                 info!("shutdown signal received");
                 break;
             }
