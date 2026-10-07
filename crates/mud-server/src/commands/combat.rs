@@ -1886,14 +1886,18 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
         "use",
     );
 }
-/// Area attacks hit every mob in the room; drop other players' pets the PK
-/// rule forbids `player` to attack (silently, as legacy `mass_attack_ok`).
+/// Area attacks hit every mob in the room; drop the attacker's own group
+/// (own pets, followers and group members' pets, as legacy `area_attack_target`
+/// skips `is_grouped` and `master` links) and other players' pets the PK rule
+/// forbids `player` to attack (silently, as legacy `mass_attack_ok`).
 fn skip_forbidden_pets(world: &mut World, player: Entity, targets: Vec<Entity>) -> Vec<Entity> {
+    let my_root = super::group_root(world, player);
     targets
         .into_iter()
         .filter(|t| {
-            super::attack_ok::pet_owner(world, *t).is_none()
-                || super::attack_ok::attack_ok(world, player, *t, false)
+            super::group_root(world, *t) != my_root
+                && (super::attack_ok::pet_owner(world, *t).is_none()
+                    || super::attack_ok::attack_ok(world, player, *t, false))
         })
         .collect()
 }
