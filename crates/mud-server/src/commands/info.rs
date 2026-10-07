@@ -5374,14 +5374,32 @@ pub(crate) fn cmd_search(world: &mut World, player: Entity, _args: &str) {
     if let Ok(mut e) = world.get_entity_mut(player) {
         e.insert(RevealedExits { set: next });
     }
+    // Legacy wording: "You have found a hidden monolith to the east."
+    // The noun is the first word of the exit's first keyword ("door"
+    // when it has none); plural nouns drop the article.
     let mut out = String::new();
+    let mut others = String::new();
     for dir in &newly {
-        out.push_str(&format!(
-            "You discover a hidden exit to the {}!\r\n",
-            direction_name(*dir),
+        let kw = world
+            .get::<Exits>(room)
+            .and_then(|e| e.0.get(dir))
+            .and_then(|ed| ed.keywords.first())
+            .and_then(|k| k.split_whitespace().next())
+            .unwrap_or("door")
+            .to_string();
+        let article = if kw.ends_with('s') { "" } else { " a" };
+        let place = match dir {
+            Direction::Up => "in the ceiling".to_string(),
+            Direction::Down => "in the floor".to_string(),
+            _ => format!("to the {}", direction_name(*dir)),
+        };
+        out.push_str(&format!("You have found{article} hidden {kw} {place}.\r\n"));
+        others.push_str(&format!(
+            "{player_name} has found{article} hidden {kw} {place}.\r\n"
         ));
     }
     send_rendered(world, player, &out);
+    broadcast_room_except_players_rendered(world, room, &[player], &others);
 }
 
 inventory::submit! {

@@ -444,6 +444,9 @@ mod release;
 mod room_chat;
 #[path = "commands/save.rs"]
 mod save;
+#[cfg(test)]
+#[path = "commands/search_tests.rs"]
+mod search_tests;
 #[path = "commands/setrecall.rs"]
 mod setrecall;
 #[path = "commands/skills_extra.rs"]
@@ -7931,20 +7934,16 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             .map_or("Unknown", |s| sector_label(s.0));
         // Exits dict: direction → destination composite num. Doors
         // dict: direction → "closed" / "locked" for non-Open
-        // states. Hidden exits omitted entirely (the same way
+        // states. Hidden exits omitted until found (the same way
         // `look` hides them from unsearched rooms).
         let mut exit_entries: Vec<String> = Vec::new();
         let mut door_entries: Vec<String> = Vec::new();
         if let Some(exits) = world.get::<Exits>(room) {
             for (dir, data) in &exits.0 {
-                if data.is_hidden {
-                    continue;
-                }
-                // Exits into a god zone are not mapped for mortals.
-                if data
-                    .to
-                    .is_some_and(|dest| !crate::room_access::room_visible_to(world, target, dest))
-                {
+                // Undiscovered hidden exits and exits into a god zone
+                // are not mapped; hidden exits the player has found
+                // via `search` are.
+                if exit_is_hidden_to(world, target, room, *dir, data) {
                     continue;
                 }
                 let dir_name = direction_name(*dir);
