@@ -619,7 +619,7 @@ pub fn effects_tick(world: &mut World) {
                     q.iter(world).any(|(_, applied)| applied.0 == target)
                 };
                 if !still_invisible {
-                    try_remove::<mud_world::Invisible>(world, target);
+                    crate::commands::invisibility_faded(world, target);
                 }
             }
         }

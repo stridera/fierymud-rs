@@ -266,22 +266,156 @@ fn visible_broadcasts_stay_silent_for_an_invisible_sender() {
     assert!(drain(&mut fx.wrx).contains("Ghost leaves north."));
 }
 
+// -- every damage source breaks invisibility ------------------------------
+
 #[test]
-fn combat_swing_lines_say_someone_for_an_invisible_attacker() {
-    // Whatever the swing rolls (hit / miss / dodge), neither the victim
-    // nor a bystander is told the invisible attacker's name.
+fn any_damage_dealt_breaks_invisibility() {
+    // `apply_damage_from` is the shared sink for melee, skills (bash,
+    // hitall, taunt, class strikes) and spell damage.
     let mut fx = Fx::new();
     let ogre = fx.mob("an ogre", 0);
-    let (bystander, mut brx) = player_in(&mut fx.world, fx.room);
-    fx.world.entity_mut(bystander).insert(Named {
-        name: "Bystander".into(),
+    super::apply_damage_from(&mut fx.world, ogre, 5, fx.ghost);
+    assert!(fx.world.get::<Invisible>(fx.ghost).is_none());
+    assert!(drain(&mut fx.wrx).contains("Ghost snaps into visibility."));
+}
+
+#[test]
+fn zero_damage_and_self_damage_do_not_break_invisibility() {
+    let mut fx = Fx::new();
+    let ogre = fx.mob("an ogre", 0);
+    super::apply_damage_from(&mut fx.world, ogre, 0, fx.ghost);
+    super::apply_damage_from(&mut fx.world, fx.ghost, 5, fx.ghost);
+    assert!(fx.world.get::<Invisible>(fx.ghost).is_some());
+}
+
+// -- expiry ---------------------------------------------------------------
+
+#[test]
+fn expiry_announces_refreshes_the_panel_and_lets_mobs_aggro() {
+    use crate::TickCount;
+    let mut fx = Fx::new();
+    let wolf = fx.mob("a wolf", -1000);
+    fx.world.spawn((
+        mud_world::EffectInstance {
+            kind: 1,
+            name: "invisible".into(),
+            strength: 1,
+            remaining_secs: 1,
+            source: mud_world::EffectSource::Spell,
+            ability_id: None,
+        },
+        mud_world::AppliedTo(fx.ghost),
+        mud_world::InvisibleSource,
+    ));
+    let _ = drain(&mut fx.wrx);
+    let _ = drain(&mut fx.grx);
+    fx.world.insert_resource(TickCount(10));
+    crate::effects::effects_tick(&mut fx.world);
+    assert!(fx.world.get::<Invisible>(fx.ghost).is_none());
+    let seen = drain(&mut fx.wrx);
+    assert!(seen.contains("Ghost fades back into view."), "{seen}");
+    assert!(seen.contains("Room.Players"), "panel refreshed: {seen}");
+    assert!(drain(&mut fx.grx).contains("You fade back into view."));
+    assert_eq!(fx.world.get::<Fighting>(wolf).map(|f| f.0), Some(fx.ghost));
+}
+
+// -- MobDefaultEffects ----------------------------------------------------
+
+#[test]
+fn default_effect_detect_invisible_lets_a_spawned_mob_aggro() {
+    use mud_world::{EffectCatalog, EffectDef, MobDefaultEffect, MobDefaultEffectCatalog};
+    let mut fx = Fx::new();
+    let mut effects = EffectCatalog::default();
+    effects.by_id.insert(
+        4,
+        EffectDef {
+            id: 4,
+            name: "status".into(),
+            description: None,
+            effect_type: "status".into(),
+            tags: vec![],
+            presence_override: None,
+            default_params: serde_json::json!({"flag": "detect_invisible"}),
+            prevents_speaking: false,
+            prevents_casting: false,
+            prevents_movement: false,
+            on_apply: None,
+            on_tick: None,
+            on_remove: None,
+        },
+    );
+    fx.world.insert_resource(effects);
+    let mut defaults = MobDefaultEffectCatalog::default();
+    defaults.by_key.insert(
+        (30, 1),
+        vec![MobDefaultEffect {
+            effect_id: 4,
+            strength: 1,
+            modifier_data: serde_json::json!({}),
+        }],
+    );
+    fx.world.insert_resource(defaults);
+    let blind = fx.mob("a blind wolf", -1000);
+    let seeing = fx.mob("a seeing wolf", -1000);
+    mud_world::mob_effects::apply_mob_default_effects(&mut fx.world, seeing, (30, 1));
+    assert!(fx.world.get::<DetectInvis>(seeing).is_some());
+    assert!(fx.world.get::<DetectInvis>(blind).is_none());
+    try_engage_aggressive_mob(&mut fx.world, fx.ghost, fx.room);
+    assert_eq!(
+        fx.world.get::<Fighting>(seeing).map(|f| f.0),
+        Some(fx.ghost)
+    );
+    assert!(fx.world.get::<Fighting>(blind).is_none());
+}
+
+// -- anonymise_for --------------------------------------------------------
+
+#[test]
+fn anonymise_matches_whole_words_only() {
+    let mut fx = Fx::new();
+    fx.world
+        .entity_mut(fx.ghost)
+        .insert(Named { name: "Al".into() });
+    let out = super::anonymise_for(
+        &fx.world,
+        fx.watcher,
+        &[(fx.ghost, "Al")],
+        "Al hits Alric; Alric hits Al.\r\n",
+    );
+    assert_eq!(out, "Someone hits Alric; Alric hits someone.\r\n");
+}
+
+#[test]
+fn anonymise_handles_the_capitalised_mob_form() {
+    let mut fx = Fx::new();
+    fx.world.entity_mut(fx.ghost).insert(Named {
+        name: "a goblin".into(),
     });
-    engage_combat(&mut fx.world, fx.ghost, ogre, fx.room);
-    let _ = drain(&mut brx);
-    for _ in 0..8 {
-        crate::combat::engage_swing_now(&mut fx.world, fx.ghost, ogre);
-    }
-    let out = drain(&mut brx);
-    assert!(out.contains("Someone"), "{out}");
-    assert!(!out.contains("Ghost"), "{out}");
+    let out = super::anonymise_for(
+        &fx.world,
+        fx.watcher,
+        &[(fx.ghost, "a goblin")],
+        "<dim>A goblin swings at Bob; Bob dodges a goblin.</>\r\n",
+    );
+    assert_eq!(
+        out,
+        "<dim>Someone swings at Bob; Bob dodges someone.</>\r\n"
+    );
+}
+
+// -- where ----------------------------------------------------------------
+
+#[test]
+fn where_name_hides_invisible_players_from_mortals_but_not_gods() {
+    let mut fx = Fx::new();
+    fx.world.entity_mut(fx.ghost).insert(mud_world::Online);
+    dispatch(&mut fx.world, fx.watcher, "where ghost");
+    let out = drain(&mut fx.wrx);
+    assert!(out.contains("isn't online"), "{out}");
+    fx.world
+        .entity_mut(fx.watcher)
+        .insert(account(UserRole::Immortal));
+    dispatch(&mut fx.world, fx.watcher, "where ghost");
+    let out = drain(&mut fx.wrx);
+    assert!(out.contains("Ghost is in"), "{out}");
 }

@@ -1606,16 +1606,26 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
     let player_name = name_of(world, player);
 
     if !success {
+        // Getting caught breaks invisibility (legacy `appear()`) before
+        // the victim is told who it was.
+        crate::commands::break_invisibility(world, player);
         send_to(world, player, "Oops...\r\n");
+        let thief_seen = crate::commands::cap_sentence_start(&crate::commands::seen_name(
+            world,
+            target,
+            player,
+            &player_name,
+        ));
         send_rendered(
             world,
             target,
-            &format!("<b:yellow>{player_name} tried to steal something from you!</>\r\n"),
+            &format!("<b:yellow>{thief_seen} tried to steal something from you!</>\r\n"),
         );
-        broadcast_room_except_rendered(
+        crate::commands::broadcast_room_anonymised(
             world,
             room,
             &[player, target],
+            &[(player, &player_name), (target, &target_name)],
             &format!("<b:yellow>{player_name} tries to steal from {target_name}.</>\r\n"),
         );
         // Caught — make the target aggro the thief. For mobs, push

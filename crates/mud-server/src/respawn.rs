@@ -229,6 +229,7 @@ pub fn respawn_tick(world: &mut World) {
         // uses, so the respawn matches the original outfit, minus any
         // item whose world-wide cap is already met.
         let new_mob = em.id();
+        mud_world::mob_effects::apply_mob_default_effects(world, new_mob, proto_key);
         let has_gear = world
             .get_resource::<MobGearCatalog>()
             .is_some_and(|c| c.by_reset.contains_key(&entry.reset_id));

@@ -10789,8 +10789,10 @@ pub(crate) fn seen_name(world: &World, observer: Entity, actor: Entity, name: &s
 }
 
 /// Rewrite `raw_msg` for `observer`, replacing each `(actor, name)`
-/// pair's name with "someone" ("Someone" at the very start of the
-/// message) when the observer cannot see that actor.
+/// pair's name with "someone" ("Someone" at the start of a sentence)
+/// when the observer cannot see that actor. Whole-word matches only
+/// ("Al" never matches inside "Alric"); both the name as given and its
+/// sentence-capitalised form ("A goblin") are recognised.
 #[must_use]
 pub(crate) fn anonymise_for(
     world: &World,
@@ -10803,16 +10805,60 @@ pub(crate) fn anonymise_for(
         if name.is_empty() || can_see_player(world, observer, actor) {
             continue;
         }
-        let cap = cap_sentence_start(name);
-        let tail = if let Some(rest) = out.strip_prefix(&cap) {
-            Some(rest.to_string())
+        out = replace_name_whole_word(&out, name);
+    }
+    out
+}
+
+/// True when `text` (everything before a candidate name) leaves the
+/// name at the start of a sentence: empty, or ending in a newline once
+/// trailing `<tag>` markup is ignored.
+fn at_sentence_start(text: &str) -> bool {
+    let mut t = text;
+    while t.ends_with('>') {
+        match t.rfind('<') {
+            Some(i) => t = &t[..i],
+            None => break,
+        }
+    }
+    t.is_empty() || t.ends_with('\n')
+}
+
+fn replace_name_whole_word(msg: &str, name: &str) -> String {
+    let cap = cap_sentence_start(name);
+    let mut variants: Vec<&str> = vec![&cap];
+    if cap != name {
+        variants.push(name);
+    }
+    let mut out = String::with_capacity(msg.len());
+    let mut i = 0;
+    while i < msg.len() {
+        let rest = &msg[i..];
+        let before_ok = !msg[..i]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric);
+        let hit = variants.iter().find(|v| {
+            before_ok
+                && rest.starts_with(**v)
+                && !rest[v.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphanumeric)
+        });
+        if let Some(v) = hit {
+            out.push_str(if at_sentence_start(&msg[..i]) {
+                "Someone"
+            } else {
+                "someone"
+            });
+            i += v.len();
+        } else if let Some(ch) = rest.chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
         } else {
-            out.strip_prefix(name).map(str::to_string)
-        };
-        out = match tail {
-            Some(rest) => format!("Someone{}", rest.replace(name, "someone")),
-            None => out.replace(name, "someone"),
-        };
+            break;
+        }
     }
     out
 }
@@ -10869,6 +10915,55 @@ pub(crate) fn break_invisibility(world: &mut World, entity: Entity) {
             &format!("{name} snaps into visibility.\r\n"),
         );
         refresh_room_players(world, room);
+    }
+    // The actor is now visible: mobs that would have aggroed it get
+    // their chance.
+    recheck_aggro_in_room(world, entity);
+}
+
+/// Magical invisibility ran out: the `Invisible` marker is already
+/// gone (or about to be) — tell the actor and the room, refresh the
+/// "who's here" panels and let aggressive mobs react. No-op when the
+/// actor wasn't invisible.
+pub(crate) fn invisibility_faded(world: &mut World, entity: Entity) {
+    if world.get::<mud_world::Invisible>(entity).is_none() {
+        return;
+    }
+    try_remove::<mud_world::Invisible>(world, entity);
+    send_to(world, entity, "You fade back into view.\r\n");
+    if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
+        let name = cap_sentence_start(&name_of(world, entity));
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[entity],
+            &format!("{name} fades back into view.\r\n"),
+        );
+        refresh_room_players(world, room);
+    }
+    recheck_aggro_in_room(world, entity);
+}
+
+/// Give the room's aggressive mobs a chance to attack `player`: a mob
+/// with a grudge first, then the alignment / formula rule. Used on
+/// room entry and whenever `player` becomes visible. Only idle,
+/// non-staff players are eligible, and each call engages at most one
+/// mob.
+pub(crate) fn recheck_aggro_in_room(world: &mut World, player: Entity) {
+    if world.get::<Player>(player).is_none() || world.get::<Fighting>(player).is_some() {
+        return;
+    }
+    if world
+        .get::<Account>(player)
+        .is_some_and(|a| a.role.rank() > UserRole::Player.rank())
+    {
+        return;
+    }
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        return;
+    };
+    if !try_engage_remembered_mob(world, player, room) {
+        try_engage_aggressive_mob(world, player, room);
     }
 }
 
@@ -17038,44 +17133,13 @@ pub(crate) fn invoke_ability_with(
                 {
                     try_insert(world, target_entity, mud_world::Stealth);
                 }
-                // Flying-flag status effects (FLY, WINGS_OF_HEAVEN,
-                // WINGS_OF_HELL) install the `Flying` marker so the
-                // movement-cost + drowning gates see the target as
-                // airborne. Removed by effects_tick when the last
-                // backing instance fades.
-                if flag == "fly" {
-                    try_insert(world, target_entity, mud_world::Flying);
-                }
-                // Bless-flag status effects (BLESS family) install
-                // the `Bless` marker so the combat hit_chance_pct
-                // reads it and adds +5 accuracy. Auto-removed by
-                // effects_tick when the last "bless" instance fades.
-                if flag == "bless" {
-                    try_insert(world, target_entity, mud_world::Bless);
-                }
-                // Sanctuary-flag status effects (SANCTUARY,
-                // SOULSHIELD) install the `Sanctuary` marker so
-                // apply_damage halves incoming damage. Auto-removed
-                // by effects_tick when the last "sanctuary"
-                // instance fades.
-                if flag == "sanctuary" {
-                    try_insert(world, target_entity, mud_world::Sanctuary);
-                }
-                // Detect-invisible-flag status effects (DETECT_INVIS,
-                // FARSEE family) install the `DetectInvis` marker so
-                // can_see_player lets the bearer perceive Invisible
-                // targets. Removed by effects_tick when the last
-                // backing instance fades.
-                if flag == "detect_invisible" {
-                    try_insert(world, target_entity, mud_world::DetectInvis);
-                }
-                // Haste-flag status effects (HASTE family) install the
-                // `Haste` marker so combat_tick runs the attacker for
-                // a second swing per round. Removed by effects_tick
-                // when the last backing "haste" instance fades.
-                if flag == "haste" {
-                    try_insert(world, target_entity, mud_world::Haste);
-                }
+                // Marker flags (fly, bless, sanctuary, detect_invisible,
+                // haste) install their marker component so the
+                // movement / combat / visibility gates see the target
+                // as flying, blessed, etc. Auto-removed by effects_tick
+                // when the last backing instance fades. The mapping is
+                // shared with `MobDefaultEffects`.
+                mud_world::mob_effects::install_flag_marker(world, target_entity, &flag);
                 // Empowered-flag status effects (HARNESS) install
                 // the `Empowered` marker. The damage arm in
                 // `invoke_ability_with` checks this on the caster
@@ -19958,6 +20022,9 @@ pub(crate) fn apply_damage_from(
 ) -> (bool, Option<&'static str>) {
     if amount > 0 && attacker != target {
         crate::combat::record_damager(world, target, attacker);
+        // Legacy `damage()` -> `appear()`: dealing damage of any kind
+        // (melee, skills, spells) breaks the attacker's invisibility.
+        break_invisibility(world, attacker);
     }
     apply_damage(world, target, amount)
 }
@@ -20822,25 +20889,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // per arrival to avoid a gang pile when several aggro mobs
     // share a room.
     for &mover in &movers {
-        if world.get::<Player>(mover).is_none() {
-            continue;
-        }
-        if world.get::<Fighting>(mover).is_some() {
-            continue;
-        }
-        if world
-            .get::<Account>(mover)
-            .is_some_and(|a| a.role.rank() > UserRole::Player.rank())
-        {
-            continue;
-        }
-        // Memory check first: a mob already nursing a grudge from
-        // an earlier swing engages before the alignment-tier
-        // generic-aggro check fires. Otherwise fall through to the
-        // alignment rule.
-        if !try_engage_remembered_mob(world, mover, target) {
-            try_engage_aggressive_mob(world, mover, target);
-        }
+        recheck_aggro_in_room(world, mover);
     }
 }
 

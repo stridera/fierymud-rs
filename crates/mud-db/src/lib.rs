@@ -36,6 +36,7 @@ pub mod levels;
 pub mod liquids;
 pub mod login_message;
 pub mod mail;
+pub mod mob_default_effects;
 pub mod mob_reset_equipment;
 pub mod mob_resets;
 pub mod mobs;

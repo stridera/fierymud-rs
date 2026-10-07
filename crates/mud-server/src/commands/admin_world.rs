@@ -776,7 +776,10 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
         let mut q =
             world.query_filtered::<(Entity, &Named, &Located), (With<Player>, With<Online>)>();
         q.iter(world)
-            .find(|(_, n, _)| n.name.eq_ignore_ascii_case(&needle))
+            .find(|(e, n, _)| {
+                n.name.eq_ignore_ascii_case(&needle)
+                    && crate::commands::can_see_player(world, player, *e)
+            })
             .map(|(e, _, l)| (e, l.0))
     };
     // A target standing in a god zone reads as offline to mortals.

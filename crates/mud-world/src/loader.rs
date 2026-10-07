@@ -25,11 +25,11 @@ use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
     ClassDef, ConsumableEffectBinding, ConsumableEffectCatalog, DamageComponent, EffectCatalog,
     EffectDef, HelpCatalog, HelpEntry as HelpEntryDef, LiquidCatalog, LiquidDef, LiquidIndex,
-    LiquidProto, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, ObjectAbilityCatalog,
-    ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry, RaceCatalog, RaceDef,
-    RaceStatCaps, SavingThrow, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering,
-    SocialDef, SocialRegistry, TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef,
-    TriggerEvent, WorldKeyIndex,
+    LiquidProto, MobDefaultEffect, MobDefaultEffectCatalog, MobProto, MobPrototypes,
+    MobResetCatalog, MobResetEntry, ObjectAbilityCatalog, ObjectProto, ObjectPrototypes,
+    ObjectResetCatalog, ObjectResetEntry, RaceCatalog, RaceDef, RaceStatCaps, SavingThrow,
+    ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef, SocialRegistry,
+    TargetingRule, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, WorldKeyIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -743,6 +743,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(mob_prototypes);
     world.insert_resource(object_prototypes);
     world.insert_resource(effect_catalog);
+    world.insert_resource(load_mob_default_effect_catalog(pool).await?);
     world.insert_resource(social_registry);
     world.insert_resource(ability_catalog);
     world.insert_resource(class_catalog);
@@ -1110,6 +1111,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             em.insert(Mountable);
         }
         let e = em.id();
+        crate::mob_effects::apply_mob_default_effects(world, e, proto_key);
         mobs_by_reset.insert(r.id, vec![e]);
         *mob_world_count.entry(proto_key).or_insert(0) += 1;
         stats.mob_resets_spawned += 1;
@@ -1502,6 +1504,27 @@ pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototy
         );
     }
     Ok(object_prototypes)
+}
+
+/// Load every `MobDefaultEffects` row into a fresh
+/// [`MobDefaultEffectCatalog`]. Shared by the boot loader and `areload`.
+pub async fn load_mob_default_effect_catalog(
+    pool: &PgPool,
+) -> sqlx::Result<MobDefaultEffectCatalog> {
+    let rows = mud_db::mob_default_effects::list_all(pool).await?;
+    let mut catalog = MobDefaultEffectCatalog::default();
+    for r in rows {
+        catalog
+            .by_key
+            .entry((r.mob_zone_id, r.mob_id))
+            .or_default()
+            .push(MobDefaultEffect {
+                effect_id: r.effect_id,
+                strength: r.strength,
+                modifier_data: r.modifier_data,
+            });
+    }
+    Ok(catalog)
 }
 
 /// Load every `Effect` row into a fresh [`EffectCatalog`]. Shared by the boot
@@ -2362,6 +2385,7 @@ pub async fn reload_zones(
     let equipment_rows = mob_reset_equipment::list_all(pool).await?;
     let content_rows = object_reset_contents::list_all(pool).await?;
     let fresh_wake = crate::load_wake_effect_catalog(pool).await?;
+    let fresh_mob_effects = load_mob_default_effect_catalog(pool).await?;
 
     if let Some(z) = zone
         && !zone_rows.iter().any(|r| r.id == z)
@@ -2395,6 +2419,19 @@ pub async fn reload_zones(
         warn!(
             ?object_orphans,
             "object prototypes no longer in DB; kept as orphaned"
+        );
+    }
+
+    // Mob default effects: same in-scope slice replacement (keyed by
+    // the mob proto's zone).
+    {
+        let mut cat = world.get_resource_or_insert_with(MobDefaultEffectCatalog::default);
+        cat.by_key.retain(|(z, _), _| !in_scope(*z));
+        cat.by_key.extend(
+            fresh_mob_effects
+                .by_key
+                .into_iter()
+                .filter(|(k, _)| in_scope(k.0)),
         );
     }
 

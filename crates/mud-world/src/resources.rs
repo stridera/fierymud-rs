@@ -1166,6 +1166,22 @@ pub struct MobPrototypes {
     pub by_key: HashMap<(i32, i32), MobProto>,
 }
 
+/// One `MobDefaultEffects` row: an effect every spawned instance of the
+/// proto carries from birth.
+#[derive(Debug, Clone)]
+pub struct MobDefaultEffect {
+    pub effect_id: i32,
+    pub strength: i32,
+    pub modifier_data: serde_json::Value,
+}
+
+/// `MobDefaultEffects` rows keyed by mob proto `(zone, id)`. Applied at
+/// spawn by [`crate::mob_effects::apply_mob_default_effects`].
+#[derive(Resource, Default, Debug)]
+pub struct MobDefaultEffectCatalog {
+    pub by_key: HashMap<(i32, i32), Vec<MobDefaultEffect>>,
+}
+
 /// Per-shop offering: an item the keeper sells, with stock and the
 /// override price (`0` = use the object's base cost).
 #[derive(Debug, Clone, Copy)]
