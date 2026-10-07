@@ -74,6 +74,20 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
     let Some(proto) = proto else {
         return;
     };
+    // ---- Light sources ----
+    // A worn / held light burns without a separate `light` command
+    // (the pre-rewrite game's torches worked the moment you held
+    // them). Spent lights (`remaining == 0`) stay dark; `-1` is the
+    // permanent-flame sentinel and does light. Items already `Lit`
+    // are left alone.
+    if proto.r#type == mud_db::enums::ObjectType::Light
+        && world.get::<mud_world::Lit>(item).is_none()
+        && world
+            .get::<mud_world::LightFuel>(item)
+            .is_none_or(|f| f.remaining != 0)
+    {
+        try_insert(world, item, mud_world::Lit);
+    }
     // ---- Resistances ----
     let mut applied_resistances: Vec<(mud_db::enums::ElementType, i32)> = Vec::new();
     if !proto.resistances.is_empty() {
@@ -602,5 +616,97 @@ mod tests {
 
         let cs = world.get::<CombatStats>(wearer).unwrap();
         assert_eq!(cs.accuracy, 5, "wear_location=Finger fired on finger slot");
+    }
+
+    /// Proto for a torch-like light with the given initial fuel.
+    fn light_proto(id: i32) -> ObjectProto {
+        let mut p =
+            crate::commands::test_support::object_proto(1, id, mud_db::enums::ObjectType::Light);
+        p.name = "a torch".into();
+        p
+    }
+
+    fn light_world(
+        fuel: Option<mud_world::LightFuel>,
+        slot: Option<Slot>,
+    ) -> (World, Entity, Entity, Entity) {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        protos.by_key.insert((1, 30), light_proto(30));
+        world.insert_resource(protos);
+        let room = world.spawn_empty().id();
+        let wearer = world
+            .spawn((mud_world::Player, Located(room), Named { name: "W".into() }))
+            .id();
+        let mut item = world.spawn((
+            Item,
+            Named {
+                name: "a torch".into(),
+            },
+            Located(wearer),
+            WorldKey { zone: 1, id: 30 },
+        ));
+        if let Some(f) = fuel {
+            item.insert(f);
+        }
+        if let Some(s) = slot {
+            item.insert(mud_world::EquippedSlot(s));
+        }
+        let item = item.id();
+        (world, room, wearer, item)
+    }
+
+    #[test]
+    fn worn_light_is_lit_and_lights_the_room() {
+        let (mut world, room, wearer, item) = light_world(
+            Some(mud_world::LightFuel {
+                capacity: 150,
+                remaining: 150,
+            }),
+            Some(Slot::Hold),
+        );
+        assert!(!crate::commands::room_has_light(&mut world, room));
+        apply_object_to_wearer(&mut world, item, wearer);
+        assert!(world.get::<mud_world::Lit>(item).is_some());
+        assert!(crate::commands::room_has_light(&mut world, room));
+    }
+
+    #[test]
+    fn permanent_flame_lights_when_worn() {
+        let (mut world, _room, wearer, item) = light_world(
+            Some(mud_world::LightFuel {
+                capacity: -1,
+                remaining: -1,
+            }),
+            Some(Slot::Hold),
+        );
+        apply_object_to_wearer(&mut world, item, wearer);
+        assert!(world.get::<mud_world::Lit>(item).is_some());
+    }
+
+    #[test]
+    fn spent_light_stays_dark_when_worn() {
+        let (mut world, room, wearer, item) = light_world(
+            Some(mud_world::LightFuel {
+                capacity: 150,
+                remaining: 0,
+            }),
+            Some(Slot::Hold),
+        );
+        apply_object_to_wearer(&mut world, item, wearer);
+        assert!(world.get::<mud_world::Lit>(item).is_none());
+        assert!(!crate::commands::room_has_light(&mut world, room));
+    }
+
+    #[test]
+    fn non_light_items_are_never_lit() {
+        let (mut world, _room, wearer, item) = light_world(None, Some(Slot::Hold));
+        let mut protos = ObjectPrototypes::default();
+        let mut p = light_proto(30);
+        p.r#type = mud_db::enums::ObjectType::Other;
+        protos.by_key.insert((1, 30), p);
+        world.insert_resource(protos);
+        apply_object_to_wearer(&mut world, item, wearer);
+        assert!(world.get::<mud_world::Lit>(item).is_none());
     }
 }
