@@ -394,8 +394,8 @@ fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
         &format!("{mob_capped} panics and flees {}!\r\n", direction_name(dir)),
     );
     try_remove::<Fighting>(world, mob);
-    if let Some(mut l) = world.get_mut::<Located>(mob) {
-        l.0 = target_room;
+    if world.get::<Located>(mob).is_some() {
+        world.entity_mut(mob).insert(Located(target_room));
     }
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))
@@ -1635,8 +1635,8 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 // Skip both moves — bound gear stays on the ghost.
                 continue;
             }
-            if let Some(mut l) = world.get_mut::<Located>(it) {
-                l.0 = corpse;
+            if world.get::<Located>(it).is_some() {
+                world.entity_mut(it).insert(Located(corpse));
             }
             // Strip EquippedSlot — items inside a corpse aren't
             // worn anymore. crate uses `mud_world::EquippedSlot`.
@@ -1838,8 +1838,8 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 });
         }
         for it in &owned_items {
-            if let Some(mut l) = world.get_mut::<Located>(*it) {
-                l.0 = corpse;
+            if world.get::<Located>(*it).is_some() {
+                world.entity_mut(*it).insert(Located(corpse));
             }
             try_remove::<mud_world::EquippedSlot>(world, *it);
         }
@@ -1860,8 +1860,8 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         {
             let mut moved = 0;
             for it in &owned_items {
-                if let Some(mut l) = world.get_mut::<Located>(*it) {
-                    l.0 = killer;
+                if world.get::<Located>(*it).is_some() {
+                    world.entity_mut(*it).insert(Located(killer));
                     moved += 1;
                 }
             }
@@ -2240,7 +2240,7 @@ pub(crate) fn refresh_account_rank(world: &mut World, entity: Entity) {
 /// (`effective_rank`), so setting one is a privilege escalation: it requires
 /// the actor's *effective* rank to be Implementor. This deliberately does not
 /// honor `DevMode` (which waives `min_role` for every account holder) —
-/// DevMode must not become a way to mint gods. Both outcomes are written to
+/// `DevMode` must not become a way to mint gods. Both outcomes are written to
 /// the admin audit log (grant and denial), tagged with target and level.
 /// Levels below 100 need no extra privilege beyond the calling command's own
 /// `min_role`.

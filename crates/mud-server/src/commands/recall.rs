@@ -77,13 +77,13 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
     );
 
     let mount = world.get::<Mounted>(player).map(|m| m.0);
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = target;
+    if world.get::<Located>(player).is_some() {
+        world.entity_mut(player).insert(Located(target));
     }
     if let Some(mount) = mount
-        && let Some(mut l) = world.get_mut::<Located>(mount)
+        && world.get::<Located>(mount).is_some()
     {
-        l.0 = target;
+        world.entity_mut(mount).insert(Located(target));
     }
 
     crate::commands::broadcast_room_visible(

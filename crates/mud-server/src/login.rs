@@ -17,6 +17,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
 
+use crate::autosave::SaveCoordinator;
 use crate::commands::{self, Connection};
 
 /// Pre-login banner — XML-Lite content. Live banner content lives
@@ -946,6 +947,36 @@ impl ConnRouter {
             // diagnostics.
             let _ = save_player(world, entity, pool).await;
         }
+        // Background (autosave / `actor:save()`) writes may still be in
+        // flight; the process must not exit until they have landed.
+        let coordinator = world
+            .get_resource::<SaveCoordinator>()
+            .cloned()
+            .unwrap_or_default();
+        if !coordinator.flush(world, Duration::from_secs(30)).await {
+            warn!("shutdown: background saves still pending after 30s");
+        }
+    }
+
+    /// Periodic autosave, called from the tick. Never awaits: it snapshots
+    /// at most `AUTOSAVE_PER_SCAN` due characters (see `autosave.rs` for
+    /// the staggering rule) and spawns their DB writes.
+    pub fn autosave_tick(&self, world: &mut World, pool: &PgPool, interval: Duration) {
+        let Some(coordinator) = world.get_resource::<SaveCoordinator>().cloned() else {
+            return;
+        };
+        coordinator.apply_completions(world);
+        let online: HashMap<String, Entity> = self
+            .playing
+            .values()
+            .filter_map(|&e| world.get::<Account>(e).map(|a| (a.character_id.clone(), e)))
+            .collect();
+        let ids: Vec<String> = online.keys().cloned().collect();
+        for cid in coordinator.autosave_due(&ids, interval, crate::autosave::AUTOSAVE_PER_SCAN) {
+            if let Some(&entity) = online.get(&cid) {
+                spawn_background_save(world, entity, pool);
+            }
+        }
     }
 
     pub async fn on_disconnect(&mut self, world: &mut World, conn_id: ConnId, pool: &PgPool) {
@@ -990,16 +1021,24 @@ impl ConnRouter {
             // report a partial save. The tracing::warn inside
             // save_player covers diagnostics.
             let _ = save_player(world, entity, pool).await;
-            // Despawn the player AND every item they were carrying / wearing.
-            // Located(player) catches both inventory and equipped (EquippedSlot
-            // is additive, items are still Located on the carrier).
-            let items: Vec<Entity> = {
-                let mut q = world.query::<(Entity, &Located, &Item)>();
-                q.iter(world)
-                    .filter(|(_, l, _)| l.0 == entity)
-                    .map(|(e, _, _)| e)
-                    .collect()
-            };
+            // Despawn the player AND every item they were carrying / wearing
+            // (Located(player) catches both inventory and equipped —
+            // EquippedSlot is additive), including items nested inside
+            // carried containers. Walk the `Contents` index so this costs
+            // O(carried), not a scan of every item in the world.
+            let mut items: Vec<Entity> = Vec::new();
+            let mut frontier: Vec<Entity> = vec![entity];
+            while let Some(parent) = frontier.pop() {
+                let Some(contents) = world.get::<mud_world::Contents>(parent) else {
+                    continue;
+                };
+                for child in contents.iter() {
+                    if world.get::<Item>(child).is_some() {
+                        items.push(child);
+                        frontier.push(child);
+                    }
+                }
+            }
             for item in items {
                 world.despawn(item);
             }
@@ -4013,14 +4052,76 @@ pub(crate) struct SaveOutcome {
     pub error: Option<String>,
 }
 
+/// Everything one character save writes, captured synchronously from the
+/// ECS by [`snapshot_player`]. Owning every value (no `World` borrow, no
+/// `Entity` dereference) is what lets the DB write run off the tick: the
+/// snapshot is built in microseconds on the game thread, then handed to
+/// [`write_snapshot`] wherever it is convenient to await.
+#[derive(Debug)]
+pub(crate) struct PlayerSaveSnapshot {
+    pub(crate) character_id: String,
+    pub(crate) entity: Entity,
+    /// Monotonic per-character save sequence number, assigned by the
+    /// [`SaveCoordinator`](crate::autosave::SaveCoordinator) when the
+    /// snapshot is taken. A write whose generation is lower than one
+    /// already committed is stale and must not run (see `autosave.rs`).
+    pub(crate) generation: u64,
+    user_id: String,
+    hp: i32,
+    stamina: i32,
+    zone_id: Option<i32>,
+    room_id: Option<i32>,
+    recall_zone: Option<i32>,
+    recall_room: Option<i32>,
+    flags: Vec<mud_db::enums::PlayerFlag>,
+    prompt: String,
+    title: Option<String>,
+    description: Option<String>,
+    wealth: i64,
+    experience: i32,
+    skill_points: i32,
+    hunger: i32,
+    thirst: i32,
+    invis_level: i32,
+    freeze_level: Option<i32>,
+    wimpy_threshold: i32,
+    poof_in: Option<String>,
+    poof_out: Option<String>,
+    position: mud_db::enums::Position,
+    rest_source: mud_db::enums::RestSource,
+    rest_tier: i32,
+    repose: i32,
+    items: Vec<mud_db::character_items::CharacterItemSnap>,
+    /// Parallel to `items`: the entity each snap came from, so ids the
+    /// diff assigns can be stamped back as `PersistedItemId`.
+    entity_for_idx: Vec<Entity>,
+    drunk: i32,
+    bank: i64,
+    account_wealth: i64,
+    script_vars_json: Option<serde_json::Value>,
+    trophy_json: Option<serde_json::Value>,
+    spell_cooldowns_json: Option<serde_json::Value>,
+    cooldowns_json: Option<serde_json::Value>,
+    ignore_list_json: Option<serde_json::Value>,
+    effect_instances_json: Option<serde_json::Value>,
+    pets_json: Option<serde_json::Value>,
+    ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow>,
+    alias_rows: Vec<mud_db::character_aliases::CharacterAliasRow>,
+    core_stats_payload: Option<mud_db::characters::CoreStatsPayload>,
+    now_inst: std::time::Instant,
+    new_time_played: Option<i32>,
+}
+
+/// Capture a player's save payload from the ECS without any I/O. Returns
+/// `None` when the entity isn't a player (no `Account`, e.g. a mob
+/// reached via `switch`).
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) -> SaveOutcome {
-    let Some(account) = world.get::<Account>(entity).cloned() else {
-        return SaveOutcome {
-            aborted: true,
-            ..SaveOutcome::default()
-        };
-    };
+pub(crate) fn snapshot_player(
+    world: &mut World,
+    entity: Entity,
+    generation: u64,
+) -> Option<PlayerSaveSnapshot> {
+    let account = world.get::<Account>(entity).cloned()?;
     let hp = world.get::<Health>(entity).map_or(0, |h| h.hp);
     let stamina = world.get::<Stamina>(entity).map_or(0, |s| s.current);
     let (zone_id, room_id) = world
@@ -4100,10 +4201,6 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         Vec<Entity>,
     ) = {
         use std::collections::HashMap;
-        // Single query — every per-item field we need so the build
-        // loop below doesn't reborrow World. `Charges` and
-        // `LiquidContainer` are both Optional since most items have
-        // neither.
         type ItemSnap = (
             Entity,
             Entity,
@@ -4113,52 +4210,48 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
             Option<mud_world::Charges>,
             Option<mud_world::LiquidContainer>,
         );
-        let all_items: Vec<ItemSnap> = {
-            let mut q = world.query::<(
-                Entity,
-                &Located,
-                &WorldKey,
-                Option<&EquippedSlot>,
-                Option<&mud_world::PersistedItemId>,
-                Option<&mud_world::Charges>,
-                Option<&mud_world::LiquidContainer>,
-                Option<&mud_world::ObjectFlags>,
-                &Item,
-            )>();
-            q.iter(world)
-                // TEMPORARY items vanish on rent / logout — drop them
-                // from the snapshot so they don't round-trip into the
-                // next session. Permanent disappearance is the
-                // canonical behavior; the DB row is also released by
-                // the diff (an item not in the snapshot is deleted).
-                .filter(|(_, _, _, _, _, _, _, flags, _)| {
-                    !flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Temporary))
-                })
-                .map(|(e, l, wk, eq, pid, ch, lc, _, _)| {
-                    (
-                        e,
-                        l.0,
-                        *wk,
-                        eq.copied(),
-                        pid.copied(),
-                        ch.copied(),
-                        lc.cloned(),
-                    )
-                })
-                .collect()
-        };
-        // BFS from `entity` (the player) through "is parent of" edges.
+        // BFS from `entity` (the player) through the `Contents` reverse
+        // index of `Located`, so the walk costs O(carried items) rather
+        // than a scan over every item in the world. Parents are pushed
+        // before their children.
         let mut order: Vec<ItemSnap> = Vec::new();
         let mut entity_to_idx: HashMap<Entity, usize> = HashMap::new();
         let mut frontier: Vec<Entity> = vec![entity];
         while let Some(parent) = frontier.pop() {
-            for snap in &all_items {
-                let (e, p, _, _, _, _, _) = snap;
-                if *p == parent && !entity_to_idx.contains_key(e) {
-                    entity_to_idx.insert(*e, order.len());
-                    order.push(snap.clone());
-                    frontier.push(*e);
+            let Some(contents) = world.get::<mud_world::Contents>(parent) else {
+                continue;
+            };
+            for e in contents.iter() {
+                if entity_to_idx.contains_key(&e) || world.get::<Item>(e).is_none() {
+                    continue;
                 }
+                // Items without a prototype key can't be reloaded.
+                let Some(wk) = world.get::<WorldKey>(e).copied() else {
+                    continue;
+                };
+                // TEMPORARY items vanish on rent / logout — drop them
+                // (and anything inside them) from the snapshot so they
+                // don't round-trip into the next session. Permanent
+                // disappearance is the canonical behavior; the DB row is
+                // also released by the diff (an item not in the snapshot
+                // is deleted).
+                if world
+                    .get::<mud_world::ObjectFlags>(e)
+                    .is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Temporary))
+                {
+                    continue;
+                }
+                entity_to_idx.insert(e, order.len());
+                order.push((
+                    e,
+                    parent,
+                    wk,
+                    world.get::<EquippedSlot>(e).copied(),
+                    world.get::<mud_world::PersistedItemId>(e).copied(),
+                    world.get::<mud_world::Charges>(e).copied(),
+                    world.get::<mud_world::LiquidContainer>(e).cloned(),
+                ));
+                frontier.push(e);
             }
         }
         // Pull persisted-id of the parent (if loaded) from the entity
@@ -4198,7 +4291,6 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         }
         (snaps, ents)
     };
-    let item_count = new_items.len();
 
     // Pre-collect all snapshot values so the inside-tx block doesn't
     // re-borrow the world. Each helper that takes a JSON blob /
@@ -4344,7 +4436,6 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         .get::<mud_world::Aliases>(entity)
         .map(mud_world::Aliases::to_rows)
         .unwrap_or_default();
-    let alias_count = alias_rows.len();
     let core_stats_payload: Option<mud_db::characters::CoreStatsPayload> =
         world.get::<CoreStats>(entity).copied().map(Into::into);
     // Time-played accumulator. We compute the deltas now, but only
@@ -4387,118 +4478,251 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
 
     // === Single transaction wraps every per-character DB write ===
     //
-    // All-or-nothing: if any save_X fails, the `?` short-circuits,
+    // All-or-nothing: if any `save_X` fails, the `?` short-circuits,
     // the inner block returns Err, the tx drops without commit (auto-
     // rollback), and the character row is unchanged from the last
     // successful save. Postgres SAVEPOINT is implicit on `?`-bubbling
     // so we don't manage it explicitly. PersistedItemId stamping
     // happens AFTER commit so a rolled-back save can't leave entities
     // pointing at row IDs that don't exist.
-    let cid = account.character_id.clone();
-    let tx_result: Result<std::collections::HashMap<usize, i32>, mud_db::sqlx::Error> = async {
-        let mut tx = pool.begin().await?;
-        characters::save_state(
-            &mut *tx,
-            &cid,
-            &mud_db::characters::CharacterStatePayload {
-                hit_points: hp,
-                stamina,
-                current_room_zone_id: zone_id,
-                current_room_id: room_id,
-                recall_room_zone_id: recall_zone,
-                recall_room_id: recall_room,
-                player_flags: &flags,
-                prompt: &prompt,
-                title: title.as_deref(),
-                description: description.as_deref(),
-                wealth,
-                experience,
-                skill_points,
-                hunger,
-                thirst,
-                invis_level,
-                freeze_level,
-                wimpy_threshold,
-                poof_in: poof_in.as_deref(),
-                poof_out: poof_out.as_deref(),
-                position,
-            },
-        )
-        .await?;
-        let assigned =
-            mud_db::character_items::save_inventory_diff(&mut tx, &cid, &new_items).await?;
-        mud_db::characters::save_drunkenness(&mut *tx, &cid, drunk).await?;
-        mud_db::characters::save_script_vars(&mut *tx, &cid, script_vars_json.as_ref()).await?;
-        mud_db::characters::save_trophy(&mut *tx, &cid, trophy_json.as_ref()).await?;
-        mud_db::characters::save_spell_cooldowns(&mut *tx, &cid, spell_cooldowns_json.as_ref())
-            .await?;
-        mud_db::characters::save_cooldowns(&mut *tx, &cid, cooldowns_json.as_ref()).await?;
-        mud_db::characters::save_ignore_list(&mut *tx, &cid, ignore_list_json.as_ref()).await?;
-        mud_db::characters::save_effect_instances(&mut *tx, &cid, effect_instances_json.as_ref())
-            .await?;
-        mud_db::characters::save_pets(&mut *tx, &cid, pets_json.as_ref()).await?;
-        mud_db::characters::save_bank_wealth(&mut *tx, &cid, bank).await?;
-        mud_db::characters::save_rest_state(&mut *tx, &cid, repose, rest_source, rest_tier).await?;
-        // Unlinked legacy characters have no `Users` row to carry the pool.
-        if !user_id.is_empty() {
-            mud_db::users::save_account_wealth(&mut *tx, &user_id, account_wealth).await?;
-        }
-        if let Some(t) = new_time_played {
-            mud_db::characters::save_time_played(&mut *tx, &cid, t).await?;
-        }
-        mud_db::character_abilities::save_for(&mut tx, &cid, &ability_rows).await?;
-        mud_db::character_aliases::save_for(&mut tx, &cid, &alias_rows).await?;
-        if let Some(stats) = &core_stats_payload {
-            characters::save_core_stats(&mut *tx, &cid, stats).await?;
-        }
-        tx.commit().await?;
-        Ok(assigned)
-    }
-    .await;
 
-    let mut outcome = SaveOutcome::default();
-    match tx_result {
-        Ok(assigned) => {
-            outcome.committed = true;
-            // Stamp newly-INSERTed CharacterItems rows' ids onto the
-            // entities. Done AFTER tx.commit() so a rolled-back save
-            // can't leave entities pointing at non-existent rows.
-            for (idx, new_id) in assigned {
-                if let Some(target) = entity_for_idx.get(idx).copied()
-                    && let Ok(mut em) = world.get_entity_mut(target)
-                {
-                    em.insert(mud_world::PersistedItemId(new_id));
-                }
-            }
-            // Bump the time-played anchor on success only, mirroring
-            // the same "DB-first, then in-memory" rule.
-            if let Some(t) = new_time_played
-                && let Ok(mut em) = world.get_entity_mut(entity)
-            {
-                em.insert(mud_world::TimePlayed(t));
-                em.insert(mud_world::LastPersistedAt(now_inst));
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, character_id = %account.character_id, "save tx failed; rolled back");
-            outcome.error = Some(e.to_string());
-        }
-    }
-
-    info!(
-        character_id = %account.character_id,
+    Some(PlayerSaveSnapshot {
+        character_id: account.character_id,
+        entity,
+        generation,
+        user_id,
         hp,
+        stamina,
         zone_id,
         room_id,
         recall_zone,
         recall_room,
-        flag_count = flags.len(),
-        item_count,
-        alias_count,
-        committed = outcome.committed,
+        flags,
+        prompt,
+        title,
+        description,
+        wealth,
+        experience,
+        skill_points,
+        hunger,
+        thirst,
+        invis_level,
+        freeze_level,
+        wimpy_threshold,
+        poof_in,
+        poof_out,
+        position,
+        rest_source,
+        rest_tier,
+        repose,
+        items: new_items,
+        entity_for_idx,
+        drunk,
+        bank,
+        account_wealth,
+        script_vars_json,
+        trophy_json,
+        spell_cooldowns_json,
+        cooldowns_json,
+        ignore_list_json,
+        effect_instances_json,
+        pets_json,
+        ability_rows,
+        alias_rows,
+        core_stats_payload,
+        now_inst,
+        new_time_played,
+    })
+}
+
+/// Run every per-character DB write for `snap` inside ONE transaction.
+///
+/// All-or-nothing: if any `save_X` fails, the `?` short-circuits, the
+/// inner block returns Err, the tx drops without commit (auto-rollback),
+/// and the character row is unchanged from the last successful save.
+/// Returns the ids assigned to newly-INSERTed `CharacterItems` rows,
+/// keyed by index into the snapshot's item list; the caller stamps them
+/// on the entities (via [`apply_commit`]) only AFTER commit so a
+/// rolled-back save can't leave entities pointing at row ids that don't
+/// exist.
+pub(crate) async fn write_snapshot(
+    pool: &PgPool,
+    snap: &PlayerSaveSnapshot,
+) -> Result<HashMap<usize, i32>, mud_db::sqlx::Error> {
+    let cid = snap.character_id.as_str();
+    let mut tx = pool.begin().await?;
+    characters::save_state(
+        &mut *tx,
+        cid,
+        &mud_db::characters::CharacterStatePayload {
+            hit_points: snap.hp,
+            stamina: snap.stamina,
+            current_room_zone_id: snap.zone_id,
+            current_room_id: snap.room_id,
+            recall_room_zone_id: snap.recall_zone,
+            recall_room_id: snap.recall_room,
+            player_flags: &snap.flags,
+            prompt: &snap.prompt,
+            title: snap.title.as_deref(),
+            description: snap.description.as_deref(),
+            wealth: snap.wealth,
+            experience: snap.experience,
+            skill_points: snap.skill_points,
+            hunger: snap.hunger,
+            thirst: snap.thirst,
+            invis_level: snap.invis_level,
+            freeze_level: snap.freeze_level,
+            wimpy_threshold: snap.wimpy_threshold,
+            poof_in: snap.poof_in.as_deref(),
+            poof_out: snap.poof_out.as_deref(),
+            position: snap.position,
+        },
+    )
+    .await?;
+    let assigned = mud_db::character_items::save_inventory_diff(&mut tx, cid, &snap.items).await?;
+    mud_db::characters::save_drunkenness(&mut *tx, cid, snap.drunk).await?;
+    mud_db::characters::save_script_vars(&mut *tx, cid, snap.script_vars_json.as_ref()).await?;
+    mud_db::characters::save_trophy(&mut *tx, cid, snap.trophy_json.as_ref()).await?;
+    mud_db::characters::save_spell_cooldowns(&mut *tx, cid, snap.spell_cooldowns_json.as_ref())
+        .await?;
+    mud_db::characters::save_cooldowns(&mut *tx, cid, snap.cooldowns_json.as_ref()).await?;
+    mud_db::characters::save_ignore_list(&mut *tx, cid, snap.ignore_list_json.as_ref()).await?;
+    mud_db::characters::save_effect_instances(&mut *tx, cid, snap.effect_instances_json.as_ref())
+        .await?;
+    mud_db::characters::save_pets(&mut *tx, cid, snap.pets_json.as_ref()).await?;
+    mud_db::characters::save_bank_wealth(&mut *tx, cid, snap.bank).await?;
+    mud_db::characters::save_rest_state(
+        &mut *tx,
+        cid,
+        snap.repose,
+        snap.rest_source,
+        snap.rest_tier,
+    )
+    .await?;
+    // Unlinked legacy characters have no `Users` row to carry the pool.
+    if !snap.user_id.is_empty() {
+        mud_db::users::save_account_wealth(&mut *tx, &snap.user_id, snap.account_wealth).await?;
+    }
+    if let Some(t) = snap.new_time_played {
+        mud_db::characters::save_time_played(&mut *tx, cid, t).await?;
+    }
+    mud_db::character_abilities::save_for(&mut tx, cid, &snap.ability_rows).await?;
+    mud_db::character_aliases::save_for(&mut tx, cid, &snap.alias_rows).await?;
+    if let Some(stats) = &snap.core_stats_payload {
+        characters::save_core_stats(&mut *tx, cid, stats).await?;
+    }
+    tx.commit().await?;
+    info!(
+        character_id = %snap.character_id,
+        hp = snap.hp,
+        zone_id = snap.zone_id,
+        room_id = snap.room_id,
+        recall_zone = snap.recall_zone,
+        recall_room = snap.recall_room,
+        flag_count = snap.flags.len(),
+        item_count = snap.items.len(),
+        alias_count = snap.alias_rows.len(),
+        generation = snap.generation,
         "player saved"
     );
+    Ok(assigned)
+}
+
+/// Fold a committed save back into the ECS: stamp newly-INSERTed
+/// `CharacterItems` ids onto their entities and advance the time-played
+/// anchor. Strictly post-commit ("DB first, then in-memory"). Entities
+/// despawned since the snapshot (the player quit) are skipped.
+pub(crate) fn apply_commit(
+    world: &mut World,
+    snap: &PlayerSaveSnapshot,
+    assigned: HashMap<usize, i32>,
+) {
+    for (idx, new_id) in assigned {
+        if let Some(target) = snap.entity_for_idx.get(idx).copied()
+            && let Ok(mut em) = world.get_entity_mut(target)
+        {
+            em.insert(mud_world::PersistedItemId(new_id));
+        }
+    }
+    if let Some(t) = snap.new_time_played
+        && let Ok(mut em) = world.get_entity_mut(snap.entity)
+    {
+        em.insert(mud_world::TimePlayed(t));
+        em.insert(mud_world::LastPersistedAt(snap.now_inst));
+    }
+}
+
+/// Foreground save: snapshot + write + apply, awaited by the caller. Used
+/// where the caller needs the outcome or the entity is about to vanish
+/// (`save` command, disconnect / idle-kick, shutdown). Periodic saves go
+/// through [`spawn_background_save`] instead so the tick never waits on
+/// Postgres.
+///
+/// Ordering: holds the character's save lock for the whole write, so it
+/// queues behind any in-flight background save of the same character
+/// (whose item-id stamps are applied before this snapshot is taken) and
+/// any older background snapshot still waiting for the lock is dropped as
+/// stale once this write commits.
+pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) -> SaveOutcome {
+    let Some(character_id) = world.get::<Account>(entity).map(|a| a.character_id.clone()) else {
+        return SaveOutcome {
+            aborted: true,
+            ..SaveOutcome::default()
+        };
+    };
+    let coordinator = world
+        .get_resource::<SaveCoordinator>()
+        .cloned()
+        .unwrap_or_default();
+    let mut ordered = coordinator.begin_ordered(&character_id).await;
+    // The write we just waited for (if any) finished before we got the
+    // lock; fold its stamps into the world BEFORE snapshotting.
+    coordinator.apply_completions(world);
+    let generation = ordered.next_generation();
+    let Some(snap) = snapshot_player(world, entity, generation) else {
+        return SaveOutcome {
+            aborted: true,
+            ..SaveOutcome::default()
+        };
+    };
+    let mut outcome = SaveOutcome::default();
+    match write_snapshot(pool, &snap).await {
+        Ok(assigned) => {
+            outcome.committed = true;
+            ordered.record_commit(generation);
+            apply_commit(world, &snap, assigned);
+        }
+        Err(e) => {
+            warn!(error = %e, character_id = %snap.character_id, "save tx failed; rolled back");
+            outcome.error = Some(e.to_string());
+        }
+    }
     outcome
+}
+
+/// Background save for periodic autosave and Lua `actor:save()`:
+/// snapshots the player now (cheap, in-memory) and hands the DB write to a
+/// spawned task, so the tick never awaits I/O. Returns `false` when the
+/// character already has a background save in flight (caller retries
+/// later) or isn't a player.
+pub(crate) fn spawn_background_save(world: &mut World, entity: Entity, pool: &PgPool) -> bool {
+    let Some(character_id) = world.get::<Account>(entity).map(|a| a.character_id.clone()) else {
+        return false;
+    };
+    let coordinator = world
+        .get_resource::<SaveCoordinator>()
+        .cloned()
+        .unwrap_or_default();
+    let pool = pool.clone();
+    coordinator.request_background(
+        &character_id,
+        |generation| snapshot_player(world, entity, generation),
+        move |snap| async move {
+            write_snapshot(&pool, &snap)
+                .await
+                .map_err(|e| e.to_string())
+        },
+    )
 }
 
 /// Materialize each saved `CharacterItem` into a live Item entity. Top-
@@ -6085,6 +6309,102 @@ mod tests {
         c.name = name;
         c.user_id = None;
         (user, Box::new(c))
+    }
+
+    /// End-to-end through the real tables: the foreground path and the
+    /// background (autosave) path both write the snapshot, stamp the
+    /// assigned `CharacterItems` ids back, and a second save updates
+    /// rather than duplicates the item rows.
+    #[tokio::test(flavor = "current_thread")]
+    async fn foreground_and_background_saves_round_trip() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let object: Option<(i32, i32)> =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some((oz, oid)) = object else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "sv").await;
+        let count = |pool: PgPool, cid: String| async move {
+            mud_db::sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM \"CharacterItems\" WHERE character_id = $1",
+            )
+            .bind(cid)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let hp_of = |pool: PgPool, cid: String| async move {
+            mud_db::sqlx::query_scalar::<_, i32>(
+                "SELECT hit_points FROM \"Characters\" WHERE id = $1",
+            )
+            .bind(cid)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let player = world
+            .spawn((
+                Account {
+                    user_id: String::new(),
+                    character_id: c.id.clone(),
+                    role: mud_db::enums::UserRole::Player,
+                    account_role: mud_db::enums::UserRole::Player,
+                    perms: vec![],
+                },
+                Health { hp: 7, max: 20 },
+                Located(room),
+            ))
+            .id();
+        let item = world
+            .spawn((Item, WorldKey { zone: oz, id: oid }, Located(player)))
+            .id();
+
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        assert_eq!(hp_of(pool.clone(), c.id.clone()).await, 7);
+        assert_eq!(count(pool.clone(), c.id.clone()).await, 1);
+        let pid = world.get::<mud_world::PersistedItemId>(item).unwrap().0;
+
+        // Background path: changed hp lands via the spawned writer, and
+        // the already-stamped item is updated in place (same row id).
+        world.get_mut::<Health>(player).unwrap().hp = 9;
+        assert!(spawn_background_save(&mut world, player, &pool));
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+        assert_eq!(hp_of(pool.clone(), c.id.clone()).await, 9);
+        assert_eq!(count(pool.clone(), c.id.clone()).await, 1);
+        assert_eq!(
+            world.get::<mud_world::PersistedItemId>(item).unwrap().0,
+            pid
+        );
+
+        // A new item acquired between saves is inserted by the background
+        // write and stamped back when the tick folds the completion in.
+        let item2 = world
+            .spawn((Item, WorldKey { zone: oz, id: oid }, Located(player)))
+            .id();
+        assert!(spawn_background_save(&mut world, player, &pool));
+        assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+        assert_eq!(count(pool.clone(), c.id.clone()).await, 2);
+        assert!(world.get::<mud_world::PersistedItemId>(item2).is_some());
+
+        mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 
     async fn temp_cleanup(pool: &PgPool, code_ids: &[&str], char_ids: &[&str], user_ids: &[&str]) {

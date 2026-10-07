@@ -189,8 +189,8 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
         send_to(world, player, "Couldn't resolve the house foyer.\r\n");
         return;
     };
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = foyer_entity;
+    if world.get::<Located>(player).is_some() {
+        world.entity_mut(player).insert(Located(foyer_entity));
     }
     send_to(
         world,

@@ -2935,8 +2935,8 @@ impl UserData for LuaActor {
                 else {
                     return;
                 };
-                if let Some(mut loc) = world.get_mut::<Located>(this.entity) {
-                    loc.0 = target;
+                if world.get::<Located>(this.entity).is_some() {
+                    world.entity_mut(this.entity).insert(Located(target));
                 }
             })
         });
@@ -3077,8 +3077,8 @@ impl UserData for LuaActor {
             |lua, this, target: AnyUserData| -> mlua::Result<()> {
                 let room_entity = target.borrow::<LuaRoom>()?.entity;
                 world_mut_from_lua(lua, |world| {
-                    if let Some(mut loc) = world.get_mut::<Located>(this.entity) {
-                        loc.0 = room_entity;
+                    if world.get::<Located>(this.entity).is_some() {
+                        world.entity_mut(this.entity).insert(Located(room_entity));
                     }
                 })
             },

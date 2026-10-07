@@ -153,8 +153,8 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{mover_capped} steps into {portal_name} and vanishes.\r\n"),
     );
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = dest;
+    if world.get::<Located>(player).is_some() {
+        world.entity_mut(player).insert(Located(dest));
     }
     crate::commands::broadcast_room_visible(
         world,

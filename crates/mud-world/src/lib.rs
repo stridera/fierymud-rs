@@ -9,7 +9,7 @@ pub use components::{
     Account, AccountSummary, AccountWealth, Aliases, AlignmentProtectionTag, AppliedTo, ArenaRoom,
     AttachedTriggers, BankWealth, BaseLightLevel, Bless, BoardDraft, BoardLink, BodyMetrics,
     Camping, Casting, CharacterAchievements, Charges, ClanMembership, CoinPile, CombatStats,
-    Cooldowns, CoreStats, Corpse, CorpseDecay, CorpseOriginLevel, DeathTrap, Description,
+    Contents, Cooldowns, CoreStats, Corpse, CorpseDecay, CorpseOriginLevel, DeathTrap, Description,
     DetectInvis, Drunkenness, EffectInstance, EffectSource, Empowered, EquippedSlot, ExamineText,
     ExitData, Exits, Fighting, Flying, Focus, Follower, FromMobReset, FromObjectReset, Frozen,
     Ghost, GrantedByItem, GroupInvite, Guarding, GuildhallRoom, Haste, Health, HouseExitEntry,

@@ -9368,8 +9368,8 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    if let Some(mut l) = world.get_mut::<Located>(item) {
-        l.0 = player;
+    if world.get::<Located>(item).is_some() {
+        world.entity_mut(item).insert(Located(player));
     }
 
     send_rendered(world, player, &format!("You pick up {item_name}.\r\n"));
@@ -9515,8 +9515,8 @@ fn get_from_container(
                 continue;
             }
             running += w;
-            if let Some(mut l) = world.get_mut::<Located>(*item) {
-                l.0 = player;
+            if world.get::<Located>(*item).is_some() {
+                world.entity_mut(*item).insert(Located(player));
             }
             send_rendered(
                 world,
@@ -9590,8 +9590,8 @@ fn get_from_container(
         );
         return;
     }
-    if let Some(mut l) = world.get_mut::<Located>(item) {
-        l.0 = player;
+    if world.get::<Located>(item).is_some() {
+        world.entity_mut(item).insert(Located(player));
     }
     send_rendered(
         world,
@@ -9679,8 +9679,8 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
             continue;
         }
         running += w;
-        if let Some(mut l) = world.get_mut::<Located>(*item) {
-            l.0 = player;
+        if world.get::<Located>(*item).is_some() {
+            world.entity_mut(*item).insert(Located(player));
         }
         send_rendered(world, player, &format!("You pick up {item_name}.\r\n"));
         crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Get);
@@ -9788,8 +9788,8 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
         }
         let count = items.len();
         for (item, item_name) in &items {
-            if let Some(mut l) = world.get_mut::<Located>(*item) {
-                l.0 = container;
+            if world.get::<Located>(*item).is_some() {
+                world.entity_mut(*item).insert(Located(container));
             }
             send_rendered(
                 world,
@@ -9820,8 +9820,8 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let item_name = name_of(world, item);
-    if let Some(mut l) = world.get_mut::<Located>(item) {
-        l.0 = container;
+    if world.get::<Located>(item).is_some() {
+        world.entity_mut(item).insert(Located(container));
     }
     send_rendered(
         world,
@@ -9895,8 +9895,8 @@ pub(crate) fn cmd_donate(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let item_name = name_of(world, item);
     let player_name = name_of(world, player);
-    if let Some(mut l) = world.get_mut::<Located>(item) {
-        l.0 = room;
+    if world.get::<Located>(item).is_some() {
+        world.entity_mut(item).insert(Located(room));
     }
     send_rendered(
         world,
@@ -10003,8 +10003,8 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
                 blocked += 1;
                 continue;
             }
-            if let Some(mut l) = world.get_mut::<Located>(*item) {
-                l.0 = room;
+            if world.get::<Located>(*item).is_some() {
+                world.entity_mut(*item).insert(Located(room));
             }
             // Identification is broken when the item leaves the
             // player's possession to the ground. Whoever picks it
@@ -10068,8 +10068,8 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    if let Some(mut l) = world.get_mut::<Located>(item) {
-        l.0 = room;
+    if world.get::<Located>(item).is_some() {
+        world.entity_mut(item).insert(Located(room));
     }
     // Drop breaks identification — see `Identified` doc comment.
     // Cleared after the Located mutation so the bookkeeping
@@ -10174,8 +10174,8 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    if let Some(mut l) = world.get_mut::<Located>(item) {
-        l.0 = target;
+    if world.get::<Located>(item).is_some() {
+        world.entity_mut(item).insert(Located(target));
     }
 
     send_to(
@@ -11918,8 +11918,8 @@ pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
         }
         let cur_room = world.get::<Located>(player).map(|l| l.0);
         let actually_moved = cur_room != Some(summon.dest_room);
-        if actually_moved && let Some(mut l) = world.get_mut::<Located>(player) {
-            l.0 = summon.dest_room;
+        if actually_moved && world.get::<Located>(player).is_some() {
+            world.entity_mut(player).insert(Located(summon.dest_room));
         }
         let tname = world
             .get::<Named>(player)
@@ -12892,8 +12892,8 @@ pub(crate) fn cmd_home(world: &mut World, player: Entity, _args: &str) {
         return;
     };
 
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = foyer;
+    if world.get::<Located>(player).is_some() {
+        world.entity_mut(player).insert(Located(foyer));
     }
     send_to(world, player, "You return home.\r\n");
     cmd_look(world, player, "");
@@ -12966,8 +12966,8 @@ pub(crate) fn cmd_house_place(
         return;
     };
     let item_name = name_of(world, item);
-    if let Some(mut l) = world.get_mut::<Located>(item) {
-        l.0 = room;
+    if world.get::<Located>(item).is_some() {
+        world.entity_mut(item).insert(Located(room));
     }
     send_rendered(
         world,
@@ -13049,8 +13049,8 @@ pub(crate) fn cmd_house_take(
         );
         return;
     };
-    if let Some(mut l) = world.get_mut::<Located>(item) {
-        l.0 = player;
+    if world.get::<Located>(item).is_some() {
+        world.entity_mut(item).insert(Located(player));
     }
     // Strip the FK so the item is now an ordinary carried item.
     if let Ok(mut e) = world.get_entity_mut(item) {
@@ -13853,7 +13853,7 @@ mod tests {
         let (mut world, _room, player, sword, bob) = make_give_world();
         cmd_give(&mut world, player, "sword to bob");
         assert_eq!(world.get::<Located>(sword).unwrap().0, bob);
-        world.get_mut::<Located>(sword).unwrap().0 = player;
+        world.entity_mut(sword).insert(Located(player));
         cmd_give(&mut world, player, "sword bob");
         assert_eq!(world.get::<Located>(sword).unwrap().0, bob);
     }
@@ -13894,10 +13894,10 @@ mod tests {
             world.get::<Located>(player).unwrap().0
         );
         // `into` and `on` are accepted.
-        world.get_mut::<Located>(apple).unwrap().0 = player;
+        world.entity_mut(apple).insert(Located(player));
         cmd_put(&mut world, player, "apple into bag");
         assert_eq!(world.get::<Located>(apple).unwrap().0, bag);
-        world.get_mut::<Located>(apple).unwrap().0 = player;
+        world.entity_mut(apple).insert(Located(player));
         cmd_put(&mut world, player, "apple on bag");
         assert_eq!(world.get::<Located>(apple).unwrap().0, bag);
     }

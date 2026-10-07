@@ -62,8 +62,8 @@ fn cmd_call(world: &mut World, player: Entity, _args: &str) {
             );
         }
         try_remove::<Fighting>(world, follower);
-        if let Some(mut loc) = world.get_mut::<Located>(follower) {
-            loc.0 = here;
+        if world.get::<Located>(follower).is_some() {
+            world.entity_mut(follower).insert(Located(here));
         } else if let Ok(mut em) = world.get_entity_mut(follower) {
             em.insert(Located(here));
         }

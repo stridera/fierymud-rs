@@ -2226,8 +2226,25 @@ pub struct Description(pub String);
 
 /// Containment relationship: this entity is "inside" the target.
 /// Rooms are inside their Zone; later, players/objects will be inside Rooms.
+///
+/// `Located` is a bevy relationship: bevy keeps the reverse index
+/// ([`Contents`]) on the target entity in sync at every insert, replace
+/// and remove site, so "what is inside / carried by X" is an O(children)
+/// lookup instead of a scan over every `Located` entity in the world.
+/// Despawning a container strips `Located` from whatever still pointed at
+/// it (no `linked_spawn`: children are never auto-despawned).
 #[derive(Component, Debug, Clone, Copy)]
+#[relationship(relationship_target = Contents)]
 pub struct Located(pub Entity);
+
+/// Reverse index of [`Located`]: the entities directly inside / carried by
+/// this entity (items in a room, a bag or an inventory; mobs and players in
+/// a room). Maintained entirely by bevy's relationship hooks — never
+/// mutate it by hand. Read it with `world.get::<Contents>(e)`; callers
+/// that only want items filter on `With<Item>` / `get::<Item>`.
+#[derive(Component, Debug)]
+#[relationship_target(relationship = Located)]
+pub struct Contents(Vec<Entity>);
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct RoomSector(pub Sector);

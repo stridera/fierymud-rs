@@ -1459,6 +1459,17 @@ fn world_status(world: &mut World) -> Value {
         .count();
     let mobs = world.query_filtered::<(), With<Mob>>().iter(world).count();
     let items = world.query_filtered::<(), With<Item>>().iter(world).count();
+    // Tick duration percentiles over the last minute (issue #29: lag was
+    // invisible). Absent resource (unit-test worlds) reads as all zeros.
+    let timing = world.get_resource::<crate::tick_stats::TickStats>().map_or(
+        crate::tick_stats::TickSummary {
+            samples: 0,
+            p50_ms: 0.0,
+            p95_ms: 0.0,
+            max_ms: 0.0,
+        },
+        |t| t.summary(std::time::Instant::now()),
+    );
     json!({
         "paused": paused,
         "pending_forced_ticks": pending_ticks,
@@ -1466,6 +1477,11 @@ fn world_status(world: &mut World) -> Value {
         "online_players": players,
         "mobs": mobs,
         "items": items,
+        "tick_window_secs": 60,
+        "tick_samples": timing.samples,
+        "tick_p50_ms": timing.p50_ms,
+        "tick_p95_ms": timing.p95_ms,
+        "tick_max_ms": timing.max_ms,
     })
 }
 
@@ -1994,8 +2010,8 @@ fn teleport(world: &mut World, name: &str, zone_id: i32, room_id: i32) -> AdminR
             format!("room ({zone_id}, {room_id}) not loaded"),
         ));
     };
-    if let Some(mut l) = world.get_mut::<Located>(entity) {
-        l.0 = room_entity;
+    if world.get::<Located>(entity).is_some() {
+        world.entity_mut(entity).insert(Located(room_entity));
     } else if let Ok(mut e) = world.get_entity_mut(entity) {
         e.insert(Located(room_entity));
     }

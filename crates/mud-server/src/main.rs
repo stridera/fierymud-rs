@@ -1,5 +1,6 @@
 mod admin;
 mod aggression;
+mod autosave;
 mod camp;
 mod casting;
 mod combat;
@@ -23,6 +24,7 @@ mod rest;
 mod shops;
 mod sleep;
 mod syslog;
+mod tick_stats;
 mod triggers;
 mod wander;
 mod weather;
@@ -36,7 +38,7 @@ use mud_net::{Inbound, InboundKind};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Notify, mpsc};
 use tokio::time::{MissedTickBehavior, interval};
-use tracing::{error, info, info_span};
+use tracing::{error, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -145,6 +147,54 @@ fn install_panic_hook() {
     }));
 }
 
+/// Record a finished tick and emit the (rate-limited) slow-tick WARN naming
+/// the slowest phase.
+fn note_tick_finished(world: &mut World, tick_start: Instant) {
+    let now = Instant::now();
+    let total = now.saturating_duration_since(tick_start);
+    if let Some(r) = world
+        .resource_mut::<tick_stats::TickStats>()
+        .finish_tick(now, total)
+    {
+        warn!(
+            phase = r.phase,
+            duration_ms = u64::try_from(r.duration.as_millis()).unwrap_or(u64::MAX),
+            suppressed_since_last_warn = r.suppressed,
+            "slow tick (>= {} ms); slowest phase shown",
+            tick_stats::SLOW_TURN.as_millis()
+        );
+    }
+}
+
+/// Same for loop turns that aren't the tick (inbound commands, auth
+/// completions): they block the single-threaded loop just the same.
+fn note_slow_turn(world: &mut World, phase: &'static str, turn_start: Instant) {
+    let now = Instant::now();
+    let d = now.saturating_duration_since(turn_start);
+    if let Some(r) = world
+        .resource_mut::<tick_stats::TickStats>()
+        .report_slow(now, phase, d)
+    {
+        warn!(
+            phase = r.phase,
+            duration_ms = u64::try_from(r.duration.as_millis()).unwrap_or(u64::MAX),
+            suppressed_since_last_warn = r.suppressed,
+            "slow loop turn (>= {} ms)",
+            tick_stats::SLOW_TURN.as_millis()
+        );
+    }
+}
+
+/// Wrap a schedule system so the time it takes is credited to its name in
+/// [`tick_stats::TickStats`]. Relies on the schedule being fully chained:
+/// the marker runs immediately after the system, so the gap since the
+/// previous marker is exactly that system's runtime.
+macro_rules! timed {
+    ($sys:path) => {
+        ($sys, tick_stats::lap_after(stringify!($sys))).chain()
+    };
+}
+
 #[tokio::main(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)]
 async fn main() {
@@ -190,6 +240,8 @@ async fn main() {
 
     let mut world = World::new();
     world.insert_resource(TickCount::default());
+    world.insert_resource(tick_stats::TickStats::default());
+    world.insert_resource(autosave::SaveCoordinator::default());
     world.insert_resource(ServerStart(Instant::now()));
     // DevMode lives in the GameConfig `server.dev_mode` row so the
     // toggle persists across restarts. Boot initial value is `false`;
@@ -462,40 +514,40 @@ async fn main() {
     schedule.add_systems(
         (
             (
-                advance_tick,
-                mud_clock_tick,
-                casting::casting_tick,
-                commands::info::pending_summon_tick,
-                combat::combat_tick,
-                combat::corpse_decay_tick,
-                item_decay::item_decay_tick,
-                effects::effects_tick,
-                regen::regen_tick,
-                regen::hunger_thirst_tick,
-                regen::light_fuel_tick,
-                regen::drunkenness_tick,
-                drowning::drowning_tick,
-                weather::weather_tick,
-                weather::ambient_tick,
-                sleep::mob_sleep_tick,
+                timed!(advance_tick),
+                timed!(mud_clock_tick),
+                timed!(casting::casting_tick),
+                timed!(commands::info::pending_summon_tick),
+                timed!(combat::combat_tick),
+                timed!(combat::corpse_decay_tick),
+                timed!(item_decay::item_decay_tick),
+                timed!(effects::effects_tick),
+                timed!(regen::regen_tick),
+                timed!(regen::hunger_thirst_tick),
+                timed!(regen::light_fuel_tick),
+                timed!(regen::drunkenness_tick),
+                timed!(drowning::drowning_tick),
+                timed!(weather::weather_tick),
+                timed!(weather::ambient_tick),
+                timed!(sleep::mob_sleep_tick),
             )
                 .chain(),
             (
-                wander::wander_tick,
-                wander::scavenger_tick,
-                idle::idle_kick_tick,
-                camp::camp_tick,
-                memorize::memorize_tick,
-                respawn::respawn_tick,
-                triggers::lua_coroutine_tick,
-                entity_vars::entity_var_flush_tick,
-                quest_vars::quest_var_flush_tick,
-                commands::drain_player_updates,
-                quest_triggers::quest_sweep_tick,
-                quest_triggers::quest_custom_lua_drain,
-                events::events_poll_tick,
-                events::drain_events_inbox,
-                log_heartbeat,
+                timed!(wander::wander_tick),
+                timed!(wander::scavenger_tick),
+                timed!(idle::idle_kick_tick),
+                timed!(camp::camp_tick),
+                timed!(memorize::memorize_tick),
+                timed!(respawn::respawn_tick),
+                timed!(triggers::lua_coroutine_tick),
+                timed!(entity_vars::entity_var_flush_tick),
+                timed!(quest_vars::quest_var_flush_tick),
+                timed!(commands::drain_player_updates),
+                timed!(quest_triggers::quest_sweep_tick),
+                timed!(quest_triggers::quest_custom_lua_drain),
+                timed!(events::events_poll_tick),
+                timed!(events::drain_events_inbox),
+                timed!(log_heartbeat),
             )
                 .chain(),
         )
@@ -535,11 +587,14 @@ async fn main() {
             _ = ticker.tick() => {
                 let span = info_span!("tick");
                 let _g = span.enter();
+                let tick_start = Instant::now();
+                world.resource_mut::<tick_stats::TickStats>().begin_turn(tick_start);
                 // Always drain admin requests first — pause/unpause/
                 // tick must flow even while the rest of the world is
                 // frozen. The drain consumes any forced-tick budget
                 // posted by /api/admin/world/tick.
                 admin::drain_admin_requests(&mut world);
+                tick_stats::lap(&mut world, "admin_drain");
                 // Tell mud-net which connections have finished login
                 // so they leave the pre-login timeout. Wall-clock
                 // paced (not tick-paced) so a paused world still
@@ -548,6 +603,7 @@ async fn main() {
                 if last_auth_sync.elapsed() >= Duration::from_secs(1) {
                     last_auth_sync = std::time::Instant::now();
                     idle::sync_authenticated(&mut world, &router);
+                    tick_stats::lap(&mut world, "auth_sync");
                 }
                 let run_world = {
                     let mut p = world.resource_mut::<admin::WorldPause>();
@@ -568,21 +624,32 @@ async fn main() {
                     // crashes — a SIGKILL or a power loss would skip
                     // the graceful shutdown save_all_online path
                     // entirely. Done out-of-band of the schedule so
-                    // any save_player work doesn't get re-entered by
-                    // the schedule's effects/regen ticks.
+                    // any save work doesn't get re-entered by the
+                    // schedule's effects/regen ticks.
+                    //
+                    // Never awaits the database: once a second it
+                    // snapshots the (at most two) characters whose own
+                    // save is older than the interval and spawns their
+                    // writes (see `autosave.rs`). The old code saved
+                    // every online player serially, awaited inline, so
+                    // the whole world froze for the full duration.
                     {
                         let tick = world.resource::<TickCount>().0;
-                        let autosave_secs = world
-                            .resource::<mud_world::RuntimeConfig>()
-                            .get_i32("server", "auto_save_interval_seconds", 300)
-                            .max(10); // floor to avoid pathological config
-                        let autosave_ticks = u64::from(u32::try_from(autosave_secs).unwrap_or(300))
-                            * TICK_HZ;
-                        if tick > 0 && tick.is_multiple_of(autosave_ticks) {
-                            router.save_all_online(&mut world, &pool).await;
-                            info!(tick, autosave_ticks, "periodic autosave");
+                        if tick.is_multiple_of(TICK_HZ) {
+                            let autosave_secs = world
+                                .resource::<mud_world::RuntimeConfig>()
+                                .get_i32("server", "auto_save_interval_seconds", 300)
+                                .max(10); // floor to avoid pathological config
+                            router.autosave_tick(
+                                &mut world,
+                                &pool,
+                                Duration::from_secs(u64::from(
+                                    u32::try_from(autosave_secs).unwrap_or(300),
+                                )),
+                            );
                         }
                     }
+                    tick_stats::lap(&mut world, "autosave");
                     // Periodic expiry of in-memory Discord-link
                     // verification codes. Cadence: every 30 simulated
                     // seconds (300 ticks at 10 Hz). A stalled link
@@ -613,9 +680,13 @@ async fn main() {
                     // `actor:save()` to checkpoint progress mid-tick.
                     // The Lua callback inserts a `PendingSave` marker
                     // since async DB writes can't run inline; we drain
-                    // the markers here, save each player, and clear the
-                    // marker. Plays well with the post-tick autosave
-                    // above because every save_player is idempotent.
+                    // the markers here and hand each player to the same
+                    // background writer the autosave uses (so a script
+                    // calling save() can't stall the tick). A player
+                    // whose previous background save is still in flight
+                    // keeps the marker and is retried next tick. Plays
+                    // well with the autosave above because every save
+                    // is idempotent.
                     {
                         let pending_save: Vec<Entity> = {
                             let mut q = world
@@ -623,20 +694,22 @@ async fn main() {
                             q.iter(&world).collect()
                         };
                         for e in pending_save {
-                            if let Ok(mut em) = world.get_entity_mut(e) {
+                            // Outcome ignored — the autosave path logs
+                            // failures; `false` means "busy, retry".
+                            if login::spawn_background_save(&mut world, e, &pool)
+                                && let Ok(mut em) = world.get_entity_mut(e)
+                            {
                                 em.remove::<mud_world::PendingSave>();
                             }
-                            // PendingSave is the autosave path —
-                            // ignore the outcome (tracing::warn
-                            // covers diagnostics).
-                            let _ = login::save_player(&mut world, e, &pool).await;
                         }
                     }
+                    tick_stats::lap(&mut world, "pending_save");
                     // Drain idle-kick markers before flushing prompts
                     // so the kick notice lands ahead of the prompt
                     // refresh and the disconnect path runs cleanly
                     // through the canonical on_disconnect save flow.
                     idle::drain_idle_kicks(&mut world, &mut router, &pool).await;
+                    tick_stats::lap(&mut world, "idle_kicks");
                 }
                 // Drain real-time syslog WARN+ events to subscribers
                 // before the prompt flush so any pushed lines land
@@ -644,10 +717,13 @@ async fn main() {
                 // separated from gameplay output. Cheap when no one
                 // is watching (early-out on empty subscriber list).
                 commands::drain_syslog_to_watchers(&mut world);
+                tick_stats::lap(&mut world, "syslog_drain");
                 // After all systems for this tick have run, refresh
                 // prompts for anyone who received output (combat hits,
                 // effect fades, broadcasts, etc.).
                 commands::flush_prompts(&mut world);
+                tick_stats::lap(&mut world, "flush_prompts");
+                note_tick_finished(&mut world, tick_start);
                 // Admin `shutdown`: announce the countdown and, once it
                 // expires, leave the loop so the save-everyone path below
                 // runs before the process exits.
@@ -657,12 +733,22 @@ async fn main() {
                 }
             }
             Some(done) = auth_rx.recv() => {
+                let turn_start = Instant::now();
                 router.on_auth_done(done, &pool, &mut world).await;
+                note_slow_turn(&mut world, "auth_done", turn_start);
             }
             msg = inbound_rx.recv() => {
                 let Some(msg) = msg else {
                     error!("inbound channel closed; shutting down");
                     break;
+                };
+                let turn_start = Instant::now();
+                let turn_name = match &msg.kind {
+                    InboundKind::Connected { .. } => "inbound:connect",
+                    InboundKind::Line(_) => "inbound:line",
+                    InboundKind::Disconnected => "inbound:disconnect",
+                    InboundKind::Gmcp { .. } => "inbound:gmcp",
+                    _ => "inbound:other",
                 };
                 match msg.kind {
                     InboundKind::Connected { peer, outbound } => {
@@ -689,6 +775,7 @@ async fn main() {
                         router.on_disconnect(&mut world, msg.conn, &pool).await;
                     }
                 }
+                note_slow_turn(&mut world, turn_name, turn_start);
             }
             () = shutdown.notified() => {
                 info!("shutdown signal received");

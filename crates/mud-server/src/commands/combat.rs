@@ -1544,8 +1544,8 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    if let Some(mut l) = world.get_mut::<mud_world::Located>(item) {
-        l.0 = player;
+    if world.get::<mud_world::Located>(item).is_some() {
+        world.entity_mut(item).insert(mud_world::Located(player));
     }
     send_rendered(
         world,
@@ -1613,8 +1613,8 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
         // Each retreating member drops their own Fighting; the
         // combat tick auto-disengages attackers on next pass.
         try_remove::<Fighting>(world, *m);
-        if let Some(mut l) = world.get_mut::<Located>(*m) {
-            l.0 = target;
+        if world.get::<Located>(*m).is_some() {
+            world.entity_mut(*m).insert(Located(target));
         }
     }
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
@@ -1688,8 +1688,8 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
     try_remove::<Fighting>(world, player);
 
     // Move + announce arrival + auto-look.
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = target;
+    if world.get::<Located>(player).is_some() {
+        world.entity_mut(player).insert(Located(target));
     }
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))
@@ -2541,8 +2541,8 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         &format!("{mover_name} retreats {dir_name}!\r\n"),
     );
     try_remove::<Fighting>(world, player);
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = target;
+    if world.get::<Located>(player).is_some() {
+        world.entity_mut(player).insert(Located(target));
     }
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))

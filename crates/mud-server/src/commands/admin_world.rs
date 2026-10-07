@@ -2548,8 +2548,8 @@ pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
     }
 
     // Move the target.
-    if let Some(mut l) = world.get_mut::<Located>(target) {
-        l.0 = dest_loc.0;
+    if world.get::<Located>(target).is_some() {
+        world.entity_mut(target).insert(Located(dest_loc.0));
     }
 
     // Destination-room bystanders (everyone but admin and the just-arrived target).
@@ -2645,13 +2645,13 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
         );
     }
 
-    if let Some(mut l) = world.get_mut::<Located>(target) {
-        l.0 = dest;
+    if world.get::<Located>(target).is_some() {
+        world.entity_mut(target).insert(Located(dest));
     }
     if let Some(mount) = mount
-        && let Some(mut l) = world.get_mut::<Located>(mount)
+        && world.get::<Located>(mount).is_some()
     {
-        l.0 = dest;
+        world.entity_mut(mount).insert(Located(dest));
     }
 
     let dest_bystanders: Vec<Entity> = {
@@ -2793,15 +2793,15 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = target;
+    if world.get::<Located>(player).is_some() {
+        world.entity_mut(player).insert(Located(target));
     }
     // Bring the mount along on goto / recall — otherwise the mount
     // is orphaned in the old room with a stale RiddenBy link.
     if let Some(mount) = mount
-        && let Some(mut l) = world.get_mut::<Located>(mount)
+        && world.get::<Located>(mount).is_some()
     {
-        l.0 = target;
+        world.entity_mut(mount).insert(Located(target));
     }
     cmd_look(world, player, "");
 }

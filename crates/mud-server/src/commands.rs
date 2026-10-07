@@ -11010,24 +11010,25 @@ pub(crate) fn item_weight(world: &World, item: Entity) -> f64 {
 /// synthetic seed items) contribute zero. Used by `inventory` for
 /// the readout, and reusable when pickup enforcement lands later.
 pub(crate) fn carried_weight(world: &mut World, actor: Entity) -> f64 {
-    use std::collections::HashSet;
-    // Snapshot every (item, parent, proto_key) once so the BFS
-    // below doesn't reborrow the world each step.
-    let all_items: Vec<(Entity, Entity, Option<WorldKey>)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, Option<&WorldKey>), With<Item>>();
-        q.iter(world)
-            .map(|(e, l, wk)| (e, l.0, wk.copied()))
-            .collect()
-    };
-    let mut visited: HashSet<Entity> = HashSet::new();
-    let mut frontier: Vec<Entity> = vec![actor];
+    // Walk the `Contents` reverse index of `Located` (kept in sync by
+    // bevy's relationship hooks) instead of scanning every item in the
+    // world: cost is O(carried items), independent of world size. This
+    // runs on every move, so the old O(world items x carried) scan was a
+    // per-step tick cost that grew with the whole world's population.
+    let mut visited: std::collections::HashSet<Entity> = std::collections::HashSet::new();
     let mut total = 0.0_f64;
+    let mut frontier: Vec<Entity> = vec![actor];
     while let Some(parent) = frontier.pop() {
-        for (e, p, wk) in &all_items {
-            if *p != parent || !visited.insert(*e) {
+        let Some(contents) = world.get::<mud_world::Contents>(parent) else {
+            continue;
+        };
+        for e in contents.iter() {
+            // `Contents` also lists non-items (mobs/players standing in a
+            // room); only items weigh anything or nest further.
+            if world.get::<Item>(e).is_none() || !visited.insert(e) {
                 continue;
             }
-            if let Some(wk) = wk
+            if let Some(wk) = world.get::<WorldKey>(e)
                 && let Some(proto) = world
                     .resource::<ObjectPrototypes>()
                     .by_key
@@ -11035,7 +11036,7 @@ pub(crate) fn carried_weight(world: &mut World, actor: Entity) -> f64 {
             {
                 total += proto.weight;
             }
-            frontier.push(*e);
+            frontier.push(e);
         }
     }
     total
@@ -15020,8 +15021,8 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{pretty} (already there)"));
                     continue;
                 }
-                if let Some(mut l) = world.get_mut::<Located>(target_entity) {
-                    l.0 = dest_room;
+                if world.get::<Located>(target_entity).is_some() {
+                    world.entity_mut(target_entity).insert(Located(dest_room));
                 }
                 // Defer the auto-look until after the cast
                 // confirmation prints — otherwise the room description
@@ -15501,9 +15502,9 @@ pub(crate) fn invoke_ability_with(
                 try_remove::<mud_world::Ghost>(world, target_entity);
                 // Drop the ghost in the caster's room.
                 if let Some(caster_room) = world.get::<Located>(player).map(|l| l.0)
-                    && let Some(mut l) = world.get_mut::<Located>(target_entity)
+                    && world.get::<Located>(target_entity).is_some()
                 {
-                    l.0 = caster_room;
+                    world.entity_mut(target_entity).insert(Located(caster_room));
                 }
                 let target_name = name_or(world, target_entity, "(unknown)");
                 // Corpse-equipment transfer. Walk every Item-Corpse
@@ -15530,8 +15531,8 @@ pub(crate) fn invoke_ability_with(
                             .collect()
                     };
                     for it in items_in_corpse {
-                        if let Some(mut l) = world.get_mut::<Located>(it) {
-                            l.0 = target_entity;
+                        if world.get::<Located>(it).is_some() {
+                            world.entity_mut(it).insert(Located(target_entity));
                         }
                         try_remove::<mud_world::EquippedSlot>(world, it);
                         items_returned += 1;
@@ -19699,13 +19700,13 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         .filter_map(|m| world.get::<mud_world::Mounted>(*m).map(|x| x.0))
         .collect();
     for &mover in &movers {
-        if let Some(mut l) = world.get_mut::<Located>(mover) {
-            l.0 = target;
+        if world.get::<Located>(mover).is_some() {
+            world.entity_mut(mover).insert(Located(target));
         }
     }
     for mount in mounts {
-        if let Some(mut l) = world.get_mut::<Located>(mount) {
-            l.0 = target;
+        if world.get::<Located>(mount).is_some() {
+            world.entity_mut(mount).insert(Located(target));
         }
     }
     // Zone-clear tracking: each player mover now occupies `target`.
@@ -20143,4 +20144,142 @@ pub(crate) fn opposite(d: Direction) -> Option<Direction> {
         Out => In,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod carried_weight_tests {
+    use super::{carried_weight, test_support};
+    use bevy_ecs::prelude::*;
+    use mud_db::enums::ObjectType;
+    use mud_world::{Contents, Item, Located, ObjectPrototypes, WorldKey};
+    use std::collections::HashSet;
+
+    /// The pre-index algorithm, verbatim in behaviour: snapshot every item
+    /// in the world, then BFS from the actor re-scanning that snapshot per
+    /// parent. Kept as the oracle for `carried_weight`.
+    fn carried_weight_scan(world: &mut World, actor: Entity) -> f64 {
+        let all_items: Vec<(Entity, Entity, Option<WorldKey>)> = {
+            let mut q = world.query_filtered::<(Entity, &Located, Option<&WorldKey>), With<Item>>();
+            q.iter(world)
+                .map(|(e, l, wk)| (e, l.0, wk.copied()))
+                .collect()
+        };
+        let mut visited: HashSet<Entity> = HashSet::new();
+        let mut frontier: Vec<Entity> = vec![actor];
+        let mut total = 0.0_f64;
+        while let Some(parent) = frontier.pop() {
+            for (e, p, wk) in &all_items {
+                if *p != parent || !visited.insert(*e) {
+                    continue;
+                }
+                if let Some(wk) = wk
+                    && let Some(proto) = world
+                        .resource::<ObjectPrototypes>()
+                        .by_key
+                        .get(&(wk.zone, wk.id))
+                {
+                    total += proto.weight;
+                }
+                frontier.push(*e);
+            }
+        }
+        total
+    }
+
+    fn item(world: &mut World, key: (i32, i32), parent: Entity) -> Entity {
+        world
+            .spawn((
+                Item,
+                WorldKey {
+                    zone: key.0,
+                    id: key.1,
+                },
+                Located(parent),
+            ))
+            .id()
+    }
+
+    fn fixture() -> (World, Entity, Entity, Vec<Entity>) {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        // Weights are exact binary fractions so summation order can't matter.
+        for id in 1..=6 {
+            let mut p = test_support::object_proto(1, id, ObjectType::Other);
+            p.weight = f64::from(id) * 0.5;
+            protos.by_key.insert((1, id), p);
+        }
+        world.insert_resource(protos);
+        let room = world.spawn_empty().id();
+        let (player, _rx) = test_support::player_in(&mut world, room);
+        // A big world: thousands of items on room floors and in room
+        // containers, none carried by the player.
+        let other_room = world.spawn_empty().id();
+        let floor_bag = item(&mut world, (1, 6), other_room);
+        for i in 0..3000 {
+            item(&mut world, (1, 1 + (i % 6)), other_room);
+            item(&mut world, (1, 1 + (i % 6)), floor_bag);
+        }
+        // Carried: 2 loose items, a bag holding an item and a nested bag.
+        let a = item(&mut world, (1, 1), player);
+        let b = item(&mut world, (1, 2), player);
+        let bag = item(&mut world, (1, 6), player);
+        let in_bag = item(&mut world, (1, 3), bag);
+        let inner_bag = item(&mut world, (1, 6), bag);
+        let deep = item(&mut world, (1, 4), inner_bag);
+        // A synthetic item with no WorldKey contributes zero but still nests.
+        let keyless = world.spawn((Item, Located(player))).id();
+        let under_keyless = item(&mut world, (1, 5), keyless);
+        (
+            world,
+            player,
+            bag,
+            vec![a, b, bag, in_bag, inner_bag, deep, keyless, under_keyless],
+        )
+    }
+
+    #[test]
+    fn matches_the_old_world_scan_on_a_large_world() {
+        let (mut world, player, _bag, _carried) = fixture();
+        let expected = carried_weight_scan(&mut world, player);
+        // 0.5 + 1.0 + 3.0 + 1.5 + 3.0 + 2.0 + 0 + 2.5
+        assert!((expected - 13.5).abs() < f64::EPSILON, "oracle {expected}");
+        assert!((carried_weight(&mut world, player) - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn index_only_lists_what_the_player_holds() {
+        // The index is what makes the cost O(carried): the player's own
+        // `Contents` is just its 4 direct items, regardless of the 6000
+        // world items elsewhere.
+        let (world, player, _bag, _carried) = fixture();
+        assert_eq!(world.get::<Contents>(player).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn index_follows_moves_despawns_and_removals() {
+        let (mut world, player, bag, carried) = fixture();
+        let room = world.get::<Located>(player).unwrap().0;
+        // Drop the bag (with its contents riding along): weight falls.
+        world.entity_mut(bag).insert(Located(room));
+        let (now, oracle) = (
+            carried_weight(&mut world, player),
+            carried_weight_scan(&mut world, player),
+        );
+        assert!((now - oracle).abs() < f64::EPSILON, "{now} vs {oracle}");
+        // The bag subtree (3.0 + 1.5 + 3.0 + 2.0) left with it; the loose
+        // items and the keyless chain (0.5 + 1.0 + 2.5) stay.
+        assert!((carried_weight(&mut world, player) - 4.0).abs() < f64::EPSILON);
+        // Pick it back up through a different path (insert over Located).
+        world.entity_mut(bag).insert(Located(player));
+        assert!((carried_weight(&mut world, player) - 13.5).abs() < f64::EPSILON);
+        // Despawn a nested item and remove Located from another.
+        world.despawn(carried[3]);
+        world.entity_mut(carried[0]).remove::<Located>();
+        let (now, oracle) = (
+            carried_weight(&mut world, player),
+            carried_weight_scan(&mut world, player),
+        );
+        assert!((now - oracle).abs() < f64::EPSILON, "{now} vs {oracle}");
+        assert!((carried_weight(&mut world, player) - (13.5 - 1.5 - 0.5)).abs() < f64::EPSILON);
+    }
 }

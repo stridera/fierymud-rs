@@ -148,8 +148,8 @@ pub fn wander_tick(world: &mut World) {
                 direction_name(dir),
             ),
         );
-        if let Some(mut l) = world.get_mut::<Located>(mob) {
-            l.0 = target_room;
+        if world.get::<Located>(mob).is_some() {
+            world.entity_mut(mob).insert(Located(target_room));
         }
         let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
             format!("the {}", direction_name(d))
@@ -202,8 +202,8 @@ pub fn scavenger_tick(world: &mut World) {
         let Some((item, item_name)) = target_item else {
             continue;
         };
-        if let Some(mut l) = world.get_mut::<Located>(item) {
-            l.0 = mob;
+        if world.get::<Located>(item).is_some() {
+            world.entity_mut(item).insert(Located(mob));
         }
         let mob_name = world
             .get::<Named>(mob)

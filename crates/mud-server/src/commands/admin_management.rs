@@ -970,8 +970,10 @@ pub(crate) async fn cmd_hgoto(
         send_to(world, player, "Couldn't resolve the house foyer.\r\n");
         return;
     };
-    if let Some(mut l) = world.get_mut::<mud_world::Located>(player) {
-        l.0 = foyer_entity;
+    if world.get::<mud_world::Located>(player).is_some() {
+        world
+            .entity_mut(player)
+            .insert(mud_world::Located(foyer_entity));
     }
     send_to(
         world,

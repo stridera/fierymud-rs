@@ -82,8 +82,8 @@ fn cmd_release(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     }
-    if let Some(mut l) = world.get_mut::<Located>(player) {
-        l.0 = target;
+    if world.get::<Located>(player).is_some() {
+        world.entity_mut(player).insert(Located(target));
     } else {
         try_insert(world, player, Located(target));
     }
