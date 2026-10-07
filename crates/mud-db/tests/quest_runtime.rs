@@ -473,3 +473,82 @@ async fn deliver_item_and_use_skill_objectives_match_their_targets() {
     assert_eq!(used[0].objective_id, 2);
     fx.end().await;
 }
+
+/// Simultaneous bumps are atomic: no lost steps, and exactly one of
+/// them observes the transition to complete.
+#[tokio::test]
+async fn concurrent_increments_count_every_step_and_complete_once() {
+    let Some(fx) = fixture().await else { return };
+    fx.phase(1, 0).await;
+    sqlx::query(
+        "INSERT INTO \"QuestObjective\" (quest_zone_id, quest_id, phase_id, id, \
+         objective_type, player_description, required_count, \
+         target_mob_zone_id, target_mob_id) \
+         VALUES ($1, $2, 1, 1, 'KILL_MOB'::\"QuestObjectiveType\", 'kill', 8, $3, $4)",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .bind(fx.mobs[0].0)
+    .bind(fx.mobs[0].1)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(fx.accept().await, AcceptOutcome::Accepted);
+    let cq = fx.cq_id().await;
+
+    let mut tasks = Vec::new();
+    for _ in 0..12 {
+        let (pool, cq, zone, quest) = (fx.pool.clone(), cq.clone(), fx.zone, fx.quest);
+        tasks.push(tokio::spawn(async move {
+            mud_db::quest_objectives::increment_progress(&pool, &cq, zone, quest, 1, 1, 8)
+                .await
+                .unwrap()
+        }));
+    }
+    let mut results = Vec::new();
+    for t in tasks {
+        results.push(t.await.unwrap());
+    }
+    let applied: Vec<_> = results.iter().flatten().collect();
+    assert_eq!(applied.len(), 8, "bumps past completion are no-ops");
+    assert_eq!(applied.iter().filter(|(_, done)| *done).count(), 1);
+    let mut counts: Vec<i32> = applied.iter().map(|(c, _)| *c).collect();
+    counts.sort_unstable();
+    assert_eq!(counts, (1..=8).collect::<Vec<_>>(), "no lost updates");
+    fx.end().await;
+}
+
+/// Two racing completion checks: one quest completion, one
+/// completion_count bump.
+#[tokio::test]
+async fn concurrent_phase_checks_complete_the_quest_once() {
+    let Some(fx) = fixture().await else { return };
+    fx.phase(1, 0).await;
+    fx.kill(1, 1, 0).await;
+    assert_eq!(fx.accept().await, AcceptOutcome::Accepted);
+    let cq = fx.cq_id().await;
+    fx.complete(&cq, 1, 1).await;
+
+    let mut tasks = Vec::new();
+    for _ in 0..6 {
+        let (pool, cq) = (fx.pool.clone(), cq.clone());
+        tasks.push(tokio::spawn(async move {
+            try_advance_phase(&pool, &cq).await.unwrap()
+        }));
+    }
+    let mut completions = 0;
+    for t in tasks {
+        if t.await.unwrap() == PhaseAdvance::QuestComplete {
+            completions += 1;
+        }
+    }
+    assert_eq!(completions, 1, "exactly one caller sees the completion");
+    let count: i32 =
+        sqlx::query_scalar("SELECT completion_count FROM \"CharacterQuest\" WHERE id = $1")
+            .bind(&cq)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+    fx.end().await;
+}

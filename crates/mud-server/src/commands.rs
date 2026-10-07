@@ -8513,12 +8513,10 @@ fn bump_quest_progress_with(
             };
             let prefix = if is_actor { "" } else { "(party) " };
             for row in &rows {
-                let new_count = (row.current_count + 1).min(row.required_count);
                 crate::quest_progress::record_progress(
                     &pool,
                     &notify,
                     &crate::quest_progress::ObjectiveRef::from(row),
-                    new_count,
                     prefix,
                 )
                 .await;

@@ -325,3 +325,40 @@ async fn qreset_clears_a_players_quest_state() {
     assert!(drain(&mut rx).contains("no record"));
     fx.end().await;
 }
+
+/// Racing completion checks (several bumps landing together) pay the
+/// quest's rewards exactly once.
+#[tokio::test(flavor = "current_thread")]
+async fn racing_completions_pay_rewards_once() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    fx.rewards().await;
+    fx.accept().await;
+    let cq = mud_db::quests::find_character_quest(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    mud_db::quest_objectives::upsert_progress(&fx.pool, &cq, fx.zone, fx.quest, 1, 1, 1, true)
+        .await
+        .unwrap();
+    let before = fx.paid().await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let notify = crate::quest_progress::Notifier {
+        character_id: fx.char_id.clone(),
+        out: tx,
+        update_tx: None,
+    };
+    let check = || crate::quest_progress::advance_quest(&fx.pool, &notify, &cq, fx.zone, fx.quest);
+    tokio::join!(check(), check(), check(), check());
+
+    let after = fx.paid().await;
+    assert_eq!(after.0 - before.0, 50, "experience paid once");
+    assert_eq!(after.1 - before.1, 7, "gold paid once");
+    let mut text = String::new();
+    while let Ok(b) = rx.try_recv() {
+        text.push_str(&String::from_utf8_lossy(&b));
+    }
+    assert_eq!(text.matches("*** Quest complete! ***").count(), 1, "{text}");
+    fx.end().await;
+}

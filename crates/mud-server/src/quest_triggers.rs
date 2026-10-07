@@ -485,10 +485,9 @@ pub(crate) fn quest_custom_lua_drain(world: &mut World) {
         let Some(notify) = crate::quest_progress::Notifier::for_player(world, entity) else {
             continue;
         };
-        let new_count = (row.current_count + 1).min(row.required_count);
         let obj = crate::quest_progress::ObjectiveRef::from(&row);
         tokio::spawn(async move {
-            crate::quest_progress::record_progress(&pool, &notify, &obj, new_count, "").await;
+            crate::quest_progress::record_progress(&pool, &notify, &obj, "").await;
         });
     }
 }

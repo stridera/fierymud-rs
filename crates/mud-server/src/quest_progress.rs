@@ -102,16 +102,59 @@ impl From<&mud_db::quest_objectives::CustomLuaObjective> for ObjectiveRef {
     }
 }
 
-/// Persist `new_count` for `obj`, tell the player, and run the
+/// Add one to `obj`'s progress, tell the player, and run the
 /// phase-advance / quest-completion handling when it reached its
 /// required count. `party_prefix` is `"(party) "` for a group member
 /// credited by someone else's action, otherwise empty.
+///
+/// The increment is a single atomic SQL statement, so bumps that race
+/// (several tasks for one player) neither lose steps nor complete the
+/// objective twice; a bump that loses the race to completion is a
+/// no-op.
 pub(crate) async fn record_progress(
     pool: &mud_db::sqlx::PgPool,
     notify: &Notifier,
     obj: &ObjectiveRef,
-    new_count: i32,
     party_prefix: &str,
+) {
+    let (new_count, completed) = match mud_db::quest_objectives::increment_progress(
+        pool,
+        &obj.character_quest_id,
+        obj.quest_zone_id,
+        obj.quest_id,
+        obj.phase_id,
+        obj.objective_id,
+        obj.required_count,
+    )
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "objective increment failed");
+            return;
+        }
+    };
+    notify.say(&progress_line(obj, new_count, completed, party_prefix));
+    if completed {
+        advance_quest(
+            pool,
+            notify,
+            &obj.character_quest_id,
+            obj.quest_zone_id,
+            obj.quest_id,
+        )
+        .await;
+    }
+}
+
+/// Set an objective's count outright (held-items credit) rather than
+/// stepping it, then announce and advance like [`record_progress`].
+async fn record_absolute(
+    pool: &mud_db::sqlx::PgPool,
+    notify: &Notifier,
+    obj: &ObjectiveRef,
+    new_count: i32,
 ) {
     let completed = new_count >= obj.required_count;
     if let Err(e) = mud_db::quest_objectives::upsert_progress(
@@ -129,7 +172,27 @@ pub(crate) async fn record_progress(
         tracing::warn!(error = %e, "objective upsert failed");
         return;
     }
-    let line = if completed {
+    notify.say(&progress_line(obj, new_count, completed, ""));
+    if completed {
+        advance_quest(
+            pool,
+            notify,
+            &obj.character_quest_id,
+            obj.quest_zone_id,
+            obj.quest_id,
+        )
+        .await;
+    }
+}
+
+/// The progress message for an objective at `new_count`.
+fn progress_line(
+    obj: &ObjectiveRef,
+    new_count: i32,
+    completed: bool,
+    party_prefix: &str,
+) -> String {
+    if completed {
         format!(
             "{party_prefix}Quest objective complete: {}\r\n",
             obj.player_description
@@ -144,17 +207,6 @@ pub(crate) async fn record_progress(
             "{party_prefix}Quest objective updated: {}\r\n",
             obj.player_description
         )
-    };
-    notify.say(&line);
-    if completed {
-        advance_quest(
-            pool,
-            notify,
-            &obj.character_quest_id,
-            obj.quest_zone_id,
-            obj.quest_id,
-        )
-        .await;
     }
 }
 
@@ -348,7 +400,7 @@ async fn recheck_collect_task(
             .copied()
             .unwrap_or(0);
         if let Some(new_count) = collect_credit(n, row.current_count, row.required_count) {
-            record_progress(pool, notify, &ObjectiveRef::from(row), new_count, "").await;
+            record_absolute(pool, notify, &ObjectiveRef::from(row), new_count).await;
         }
     }
 }

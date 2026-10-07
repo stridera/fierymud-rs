@@ -837,6 +837,9 @@ pub enum PhaseAdvance {
 /// phase, and if so either advance to the next phase or mark the
 /// whole quest complete. Idempotent — safe to call after every
 /// objective bump; bails early when the phase isn't fully done.
+///
+/// The quest row is locked for the duration, so concurrent callers
+/// serialise and only one of them gets [`PhaseAdvance::QuestComplete`].
 #[allow(clippy::too_many_lines)]
 pub async fn try_advance_phase(
     pool: &PgPool,
@@ -852,6 +855,7 @@ pub async fn try_advance_phase(
             cq.status::text AS "status!: String"
         FROM "CharacterQuest" cq
         WHERE cq.id = $1
+        FOR UPDATE
         "#,
         character_quest_id,
     )
@@ -969,21 +973,73 @@ pub async fn try_advance_phase(
         current_phase_id = next.id;
         advanced = Some((next.id, next.name));
     }
-    // No next phase — quest done.
-    sqlx::query!(
+    // No next phase — quest done. Guarded on status so that exactly
+    // one caller ever observes the completion (and pays the rewards).
+    let done = sqlx::query!(
         r#"
         UPDATE "CharacterQuest"
         SET status = 'COMPLETED'::"QuestStatus",
             completed_at = NOW(),
             completion_count = completion_count + 1
-        WHERE id = $1
+        WHERE id = $1 AND status = 'IN_PROGRESS'::"QuestStatus"
         "#,
         character_quest_id,
     )
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(PhaseAdvance::QuestComplete)
+    Ok(if done.rows_affected() == 1 {
+        PhaseAdvance::QuestComplete
+    } else {
+        PhaseAdvance::Pending
+    })
+}
+
+/// Atomically add one to an objective's count (capped at
+/// `required_count`), creating the row on first progress. Returns the
+/// new `(count, completed)`, or `None` when the objective was already
+/// complete (a concurrent bump finished it first), in which case
+/// nothing changed. Being a single SQL statement, simultaneous bumps
+/// never lose or double-count a step, and exactly one of them sees the
+/// transition to complete.
+pub async fn increment_progress(
+    pool: &PgPool,
+    character_quest_id: &str,
+    quest_zone_id: i32,
+    quest_id: i32,
+    phase_id: i32,
+    objective_id: i32,
+    required_count: i32,
+) -> sqlx::Result<Option<(i32, bool)>> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO "CharacterQuestObjective"
+            (id, character_quest_id, quest_zone_id, quest_id, phase_id,
+             objective_id, current_count, completed, completed_at)
+        VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5,
+                LEAST(1, $6::int), 1 >= $6::int,
+                CASE WHEN 1 >= $6::int THEN NOW() ELSE NULL END)
+        ON CONFLICT (character_quest_id, quest_zone_id, quest_id, phase_id, objective_id)
+        DO UPDATE SET
+            current_count = LEAST("CharacterQuestObjective".current_count + 1, $6::int),
+            completed = "CharacterQuestObjective".current_count + 1 >= $6::int,
+            completed_at = CASE
+                WHEN "CharacterQuestObjective".current_count + 1 >= $6::int THEN NOW()
+                ELSE NULL
+            END
+        WHERE "CharacterQuestObjective".completed = false
+        RETURNING current_count AS "current_count!: i32", completed AS "completed!: bool"
+        "#,
+        character_quest_id,
+        quest_zone_id,
+        quest_id,
+        phase_id,
+        objective_id,
+        required_count,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| (r.current_count, r.completed)))
 }
 
 #[allow(clippy::too_many_arguments)]
