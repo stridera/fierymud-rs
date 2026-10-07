@@ -961,6 +961,44 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         );
     }
 }
+/// Re-engage lag: one combat round (`REENGAGE_LAG_TICKS`) after any
+/// engage, `disengage` or failed switch. Inside the window a new
+/// `kill` still sets `Fighting` (the normal combat tick swings at its
+/// usual cadence) but gets no instant swing and no second ATTACK
+/// trigger, so `disengage` + `kill` cannot be looped for free rounds.
+/// `last_opponent` makes `disengage` + `kill <other>` count as a
+/// switch attempt. Cleared when the target dies (`disengage_attackers_of`).
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct ReengageLag {
+    until: u64,
+    last_opponent: Option<Entity>,
+}
+
+/// One combat round, in 10Hz ticks (matches `combat::COMBAT_PERIOD_TICKS`).
+const REENGAGE_LAG_TICKS: u64 = 40;
+
+fn now_tick(world: &World) -> u64 {
+    world.get_resource::<crate::TickCount>().map_or(0, |t| t.0)
+}
+
+/// The actor's lag if the window is still open.
+fn active_reengage_lag(world: &World, actor: Entity) -> Option<ReengageLag> {
+    let now = now_tick(world);
+    world
+        .get::<ReengageLag>(actor)
+        .copied()
+        .filter(|l| l.until > now)
+}
+
+/// Open (or restart) the re-engage window, remembering `opponent`.
+fn stamp_reengage(world: &mut World, actor: Entity, opponent: Option<Entity>) {
+    let lag = ReengageLag {
+        until: now_tick(world) + REENGAGE_LAG_TICKS,
+        last_opponent: opponent,
+    };
+    try_insert(world, actor, lag);
+}
+
 /// Legacy `switch_ok`: moving to a new opponent mid-fight needs the
 /// `Switch` skill. No skill refuses outright; a failed roll (`roll`
 /// is 1..=101 against the skill percent) drops the current fight
@@ -992,6 +1030,7 @@ fn try_switch_opponent(world: &mut World, player: Entity, old: Entity, roll: i32
     let room = world.get::<Located>(player).map(|l| l.0);
     try_remove::<Fighting>(world, player);
     if roll > skill {
+        stamp_reengage(world, player, Some(old));
         send_to(
             world,
             player,
@@ -1019,6 +1058,12 @@ fn try_switch_opponent(world: &mut World, player: Entity, old: Entity, roll: i32
     true
 }
 pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
+    attack_with_switch_roll(world, player, target_name, rand::random_range(1..=101));
+}
+
+/// `cmd_attack` with the Switch d101 roll injected (tests pin it).
+#[allow(clippy::too_many_lines)]
+fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str, switch_roll: i32) {
     if !require_alert_posture(world, player, "attack") {
         return;
     }
@@ -1116,12 +1161,27 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         send_to(world, player, "You're doing the best you can!\r\n");
         return;
     }
-    if let Some(old) = current
+    // `disengage` / a failed switch leave no `Fighting` behind, so the
+    // lag window remembers who we were fighting: moving to someone else
+    // inside it is still a switch attempt.
+    let lag = active_reengage_lag(world, player);
+    let switching_from = current.or_else(|| {
+        lag.and_then(|l| l.last_opponent).filter(|&o| {
+            o != target
+                && world.get::<Located>(o).is_some_and(|l| l.0 == located.0)
+                && world.get::<Health>(o).is_some_and(|h| h.hp > 0)
+        })
+    });
+    if let Some(old) = switching_from
         && world.get::<Mob>(player).is_none()
-        && !try_switch_opponent(world, player, old, rand::random_range(1..=101))
+        && !try_switch_opponent(world, player, old, switch_roll)
     {
         return;
     }
+    // Only a fresh engage (no open lag window) gets the instant swing
+    // and the ATTACK trigger.
+    let fresh = lag.is_none();
+    stamp_reengage(world, player, Some(target));
     let actual_name = name_of(world, target);
     let player_name = name_of(world, player);
 
@@ -1161,14 +1221,22 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     // Fire ATTACK trigger on the target. Bodies typically run
     // initial-aggression flavor or counter-attacks. `self` = target,
     // `actor` = attacker.
-    crate::triggers::fire_event_with_actor(world, target, player, mud_world::TriggerEvent::Attack);
+    if fresh {
+        crate::triggers::fire_event_with_actor(
+            world,
+            target,
+            player,
+            mud_world::TriggerEvent::Attack,
+        );
+    }
 
     // G3.1: fire the player's first swing right here so they don't
     // sit through "You attack X!" with no follow-up until the next
     // combat tick (up to ~4s). Subsequent swings come from the
     // regular `combat_tick` cadence. ATTACK trigger above may have
     // killed / moved the target — verify the engagement still holds.
-    if world.get_entity(target).is_ok()
+    if fresh
+        && world.get_entity(target).is_ok()
         && world.get::<Fighting>(player).is_some_and(|f| f.0 == target)
     {
         crate::combat::engage_swing_now(world, player, target);
@@ -3125,7 +3193,9 @@ pub(crate) fn cmd_disengage(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You aren't fighting anyone.\r\n");
         return;
     }
+    let old_target = world.get::<Fighting>(player).map(|f| f.0);
     try_remove::<Fighting>(world, player);
+    stamp_reengage(world, player, old_target);
     send_to(world, player, "You stop fighting.\r\n");
 }
 
@@ -3262,5 +3332,180 @@ mod attack_while_fighting_tests {
         // the skill gate is player-only.
         cmd_attack(&mut world, ogre, "rat");
         assert_eq!(world.get::<Fighting>(ogre).map(|f| f.0), Some(rat));
+    }
+
+    use mud_world::{AttachedTriggers, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent};
+
+    /// Player "Tester" (not fighting) with sleeping, auto-hit mobs
+    /// "ogre" (carries an ATTACK trigger) and "rat"; `TickCount` at 0.
+    fn fresh() -> (
+        World,
+        Entity,
+        Entity,
+        Entity,
+        crate::commands::test_support::Rx,
+    ) {
+        let mut world = World::new();
+        world.insert_resource(crate::TickCount(0));
+        let mut catalog = TriggerCatalog::default();
+        catalog.by_key.insert(
+            (99, 1),
+            TriggerDef {
+                zone_id: 99,
+                id: 1,
+                name: "t".to_string(),
+                attach_type: TriggerAttach::Mob,
+                commands: "return".to_string(),
+                flags: vec![TriggerEvent::Attack],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        world.insert_resource(catalog);
+        world.insert_resource(mud_script::LuaHost::new());
+        let room = world.spawn_empty().id();
+        let (p, rx) = player_in(&mut world, room);
+        world
+            .entity_mut(p)
+            .insert((CombatStats::default(), Health { hp: 100, max: 100 }));
+        let mk = |world: &mut World, name: &str| {
+            world
+                .spawn((
+                    Mob,
+                    Named { name: name.into() },
+                    Located(room),
+                    CombatStats::default(),
+                    Health { hp: 100, max: 100 },
+                    Posture(PostureKind::Sleeping),
+                ))
+                .id()
+        };
+        let ogre = mk(&mut world, "ogre");
+        let rat = mk(&mut world, "rat");
+        world
+            .entity_mut(ogre)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+        (world, p, ogre, rat, rx)
+    }
+
+    fn attack_triggers(world: &World) -> u64 {
+        world
+            .get_resource::<crate::triggers::TriggerStats>()
+            .and_then(|s| s.by_event.get("Attack"))
+            .map_or(0, |c| c.fired)
+    }
+
+    fn advance(world: &mut World, ticks: u64) {
+        world.resource_mut::<crate::TickCount>().0 += ticks;
+    }
+
+    #[test]
+    fn disengage_then_kill_gets_no_free_round() {
+        let (mut world, p, ogre, _rat, _rx) = fresh();
+        cmd_attack(&mut world, p, "ogre");
+        assert_eq!(hp(&world, ogre), 99, "fresh engage swings once");
+        assert_eq!(attack_triggers(&world), 1);
+        for _ in 0..3 {
+            cmd_disengage(&mut world, p, "");
+            cmd_attack(&mut world, p, "ogre");
+            assert_eq!(world.get::<Fighting>(p).map(|f| f.0), Some(ogre));
+        }
+        assert_eq!(hp(&world, ogre), 99, "no instant swing inside the window");
+        assert_eq!(attack_triggers(&world), 1, "ATTACK fires once per window");
+    }
+
+    #[test]
+    fn a_fresh_engage_after_the_window_swings_again() {
+        let (mut world, p, ogre, _rat, _rx) = fresh();
+        cmd_attack(&mut world, p, "ogre");
+        cmd_disengage(&mut world, p, "");
+        advance(&mut world, REENGAGE_LAG_TICKS);
+        // Damage woke it; put it back to sleep so the swing auto-hits.
+        world
+            .entity_mut(ogre)
+            .insert(Posture(PostureKind::Sleeping));
+        cmd_attack(&mut world, p, "ogre");
+        assert_eq!(hp(&world, ogre), 98);
+        assert_eq!(attack_triggers(&world), 2);
+    }
+
+    #[test]
+    fn disengage_then_kill_other_still_needs_the_switch_skill() {
+        let (mut world, p, ogre, rat, mut rx) = fresh();
+        cmd_attack(&mut world, p, "ogre");
+        cmd_disengage(&mut world, p, "");
+        drain(&mut rx);
+        cmd_attack(&mut world, p, "rat");
+        let out = drain(&mut rx);
+        assert!(out.contains("You are already busy fighting with"), "{out}");
+        assert!(world.get::<Fighting>(p).is_none());
+        assert_eq!(hp(&world, rat), 100);
+        let _ = ogre;
+    }
+
+    #[test]
+    fn failed_switch_roll_then_kill_gets_no_free_round() {
+        let (mut world, p, ogre, rat, mut rx) = fresh();
+        with_switch(&mut world, p, 500);
+        cmd_attack(&mut world, p, "ogre");
+        advance(&mut world, REENGAGE_LAG_TICKS);
+        attack_with_switch_roll(&mut world, p, "rat", 101);
+        assert!(drain(&mut rx).contains("become confused"));
+        assert!(world.get::<Fighting>(p).is_none());
+        // The very next kill, same or other, is lagged.
+        attack_with_switch_roll(&mut world, p, "ogre", 1);
+        assert_eq!(hp(&world, ogre), 99, "no swing after the failed switch");
+        attack_with_switch_roll(&mut world, p, "rat", 101);
+        assert_eq!(hp(&world, rat), 100);
+    }
+
+    #[test]
+    fn successful_switch_swings_once_through_cmd_attack() {
+        let (mut world, p, ogre, rat, mut rx) = fresh();
+        with_switch(&mut world, p, 500);
+        cmd_attack(&mut world, p, "ogre");
+        advance(&mut world, REENGAGE_LAG_TICKS);
+        attack_with_switch_roll(&mut world, p, "rat", 50);
+        assert!(drain(&mut rx).contains("You switch opponents!"));
+        assert_eq!(world.get::<Fighting>(p).map(|f| f.0), Some(rat));
+        assert_eq!(hp(&world, rat), 99, "one swing at the new target");
+        assert_eq!(hp(&world, ogre), 99);
+        // Switching straight back inside the new window: no free swing.
+        attack_with_switch_roll(&mut world, p, "ogre", 50);
+        assert_eq!(hp(&world, ogre), 99);
+    }
+
+    #[test]
+    fn pet_target_alternation_gets_no_free_swings() {
+        let (mut world, _p, ogre, rat, _rx) = fresh();
+        let room = world.get::<Located>(ogre).unwrap().0;
+        let pet = world
+            .spawn((
+                Mob,
+                Named { name: "pet".into() },
+                Located(room),
+                CombatStats::default(),
+                Health { hp: 100, max: 100 },
+            ))
+            .id();
+        cmd_attack(&mut world, pet, "ogre");
+        assert_eq!(hp(&world, ogre), 99);
+        for _ in 0..3 {
+            cmd_attack(&mut world, pet, "rat");
+            assert_eq!(world.get::<Fighting>(pet).map(|f| f.0), Some(rat));
+            cmd_attack(&mut world, pet, "ogre");
+            assert_eq!(world.get::<Fighting>(pet).map(|f| f.0), Some(ogre));
+        }
+        assert_eq!(hp(&world, ogre), 99);
+        assert_eq!(hp(&world, rat), 100);
+    }
+
+    #[test]
+    fn a_kill_clears_the_lag_for_the_next_target() {
+        let (mut world, p, ogre, rat, _rx) = fresh();
+        cmd_attack(&mut world, p, "ogre");
+        crate::commands::disengage_attackers_of(&mut world, ogre);
+        cmd_attack(&mut world, p, "rat");
+        assert_eq!(hp(&world, rat), 99, "next target swings right away");
     }
 }

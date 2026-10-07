@@ -19881,6 +19881,7 @@ pub(crate) fn disengage_attackers_of(world: &mut World, target: Entity) {
     };
     for a in attackers {
         try_remove::<Fighting>(world, a);
+        try_remove::<combat_commands::ReengageLag>(world, a);
         send_to(world, a, "Your target falls.\r\n");
     }
 }
