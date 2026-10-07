@@ -2,9 +2,9 @@
 //! consenting body along behind you. Mirrors legacy `do_drag`.
 
 use bevy_ecs::prelude::{Entity, World};
-use mud_db::enums::{ObjectRestriction, PlayerFlag, UserRole};
+use mud_db::enums::{Direction, ObjectRestriction, PlayerFlag, UserRole};
 use mud_world::{
-    Account, Corpse, Fighting, Located, Mob, Player, PlayerCorpse, PlayerFlags, Posture,
+    Account, Corpse, Exits, Fighting, Located, Mob, Player, PlayerCorpse, PlayerFlags, Posture,
     PostureKind, Stamina,
 };
 
@@ -14,6 +14,7 @@ use crate::commands::{
     has_restriction, is_staff, item_weight, name_of, parse_direction, send_room_players_snapshot,
     send_to,
 };
+use crate::room_access::{entry_allowed_following, room_visible_to};
 
 inventory::submit! {
     Command {
@@ -87,6 +88,11 @@ fn check_draggable(
             (item, item_weight(world, item))
         }
         Dragged::Body(body) => {
+            if world.get::<Fighting>(body).is_some() {
+                let name = name_of(world, body);
+                send_to(world, player, format!("{name} is fighting!\r\n"));
+                return None;
+            }
             let consents = world
                 .get::<PlayerFlags>(body)
                 .is_some_and(|f| f.has(PlayerFlag::Consent));
@@ -126,6 +132,29 @@ fn check_draggable(
         }
     };
     Some(result)
+}
+
+/// May `body` be hauled through `dir` out of `from_room`? `cmd_move` only
+/// applies room entry rules to the dragger, so check the body here: the
+/// destination must not be hidden from it (god zones) and its entry
+/// restriction must admit it as the dragger's follower. A missing exit is
+/// left for `cmd_move` to refuse.
+fn body_may_enter(
+    world: &mut World,
+    player: Entity,
+    body: Entity,
+    from_room: Entity,
+    dir: Direction,
+) -> bool {
+    let Some(dest) = world
+        .get::<Exits>(from_room)
+        .and_then(|e| e.0.get(&dir))
+        .and_then(|ed| ed.to)
+    else {
+        return true;
+    };
+    room_visible_to(world, body, dest)
+        && entry_allowed_following(world, body, dest, Some(player), true)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -184,6 +213,18 @@ pub(crate) fn cmd_drag(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
+    if let Dragged::Body(body) = dragged
+        && !body_may_enter(world, player, body, from_room, dir)
+    {
+        let name = name_of(world, body);
+        send_to(
+            world,
+            player,
+            format!("{name} can't be dragged that way.\r\n"),
+        );
+        return;
+    }
+
     let extra = drag_extra_cost(weight);
     if !staff
         && world
@@ -228,10 +269,16 @@ pub(crate) fn cmd_drag(world: &mut World, player: Entity, args: &str) {
         &[player, subject],
         &format!("{player_name} drags {subject_name} behind them.\r\n"),
     );
-    if world.get::<Located>(subject).is_some() {
+    // A standing follower of the dragger already walked through `cmd_move`
+    // (with its own GMCP diffs and look); don't move or announce it twice.
+    let already_there = world
+        .get::<Located>(subject)
+        .is_some_and(|l| l.0 == to_room);
+    if !already_there && world.get::<Located>(subject).is_some() {
         world.entity_mut(subject).insert(Located(to_room));
     }
-    let is_player_body = matches!(dragged, Dragged::Body(b) if world.get::<Player>(b).is_some());
+    let is_player_body =
+        !already_there && matches!(dragged, Dragged::Body(b) if world.get::<Player>(b).is_some());
     if is_player_body {
         broadcast_room_player_diff(world, from_room, subject, "RemovePlayer");
         broadcast_room_player_diff(world, to_room, subject, "AddPlayer");
@@ -471,5 +518,80 @@ mod tests {
         dispatch(&mut world, p, "drag corpse s");
         assert!(drain(&mut rx).contains("proper leverage"));
         assert_eq!(room_of(&world, c), a);
+    }
+
+    fn body_in(world: &mut World, room: Entity, name: &str) -> (Entity, Rx) {
+        let (b, rx) = player_in(world, room);
+        world.entity_mut(b).insert((
+            Named { name: name.into() },
+            Keywords(vec![name.to_ascii_lowercase()]),
+            PlayerFlags(vec![mud_db::enums::PlayerFlag::Consent]),
+            Posture(PostureKind::Sitting),
+        ));
+        (b, rx)
+    }
+
+    #[test]
+    fn drag_body_into_room_that_refuses_it_is_blocked() {
+        let (mut world, a, b, p, mut rx) = setup();
+        let (body, _brx) = body_in(&mut world, a, "Bob");
+        // Admits the level-20 dragger but not the level-5 body.
+        world.entity_mut(body).insert(Profile {
+            level: 5,
+            class_id: None,
+            race: "Human".into(),
+            experience: 0,
+            gender: "neutral".into(),
+        });
+        world
+            .entity_mut(b)
+            .insert(EntryRestriction("return actor.level >= 20".into()));
+        dispatch(&mut world, p, "drag bob s");
+        let out = drain(&mut rx);
+        assert!(out.contains("can't be dragged that way"), "{out}");
+        assert_eq!(room_of(&world, p), a);
+        assert_eq!(room_of(&world, body), a);
+    }
+
+    #[test]
+    fn drag_body_into_god_zone_is_blocked() {
+        let (mut world, a, b, p, mut rx) = setup();
+        let (body, _brx) = body_in(&mut world, a, "Bob");
+        let zone = room_of(&world, b);
+        world.entity_mut(zone).insert(GodZone);
+        // An immortal dragger may enter; the mortal body still may not.
+        world.entity_mut(p).insert(Account {
+            user_id: String::new(),
+            character_id: "c-god".into(),
+            role: effective_rank(100, UserRole::Player),
+            account_role: UserRole::Player,
+            perms: vec![],
+        });
+        dispatch(&mut world, p, "drag bob s");
+        drain(&mut rx);
+        assert_eq!(room_of(&world, body), a);
+    }
+
+    #[test]
+    fn drag_body_into_unrestricted_room_works() {
+        let (mut world, a, b, p, mut rx) = setup();
+        let (body, _brx) = body_in(&mut world, a, "Bob");
+        dispatch(&mut world, p, "drag bob s");
+        drain(&mut rx);
+        assert_eq!(room_of(&world, p), b);
+        assert_eq!(room_of(&world, body), b);
+    }
+
+    #[test]
+    fn drag_refuses_a_body_that_is_fighting() {
+        let (mut world, a, _b, p, mut rx) = setup();
+        let (body, _brx) = body_in(&mut world, a, "Bob");
+        let foe = world.spawn((Mob, Located(a))).id();
+        world.entity_mut(body).insert(Fighting(foe));
+        dispatch(&mut world, p, "drag bob s");
+        let out = drain(&mut rx);
+        assert!(out.contains("Bob is fighting!"), "{out}");
+        assert_eq!(room_of(&world, p), a);
+        assert_eq!(room_of(&world, body), a);
     }
 }
