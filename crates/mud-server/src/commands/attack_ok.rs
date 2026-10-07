@@ -569,6 +569,7 @@ mod tests {
         cmd_sweep(&mut world, a, "");
         let hp = |w: &World, e: Entity| w.get::<mud_world::Health>(e).unwrap().hp;
         assert_eq!(hp(&world, theirs), 50, "another player's pet is skipped");
+        assert_eq!(hp(&world, mine), 50, "the attacker's own pet is skipped");
         assert!(hp(&world, rat) < 50, "plain mobs are still hit");
     }
 
