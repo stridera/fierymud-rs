@@ -1,21 +1,19 @@
-//! Rest / repose: `rent` command.
+//! `rent`: leave the world at a receptionist, or book a prepaid inn rest.
 //!
-//! Inn rental flow (R2):
-//! - `rent` with no arg in an `is_inn` room: print the available tier
-//!   menu pulled from the room's `InnRoom` component.
-//! - `rent <tier-name>`: validate the name, check gold, and either
-//!   set the `RestSource` to `Inn` immediately (tier 1) or stash a
-//!   `PendingRentConfirm` component and prompt the player to confirm
-//!   (tier > 1).
-//! - Outside an `is_inn` room: "There's nothing to rent here." — unless
-//!   a receptionist is present, who explains that belongings are kept
-//!   free of charge and points at `quit`.
-//!
-//! Legacy `rent` at a receptionist saved the character and quit. That
-//! verb is claimed by the inn tiers above (see the Rest / Repose design:
-//! leaving is free and penalty-free everywhere), so the legacy flow is
-//! not ported: `quit` already saves and disconnects, and `offer` answers
-//! the "what does it cost to store my things?" question.
+//! - `rent` with no argument while a receptionist (a mob whose prototype
+//!   carries the `Receptionist` profession) stands in the room: legacy
+//!   "store your belongings" lines, then exactly what `quit` does
+//!   ([`begin_quit`]: the `Quitting` marker drained by the connection layer
+//!   into the ordered save + disconnect). Any rest source already booked
+//!   (inn tier, camp) is kept by that save path, so a prepaid rest is
+//!   applied on the way out.
+//! - `rent` with no argument in an `is_inn` room with no receptionist:
+//!   print the available tier menu from the room's `InnRoom` component.
+//! - `rent <tier-name>` in an `is_inn` room: validate the name, check
+//!   gold, and either set the `RestSource` to `Inn` immediately (tier 1)
+//!   or stash a `PendingRentConfirm` component and prompt the player to
+//!   confirm (tier > 1). The player then `rent`s (or `quit`s) to leave.
+//! - Anywhere else: "There's nothing to rent here." and nothing happens.
 //!
 //! Per ADR 0001 §3 the fee is **flat per tier**, NOT per-night. The
 //! player who returns in a year pays the same as the player who
@@ -27,6 +25,7 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{RestSource, UserRole};
 use mud_world::{InnRoom, Located, Mob, MobPrototypes, RestState, Wealth, WorldKey};
 
+use crate::commands::info::begin_quit;
 use crate::commands::{Category, Command, Help, name_of, send_rendered, send_to};
 
 /// Copper-per-gold conversion. Wealth is stored in copper; inn
@@ -43,10 +42,13 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "rent [<tier-name>]",
-            summary: "Rent a room at an inn for a rest / repose bonus.",
-            long: "In an inn room (one flagged `is_inn` by builders), \
-                   `rent` with no argument lists the available tiers \
-                   and their fees. `rent <name>` charges the fee in \
+            summary: "Rent a room: save and leave at a receptionist, or book an inn rest.",
+            long: "With a receptionist present, `rent` stores your \
+                   belongings and leaves the game exactly like `quit`, \
+                   keeping any rest you have already booked. In an inn \
+                   room (one flagged `is_inn` by builders), `rent` with \
+                   no receptionist lists the available tiers and their \
+                   fees. `rent <name>` charges the fee in \
                    gold and queues an INN RestSource at the chosen \
                    tier; you'll see Refreshed regen and any Wake \
                    Effect attachments on your next XP gain after \
@@ -70,7 +72,7 @@ inventory::submit! {
             long: "Speak to a receptionist (or stand in an inn) to hear \
                    the terms. Your character and belongings are saved \
                    automatically and cost nothing to keep: `quit` \
-                   anywhere to save and leave. Inns additionally sell \
+                   anywhere (or `rent` at a receptionist) to save and leave. Inns additionally sell \
                    prepaid rest tiers; `offer` lists them, `rent <name>` \
                    books one.",
         },
@@ -95,10 +97,17 @@ pub(crate) fn cmd_rent(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
+    let clerk = receptionist_in_room(world, room);
     let inn = world.get::<InnRoom>(room).cloned();
+    if args.trim().is_empty()
+        && let Some(clerk) = clerk
+    {
+        rent_and_quit(world, player, room, clerk);
+        return;
+    }
     let Some(inn) = inn else {
-        if let Some(clerk) = receptionist_in_room(world, room) {
-            tell_no_rent_due(world, player, clerk);
+        if let Some(clerk) = clerk {
+            tell_rent_is_free(world, player, clerk);
         } else {
             send_to(world, player, "There's nothing to rent here.\r\n");
         }
@@ -188,16 +197,41 @@ fn receptionist_in_room(world: &mut World, room: Entity) -> Option<Entity> {
     })
 }
 
-/// The receptionist's standing answer: no rent is owed, `quit` saves.
-fn tell_no_rent_due(world: &mut World, player: Entity, clerk: Entity) {
-    let clerk_name = name_of(world, clerk);
+/// Legacy receptionist `rent`: the clerk takes the player's things and
+/// shows them to their chamber, then the player leaves via the shared
+/// `quit` path. Nothing is said to the room unless the quit began (it can be
+/// refused, e.g. mid-fight).
+fn rent_and_quit(world: &mut World, player: Entity, room: Entity, clerk: Entity) {
+    let clerk_name = crate::commands::cap_sentence_start(&name_of(world, clerk));
+    let farewell = format!(
+        "<b:white>{clerk_name} tells you, 'Rent?  Sure, come this way!'</>\r\n\
+         <b:white>{clerk_name} stores your belongings and helps you into your private chamber.</>\r\n"
+    );
+    if !begin_quit(world, player, &farewell) {
+        return;
+    }
+    let player_name = name_of(world, player);
+    crate::commands::broadcast_room_visual(
+        world,
+        room,
+        player,
+        &[player],
+        &crate::commands::cap_sentence_start(&format!(
+            "{clerk_name} helps {player_name} into their private chamber.\r\n"
+        )),
+    );
+}
+
+/// The receptionist's answer to `rent <something>` where there are no rooms
+/// to book: storage is free, plain `rent` (or `quit`) saves.
+fn tell_rent_is_free(world: &mut World, player: Entity, clerk: Entity) {
+    let clerk_name = crate::commands::cap_sentence_start(&name_of(world, clerk));
     send_rendered(
         world,
         player,
         &format!(
-            "{clerk_name} tells you, 'No rent is due here. Your belongings are saved \
-             automatically and keep for free. Just type <b:white>quit</> whenever you are \
-             ready to leave.'\r\n"
+            "{clerk_name} tells you, 'No rent is due here. Your belongings keep for free. \
+             Just type <b:white>rent</> whenever you are ready to leave.'\r\n"
         ),
     );
 }
@@ -221,7 +255,7 @@ pub(crate) fn cmd_offer(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     if let Some(clerk) = clerk {
-        tell_no_rent_due(world, player, clerk);
+        tell_rent_is_free(world, player, clerk);
     } else {
         send_to(
             world,
@@ -361,22 +395,97 @@ mod tests {
     }
 
     #[test]
-    fn rent_at_a_receptionist_without_an_inn_points_at_quit() {
+    fn rent_at_a_receptionist_stores_belongings_and_quits() {
         let (mut world, player, mut rx) = world_with_clerk(false);
         cmd_rent(&mut world, player, "");
         let out = drain(&mut rx);
-        assert!(out.contains("No rent is due"), "{out}");
-        assert!(out.contains("quit"), "{out}");
-        assert!(!out.contains("nothing to rent"), "{out}");
+        assert!(out.contains("Rent?  Sure, come this way!"), "{out}");
+        assert!(
+            out.contains("stores your belongings and helps you into your private chamber"),
+            "{out}"
+        );
+        // Same marker `quit` sets: the connection layer then runs the
+        // ordered save + disconnect.
+        assert!(world.get::<crate::commands::Quitting>(player).is_some());
     }
 
     #[test]
-    fn rent_with_no_receptionist_still_says_nothing_to_rent() {
+    fn rent_sets_the_same_state_as_quit() {
+        let (mut world, player, _rx) = world_with_clerk(false);
+        crate::commands::info::cmd_quit(&mut world, player, "");
+        let quit_marker = world.get::<crate::commands::Quitting>(player).is_some();
+        world
+            .entity_mut(player)
+            .remove::<crate::commands::Quitting>();
+        cmd_rent(&mut world, player, "");
+        assert_eq!(
+            world.get::<crate::commands::Quitting>(player).is_some(),
+            quit_marker
+        );
+    }
+
+    #[test]
+    fn rent_at_a_receptionist_keeps_a_booked_rest() {
+        let (mut world, player, _rx) = world_with_clerk(true);
+        world.entity_mut(player).insert(RestState {
+            repose: 7,
+            source: RestSource::Inn,
+            tier: 2,
+        });
+        cmd_rent(&mut world, player, "");
+        assert!(world.get::<crate::commands::Quitting>(player).is_some());
+        let rest = world.get::<RestState>(player).unwrap();
+        assert_eq!(
+            (rest.source, rest.tier, rest.repose),
+            (RestSource::Inn, 2, 7)
+        );
+    }
+
+    #[test]
+    fn rent_at_a_receptionist_is_refused_mid_fight() {
+        let (mut world, player, mut rx) = world_with_clerk(false);
+        let room = world.get::<Located>(player).unwrap().0;
+        let foe = world.spawn((Mob, Located(room))).id();
+        world.entity_mut(player).insert(mud_world::Fighting(foe));
+        cmd_rent(&mut world, player, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("fighting for your life"), "{out}");
+        assert!(!out.contains("private chamber"), "{out}");
+        assert!(world.get::<crate::commands::Quitting>(player).is_none());
+    }
+
+    #[test]
+    fn rent_with_a_tier_name_and_no_inn_does_not_quit() {
+        let (mut world, player, mut rx) = world_with_clerk(false);
+        cmd_rent(&mut world, player, "basic");
+        let out = drain(&mut rx);
+        assert!(out.contains("No rent is due"), "{out}");
+        assert!(world.get::<crate::commands::Quitting>(player).is_none());
+    }
+
+    #[test]
+    fn rent_in_an_inn_without_a_receptionist_lists_tiers_and_does_not_quit() {
+        let (mut world, player, mut rx) = world_with_clerk(true);
+        let room = world.get::<Located>(player).unwrap().0;
+        let clerk = receptionist_in_room(&mut world, room).unwrap();
+        world.despawn(clerk);
+        cmd_rent(&mut world, player, "");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("Available rooms here") && out.contains("basic"),
+            "{out}"
+        );
+        assert!(world.get::<crate::commands::Quitting>(player).is_none());
+    }
+
+    #[test]
+    fn rent_away_from_a_receptionist_refuses_and_does_not_quit() {
         let mut world = World::new();
         let room = world.spawn_empty().id();
         let (player, mut rx) = test_support::player_in(&mut world, room);
         cmd_rent(&mut world, player, "");
         assert!(drain(&mut rx).contains("nothing to rent"));
+        assert!(world.get::<crate::commands::Quitting>(player).is_none());
     }
 
     #[test]

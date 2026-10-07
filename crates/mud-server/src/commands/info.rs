@@ -7213,9 +7213,24 @@ pub(crate) fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
 /// Only the whole word works: `q`, `qu`, `qui` are answered by the
 /// dispatcher's safety reply (legacy hidden `qui` entry).
 pub(crate) fn cmd_quit(world: &mut World, player: Entity, args: &str) {
+    let first = args.split_whitespace().next().unwrap_or("");
+    if !first.is_empty() && !first.eq_ignore_ascii_case("yes") {
+        // Shapechange / typed-origin refusals take precedence over the
+        // junk-argument reply.
+        if !quit_refused(world, player) {
+            send_to(world, player, "Just type 'quit' to leave the world.\r\n");
+        }
+        return;
+    }
+    begin_quit(world, player, "Goodbye, friend.  Come back soon!\r\n");
+}
+
+/// True (after telling the player why) when `player` cannot quit because
+/// they are shapechanged or the line was not typed by them.
+fn quit_refused(world: &mut World, player: Entity) -> bool {
     if world.get::<Player>(player).is_none() {
         send_to(world, player, "You can't quit while shapechanged!\r\n");
-        return;
+        return true;
     }
     // Only the connection that typed `quit` drains the `Quitting` marker, so a
     // forced or scripted quit would strand the player half-quit. Players
@@ -7226,24 +7241,32 @@ pub(crate) fn cmd_quit(world: &mut World, player: Entity, args: &str) {
             player,
             "You can't quit on someone else's say-so.\r\n",
         );
-        return;
+        return true;
     }
-    let first = args.split_whitespace().next().unwrap_or("");
-    if !first.is_empty() && !first.eq_ignore_ascii_case("yes") {
-        send_to(world, player, "Just type 'quit' to leave the world.\r\n");
-        return;
+    false
+}
+
+/// The one way a player leaves the world on their own: checks the
+/// shapechange / typed-origin / mid-fight refusals, sends `farewell`, and
+/// flags the session [`Quitting`] so the connection layer runs the canonical
+/// save + despawn + close path. Shared by `quit` and `rent` so the two cannot
+/// diverge. Returns whether the quit began.
+pub(crate) fn begin_quit(world: &mut World, player: Entity, farewell: &str) -> bool {
+    if quit_refused(world, player) {
+        return false;
     }
     let is_staff = world
         .get::<mud_world::Account>(player)
         .is_some_and(|a| a.role.rank() > mud_db::enums::UserRole::Player.rank());
     if !is_staff && world.get::<Fighting>(player).is_some() {
         send_to(world, player, "No way!  You're fighting for your life!\r\n");
-        return;
+        return false;
     }
-    send_to(world, player, "Goodbye, friend.  Come back soon!\r\n");
+    send_rendered(world, player, farewell);
     if let Ok(mut e) = world.get_entity_mut(player) {
         e.insert(crate::commands::Quitting);
     }
+    true
 }
 
 /// Built-in prompt templates a player can pick by short name.

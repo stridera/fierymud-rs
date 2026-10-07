@@ -6637,6 +6637,73 @@ mod tests {
         assert!(drain(&mut rx).contains("No way!  You're fighting for your life!"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn rent_at_a_receptionist_takes_the_quit_save_and_disconnect_path() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        let mut protos = mud_world::MobPrototypes::default();
+        protos.by_key.insert(
+            (1, 5),
+            crate::commands::test_support::mob_proto(
+                1,
+                5,
+                mud_db::enums::MobProfession::Receptionist,
+            ),
+        );
+        world.insert_resource(protos);
+        let pool = failing_pool();
+        world.insert_resource(SaveCoordinator::default());
+        let mut router = ConnRouter::new();
+        QUIT_CLOSED.with(|v| v.borrow_mut().clear());
+        router.close_conn = |c| {
+            QUIT_CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
+        let room = world.spawn(mud_world::Room).id();
+        world.spawn((
+            mud_world::Mob,
+            mud_world::WorldKey { zone: 1, id: 5 },
+            Located(room),
+            mud_world::Named {
+                name: "the receptionist".into(),
+            },
+        ));
+        let (guest, mut rx) = playing_in(&mut router, &mut world, room, 1, "Guest");
+
+        router.on_line(1, "rent".into(), &pool, &mut world).await;
+
+        // Identical teardown to `quit`: saved (failed write handed to the
+        // background retry), despawned, detached, socket closed.
+        assert!(world.get_entity(guest).is_err());
+        assert_eq!(world.resource::<SaveCoordinator>().pending(), 1);
+        assert!(!router.playing.contains_key(&1));
+        assert_eq!(QUIT_CLOSED.with(|v| v.borrow().clone()), vec![1]);
+        let out = drain(&mut rx);
+        assert!(out.contains("private chamber"), "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rent_away_from_a_receptionist_keeps_the_connection_open() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        QUIT_CLOSED.with(|v| v.borrow_mut().clear());
+        router.close_conn = |c| {
+            QUIT_CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
+        let room = world.spawn(mud_world::Room).id();
+        let (guest, mut rx) = playing_in(&mut router, &mut world, room, 1, "Guest");
+
+        router.on_line(1, "rent".into(), &pool, &mut world).await;
+
+        assert!(world.get_entity(guest).is_ok());
+        assert_eq!(router.playing.get(&1), Some(&guest));
+        assert!(QUIT_CLOSED.with(|v| v.borrow().is_empty()));
+        assert!(drain(&mut rx).contains("nothing to rent"));
+    }
+
     // ---- device-code / game-password-only login ----
 
     #[test]
