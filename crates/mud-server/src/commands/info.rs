@@ -10929,7 +10929,79 @@ pub(crate) fn cmd_visible(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, "You stop hiding.\r\n");
 }
 
+/// Despawn `item` and everything nested inside it. `Located` has no
+/// linked spawn, so despawning a container alone would strand its
+/// contents as orphan entities; collect the tree first. Nothing else
+/// is needed for persistence: the save diff only sees items still
+/// reachable from the player, so the `CharacterItems` rows of the
+/// whole tree are dropped on the next save.
+fn despawn_item_tree(world: &mut World, item: Entity) {
+    let mut tree = vec![item];
+    let mut i = 0;
+    while i < tree.len() {
+        if let Some(contents) = world.get::<Contents>(tree[i]) {
+            let kids: Vec<Entity> = contents
+                .iter()
+                .filter(|e| world.get::<Item>(*e).is_some())
+                .collect();
+            tree.extend(kids);
+        }
+        i += 1;
+    }
+    for e in tree {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+}
+
+/// Gods (staff level, see `is_staff_level`) can `eat` any carried item
+/// that is not food: it is destroyed, with no nutrition or effects.
+/// Returns true when the command was handled here.
+fn god_eats_item(world: &mut World, player: Entity, args: &str) -> bool {
+    let is_god = world
+        .get::<Profile>(player)
+        .is_some_and(|p| mud_db::enums::is_staff_level(p.level));
+    let target_word = args.trim();
+    if !is_god || target_word.is_empty() {
+        return false;
+    }
+    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
+        return false;
+    };
+    let is_food = world
+        .get::<WorldKey>(item)
+        .and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| p.r#type)
+        })
+        .is_some_and(|t| t == mud_db::enums::ObjectType::Food);
+    if is_food {
+        return false;
+    }
+    let item_name = name_of(world, item);
+    send_rendered(world, player, &format!("You eat {item_name}.\r\n"));
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let actor_name = name_of(world, player);
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&format!("{actor_name} eats {item_name}.\r\n")),
+        );
+    }
+    despawn_item_tree(world, item);
+    true
+}
+
 pub(crate) fn cmd_eat(world: &mut World, player: Entity, args: &str) {
+    if god_eats_item(world, player, args) {
+        return;
+    }
     if consume_item(world, player, args, mud_db::enums::ObjectType::Food, "eat")
         && let Some(mut h) = world.get_mut::<mud_world::Hunger>(player)
     {
@@ -14485,5 +14557,89 @@ mod tests {
         cmd_give(&mut world, player, "2 sword to bob");
         assert_eq!(count_at(&mut world, bob), 2);
         assert_eq!(count_at(&mut world, player), 1);
+    }
+}
+
+#[cfg(test)]
+mod god_eat_tests {
+    use super::cmd_eat;
+    use crate::commands::test_support::{self, drain};
+    use bevy_ecs::prelude::*;
+    use mud_db::enums::ObjectType;
+    use mud_world::{Item, Keywords, Located, Named, ObjectPrototypes, Profile, WorldKey};
+
+    fn setup(level: i32) -> (World, Entity, test_support::Rx, test_support::Rx) {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        protos
+            .by_key
+            .insert((1, 1), test_support::object_proto(1, 1, ObjectType::Weapon));
+        protos.by_key.insert(
+            (1, 2),
+            test_support::object_proto(1, 2, ObjectType::Container),
+        );
+        protos
+            .by_key
+            .insert((1, 3), test_support::object_proto(1, 3, ObjectType::Other));
+        world.insert_resource(protos);
+        let room = world.spawn_empty().id();
+        let (actor, rx) = test_support::player_in(&mut world, room);
+        let (_watcher, watcher_rx) = test_support::player_in(&mut world, room);
+        world.entity_mut(actor).insert(Profile {
+            level,
+            class_id: None,
+            race: "HUMAN".into(),
+            experience: 0,
+            gender: "male".into(),
+        });
+        (world, actor, rx, watcher_rx)
+    }
+
+    fn item(world: &mut World, id: i32, name: &str, kw: &str, parent: Entity) -> Entity {
+        world
+            .spawn((
+                Item,
+                Named { name: name.into() },
+                Keywords(vec![kw.into()]),
+                WorldKey { zone: 1, id },
+                Located(parent),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn god_eats_a_sword_and_the_room_sees_it() {
+        let (mut world, god, mut rx, mut watcher) = setup(105);
+        let sword = item(&mut world, 1, "a rusty sword", "sword", god);
+        cmd_eat(&mut world, god, "sword");
+        assert!(world.get_entity(sword).is_err(), "sword destroyed");
+        let out = drain(&mut rx);
+        assert!(out.contains("You eat a rusty sword."), "{out}");
+        let seen = drain(&mut watcher);
+        assert!(seen.contains("Tester eats a rusty sword."), "{seen}");
+    }
+
+    #[test]
+    fn god_eating_a_bag_destroys_its_contents_too() {
+        let (mut world, god, _rx, _w) = setup(100);
+        let bag = item(&mut world, 2, "a leather bag", "bag", god);
+        let inner = item(&mut world, 1, "a rusty sword", "sword", bag);
+        let nested = item(&mut world, 2, "a pouch", "pouch", bag);
+        let deep = item(&mut world, 3, "a pebble", "pebble", nested);
+        cmd_eat(&mut world, god, "bag");
+        for e in [bag, inner, nested, deep] {
+            assert!(world.get_entity(e).is_err(), "{e:?} should be gone");
+        }
+    }
+
+    #[test]
+    fn mortal_cannot_eat_a_sword() {
+        let (mut world, mortal, mut rx, mut watcher) = setup(99);
+        let sword = item(&mut world, 1, "a rusty sword", "sword", mortal);
+        cmd_eat(&mut world, mortal, "sword");
+        assert!(world.get_entity(sword).is_ok(), "sword kept");
+        let out = drain(&mut rx);
+        assert!(out.contains("You can't eat a rusty sword."), "{out}");
+        assert!(drain(&mut watcher).is_empty());
     }
 }
