@@ -58,8 +58,11 @@ pub(crate) fn room_visible_to(world: &World, viewer: Entity, room: Entity) -> bo
 // Entry restrictions
 // ---------------------------------------------------------------------------
 
-/// Evaluate an entry-restriction body for `mover`. Only an explicit boolean
-/// `true` admits; everything else (false, non-boolean, error, no host)
+/// Evaluate an entry-restriction body for `mover` in the read-only condition
+/// environment (`LuaHost::eval_condition`): `actor` can be queried but not
+/// acted through, nothing can yield or be parked, and the instruction budget
+/// and wall-clock watchdog apply. Only an explicit boolean `true` admits;
+/// everything else (false, non-boolean, yield attempt, error, no host)
 /// refuses.
 fn evaluate_restriction(world: &mut World, mover: Entity, dest: Entity, expr: &str) -> bool {
     let body = if expr.contains("return") {
@@ -76,16 +79,12 @@ fn evaluate_restriction(world: &mut World, mover: Entity, dest: Entity, expr: &s
         return false;
     }
     let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-        host.exec_for_event_with_value(world, mover, mover, None, &body, &[])
+        host.eval_condition(world, mover, Some(dest), &body)
     });
     match result {
-        Ok((_out, Some(allowed))) => allowed,
-        Ok((_out, None)) => {
-            tracing::warn!(?room, expr = %expr, "entry restriction returned a non-boolean; refusing entry");
-            false
-        }
+        Ok(allowed) => allowed,
         Err(e) => {
-            tracing::warn!(?room, expr = %expr, error = %e, "entry restriction script failed; refusing entry");
+            tracing::warn!(?room, expr = %expr, error = %e, "entry restriction script refused or failed; refusing entry");
             false
         }
     }
@@ -104,20 +103,24 @@ pub(crate) fn entry_allowed(world: &mut World, mover: Entity, dest: Entity) -> b
 }
 
 /// Like [`entry_allowed`] for a mover being led by `leader`. Legacy lets a
-/// follower of a deity into a restricted room once the deity is already
-/// standing in it (act.movement.cpp: `ch->master->in_room == dest`).
+/// follower of a deity into a restricted room once the deity is standing in
+/// it (act.movement.cpp: `ch->master->in_room == dest`; the master moves
+/// first). `leader_arriving` says the leader has already been admitted and
+/// is moving into `dest` in the same step (group walking), which counts the
+/// same as the leader already being there.
 pub(crate) fn entry_allowed_following(
     world: &mut World,
     mover: Entity,
     dest: Entity,
     leader: Option<Entity>,
+    leader_arriving: bool,
 ) -> bool {
     if world.get::<EntryRestriction>(dest).is_none() {
         return true;
     }
     if let Some(leader) = leader
         && is_immortal(world, leader)
-        && world.get::<Located>(leader).is_some_and(|l| l.0 == dest)
+        && (leader_arriving || world.get::<Located>(leader).is_some_and(|l| l.0 == dest))
     {
         return true;
     }
@@ -142,7 +145,11 @@ pub(crate) fn retain_admitted<T>(
     movers: &[Entity],
     candidates: &mut Vec<(T, Entity)>,
 ) {
-    candidates.retain(|(_, room)| movers.iter().all(|m| entry_allowed(world, *m, *room)));
+    candidates.retain(|(_, room)| {
+        movers
+            .iter()
+            .all(|m| room_visible_to(world, *m, *room) && entry_allowed(world, *m, *room))
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +171,8 @@ pub(crate) enum RandomRange {
 pub(crate) struct RandomTeleportParams {
     pub(crate) range: RandomRange,
     /// `Some((base, per_skill))`: the cast succeeds when
-    /// `random(1,100) <= base + skill * per_skill`. `None`: always succeeds.
+    /// `random(1,100) <= base + skill * per_skill`. `None` (only built by
+    /// hand in tests) always succeeds.
     pub(crate) success: Option<(i32, i32)>,
 }
 
@@ -182,17 +190,34 @@ pub(crate) fn parse_random_params(
             .and_then(serde_json::Value::as_i64)
             .and_then(|n| i32::try_from(n).ok())
     };
+    // Missing data falls back to the legacy spell, never to something more
+    // generous: zone-limited, with the skill-based success roll.
     let range = match get("range")
         .and_then(serde_json::Value::as_str)
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("zone") => RandomRange::Zone,
-        _ => RandomRange::World,
+        Some("world") => RandomRange::World,
+        _ => RandomRange::Zone,
     };
-    let success =
-        int("success_base_pct").map(|base| (base, int("success_per_skill_pct").unwrap_or(0)));
+    let success = Some((
+        int("success_base_pct").unwrap_or(LEGACY_SUCCESS_BASE_PCT),
+        int("success_per_skill_pct").unwrap_or(LEGACY_SUCCESS_PER_SKILL_PCT),
+    ));
     RandomTeleportParams { range, success }
+}
+
+/// Legacy `perform_teleport_spell`: succeed when `random(1,100) <= 10 +
+/// skill*2`.
+const LEGACY_SUCCESS_BASE_PCT: i32 = 10;
+const LEGACY_SUCCESS_PER_SKILL_PCT: i32 = 2;
+
+/// Skill used for the success roll. A character who knows the spell uses
+/// their proficiency (0..=100); anything else casting it (a scroll or wand
+/// user, a mob, a Lua `spells.cast`) uses the caster's level, as legacy
+/// passes the caster/item level as the skill for those.
+pub(crate) fn effective_teleport_skill(known_skill: Option<i32>, caster_level: i32) -> i32 {
+    known_skill.unwrap_or_else(|| caster_level.clamp(0, 100))
 }
 
 /// Legacy success roll (`random_number(1, 100) > 10 + skill * 2` fails).

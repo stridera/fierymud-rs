@@ -54,7 +54,8 @@ fn cmd_call(world: &mut World, player: Entity, _args: &str) {
         }
         // A pet the room refuses stays where it is (the caller is in the
         // destination, so a staff caller admits their own followers).
-        if !crate::room_access::entry_allowed_following(world, follower, here, Some(player)) {
+        if !crate::room_access::entry_allowed_following(world, follower, here, Some(player), false)
+        {
             continue;
         }
         let follower_name = name_of(world, follower);

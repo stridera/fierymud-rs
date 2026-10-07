@@ -15366,11 +15366,15 @@ pub(crate) fn invoke_ability_with(
                         }
                         // Skill-based failure: "swirls about and dies away".
                         let roll = rand::random_range(1..=100);
-                        if !crate::room_access::teleport_roll_succeeds(
-                            &params,
-                            formula_ctx.skill,
-                            roll,
-                        ) {
+                        let known_skill = world.get::<KnownAbilities>(player).and_then(|k| {
+                            k.entries
+                                .iter()
+                                .find(|(id, _, _)| *id == def.id)
+                                .map(|(_, p, _)| (*p / 10).clamp(0, 100))
+                        });
+                        let skill =
+                            crate::room_access::effective_teleport_skill(known_skill, caster_level);
+                        if !crate::room_access::teleport_roll_succeeds(&params, skill, roll) {
                             send_to(world, player, "The spell swirls about and dies away.\r\n");
                             if let Some(room) = victim_room {
                                 let line = if target_entity == player {
@@ -19168,7 +19172,8 @@ pub(crate) fn is_staff(world: &World, entity: Entity) -> bool {
 }
 
 /// `true` when the exit should appear hidden to this player —
-/// i.e. it carries `ExitData::is_hidden = true` and the player
+/// i.e. it leads into a god zone and the player is below Immortal, or
+/// it carries `ExitData::is_hidden = true` and the player
 /// hasn't yet found it via `search`. Used by every exit-rendering
 /// / movement site so the reveal logic stays consistent. Pass
 /// the `room` entity the exit lives on so the per-character
@@ -19181,6 +19186,14 @@ pub(crate) fn exit_is_hidden_to(
     dir: Direction,
     ed: &mud_world::ExitData,
 ) -> bool {
+    // Exits into a god zone don't exist as far as mortals can tell: not in
+    // the exit lists, not in `look <dir>`, not walkable, not scannable.
+    if ed
+        .to
+        .is_some_and(|dest| !crate::room_access::room_visible_to(world, player, dest))
+    {
+        return true;
+    }
     if !ed.is_hidden {
         return false;
     }
@@ -20164,7 +20177,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         for f in new_followers {
             // A follower the room refuses stays behind (legacy checks each
             // mover); followers of a deity already inside are admitted.
-            if crate::room_access::entry_allowed_following(world, f, target, Some(leader)) {
+            if crate::room_access::entry_allowed_following(world, f, target, Some(leader), true) {
                 movers.push(f);
             } else {
                 send_to(world, f, crate::room_access::ENTRY_REFUSED);

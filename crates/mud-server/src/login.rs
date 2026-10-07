@@ -3861,6 +3861,32 @@ pub(crate) fn build_achievement_components(
     (ca, zv)
 }
 
+/// Room a character logs in to. A mortal whose saved room has become
+/// off-limits (it carries an entry restriction, or sits in a god zone) logs
+/// in at their recall point instead, then the race start room; staff land
+/// wherever they saved. A restricted room can't be evaluated before the
+/// player entity exists, so any restriction counts as off-limits here.
+pub(crate) fn resolve_login_room(
+    world: &World,
+    wanted: (i32, i32),
+    recall: Option<Entity>,
+    race_start: Option<(i32, i32)>,
+    is_staff: bool,
+) -> Option<Entity> {
+    let index = world.resource::<WorldKeyIndex>();
+    let allowed = |room: Entity| {
+        is_staff
+            || (world.get::<mud_world::EntryRestriction>(room).is_none()
+                && !mud_world::room_in_god_zone(world, room))
+    };
+    let lookup = |key: (i32, i32)| index.rooms.get(&key).copied();
+    lookup(wanted)
+        .filter(|r| allowed(*r))
+        .or_else(|| recall.filter(|r| allowed(*r)))
+        .or_else(|| race_start.and_then(lookup).filter(|r| allowed(*r)))
+        .or_else(|| lookup(FALLBACK_START))
+}
+
 /// Single spawn path for a player entity. The `Located(room_entity)`
 /// component is added in a follow-up insert (after spawn) only when
 /// the starting room resolved — keeping the core bundle one place
@@ -3897,17 +3923,15 @@ pub(crate) fn spawn_player(
     let new_repose = accrue_repose(c.repose, c.rest_tier, c.level, elapsed_secs);
 
     let index = world.resource::<WorldKeyIndex>();
-    let room_entity = index
-        .rooms
-        .get(&(zone, room))
-        .copied()
-        .or_else(|| index.rooms.get(&FALLBACK_START).copied());
     // Recall point: only set when the row has both coordinates AND the room
     // is loaded. Missing recall is a normal state (`recall` will report it).
     let recall_entity = match (c.recall_room_zone_id, c.recall_room_id) {
         (Some(rz), Some(rr)) => index.rooms.get(&(rz, rr)).copied(),
         _ => None,
     };
+    let is_staff = mud_db::enums::effective_rank(c.level, user.role)
+        .at_least(mud_db::enums::UserRole::Immortal);
+    let room_entity = resolve_login_room(world, (zone, room), recall_entity, race_start, is_staff);
 
     let health = Health {
         hp: c.hit_points,

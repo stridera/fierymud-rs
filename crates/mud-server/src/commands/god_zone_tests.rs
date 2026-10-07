@@ -198,8 +198,9 @@ fn exits_listing_hides_god_room_names_from_mortals() {
 
     dispatch(&mut fx.world, mortal, "exits");
     let out = drain(&mut mrx);
-    assert!(out.contains("(beyond)"), "{out}");
+    assert!(out.contains("No exits"), "{out}");
     assert!(!out.contains("Room 12:4"), "{out}");
+    assert!(!out.contains("(beyond)"), "{out}");
 
     dispatch(&mut fx.world, imm, "exits");
     assert!(drain(&mut irx).contains("Room 12:4"));
@@ -390,35 +391,58 @@ fn followers_of_a_god_enter_only_once_the_god_is_inside() {
         &mut fx.world,
         follower,
         sanctum,
-        Some(god)
+        Some(god),
+        false
     ));
     fx.world.entity_mut(god).insert(Located(sanctum));
     assert!(room_access::entry_allowed_following(
         &mut fx.world,
         follower,
         sanctum,
-        Some(god)
+        Some(god),
+        false
     ));
 }
 
 #[test]
-fn followers_are_left_behind_when_the_room_refuses_them() {
+fn a_mortal_following_an_immortal_into_a_god_room_is_admitted() {
     let mut fx = Fx::new();
     let town = fx.zone(30, false);
     let square = fx.room(town, 30, 1);
     let sanctum = fx.room(town, 30, 2);
     fx.link(square, Direction::North, sanctum);
-    // Only level >= 100 may enter, but the leader is staff-bypassed via
-    // rank while the follower is a plain mortal.
     restrict(&mut fx, sanctum, GOD_ONLY);
     let (god, _grx) = fx.person("Chinok", 105, square);
-    let (follower, mut frx) = fx.person("Pet", 20, square);
+    let (follower, _frx) = fx.person("Pet", 20, square);
     fx.world
         .entity_mut(follower)
         .insert(mud_world::Follower(god));
 
     crate::commands::cmd_move(&mut fx.world, god, Direction::North);
     assert_eq!(fx.room_of(god), sanctum);
+    assert_eq!(
+        fx.room_of(follower),
+        sanctum,
+        "legacy: followers of a deity enter once the master is in"
+    );
+}
+
+#[test]
+fn a_mortal_following_a_mortal_into_a_restricted_room_is_refused() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let square = fx.room(town, 30, 1);
+    let vault = fx.room(town, 30, 2);
+    fx.link(square, Direction::North, vault);
+    restrict(&mut fx, vault, "return actor.level >= 50");
+    let (leader, _lrx) = fx.person("Veteran", 60, square);
+    let (follower, mut frx) = fx.person("Pup", 20, square);
+    fx.world
+        .entity_mut(follower)
+        .insert(mud_world::Follower(leader));
+
+    crate::commands::cmd_move(&mut fx.world, leader, Direction::North);
+    assert_eq!(fx.room_of(leader), vault);
     assert_eq!(fx.room_of(follower), square, "mortal follower stays out");
     assert!(drain(&mut frx).contains("mysterious powerful force"));
 }
@@ -671,10 +695,17 @@ fn random_params_come_from_the_effect_data() {
     );
     assert_eq!(p.range, RandomRange::Zone);
     assert_eq!(p.success, Some((10, 2)));
-    // Default: whole world, always succeeds.
+    // Missing data falls back to the legacy spell: zone-limited, with the
+    // 10 + 2*skill roll. Never world-wide, never a guaranteed success.
     let p = room_access::parse_random_params(Some(&json!({"destination": "random"})), None);
-    assert_eq!(p.range, RandomRange::World);
-    assert_eq!(p.success, None);
+    assert_eq!(p.range, RandomRange::Zone);
+    assert_eq!(p.success, Some((10, 2)));
+    let p = room_access::parse_random_params(None, None);
+    assert_eq!(p.range, RandomRange::Zone);
+    assert_eq!(p.success, Some((10, 2)));
+    assert!(!room_access::teleport_roll_succeeds(&p, 0, 11));
+    let p = room_access::parse_random_params(Some(&json!({"range": "nonsense"})), None);
+    assert_eq!(p.range, RandomRange::Zone);
     // Legacy roll: succeed iff roll <= 10 + skill*2.
     let p = room_access::parse_random_params(
         Some(&json!({"range": "world", "success_base_pct": 10, "success_per_skill_pct": 2})),
@@ -684,11 +715,6 @@ fn random_params_come_from_the_effect_data() {
     assert!(!room_access::teleport_roll_succeeds(&p, 0, 11));
     assert!(room_access::teleport_roll_succeeds(&p, 45, 100));
     assert!(!room_access::teleport_roll_succeeds(&p, 44, 100));
-    assert!(room_access::teleport_roll_succeeds(
-        &room_access::parse_random_params(None, None),
-        0,
-        100
-    ));
 }
 
 #[test]
@@ -867,5 +893,224 @@ fn is_god_is_a_real_lua_method_not_a_script_error() {
             .exec_for_event_with_value(&mut fx.world, who, who, None, "return actor:is_god()", &[])
             .expect("is_god must not raise");
         assert_eq!(value, Some(expected));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Review follow-ups: read-only restriction scripts, look/exit hiding,
+// login room, is_god, caster skill
+// ---------------------------------------------------------------------------
+
+#[test]
+fn restriction_scripts_cannot_act_yield_or_leave_a_paused_script() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let elsewhere = fx.room(town, 30, 9);
+    let square = fx.room(town, 30, 1);
+    let vault = fx.room(town, 30, 2);
+    let (mortal, mut rx) = fx.person("Mortal", 20, square);
+    for script in [
+        "wait(1) return true",
+        "coroutine.yield(1) return true",
+        "actor:teleport(30, 9) return true",
+        "actor:send('hi') return true",
+        "actor:command('say hi') return true",
+        "actor:award_exp(1000) return true",
+        "world.destroy(actor) return true",
+        "spells.cast(actor, 'fireball') return true",
+        "skills.execute(actor, 'kick', nil) return true",
+        "actor.level = 99 return true",
+        "return true, wait(1)",
+    ] {
+        restrict(&mut fx, vault, script);
+        assert!(
+            !entry_allowed(&mut fx.world, mortal, vault),
+            "{script:?} must refuse"
+        );
+        assert_eq!(fx.room_of(mortal), square, "{script:?}");
+        assert_eq!(
+            fx.world.resource::<mud_script::LuaHost>().yielded_count(),
+            0,
+            "{script:?} left a paused script behind"
+        );
+        crate::commands::drain_lua_outbox(&mut fx.world);
+        assert_eq!(drain(&mut rx), "", "{script:?} had a side effect");
+    }
+    let _ = elsewhere;
+    assert_eq!(
+        fx.world.get::<Profile>(mortal).unwrap().experience,
+        0,
+        "award_exp must not have run"
+    );
+    // The read accessors still work.
+    restrict(
+        &mut fx,
+        vault,
+        "return actor.is_player and actor.level < 50 and room.zone_id == 30 and room.id == 2",
+    );
+    assert!(entry_allowed(&mut fx.world, mortal, vault));
+}
+
+#[test]
+fn read_only_restriction_still_has_the_instruction_budget() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let square = fx.room(town, 30, 1);
+    let vault = fx.room(town, 30, 2);
+    let (mortal, _rx) = fx.person("Mortal", 20, square);
+    restrict(&mut fx, vault, "while true do end return true");
+    assert!(!entry_allowed(&mut fx.world, mortal, vault));
+    // The host is usable afterwards.
+    restrict(&mut fx, vault, "return true");
+    assert!(entry_allowed(&mut fx.world, mortal, vault));
+}
+
+#[test]
+fn look_direction_into_a_god_zone_shows_nothing_to_mortals() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let heavens = fx.zone(12, true);
+    let square = fx.room(town, 30, 1);
+    let hall = fx.room(heavens, 12, 4);
+    fx.world
+        .entity_mut(hall)
+        .insert(mud_world::Description("A shining hall.".into()));
+    fx.link(square, Direction::Up, hall);
+    let (mortal, mut mrx) = fx.person("Mortal", 20, square);
+    let (imm, mut irx) = fx.person("Laoris", 100, square);
+
+    dispatch(&mut fx.world, mortal, "look up");
+    let out = drain(&mut mrx);
+    assert!(out.contains("You see nothing in that direction"), "{out}");
+    assert!(
+        !out.contains("Room 12") && !out.contains("shining"),
+        "{out}"
+    );
+
+    dispatch(&mut fx.world, imm, "look up");
+    assert!(!drain(&mut irx).contains("nothing in that direction"));
+}
+
+#[test]
+fn mortals_cannot_walk_into_god_zone_rooms_even_without_a_restriction() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let heavens = fx.zone(12, true);
+    let square = fx.room(town, 30, 1);
+    let hall = fx.room(heavens, 12, 4);
+    fx.link(square, Direction::Up, hall);
+    let (mortal, mut mrx) = fx.person("Mortal", 20, square);
+    dispatch(&mut fx.world, mortal, "up");
+    assert!(drain(&mut mrx).contains("You can't go that way"));
+    assert_eq!(fx.room_of(mortal), square);
+    let (imm, _irx) = fx.person("Laoris", 100, square);
+    crate::commands::cmd_move(&mut fx.world, imm, Direction::Up);
+    assert_eq!(fx.room_of(imm), hall);
+}
+
+#[test]
+fn login_room_falls_back_to_recall_for_mortals_in_restricted_or_god_rooms() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let heavens = fx.zone(12, true);
+    let saved_plain = fx.room(town, 30, 1);
+    let recall = fx.room(town, 30, 2);
+    let race_start = fx.room(town, 30, 3);
+    let sanctum = fx.room(town, 30, 4);
+    restrict(&mut fx, sanctum, GOD_ONLY);
+    let hall = fx.room(heavens, 12, 4);
+    let _ = (saved_plain, race_start);
+    let w = &fx.world;
+    let go = |wanted, is_staff| {
+        crate::login::resolve_login_room(w, wanted, Some(recall), Some((30, 3)), is_staff)
+    };
+    assert_eq!(go((30, 1), false), Some(saved_plain), "ordinary room kept");
+    assert_eq!(go((30, 4), false), Some(recall), "restricted -> recall");
+    assert_eq!(go((12, 4), false), Some(recall), "god zone -> recall");
+    assert_eq!(go((30, 4), true), Some(sanctum), "staff keep their room");
+    assert_eq!(go((12, 4), true), Some(hall));
+    // No recall point: the race start room is next.
+    assert_eq!(
+        crate::login::resolve_login_room(w, (30, 4), None, Some((30, 3)), false),
+        Some(race_start)
+    );
+}
+
+#[test]
+fn is_god_is_staff_characters_only_never_high_level_mobs() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let square = fx.room(town, 30, 1);
+    let (god, _grx) = fx.person("Chinok", 105, square);
+    let (mortal, _mrx) = fx.person("Mortal", 20, square);
+    // A level-110 mob (Profile, no Account) and a bare Profile entity.
+    let mob = fx
+        .world
+        .spawn((
+            mud_world::Mob,
+            Named {
+                name: "a titan".into(),
+            },
+            Located(square),
+            Profile {
+                level: 110,
+                class_id: None,
+                race: "Giant".into(),
+                experience: 0,
+                gender: "neutral".into(),
+            },
+        ))
+        .id();
+    let mut host = mud_script::LuaHost::default();
+    for (who, expected) in [(god, true), (mortal, false), (mob, false)] {
+        let (_out, value) = host
+            .exec_for_event_with_value(&mut fx.world, who, who, None, "return actor:is_god()", &[])
+            .unwrap();
+        assert_eq!(value, Some(expected));
+        assert_eq!(
+            host.eval_condition(&mut fx.world, who, None, "return actor:is_god()"),
+            Ok(expected)
+        );
+    }
+    // The mob is refused by a god-only room (no staff bypass for mobs).
+    let vault = fx.room(town, 30, 2);
+    restrict(&mut fx, vault, GOD_ONLY);
+    assert!(!entry_allowed(&mut fx.world, mob, vault));
+}
+
+#[test]
+fn non_player_casters_use_their_level_as_teleport_skill() {
+    // A scroll user / mob / Lua cast has no proficiency row: level counts.
+    assert_eq!(room_access::effective_teleport_skill(None, 30), 30);
+    assert_eq!(room_access::effective_teleport_skill(None, 250), 100);
+    assert_eq!(room_access::effective_teleport_skill(None, -3), 0);
+    // A caster who knows the spell uses their proficiency, even when it is 0.
+    assert_eq!(room_access::effective_teleport_skill(Some(0), 30), 0);
+    assert_eq!(room_access::effective_teleport_skill(Some(77), 30), 77);
+}
+
+#[test]
+fn teleport_from_a_scroll_by_an_unskilled_caster_uses_level() {
+    let mut fx = Fx::new();
+    let zone = fx.zone(30, false);
+    let here = fx.room(zone, 30, 0);
+    let there = fx.room(zone, 30, 1);
+    let (caster, mut rx) = fx.person("Scribe", 50, here);
+    // No KnownAbilities row for the spell (scroll use): level 50 -> 10 + 100
+    // >= 100, so the 10 + 2*skill roll can never fail. With skill 0 it would
+    // fail ~90% of the time, so 40 straight successes proves the level is used.
+    teleport_fixture(
+        &mut fx,
+        caster,
+        serde_json::json!({"destination": "random", "range": "zone"}),
+        0,
+    );
+    fx.world
+        .entity_mut(caster)
+        .remove::<mud_world::KnownAbilities>();
+    for _ in 0..40 {
+        fx.world.entity_mut(caster).insert(Located(here));
+        cast_teleport(&mut fx, caster);
+        assert_eq!(fx.room_of(caster), there, "{}", drain(&mut rx));
     }
 }

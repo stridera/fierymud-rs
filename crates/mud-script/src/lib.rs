@@ -11,8 +11,8 @@ use std::ptr::NonNull;
 
 use bevy_ecs::prelude::*;
 use mlua::{
-    AnyUserData, Function, Lua, MetaMethod, MultiValue, Table, Thread, ThreadStatus, UserData,
-    UserDataMethods, Value, Variadic,
+    AnyUserData, Function, Lua, MetaMethod, MultiValue, ObjectLike, Table, Thread, ThreadStatus,
+    UserData, UserDataMethods, Value, Variadic,
 };
 use mud_db::enums::EntityType;
 use mud_world::{
@@ -771,6 +771,67 @@ impl LuaHost {
             }
             Ok(None) => Ok(()),
             Err(e) => Err(format!("lua resume error: {e}")),
+        }
+    }
+
+    /// Evaluate a boolean *condition* script (room entry restrictions) in a
+    /// read-only environment. `actor` is a [`LuaReadActor`] and `room`, when
+    /// given, a plain table of `id` / `zone_id` / `name`. None of the write
+    /// bindings exist (`world`, `spells`, `skills`, `combat`, quest setters,
+    /// `send`, `wait`, `coroutine`), the body runs as a plain call (never a
+    /// coroutine, so nothing can be parked), and the usual instruction
+    /// budget and wall-clock watchdog apply. Only an explicit boolean result
+    /// is returned; anything else, a yield attempt, or any error is `Err`.
+    ///
+    /// # Errors
+    /// Returns a description when the script errors, exceeds its budget,
+    /// tries to yield, or returns a non-boolean.
+    pub fn eval_condition(
+        &mut self,
+        world: &mut World,
+        actor: Entity,
+        room: Option<Entity>,
+        code: &str,
+    ) -> Result<bool, String> {
+        let room_info = room.map(|r| {
+            let name = world.get::<Named>(r).map(|n| n.name.clone());
+            let key = world.get::<WorldKey>(r).map(|k| (k.zone, k.id));
+            (name, key)
+        });
+        self.lua.set_app_data(WorldPtr(NonNull::from(&mut *world)));
+        self.lua.set_app_data(SelfEntity(actor));
+        reset_budget(&self.lua);
+        let result: mlua::Result<Value> = (|| {
+            let env = self.new_trigger_env()?;
+            // Shadow everything that could output or yield; indexing a
+            // boolean / calling `false` raises, which is a refusal.
+            for name in ["print", "coroutine"] {
+                env.raw_set(name, false)?;
+            }
+            env.raw_set("actor", LuaReadActor { entity: actor })?;
+            if let Some((name, key)) = room_info {
+                let t = self.lua.create_table()?;
+                if let Some(name) = name {
+                    t.set("name", name)?;
+                }
+                if let Some((zone, id)) = key {
+                    t.set("zone_id", zone)?;
+                    t.set("id", id)?;
+                }
+                env.raw_set("room", t)?;
+            }
+            let func: Function = self.lua.load(code).set_environment(env).into_function()?;
+            func.call::<Value>(())
+        })();
+        self.lua.remove_app_data::<WorldPtr>();
+        self.lua.remove_app_data::<SelfEntity>();
+        match result {
+            Ok(Value::Boolean(b)) => Ok(b),
+            Ok(other) => Err(format!(
+                "condition returned {} instead of a boolean",
+                other.type_name()
+            )),
+            Err(e) => Err(format!("lua error: {e}")),
         }
     }
 
@@ -2366,14 +2427,86 @@ fn format_args(args: &Variadic<Value>) -> String {
 // LuaActor userdata
 // ---------------------------------------------------------------------------
 
-/// Staff = effective rank Immortal or above (cached on `Account.role`), or,
-/// for an entity with no `Account`, a `Profile` at level 100+ (the legacy
-/// `LVL_IMMORT` threshold). Mobs without a `Profile` are never staff.
+/// Staff = a player character whose effective rank (cached on
+/// `Account.role`) is Immortal or above. Mobs and account-less entities are
+/// never staff, whatever their level. Same rule as the server's staff check.
 fn entity_is_staff(world: &World, entity: Entity) -> bool {
-    if let Some(account) = world.get::<mud_world::Account>(entity) {
-        return account.role.at_least(mud_db::enums::UserRole::Immortal);
+    world
+        .get::<mud_world::Account>(entity)
+        .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Immortal))
+}
+
+/// Read-only view of an actor for condition scripts (room entry
+/// restrictions). Exposes a whitelist of read accessors and nothing that
+/// mutates the world, sends output, or schedules work; assignment errors.
+#[derive(Clone, Copy)]
+struct LuaReadActor {
+    entity: Entity,
+}
+
+/// Fields forwarded from the full `LuaActor` accessors.
+const READ_ACTOR_FIELDS: &[&str] = &[
+    "name",
+    "level",
+    "class",
+    "race",
+    "gender",
+    "size",
+    "hp",
+    "max_hp",
+    "alignment",
+    "is_player",
+    "is_mob",
+    "is_npc",
+    "is_immortal",
+    "is_fighting",
+    "flags",
+    "id",
+    "zone_id",
+];
+
+/// Query methods forwarded from the full `LuaActor`.
+const READ_ACTOR_METHODS: &[&str] = &[
+    "has_skill",
+    "has_effect",
+    "has_item",
+    "has_equipped",
+    "get_has_spell",
+];
+
+impl UserData for LuaReadActor {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(
+            MetaMethod::Index,
+            |lua, this, key: String| -> mlua::Result<Value> {
+                let entity = this.entity;
+                if key == "is_god" {
+                    return Ok(Value::Function(lua.create_function(
+                        move |lua, _: MultiValue| -> mlua::Result<bool> {
+                            world_from_lua(lua, |w| entity_is_staff(w, entity))
+                        },
+                    )?));
+                }
+                let full = lua.create_userdata(LuaActor { entity })?;
+                if READ_ACTOR_FIELDS.contains(&key.as_str()) {
+                    return full.get::<Value>(key.as_str());
+                }
+                if READ_ACTOR_METHODS.contains(&key.as_str()) {
+                    let method: Function = full.get(key.as_str())?;
+                    return Ok(Value::Function(lua.create_function(
+                        move |_, mut args: MultiValue| -> mlua::Result<Value> {
+                            // Replace the read-only `self` with the full actor
+                            // for this one query method.
+                            args.pop_front();
+                            args.push_front(Value::UserData(full.clone()));
+                            method.call::<Value>(args)
+                        },
+                    )?));
+                }
+                Ok(Value::Nil)
+            },
+        );
     }
-    world.get::<Profile>(entity).is_some_and(|p| p.level >= 100)
 }
 
 #[derive(Clone, Copy)]
