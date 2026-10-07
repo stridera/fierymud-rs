@@ -1848,6 +1848,22 @@ pub struct Profile {
     pub gender: String,
 }
 
+impl Profile {
+    /// Add gameplay experience (kill / quest / script reward). The single
+    /// write path for those awards: characters at a staff level
+    /// ([`mud_db::enums::is_staff_level`]) gain nothing, so XP can never
+    /// move a god (gods don't climb ranks by XP). Negative amounts clamp
+    /// the total at 0, matching the schema's non-negative range. Returns
+    /// whether experience was applied.
+    pub fn grant_experience(&mut self, amount: i32) -> bool {
+        if mud_db::enums::is_staff_level(self.level) {
+            return false;
+        }
+        self.experience = self.experience.saturating_add(amount).max(0);
+        true
+    }
+}
+
 /// One spell slot currently in cooldown after a cast. Mirrors
 /// legacy `SpellCast{circle, recover_time}` (`spell_mem.cpp`). The
 /// slot regenerates as `secs_remaining` ticks down; when it hits

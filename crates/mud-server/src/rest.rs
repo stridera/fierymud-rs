@@ -81,10 +81,11 @@ pub fn award_experience(world: &mut World, entity: Entity, base_xp: i32) -> i32 
     consume_rest_source_on_xp(world, entity);
     let bonus = apply_repose_on_xp(world, entity, base_xp);
     let total = base_xp.saturating_add(bonus);
-    if let Some(mut p) = world.get_mut::<Profile>(entity) {
-        p.experience = p.experience.saturating_add(total);
-    }
-    total
+    // Staff-level characters gain nothing (`Profile::grant_experience`).
+    let applied = world
+        .get_mut::<Profile>(entity)
+        .is_some_and(|mut p| p.grant_experience(total));
+    if applied { total } else { 0 }
 }
 
 /// R5: spend Repose to multiply the gain. Returns the bonus XP

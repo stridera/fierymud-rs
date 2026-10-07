@@ -2186,7 +2186,10 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
         } else {
             format!("You gain {scaled} experience (group share) for the kill of {victim_name}.\r\n")
         };
-        send_to(world, *entity, line);
+        // Staff-level characters gain no XP (`Profile::grant_experience`).
+        if scaled > 0 {
+            send_to(world, *entity, line);
+        }
         check_level_up(world, *entity);
     }
 }
@@ -2216,58 +2219,147 @@ pub fn trophy_xp_modifier(prior_kills: f32) -> f32 {
 /// next-level threshold, and if so promote (possibly multiple
 /// levels in one call). XP-driven, so it never crosses
 /// [`mud_db::enums::MAX_MORTAL_LEVEL`]: level >= 100 grants staff rank
-/// (`mud_db::enums::effective_rank`) and is reserved to staff action.
+/// (`mud_db::enums::effective_rank`) and is reserved to staff action. A
+/// character already at a staff level never levels from XP at all.
 pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
+    if world
+        .get::<mud_world::Profile>(entity)
+        .is_some_and(|p| mud_db::enums::is_staff_level(p.level))
+    {
+        return;
+    }
     level_up_to(world, entity, mud_db::enums::MAX_MORTAL_LEVEL);
 }
 
-/// Recompute the cached effective staff rank in `Account.role` from the
-/// entity's current `Profile.level`. Must be called after anything that
-/// changes a player's level, otherwise permissions go stale until relog.
-pub(crate) fn refresh_account_rank(world: &mut World, entity: Entity) {
+/// Bring everything derived from a player's level back in sync after it
+/// changed from `old_level` to the current `Profile.level` (either
+/// direction): the cached effective staff rank in `Account.role`, and the
+/// permissions granted by the level table. Permissions of level rows above
+/// the new level are removed (lowering a level must not leave Summon-style
+/// perms behind); those of rows at or below it are granted. Permissions
+/// that no level row confers (explicit per-character grants) are untouched.
+/// Must be called after anything that changes a player's level, otherwise
+/// rank and permissions go stale until relog.
+pub(crate) fn after_level_change(world: &mut World, entity: Entity, old_level: i32) {
     let Some(level) = world.get::<mud_world::Profile>(entity).map(|p| p.level) else {
         return;
     };
+    let (revoke, grant): (Vec<_>, Vec<_>) = {
+        let Some(table) = world.get_resource::<mud_world::LevelTable>() else {
+            return refresh_rank_only(world, entity, level);
+        };
+        let conferred = |at: i32| -> Vec<mud_db::enums::Permission> {
+            table
+                .rows
+                .iter()
+                .filter(|r| r.level <= at)
+                .flat_map(|r| r.permissions.iter().copied())
+                .collect()
+        };
+        let now = conferred(level);
+        let before = conferred(old_level);
+        (
+            before
+                .iter()
+                .copied()
+                .filter(|p| !now.contains(p))
+                .collect(),
+            now,
+        )
+    };
+    if let Some(mut acct) = world.get_mut::<mud_world::Account>(entity) {
+        acct.refresh_rank(level);
+        acct.perms.retain(|p| !revoke.contains(p));
+        for p in grant {
+            if !acct.perms.contains(&p) {
+                acct.perms.push(p);
+            }
+        }
+    }
+}
+
+fn refresh_rank_only(world: &mut World, entity: Entity, level: i32) {
     if let Some(mut acct) = world.get_mut::<mud_world::Account>(entity) {
         acct.refresh_rank(level);
     }
 }
 
-/// Authorization for any staff action that sets a character's level to
+/// Why [`authorize_level_change`] refused. Each variant maps to one
+/// player-facing denial message via [`LevelChangeDenied::message`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LevelChangeDenied {
+    /// The new level is at or above the actor's own level.
+    RaiseToOwnLevel,
+    /// The target's current level is at or above the actor's own level.
+    TargetOutranks,
+    /// The target isn't a player character (mobs have no staff levels).
+    NotAPlayer,
+}
+
+impl LevelChangeDenied {
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::RaiseToOwnLevel => "You can't raise someone to your own level or higher.\r\n",
+            Self::TargetOutranks => {
+                "You can't change the level of someone at or above your own level.\r\n"
+            }
+            Self::NotAPlayer => "You can only change the level of player characters.\r\n",
+        }
+    }
+}
+
+/// Authorization for any in-game action that sets a character's level to
 /// `new_level` (`advance`, `set <char> level`).
 ///
-/// Level >= [`mud_db::enums::MIN_STAFF_LEVEL`] confers in-game staff rank
-/// (`effective_rank`), so setting one is a privilege escalation: it requires
-/// the actor's *effective* rank to be Implementor. This deliberately does not
-/// honor `DevMode` (which waives `min_role` for every account holder) —
-/// `DevMode` must not become a way to mint gods. Both outcomes are written to
-/// the admin audit log (grant and denial), tagged with target and level.
-/// Levels below 100 need no extra privilege beyond the calling command's own
-/// `min_role`.
+/// Level confers in-game staff rank (`effective_rank`), so setting one is a
+/// privilege escalation. Rules, keyed on the *actor's* `Profile.level`
+/// (never `DevMode`, which waives `min_role` for every account holder):
+/// 1. `new_level` must be strictly below the actor's level, so nobody can
+///    raise anyone to or above their own rank (a 105 Implementor tops out at
+///    104; an Implementor can never be created in game).
+/// 2. The target's current level must be strictly below the actor's level,
+///    so peers and superiors can't be demoted or edited. The one exception
+///    is the actor lowering themselves (rule 1 still applies).
+/// 3. The target must be a player character, never a mob.
+///
+/// The authenticated admin HTTP `player/set` is exempt (operator tooling).
+/// Denials are always written to the admin audit log; grants of staff
+/// levels (>= 100) are too, tagged with target and level.
 pub(crate) fn authorize_level_change(
     world: &mut World,
     actor: Entity,
+    target: Entity,
     target_name: &str,
     new_level: i32,
-) -> bool {
-    use mud_db::enums::{MIN_STAFF_LEVEL, UserRole};
-    if new_level < MIN_STAFF_LEVEL {
-        return true;
+) -> Result<(), LevelChangeDenied> {
+    let actor_level = world
+        .get::<mud_world::Profile>(actor)
+        .map_or(0, |p| p.level);
+    let target_level = world
+        .get::<mud_world::Profile>(target)
+        .map_or(0, |p| p.level);
+    let verdict = if world.get::<mud_world::Player>(target).is_none() {
+        Err(LevelChangeDenied::NotAPlayer)
+    } else if new_level >= actor_level {
+        Err(LevelChangeDenied::RaiseToOwnLevel)
+    } else if target != actor && target_level >= actor_level {
+        Err(LevelChangeDenied::TargetOutranks)
+    } else {
+        Ok(())
+    };
+    if verdict.is_err() || mud_db::enums::is_staff_level(new_level) {
+        crate::commands::record_admin_action(
+            world,
+            actor,
+            if verdict.is_ok() {
+                "staff_level_grant"
+            } else {
+                "staff_level_grant_denied"
+            },
+            &format!("{target_name} {new_level}"),
+        );
     }
-    let allowed = world
-        .get::<mud_world::Account>(actor)
-        .is_some_and(|a| a.role.at_least(UserRole::Implementor));
-    crate::commands::record_admin_action(
-        world,
-        actor,
-        if allowed {
-            "staff_level_grant"
-        } else {
-            "staff_level_grant_denied"
-        },
-        &format!("{target_name} {new_level}"),
-    );
-    allowed
+    verdict
 }
 
 /// Promote `entity` while its XP clears the next threshold and the next

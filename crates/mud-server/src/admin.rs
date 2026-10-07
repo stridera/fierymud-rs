@@ -1085,13 +1085,14 @@ fn set_player_field(
                         args: format!("{player_name} {new_level}"),
                     });
             }
+            let old_level = world.get::<Profile>(entity).map_or(0, |p| p.level);
             if let Some(mut p) = world.get_mut::<Profile>(entity) {
                 p.level = new_level;
             } else {
                 applied = false;
             }
-            // Keep the cached effective rank (Account.role) in sync.
-            crate::combat::refresh_account_rank(world, entity);
+            // Keep cached rank (Account.role) and level perms in sync.
+            crate::combat::after_level_change(world, entity, old_level);
         }
         "experience" => {
             if let Some(mut p) = world.get_mut::<Profile>(entity) {
@@ -2282,6 +2283,44 @@ mod players_tests {
             experience: 0,
             gender: "neutral".to_string(),
         }
+    }
+
+    #[test]
+    fn admin_http_level_set_is_exempt_from_ceiling_but_audited() {
+        let mut world = World::new();
+        world.spawn((
+            Player,
+            Online,
+            account("boss"),
+            Named {
+                name: "Boss".to_string(),
+            },
+            profile(104, None),
+        ));
+        // No in-game actor: operator tooling may mint a 105 (database /
+        // website equivalent), unlike in-game `advance` / `set`.
+        let resp = set_player_field(&mut world, "Boss", "level", 105);
+        assert!(resp.is_ok(), "{resp:?}");
+        let level = world
+            .query::<&Profile>()
+            .iter(&world)
+            .next()
+            .map(|p| p.level);
+        assert_eq!(level, Some(105));
+        let role = world
+            .query::<&Account>()
+            .iter(&world)
+            .next()
+            .map(|a| a.role);
+        assert_eq!(role, Some(UserRole::Implementor));
+        assert!(
+            world
+                .resource::<commands::AdminAuditLog>()
+                .entries
+                .iter()
+                .any(|e| e.verb == "staff_level_grant" && e.args == "Boss 105"),
+            "HTTP staff-level grant must be audit-logged"
+        );
     }
 
     #[test]

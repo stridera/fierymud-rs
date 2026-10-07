@@ -31,7 +31,7 @@ use mud_world::{
     Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, Wealth, WearableIn, WorldKey,
     WorldKeyIndex,
 };
-use tracing::info_span;
+use tracing::{info_span, warn};
 
 use crate::{ServerStart, TickCount};
 
@@ -147,7 +147,7 @@ pub fn drain_player_updates(world: &mut World) {
                 if amount > 0 {
                     crate::rest::award_experience(world, entity, amount);
                 } else if let Some(mut p) = world.get_mut::<Profile>(entity) {
-                    p.experience = p.experience.saturating_add(amount);
+                    p.grant_experience(amount);
                 }
             }
             PendingPlayerUpdate::WealthDelta { amount, .. } => {
@@ -738,11 +738,65 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     (cmd.run)(world, player, args);
 }
 
+/// Where the line currently being dispatched came from. Anything other
+/// than [`CommandOrigin::Direct`] was not typed by the acting character
+/// themself, so it must never run with that character's staff rank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandOrigin {
+    /// Typed by the player (or the authenticated admin HTTP API).
+    Direct,
+    /// Queued by a Lua trigger via `actor:command(line)`.
+    Script,
+    /// Forced by another character via `force`.
+    Forced,
+}
+
+thread_local! {
+    static COMMAND_ORIGIN: std::cell::Cell<CommandOrigin> =
+        const { std::cell::Cell::new(CommandOrigin::Direct) };
+}
+
+/// Run `f` with `origin` recorded for [`command_permitted`], restoring the
+/// previous origin afterwards (including on unwind). Nested dispatches
+/// inherit the strictest enclosing origin, because `Direct` never overrides
+/// a surrounding `Script`/`Forced`.
+pub(crate) fn with_command_origin<R>(origin: CommandOrigin, f: impl FnOnce() -> R) -> R {
+    struct Restore(CommandOrigin);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            COMMAND_ORIGIN.with(|o| o.set(self.0));
+        }
+    }
+    let prev = COMMAND_ORIGIN.with(std::cell::Cell::get);
+    let _restore = Restore(prev);
+    if prev == CommandOrigin::Direct {
+        COMMAND_ORIGIN.with(|o| o.set(origin));
+    }
+    f()
+}
+
 /// Role / permission gate shared by the sync and async dispatchers.
 /// Players check `Account.role` (+ `required_perm`); mobs (no `Account`)
 /// are allowed Player-level commands only; `DevMode` grants every command
 /// to every account holder.
 fn command_permitted(world: &World, player: Entity, cmd: &Command) -> bool {
+    // Script-queued and forced lines run as someone else's intent but
+    // would otherwise be checked against the *acting* character's rank (an
+    // Implementor walking into a builder's trigger room). So only
+    // Player-level commands are allowed unless the line was typed directly.
+    // Applies even under DevMode.
+    let origin = COMMAND_ORIGIN.with(std::cell::Cell::get);
+    if origin != CommandOrigin::Direct
+        && (cmd.min_role != UserRole::Player || cmd.required_perm.is_some())
+    {
+        warn!(
+            actor = %world.get::<Named>(player).map_or("?", |n| n.name.as_str()),
+            command = cmd.names[0],
+            ?origin,
+            "refused staff command from non-direct source"
+        );
+        return false;
+    }
     let dev_mode_on = world.get_resource::<crate::DevMode>().is_some_and(|d| d.0);
     if let Some(a) = world.get::<Account>(player) {
         dev_mode_on
@@ -1201,8 +1255,9 @@ pub(crate) fn drain_lua_outbox(world: &mut World) {
     // if the actor had typed each line. Bounded recursion: any Lua
     // these commands fire pushes onto the outbox again, which is
     // drained by THAT command handler before this loop continues.
+    // Script-sourced: staff commands are refused (see `command_permitted`).
     for (actor, line) in commands {
-        dispatch(world, actor, &line);
+        with_command_origin(CommandOrigin::Script, || dispatch(world, actor, &line));
     }
 }
 

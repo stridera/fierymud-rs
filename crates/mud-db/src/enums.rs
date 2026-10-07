@@ -1336,11 +1336,20 @@ impl MovementMode {
 
 /// Highest level reachable by experience. Levels at or above
 /// [`MIN_STAFF_LEVEL`] only arrive via staff action (`advance` / `set level`
-/// by an Implementor, the authenticated admin HTTP API, or legacy import).
+/// by a staff member of strictly higher level, the authenticated admin HTTP
+/// API, the database / website, or legacy import). Experience never moves a
+/// character at or above [`MIN_STAFF_LEVEL`] at all.
 pub const MAX_MORTAL_LEVEL: i32 = 99;
 
 /// First level that carries in-game staff rank (see [`UserRole::from_level`]).
 pub const MIN_STAFF_LEVEL: i32 = MAX_MORTAL_LEVEL + 1;
+
+/// True when `level` carries staff rank. Characters at such a level do not
+/// gain or spend experience through gameplay (gods don't climb by XP).
+#[must_use]
+pub const fn is_staff_level(level: i32) -> bool {
+    level >= MIN_STAFF_LEVEL
+}
 
 /// In-game staff rank for a character: the higher of the website account
 /// role and the role implied by character level (`UserRole::from_level`).
@@ -1349,10 +1358,12 @@ pub const MIN_STAFF_LEVEL: i32 = MAX_MORTAL_LEVEL + 1;
 /// that god characters whose legacy account was never linked to a website
 /// user (and therefore have no account role) still get their commands. This
 /// is safe only because level >= 100 is unreachable by gameplay: XP-based
-/// level-up is capped at [`MAX_MORTAL_LEVEL`], and every path that sets a
-/// level >= [`MIN_STAFF_LEVEL`] (`advance`, `set level`, admin HTTP
-/// `player/set`) is restricted to Implementors / authenticated admin calls
-/// and audit-logged. The result is never lower than either input, so a
+/// level-up is capped at [`MAX_MORTAL_LEVEL`] and never applies to staff,
+/// and every in-game path that sets a level (`advance`, `set level`)
+/// requires the actor's level to be strictly above both the target's current
+/// and new level, so nobody can mint an Implementor in game. The only other
+/// path is the authenticated admin HTTP `player/set`, which is audit-logged.
+/// The result is never lower than either input, so a
 /// demoted-by-level character still keeps a higher website role.
 ///
 /// This is the single place rank is combined; the result is cached in

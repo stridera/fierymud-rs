@@ -1759,23 +1759,26 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
 
     let applied = match field.as_str() {
         "level" => {
-            // Level >= 100 confers staff rank: Implementor only, audited.
-            // Lowering is gated by `set`'s own Implementor min_role.
+            // Rank rules (see `authorize_level_change`): audited, keyed on
+            // the actor's level, `set`'s own min_role still applies.
             let new_level = value_i32.max(1);
-            if !crate::combat::authorize_level_change(world, player, &target_name, new_level) {
-                send_to(
-                    world,
-                    player,
-                    "Only an Implementor can set a level of 100 or above.\r\n",
-                );
+            if let Err(denied) = crate::combat::authorize_level_change(
+                world,
+                player,
+                target,
+                &target_name,
+                new_level,
+            ) {
+                send_to(world, player, denied.message());
                 return;
             }
+            let old_level = world.get::<Profile>(target).map_or(0, |p| p.level);
             let applied = world
                 .get_mut::<Profile>(target)
                 .map(|mut p| p.level = new_level)
                 .is_some();
-            // Keep the cached effective rank (Account.role) in sync.
-            crate::combat::refresh_account_rank(world, target);
+            // Keep cached rank (Account.role) and level perms in sync.
+            crate::combat::after_level_change(world, target, old_level);
             applied
         }
         "xp" | "exp" | "experience" => world

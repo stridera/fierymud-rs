@@ -1868,15 +1868,13 @@ pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    // Raising someone to level >= 100 mints staff rank: Implementor only
-    // (checked on the actor's effective rank, independent of DevMode).
+    // Rank rules (see `authorize_level_change`): target level strictly below
+    // the actor's, and the target must not already be at/above the actor.
     let target_name = name_of(world, target);
-    if !crate::combat::authorize_level_change(world, player, &target_name, target_level) {
-        send_to(
-            world,
-            player,
-            "Only an Implementor can advance someone to level 100 or above.\r\n",
-        );
+    if let Err(denied) =
+        crate::combat::authorize_level_change(world, player, target, &target_name, target_level)
+    {
+        send_to(world, player, denied.message());
         return;
     }
     // Look up the XP threshold for the target level. If the level
@@ -1901,7 +1899,7 @@ pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
     // Capped at the requested level so a large pre-existing XP total
     // can't carry the target past what the caller authorized.
     crate::combat::level_up_to(world, target, target_level);
-    crate::combat::refresh_account_rank(world, target);
+    crate::combat::after_level_change(world, target, current_level);
     send_rendered(
         world,
         player,
@@ -2489,7 +2487,11 @@ pub(crate) fn cmd_force(world: &mut World, player: Entity, args: &str) {
         command = %cmd_text,
         "force"
     );
-    commands::dispatch(world, target, cmd_text);
+    // The forced line runs as `target` but on `player`'s initiative:
+    // staff commands are refused (see `commands::command_permitted`).
+    commands::with_command_origin(commands::CommandOrigin::Forced, || {
+        commands::dispatch(world, target, cmd_text);
+    });
 }
 pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();

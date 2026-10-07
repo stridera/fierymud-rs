@@ -2763,8 +2763,9 @@ impl UserData for LuaActor {
                 if world.get::<mud_world::Player>(this.entity).is_none() {
                     return;
                 }
+                // Staff-level characters gain nothing (single XP write path).
                 if let Some(mut p) = world.get_mut::<mud_world::Profile>(this.entity) {
-                    p.experience = p.experience.saturating_add(amount).max(0);
+                    p.grant_experience(amount);
                 }
             })
         });
