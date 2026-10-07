@@ -401,10 +401,16 @@ mod tests {
         let (mut world, a, _b, mut rx) = duo();
         pk_on(&mut world, a);
         let elsewhere = world.spawn_empty().id();
+        let home = world.get::<Located>(a).unwrap().0;
+        world.entity_mut(home).insert(Named {
+            name: "The Temple of Midgaard".into(),
+        });
         world.entity_mut(a).insert(Located(elsewhere));
         cmd_pk(&mut world, a, "off");
         assert!(has_pk(&world, a));
-        assert!(drain(&mut rx).contains("only turn off player killing at your recall point"));
+        assert!(drain(&mut rx).contains(
+            "You can only turn off player killing at your recall point (The Temple of Midgaard)."
+        ));
         // The toggle command takes the same road.
         crate::commands::info::cmd_toggle(&mut world, a, "pk");
         assert!(has_pk(&world, a));

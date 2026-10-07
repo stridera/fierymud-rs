@@ -8151,11 +8151,18 @@ pub(crate) fn cmd_pk(world: &mut World, player: Entity, args: &str) {
             || crate::room_access::is_immortal(world, player);
         let here = world.get::<Located>(player).map(|l| l.0);
         let home = crate::commands::recall::recall_room(world, player);
-        if !staff && home.is_some() && here != home {
+        if !staff
+            && let Some(home_room) = home
+            && here != home
+        {
+            let home_name = world.get::<Named>(home_room).map(|n| {
+                crate::commands::render_color_tags(&n.name, crate::commands::ColorMode::Strip)
+            });
+            let suffix = home_name.map_or_else(String::new, |n| format!(" ({n})"));
             send_to(
                 world,
                 player,
-                "You can only turn off player killing at your recall point.\r\n",
+                format!("You can only turn off player killing at your recall point{suffix}.\r\n"),
             );
             return;
         }
