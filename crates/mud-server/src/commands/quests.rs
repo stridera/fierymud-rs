@@ -355,7 +355,12 @@ pub(crate) async fn cmd_qaccept(
             .availability_requirement
             .as_ref()
             .filter(|s| !s.trim().is_empty())
-        && !eval_quest_availability(world, player, expr)
+        && !eval_quest_availability(
+            world,
+            player,
+            expr,
+            &format!("quest ({zone}, {id}) availability requirement"),
+        )
     {
         send_to(
             world,
@@ -425,13 +430,21 @@ pub(crate) async fn cmd_qaccept(
     }
 }
 
-/// Evaluate `availability_requirement` Lua for `player` (Wave 4.4).
-/// Returns true when the expression returns truthy or when
-/// evaluation fails (fail-open — a syntax error shouldn't lock the
-/// player out of an entire quest line; the error lands in syslog).
-/// The expression is wrapped in `return (...)` so builders can author
-/// raw boolean expressions like `character.class == 'PALADIN'`.
-pub(crate) fn eval_quest_availability(world: &mut World, player: Entity, expr: &str) -> bool {
+/// Evaluate a quest gate expression (`availability_requirement` or a
+/// reward `condition`) for `player`. The expression is wrapped in
+/// `return (...)` so builders can author raw boolean expressions like
+/// `actor.class == 'paladin'`.
+///
+/// Fails CLOSED: a script error or a non-boolean result denies, so a
+/// typo can never hand a gated quest or reward to everyone. The
+/// failure is logged with `label` (the quest, and the reward when
+/// there is one) so a builder can find the broken row in syslog.
+pub(crate) fn eval_quest_availability(
+    world: &mut World,
+    player: Entity,
+    expr: &str,
+    label: &str,
+) -> bool {
     let body = format!("return ({expr})");
     let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
         host.exec_for_event_with_value(world, player, player, None, &body, &[])
@@ -439,14 +452,21 @@ pub(crate) fn eval_quest_availability(world: &mut World, player: Entity, expr: &
     match result {
         Ok((_out, Some(b))) => b,
         Ok((_out, None)) => {
-            // Non-boolean return — treat as "yes" so builders who
-            // author side-effecting checks don't accidentally
-            // brick the quest. Fail-open.
-            true
+            tracing::warn!(
+                gate = %label,
+                expr = %expr,
+                "quest expression returned a non-boolean; denying"
+            );
+            false
         }
         Err(e) => {
-            tracing::warn!(error = %e, expr = %expr, "quest availability Lua failed");
-            true
+            tracing::warn!(
+                gate = %label,
+                error = %e,
+                expr = %expr,
+                "quest expression failed; denying"
+            );
+            false
         }
     }
 }
@@ -1192,7 +1212,12 @@ async fn qreward_claim(
     // re-classed and a class-locked reward silently refused.
     if let Some(expr) = reward.condition.as_deref()
         && !expr.trim().is_empty()
-        && !eval_quest_availability(world, player, expr)
+        && !eval_quest_availability(
+            world,
+            player,
+            expr,
+            &format!("quest ({zone}, {id}) reward {reward_id} condition"),
+        )
     {
         send_to(
             world,
@@ -1471,51 +1496,57 @@ mod tests {
     // Condition gate (Wave 4.10 — qreward refuses on unmet condition)
     // ----------------------------------------------------------------
     //
-    // The qreward_claim path's condition gate routes through
-    // `eval_quest_availability`. A full e2e test would need a quest
-    // row + completed CharacterQuest + Lua-evaluable `actor` userdata
-    // backed by Profile/Class/Wealth components — too heavy for this
-    // file. Instead, test the gate directly with literal expressions
-    // (no entity-field access) so the contract "false → don't grant,
-    // true → grant, malformed → fail-open" is locked in. Anyone
-    // refactoring the eval helper now has a unit-level guard.
+    // Both the `qaccept` availability check and the `qreward` condition
+    // gate route through `eval_quest_availability`. A full e2e test
+    // would need a quest row + completed CharacterQuest +
+    // Lua-evaluable `actor` userdata backed by Profile/Class/Wealth
+    // components, so test the gate directly with literal expressions:
+    // true grants, false denies, and anything else (script error,
+    // non-boolean) DENIES.
 
-    #[test]
-    fn eval_quest_availability_literal_true_returns_true() {
+    fn gate(expr: &str) -> bool {
         let mut world = World::new();
         world.insert_resource(mud_script::LuaHost::default());
         let entity = world.spawn(()).id();
-        assert!(eval_quest_availability(&mut world, entity, "true"));
+        eval_quest_availability(&mut world, entity, expr, "quest (30, 1) test gate")
+    }
+
+    #[test]
+    fn eval_quest_availability_literal_true_returns_true() {
+        assert!(gate("true"));
     }
 
     #[test]
     fn eval_quest_availability_literal_false_returns_false() {
-        let mut world = World::new();
-        world.insert_resource(mud_script::LuaHost::default());
-        let entity = world.spawn(()).id();
-        assert!(!eval_quest_availability(&mut world, entity, "false"));
+        assert!(!gate("false"));
     }
 
     #[test]
     fn eval_quest_availability_arithmetic_predicate() {
-        let mut world = World::new();
-        world.insert_resource(mud_script::LuaHost::default());
-        let entity = world.spawn(()).id();
-        assert!(eval_quest_availability(&mut world, entity, "1 + 1 == 2"));
-        assert!(!eval_quest_availability(&mut world, entity, "1 + 1 == 3"));
+        assert!(gate("1 + 1 == 2"));
+        assert!(!gate("1 + 1 == 3"));
     }
 
     #[test]
-    fn eval_quest_availability_compile_error_is_fail_open() {
+    fn eval_quest_availability_compile_error_denies() {
         // Author-error: unbalanced paren. Wrapped in `return (...)`,
-        // so the resulting body is `return ((` — a compile error.
-        // The helper logs + returns true so the player isn't bricked
-        // by a typo in the QuestReward.condition column. The qreward
-        // path then grants the reward; staffers see the warning in
-        // syslog and can fix the row.
-        let mut world = World::new();
-        world.insert_resource(mud_script::LuaHost::default());
-        let entity = world.spawn(()).id();
-        assert!(eval_quest_availability(&mut world, entity, "((unbalanced"));
+        // so the body is `return ((` — a compile error. The gate
+        // must deny rather than let everyone through.
+        assert!(!gate("((unbalanced"));
+    }
+
+    #[test]
+    fn eval_quest_availability_runtime_error_denies() {
+        // `character` is not a variable (the player is `actor`), so
+        // indexing it raises at runtime.
+        assert!(!gate("character.class == 'paladin'"));
+        assert!(!gate("error('boom')"));
+    }
+
+    #[test]
+    fn eval_quest_availability_non_boolean_denies() {
+        assert!(!gate("1"));
+        assert!(!gate("'yes'"));
+        assert!(!gate("nil"));
     }
 }
