@@ -824,6 +824,7 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     if trimmed.is_empty() {
         return;
     }
+    LINE_HAS_TRAILING_SPACE.with(|f| f.set(line.ends_with(char::is_whitespace)));
 
     // Per-character alias expansion (legacy `perform_alias`): the typist's
     // aliases are consulted before `switch` retargeting so they keep
@@ -1137,6 +1138,17 @@ pub(crate) enum CommandOrigin {
 thread_local! {
     static COMMAND_ORIGIN: std::cell::Cell<CommandOrigin> =
         const { std::cell::Cell::new(CommandOrigin::Direct) };
+    /// Whether the line most recently dispatched ended in whitespace, i.e.
+    /// a client sent `verb ` with an argument slot that is present but empty.
+    static LINE_HAS_TRAILING_SPACE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// True when the line being dispatched ended in whitespace after its last
+/// token. The dispatcher trims lines, so this is the only way a handler can
+/// tell `rent` from `rent ` (a client button with an empty name).
+pub(crate) fn line_has_trailing_space() -> bool {
+    LINE_HAS_TRAILING_SPACE.with(std::cell::Cell::get)
 }
 
 /// Run `f` with `origin` recorded for [`command_permitted`], restoring the

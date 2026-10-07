@@ -23,7 +23,10 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{RestSource, UserRole};
-use mud_world::{InnRoom, Located, Mob, MobPrototypes, RestState, Wealth, WorldKey};
+use mud_world::{
+    Account, Fighting, InnRoom, Located, Mob, MobPrototypes, Posture, PostureKind, RestState,
+    Stunned, Wealth, WorldKey,
+};
 
 use crate::commands::info::begin_quit;
 use crate::commands::{Category, Command, Help, name_of, send_rendered, send_to};
@@ -43,12 +46,13 @@ inventory::submit! {
         help: Help {
             usage: "rent [<tier-name>]",
             summary: "Rent a room: save and leave at a receptionist, or book an inn rest.",
-            long: "With a receptionist present, `rent` stores your \
-                   belongings and leaves the game exactly like `quit`, \
-                   keeping any rest you have already booked. In an inn \
-                   room (one flagged `is_inn` by builders), `rent` with \
-                   no receptionist lists the available tiers and their \
-                   fees. `rent <name>` charges the fee in \
+            long: "With a receptionist present, plain `rent` stores \
+                   your belongings and leaves the game exactly like \
+                   `quit`, keeping any rest you have already booked. \
+                   `offer` lists the available inn tiers and their \
+                   prices (so does `rent` in an inn with no \
+                   receptionist). `rent <name>` books that tier and \
+                   charges the fee in \
                    gold and queues an INN RestSource at the chosen \
                    tier; you'll see Refreshed regen and any Wake \
                    Effect attachments on your next XP gain after \
@@ -99,9 +103,10 @@ pub(crate) fn cmd_rent(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let clerk = receptionist_in_room(world, room);
     let inn = world.get::<InnRoom>(room).cloned();
-    if args.trim().is_empty()
-        && let Some(clerk) = clerk
-    {
+    // `rent ` (a trailing space: a client sending an empty tier name) is an
+    // argument that happens to be empty, not a bare `rent`, and never quits.
+    let bare = args.trim().is_empty() && !crate::commands::line_has_trailing_space();
+    if bare && let Some(clerk) = clerk {
         rent_and_quit(world, player, room, clerk);
         return;
     }
@@ -203,6 +208,9 @@ fn receptionist_in_room(world: &mut World, room: Entity) -> Option<Entity> {
 /// refused, e.g. mid-fight).
 fn rent_and_quit(world: &mut World, player: Entity, room: Entity, clerk: Entity) {
     let clerk_name = crate::commands::cap_sentence_start(&name_of(world, clerk));
+    if !clerk_can_serve(world, player, clerk, &clerk_name) {
+        return;
+    }
     let farewell = format!(
         "<b:white>{clerk_name} tells you, 'Rent?  Sure, come this way!'</>\r\n\
          <b:white>{clerk_name} stores your belongings and helps you into your private chamber.</>\r\n"
@@ -220,6 +228,43 @@ fn rent_and_quit(world: &mut World, player: Entity, room: Entity, clerk: Entity)
             "{clerk_name} helps {player_name} into their private chamber.\r\n"
         )),
     );
+}
+
+/// Legacy `gen_receptionist` gates: the clerk must be awake, free and able
+/// to see the player (staff are exempt from the sight check). Sends the
+/// refusal itself.
+fn clerk_can_serve(world: &mut World, player: Entity, clerk: Entity, clerk_name: &str) -> bool {
+    let asleep = world
+        .get::<Posture>(clerk)
+        .is_some_and(|p| p.0.rank() <= PostureKind::Sleeping.rank());
+    if asleep || world.get::<Stunned>(clerk).is_some() {
+        send_to(
+            world,
+            player,
+            format!("{clerk_name} is unable to talk to you...\r\n"),
+        );
+        return false;
+    }
+    if world.get::<Fighting>(clerk).is_some() {
+        send_to(
+            world,
+            player,
+            format!("{clerk_name} is too busy to help you right now.\r\n"),
+        );
+        return false;
+    }
+    let is_staff = world
+        .get::<Account>(player)
+        .is_some_and(|a| a.role.rank() > UserRole::Player.rank());
+    if !is_staff && !crate::commands::can_see_player(world, clerk, player) {
+        send_rendered(
+            world,
+            player,
+            &format!("{clerk_name} says, 'I don't deal with people I can't see!'\r\n"),
+        );
+        return false;
+    }
+    true
 }
 
 /// The receptionist's answer to `rent <something>` where there are no rooms
@@ -340,7 +385,7 @@ fn render_tier_menu(world: &mut World, player: Entity, inn: &InnRoom) {
             t.name, t.tier, t.fee_gp
         ));
     }
-    out.push_str("Use `rent <name>` to book one. Tiers 2 and 3 ask to confirm.\r\n");
+    out.push_str("`offer` lists prices; `rent <name>` books a room (tiers 2 and 3 ask to confirm). With a receptionist present, plain `rent` stores your belongings and leaves the game.\r\n");
     send_to(world, player, out);
 }
 
@@ -476,6 +521,105 @@ mod tests {
             "{out}"
         );
         assert!(world.get::<crate::commands::Quitting>(player).is_none());
+    }
+
+    fn clerk_of(world: &mut World, player: Entity) -> Entity {
+        let room = world.get::<Located>(player).unwrap().0;
+        receptionist_in_room(world, room).unwrap()
+    }
+
+    #[test]
+    fn rent_with_a_trailing_space_is_an_empty_argument_and_does_not_quit() {
+        let (mut world, player, mut rx) = world_with_clerk(false);
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.entity_mut(player).insert(Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        });
+        crate::commands::dispatch(&mut world, player, "rent ");
+        let out = drain(&mut rx);
+        assert!(out.contains("No rent is due"), "{out}");
+        assert!(world.get::<crate::commands::Quitting>(player).is_none());
+        // The bare form on the same world still quits.
+        crate::commands::dispatch(&mut world, player, "rent");
+        assert!(world.get::<crate::commands::Quitting>(player).is_some());
+    }
+
+    #[test]
+    fn rent_with_a_trailing_space_in_an_inn_lists_tiers() {
+        let (mut world, player, mut rx) = world_with_clerk(true);
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.entity_mut(player).insert(Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        });
+        crate::commands::dispatch(&mut world, player, "rent ");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("Available rooms here") && out.contains("offer"),
+            "{out}"
+        );
+        assert!(world.get::<crate::commands::Quitting>(player).is_none());
+    }
+
+    #[test]
+    fn rent_with_a_sleeping_receptionist_refuses() {
+        let (mut world, player, mut rx) = world_with_clerk(false);
+        let clerk = clerk_of(&mut world, player);
+        world
+            .entity_mut(clerk)
+            .insert(Posture(PostureKind::Sleeping));
+        cmd_rent(&mut world, player, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("is unable to talk to you"), "{out}");
+        assert!(world.get::<crate::commands::Quitting>(player).is_none());
+        // Resting is awake enough.
+        world
+            .entity_mut(clerk)
+            .insert(Posture(PostureKind::Resting));
+        cmd_rent(&mut world, player, "");
+        assert!(world.get::<crate::commands::Quitting>(player).is_some());
+    }
+
+    #[test]
+    fn rent_with_a_busy_receptionist_refuses() {
+        let (mut world, player, mut rx) = world_with_clerk(false);
+        let clerk = clerk_of(&mut world, player);
+        let room = world.get::<Located>(player).unwrap().0;
+        let foe = world.spawn((Mob, Located(room))).id();
+        world.entity_mut(clerk).insert(Fighting(foe));
+        cmd_rent(&mut world, player, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("too busy to help you"), "{out}");
+        assert!(world.get::<crate::commands::Quitting>(player).is_none());
+    }
+
+    #[test]
+    fn rent_with_an_invisible_player_is_refused_unless_staff() {
+        let (mut world, player, mut rx) = world_with_clerk(false);
+        world.entity_mut(player).insert(mud_world::Invisible);
+        cmd_rent(&mut world, player, "");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("I don't deal with people I can't see"),
+            "{out}"
+        );
+        assert!(world.get::<crate::commands::Quitting>(player).is_none());
+        world.entity_mut(player).insert(Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: UserRole::Immortal,
+            account_role: UserRole::Immortal,
+            perms: vec![],
+        });
+        cmd_rent(&mut world, player, "");
+        assert!(world.get::<crate::commands::Quitting>(player).is_some());
     }
 
     #[test]
