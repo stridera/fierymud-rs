@@ -1039,6 +1039,19 @@ impl LineSplitter {
 
 /// Most negotiation events buffered before `Connected` is released.
 const MAX_PENDING_EVENTS: usize = 256;
+/// Most payload bytes buffered before `Connected` is released, so a peer
+/// can't park large GMCP frames in memory while negotiation is pending.
+const MAX_PENDING_BYTES: usize = 64 * 1024;
+
+/// Approximate heap weight of a buffered event, for the pending byte cap.
+fn event_bytes(kind: &InboundKind) -> usize {
+    match kind {
+        InboundKind::Line(line) => line.len(),
+        InboundKind::Terminal { value, .. } => value.len(),
+        InboundKind::Gmcp { package, payload } => package.len() + payload.len(),
+        _ => 0,
+    }
+}
 
 /// Where a connection's events go. Until the connect greeting is
 /// released ([`Sink::connect`]) events are buffered, so the server sees
@@ -1047,6 +1060,8 @@ struct Sink<'a> {
     conn_id: ConnId,
     inbound: &'a InboundTx,
     pending: Vec<InboundKind>,
+    /// Sum of [`event_bytes`] over `pending`.
+    pending_bytes: usize,
     /// `Some` until `Connected` has been sent.
     hello: Option<(SocketAddr, Outbound, OutputHandle)>,
 }
@@ -1068,8 +1083,9 @@ impl Sink<'_> {
                 .await
                 .is_ok();
         }
+        self.pending_bytes = self.pending_bytes.saturating_add(event_bytes(&kind));
         self.pending.push(kind);
-        if self.pending.len() >= MAX_PENDING_EVENTS {
+        if self.pending.len() >= MAX_PENDING_EVENTS || self.pending_bytes >= MAX_PENDING_BYTES {
             return self.connect().await;
         }
         true
@@ -1091,6 +1107,7 @@ impl Sink<'_> {
         if self.inbound.send(first).await.is_err() {
             return false;
         }
+        self.pending_bytes = 0;
         for kind in std::mem::take(&mut self.pending) {
             let msg = Inbound {
                 conn: self.conn_id,
@@ -1124,6 +1141,7 @@ async fn handle_connection<S>(
         conn_id,
         inbound: &inbound,
         pending: Vec::new(),
+        pending_bytes: 0,
         hello: Some((peer, out_tx.clone(), caps.output.clone())),
     };
 
@@ -1972,6 +1990,41 @@ mod limit_tests {
     }
 
     #[tokio::test]
+    async fn pending_bytes_cap_releases_connected_early() {
+        let (in_tx, mut in_rx) = mpsc::channel::<Inbound>(64);
+        let (out_tx, _out_rx) = mpsc::channel::<Vec<u8>>(8);
+        let mut sink = Sink {
+            conn_id: 1,
+            inbound: &in_tx,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            hello: Some(("127.0.0.1:1".parse().unwrap(), out_tx, OutputHandle::new())),
+        };
+        let big = "x".repeat(MAX_PENDING_BYTES / 2);
+        let gmcp = |p: &str| InboundKind::Gmcp {
+            package: "Core.Hello".into(),
+            payload: p.into(),
+        };
+        assert!(sink.send(gmcp(&big)).await);
+        assert!(!sink.connected(), "under the cap: still buffering");
+        assert!(sink.send(gmcp(&big)).await);
+        assert!(sink.connected(), "byte cap reached: Connected released");
+        assert_eq!(sink.pending_bytes, 0);
+        assert!(matches!(
+            in_rx.recv().await.unwrap().kind,
+            InboundKind::Connected { .. }
+        ));
+        assert!(matches!(
+            in_rx.recv().await.unwrap().kind,
+            InboundKind::Gmcp { .. }
+        ));
+        assert!(matches!(
+            in_rx.recv().await.unwrap().kind,
+            InboundKind::Gmcp { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn client_initiated_sga_is_accepted_once_without_looping() {
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(8);
         let (in_tx, _in_rx) = mpsc::channel::<Inbound>(8);
@@ -1979,6 +2032,7 @@ mod limit_tests {
             conn_id: 1,
             inbound: &in_tx,
             pending: Vec::new(),
+            pending_bytes: 0,
             hello: None,
         };
         let mut caps = CapsLocal::default();
