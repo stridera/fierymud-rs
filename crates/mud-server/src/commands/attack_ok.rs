@@ -33,8 +33,21 @@ pub(super) fn is_charmed(world: &mut World, entity: Entity) -> bool {
         .any(|(i, a)| a.0 == entity && i.name.eq_ignore_ascii_case("charmed"))
 }
 
-/// The master of a charmed pet, if `entity` is one.
+/// The player a pet belongs to: any mob following a player, whether it is
+/// charmed or just a shop pet / summoned follower. A pet's attack is judged as
+/// its owner's attack, and an attack on it as an attack on the owner.
+pub(super) fn pet_owner(world: &World, entity: Entity) -> Option<Entity> {
+    world.get::<Mob>(entity)?;
+    let master = world.get::<Follower>(entity).map(|f| f.0)?;
+    world.get::<Player>(master).is_some().then_some(master)
+}
+
+/// The master of a pet, if `entity` is one (any player-followed mob, or a
+/// charmed mob following anyone).
 fn charm_master(world: &mut World, entity: Entity) -> Option<Entity> {
+    if let Some(owner) = pet_owner(world, entity) {
+        return Some(owner);
+    }
     let master = world.get::<Follower>(entity).map(|f| f.0)?;
     (world.get::<Mob>(entity).is_some() && is_charmed(world, entity)).then_some(master)
 }
@@ -158,7 +171,10 @@ pub(crate) fn attack_ok(world: &mut World, ch: Entity, victim: Entity, verbose: 
             let n = cap_sentence_start(&name_of(world, target));
             format!("{n} is not a player killer.\r\n")
         };
-        say(world, msg);
+        // A pet has no connection: tell its owner.
+        if verbose {
+            send_to(world, attacker, msg);
+        }
         return false;
     }
     true
@@ -192,8 +208,12 @@ mod tests {
         world.entity_mut(b).insert(Named {
             name: "Victim".into(),
         });
-        world.entity_mut(a).insert(PlayerFlags(vec![]));
-        world.entity_mut(b).insert(PlayerFlags(vec![]));
+        world
+            .entity_mut(a)
+            .insert((PlayerFlags(vec![]), mud_world::RecallPoint(room)));
+        world
+            .entity_mut(b)
+            .insert((PlayerFlags(vec![]), mud_world::RecallPoint(room)));
         (world, a, b, rx)
     }
 
@@ -348,5 +368,254 @@ mod tests {
         ]));
         crate::commands::auto_assist_followers_of(&mut world, b, a, room);
         assert!(world.get::<Fighting>(h).is_some());
+    }
+
+    /// `owner`'s pet: a mob that only has `Follower(owner)` (a shop pet or a
+    /// summoned follower, no charm effect).
+    fn pet_of(world: &mut World, owner: Entity) -> Entity {
+        let room = world.get::<Located>(owner).unwrap().0;
+        world
+            .spawn((
+                Mob,
+                Named { name: "pet".into() },
+                mud_world::Keywords(vec!["pet".into()]),
+                Located(room),
+                Follower(owner),
+                mud_world::CombatStats::default(),
+            ))
+            .id()
+    }
+
+    fn staff_profile(level: i32) -> mud_world::Profile {
+        mud_world::Profile {
+            level,
+            class_id: None,
+            race: "Human".into(),
+            experience: 0,
+            gender: "neutral".into(),
+        }
+    }
+
+    #[test]
+    fn pk_off_is_refused_away_from_the_recall_point() {
+        let (mut world, a, _b, mut rx) = duo();
+        pk_on(&mut world, a);
+        let elsewhere = world.spawn_empty().id();
+        world.entity_mut(a).insert(Located(elsewhere));
+        cmd_pk(&mut world, a, "off");
+        assert!(has_pk(&world, a));
+        assert!(drain(&mut rx).contains("only turn off player killing at your recall point"));
+        // The toggle command takes the same road.
+        crate::commands::info::cmd_toggle(&mut world, a, "pk");
+        assert!(has_pk(&world, a));
+    }
+
+    #[test]
+    fn pk_off_is_allowed_at_the_recall_point_and_on_works_anywhere() {
+        let (mut world, a, _b, _rx) = duo();
+        pk_on(&mut world, a);
+        cmd_pk(&mut world, a, "off");
+        assert!(!has_pk(&world, a));
+        let elsewhere = world.spawn_empty().id();
+        world.entity_mut(a).insert(Located(elsewhere));
+        cmd_pk(&mut world, a, "on");
+        assert!(has_pk(&world, a));
+    }
+
+    #[test]
+    fn staff_may_turn_pk_off_anywhere() {
+        let (mut world, a, _b, _rx) = duo();
+        pk_on(&mut world, a);
+        let elsewhere = world.spawn_empty().id();
+        world
+            .entity_mut(a)
+            .insert((Located(elsewhere), staff_profile(100)));
+        cmd_pk(&mut world, a, "off");
+        assert!(!has_pk(&world, a));
+    }
+
+    #[test]
+    fn toggle_pk_obeys_the_fighting_rule() {
+        let (mut world, a, b, mut rx) = duo();
+        pk_on(&mut world, a);
+        pk_on(&mut world, b);
+        world.entity_mut(a).insert(Fighting(b));
+        crate::commands::info::cmd_toggle(&mut world, a, "pk");
+        assert!(has_pk(&world, a));
+        assert!(drain(&mut rx).contains("Not while you're fighting!"));
+    }
+
+    #[test]
+    fn pk_off_is_refused_while_a_pet_fights_another_players_pet() {
+        let (mut world, a, b, mut rx) = duo();
+        pk_on(&mut world, a);
+        let mine = pet_of(&mut world, a);
+        let theirs = pet_of(&mut world, b);
+        world.entity_mut(mine).insert(Fighting(theirs));
+        cmd_pk(&mut world, a, "off");
+        assert!(has_pk(&world, a));
+        assert!(drain(&mut rx).contains("Not while you're fighting!"));
+        // Fighting a plain mob with a pet does not count.
+        let room = world.get::<Located>(a).unwrap().0;
+        let rat = world
+            .spawn((Mob, Named { name: "rat".into() }, Located(room)))
+            .id();
+        world.entity_mut(mine).insert(Fighting(rat));
+        cmd_pk(&mut world, a, "off");
+        assert!(!has_pk(&world, a));
+    }
+
+    #[test]
+    fn a_followed_mob_counts_as_its_owners_pet() {
+        let (mut world, a, b, mut rx) = duo();
+        let pet = pet_of(&mut world, a);
+        // The owner has PK off: the pet may not attack a player.
+        pk_on(&mut world, b);
+        assert!(!attack_ok(&mut world, pet, b, true));
+        assert!(drain(&mut rx).contains("You must turn on PK first"));
+        // And a non-PK stranger can't attack it.
+        assert!(!attack_ok(&mut world, b, pet, false));
+        // With both owners PK-on, the pet is fair game.
+        pk_on(&mut world, a);
+        assert!(attack_ok(&mut world, pet, b, false));
+        assert!(attack_ok(&mut world, b, pet, false));
+    }
+
+    #[test]
+    fn ordering_a_pet_to_kill_a_player_obeys_the_pk_rule() {
+        let (mut world, a, b, mut rx) = duo();
+        world
+            .entity_mut(b)
+            .insert(mud_world::CombatStats::default());
+        let pet = pet_of(&mut world, a);
+        crate::commands::info::cmd_order(&mut world, a, "pet kill victim");
+        assert!(world.get::<Fighting>(pet).is_none());
+        assert!(world.get::<Fighting>(b).is_none());
+        let text = drain(&mut rx);
+        assert!(text.contains("You must turn on PK first"), "{text}");
+        // Both players PK-on: the pet may engage.
+        pk_on(&mut world, a);
+        pk_on(&mut world, b);
+        crate::commands::info::cmd_order(&mut world, a, "pet kill victim");
+        let text = drain(&mut rx);
+        assert!(text.contains("pet attacks Victim"), "{text}");
+        assert!(!text.contains("You must turn on PK"), "{text}");
+    }
+
+    #[test]
+    fn bash_backstab_and_taunt_obey_the_pk_rule() {
+        use crate::commands::combat_commands::{cmd_backstab, cmd_bash, cmd_taunt};
+        let (mut world, a, b, mut rx) = duo();
+        world
+            .entity_mut(b)
+            .insert(mud_world::CombatStats::default());
+        world
+            .entity_mut(b)
+            .insert(mud_world::Keywords(vec!["victim".into()]));
+        cmd_bash(&mut world, a, "victim");
+        let text = drain(&mut rx);
+        assert!(text.contains("You must turn on PK first"), "bash: {text}");
+        cmd_backstab(&mut world, a, "victim");
+        let text = drain(&mut rx);
+        assert!(
+            text.contains("You must turn on PK first"),
+            "backstab: {text}"
+        );
+        cmd_taunt(&mut world, a, "victim");
+        let text = drain(&mut rx);
+        assert!(text.contains("You must turn on PK first"), "taunt: {text}");
+        assert!(world.get::<Fighting>(a).is_none());
+        assert!(world.get::<Fighting>(b).is_none());
+    }
+
+    #[test]
+    fn disarm_obeys_the_pk_rule() {
+        let (mut world, a, b, mut rx) = duo();
+        world
+            .entity_mut(b)
+            .insert(mud_world::CombatStats::default());
+        crate::commands::combat_commands::cmd_disarm(&mut world, a, "victim");
+        let text = drain(&mut rx);
+        assert!(text.contains("You must turn on PK first"), "{text}");
+    }
+
+    #[test]
+    fn hitall_and_sweep_skip_other_players_pets() {
+        use crate::commands::combat_commands::{cmd_hitall, cmd_sweep};
+        let (mut world, a, b, _rx) = duo();
+        let theirs = pet_of(&mut world, b);
+        let mine = pet_of(&mut world, a);
+        let room = world.get::<Located>(a).unwrap().0;
+        let rat = world
+            .spawn((
+                Mob,
+                Named { name: "rat".into() },
+                Located(room),
+                mud_world::Health { hp: 50, max: 50 },
+            ))
+            .id();
+        for e in [theirs, mine] {
+            world
+                .entity_mut(e)
+                .insert(mud_world::Health { hp: 50, max: 50 });
+        }
+        cmd_hitall(&mut world, a, "");
+        cmd_sweep(&mut world, a, "");
+        let hp = |w: &World, e: Entity| w.get::<mud_world::Health>(e).unwrap().hp;
+        assert_eq!(hp(&world, theirs), 50, "another player's pet is skipped");
+        assert!(hp(&world, rat) < 50, "plain mobs are still hit");
+    }
+
+    #[test]
+    fn rescue_from_a_player_obeys_the_pk_rule() {
+        use mud_db::abilities::AbilityKind;
+        let (mut world, rescuer, attacker, mut rx) = duo();
+        let room = world.get::<Located>(rescuer).unwrap().0;
+        let (ally, _arx) = player_in(&mut world, room);
+        world.entity_mut(ally).insert(Named {
+            name: "Ally".into(),
+        });
+        world
+            .entity_mut(ally)
+            .insert(mud_world::Keywords(vec!["ally".into()]));
+        world.entity_mut(attacker).insert(Fighting(ally));
+        world.entity_mut(ally).insert(Fighting(attacker));
+        let mut abilities = mud_world::AbilityCatalog::default();
+        let def = crate::commands::test_support::ability_def(900, "Rescue", AbilityKind::Skill);
+        abilities.by_name.insert("rescue".to_string(), def);
+        abilities
+            .effects_for
+            .insert(900, vec![(901, Some(serde_json::json!({"aggro": true})))]);
+        world.insert_resource(abilities);
+        let mut effects = mud_world::EffectCatalog::default();
+        effects.by_id.insert(
+            901,
+            mud_world::EffectDef {
+                id: 901,
+                name: "redirect".into(),
+                description: None,
+                effect_type: "redirect".into(),
+                tags: vec![],
+                presence_override: None,
+                default_params: serde_json::json!({"aggro": true}),
+                prevents_speaking: false,
+                prevents_casting: false,
+                prevents_movement: false,
+                on_apply: None,
+                on_tick: None,
+                on_remove: None,
+            },
+        );
+        world.insert_resource(effects);
+        world.insert_resource(mud_world::WeatherCatalog::default());
+        world.insert_resource(mud_world::RaceCatalog::default());
+        world.entity_mut(rescuer).insert(mud_world::KnownAbilities {
+            entries: vec![(900, 1000, true)],
+        });
+        crate::commands::combat_commands::cmd_rescue(&mut world, rescuer, "ally");
+        let text = drain(&mut rx);
+        assert!(text.contains("You must turn on PK first"), "{text}");
+        assert!(world.get::<Fighting>(rescuer).is_none());
+        assert!(world.get::<Fighting>(attacker).is_some_and(|f| f.0 == ally));
     }
 }

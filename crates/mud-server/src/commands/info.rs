@@ -1969,8 +1969,9 @@ inventory::submit! {
             usage: "pk [on|off]",
             summary: "Toggle player-kill participation.",
             long: "Sets PK_ENABLED. Two players can fight each other only \
-                   while BOTH have PK on. You can't turn it off while \
-                   fighting another player.",
+                   while BOTH have PK on. Turning it on works anywhere; \
+                   you can turn it off only at your recall point, and not \
+                   while fighting another player.",
         },
         run: cmd_pk,
     }
@@ -7592,6 +7593,11 @@ pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
+    // PK has its own rules (not mid-fight, only at the recall point).
+    if flag == PlayerFlag::PkEnabled {
+        cmd_pk(world, player, "");
+        return;
+    }
     // God-only flags (HOLY_LIGHT, SHOW_IDS) are gated on the
     // dedicated cmd_holylight / cmd_showids commands; the generic
     // toggle path must not become a bypass.
@@ -8135,29 +8141,58 @@ pub(crate) fn cmd_pk(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    if !want_on && fighting_another_player(world, player) {
-        send_to(world, player, "Not while you're fighting!\r\n");
-        return;
+    if !want_on {
+        if fighting_another_player(world, player) {
+            send_to(world, player, "Not while you're fighting!\r\n");
+            return;
+        }
+        // Opting out is only possible at home; staff are exempt.
+        let staff = world.get::<Profile>(player).is_some_and(|p| p.level >= 100)
+            || crate::room_access::is_immortal(world, player);
+        let here = world.get::<Located>(player).map(|l| l.0);
+        let home = crate::commands::recall::recall_room(world, player);
+        if !staff && home.is_some() && here != home {
+            send_to(
+                world,
+                player,
+                "You can only turn off player killing at your recall point.\r\n",
+            );
+            return;
+        }
     }
     toggle_player_flag(
         world,
         player,
         PlayerFlag::PkEnabled,
-        "Player killing is now ON. Players who also have PK on may attack you, and you them.",
+        "Player killing is now ON. Players who also have PK on may attack you, and you them. \
+         You can only turn it off again at your recall point.",
         "Player killing is now OFF.",
     );
 }
 
-/// Is `player` in a fight with another player (either as attacker or target)?
+/// Is `player` (or one of their pets) in a fight with another player or
+/// another player's pet, in either direction?
 fn fighting_another_player(world: &mut World, player: Entity) -> bool {
-    if world
-        .get::<mud_world::Fighting>(player)
-        .is_some_and(|f| f.0 != player && world.get::<mud_world::Player>(f.0).is_some())
+    let mut mine = vec![player];
     {
-        return true;
+        let mut q = world.query_filtered::<Entity, With<Mob>>();
+        let mobs: Vec<Entity> = q.iter(world).collect();
+        for m in mobs {
+            if super::attack_ok::pet_owner(world, m) == Some(player) {
+                mine.push(m);
+            }
+        }
     }
-    let mut q = world.query_filtered::<&mud_world::Fighting, With<mud_world::Player>>();
-    q.iter(world).any(|f| f.0 == player)
+    let theirs = |world: &World, e: Entity| {
+        e != player
+            && !mine.contains(&e)
+            && (world.get::<Player>(e).is_some() || super::attack_ok::pet_owner(world, e).is_some())
+    };
+    let mut q = world.query::<(Entity, &Fighting)>();
+    let pairs: Vec<(Entity, Entity)> = q.iter(world).map(|(e, f)| (e, f.0)).collect();
+    pairs.into_iter().any(|(x, y)| {
+        (mine.contains(&x) && theirs(world, y)) || (mine.contains(&y) && theirs(world, x))
+    })
 }
 
 pub(crate) fn cmd_quest_flag(world: &mut World, player: Entity, _args: &str) {

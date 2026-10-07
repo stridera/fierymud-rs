@@ -2,7 +2,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Fighting, Located, Mounted, RecallPoint};
+use mud_world::{Fighting, Located, Mounted, Profile, RaceDefaults, RecallPoint, WorldKeyIndex};
 
 use crate::commands::{Category, Command, Help, cmd_look, name_of, send_to, try_remove};
 
@@ -22,6 +22,28 @@ inventory::submit! {
         },
         run: cmd_recall,
     }
+}
+
+/// The room `recall` takes `player` to: the bound `RecallPoint`, or (for
+/// someone who never bound one) their race's start room, the same fallback
+/// the respawn chain uses.
+pub(crate) fn recall_room(world: &World, player: Entity) -> Option<Entity> {
+    if let Some(r) = world.get::<RecallPoint>(player).map(|r| r.0)
+        && world.get_entity(r).is_ok()
+    {
+        return Some(r);
+    }
+    let race = world.get::<Profile>(player).map(|p| p.race.clone())?;
+    let key = world
+        .get_resource::<RaceDefaults>()?
+        .start_room_by_race
+        .get(&race)
+        .copied()?;
+    world
+        .get_resource::<WorldKeyIndex>()?
+        .rooms
+        .get(&key)
+        .copied()
 }
 
 fn cmd_recall(world: &mut World, player: Entity, _args: &str) {

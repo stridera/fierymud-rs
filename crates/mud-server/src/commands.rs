@@ -14899,6 +14899,15 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{pretty} (attacker has vanished)"));
                     continue;
                 }
+                // Taking over a player's (or a player's pet's) attack is
+                // attacking them: the PK rule applies.
+                if (world.get::<Player>(attacker).is_some()
+                    || attack_ok::pet_owner(world, attacker).is_some())
+                    && !attack_ok::attack_ok(world, player, attacker, true)
+                {
+                    applied_msgs.push(format!("{pretty} (PK refused)"));
+                    continue;
+                }
                 crate::commands::try_remove::<Fighting>(world, target_entity);
                 crate::commands::try_insert(world, attacker, Fighting(player));
                 crate::commands::try_insert(world, player, Fighting(attacker));

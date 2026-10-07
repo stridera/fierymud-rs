@@ -1441,18 +1441,18 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    // Legacy: player-stealing is only allowed during PK.
-    if world.get::<mud_world::Player>(target).is_some()
-        && !super::attack_ok::attack_ok(world, player, target, true)
-    {
-        return;
-    }
     if world.get::<mud_world::PeacefulRoom>(room).is_some() {
         send_to(
             world,
             player,
             "A peaceful aura wards off such attempts here.\r\n",
         );
+        return;
+    }
+    // Legacy: player-stealing is only allowed during PK.
+    if world.get::<mud_world::Player>(target).is_some()
+        && !super::attack_ok::attack_ok(world, player, target, true)
+    {
         return;
     }
 
@@ -1886,6 +1886,18 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
         "use",
     );
 }
+/// Area attacks hit every mob in the room; drop other players' pets the PK
+/// rule forbids `player` to attack (silently, as legacy `mass_attack_ok`).
+fn skip_forbidden_pets(world: &mut World, player: Entity, targets: Vec<Entity>) -> Vec<Entity> {
+    targets
+        .into_iter()
+        .filter(|t| {
+            super::attack_ok::pet_owner(world, *t).is_none()
+                || super::attack_ok::attack_ok(world, player, *t, false)
+        })
+        .collect()
+}
+
 pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "sweep") {
         return;
@@ -1913,6 +1925,7 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
             .map(|(e, _, _, _)| e)
             .collect()
     };
+    let targets = skip_forbidden_pets(world, player, targets);
     if targets.is_empty() {
         send_to(world, player, "Nothing here to sweep.\r\n");
         return;
@@ -2250,6 +2263,7 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
             .map(|(e, _, _)| e)
             .collect()
     };
+    let mob_targets = skip_forbidden_pets(world, player, mob_targets);
     if mob_targets.is_empty() {
         send_to(world, player, "Nothing here to swing at.\r\n");
         return;
@@ -2327,6 +2341,9 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     };
     if target == player {
         send_to(world, player, "You can't disarm yourself.\r\n");
+        return;
+    }
+    if !super::attack_ok::attack_ok(world, player, target, true) {
         return;
     }
 
