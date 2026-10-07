@@ -3540,7 +3540,10 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .get_resource::<MobPrototypes>()
             .and_then(|p| p.by_key.get(&(key.zone, key.id)))
         && proto.level > 0
+        && crate::commands::is_staff(world, player)
     {
+        // Staff-only: legacy `look` never showed a mob's numeric level
+        // to mortals (they gauge difficulty with `consider`).
         let lvl_open = who_level_color(proto.level).unwrap_or("");
         let lvl_close = if lvl_open.is_empty() { "" } else { "</>" };
         out.push_str(&format!(
@@ -3606,15 +3609,19 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         )));
     }
     // Mob latent parity (Wave 2.L) atmospheric flavor lines.
-    // Size: surface non-MEDIUM body classes — most mobs are MEDIUM
-    // so the line stays absent for the common case.
-    if let Some(mud_world::Sized(size)) = world.get::<mud_world::Sized>(target).copied()
-        && !matches!(size, mud_db::enums::Size::Medium)
+    // Legacy `print_char_appearance_to_char`: "<He> is <size> in size[,
+    // and is composed of <mass>]." for every mob, so the composition
+    // the reporter of #46 misses sits right under the condition line.
+    if world.get::<Mob>(target).is_some()
+        && let Some(key) = world.get::<WorldKey>(target).copied()
+        && let Some(proto) = world
+            .get_resource::<MobPrototypes>()
+            .and_then(|p| p.by_key.get(&(key.zone, key.id)))
     {
-        out.push_str(&format!(
-            "It is a <yellow>{}</> creature.\r\n",
-            size.label().to_ascii_uppercase()
-        ));
+        let size = world
+            .get::<mud_world::Sized>(target)
+            .map_or(proto.size, |s| s.0);
+        out.push_str(&mob_appearance_line(proto, size));
     }
     // LifeForce: only surface non-LIFE (the default). UNDEAD gets a
     // distinctive line; the other supernatural forms share a shorter
@@ -4236,6 +4243,37 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
     send_rendered(world, player, &out);
 }
 
+/// Mass noun for a race's innate composition, or `None` for plain
+/// flesh. Legacy `races[].def_composition`: only the plant races
+/// (`plant`, `arborean`) are non-flesh. Composition is not stored in
+/// the DB yet (fierylib drops the legacy `Composition:` mob field after
+/// using it for placeholder stats), so the race default is the best
+/// data we have; the per-mob override lands with a schema column.
+fn race_composition_mass(race: &str) -> Option<&'static str> {
+    match race.to_ascii_lowercase().as_str() {
+        "plant" | "arborean" => Some("plant material"),
+        _ => None,
+    }
+}
+
+/// Legacy "He is large in size, and is composed of plant material."
+/// line for a mob (`print_char_appearance_to_char`): flesh mobs get the
+/// size only. Ends with CRLF.
+fn mob_appearance_line(proto: &mud_world::MobProto, size: mud_db::enums::Size) -> String {
+    let pronoun = match proto.gender.to_ascii_lowercase().as_str() {
+        "male" => "He",
+        "female" => "She",
+        _ => "It",
+    };
+    let size = size.label().to_ascii_lowercase();
+    match race_composition_mass(&proto.race) {
+        Some(mass) => format!(
+            "{pronoun} is <yellow>{size}</> in size, and is composed of <green>{mass}</>.\r\n"
+        ),
+        None => format!("{pronoun} is <yellow>{size}</> in size.\r\n"),
+    }
+}
+
 /// Legacy `shopping_inspect` fee: a tenth of the purchase price, never
 /// less than one copper.
 fn inspect_fee(buy_price: i64) -> i64 {
@@ -4456,7 +4494,7 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
         }
         let out = format!(
             "Name: {}\r\nLevel: {}, Hit Points: {}, Movement Points: {}\r\n\
-             Damage: {}d{}+{}, Accuracy: {}, Evasion: {}\r\n",
+             Damage: {}d{}+{}, Accuracy: {}, Evasion: {}\r\n{}",
             proto.name,
             proto.level,
             proto.rolled_hp(),
@@ -4466,6 +4504,7 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
             proto.damage_dice_bonus,
             proto.accuracy,
             proto.evasion,
+            mob_appearance_line(&proto, proto.size),
         );
         send_rendered(world, player, &out);
         return;

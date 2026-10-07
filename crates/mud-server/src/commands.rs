@@ -432,6 +432,9 @@ mod god_zone_tests;
 #[path = "commands/invisibility_tests.rs"]
 mod invisibility_tests;
 #[cfg(test)]
+#[path = "commands/look_mob_tests.rs"]
+mod look_mob_tests;
+#[cfg(test)]
 #[path = "commands/parser_tests.rs"]
 mod parser_tests;
 #[cfg(test)]
