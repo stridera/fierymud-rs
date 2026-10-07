@@ -518,10 +518,14 @@ fn default_invisible_is_stripped_when_the_mob_attacks_like_legacy() {
 /// unreachable.
 #[tokio::test]
 async fn live_db_default_effects_install_detect_invis() {
+    let _db_lock = super::test_support::db_test_lock().await;
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
-    let Ok(Ok(pool)) =
-        tokio::time::timeout(std::time::Duration::from_secs(3), mud_db::connect(&url)).await
+    let Ok(Ok(pool)) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        mud_db::connect_with(&url, super::test_support::db_test_pool_settings()),
+    )
+    .await
     else {
         return;
     };

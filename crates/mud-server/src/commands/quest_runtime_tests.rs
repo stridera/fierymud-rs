@@ -14,18 +14,11 @@ use mud_world::{Account, Item, Located, Named, Online, Player, WorldKey};
 use super::test_support::{Rx, drain};
 use super::{Connection, DbPool};
 
-/// Small pools: every test opens its own, and the suite is routinely
-/// run many copies at once against one shared database server.
-fn test_pool_settings() -> mud_db::PoolSettings {
-    mud_db::PoolSettings {
-        max_connections: 1,
-        acquire_timeout: std::time::Duration::from_secs(60),
-    }
-}
-
 static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 struct Fx {
+    /// Serialises live-DB tests; released when the fixture drops.
+    _db_lock: tokio::sync::MutexGuard<'static, ()>,
     pool: PgPool,
     char_id: String,
     name: String,
@@ -35,11 +28,12 @@ struct Fx {
 }
 
 async fn fixture() -> Option<Fx> {
+    let db_lock = super::test_support::db_test_lock().await;
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
     let Ok(Ok(pool)) = tokio::time::timeout(
         Duration::from_secs(3),
-        mud_db::connect_with(&url, test_pool_settings()),
+        mud_db::connect_with(&url, super::test_support::db_test_pool_settings()),
     )
     .await
     else {
@@ -119,6 +113,7 @@ async fn fixture() -> Option<Fx> {
     .await
     .unwrap();
     Some(Fx {
+        _db_lock: db_lock,
         pool,
         char_id,
         name,

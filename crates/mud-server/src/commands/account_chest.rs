@@ -535,6 +535,8 @@ mod tests {
 
     /// Live-DB scaffolding: a temp user + character, torn down by `end`.
     struct Fx {
+        /// Serialises live-DB tests; released when the fixture drops.
+        _db_lock: tokio::sync::MutexGuard<'static, ()>,
         pool: mud_db::sqlx::PgPool,
         user_id: String,
         char_id: String,
@@ -543,10 +545,14 @@ mod tests {
     }
 
     async fn fixture() -> Option<Fx> {
+        let db_lock = crate::commands::test_support::db_test_lock().await;
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
-        let Ok(Ok(pool)) =
-            tokio::time::timeout(std::time::Duration::from_secs(3), mud_db::connect(&url)).await
+        let Ok(Ok(pool)) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            mud_db::connect_with(&url, crate::commands::test_support::db_test_pool_settings()),
+        )
+        .await
         else {
             eprintln!("skipping: dev database unavailable");
             return None;
@@ -583,6 +589,7 @@ mod tests {
         .await
         .unwrap();
         Some(Fx {
+            _db_lock: db_lock,
             pool,
             user_id,
             char_id,

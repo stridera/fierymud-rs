@@ -6913,7 +6913,7 @@ mod tests {
     /// flow right after the upgrade so no player spawn is needed.
     #[tokio::test(flavor = "current_thread")]
     async fn legacy_login_upgrades_hash_without_creating_user() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7014,18 +7014,22 @@ mod tests {
     /// Connect to the dev database for the flow tests that exercise
     /// the real `GameLoginCode` table; `None` (test skipped) when it
     /// isn't reachable.
-    async fn live_pool() -> Option<PgPool> {
+    async fn live_pool() -> Option<(PgPool, tokio::sync::MutexGuard<'static, ()>)> {
+        let db_lock = crate::commands::test_support::db_test_lock().await;
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
-        let pool = tokio::time::timeout(Duration::from_secs(3), mud_db::connect(&url))
-            .await
-            .ok()?
-            .ok()?;
+        let pool = tokio::time::timeout(
+            Duration::from_secs(3),
+            mud_db::connect_with(&url, crate::commands::test_support::db_test_pool_settings()),
+        )
+        .await
+        .ok()?
+        .ok()?;
         mud_db::sqlx::query("SELECT 1 FROM \"GameLoginCode\" LIMIT 1")
             .execute(&pool)
             .await
             .ok()?;
-        Some(pool)
+        Some((pool, db_lock))
     }
 
     fn pending_web(router: &ConnRouter, conn: ConnId) -> (String, String) {
@@ -7038,7 +7042,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     #[tokio::test(flavor = "current_thread")]
     async fn code_at_password_prompt_enters_web_approval_and_resolves() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7193,7 +7197,7 @@ mod tests {
     /// rather than duplicates the item rows.
     #[tokio::test(flavor = "current_thread")]
     async fn foreground_and_background_saves_round_trip() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7346,7 +7350,7 @@ mod tests {
     /// B saves (A "crashed").
     #[tokio::test(flavor = "current_thread")]
     async fn given_item_ends_as_one_row_owned_by_receiver_in_every_save_order() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7390,7 +7394,7 @@ mod tests {
     /// re-inserted under the re-inserted parent).
     #[tokio::test(flavor = "current_thread")]
     async fn given_container_with_contents_survives_either_save_order() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7440,7 +7444,7 @@ mod tests {
     /// persisted), and the next person to pick it up INSERTs a fresh one.
     #[tokio::test(flavor = "current_thread")]
     async fn dropped_item_row_is_deleted_and_pickup_inserts_fresh() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7485,7 +7489,7 @@ mod tests {
     /// ever saves (the dropper "crashed") - no duplicate window.
     #[tokio::test(flavor = "current_thread")]
     async fn ground_item_pickup_ends_with_exactly_one_row() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7532,7 +7536,7 @@ mod tests {
     /// saves first or whether only the looter saves.
     #[tokio::test(flavor = "current_thread")]
     async fn corpse_looting_ends_with_one_row_owned_by_the_looter() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7578,7 +7582,7 @@ mod tests {
     /// left on the ground or in a corpse forever do too.
     #[tokio::test(flavor = "current_thread")]
     async fn destroyed_and_abandoned_items_lose_their_rows_at_the_owners_next_save() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7719,7 +7723,7 @@ mod tests {
     /// so it starts from what that save wrote, not the stale pre-save row.
     #[tokio::test(flavor = "current_thread")]
     async fn relog_waits_for_the_pending_quit_save_and_loads_its_state() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7788,7 +7792,7 @@ mod tests {
     /// out, login is refused rather than loading stale state.
     #[tokio::test(flavor = "current_thread")]
     async fn relog_is_refused_while_the_previous_save_keeps_failing() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7870,7 +7874,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn code_for_unlinked_character_inserts_null_user_row_and_ignores_throttles() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -7935,7 +7939,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn unlinked_code_approved_after_link_logs_in_as_linked_user() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8002,7 +8006,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn unlinked_code_approved_without_link_is_rejected_and_expired() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8084,7 +8088,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn web_approval_denied_cancel_and_wake() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8170,7 +8174,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn code_requests_are_rate_limited_per_ip() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8268,7 +8272,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn locked_account_code_proceeds_and_ignores_connection_failure_cap() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8307,7 +8311,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn consumed_code_clears_account_lockout() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8392,7 +8396,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn freshly_recorded_lock_and_ban_read_back_as_naive_utc() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8451,7 +8455,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn pool_now_is_naive_utc() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8467,7 +8471,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn record_failed_login_counts_in_row_and_resets_after_expired_lock() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8583,7 +8587,7 @@ mod tests {
     /// A control load without a fault returns both.
     #[tokio::test(flavor = "current_thread")]
     async fn failed_table_load_refuses_login_and_keeps_rows() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8683,7 +8687,7 @@ mod tests {
     /// still log in (checked via the loader).
     #[tokio::test(flavor = "current_thread")]
     async fn unparseable_saved_state_refuses_login_and_keeps_bytes() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };
@@ -8760,7 +8764,7 @@ mod tests {
     /// instead of continuing on the pre-wait row.
     #[tokio::test(flavor = "current_thread")]
     async fn failed_reload_after_save_wait_refuses_login() {
-        let Some(pool) = live_pool().await else {
+        let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
         };

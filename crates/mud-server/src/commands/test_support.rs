@@ -10,6 +10,28 @@ use crate::commands::Connection;
 
 pub(crate) type Rx = tokio::sync::mpsc::Receiver<Vec<u8>>;
 
+/// Process-wide gate for every unit test that talks to the live dev
+/// database. The tests share one Postgres (also hit by sibling copies of
+/// the suite), and a burst of parallel tests, each with its own pool, used
+/// to exhaust its connection slots (`PoolTimedOut` on the first insert).
+/// A `tokio` mutex never poisons, so one panicking test cannot cascade.
+static DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Hold for the whole body of a live-DB test; serialises it against the
+/// other live-DB tests in this binary.
+pub(crate) async fn db_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    DB_TEST_LOCK.lock().await
+}
+
+/// Small pools with a generous acquire timeout: every live-DB test opens its
+/// own pool and several copies of the suite may share one database server.
+pub(crate) fn db_test_pool_settings() -> mud_db::PoolSettings {
+    mud_db::PoolSettings {
+        max_connections: 4,
+        acquire_timeout: std::time::Duration::from_secs(60),
+    }
+}
+
 /// Everything the player has been sent so far, lossily decoded.
 pub(crate) fn drain(rx: &mut Rx) -> String {
     let mut out = String::new();
