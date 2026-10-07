@@ -324,6 +324,9 @@ mod followers;
 mod magic_focus;
 pub(crate) use magic_focus::Concentrating;
 #[cfg(test)]
+#[path = "commands/progression_tests.rs"]
+mod progression_tests;
+#[cfg(test)]
 #[path = "commands/rank_tests.rs"]
 mod rank_tests;
 #[path = "commands/release.rs"]
@@ -5187,23 +5190,6 @@ mod tests {
     }
 
     #[test]
-    fn level_progress_capped_at_99() {
-        // level 100 = max; no progress shown.
-        assert!(super::level_progress_for(100, 1).is_none());
-        // level 0 = invalid; no progress shown.
-        assert!(super::level_progress_for(0, 1).is_none());
-    }
-
-    #[test]
-    fn level_progress_clamps_negative_xp_to_zero() {
-        // Death penalty can drive xp below the bracket floor —
-        // make sure the bar shows 0% rather than a negative
-        // percent or wraparound.
-        let p = super::level_progress_for(5, -100).expect("inside range");
-        assert_eq!(p.percent, 0);
-    }
-
-    #[test]
     fn progress_bar_is_fixed_width() {
         // Always 22 chars: '[' + 20 cells + ']'.
         for pct in [0, 1, 50, 99, 100] {
@@ -5386,7 +5372,13 @@ mod tests {
             clan: Some(("Test Clan", "TC", "Member")),
             active_effects: effects,
             group_status: super::GroupStatus::default(),
-            level_progress: super::level_progress_for(25, 1234),
+            level_progress: Some(super::LevelProgress {
+                current_xp: 1234,
+                next_level_xp: 3000,
+                level_floor_xp: 1000,
+                percent: 11,
+            }),
+            stars: None,
             location: Some(("Town Square", 30, 1)),
             practice_points: 3,
             achievements: (5, 47),
@@ -5610,6 +5602,32 @@ mod tests {
             out.contains("Level 25 Implementer Male Human"),
             "rank title in level row: {out}",
         );
+    }
+
+    #[test]
+    fn score_shows_class_stars_for_a_maxed_mortal() {
+        let effects: Vec<String> = Vec::new();
+        let mut data = build_smoke_score_data("Cerworn", &effects);
+        data.profile = Some((99, "Sorcerer", "human", "male", 105_000_000));
+        data.stars = Some("<b:magenta>**</>");
+        data.level_progress = None;
+        let standard = super::render_score_standard(&data);
+        assert!(
+            standard.contains("Level 99 <b:black>{</><b:magenta>**</><b:black>}</> Male Human"),
+            "stars beside the level: {standard}",
+        );
+        assert!(standard.contains("You are as powerful as a mortal can be!"));
+        assert!(
+            !standard.contains("Exp: 0 /"),
+            "no XP bar at **: {standard}"
+        );
+        let fancy = super::render_score_fancy(&data);
+        assert!(fancy.contains("{</><b:magenta>**</>"), "{fancy}");
+        let minimal = super::render_score_minimal(&data);
+        assert!(minimal.contains("L99 <b:black>{</>"), "{minimal}");
+        // Without the marker a level-99 sheet is unchanged.
+        data.stars = None;
+        assert!(super::render_score_standard(&data).contains("Level 99 Male Human"));
     }
 
     #[test]
@@ -5973,27 +5991,6 @@ mod tests {
             "gate clears immediately on marker remove",
         );
     }
-}
-
-/// Compute the "next level" progress (`next_level_pct` in
-/// `Char.Vitals`). Returns the integer percentage `[0, 100]` of the
-/// way from this level's XP threshold toward the next level's.
-/// Returns 0 for the immortal levels (no "next") and 0 when the
-/// level table hasn't loaded yet — calling code treats either as
-/// "no progress bar to draw" rather than as a real measurement.
-fn compute_level_progress(world: &World, level: i32, xp: i32) -> i32 {
-    let Some(table) = world.get_resource::<mud_world::LevelTable>() else {
-        return 0;
-    };
-    let Some(curr_thr) = table.exp_for(level) else {
-        return 0;
-    };
-    let Some(next_thr) = table.exp_for(level + 1) else {
-        return 0;
-    };
-    let span = (next_thr - curr_thr).max(1);
-    let into = (xp - curr_thr).max(0);
-    ((into * 100) / span).clamp(0, 100)
 }
 
 /// Push a `Char.Items.List` GMCP frame to `viewer`. `location` is
@@ -9127,6 +9124,10 @@ pub(crate) struct WhoRow {
     pub afk: bool,
     pub idle: Option<u64>,
     pub level: i32,
+    /// The class's color-tagged `**` when this is a level-99 mortal with
+    /// the XP to "gain" 100 (legacy `IS_STARSTAR`); shown instead of the
+    /// level number.
+    pub stars: Option<String>,
     pub clan_abbrev: Option<String>,
     /// Plain class name resolved via `ClassCatalog`, when the
     /// player has a class. None for classless characters; the
@@ -9273,6 +9274,10 @@ pub(crate) struct ScoreData<'a> {
     /// "Exp: X / Y [bar] N%" line; the bar is computed here so
     /// renderers stay free of math.
     level_progress: Option<LevelProgress>,
+    /// The class's `**` marker (already color-tagged) when the character
+    /// is a level-99 mortal with the XP to "gain" level 100; shown next to
+    /// the level and in place of the XP bar (legacy `IS_STARSTAR`).
+    stars: Option<&'a str>,
     /// Current room: `(display_name, zone, id)`. `None` only for
     /// disconnected/unrooted entities (in practice never for an
     /// online player at score time, but keep it Option-shaped so
@@ -9405,6 +9410,15 @@ pub(crate) struct RestStateDisplay {
     pub repose: i32,
 }
 
+/// Legacy `exp_message` text for a character at `**`.
+pub(crate) const MAX_MORTAL_EXP_MESSAGE: &str = "You are as powerful as a mortal can be!";
+
+/// Legacy score decoration for a `**` character: the class stars in dim
+/// braces after the level (`Level: 99 {**}`). Empty otherwise.
+fn star_suffix(stars: Option<&str>) -> String {
+    stars.map_or_else(String::new, |s| format!(" <b:black>{{</>{s}<b:black>}}</>"))
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct LevelProgress {
     pub current_xp: i64,
@@ -9426,8 +9440,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         let gender_label = capitalize(gender);
         let race_label = capitalize(race);
         let rank = d.level_title.map_or(String::new(), |t| format!(" {t}"));
+        let stars = star_suffix(d.stars);
         out.push_str(&format!(
-            "  Level {level}{rank} {gender_label} {race_label} ({class})\r\n",
+            "  Level {level}{stars}{rank} {gender_label} {race_label} ({class})\r\n",
         ));
     }
     if let Some(t) = d.title {
@@ -9602,6 +9617,9 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     if let Some(line) = group_status_line(&d.group_status) {
         out.push_str(&format!("  {line}\r\n"));
     }
+    if d.stars.is_some() {
+        out.push_str(&format!("  Exp: {MAX_MORTAL_EXP_MESSAGE}\r\n"));
+    }
     if let Some(p) = d.level_progress {
         // Show progress *within* the current level — earned-this-
         // level / needed-this-level — so the percent matches what
@@ -9729,10 +9747,11 @@ fn group_status_line(g: &GroupStatus) -> Option<String> {
     }
 }
 
-/// Cumulative XP required to *reach* `level`, matching the legacy
-/// `level^2.5 * 1000` curve. Level 1 is the floor (returns 0); the
-/// curve is monotonic and stops mattering at level 100 where score
-/// suppresses the progress bar entirely.
+/// Cumulative XP required to *reach* `level` on the old
+/// `level^2.5 * 1000` curve. Only the offline Repose accrual cap in
+/// `login.rs` still uses it; every XP readout and level-up reads the
+/// `LevelDefinition` table through [`level_progress`] / `exp_to_reach`.
+/// TODO: move the Repose cap onto the level table and delete this.
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn experience_for_level(level: i32) -> i64 {
@@ -9743,18 +9762,22 @@ pub(crate) fn experience_for_level(level: i32) -> i64 {
     raw as i64
 }
 
-/// XP-to-next-level summary for the score sheet. `None` at the
-/// level cap (>= 100) so the renderer can quietly skip the line.
-/// Negative XP (death penalties, admin-set floors) clamps the
+/// XP-to-next-level summary for `profile`, from the live level table and
+/// the character's class factor. `None` for staff levels, for `**`
+/// characters (nothing left to earn), and when the table has no row for the
+/// next level. Negative XP (death penalties, admin-set floors) clamps the
 /// percent at 0 rather than printing a negative bar.
 #[must_use]
-pub(crate) fn level_progress_for(level: i32, current_xp: i32) -> Option<LevelProgress> {
-    if !(1..100).contains(&level) {
+pub(crate) fn level_progress(world: &World, profile: &Profile) -> Option<LevelProgress> {
+    let level = profile.level;
+    if !(1..mud_db::enums::MIN_STAFF_LEVEL).contains(&level)
+        || mud_world::is_starstar(world, profile)
+    {
         return None;
     }
-    let current_xp = i64::from(current_xp);
-    let floor = experience_for_level(level);
-    let ceiling = experience_for_level(level + 1);
+    let floor = i64::from(mud_world::exp_to_reach(world, profile.class_id, level).unwrap_or(0));
+    let ceiling = i64::from(mud_world::exp_to_reach(world, profile.class_id, level + 1)?);
+    let current_xp = i64::from(profile.experience);
     let bracket = (ceiling - floor).max(1);
     let into_bracket = (current_xp - floor).max(0);
     let percent = ((into_bracket * 100) / bracket).clamp(0, 100);
@@ -9971,7 +9994,8 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     if let Some((level, class, race, gender, _xp)) = d.profile {
         let rank = d.level_title.map_or(String::new(), |t| format!(" {t}"));
         row(format!(
-            "Level:     {level}{rank} {} {} ({class})",
+            "Level:     {level}{}{rank} {} {} ({class})",
+            star_suffix(d.stars),
             capitalize(gender),
             capitalize(race),
         ));
@@ -10119,6 +10143,9 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
     if let Some(line) = group_status_line(&d.group_status) {
         row(line);
     }
+    if d.stars.is_some() {
+        row(format!("Exp:       {MAX_MORTAL_EXP_MESSAGE}"));
+    }
     if let Some(p) = d.level_progress {
         let into_bracket = (p.current_xp - p.level_floor_xp).max(0);
         let bracket = (p.next_level_xp - p.level_floor_xp).max(1);
@@ -10165,7 +10192,7 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
 pub(crate) fn render_score_minimal(d: &ScoreData) -> String {
     let mut parts = vec![d.name.to_string()];
     if let Some((level, class, race, _gender, xp)) = d.profile {
-        parts.push(format!("L{level} {race}/{class}"));
+        parts.push(format!("L{level}{} {race}/{class}", star_suffix(d.stars)));
         // Show level progress as a percent rather than raw xp
         // when available — far more useful in a one-line glance
         // ("am I close to leveling?") than the absolute number.
@@ -19021,10 +19048,10 @@ pub(crate) fn send_char_vitals(world: &World, target: Entity) {
     ) else {
         return;
     };
-    let (level, xp) = world
+    let next_level_pct = world
         .get::<Profile>(target)
-        .map_or((0, 0), |p| (p.level, p.experience));
-    let next_level_pct = compute_level_progress(world, level, xp);
+        .and_then(|p| level_progress(world, p))
+        .map_or(0, |lp| lp.percent);
     let payload = format!(
         "{{\"hp\":{hp},\"max_hp\":{max_hp},\"mv\":{mv},\"max_mv\":{max_mv},\"next_level_pct\":{nlp},\"string\":\"H:{hp}/{max_hp} V:{mv}/{max_mv}\"}}",
         hp = h.hp,

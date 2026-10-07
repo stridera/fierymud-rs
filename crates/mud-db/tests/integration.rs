@@ -568,3 +568,40 @@ async fn pool_sessions_use_utc_for_naive_now() {
     let skew = (db_now - rust_now).num_seconds().abs();
     assert!(skew <= 5, "NOW()::timestamp is {skew}s off naive UTC");
 }
+
+/// The seeded `LevelDefinition` table is the legacy `init_exp_table`
+/// (row N = `exp_table[N - 1]`), and `Class.exp_gain_factor` carries the
+/// legacy per-class factors. Needs
+/// `fierylib/data/sql/2026-10-07-legacy-exp-table.sql` (or `seed levels`).
+#[tokio::test]
+#[ignore = "requires live fierydev DB seeded with the legacy exp table"]
+async fn level_table_is_the_legacy_curve_with_class_factors() {
+    let pool = pool().await;
+    let levels = mud_db::levels::list_all(&pool).await.expect("levels");
+    let exp = |l: i32| {
+        levels
+            .iter()
+            .find(|r| r.level == l)
+            .unwrap_or_else(|| panic!("level {l}"))
+            .exp_required
+    };
+    assert_eq!(exp(1), 0);
+    assert_eq!(exp(2), 5_500);
+    assert_eq!(exp(10), 254_500);
+    assert_eq!(exp(85), 67_772_000);
+    assert_eq!(exp(99), 99_938_000);
+    assert_eq!(exp(100), 105_806_000);
+    assert_eq!(exp(101), 299_999_999);
+    let classes = mud_db::classes::list_all(&pool).await.expect("classes");
+    let factor = |name: &str| {
+        classes
+            .iter()
+            .find(|c| c.plain_name == name)
+            .unwrap_or_else(|| panic!("class {name}"))
+            .exp_gain_factor
+    };
+    assert!((factor("Cleric") - 1.0).abs() < f64::EPSILON);
+    assert!((factor("Sorcerer") - 1.2).abs() < f64::EPSILON);
+    assert!((factor("Necromancer") - 1.3).abs() < f64::EPSILON);
+    assert!((factor("Paladin") - 1.15).abs() < f64::EPSILON);
+}

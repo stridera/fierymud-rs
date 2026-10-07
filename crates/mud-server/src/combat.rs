@@ -2231,6 +2231,52 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
     level_up_to(world, entity, mud_db::enums::MAX_MORTAL_LEVEL);
 }
 
+/// Progression sweep, run once per tick for every player character: the
+/// single place that turns banked XP into levels, whatever granted it.
+/// Kills call [`check_level_up`] directly for immediate feedback, but quest
+/// rewards, Lua `award_exp`, admin XP edits and characters already carrying
+/// surplus XP from before a curve change all reach `Profile.experience`
+/// without it, so without this sweep they would sit "ready to level" until
+/// the next kill.
+///
+/// Mortal XP is also capped at the `**` amount (legacy `gain_exp`: level
+/// 100's threshold minus 1) so it cannot pile up past the point at which a
+/// level-99 character is maxed. Staff-level characters are skipped.
+pub(crate) fn level_sweep_tick(world: &mut World) {
+    use mud_world::{LevelTable, Player, Profile};
+    if world.get_resource::<LevelTable>().is_none() {
+        return;
+    }
+    let players: Vec<(Entity, i32, i32, Option<i32>)> = world
+        .query_filtered::<(Entity, &Profile), With<Player>>()
+        .iter(world)
+        .filter(|(_, p)| !mud_db::enums::is_staff_level(p.level))
+        .map(|(e, p)| (e, p.level, p.experience, p.class_id))
+        .collect();
+    for (entity, level, xp, class_id) in players {
+        let factor = mud_world::class_exp_factor(world, class_id);
+        let (cap, ready) = {
+            let table = world.resource::<LevelTable>();
+            (
+                table.starstar_exp(factor),
+                level < mud_db::enums::MAX_MORTAL_LEVEL
+                    && table
+                        .exp_for_class(level + 1, factor)
+                        .is_some_and(|t| xp >= t),
+            )
+        };
+        if let Some(cap) = cap
+            && xp > cap
+            && let Some(mut p) = world.get_mut::<Profile>(entity)
+        {
+            p.experience = cap;
+        }
+        if ready {
+            check_level_up(world, entity);
+        }
+    }
+}
+
 /// Bring everything derived from a player's level back in sync after it
 /// changed from `old_level` to the current `Profile.level` (either
 /// direction): the cached effective staff rank in `Account.role`, and the
@@ -2387,7 +2433,13 @@ pub(crate) fn level_up_to(world: &mut World, entity: Entity, max_level: i32) {
         let Some(next_row) = table.iter().find(|r| r.level == next) else {
             return; // max level
         };
-        if xp < next_row.exp_required {
+        let class_id = world.get::<Profile>(entity).and_then(|p| p.class_id);
+        let threshold = mud_world::scale_exp(
+            next_row.exp_required,
+            next,
+            mud_world::class_exp_factor(world, class_id),
+        );
+        if xp < threshold {
             return;
         }
         // Level up.

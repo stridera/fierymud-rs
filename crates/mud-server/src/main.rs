@@ -545,6 +545,7 @@ async fn main() {
                 timed!(entity_vars::entity_var_flush_tick),
                 timed!(quest_vars::quest_var_flush_tick),
                 timed!(commands::drain_player_updates),
+                timed!(combat::level_sweep_tick),
                 timed!(quest_triggers::quest_sweep_tick),
                 timed!(quest_triggers::quest_custom_lua_drain),
                 timed!(events::events_poll_tick),

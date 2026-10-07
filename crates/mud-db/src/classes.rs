@@ -32,6 +32,10 @@ pub struct ClassRow {
     /// Flat HP gain per level (added on top of `LevelDefinition.hp_gain`
     /// once the consumer wires it). Schema default `10`.
     pub hp_per_level: i32,
+    /// Legacy per-class "exp needed to level" multiplier
+    /// (`Class.exp_gain_factor`, default `1.0`). Scales the class-neutral
+    /// `LevelDefinition.exp_required` table at load time.
+    pub exp_gain_factor: f64,
     /// JSON map of element name → mitigation percent. Folds into
     /// the wearer's `Resistances` at spawn time alongside race
     /// resistances and gear bookkeeping.
@@ -52,6 +56,7 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<ClassRow>> {
             hit_dice,
             primary_stat,
             hp_per_level,
+            exp_gain_factor,
             COALESCE(resistances, '{}'::jsonb) AS "resistances!: serde_json::Value"
         FROM "Class"
         ORDER BY id

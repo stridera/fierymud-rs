@@ -1879,12 +1879,8 @@ pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
     }
     // Look up the XP threshold for the target level. If the level
     // table doesn't have it we refuse rather than silently no-op.
-    let threshold = world
-        .resource::<mud_world::LevelTable>()
-        .clone_rows()
-        .into_iter()
-        .find(|r| r.level == target_level)
-        .map(|r| r.exp_required);
+    let target_class = world.get::<Profile>(target).and_then(|p| p.class_id);
+    let threshold = mud_world::exp_to_reach(world, target_class, target_level);
     let Some(threshold) = threshold else {
         send_to(
             world,

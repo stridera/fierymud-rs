@@ -1362,6 +1362,24 @@ impl LevelTable {
             .map(|r| (r.hp_gain, r.stamina_gain))
     }
 
+    /// XP a character with class factor `factor` needs to *reach* `level`:
+    /// legacy `exp_next_level(level - 1, class)`. The stored row is the
+    /// class-neutral table; staff levels (`>= 101`) ignore the factor.
+    #[must_use]
+    pub fn exp_for_class(&self, level: i32, factor: f64) -> Option<i32> {
+        self.exp_for(level)
+            .map(|base| scale_exp(base, level, factor))
+    }
+
+    /// The XP at which a level-99 mortal shows `**`: one short of the XP
+    /// needed to reach level 100 (legacy `exp_next_level(99) - 1`). Mortal
+    /// XP is capped here. `None` when the table has no level-100 row.
+    #[must_use]
+    pub fn starstar_exp(&self, factor: f64) -> Option<i32> {
+        self.exp_for_class(mud_db::enums::MIN_STAFF_LEVEL, factor)
+            .map(|e| e - 1)
+    }
+
     /// Snapshot of the underlying rows. Used by callers that need
     /// to mutate the world while inspecting level data without
     /// holding a `Res<LevelTable>` borrow.
@@ -1369,6 +1387,56 @@ impl LevelTable {
     pub fn clone_rows(&self) -> Vec<LevelRow> {
         self.rows.clone()
     }
+}
+
+/// Apply a class "exp needed to level" `factor` to the class-neutral XP
+/// needed to reach `level`, truncating like legacy `exp_next_level`
+/// (`(long)(exp_table[n] * gain_factor)`). Staff levels (`level - 1 >=
+/// LVL_IMMORT`, i.e. `level >= 101`) are class-independent.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn scale_exp(base: i32, level: i32, factor: f64) -> i32 {
+    if level > mud_db::enums::MIN_STAFF_LEVEL {
+        return base;
+    }
+    (f64::from(base) * factor) as i32
+}
+
+/// Class XP factor for a character (1.0 when classless or unknown).
+#[must_use]
+pub fn class_exp_factor(world: &World, class_id: Option<i32>) -> f64 {
+    class_id
+        .and_then(|id| {
+            world
+                .get_resource::<ClassCatalog>()
+                .and_then(|c| c.by_id.get(&id))
+        })
+        .map_or(1.0, |c| c.exp_gain_factor)
+}
+
+/// XP `profile` needs to reach `level`, scaled by its class factor.
+#[must_use]
+pub fn exp_to_reach(world: &World, class_id: Option<i32>, level: i32) -> Option<i32> {
+    world
+        .get_resource::<LevelTable>()?
+        .exp_for_class(level, class_exp_factor(world, class_id))
+}
+
+/// Whether a character is at the mortal cap with the XP to "gain" level
+/// 100: level 99 and `experience >= exp_next_level(99) - 1` (legacy
+/// `IS_STARSTAR`). Displayed as the class's stars (`**`) in place of the
+/// level in `who` / `score`.
+#[must_use]
+pub fn is_starstar(world: &World, profile: &crate::Profile) -> bool {
+    if profile.level != mud_db::enums::MAX_MORTAL_LEVEL {
+        return false;
+    }
+    let Some(table) = world.get_resource::<LevelTable>() else {
+        return false;
+    };
+    table
+        .starstar_exp(class_exp_factor(world, profile.class_id))
+        .is_some_and(|star| profile.experience >= star)
 }
 
 /// Per-circle base recover time in seconds. Index = circle number
@@ -1805,11 +1873,38 @@ pub struct ClassDef {
     /// Flat HP gain per level layered on `LevelDefinition.hp_gain`.
     /// Schema default `10`.
     pub hp_per_level: i32,
+    /// Legacy "exp needed to level" multiplier (`Class.exp_gain_factor`):
+    /// `1.0` is the base table, `1.3` needs 30% more XP per level.
+    pub exp_gain_factor: f64,
     /// Per-element resistance map distilled from the schema's
     /// `Class.resistances` JSON: keys are `ElementType` variants
     /// the runtime models, unrecognized strings are dropped at
     /// catalog hydration time so combat reads a clean Rust map.
     pub resistances: HashMap<mud_db::enums::ElementType, i32>,
+}
+
+impl ClassDef {
+    /// The class's max-level marker: `**` in the class's lead color
+    /// (legacy `classes[].stars`, e.g. `&5&b**&0` for sorcerer). Every
+    /// legacy class used the first color of its display name, so the
+    /// opening tag of `name` supplies it; an uncolored name (paladin)
+    /// gives bare `**`.
+    #[must_use]
+    pub fn stars(&self) -> String {
+        stars_for_name(&self.name)
+    }
+}
+
+/// `**` wrapped in the first color tag of `name` (see [`ClassDef::stars`]).
+#[must_use]
+pub fn stars_for_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix('<')
+        && let Some(end) = rest.find('>')
+        && !rest.starts_with('/')
+    {
+        return format!("<{}>**</>", &rest[..end]);
+    }
+    "**".to_string()
 }
 
 /// Catalog of every ability (spell / chant / song / skill) in the game,

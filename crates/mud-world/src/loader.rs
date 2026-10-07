@@ -260,6 +260,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 hit_dice: row.hit_dice,
                 primary_stat: row.primary_stat,
                 hp_per_level: row.hp_per_level,
+                exp_gain_factor: row.exp_gain_factor,
                 resistances,
             },
         );

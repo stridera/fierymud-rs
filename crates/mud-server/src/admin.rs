@@ -2339,6 +2339,7 @@ mod players_tests {
                 hit_dice: "1d10".to_string(),
                 primary_stat: None,
                 hp_per_level: 10,
+                exp_gain_factor: 1.0,
                 resistances: HashMap::new(),
             },
         );

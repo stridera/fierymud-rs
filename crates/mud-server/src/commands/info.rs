@@ -1451,12 +1451,11 @@ inventory::submit! {
         category: Category::Info,
         help: Help {
             usage: "level",
-            summary: "XP-curve readout: current level, XP, distance to next.",
-            long: "Reads `Profile.level` and `Profile.experience` and \
-                   shows the cumulative XP for this level, the next \
-                   level's threshold, and how far you have to go. \
-                   Capped levels (max in `LevelDefinition`) print a \
-                   max-level note instead.",
+            summary: "Your level and progress toward the next one.",
+            long: "Shows your level, a progress bar and how much XP is \
+                   left to the next level, scaled for your class. At the \
+                   mortal cap with enough XP to reach level 100 you are \
+                   marked with your class stars (`**`) instead.",
         },
         run: cmd_level,
     }
@@ -3885,12 +3884,12 @@ pub(crate) fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let mut out = format!("\r\nLevel {}    Experience: {}\r\n", p.level, p.experience);
-    if let Some(lp) = crate::commands::level_progress_for(p.level, p.experience) {
+    if let Some(lp) = crate::commands::level_progress(world, &p) {
         let into_bracket = (lp.current_xp - lp.level_floor_xp).max(0);
         let bracket = (lp.next_level_xp - lp.level_floor_xp).max(1);
         let to_go = (bracket - into_bracket).max(0);
         out.push_str(&format!(
-            "Level {} → {}:  {} / {}  {} {}%  ({} to go)\r\n",
+            "Level {} to {}:  {} / {}  {} {}%  ({} to go)\r\n",
             p.level,
             p.level + 1,
             into_bracket,
@@ -3899,8 +3898,13 @@ pub(crate) fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
             lp.percent,
             to_go,
         ));
+    } else if mud_db::enums::is_staff_level(p.level) {
+        out.push_str("Experience has no meaning for you.\r\n");
+    } else if mud_world::is_starstar(world, &p) {
+        out.push_str(crate::commands::MAX_MORTAL_EXP_MESSAGE);
+        out.push_str("\r\n");
     } else {
-        out.push_str("(Level cap reached — no further progress shown.)\r\n");
+        out.push_str("(No further progress to show.)\r\n");
     }
     send_to(world, player, out);
 }
@@ -5964,6 +5968,11 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
                 afk: f.is_some_and(|pf| pf.has(PlayerFlag::Afk)),
                 idle: last.map(|l| l.0.elapsed().as_secs()),
                 level: prof.map_or(0, |p| p.level),
+                stars: prof.filter(|p| mud_world::is_starstar(world, p)).map(|p| {
+                    p.class_id
+                        .and_then(|cid| class_lookup.get(&cid))
+                        .map_or_else(|| "**".to_string(), |n| mud_world::stars_for_name(n))
+                }),
                 clan_abbrev: clan.map(|c| c.clan_abbrev.clone()),
                 class_name: prof
                     .and_then(|p| p.class_id)
@@ -6031,12 +6040,21 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     // Sort by level desc so endgame players surface first; same-
     // level players sort alphabetically for stable output.
     let mut raw_sorted = raw_filtered;
-    raw_sorted.sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.name.cmp(&b.name)));
+    raw_sorted.sort_by(|a, b| {
+        b.level
+            .cmp(&a.level)
+            .then_with(|| b.stars.is_some().cmp(&a.stars.is_some()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
     for r in &raw_sorted {
         let root = roots.get(&r.entity).copied().unwrap_or(r.entity);
         let in_group = group_size.get(&root).copied().unwrap_or(0) > 1;
         out.push_str("  ");
-        if r.level > 0 {
+        if let Some(stars) = &r.stars {
+            // Level-99 mortal at the XP cap: the class stars replace the
+            // level number, as in legacy `who` (`[Sor **]`).
+            out.push_str(&format!("[L {stars}] "));
+        } else if r.level > 0 {
             // Level tag colored by progression band — newbie
             // yellow / mid green / endgame cyan / staff magenta.
             // Lets the player scan the list and spot peers + staff
@@ -6824,6 +6842,19 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             .gains_for(next)
             .map(|(hp, st)| (next, hp, st))
     });
+    let stars_owned: Option<String> = world.get::<Profile>(player).and_then(|p| {
+        mud_world::is_starstar(world, p).then(|| {
+            p.class_id
+                .and_then(|id| {
+                    world
+                        .resource::<mud_world::ClassCatalog>()
+                        .by_id
+                        .get(&id)
+                        .map(mud_world::ClassDef::stars)
+                })
+                .unwrap_or_else(|| "**".to_string())
+        })
+    });
     let data = ScoreData {
         name: &name,
         hp,
@@ -6850,33 +6881,12 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             leader: leader_name.as_deref(),
             member_count: group_size,
         },
-        // Score's level-progress reads from the live LevelTable so
-        // the percent agrees with `level` command output. Falls
-        // back to the legacy `level^2.5 * 1000` curve via
-        // `level_progress_for` only if the table doesn't carry a
-        // next-level row (e.g. brand-new boot before levels are
-        // loaded). Capped at level >= 100 the same way score did
-        // before the LevelTable hookup.
-        level_progress: profile_owned.as_ref().and_then(|(lvl, _, _, _, xp)| {
-            if !(1..100).contains(lvl) {
-                return None;
-            }
-            let table = world.resource::<mud_world::LevelTable>();
-            if let (prev, Some(next)) = (table.exp_for(*lvl).unwrap_or(0), table.exp_for(*lvl + 1))
-            {
-                let bracket = (next - prev).max(1);
-                let into = (*xp - prev).max(0);
-                let percent = ((i64::from(into) * 100) / i64::from(bracket)).clamp(0, 100);
-                Some(LevelProgress {
-                    current_xp: i64::from(*xp),
-                    next_level_xp: i64::from(next),
-                    level_floor_xp: i64::from(prev),
-                    percent: i32::try_from(percent).unwrap_or(0),
-                })
-            } else {
-                level_progress_for(*lvl, *xp)
-            }
-        }),
+        // Score's level-progress reads the live LevelTable scaled by the
+        // character's class factor, so the percent agrees with `level`.
+        level_progress: world
+            .get::<Profile>(player)
+            .and_then(|p| crate::commands::level_progress(world, p)),
+        stars: stars_owned.as_deref(),
         location: location_owned
             .as_ref()
             .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
@@ -11473,45 +11483,72 @@ pub(crate) fn cmd_house(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 
-/// `level`: print level / XP / next-level delta.
-pub(crate) fn cmd_level(world: &mut World, player: Entity, _args: &str) {
-    use mud_world::LevelTable;
-    let Some(p) = world.get::<Profile>(player) else {
-        send_to(world, player, "You have no profile.\r\n");
-        return;
-    };
-    let level = p.level;
-    let xp = p.experience;
-    let table = world.resource::<LevelTable>();
-    let level_name = table.name_for(level);
-    let prev_threshold = table.exp_for(level).unwrap_or(0);
-    let next_threshold = table.exp_for(level + 1);
-    let mut out = format!("\r\n{level_name} (level {level})\r\n");
-    out.push_str(&format!("Experience: {xp}\r\n"));
-    if let Some(threshold) = next_threshold {
-        let to_go = (threshold - xp).max(0);
-        let next_name = table.name_for(level + 1);
-        // Progress bar within the current bracket. Uses the live
-        // LevelTable thresholds rather than the score sheet's
-        // legacy `level^2.5 * 1000` curve so the percent here
-        // matches what the level table actually requires for
-        // this character class. Visual format mirrors score.
-        let bracket = (threshold - prev_threshold).max(1);
-        let into_bracket = (xp - prev_threshold).max(0);
-        let percent = ((i64::from(into_bracket) * 100) / i64::from(bracket)).clamp(0, 100);
-        let percent_i32 = i32::try_from(percent).unwrap_or(0);
+/// What the `level` readout needs, gathered from the world so the text
+/// itself can be built (and tested) without one.
+pub(crate) struct LevelReport<'a> {
+    pub level: i32,
+    /// Staff rank title ("Avatar"), when the level row has one.
+    pub title: Option<&'a str>,
+    /// Color-tagged class stars when the character is at `**`.
+    pub stars: Option<&'a str>,
+    /// Progress toward the next level; `None` at `**`, for staff, or when
+    /// the level table has no next row.
+    pub progress: Option<crate::commands::LevelProgress>,
+}
+
+/// Plain-ASCII `level` text: one headline, one progress line.
+pub(crate) fn render_level_report(r: &LevelReport<'_>) -> String {
+    let mut out = format!("\r\nLevel {}", r.level);
+    if let Some(stars) = r.stars {
+        out.push_str(&format!(" {stars}"));
+    } else if let Some(title) = r.title {
+        out.push_str(&format!(" ({title})"));
+    }
+    out.push_str("\r\n");
+    if mud_db::enums::is_staff_level(r.level) {
+        out.push_str("Experience has no meaning for you.\r\n");
+    } else if r.stars.is_some() {
+        out.push_str(crate::commands::MAX_MORTAL_EXP_MESSAGE);
+        out.push_str("\r\n");
+    } else if let Some(p) = r.progress {
+        let to_go = (p.next_level_xp - p.current_xp).max(0);
         out.push_str(&format!(
-            "Progress: {} {percent_i32}%  ({xp} / {threshold})\r\n",
-            crate::commands::progress_bar(percent_i32),
-        ));
-        out.push_str(&format!(
-            "Next level ({next_name}, level {next_level}) at {threshold} XP — {to_go} to go.\r\n",
-            next_level = level + 1
+            "Progress: {} {}%  ({to_go} XP to level {})\r\n",
+            crate::commands::progress_bar(p.percent),
+            p.percent,
+            r.level + 1,
         ));
     } else {
         out.push_str("You are at the maximum level.\r\n");
     }
-    send_to(world, player, out);
+    out
+}
+
+/// `level`: print level and progress toward the next one.
+pub(crate) fn cmd_level(world: &mut World, player: Entity, _args: &str) {
+    let Some(p) = world.get::<Profile>(player) else {
+        send_to(world, player, "You have no profile.\r\n");
+        return;
+    };
+    let stars = mud_world::is_starstar(world, p).then(|| {
+        p.class_id
+            .and_then(|id| {
+                world
+                    .resource::<ClassCatalog>()
+                    .by_id
+                    .get(&id)
+                    .map(mud_world::ClassDef::stars)
+            })
+            .unwrap_or_else(|| "**".to_string())
+    });
+    let report = LevelReport {
+        level: p.level,
+        title: world.resource::<mud_world::LevelTable>().title_for(p.level),
+        stars: stars.as_deref(),
+        progress: crate::commands::level_progress(world, p),
+    };
+    let out = render_level_report(&report);
+    send_rendered(world, player, &out);
 }
 
 /// `slots`: display the player's per-circle spell-slot pool and any

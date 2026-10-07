@@ -54,3 +54,4 @@ pub use resources::{
     TriggerHistoryLog, WeatherCatalog, WeatherDriftLocks, WeatherState, WizLock, WorldKeyIndex,
     parse_resistance_json,
 };
+pub use resources::{class_exp_factor, exp_to_reach, is_starstar, scale_exp, stars_for_name};
