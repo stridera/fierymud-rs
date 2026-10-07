@@ -8186,7 +8186,14 @@ pub(crate) fn note_room_entry(world: &mut World, player: Entity, room: Entity) {
     let Some(key) = world.get::<WorldKey>(room).copied() else {
         return;
     };
-    bump_visit_quest_progress(world, player, key.zone, key.id);
+    // Only rooms some VISIT_ROOM objective names need the database; the
+    // index spares every other step a query per group member.
+    let is_target = world
+        .get_resource::<crate::quest_triggers::RoomQuestIndex>()
+        .is_none_or(|i| i.is_visit_target((key.zone, key.id)));
+    if is_target {
+        bump_visit_quest_progress(world, player, key.zone, key.id);
+    }
     crate::quest_triggers::dispatch_room_trigger(world, player, key.zone, key.id);
 }
 

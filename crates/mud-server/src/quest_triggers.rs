@@ -24,7 +24,89 @@
 use bevy_ecs::prelude::*;
 use mud_world::{Account, Online, Player, Profile};
 
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
+
 use crate::commands::{Connection, DbPool};
+
+/// In-memory copy of what the room-entry path needs from the quest
+/// tables, so walking around costs no database round trips: the quests
+/// triggered by each room, and the rooms any `VISIT_ROOM` objective
+/// targets. Loaded at boot and refreshed by the once-a-minute quest
+/// sweep, so a quest edited in Muditor takes effect within a minute.
+#[derive(Resource, Clone, Default)]
+pub(crate) struct RoomQuestIndex(Arc<RwLock<RoomIndexData>>);
+
+#[derive(Default)]
+struct RoomIndexData {
+    triggers: HashMap<(i32, i32), Vec<mud_db::quests::QuestRow>>,
+    visit_targets: HashSet<(i32, i32)>,
+}
+
+impl RoomQuestIndex {
+    #[cfg(test)]
+    pub(crate) fn with(
+        quests: Vec<mud_db::quests::QuestRow>,
+        visit_targets: impl IntoIterator<Item = (i32, i32)>,
+    ) -> Self {
+        let index = Self::default();
+        index.replace(quests, visit_targets.into_iter().collect());
+        index
+    }
+
+    fn replace(&self, quests: Vec<mud_db::quests::QuestRow>, visit_targets: HashSet<(i32, i32)>) {
+        let mut triggers: HashMap<(i32, i32), Vec<_>> = HashMap::new();
+        for q in quests {
+            if let (Some(z), Some(r)) = (q.trigger_room_zone_id, q.trigger_room_id) {
+                triggers.entry((z, r)).or_default().push(q);
+            }
+        }
+        if let Ok(mut data) = self.0.write() {
+            *data = RoomIndexData {
+                triggers,
+                visit_targets,
+            };
+        }
+    }
+
+    /// Quests triggered by entering `room`.
+    pub(crate) fn trigger_quests(&self, room: (i32, i32)) -> Vec<mud_db::quests::QuestRow> {
+        self.0
+            .read()
+            .ok()
+            .and_then(|d| d.triggers.get(&room).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Is any `VISIT_ROOM` objective aimed at `room`?
+    pub(crate) fn is_visit_target(&self, room: (i32, i32)) -> bool {
+        self.0.read().is_ok_and(|d| d.visit_targets.contains(&room))
+    }
+
+    /// Reload from the database. On error the previous contents stay.
+    pub(crate) async fn refresh(&self, pool: &mud_db::sqlx::PgPool) -> mud_db::sqlx::Result<()> {
+        let quests = mud_db::quests::list_room_trigger_quests(pool).await?;
+        let targets = mud_db::quests::list_visit_room_targets(pool).await?;
+        self.replace(quests, targets.into_iter().collect());
+        Ok(())
+    }
+}
+
+/// Quests already offered to this character in this login session
+/// (lives on the player entity, so it ends with the session): a trigger
+/// offers each quest at most once, however often it re-fires.
+#[derive(Component, Default)]
+pub(crate) struct OfferedQuests(HashSet<(i32, i32)>);
+
+/// Boot: build the room index. Without a database result the index
+/// stays empty and the room paths do nothing, rather than guessing.
+pub(crate) async fn load_room_index(world: &mut World, pool: &mud_db::sqlx::PgPool) {
+    let index = RoomQuestIndex::default();
+    if let Err(e) = index.refresh(pool).await {
+        tracing::warn!(error = %e, "room quest index load failed");
+    }
+    world.insert_resource(index);
+}
 
 /// Look quests up in the background and hand the visible ones to the
 /// world thread as trigger candidates. The world thread decides what
@@ -97,6 +179,12 @@ pub(crate) fn offer_candidates(
         if q.hidden {
             continue;
         }
+        if world
+            .get::<OfferedQuests>(player)
+            .is_some_and(|o| o.0.contains(&(q.zone_id, q.id)))
+        {
+            continue;
+        }
         if let Some(expr) = q
             .availability_requirement
             .as_deref()
@@ -117,6 +205,14 @@ pub(crate) fn offer_candidates(
     }
     if allowed.is_empty() {
         return;
+    }
+    {
+        let mut offered = world
+            .get::<OfferedQuests>(player)
+            .map(|o| o.0.clone())
+            .unwrap_or_default();
+        offered.extend(allowed.iter().map(|q| (q.zone_id, q.id)));
+        crate::commands::try_insert(world, player, OfferedQuests(offered));
     }
     tokio::spawn(async move {
         for q in &allowed {
@@ -149,16 +245,22 @@ pub(crate) fn dispatch_item_trigger(
 }
 
 /// Dispatch ROOM-trigger quests when `player` enters a room with
-/// prototype `(room_zone, room_id)`. Fired from `note_room_entry` on every entry.
+/// prototype `(room_zone, room_id)`. Fired from `note_room_entry` on
+/// every entry; answered from the in-memory [`RoomQuestIndex`] and
+/// offered at most once per quest per login session.
 pub(crate) fn dispatch_room_trigger(
     world: &mut World,
     player: Entity,
     room_zone: i32,
     room_id: i32,
 ) {
-    spawn_candidate_lookup(world, player, "room-trigger", move |pool| async move {
-        mud_db::quests::list_by_trigger_room(&pool, room_zone, room_id).await
-    });
+    let Some(index) = world.get_resource::<RoomQuestIndex>() else {
+        return;
+    };
+    let quests = index.trigger_quests((room_zone, room_id));
+    if !quests.is_empty() {
+        offer_candidates(world, player, quests);
+    }
 }
 
 /// Dispatch SKILL-trigger quests when `player` first successfully
@@ -271,6 +373,22 @@ pub(crate) fn quest_sweep_tick(world: &mut World) {
     }
     quest_expiry_tick(world);
     quest_custom_lua_tick(world);
+    refresh_room_index(world);
+}
+
+/// Reload the room-entry quest index in the background.
+fn refresh_room_index(world: &World) {
+    let (Some(index), Some(pool)) = (
+        world.get_resource::<RoomQuestIndex>().cloned(),
+        world.get_resource::<DbPool>().map(|p| p.0.clone()),
+    ) else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(e) = index.refresh(&pool).await {
+            tracing::warn!(error = %e, "room quest index refresh failed");
+        }
+    });
 }
 
 /// Tick the expiry sweeper (Wave 4.2). Scan the DB for IN_PROGRESS

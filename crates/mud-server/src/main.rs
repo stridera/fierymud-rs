@@ -277,6 +277,7 @@ async fn main() {
     // (Wave 4.5 / 4.11). Must happen before the dialogue load so
     // the resource is in place when the loader fills it.
     quest_triggers::init_resources(&mut world);
+    quest_triggers::load_room_index(&mut world, &pool).await;
     // Wire the world-event catalog + poll inbox so the first
     // `events_poll_tick` (fires on tick 0) has somewhere to send
     // its result and the `drain_events_inbox` has a catalog to

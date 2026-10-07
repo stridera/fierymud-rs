@@ -723,7 +723,7 @@ async fn trigger_auto_accept_honours_the_availability_requirement() {
         .execute(&fx.pool)
         .await
         .unwrap();
-    let (mut world, player, _room, mut rx) = fx.world();
+    let (mut world, _player, _room, mut rx) = fx.world();
     Fx::with_updates(&mut world);
     world.insert_resource(mud_script::LuaHost::default());
     let tx = world.resource::<super::PlayerUpdateTx>().0.clone();
@@ -780,5 +780,88 @@ async fn trigger_auto_accept_honours_the_availability_requirement() {
     super::drain_player_updates(&mut world);
     assert_eq!(fx.wait_for_status("IN_PROGRESS").await, "IN_PROGRESS");
     assert!(drain(&mut rx).contains("New quest"));
+    fx.end().await;
+}
+
+/// Entering a trigger room offers the quest once per login session,
+/// from the in-memory index (no query per step).
+#[tokio::test(flavor = "current_thread")]
+async fn room_trigger_offers_each_quest_once_per_session() {
+    let Some(fx) = fixture().await else { return };
+    sqlx::query(
+        "UPDATE \"Quest\" SET trigger_type = 'ROOM'::\"QuestTriggerType\", \
+         trigger_room_zone_id = $3, trigger_room_id = $4 WHERE zone_id = $1 AND id = $2",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .bind(fx.room.0)
+    .bind(fx.room.1)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let index = crate::quest_triggers::RoomQuestIndex::default();
+    index.refresh(&fx.pool).await.unwrap();
+    assert!(
+        index
+            .trigger_quests(fx.room)
+            .iter()
+            .any(|q| q.id == fx.quest),
+        "refresh loads the ROOM-triggered quest"
+    );
+    let (mut world, player, room, mut rx) = fx.world();
+    world.insert_resource(index);
+
+    for _ in 0..4 {
+        super::note_room_entry(&mut world, player, room);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let out = drain(&mut rx);
+    assert_eq!(out.matches("Quest available").count(), 1, "{out}");
+
+    // A fresh session (new entity) is offered it again.
+    let (tx2, mut rx2) = tokio::sync::mpsc::channel(64);
+    let again = world
+        .spawn((
+            Player,
+            Named {
+                name: "Again".into(),
+            },
+            Account {
+                user_id: "u".into(),
+                character_id: fx.char_id.clone(),
+                role: UserRole::Player,
+                account_role: UserRole::Player,
+                perms: Vec::new(),
+            },
+            Connection(tx2),
+            Located(room),
+        ))
+        .id();
+    super::note_room_entry(&mut world, again, room);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(drain(&mut rx2).matches("Quest available").count(), 1);
+    fx.end().await;
+}
+
+/// Rooms no VISIT_ROOM objective targets cost no quest query; targeted
+/// rooms still progress.
+#[tokio::test(flavor = "current_thread")]
+async fn visit_room_bump_only_runs_for_targeted_rooms() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    let (mut world, player, room, _rx) = fx.world();
+    fx.accept().await;
+
+    world.insert_resource(crate::quest_triggers::RoomQuestIndex::with(vec![], []));
+    super::note_room_entry(&mut world, player, room);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fx.status().await, "IN_PROGRESS", "not a known target");
+
+    world.insert_resource(crate::quest_triggers::RoomQuestIndex::with(
+        vec![],
+        [fx.room],
+    ));
+    super::note_room_entry(&mut world, player, room);
+    assert_eq!(fx.wait_for_status("COMPLETED").await, "COMPLETED");
     fx.end().await;
 }

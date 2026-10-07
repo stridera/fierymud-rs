@@ -249,6 +249,69 @@ pub async fn list_by_trigger_room(
     .await
 }
 
+/// Every visible quest with `trigger_type = ROOM`, for the in-memory
+/// room-trigger index (the runtime would otherwise query on every room
+/// entry).
+pub async fn list_room_trigger_quests(pool: &PgPool) -> sqlx::Result<Vec<QuestRow>> {
+    sqlx::query_as!(
+        QuestRow,
+        r#"
+        SELECT
+            zone_id,
+            id,
+            name,
+            plain_name,
+            description,
+            short_description,
+            min_level,
+            max_level,
+            repeatable,
+            shareable,
+            hidden,
+            auto_accept,
+            trigger_type::text AS "trigger_type!: String",
+            trigger_mob_zone_id,
+            trigger_mob_id,
+            trigger_level,
+            trigger_item_zone_id,
+            trigger_item_id,
+            trigger_room_zone_id,
+            trigger_room_id,
+            trigger_ability_id,
+            trigger_event_id,
+            time_limit_minutes,
+            cooldown_minutes,
+            exclusive_group,
+            availability_requirement
+        FROM "Quest"
+        WHERE trigger_type = 'ROOM'::"QuestTriggerType"
+          AND trigger_room_zone_id IS NOT NULL
+          AND trigger_room_id IS NOT NULL
+          AND hidden = false
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Every room some `VISIT_ROOM` objective targets.
+pub async fn list_visit_room_targets(pool: &PgPool) -> sqlx::Result<Vec<(i32, i32)>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT DISTINCT
+            target_room_zone_id AS "zone!: i32",
+            target_room_id AS "id!: i32"
+        FROM "QuestObjective"
+        WHERE objective_type = 'VISIT_ROOM'::"QuestObjectiveType"
+          AND target_room_zone_id IS NOT NULL
+          AND target_room_id IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.zone, r.id)).collect())
+}
+
 /// Quests with `trigger_type = SKILL` whose ability target matches.
 pub async fn list_by_trigger_ability(
     pool: &PgPool,
