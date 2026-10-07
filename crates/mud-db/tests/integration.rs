@@ -171,6 +171,7 @@ async fn round_trips_character_items() {
             charges: None,
             liquid_remaining: None,
             liquid_type: None,
+            lit: true,
         },
         CharacterItemSnap {
             persisted_id: None,
@@ -182,6 +183,7 @@ async fn round_trips_character_items() {
             charges: None,
             liquid_remaining: None,
             liquid_type: None,
+            lit: false,
         },
     ];
     let mut conn = pool.acquire().await.expect("acquire conn");
@@ -202,6 +204,11 @@ async fn round_trips_character_items() {
         .filter(|r| r.equipped_location.is_none())
         .collect();
     assert_eq!(carried.len(), 1, "one carried row");
+    assert!(
+        carried[0].lit,
+        "lit state round-trips through custom_values"
+    );
+    assert!(!worn[0].lit, "unlit item stays unlit");
 
     // Restore the original set so re-runs are idempotent. Treat each
     // pre-existing row as an INSERT (the test's save above already
@@ -222,6 +229,7 @@ async fn round_trips_character_items() {
             },
             liquid_remaining: r.liquid_type.as_ref().map(|_| r.liquid_remaining),
             liquid_type: r.liquid_type.clone(),
+            lit: r.lit,
         })
         .collect();
     save_inventory_diff(&mut conn, &cid, &restore)

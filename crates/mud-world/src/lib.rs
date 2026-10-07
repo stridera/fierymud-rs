@@ -33,7 +33,7 @@ pub use components::{
     SpellResistanceDelta, SpellSlots, Stamina, Stealth, Stunned, SwitchedFrom, SwitchedInto,
     SyslogMinLevel, TellLog, Thirst, TimePlayed, Title, Trophy, TrophyEntry, TrophyKind, UiStyle,
     WallTraversal, WatchingSyslog, Wealth, WearableIn, WimpyThreshold, WizInvis, WorldKey, Zone,
-    ZoneClimate, ZoneVisits, room_in_god_zone, zone_is_god,
+    ZoneClimate, ZoneVisits, is_lit, room_in_god_zone, zone_is_god,
 };
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_effect_catalog,

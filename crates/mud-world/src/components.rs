@@ -346,9 +346,11 @@ impl ObjectRestrictions {
     }
 }
 
-/// Marker: a Light-type item is currently lit. Display-only today;
-/// once room-darkness mechanics land, this component on a held/worn
-/// item will let the carrier see in dark rooms.
+/// Marker: a Light-type item is currently lit. Only the `light` command
+/// sets it (wearing or holding a light does not), `extinguish` and fuel
+/// burn-out clear it. A lit light on or beside an actor lights the room.
+/// Permanent lights (`LightFuel::is_permanent`) are always lit and never
+/// need the marker: use [`is_lit`] rather than testing for `Lit` alone.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lit;
 
@@ -361,6 +363,25 @@ pub struct Lit;
 pub struct LightFuel {
     pub capacity: i32,
     pub remaining: i32,
+}
+
+impl LightFuel {
+    /// Infinite-duration flame (legacy `LIGHT_PERMANENT`, any negative
+    /// `remaining`): always lit, never burns down, cannot be put out.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        self.remaining < 0
+    }
+}
+
+/// True when the light `item` is actually giving light: it carries the
+/// [`Lit`] marker, or it is a permanent light.
+#[must_use]
+pub fn is_lit(world: &World, item: Entity) -> bool {
+    world.get::<Lit>(item).is_some()
+        || world
+            .get::<LightFuel>(item)
+            .is_some_and(LightFuel::is_permanent)
 }
 
 /// Lookup keywords for an entity, used by `get`/`drop`/`attack` matching.

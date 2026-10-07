@@ -3,9 +3,10 @@
 //!
 //! The schema column set is rich (instance flags, custom names, liquid state,
 //! charges, condition). The runtime owns a subset that mutates during play —
-//! `charges`, `liquid_remaining`, `liquid_type` — and round-trips those.
+//! `charges`, `liquid_remaining`, `liquid_type`, and the lit flag of light
+//! sources (the `lit` key of `custom_values`) — and round-trips those.
 //! Other columns (`condition`, `custom_name`, `custom_examine_description`,
-//! `custom_values`, `instance_flags`, `liquid_effects`, `liquid_identified`)
+//! the rest of `custom_values`, `instance_flags`, `liquid_effects`, `liquid_identified`)
 //! aren't yet read or written by any runtime command, so the save path
 //! UPDATEs only the runtime-owned columns and leaves the rest untouched.
 //! That preserves admin/editor edits to those fields across player saves.
@@ -47,6 +48,9 @@ pub struct CharacterItemRow {
     /// Set when a player fills/pours and the container's contents
     /// have changed from the proto default.
     pub liquid_type: Option<String>,
+    /// Whether the item is a lit light source, read from the
+    /// `custom_values` JSONB key `lit` (no dedicated column).
+    pub lit: bool,
 }
 
 /// Save-side per-item snapshot. Mirrors what the runtime knows about
@@ -75,6 +79,10 @@ pub struct CharacterItemSnap {
     /// liquid items that still match the proto's spawn defaults.
     pub liquid_remaining: Option<i32>,
     pub liquid_type: Option<String>,
+    /// Lit state of a light source. Persisted as the `lit` key of the
+    /// row's `custom_values` JSONB (other keys are left alone), so no
+    /// schema change is needed.
+    pub lit: bool,
 }
 
 /// One row from the `pscan` admin lookup — a player + an item
@@ -139,7 +147,8 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
             equipped_location,
             charges,
             liquid_remaining,
-            liquid_type
+            liquid_type,
+            COALESCE((custom_values ->> 'lit')::boolean, FALSE) AS "lit!"
         FROM "CharacterItems"
         WHERE character_id = $1
         ORDER BY id
@@ -158,7 +167,7 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
 /// * Snapshot entries with `persisted_id = Some` (loaded items still
 ///   carried) → UPDATE the runtime-owned columns (`equipped_location`,
 ///   `container_id`, `charges`, `liquid_remaining`, `liquid_type`,
-///   `updated_at`) and re-home the row to this character
+///   the `lit` key of `custom_values`, `updated_at`) and re-home the row to this character
 ///   (`character_id`), so an item handed over from another character is
 ///   claimed rather than deleted by the previous owner's save. Other
 ///   columns (`condition`, `instance_flags`, `custom_name`, etc.) are
@@ -239,6 +248,9 @@ pub async fn save_inventory_diff(
                     charges = $4,
                     liquid_remaining = $5,
                     liquid_type = $6,
+                    custom_values = CASE WHEN $8::boolean
+                        THEN custom_values || '{"lit": true}'::jsonb
+                        ELSE custom_values - 'lit' END,
                     updated_at = NOW()
                 WHERE id = $7
                 RETURNING id
@@ -250,6 +262,7 @@ pub async fn save_inventory_diff(
                 snap.liquid_remaining.unwrap_or(0),
                 snap.liquid_type.as_deref(),
                 id,
+                snap.lit,
             )
             .fetch_optional(&mut *conn)
             .await?;
@@ -263,8 +276,10 @@ pub async fn save_inventory_diff(
             INSERT INTO "CharacterItems"
                 (character_id, object_zone_id, object_id,
                  equipped_location, container_id,
-                 charges, liquid_remaining, liquid_type, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                 charges, liquid_remaining, liquid_type, custom_values, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                    CASE WHEN $9::boolean THEN '{"lit": true}'::jsonb ELSE '{}'::jsonb END,
+                    NOW())
             RETURNING id
             "#,
             character_id,
@@ -275,6 +290,7 @@ pub async fn save_inventory_diff(
             snap.charges.unwrap_or(-1),
             snap.liquid_remaining.unwrap_or(0),
             snap.liquid_type.as_deref(),
+            snap.lit,
         )
         .fetch_one(&mut *conn)
         .await?;

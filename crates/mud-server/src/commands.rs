@@ -10739,9 +10739,10 @@ pub(crate) fn can_see_player(world: &World, viewer: Entity, target: Entity) -> b
 }
 
 /// True if anyone in `room` (any actor, plus loose items on the
-/// floor and items worn or carried by actors in the room) carries
-/// a `Lit` marker. Used to override `room_is_dark` for rooms with
-/// active light sources.
+/// floor and items worn or carried by actors in the room) has a lit
+/// light source ([`mud_world::is_lit`]: lit by the `light` command, or
+/// permanent). An unlit torch gives no light. Used to override
+/// `room_is_dark` for rooms with active light sources.
 pub(crate) fn room_has_light(world: &mut World, room: Entity) -> bool {
     // Magical ILLUMINATION counts as a light source for the
     // room-light check — the room glows on its own, no torch
@@ -10750,10 +10751,7 @@ pub(crate) fn room_has_light(world: &mut World, room: Entity) -> bool {
         return true;
     }
     // 1. Loose lit items on the floor.
-    let any_floor = world
-        .query_filtered::<&Located, (With<Item>, With<mud_world::Lit>)>()
-        .iter(world)
-        .any(|l| l.0 == room);
+    let any_floor = lit_items_located_in(world, |holder| holder == room);
     if any_floor {
         return true;
     }
@@ -10767,15 +10765,22 @@ pub(crate) fn room_has_light(world: &mut World, room: Entity) -> bool {
             .collect()
     };
     for actor in inhabitants {
-        let any_on_actor = world
-            .query_filtered::<&Located, (With<Item>, With<mud_world::Lit>)>()
-            .iter(world)
-            .any(|l| l.0 == actor);
-        if any_on_actor {
+        if lit_items_located_in(world, |holder| holder == actor) {
             return true;
         }
     }
     false
+}
+
+/// True if some light source is lit ([`mud_world::is_lit`]) and its
+/// `Located` parent satisfies `holder`.
+fn lit_items_located_in(world: &mut World, holder: impl Fn(Entity) -> bool) -> bool {
+    world
+        .query_filtered::<(&Located, Has<mud_world::Lit>, Option<&mud_world::LightFuel>), With<Item>>()
+        .iter(world)
+        .any(|(l, marked, fuel)| {
+            holder(l.0) && (marked || fuel.is_some_and(mud_world::LightFuel::is_permanent))
+        })
 }
 
 /// True for room sectors where the sky is visible — used by `look`

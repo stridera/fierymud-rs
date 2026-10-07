@@ -4438,6 +4438,7 @@ pub(crate) fn snapshot_player(
                 charges: ch.map(|c| c.0),
                 liquid_remaining: lc.as_ref().map(|l| l.remaining),
                 liquid_type: lc.as_ref().map(|l| l.liquid.clone()),
+                lit: world.get::<mud_world::Lit>(*e).is_some(),
             });
             ents.push(*e);
         }
@@ -5482,6 +5483,17 @@ pub(crate) fn spawn_inventory(
             {
                 lc.liquid = saved_liq;
                 lc.remaining = row.liquid_remaining.clamp(0, lc.capacity);
+            }
+            // Lit state: a light the player lit stays lit across logout.
+            // A burnt-out light (fuel 0) never comes back lit; permanent
+            // lights need no marker (they are always lit).
+            if row.lit
+                && world
+                    .get::<mud_world::LightFuel>(item_entity)
+                    .is_some_and(|f| f.remaining > 0)
+                && let Ok(mut e) = world.get_entity_mut(item_entity)
+            {
+                e.insert(mud_world::Lit);
             }
             spawned.insert(row.id, item_entity);
             made_progress = true;

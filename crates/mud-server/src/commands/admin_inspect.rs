@@ -2766,7 +2766,7 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         out.push_str("kind:          Item\r\n");
         // Lit + fuel state for Light-typed items. Lit alone is a
         // marker; LightFuel carries the burn timer.
-        if world.get::<mud_world::Lit>(target).is_some() {
+        if mud_world::is_lit(world, target) {
             out.push_str("lit:           yes\r\n");
         }
         if let Some(fuel) = world.get::<mud_world::LightFuel>(target).copied() {

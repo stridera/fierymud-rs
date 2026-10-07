@@ -75,14 +75,13 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
         return;
     };
     // ---- Light sources ----
-    // A worn / held light burns without a separate `light` command
-    // (the pre-rewrite game's torches worked the moment you held
-    // them). Legacy semantics: `remaining == 0` is a spent light and
-    // stays dark; `-1` (any negative) is the permanent-flame sentinel
-    // and does light. A light with no fuel data at all is NOT assumed
-    // infinite: only data that says `-1` makes a flame permanent.
-    // Items already `Lit` are left alone.
+    // A player's worn / held light is NOT lit by wearing it: they must
+    // use the `light` command. Permanent lights (`remaining < 0`) need
+    // no marker, `mud_world::is_lit` treats them as always lit. Mobs
+    // can't type `light`, so a light a mob wears is lit here (unless
+    // spent: `remaining == 0`; no fuel data is never assumed infinite).
     if proto.r#type == mud_db::enums::ObjectType::Light
+        && world.get::<mud_world::Mob>(wearer).is_some()
         && world.get::<mud_world::Lit>(item).is_none()
         && world
             .get::<mud_world::LightFuel>(item)
@@ -664,32 +663,87 @@ mod tests {
         (world, room, wearer, item)
     }
 
-    #[test]
-    fn worn_light_is_lit_and_lights_the_room() {
-        let (mut world, room, wearer, item) = light_world(
-            Some(mud_world::LightFuel {
-                capacity: 150,
-                remaining: 150,
-            }),
-            Some(Slot::Hold),
-        );
-        assert!(!crate::commands::room_has_light(&mut world, room));
-        apply_object_to_wearer(&mut world, item, wearer);
-        assert!(world.get::<mud_world::Lit>(item).is_some());
-        assert!(crate::commands::room_has_light(&mut world, room));
+    fn torch_fuel(remaining: i32) -> mud_world::LightFuel {
+        mud_world::LightFuel {
+            capacity: remaining.max(150),
+            remaining,
+        }
     }
 
     #[test]
-    fn permanent_flame_lights_when_worn() {
-        let (mut world, _room, wearer, item) = light_world(
-            Some(mud_world::LightFuel {
-                capacity: -1,
-                remaining: -1,
-            }),
-            Some(Slot::Hold),
-        );
+    fn wearing_a_light_does_not_light_it() {
+        let (mut world, room, wearer, item) = light_world(Some(torch_fuel(150)), Some(Slot::Hold));
+        apply_object_to_wearer(&mut world, item, wearer);
+        recompute_equipped_for(&mut world, wearer);
+        assert!(world.get::<mud_world::Lit>(item).is_none());
+        assert!(!mud_world::is_lit(&world, item));
+        assert!(!crate::commands::room_has_light(&mut world, room));
+    }
+
+    #[test]
+    fn light_command_lights_a_worn_torch_and_the_room_sees_it() {
+        let (mut world, room, wearer, item) = light_world(Some(torch_fuel(150)), Some(Slot::Hold));
+        world
+            .entity_mut(item)
+            .insert(mud_world::Keywords(vec!["torch".into()]));
+        apply_object_to_wearer(&mut world, item, wearer);
+        assert!(!crate::commands::room_has_light(&mut world, room));
+        crate::commands::info::cmd_light(&mut world, wearer, "torch");
+        assert!(world.get::<mud_world::Lit>(item).is_some());
+        assert!(crate::commands::room_has_light(&mut world, room));
+        // Extinguishing a normal torch works and darkens the room again.
+        crate::commands::info::cmd_extinguish(&mut world, wearer, "torch");
+        assert!(world.get::<mud_world::Lit>(item).is_none());
+        assert!(!crate::commands::room_has_light(&mut world, room));
+    }
+
+    #[test]
+    fn light_command_refuses_a_spent_torch() {
+        let (mut world, room, wearer, item) = light_world(Some(torch_fuel(0)), Some(Slot::Hold));
+        world
+            .entity_mut(item)
+            .insert(mud_world::Keywords(vec!["torch".into()]));
+        crate::commands::info::cmd_light(&mut world, wearer, "torch");
+        assert!(world.get::<mud_world::Lit>(item).is_none());
+        assert!(!crate::commands::room_has_light(&mut world, room));
+    }
+
+    #[test]
+    fn permanent_light_is_always_lit_and_cannot_be_extinguished() {
+        let (mut world, room, wearer, item) = light_world(Some(torch_fuel(-1)), Some(Slot::Hold));
+        world
+            .entity_mut(item)
+            .insert(mud_world::Keywords(vec!["torch".into()]));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        world
+            .entity_mut(wearer)
+            .insert(crate::commands::Connection(tx));
+        // Lit with no marker and no `light` command, even unworn.
+        assert!(mud_world::is_lit(&world, item));
+        assert!(crate::commands::room_has_light(&mut world, room));
+        crate::commands::info::cmd_extinguish(&mut world, wearer, "torch");
+        let mut out = String::new();
+        while let Ok(b) = rx.try_recv() {
+            out.push_str(&String::from_utf8_lossy(&b));
+        }
+        assert!(out.contains("You can't put out a torch."), "{out}");
+        assert!(mud_world::is_lit(&world, item));
+        assert!(crate::commands::room_has_light(&mut world, room));
+        // `light` on it is just "already lit".
+        crate::commands::info::cmd_light(&mut world, wearer, "torch");
+        assert!(world.get::<mud_world::Lit>(item).is_none());
+    }
+
+    #[test]
+    fn mob_worn_light_is_lit_since_mobs_cannot_use_light() {
+        let (mut world, room, wearer, item) = light_world(Some(torch_fuel(150)), Some(Slot::Hold));
+        world
+            .entity_mut(wearer)
+            .remove::<mud_world::Player>()
+            .insert(mud_world::Mob);
         apply_object_to_wearer(&mut world, item, wearer);
         assert!(world.get::<mud_world::Lit>(item).is_some());
+        assert!(crate::commands::room_has_light(&mut world, room));
     }
 
     #[test]
@@ -701,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn recompute_lights_equipped_light_found_via_contents() {
+    fn recompute_keeps_permanent_light_lit_without_a_marker() {
         let (mut world, room, wearer, item) = light_world(
             Some(mud_world::LightFuel {
                 capacity: -1,
@@ -710,7 +764,8 @@ mod tests {
             Some(Slot::Hold),
         );
         recompute_equipped_for(&mut world, wearer);
-        assert!(world.get::<mud_world::Lit>(item).is_some());
+        assert!(world.get::<mud_world::Lit>(item).is_none());
+        assert!(mud_world::is_lit(&world, item));
         assert!(crate::commands::room_has_light(&mut world, room));
     }
 

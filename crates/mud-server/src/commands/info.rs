@@ -612,9 +612,11 @@ inventory::submit! {
         help: Help {
             usage: "light <item>",
             summary: "Light a torch or lantern.",
-            long: "Sets a `Lit` marker on a Light-type item in your \
-                   inventory. Refused on non-light items or items \
-                   that are already lit.",
+            long: "Lights a Light-type item you are carrying, holding \
+                   or wearing. Wearing or holding a light does not \
+                   light it. Refused on non-light items, items that \
+                   are already lit, and burnt-out lights. Permanent \
+                   lights are always lit.",
         },
         run: cmd_light,
     }
@@ -629,8 +631,9 @@ inventory::submit! {
         help: Help {
             usage: "extinguish <item>",
             summary: "Put out a lit torch or lantern.",
-            long: "Removes the `Lit` marker from a held or carried \
-                   light source. Refused on items that aren't lit.",
+            long: "Puts out a held, worn or carried light source. \
+                   Refused on items that aren't lit and on permanent \
+                   lights, which cannot be put out.",
         },
         run: cmd_extinguish,
     }
@@ -10740,8 +10743,20 @@ pub(crate) fn cmd_light(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    if world.get::<mud_world::Lit>(item).is_some() {
+    if mud_world::is_lit(world, item) {
         send_to(world, player, format!("{item_name} is already lit.\r\n"));
+        return;
+    }
+    // Burnt out (or no fuel data at all, which is never assumed infinite).
+    if world
+        .get::<mud_world::LightFuel>(item)
+        .is_none_or(|f| f.remaining == 0)
+    {
+        send_to(
+            world,
+            player,
+            format!("Sorry, there's no more power left in {item_name}.\r\n"),
+        );
         return;
     }
     if let Ok(mut e) = world.get_entity_mut(item) {
@@ -10776,6 +10791,14 @@ pub(crate) fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let item_name = name_of(world, item);
+    // A permanent light is always lit and can't be put out.
+    if world
+        .get::<mud_world::LightFuel>(item)
+        .is_some_and(mud_world::LightFuel::is_permanent)
+    {
+        send_to(world, player, format!("You can't put out {item_name}.\r\n"));
+        return;
+    }
     if world.get::<mud_world::Lit>(item).is_none() {
         send_to(world, player, format!("{item_name} isn't lit.\r\n"));
         return;

@@ -315,6 +315,52 @@ pub fn drunkenness_tick(world: &mut World) {
 mod tests {
     use super::*;
 
+    fn burn_world(fuel: i32, lit: bool) -> (World, Entity) {
+        let mut world = World::new();
+        world.insert_resource(TickCount(750));
+        let room = world.spawn_empty().id();
+        let mut item = world.spawn((
+            Named {
+                name: "a torch".into(),
+            },
+            Located(room),
+            LightFuel {
+                capacity: 150,
+                remaining: fuel,
+            },
+        ));
+        if lit {
+            item.insert(Lit);
+        }
+        let item = item.id();
+        (world, item)
+    }
+
+    #[test]
+    fn burn_down_decrements_a_lit_torch() {
+        let (mut world, item) = burn_world(10, true);
+        light_fuel_tick(&mut world);
+        assert_eq!(world.get::<LightFuel>(item).unwrap().remaining, 9);
+    }
+
+    #[test]
+    fn burn_down_skips_unlit_torches() {
+        let (mut world, item) = burn_world(10, false);
+        light_fuel_tick(&mut world);
+        assert_eq!(world.get::<LightFuel>(item).unwrap().remaining, 10);
+    }
+
+    #[test]
+    fn burn_down_skips_permanent_lights() {
+        // Permanent with and without a stray marker: never decremented.
+        for lit in [false, true] {
+            let (mut world, item) = burn_world(-1, lit);
+            light_fuel_tick(&mut world);
+            assert_eq!(world.get::<LightFuel>(item).unwrap().remaining, -1);
+            assert_eq!(world.get::<Lit>(item).is_some(), lit);
+        }
+    }
+
     fn make_player(
         world: &mut World,
         hp: i32,
