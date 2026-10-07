@@ -2,6 +2,7 @@ pub mod components;
 pub mod loader;
 pub mod reset_gear;
 pub mod resources;
+pub mod targeting;
 pub mod wake_effects;
 
 pub use wake_effects::{RoomWakeRow, WakeEffectCatalog, WakeRow, load_wake_effect_catalog};

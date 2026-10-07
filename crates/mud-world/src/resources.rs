@@ -2009,6 +2009,29 @@ pub struct AbilityCatalog {
     pub components: HashMap<i32, Vec<AbilityComponentReq>>,
 }
 
+impl AbilityCatalog {
+    /// Resolve a typed ability name (`invis`, `cure l`, `magic missile`)
+    /// with legacy semantics: an exact (underscore-normalised) match wins,
+    /// otherwise the alphabetically-first ability whose name the typed
+    /// words are a prefix of. `kind` restricts the search when given.
+    #[must_use]
+    pub fn find_by_prefix(
+        &self,
+        needle: &str,
+        kind: Option<mud_db::abilities::AbilityKind>,
+    ) -> Option<&AbilityDef> {
+        let names = self
+            .by_name
+            .values()
+            .filter(|d| kind.is_none_or(|k| d.kind == k))
+            .map(|d| d.plain_name.as_str());
+        let best = crate::targeting::best_name_match(needle, names)?;
+        self.by_name
+            .values()
+            .find(|d| d.plain_name == best && kind.is_none_or(|k| d.kind == k))
+    }
+}
+
 /// One row from the schema's `AbilityComponent` table. The
 /// `object_id` is the legacy zone-less id; runtime carrier-check
 /// matches on `WorldKey.id` regardless of zone, mirroring the

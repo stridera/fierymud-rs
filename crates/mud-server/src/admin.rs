@@ -1222,7 +1222,7 @@ fn find_actor_by_name(world: &mut World, name: &str) -> Option<Entity> {
     let mut q = world
         .query_filtered::<(Entity, &Named), bevy_ecs::prelude::Or<(With<Mob>, With<Player>)>>();
     q.iter(world)
-        .find(|(_, n)| n.name.to_ascii_lowercase().contains(&needle))
+        .find(|(_, n)| mud_world::targeting::names_match(&needle, std::iter::once(n.name.as_str())))
         .map(|(e, _)| e)
 }
 
@@ -1639,7 +1639,7 @@ fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
     let mut q = world.query_filtered::<(Entity, &Named), Or<(With<Mob>, With<Player>)>>();
     let entity = q
         .iter(world)
-        .find(|(_, n)| n.name.to_ascii_lowercase().contains(&needle))
+        .find(|(_, n)| mud_world::targeting::names_match(&needle, std::iter::once(n.name.as_str())))
         .map(|(e, _)| e);
     let Some(entity) = entity else {
         return Err((StatusCode::NOT_FOUND, format!("no actor matching '{name}'")));

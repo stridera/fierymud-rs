@@ -2254,9 +2254,20 @@ fn actor_emit_with_perspective(
     })
 }
 
+/// Script-side name test: prefix-anchored (never substring) against the
+/// entity's keywords and the words of its display name.
+fn script_name_matches(needle: &str, name: &str, kw: Option<&Keywords>) -> bool {
+    mud_world::targeting::names_match(
+        needle,
+        kw.into_iter()
+            .flat_map(|k| k.0.iter().map(String::as_str))
+            .chain(std::iter::once(name)),
+    )
+}
+
 /// Walk every non-Item entity in the world and return the first
 /// whose `Named` or `Keywords` match `needle` (case-insensitive
-/// substring). Returns nil if none.
+/// word prefix). Returns nil if none.
 fn find_actor(lua: &Lua, needle: &str) -> mlua::Result<Value> {
     let needle = needle.trim().to_ascii_lowercase();
     if needle.is_empty() {
@@ -2265,12 +2276,7 @@ fn find_actor(lua: &Lua, needle: &str) -> mlua::Result<Value> {
     let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
         let mut q = world.query_filtered::<(Entity, &Named, Option<&Keywords>), Without<Item>>();
         q.iter(world)
-            .find(|(_, n, kw)| {
-                n.name.to_ascii_lowercase().contains(&needle)
-                    || kw.is_some_and(|k| {
-                        k.0.iter().any(|w| w.to_ascii_lowercase().contains(&needle))
-                    })
-            })
+            .find(|(_, n, kw)| script_name_matches(&needle, &n.name, *kw))
             .map(|(e, _, _)| e)
     })?;
     match entity {
@@ -2304,11 +2310,7 @@ fn destroy_item(lua: &Lua, actor: Entity, needle: &str) -> mlua::Result<()> {
                 if l.0 != actor {
                     continue;
                 }
-                let matches = n.name.to_ascii_lowercase().contains(&keyword)
-                    || kw.is_some_and(|k| {
-                        k.0.iter()
-                            .any(|w| w.to_ascii_lowercase().contains(&keyword))
-                    });
+                let matches = script_name_matches(&keyword, &n.name, kw);
                 if matches {
                     to_remove.push(e);
                     if !all {
@@ -2584,11 +2586,7 @@ impl UserData for LuaActor {
                             .find(|(e, l, n, kw)| {
                                 *e != this.entity
                                     && l.0 == located.0
-                                    && (n.name.to_ascii_lowercase().contains(&needle)
-                                        || kw.is_some_and(|k| {
-                                            k.0.iter()
-                                                .any(|w| w.to_ascii_lowercase().contains(&needle))
-                                        }))
+                                    && (script_name_matches(&needle, &n.name, *kw))
                             })
                             .map(|(e, _, n, _)| (e, n.name.clone()))
                     };
@@ -4259,11 +4257,7 @@ impl UserData for LuaRoom {
                     >();
                     q.iter(world)
                         .find(|(_, l, n, kw)| {
-                            l.0 == this.entity
-                                && (n.name.to_ascii_lowercase().contains(&needle)
-                                    || kw.is_some_and(|k| {
-                                        k.0.iter().any(|w| w.to_ascii_lowercase().contains(&needle))
-                                    }))
+                            l.0 == this.entity && (script_name_matches(&needle, &n.name, *kw))
                         })
                         .map(|(e, _, _, _)| e)
                 })?;
@@ -4394,12 +4388,7 @@ impl UserData for LuaRoom {
                     q.iter(world)
                         .find(|(_, l, n, kw)| {
                             l.0 == this.entity
-                                && (n.name.to_ascii_lowercase().contains(&needle)
-                                    || kw.is_some_and(|k| {
-                                        k.0.iter().any(|w| {
-                                            w.to_ascii_lowercase().contains(&needle)
-                                        })
-                                    }))
+                                && (script_name_matches(&needle, &n.name, *kw))
                         })
                         .map(|(e, _, _, _)| e)
                 })?;

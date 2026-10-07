@@ -332,7 +332,9 @@ async fn cmd_chest_withdraw(
                 protos
                     .by_key
                     .get(&(r.object_zone_id, r.object_id))
-                    .is_some_and(|p| p.name.to_ascii_lowercase().contains(&needle))
+                    .is_some_and(|p| {
+                        mud_world::targeting::entity_matches(&needle, &p.name, Some(&p.keywords))
+                    })
             })
             .cloned()
     };

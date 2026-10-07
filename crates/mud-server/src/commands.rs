@@ -10645,10 +10645,8 @@ pub(crate) fn resolve_exit_arg(world: &World, player: Entity, arg: &str) -> Opti
         if exit_is_hidden_to(world, player, room, *dir, ed) {
             continue;
         }
-        for kw in &ed.keywords {
-            if kw.to_ascii_lowercase().contains(&needle) {
-                return Some(*dir);
-            }
+        if mud_world::targeting::names_match(&needle, ed.keywords.iter().map(String::as_str)) {
+            return Some(*dir);
         }
     }
     None
@@ -12314,14 +12312,11 @@ fn render_bound_ability_line(world: &mut World, item: Entity) -> Option<String> 
     ))
 }
 
-/// Match by Keywords substring first, falling back to Name substring.
+/// The one shared target matcher (legacy `isname`): every word of `needle`
+/// must be a case-insensitive *prefix* of a keyword, falling back to the
+/// words of the display name only when the entity has no keywords.
 pub(crate) fn matches(needle: &str, name: &Named, kw: Option<&Keywords>) -> bool {
-    if let Some(kw) = kw
-        && kw.0.iter().any(|k| k.to_ascii_lowercase().contains(needle))
-    {
-        return true;
-    }
-    name.name.to_ascii_lowercase().contains(needle)
+    mud_world::targeting::entity_matches(needle, &name.name, kw.map(|k| k.0.as_slice()))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -12439,7 +12434,7 @@ pub(crate) fn find_actor_in_room(
 /// for ambiguity, so we surface None rather than a magic value). Used
 /// by the SUMMON spell where the gates already enforce a same-zone
 /// check — the room-bound `find_actor_in_room` would miss every
-/// non-co-located target. Match semantics: case-insensitive substring
+/// non-co-located target. Match semantics: case-insensitive prefix
 /// against the displayed `Named.name`. We *don't* honor `Keywords`
 /// here — a SUMMON target is a specific player, not a generic
 /// keyword match.
@@ -12453,9 +12448,10 @@ pub(crate) fn find_online_player_anywhere(
         return None;
     }
     let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<mud_world::Online>)>();
-    let mut hits = q
-        .iter(world)
-        .filter(|(e, n)| *e != exclude && n.name.to_ascii_lowercase().contains(&needle));
+    let mut hits = q.iter(world).filter(|(e, n)| {
+        *e != exclude
+            && mud_world::targeting::names_match(&needle, std::iter::once(n.name.as_str()))
+    });
     let first = hits.next()?;
     // Ambiguity check — if a second match exists, refuse so the
     // caster can disambiguate by typing the full name. Cheap: stops
@@ -12605,19 +12601,7 @@ pub(crate) fn spawn_house_item(
 /// any keyword? Mirrors what `find_carried_by` does internally but
 /// against the room-side query.
 pub(crate) fn name_or_keyword_matches(target: &str, name: &str, kw: Option<&Keywords>) -> bool {
-    let t = target.to_ascii_lowercase();
-    let n = name.to_ascii_lowercase();
-    if n.split_whitespace().any(|tok| tok == t) {
-        return true;
-    }
-    if let Some(kw) = kw {
-        for k in &kw.0 {
-            if k.to_ascii_lowercase() == t {
-                return true;
-            }
-        }
-    }
-    false
+    mud_world::targeting::entity_matches(target, name, kw.map(|k| k.0.as_slice()))
 }
 
 /// `skill <name> [<target>]` — Phase A of the data-driven migration.
@@ -13434,21 +13418,13 @@ pub(crate) fn invoke_ability_with(
     }
     let needle = raw_needle.to_ascii_lowercase().replace(' ', "_");
 
-    // Find by exact key (and right kind) first, then fall back to the
-    // first substring match restricted to the same kind.
-    let catalog = world.resource::<AbilityCatalog>();
-    let def = catalog
-        .by_name
-        .get(&needle)
-        .filter(|d| d.kind == kind)
-        .cloned()
-        .or_else(|| {
-            catalog
-                .by_name
-                .values()
-                .find(|d| d.kind == kind && d.plain_name.to_ascii_lowercase().contains(&needle))
-                .cloned()
-        });
+    // Exact name (of the right kind) wins; otherwise the typed words must
+    // be a prefix of the ability name (`invis` never reaches
+    // `mass_invisibility`).
+    let def = world
+        .resource::<AbilityCatalog>()
+        .find_by_prefix(&needle, Some(kind))
+        .cloned();
     let Some(def) = def else {
         send_to(
             world,
@@ -16607,9 +16583,11 @@ pub(crate) fn invoke_ability_with(
                         q.iter(world)
                             .filter(|(_, l, kw, n, _)| {
                                 l.0 == caster_room
-                                    && (kw.is_some_and(|k| {
-                                        k.0.iter().any(|s| s.to_ascii_lowercase().contains(&lc))
-                                    }) || n.name.to_ascii_lowercase().contains(&lc))
+                                    && mud_world::targeting::entity_matches(
+                                        &lc,
+                                        &n.name,
+                                        kw.map(|k| k.0.as_slice()),
+                                    )
                             })
                             .map(|(e, _, _, _, pc)| (e, pc.is_some()))
                             .collect()
@@ -19284,9 +19262,7 @@ pub(crate) fn matches_self(actor_name: &str, target_word: &str) -> bool {
     if target_word.eq_ignore_ascii_case("me") || target_word.eq_ignore_ascii_case("self") {
         return true;
     }
-    actor_name
-        .to_ascii_lowercase()
-        .contains(&target_word.to_ascii_lowercase())
+    mud_world::targeting::names_match(target_word, std::iter::once(actor_name))
 }
 
 /// Replace social template placeholders. Genderless pronouns until we wire
@@ -20182,7 +20158,10 @@ pub(crate) fn group_dismiss_one(world: &mut World, dismisser: Entity, target_nam
     let target: Option<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Follower, &Named), With<Player>>();
         q.iter(world)
-            .find(|(_, f, n)| f.0 == dismisser && n.name.to_ascii_lowercase().contains(&needle))
+            .find(|(_, f, n)| {
+                f.0 == dismisser
+                    && mud_world::targeting::names_match(&needle, std::iter::once(n.name.as_str()))
+            })
             .map(|(e, _, _)| e)
     };
     let Some(target) = target else {

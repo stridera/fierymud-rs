@@ -696,3 +696,36 @@ fn staff_verbs_need_the_full_word() {
         assert!(out.contains("Type the whole command"), "`{typed}`: {out}");
     }
 }
+
+#[test]
+fn ability_lookup_is_prefix_anchored_and_exact_wins() {
+    use crate::commands::test_support::ability_def;
+    use mud_db::abilities::AbilityKind::Spell;
+    use mud_world::AbilityCatalog;
+
+    let mut catalog = AbilityCatalog::default();
+    for (id, name) in [
+        (1, "invisibility"),
+        (2, "mass_invisibility"),
+        (3, "cure_light"),
+        (4, "cure_critic"),
+        (5, "fire"),
+        (6, "fireball"),
+    ] {
+        catalog
+            .by_name
+            .insert(name.to_string(), ability_def(id, name, Spell));
+    }
+    let find = |n: &str| catalog.find_by_prefix(n, Some(Spell)).map(|d| d.id);
+    assert_eq!(
+        find("invis"),
+        Some(1),
+        "invis must not reach mass_invisibility"
+    );
+    assert_eq!(find("mass inv"), Some(2));
+    assert_eq!(find("sibility"), None, "substring no longer matches");
+    assert_eq!(find("cure l"), Some(3), "multi-word prefix");
+    assert_eq!(find("fire"), Some(5), "exact beats prefix");
+    assert_eq!(find("fireb"), Some(6));
+    assert_eq!(find("FIRE"), Some(5));
+}

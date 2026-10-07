@@ -1183,10 +1183,13 @@ fn resolve_mob_target(world: &mut World, player: Entity, args: &str) -> Option<(
         .by_key
         .iter()
         .find(|(_, p)| {
-            p.name.to_ascii_lowercase().contains(&needle)
-                || p.keywords
+            mud_world::targeting::names_match(
+                &needle,
+                p.keywords
                     .iter()
-                    .any(|k| k.to_ascii_lowercase().contains(&needle))
+                    .map(String::as_str)
+                    .chain([p.name.as_str()]),
+            )
         })
         .map(|(k, _)| *k);
     if hit.is_none() {
@@ -1228,10 +1231,13 @@ fn resolve_object_target(world: &mut World, player: Entity, args: &str) -> Optio
         .by_key
         .iter()
         .find(|(_, p)| {
-            p.name.to_ascii_lowercase().contains(&needle)
-                || p.keywords
+            mud_world::targeting::names_match(
+                &needle,
+                p.keywords
                     .iter()
-                    .any(|k| k.to_ascii_lowercase().contains(&needle))
+                    .map(String::as_str)
+                    .chain([p.name.as_str()]),
+            )
         })
         .map(|(k, _)| *k);
     if hit.is_none() {

@@ -170,13 +170,7 @@ fn cmd_scribe(world: &mut World, player: Entity, args: &str) {
     let needle = raw.to_ascii_lowercase().replace(' ', "_");
     let def = {
         let catalog = world.resource::<AbilityCatalog>();
-        catalog.by_name.get(&needle).cloned().or_else(|| {
-            catalog
-                .by_name
-                .values()
-                .find(|d| d.plain_name.to_ascii_lowercase().contains(&needle))
-                .cloned()
-        })
+        catalog.find_by_prefix(&needle, None).cloned()
     };
     let Some(def) = def else {
         send_to(

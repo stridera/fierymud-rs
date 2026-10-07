@@ -398,8 +398,11 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     let target = cancellable
         .iter()
         .find(|(_, name, src, _)| {
-            name.to_ascii_lowercase().contains(&needle)
-                || src.as_deref().is_some_and(|s| s.contains(&needle))
+            let words = |s: &str| s.replace(['_', '-'], " ");
+            mud_world::targeting::names_match(&needle, std::iter::once(words(name).as_str()))
+                || src.as_deref().is_some_and(|s| {
+                    mud_world::targeting::names_match(&needle, std::iter::once(words(s).as_str()))
+                })
         })
         .map(|(e, _, _, _)| *e);
     let Some(target_effect) = target else {

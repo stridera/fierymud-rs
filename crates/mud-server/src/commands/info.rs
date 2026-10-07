@@ -4253,7 +4253,7 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let object_protos = world.resource::<ObjectPrototypes>().by_key.clone();
-    // Parse: integer = 1-based index; otherwise substring match on proto name.
+    // Parse: integer = 1-based index; otherwise prefix match on proto name/keywords.
     let offer_idx: Option<usize> = if let Ok(n) = arg.parse::<usize>() {
         if n == 0 || n > shop.items.len() {
             None
@@ -4265,7 +4265,9 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         shop.items.iter().position(|o| {
             object_protos
                 .get(&(o.object_zone_id, o.object_id))
-                .is_some_and(|p| p.name.to_ascii_lowercase().contains(&lc))
+                .is_some_and(|p| {
+                    mud_world::targeting::entity_matches(&lc, &p.name, Some(&p.keywords))
+                })
         })
     };
     let Some(idx) = offer_idx else {
@@ -4424,9 +4426,9 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
     } else {
         let lc = arg.to_ascii_lowercase();
         shop.pets.iter().position(|o| {
-            mob_protos
-                .get(&(o.mob_zone_id, o.mob_id))
-                .is_some_and(|p| p.name.to_ascii_lowercase().contains(&lc))
+            mob_protos.get(&(o.mob_zone_id, o.mob_id)).is_some_and(|p| {
+                mud_world::targeting::entity_matches(&lc, &p.name, Some(&p.keywords))
+            })
         })
     };
     let Some(idx) = offer_idx else {
@@ -5009,10 +5011,11 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
         q.iter(world)
             .filter(|(e, _, n, kw)| {
                 *e != player
-                    && (n.name.to_ascii_lowercase().contains(&needle)
-                        || kw.is_some_and(|k| {
-                            k.0.iter().any(|w| w.to_ascii_lowercase().contains(&needle))
-                        }))
+                    && mud_world::targeting::entity_matches(
+                        &needle,
+                        &n.name,
+                        kw.map(|k| k.0.as_slice()),
+                    )
             })
             .map(|(_, l, _, _)| l.0)
             .collect()
@@ -9518,9 +9521,10 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
             .filter(|(_, l, _, eq)| l.0 == player && eq.is_none())
             .filter(|(_, _, n, _)| {
                 filter.is_empty()
-                    || render_color_tags(&n.name, ColorMode::Strip)
-                        .to_ascii_lowercase()
-                        .contains(&filter)
+                    || mud_world::targeting::names_match(
+                        &filter,
+                        std::iter::once(render_color_tags(&n.name, ColorMode::Strip).as_str()),
+                    )
             })
             .map(|(e, _, _, _)| e)
             .collect()
@@ -12917,12 +12921,13 @@ pub(crate) fn cmd_order(world: &mut World, player: Entity, args: &str) {
     } else {
         let needle = target_word.to_ascii_lowercase();
         let one = followers.into_iter().find(|e| {
-            world
-                .get::<Named>(*e)
-                .is_some_and(|n| n.name.to_ascii_lowercase().contains(&needle))
-                || world
-                    .get::<Keywords>(*e)
-                    .is_some_and(|k| k.0.iter().any(|w| w.to_ascii_lowercase().contains(&needle)))
+            world.get::<Named>(*e).is_some_and(|n| {
+                mud_world::targeting::entity_matches(
+                    &needle,
+                    &n.name,
+                    world.get::<Keywords>(*e).map(|k| k.0.as_slice()),
+                )
+            })
         });
         let Some(one) = one else {
             send_to(
@@ -14505,12 +14510,43 @@ mod tests {
     }
 
     #[test]
+    fn get_substring_of_keyword_does_not_match_but_prefix_does() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let sign = spawn_item(&mut world, "a wooden sign", "sign", room);
+        let assign = spawn_item(&mut world, "an assignment", "assignment", room);
+        // `ign` is a substring of both keywords, a prefix of neither.
+        cmd_get(&mut world, player, "ign");
+        assert_eq!(world.get::<Located>(sign).unwrap().0, room);
+        assert_eq!(world.get::<Located>(assign).unwrap().0, room);
+        // `sign` is a prefix of "sign" only, never "assignment".
+        cmd_get(&mut world, player, "sign");
+        assert_eq!(world.get::<Located>(sign).unwrap().0, player);
+        assert_eq!(world.get::<Located>(assign).unwrap().0, room);
+        cmd_get(&mut world, player, "assi");
+        assert_eq!(world.get::<Located>(assign).unwrap().0, player);
+    }
+
+    #[test]
+    fn get_ordinal_and_all_dot_still_work_with_prefix_matching() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let a = spawn_item(&mut world, "a sword", "sword", room);
+        let b = spawn_item(&mut world, "another sword", "sword", room);
+        let c = spawn_item(&mut world, "a third sword", "sword", room);
+        cmd_get(&mut world, player, "2.swo");
+        assert_eq!(world.get::<Located>(b).unwrap().0, player);
+        assert_eq!(world.get::<Located>(a).unwrap().0, room);
+        cmd_get(&mut world, player, "all.sw");
+        assert_eq!(world.get::<Located>(a).unwrap().0, player);
+        assert_eq!(world.get::<Located>(c).unwrap().0, player);
+    }
+
+    #[test]
     fn get_two_word_floor_item_is_not_treated_as_container() {
         // `get rusty sword` — the last word ("sword") resolves to a
         // floor item that is not a container, so the plain floor
         // path must win.
         let (mut world, room, player, _anvil) = make_floor_world();
-        let sword = spawn_item(&mut world, "a rusty sword", "sword", room);
+        let sword = spawn_item(&mut world, "a rusty sword", "rusty sword", room);
         cmd_get(&mut world, player, "rusty sword");
         assert_eq!(world.get::<Located>(sword).unwrap().0, player);
     }
@@ -14527,7 +14563,7 @@ mod tests {
                 Named {
                     name: "a big corpse".to_string(),
                 },
-                Keywords(vec!["corpse".to_string()]),
+                Keywords(vec!["big".to_string(), "corpse".to_string()]),
                 Located(room),
             ))
             .id();
