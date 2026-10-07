@@ -716,6 +716,8 @@ pub struct RaceDef {
     pub focus_bonus: i32,
     /// `LifeForce` enum text.
     pub default_lifeforce: String,
+    /// Race default composition; fallback for mobs left at `FLESH`.
+    pub default_composition: mud_db::enums::Composition,
     pub male_weight_low: i32,
     pub male_weight_high: i32,
     pub male_height_low: i32,
@@ -2316,6 +2318,10 @@ pub struct MobProto {
     /// DEMONIC / ELEMENTAL). Gates holy/unholy ability filters and
     /// surfaces in examine; spawns as a `LifeForceTag` component.
     pub life_force: mud_db::enums::LifeForce,
+    /// What the mob is made of (`FLESH` / `PLANT` / ...). Rendered by
+    /// `look` ("composed of plant material"); a `FLESH` value falls
+    /// back to the race default (`RaceDef::default_composition`).
+    pub composition: mud_db::enums::Composition,
     /// Natural attack flavor — drives the combat narration verb
     /// ("The wolf bites you."). Spawns as a `NaturalAttackType`
     /// component.
@@ -3555,6 +3561,7 @@ mod tests {
             default_size: "MEDIUM".to_string(),
             focus_bonus: 100,
             default_lifeforce: "LIFE".to_string(),
+            default_composition: mud_db::enums::Composition::Flesh,
             male_weight_low: male_weight.0,
             male_weight_high: male_weight.1,
             male_height_low: male_height.0,

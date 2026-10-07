@@ -1161,6 +1161,58 @@ impl LifeForce {
     }
 }
 
+/// What a creature is physically made of. Mirrors the schema's
+/// `Composition` enum (order = legacy `COMP_FLESH..COMP_PLANT`).
+/// `FLESH` is the default. Today it only drives the `look` appearance
+/// line; legacy also keys the following off it, none of which is ported
+/// yet (see `fierymud_legacy/src/composition.cpp` `compositions[]`):
+/// per-damage-type susceptibility percentages (`sus_*`), the bare-hand
+/// damage type (`default_dtype`), the phase (`RIGID`/`PHASE`: whether
+/// physical attacks pass through and whether a corpse is left), and the
+/// display color.
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[sqlx(type_name = r#""Composition""#, rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Composition {
+    #[default]
+    Flesh,
+    Earth,
+    Air,
+    Fire,
+    Water,
+    Ice,
+    Mist,
+    Ether,
+    Metal,
+    Stone,
+    Bone,
+    Lava,
+    Plant,
+}
+
+impl Composition {
+    /// Legacy `compositions[].massnoun`: the noun that completes
+    /// "is composed of ...". Note ETHER reads "nothing" and PLANT
+    /// reads "plant material", exactly as in `composition.cpp`.
+    #[must_use]
+    pub const fn mass_noun(self) -> &'static str {
+        match self {
+            Self::Flesh => "flesh",
+            Self::Earth => "earth",
+            Self::Air => "air",
+            Self::Fire => "fire",
+            Self::Water => "water",
+            Self::Ice => "ice",
+            Self::Mist => "mist",
+            Self::Ether => "nothing",
+            Self::Metal => "metal",
+            Self::Stone => "stone",
+            Self::Bone => "bone",
+            Self::Lava => "lava",
+            Self::Plant => "plant material",
+        }
+    }
+}
+
 /// Natural attack flavor for a mob's unarmed swing — drives the
 /// per-swing verb in combat narration ("The orc claws you." vs
 /// "The wolf bites you."). Mirrors `Mobs.damage_type` in the

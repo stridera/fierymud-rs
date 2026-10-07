@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::enums::{
-    DamageType, LifeForce, MobBehavior, MobProfession, MobRole, MobTrait, MovementMode, Position,
-    ProtectedKind, Size,
+    Composition, DamageType, LifeForce, MobBehavior, MobProfession, MobRole, MobTrait,
+    MovementMode, Position, ProtectedKind, Size,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +81,10 @@ pub struct Mob {
     /// default for organic mobs; UNDEAD/DEMONIC/CELESTIAL drive the
     /// faction-style ability filters.
     pub life_force: LifeForce,
+    /// What the mob is physically made of. Drives the `look` appearance
+    /// line ("... and is composed of plant material"). `FLESH` is the
+    /// schema default.
+    pub composition: Composition,
     /// Natural attack flavor for the mob's unarmed swing (claws,
     /// bites, gores, etc). Drives the combat-narration verb in
     /// `attack_message`. `HIT` is the generic fallback.
@@ -162,6 +166,7 @@ pub async fn list_mobs(pool: &PgPool) -> sqlx::Result<Vec<Mob>> {
             race::text AS "race!",
             size AS "size!: Size",
             "lifeForce" AS "life_force!: LifeForce",
+            composition AS "composition!: Composition",
             "damageType" AS "damage_type!: DamageType",
             "move" AS "move_points!",
             "defaultPosition" AS "default_position!: Position",

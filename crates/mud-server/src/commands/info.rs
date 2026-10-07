@@ -3623,7 +3623,11 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         let size = world
             .get::<mud_world::Sized>(target)
             .map_or(proto.size, |s| s.0);
-        out.push_str(&mob_appearance_line(proto, size));
+        out.push_str(&mob_appearance_line(
+            proto,
+            size,
+            mob_composition(world, proto),
+        ));
     }
     // LifeForce: only surface non-LIFE (the default). UNDEAD gets a
     // distinctive line; the other supernatural forms share a shorter
@@ -4236,34 +4240,47 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
     send_rendered(world, player, &out);
 }
 
-/// Mass noun for a race's innate composition, or `None` for plain
-/// flesh. Legacy `races[].def_composition`: only the plant races
-/// (`plant`, `arborean`) are non-flesh. Composition is not stored in
-/// the DB yet (fierylib drops the legacy `Composition:` mob field after
-/// using it for placeholder stats), so the race default is the best
-/// data we have; the per-mob override lands with a schema column.
-fn race_composition_mass(race: &str) -> Option<&'static str> {
-    match race.to_ascii_lowercase().as_str() {
-        "plant" | "arborean" => Some("plant material"),
-        _ => None,
+/// Composition a mob renders with: its own `Mobs.composition`, or the
+/// race default (`Races.default_composition`, legacy `def_composition`)
+/// when the mob is left at the `FLESH` schema default. A mob explicitly
+/// authored as flesh on a non-flesh race therefore reads as the race;
+/// there is no separate "unset" state in the column.
+fn mob_composition(world: &World, proto: &mud_world::MobProto) -> mud_db::enums::Composition {
+    use mud_db::enums::Composition;
+    if proto.composition != Composition::Flesh {
+        return proto.composition;
     }
+    world
+        .get_resource::<mud_world::RaceCatalog>()
+        .and_then(|c| c.get(&proto.race))
+        .map_or(Composition::Flesh, |r| r.default_composition)
 }
 
-/// Legacy "He is large in size, and is composed of plant material."
-/// line for a mob (`print_char_appearance_to_char`): flesh mobs get the
-/// size only. Ends with CRLF.
-fn mob_appearance_line(proto: &mud_world::MobProto, size: mud_db::enums::Size) -> String {
+/// Legacy `print_char_appearance_to_char` line for a mob:
+/// "He is large in size." for flesh, "... and is insubstantial." for
+/// ether, "... and is composed of plant material." otherwise.
+/// Ends with CRLF.
+fn mob_appearance_line(
+    proto: &mud_world::MobProto,
+    size: mud_db::enums::Size,
+    composition: mud_db::enums::Composition,
+) -> String {
+    use mud_db::enums::Composition;
     let pronoun = match proto.gender.to_ascii_lowercase().as_str() {
         "male" => "He",
         "female" => "She",
         _ => "It",
     };
     let size = size.label().to_ascii_lowercase();
-    match race_composition_mass(&proto.race) {
-        Some(mass) => format!(
-            "{pronoun} is <yellow>{size}</> in size, and is composed of <green>{mass}</>.\r\n"
+    match composition {
+        Composition::Flesh => format!("{pronoun} is <yellow>{size}</> in size.\r\n"),
+        Composition::Ether => {
+            format!("{pronoun} is <yellow>{size}</> in size, and is <green>insubstantial</>.\r\n")
+        }
+        other => format!(
+            "{pronoun} is <yellow>{size}</> in size, and is composed of <green>{}</>.\r\n",
+            other.mass_noun()
         ),
-        None => format!("{pronoun} is <yellow>{size}</> in size.\r\n"),
     }
 }
 
@@ -4497,7 +4514,7 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
             proto.damage_dice_bonus,
             proto.accuracy,
             proto.evasion,
-            mob_appearance_line(&proto, proto.size),
+            mob_appearance_line(&proto, proto.size, mob_composition(world, &proto)),
         );
         send_rendered(world, player, &out);
         return;

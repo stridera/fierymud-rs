@@ -2555,6 +2555,7 @@ mod tests {
                 professions: vec![mud_db::enums::MobProfession::Receptionist],
                 size: mud_db::enums::Size::Medium,
                 life_force: mud_db::enums::LifeForce::Life,
+                composition: mud_db::enums::Composition::Flesh,
                 damage_type: mud_db::enums::DamageType::Hit,
                 move_points: 0,
                 default_position: mud_db::enums::Position::Standing,
@@ -2631,6 +2632,7 @@ mod tests {
     /// The mob's room does not need an `InnRoom` — bank is purely
     /// mob-anchored, unlike inn.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn room_mob_get_emits_bank_block() {
         use super::{Connection, handle_room_mob_get};
         use mud_world::{
@@ -2683,6 +2685,7 @@ mod tests {
                 professions: vec![mud_db::enums::MobProfession::Banker],
                 size: mud_db::enums::Size::Medium,
                 life_force: mud_db::enums::LifeForce::Life,
+                composition: mud_db::enums::Composition::Flesh,
                 damage_type: mud_db::enums::DamageType::Hit,
                 move_points: 0,
                 default_position: mud_db::enums::Position::Standing,

@@ -2979,6 +2979,7 @@ mod tests {
                 // proto reads like a freshly-imported row.
                 size: mud_db::enums::Size::Medium,
                 life_force: mud_db::enums::LifeForce::Life,
+                composition: mud_db::enums::Composition::Flesh,
                 damage_type: mud_db::enums::DamageType::Hit,
                 move_points: 0,
                 default_position: mud_db::enums::Position::Standing,

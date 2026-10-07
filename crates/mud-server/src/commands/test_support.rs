@@ -162,6 +162,7 @@ pub(crate) fn mob_proto(zone: i32, id: i32, profession: MobProfession) -> mud_wo
         professions: vec![profession],
         size: mud_db::enums::Size::Medium,
         life_force: mud_db::enums::LifeForce::Life,
+        composition: mud_db::enums::Composition::Flesh,
         damage_type: mud_db::enums::DamageType::Hit,
         move_points: 0,
         default_position: mud_db::enums::Position::Standing,

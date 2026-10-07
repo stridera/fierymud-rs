@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
+use crate::enums::Composition;
+
 /// Map of `Race` enum text key (`HUMAN` / `ELF` / ...) to its
 /// `default_size` column (`MEDIUM` / `LARGE` / ... — the schema's
 /// `Size` enum, kept as raw text for display). Empty when the
@@ -82,6 +84,10 @@ pub struct RaceRow {
     pub focus_bonus: i32,
     /// `LifeForce` enum text (`LIFE` / `UNDEAD` / `MAGIC` / ...).
     pub default_lifeforce: String,
+    /// Race default composition (legacy `races[].def_composition`).
+    /// Typed, unlike the neighbouring enum-text columns: the runtime
+    /// reads it as a fallback for mobs left at the `FLESH` default.
+    pub default_composition: Composition,
     pub male_weight_low: i32,
     pub male_weight_high: i32,
     pub male_height_low: i32,
@@ -139,6 +145,7 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<RaceRow>> {
             default_size::text AS "default_size!",
             focus_bonus,
             default_lifeforce::text AS "default_lifeforce!",
+            default_composition AS "default_composition!: Composition",
             male_weight_low,
             male_weight_high,
             male_height_low,
