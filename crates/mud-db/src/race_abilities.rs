@@ -64,7 +64,10 @@ pub const fn innate_proficiency(row: &RaceAbilityRow) -> i32 {
 
 /// Grant a race's innate abilities to a character's ability rows.
 /// Missing abilities are added as known at [`innate_proficiency`]; an
-/// existing row keeps its proficiency but is marked known. Rows stay
+/// existing not-known row (e.g. a placeholder at proficiency 0) becomes
+/// known at `max(existing, innate_proficiency)` so a granted innate
+/// isn't left unusable at 0; an already-known row is untouched (its
+/// trained proficiency is never lowered or reset). Rows stay
 /// sorted by `ability_id` (matching `list_for`). Idempotent. Returns
 /// how many rows were added or changed.
 pub fn merge_innates(rows: &mut Vec<CharacterAbilityRow>, innates: &[RaceAbilityRow]) -> usize {
@@ -73,6 +76,7 @@ pub fn merge_innates(rows: &mut Vec<CharacterAbilityRow>, innates: &[RaceAbility
         if let Some(existing) = rows.iter_mut().find(|r| r.ability_id == innate.ability_id) {
             if !existing.known {
                 existing.known = true;
+                existing.proficiency = existing.proficiency.max(innate_proficiency(innate));
                 changed += 1;
             }
         } else {
@@ -125,14 +129,37 @@ mod tests {
     }
 
     #[test]
-    fn existing_rows_keep_proficiency_and_become_known() {
-        let mut rows = vec![row(9, false, 120), row(2, true, 400)];
-        let n = merge_innates(&mut rows, &[innate(9, 100), innate(2, 100)]);
-        assert_eq!(n, 1, "only the not-known row changed");
-        let nine = rows.iter().find(|r| r.ability_id == 9).unwrap();
-        assert_eq!((nine.known, nine.proficiency), (true, 120));
-        let two = rows.iter().find(|r| r.ability_id == 2).unwrap();
-        assert_eq!(two.proficiency, 400, "trained proficiency untouched");
+    fn unknown_rows_become_known_at_max_of_existing_and_start() {
+        let mut rows = vec![
+            row(9, false, 0),
+            row(7, false, 120),
+            row(6, false, 900),
+            row(2, true, 400),
+        ];
+        let innates = [innate(9, 100), innate(7, 50), innate(6, 50), innate(2, 100)];
+        let n = merge_innates(&mut rows, &innates);
+        assert_eq!(n, 3, "only the not-known rows changed");
+        let by = |id: i32| rows.iter().find(|r| r.ability_id == id).unwrap();
+        assert_eq!(
+            (by(9).known, by(9).proficiency),
+            (true, 1000),
+            "0 raised to start"
+        );
+        assert_eq!(
+            (by(7).known, by(7).proficiency),
+            (true, 500),
+            "120 raised to start"
+        );
+        assert_eq!(
+            (by(6).known, by(6).proficiency),
+            (true, 900),
+            "never lowered"
+        );
+        assert_eq!(
+            by(2).proficiency,
+            400,
+            "known rows keep trained proficiency"
+        );
     }
 
     #[test]
