@@ -1,5 +1,6 @@
 pub mod components;
 pub mod loader;
+pub mod reset_gear;
 pub mod resources;
 pub mod wake_effects;
 
@@ -37,6 +38,10 @@ pub use components::{
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_effect_catalog,
     load_from_db, load_trigger_catalog, merge_prototypes, reload_zones, wear_flags_primary_slot,
+};
+pub use reset_gear::{
+    ContentEntry, GearStats, MobGearCatalog, MobGearEntry, ObjectContentsCatalog, fill_container,
+    gear_cap, object_world_counts, outfit_mob,
 };
 pub use resources::{
     AbilityCatalog, AbilityComponentReq, AbilityDef, AbilityMessageSet, AchievementCatalog,

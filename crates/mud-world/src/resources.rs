@@ -2159,8 +2159,8 @@ pub struct MobResetEntry {
 /// Object resets cached for the respawn tick. Same shape as
 /// `MobResetCatalog`: each entry is a top-level (no
 /// `parent_content_id`) reset row whose target room and proto are
-/// already resolved. Nested-content resets (chest contents) are
-/// not refilled — they spawn once at boot and stay.
+/// already resolved. Nested-content rows live in
+/// `ObjectContentsCatalog` and refill with the container.
 #[derive(Resource, Debug, Default)]
 pub struct ObjectResetCatalog {
     pub entries: Vec<ObjectResetEntry>,

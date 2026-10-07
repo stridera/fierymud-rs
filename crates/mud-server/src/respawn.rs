@@ -15,8 +15,9 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_world::{
     AttachedTriggers, Description, Health, Item, Keywords, LiquidContainer, Located, Mob,
-    MobPrototypes, MobResetCatalog, Mountable, Named, ObjectPrototypes, ObjectResetCatalog,
-    Posture, ShopCatalog, Shopkeeper, TriggerCatalog, WorldKey,
+    MobGearCatalog, MobPrototypes, MobResetCatalog, Mountable, Named, ObjectPrototypes,
+    ObjectResetCatalog, Posture, ShopCatalog, Shopkeeper, TriggerCatalog, WorldKey, fill_container,
+    object_world_counts, outfit_mob,
 };
 use mud_world::{FromMobReset, FromObjectReset};
 use tracing::info;
@@ -111,6 +112,10 @@ pub fn respawn_tick(world: &mut World) {
         );
         u64::try_from(raw.max(0)).unwrap_or(0).saturating_mul(10)
     };
+    // Running world count of every object proto, built on the first
+    // gear-carrying respawn and kept current across the loop so the
+    // legacy item caps hold within a single tick too.
+    let mut gear_counts: Option<HashMap<(i32, i32), i32>> = None;
     let timers_snapshot: HashMap<i32, u64> = world
         .get_resource::<MobRespawnTimers>()
         .map_or_else(HashMap::new, |t| t.last_death_tick.clone());
@@ -232,6 +237,18 @@ pub fn respawn_tick(world: &mut World) {
             aggro_queue.push((em.id(), entry.room_entity));
         }
         refilled += 1;
+        // Re-run the reset's E / G commands (legacy `reset_zone`
+        // re-equips on every reset): same function the boot loader
+        // uses, so the respawn matches the original outfit, minus any
+        // item whose world-wide cap is already met.
+        let new_mob = em.id();
+        let has_gear = world
+            .get_resource::<MobGearCatalog>()
+            .is_some_and(|c| c.by_reset.contains_key(&entry.reset_id));
+        if has_gear {
+            let counts = gear_counts.get_or_insert_with(|| object_world_counts(world));
+            outfit_mob(world, new_mob, entry.reset_id, counts);
+        }
     }
 
     if refilled > 0 {
@@ -381,11 +398,388 @@ pub fn respawn_tick(world: &mut World) {
         }
         let spawned = bundle.id();
         crate::item_decay::attach_timer_if_decaying(world, spawned, &proto);
+        // A container that comes back gets its authored contents again.
+        fill_container(world, &[spawned], entry.reset_id);
         reset_id_alive.insert(entry.reset_id);
         *object_world_counts.entry(proto_key).or_insert(0) += 1;
         object_refilled += 1;
     }
     if object_refilled > 0 {
         info!(object_refilled, "object respawn tick");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::{mob_proto, object_proto};
+    use mud_db::enums::{MobProfession, ObjectType};
+    use mud_db::mob_reset_equipment::MobResetEquipment;
+    use mud_db::object_reset_contents::ObjectResetContent;
+    use mud_world::{
+        ContentEntry, LightFuelProto, MobResetEntry, ObjectContentsCatalog, ObjectResetEntry,
+        RuntimeConfig,
+    };
+
+    const MOB_KEY: (i32, i32) = (1, 1);
+    const SWORD: i32 = 10;
+    const HELM: i32 = 11;
+    const BREAD: i32 = 12;
+    const TORCH: i32 = 13;
+    const CHEST: i32 = 20;
+    const POUCH: i32 = 21;
+    const GEM: i32 = 22;
+
+    fn eq_row(
+        id: i32,
+        reset_id: i32,
+        obj: i32,
+        slot: Option<&str>,
+        prob: f64,
+    ) -> MobResetEquipment {
+        MobResetEquipment {
+            id,
+            reset_id,
+            object_zone_id: 1,
+            object_id: obj,
+            wear_location: slot.map(str::to_string),
+            max_instances: 1,
+            probability: prob,
+            decorative: false,
+        }
+    }
+
+    /// A world with one room, the mob proto, and all gear protos.
+    fn base_world() -> (World, Entity) {
+        let mut world = World::new();
+        world.insert_resource(TickCount(0));
+        world.insert_resource(RuntimeConfig::default());
+        world.insert_resource(ShopCatalog::default());
+        world.insert_resource(TriggerCatalog::default());
+        world.insert_resource(MobRespawnTimers::default());
+        let mut mobs = MobPrototypes::default();
+        mobs.by_key
+            .insert(MOB_KEY, mob_proto(1, 1, MobProfession::Trainer));
+        world.insert_resource(mobs);
+        let mut objs = ObjectPrototypes::default();
+        for id in [SWORD, HELM, BREAD, TORCH, CHEST, POUCH, GEM] {
+            let mut p = object_proto(1, id, ObjectType::Other);
+            p.name = format!("object {id}");
+            if id == TORCH {
+                p.r#type = ObjectType::Light;
+                p.light_fuel = Some(LightFuelProto {
+                    capacity: 100,
+                    remaining: 100,
+                });
+            }
+            objs.by_key.insert((1, id), p);
+        }
+        world.insert_resource(objs);
+        world.insert_resource(MobResetCatalog::default());
+        world.insert_resource(ObjectResetCatalog::default());
+        world.insert_resource(MobGearCatalog::default());
+        world.insert_resource(ObjectContentsCatalog::default());
+        let room = world.spawn_empty().id();
+        (world, room)
+    }
+
+    fn add_mob_reset(world: &mut World, room: Entity, reset_id: i32, rows: &[MobResetEquipment]) {
+        world
+            .resource_mut::<MobResetCatalog>()
+            .entries
+            .push(MobResetEntry {
+                reset_id,
+                mob_zone_id: 1,
+                mob_id: 1,
+                room_entity: room,
+                max_instances: 10,
+            });
+        let (fresh, _) =
+            mud_world::reset_gear::build_gear_entries(rows, world.resource::<ObjectPrototypes>());
+        world
+            .resource_mut::<MobGearCatalog>()
+            .by_reset
+            .extend(fresh);
+    }
+
+    /// What `load_from_db` does for one mob: spawn it for its reset,
+    /// outfit it, then run the gear-bonus pass.
+    fn boot_mob(world: &mut World, room: Entity, reset_id: i32) -> Entity {
+        let mob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a test mob".into(),
+                },
+                WorldKey { zone: 1, id: 1 },
+                Located(room),
+                FromMobReset(reset_id),
+            ))
+            .id();
+        let mut counts = object_world_counts(world);
+        outfit_mob(world, mob, reset_id, &mut counts);
+        crate::equip_apply::recompute_equipped_for(world, mob);
+        mob
+    }
+
+    fn mob_of(world: &mut World, reset_id: i32) -> Option<Entity> {
+        let mut q = world.query_filtered::<(Entity, &FromMobReset), With<Mob>>();
+        q.iter(world).find(|(_, f)| f.0 == reset_id).map(|(e, _)| e)
+    }
+
+    /// Sorted `(object id, worn slot)` of everything on `mob`.
+    fn gear_of(world: &mut World, mob: Entity) -> Vec<(i32, Option<String>)> {
+        let mut q = world
+            .query_filtered::<(&WorldKey, &Located, Option<&mud_world::EquippedSlot>), With<Item>>(
+            );
+        let mut v: Vec<(i32, Option<String>)> = q
+            .iter(world)
+            .filter(|(_, l, _)| l.0 == mob)
+            .map(|(k, _, s)| (k.id, s.map(|s| format!("{:?}", s.0))))
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn kill(world: &mut World, mob: Entity, room: Entity) {
+        crate::combat::handle_death(world, mob, "a test mob", room);
+    }
+
+    fn run_respawn(world: &mut World, tick: u64) {
+        world.insert_resource(TickCount(tick));
+        respawn_tick(world);
+    }
+
+    fn standard_gear() -> Vec<MobResetEquipment> {
+        vec![
+            eq_row(1, 1, SWORD, Some("WIELD"), 0.99),
+            eq_row(2, 1, HELM, Some("HEAD"), 0.99),
+            eq_row(3, 1, BREAD, None, 0.99),
+            eq_row(4, 1, BREAD, None, 0.99),
+        ]
+    }
+
+    #[test]
+    fn respawned_mob_has_same_equipment_and_inventory_as_boot() {
+        let (mut world, room) = base_world();
+        add_mob_reset(&mut world, room, 1, &standard_gear());
+        let booted = boot_mob(&mut world, room, 1);
+        let at_boot = gear_of(&mut world, booted);
+        assert_eq!(at_boot.len(), 4, "boot outfits all four items: {at_boot:?}");
+
+        kill(&mut world, booted, room);
+        assert!(world.get_entity(booted).is_err(), "mob died");
+        assert!(mob_of(&mut world, 1).is_none());
+
+        run_respawn(&mut world, 6000);
+        let reborn = mob_of(&mut world, 1).expect("mob respawned");
+        assert_eq!(gear_of(&mut world, reborn), at_boot);
+    }
+
+    #[test]
+    fn respawned_gear_is_world_owned_not_character_items() {
+        // Mob gear is parented to the mob, never to a player, so the
+        // player-save snapshot (which walks a player's Located chain)
+        // can't see it, and it carries no persistence marker.
+        let (mut world, room) = base_world();
+        add_mob_reset(&mut world, room, 1, &standard_gear());
+        let booted = boot_mob(&mut world, room, 1);
+        kill(&mut world, booted, room);
+        run_respawn(&mut world, 6000);
+        let reborn = mob_of(&mut world, 1).expect("respawned");
+        let mut q =
+            world.query_filtered::<(&Located, Has<mud_world::PersistedItemId>), With<Item>>();
+        let on_mob: Vec<bool> = q
+            .iter(&world)
+            .filter(|(l, _)| l.0 == reborn)
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(on_mob.len(), 4);
+        assert!(on_mob.iter().all(|persisted| !persisted));
+        assert!(world.get::<mud_world::Player>(reborn).is_none());
+    }
+
+    #[test]
+    fn capped_item_is_not_minted_again_while_a_copy_exists() {
+        // SWORD prob 0.01 -> legacy max 1: one copy in the world.
+        let (mut world, room) = base_world();
+        let rows = vec![
+            eq_row(1, 1, SWORD, Some("WIELD"), 0.01),
+            eq_row(2, 1, BREAD, None, 0.99),
+        ];
+        add_mob_reset(&mut world, room, 1, &rows);
+        let booted = boot_mob(&mut world, room, 1);
+        assert_eq!(gear_of(&mut world, booted).len(), 2);
+
+        // Death moves the sword into the corpse; it still exists, so
+        // the respawn must not hand out a second one.
+        kill(&mut world, booted, room);
+        run_respawn(&mut world, 6000);
+        let reborn = mob_of(&mut world, 1).expect("respawned");
+        assert_eq!(
+            gear_of(&mut world, reborn)
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![BREAD],
+            "sword is capped while the corpse still holds it"
+        );
+        let swords = *object_world_counts(&mut world)
+            .get(&(1, SWORD))
+            .unwrap_or(&0);
+        assert_eq!(swords, 1);
+
+        // Once every copy is gone (corpse decayed), the next respawn
+        // may load it again - still never more than one.
+        let sword_entities: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &WorldKey), With<Item>>();
+            q.iter(&world)
+                .filter(|(_, k)| k.id == SWORD)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        for e in sword_entities {
+            world.despawn(e);
+        }
+        kill(&mut world, reborn, room);
+        run_respawn(&mut world, 12_000);
+        let again = mob_of(&mut world, 1).expect("respawned again");
+        assert!(
+            gear_of(&mut world, again)
+                .iter()
+                .any(|(id, _)| *id == SWORD)
+        );
+        assert_eq!(
+            *object_world_counts(&mut world)
+                .get(&(1, SWORD))
+                .unwrap_or(&0),
+            1
+        );
+    }
+
+    #[test]
+    fn cap_holds_across_reset_rows_in_the_same_tick() {
+        // Two rows share a unique sword; only one mob may get it,
+        // even when both respawn in the same tick.
+        let (mut world, room) = base_world();
+        let sword = [eq_row(1, 1, SWORD, Some("WIELD"), 0.01)];
+        add_mob_reset(&mut world, room, 1, &sword);
+        let sword2 = [eq_row(2, 2, SWORD, Some("WIELD"), 0.01)];
+        add_mob_reset(&mut world, room, 2, &sword2);
+        run_respawn(&mut world, 6000);
+        assert!(mob_of(&mut world, 1).is_some() && mob_of(&mut world, 2).is_some());
+        assert_eq!(
+            *object_world_counts(&mut world)
+                .get(&(1, SWORD))
+                .unwrap_or(&0),
+            1
+        );
+    }
+
+    #[test]
+    fn respawned_mobs_worn_light_lights_the_room() {
+        let (mut world, room) = base_world();
+        add_mob_reset(
+            &mut world,
+            room,
+            1,
+            &[eq_row(1, 1, TORCH, Some("HOLD"), 0.99)],
+        );
+        let booted = boot_mob(&mut world, room, 1);
+        assert!(crate::commands::room_has_light(&mut world, room));
+        kill(&mut world, booted, room);
+        // The torch went into the corpse; nothing lights the room.
+        let lit: Vec<Entity> = {
+            let mut q = world.query_filtered::<Entity, With<mud_world::Lit>>();
+            q.iter(&world).collect()
+        };
+        for e in lit {
+            world.despawn(e);
+        }
+        assert!(!crate::commands::room_has_light(&mut world, room));
+        run_respawn(&mut world, 6000);
+        assert!(mob_of(&mut world, 1).is_some());
+        assert!(
+            crate::commands::room_has_light(&mut world, room),
+            "respawned mob's worn torch is lit"
+        );
+    }
+
+    #[test]
+    fn respawned_container_is_refilled_with_nested_contents() {
+        let (mut world, room) = base_world();
+        world
+            .resource_mut::<ObjectResetCatalog>()
+            .entries
+            .push(ObjectResetEntry {
+                reset_id: 7,
+                object_zone_id: 1,
+                object_id: CHEST,
+                room_entity: room,
+                max_instances: 1,
+            });
+        let content_rows = vec![
+            ObjectResetContent {
+                id: 1,
+                reset_id: 7,
+                parent_content_id: None,
+                object_zone_id: 1,
+                object_id: POUCH,
+                quantity: 1,
+            },
+            // Listed before its parent on purpose: order must not matter.
+            ObjectResetContent {
+                id: 3,
+                reset_id: 7,
+                parent_content_id: Some(1),
+                object_zone_id: 1,
+                object_id: GEM,
+                quantity: 3,
+            },
+            ObjectResetContent {
+                id: 2,
+                reset_id: 7,
+                parent_content_id: None,
+                object_zone_id: 1,
+                object_id: BREAD,
+                quantity: 2,
+            },
+        ];
+        let entries: Vec<ContentEntry> =
+            mud_world::reset_gear::build_content_entries(&content_rows)
+                .remove(&7)
+                .unwrap();
+        world
+            .resource_mut::<ObjectContentsCatalog>()
+            .by_reset
+            .insert(7, entries);
+
+        run_respawn(&mut world, 6000);
+        let chest = {
+            let mut q = world.query_filtered::<(Entity, &WorldKey), With<Item>>();
+            q.iter(&world)
+                .find(|(_, k)| k.id == CHEST)
+                .map(|(e, _)| e)
+                .expect("chest respawned")
+        };
+        let kids = |world: &mut World, parent: Entity| -> Vec<i32> {
+            let mut q = world.query_filtered::<(&WorldKey, &Located), With<Item>>();
+            let mut v: Vec<i32> = q
+                .iter(world)
+                .filter(|(_, l)| l.0 == parent)
+                .map(|(k, _)| k.id)
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(kids(&mut world, chest), vec![BREAD, BREAD, POUCH]);
+        let pouch = {
+            let mut q = world.query_filtered::<(Entity, &WorldKey, &Located), With<Item>>();
+            q.iter(&world)
+                .find(|(_, k, l)| k.id == POUCH && l.0 == chest)
+                .map(|(e, _, _)| e)
+                .unwrap()
+        };
+        assert_eq!(kids(&mut world, pouch), vec![GEM, GEM, GEM]);
     }
 }

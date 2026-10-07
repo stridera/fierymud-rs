@@ -11,10 +11,15 @@ use mud_db::{
 };
 use tracing::{info, warn};
 
+use crate::reset_gear::{
+    MobGearCatalog, ObjectContentsCatalog, build_content_entries, build_gear_entries,
+    fill_container, object_world_counts, outfit_mob,
+};
+
 use crate::components::{
-    AttachedTriggers, BoardLink, Description, EquippedSlot, ExitData, Exits, FromMobReset,
-    FromObjectReset, Health, Item, Keywords, LiquidContainer, Located, Mob, Mountable, Named,
-    Posture, Room, RoomSector, Shopkeeper, Slot, WorldKey, Zone, ZoneClimate,
+    AttachedTriggers, BoardLink, Description, ExitData, Exits, FromMobReset, FromObjectReset,
+    Health, Item, Keywords, LiquidContainer, Located, Mob, Mountable, Named, Posture, Room,
+    RoomSector, Shopkeeper, WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
@@ -1134,7 +1139,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         // Catalog the reset row so the respawn tick can refill if
         // the spawn ever despawns. Mirrors the `MobReset` catalog
         // shape — `ObjectResetContents` (nested chest contents)
-        // are a separate table and don't refill independently.
+        // live in `ObjectContentsCatalog` and refill with the container.
         object_reset_catalog.push(ObjectResetEntry {
             reset_id: r.id,
             object_zone_id: r.object_zone_id,
@@ -1218,154 +1223,59 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         entries: object_reset_catalog,
     });
 
-    // Pass 6: equip mobs spawned by Pass 5 according to MobResetEquipment.
-    // Each row attaches one Item to every mob spawned for its reset_id.
-    // Items get Located on the mob and EquippedSlot when wear_location
-    // parses; rows whose proto/slot/parent can't be resolved are skipped.
+    // Pass 6: equip + stock the mobs spawned by Pass 5 from
+    // MobResetEquipment. The catalog stays resident so `respawn_tick`
+    // can re-outfit the same mobs after they die; the actual spawning
+    // lives in `reset_gear::outfit_mob`, shared with that tick. Mobs
+    // are walked in reset-row order so a capped (unique) item goes to
+    // the first reset that lists it, deterministically.
     let equipment_rows = mob_reset_equipment::list_all(pool).await?;
-    for eq in &equipment_rows {
-        if eq.probability <= 0.0 {
-            continue;
-        }
-        let proto = world
-            .resource::<ObjectPrototypes>()
-            .by_key
-            .get(&(eq.object_zone_id, eq.object_id))
-            .cloned();
-        let mob_entities = mobs_by_reset.get(&eq.reset_id).cloned();
-        let (Some(proto), Some(mob_entities)) = (proto, mob_entities) else {
-            stats.mob_equipment_skipped += 1;
+    let (gear_by_reset, gear_unresolved) =
+        build_gear_entries(&equipment_rows, world.resource::<ObjectPrototypes>());
+    stats.mob_equipment_skipped += gear_unresolved;
+    world.insert_resource(MobGearCatalog {
+        by_reset: gear_by_reset,
+    });
+    let mut gear_counts = object_world_counts(world);
+    let reset_order: Vec<i32> = world
+        .resource::<MobResetCatalog>()
+        .entries
+        .iter()
+        .map(|e| e.reset_id)
+        .collect();
+    for reset_id in reset_order {
+        let Some(mob_entities) = mobs_by_reset.get(&reset_id) else {
             continue;
         };
-        let slot = eq.wear_location.as_deref().and_then(Slot::from_label);
-        let trigger_keys = world
-            .resource::<TriggerCatalog>()
-            .object_attachments
-            .get(&(proto.zone_id, proto.id))
-            .cloned();
-        for &mob in &mob_entities {
-            let mut bundle = world.spawn((
-                Item,
-                Named {
-                    name: proto.name.clone(),
-                },
-                Keywords(proto.keywords.clone()),
-                WorldKey {
-                    zone: proto.zone_id,
-                    id: proto.id,
-                },
-                Located(mob),
-            ));
-            if let Some(desc) = proto.examine_description.clone() {
-                bundle.insert(Description(desc));
-            }
-            if let Some(s) = slot {
-                bundle.insert(EquippedSlot(s));
-            }
-            // A worn light needs its fuel state: without it the light
-            // stays dark (no fuel data is never assumed infinite).
-            if let Some(fuel) = proto.light_fuel {
-                bundle.insert(crate::components::LightFuel {
-                    capacity: fuel.capacity,
-                    remaining: fuel.remaining,
-                });
-            }
-            if let Some(ref keys) = trigger_keys {
-                bundle.insert(AttachedTriggers(keys.clone()));
-            }
-            if !proto.flags.is_empty() {
-                bundle.insert(crate::components::ObjectFlags(proto.flags.clone()));
-            }
-            if !proto.restrictions.is_empty() {
-                bundle.insert(crate::components::ObjectRestrictions(
-                    proto.restrictions.clone(),
-                ));
-            }
-            stats.mob_equipment_spawned += 1;
+        for &mob in mob_entities {
+            let gear = outfit_mob(world, mob, reset_id, &mut gear_counts);
+            stats.mob_equipment_spawned += gear.spawned;
+            stats.mob_equipment_skipped += gear.skipped;
         }
     }
 
-    // Pass 7: nested ObjectResetContents. Each row spawns N items
-    // (`quantity`) inside their parent — either the container entity
-    // from Pass 5 (parent_content_id IS NULL) or another content entity
-    // spawned earlier in this pass. We iterate twice to handle the
-    // small amount of nested-content nesting that exists today (max
-    // depth 2 in fierydev); deeper nesting would just add another
-    // pass. Each row's spawned entities are tracked by content id so
-    // children can find them.
+    // Pass 7: nested ObjectResetContents. The rows stay resident in
+    // `ObjectContentsCatalog` so a container that respawns is refilled
+    // (`reset_gear::fill_container`, shared with `respawn_tick`).
     let content_rows = object_reset_contents::list_all(pool).await?;
-    let mut entities_by_content: HashMap<i32, Vec<Entity>> =
-        HashMap::with_capacity(content_rows.len());
-    // Two-pass: top-level first (parent_content_id IS NULL), nested
-    // second. With only depth-2 in the data this fully resolves.
-    for pass in 0..2 {
-        for row in &content_rows {
-            // Already spawned this row's items? skip.
-            if entities_by_content.contains_key(&row.id) {
-                continue;
-            }
-            // Deeper-nested rows wait for their parent in pass 1.
-            let want_top_level = pass == 0;
-            if row.parent_content_id.is_some() == want_top_level {
-                continue;
-            }
-            // Resolve parent entities.
-            let parents: Option<Vec<Entity>> = if let Some(pcid) = row.parent_content_id {
-                entities_by_content.get(&pcid).cloned()
-            } else {
-                objects_by_reset.get(&row.reset_id).cloned()
-            };
-            let proto = world
-                .resource::<ObjectPrototypes>()
-                .by_key
-                .get(&(row.object_zone_id, row.object_id))
-                .cloned();
-            let (Some(parents), Some(proto)) = (parents, proto) else {
-                stats.object_contents_skipped += 1;
-                continue;
-            };
-            let qty = usize::try_from(row.quantity.max(1)).unwrap_or(1);
-            let trigger_keys = world
-                .resource::<TriggerCatalog>()
-                .object_attachments
-                .get(&(proto.zone_id, proto.id))
-                .cloned();
-            let mut spawned_for_content: Vec<Entity> = Vec::with_capacity(parents.len() * qty);
-            for parent in parents {
-                for _ in 0..qty {
-                    let mut bundle = world.spawn((
-                        Item,
-                        Named {
-                            name: proto.name.clone(),
-                        },
-                        Keywords(proto.keywords.clone()),
-                        WorldKey {
-                            zone: proto.zone_id,
-                            id: proto.id,
-                        },
-                        Located(parent),
-                    ));
-                    if let Some(desc) = proto.examine_description.clone() {
-                        bundle.insert(Description(desc));
-                    }
-                    if let Some(ref keys) = trigger_keys {
-                        bundle.insert(AttachedTriggers(keys.clone()));
-                    }
-                    if !proto.flags.is_empty() {
-                        bundle.insert(crate::components::ObjectFlags(proto.flags.clone()));
-                    }
-                    if !proto.restrictions.is_empty() {
-                        bundle.insert(crate::components::ObjectRestrictions(
-                            proto.restrictions.clone(),
-                        ));
-                    }
-                    spawned_for_content.push(bundle.id());
-                    stats.object_contents_spawned += 1;
-                }
-            }
-            entities_by_content.insert(row.id, spawned_for_content);
+    let contents_by_reset = build_content_entries(&content_rows);
+    world.insert_resource(ObjectContentsCatalog {
+        by_reset: contents_by_reset.clone(),
+    });
+    for (reset_id, containers) in &objects_by_reset {
+        if contents_by_reset.contains_key(reset_id) {
+            let filled = fill_container(world, containers, *reset_id);
+            stats.object_contents_spawned += filled.spawned;
+            stats.object_contents_skipped += filled.skipped;
         }
     }
+    // Content rows of resets that never spawned a container (room or
+    // proto missing, or the global cap was already met).
+    stats.object_contents_skipped += contents_by_reset
+        .iter()
+        .filter(|(reset_id, _)| !objects_by_reset.contains_key(reset_id))
+        .map(|(_, rows)| rows.len())
+        .sum::<usize>();
 
     info!(
         zones = stats.zones,
@@ -2441,6 +2351,8 @@ pub async fn reload_zones(
     let extra_rows = mud_db::room_extra_descriptions::list_extras(pool).await?;
     let mob_reset_rows = mob_resets::list_all(pool).await?;
     let object_reset_rows = object_resets::list_all(pool).await?;
+    let equipment_rows = mob_reset_equipment::list_all(pool).await?;
+    let content_rows = object_reset_contents::list_all(pool).await?;
     let fresh_wake = crate::load_wake_effect_catalog(pool).await?;
 
     if let Some(z) = zone
@@ -2731,6 +2643,43 @@ pub async fn reload_zones(
     }
     world.resource_mut::<MobResetCatalog>().entries = mob_entries;
     world.resource_mut::<ObjectResetCatalog>().entries = obj_entries;
+
+    // Gear / container contents for the in-scope resets, so the respawn
+    // tick outfits mobs from the edited rows. Live mobs keep what they
+    // carry; only future spawns see the change.
+    {
+        let mob_reset_ids: HashSet<i32> = mob_reset_rows
+            .iter()
+            .filter(|r| in_scope(r.room_zone_id))
+            .map(|r| r.id)
+            .collect();
+        let scoped_equipment: Vec<_> = equipment_rows
+            .into_iter()
+            .filter(|e| mob_reset_ids.contains(&e.reset_id))
+            .collect();
+        let (fresh_gear, _) =
+            build_gear_entries(&scoped_equipment, world.resource::<ObjectPrototypes>());
+        let mut gear = world.get_resource_or_insert_with(MobGearCatalog::default);
+        gear.by_reset.retain(|id, _| !mob_reset_ids.contains(id));
+        gear.by_reset.extend(fresh_gear);
+
+        let object_reset_ids: HashSet<i32> = object_reset_rows
+            .iter()
+            .filter(|r| in_scope(r.room_zone_id))
+            .map(|r| r.id)
+            .collect();
+        let scoped_contents: Vec<_> = content_rows
+            .into_iter()
+            .filter(|c| object_reset_ids.contains(&c.reset_id))
+            .collect();
+        let mut contents = world.get_resource_or_insert_with(ObjectContentsCatalog::default);
+        contents
+            .by_reset
+            .retain(|id, _| !object_reset_ids.contains(id));
+        contents
+            .by_reset
+            .extend(build_content_entries(&scoped_contents));
+    }
 
     info!(?zone, ?stats, "zone data reloaded from DB");
     Ok(stats)
