@@ -132,8 +132,15 @@ pub async fn pscan_owners_by_item(pool: &PgPool, needle: &str) -> sqlx::Result<V
     .await
 }
 
-/// Read every item row for a character. Ordered by `id` (insertion order)
-/// so the runtime sees items in a deterministic shape.
+/// Read every item row for a character, oldest arrival first.
+///
+/// The runtime lists a container's contents newest-first (legacy
+/// `obj_to_*` push the list head), so the load pass must spawn rows in
+/// the order they arrived. `save_inventory_diff` stamps `updated_at`
+/// with a per-row millisecond offset in snapshot (arrival) order, so
+/// `updated_at` carries that order even when an old row (low `id`) was
+/// re-acquired after newer ones; `id` only breaks ties for rows written
+/// outside the diff (import, chest withdraw).
 pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<CharacterItemRow>> {
     sqlx::query_as!(
         CharacterItemRow,
@@ -151,7 +158,7 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
             COALESCE(custom_values -> 'lit' = 'true'::jsonb, FALSE) AS "lit!"
         FROM "CharacterItems"
         WHERE character_id = $1
-        ORDER BY id
+        ORDER BY updated_at, id
         "#,
         character_id,
     )
@@ -184,6 +191,7 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
 /// Multi-query helper — caller passes a `&mut PgConnection` and is
 /// responsible for atomicity (wrap in a transaction if the work
 /// should commit-or-rollback as a unit; `save_player` does this).
+#[allow(clippy::too_many_lines)]
 pub async fn save_inventory_diff(
     conn: &mut sqlx::PgConnection,
     character_id: &str,
@@ -231,6 +239,10 @@ pub async fn save_inventory_diff(
     let mut ids: Vec<i32> = Vec::with_capacity(items.len());
     let mut remapped: HashMap<i32, i32> = HashMap::new();
     for (idx, snap) in items.iter().enumerate() {
+        // `updated_at` column is millisecond-precision; one ms per row in
+        // snapshot order makes it a strict arrival-order key (see
+        // `list_for`).
+        let arrival_offset_ms = i32::try_from(idx).unwrap_or(i32::MAX);
         let container_id: Option<i32> = snap
             .parent_idx
             .and_then(|p_idx| ids.get(p_idx).copied())
@@ -255,7 +267,7 @@ pub async fn save_inventory_diff(
                         ELSE (CASE WHEN jsonb_typeof(custom_values) = 'object'
                                    THEN custom_values ELSE '{}'::jsonb END) - 'lit'
                         END,
-                    updated_at = NOW()
+                    updated_at = NOW() + $9::int * INTERVAL '1 millisecond'
                 WHERE id = $7
                 RETURNING id
                 "#,
@@ -267,6 +279,7 @@ pub async fn save_inventory_diff(
                 snap.liquid_type.as_deref(),
                 id,
                 snap.lit,
+                arrival_offset_ms,
             )
             .fetch_optional(&mut *conn)
             .await?;
@@ -283,7 +296,7 @@ pub async fn save_inventory_diff(
                  charges, liquid_remaining, liquid_type, custom_values, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
                     CASE WHEN $9::boolean THEN '{"lit": true}'::jsonb ELSE '{}'::jsonb END,
-                    NOW())
+                    NOW() + $10::int * INTERVAL '1 millisecond')
             RETURNING id
             "#,
             character_id,
@@ -295,6 +308,7 @@ pub async fn save_inventory_diff(
             snap.liquid_remaining.unwrap_or(0),
             snap.liquid_type.as_deref(),
             snap.lit,
+            arrival_offset_ms,
         )
         .fetch_one(&mut *conn)
         .await?;

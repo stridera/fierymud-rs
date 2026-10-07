@@ -497,14 +497,17 @@ fn get_indexed_item_with_and_without_from() {
             Located(g.room),
         ))
         .id();
-    let a = item(&mut g.world, "a rusty sword", &["sword"], corpse);
+    // Newest arrival is listed first, so `2.sword` is the older one: put
+    // `b` in first.
     let b = item(&mut g.world, "a bent sword", &["sword"], corpse);
+    let a = item(&mut g.world, "a rusty sword", &["sword"], corpse);
     cmd_get(&mut g.world, g.player, "2.sword from corpse");
     assert_eq!(loc(&g.world, a), corpse);
     assert_eq!(loc(&g.world, b), g.player);
+    // `b` goes back in as the newest arrival, so `2.sword` is now `a`.
     g.world.entity_mut(b).insert(Located(corpse));
     cmd_get(&mut g.world, g.player, "2.sword corpse");
-    assert_eq!(loc(&g.world, b), g.player);
+    assert_eq!(loc(&g.world, a), g.player);
 }
 
 #[test]
@@ -523,8 +526,9 @@ fn get_from_an_indexed_container() {
             ))
             .id()
     };
-    let first = mk(&mut g);
+    // Newest arrival is listed first, so `2.corpse` is the older one.
     let second = mk(&mut g);
+    let first = mk(&mut g);
     let in_first = item(&mut g.world, "a coin", &["coin"], first);
     let in_second = item(&mut g.world, "a gem", &["gem"], second);
     cmd_get(&mut g.world, g.player, "all from 2.corpse");
@@ -614,8 +618,9 @@ fn index_and_all_prefixes_work_across_item_verbs() {
 fn look_and_examine_take_an_index() {
     let (mut world, room, p, mut rx) = setup(UserRole::Player);
     world.entity_mut(room).insert(RoomSector(Sector::City));
-    item(&mut world, "a rusty sword", &["sword"], room);
+    // Newest arrival is listed first, so `2.sword` is the older (bent) one.
     item(&mut world, "a bent sword", &["sword"], room);
+    item(&mut world, "a rusty sword", &["sword"], room);
     for verb in ["look", "look at", "examine", "look at the"] {
         dispatch(&mut world, p, &format!("{verb} 2.sword"));
         let out = drain(&mut rx);

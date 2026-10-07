@@ -444,6 +444,9 @@ mod movement_message_tests;
 #[path = "commands/norepeat_tests.rs"]
 mod norepeat_tests;
 #[cfg(test)]
+#[path = "commands/order_tests.rs"]
+mod order_tests;
+#[cfg(test)]
 #[path = "commands/parser_tests.rs"]
 mod parser_tests;
 #[cfg(test)]
@@ -6750,10 +6753,13 @@ pub(crate) fn send_char_items_list(
 pub(crate) fn refresh_player_items_gmcp(world: &mut World, player: Entity) {
     let inv: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located, Option<&EquippedSlot>), With<Item>>();
-        q.iter(world)
+        let mut inv: Vec<Entity> = q
+            .iter(world)
             .filter(|(_, l, eq)| l.0 == player && eq.is_none())
             .map(|(e, _, _)| e)
-            .collect()
+            .collect();
+        sort_newest_first(world, player, &mut inv, |e| *e);
+        inv
     };
     send_char_items_list(world, player, "inv", &inv);
     let worn: Vec<Entity> = {
@@ -8960,6 +8966,36 @@ pub(crate) fn sphere_color_tag(sphere: &str) -> Option<&'static str> {
     }
 }
 
+/// Direct children of `container` (room / carrier / bag), newest arrival
+/// first. Legacy `obj_to_room` / `obj_to_char` / `obj_to_obj` /
+/// `char_to_room` push onto the HEAD of the linked list, so the thing that
+/// arrived last is listed first. bevy's [`mud_world::Contents`] appends on
+/// every `Located` insert (a re-insert moves the entity to the end) and
+/// removes order-preservingly, so the reversed Vec is exactly that order.
+pub(crate) fn newest_first(world: &World, container: Entity) -> Vec<Entity> {
+    world
+        .get::<mud_world::Contents>(container)
+        .map(|c| c.iter().rev().collect())
+        .unwrap_or_default()
+}
+
+/// Stable-sort `rows` so entries whose entity sits in `container` come
+/// newest-arrival first (see [`newest_first`]). Rows not inside the
+/// container sort after, in their existing order.
+pub(crate) fn sort_newest_first<T>(
+    world: &World,
+    container: Entity,
+    rows: &mut [T],
+    entity_of: impl Fn(&T) -> Entity,
+) {
+    let rank: std::collections::HashMap<Entity, usize> = newest_first(world, container)
+        .into_iter()
+        .enumerate()
+        .map(|(i, e)| (e, i))
+        .collect();
+    rows.sort_by_key(|r| rank.get(&entity_of(r)).copied().unwrap_or(usize::MAX));
+}
+
 pub(crate) fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool {
     world
         .get::<PlayerFlags>(entity)
@@ -11132,11 +11168,14 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
         return;
     }
     let items: Vec<String> = {
-        let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
-        q.iter(world)
-            .filter(|(l, _)| l.0 == container)
-            .map(|(_, n)| n.name.clone())
-            .collect()
+        let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Item>>();
+        let mut rows: Vec<(Entity, String)> = q
+            .iter(world)
+            .filter(|(_, l, _)| l.0 == container)
+            .map(|(e, _, n)| (e, n.name.clone()))
+            .collect();
+        sort_newest_first(world, container, &mut rows, |r| r.0);
+        rows.into_iter().map(|(_, n)| n).collect()
     };
     let coin = world.get::<mud_world::CoinPile>(container).map(|c| c.0);
     if items.is_empty() && coin.unwrap_or(0) <= 0 {
@@ -11735,10 +11774,13 @@ pub(crate) fn find_in_container(
     let (index, needle) = parse_indexed_needle(needle);
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-    q.iter(world)
+    let mut hits: Vec<Entity> = q
+        .iter(world)
         .filter(|(_, l, n, kw)| l.0 == container && matches(&needle, n, *kw))
-        .nth(index - 1)
         .map(|(e, _, _, _)| e)
+        .collect();
+    sort_newest_first(world, container, &mut hits, |e| *e);
+    hits.get(index - 1).copied()
 }
 
 /// `eat <item>` / `quaff <item>`: consume a Food / Potion. Looks up
@@ -12644,7 +12686,8 @@ pub(crate) fn find_carried_by(
         Option<&Keywords>,
         Option<&EquippedSlot>,
     ), With<Item>>();
-    q.iter(world)
+    let mut hits: Vec<Entity> = q
+        .iter(world)
         .filter(|(_, l, n, kw, eq)| {
             if l.0 != carrier {
                 return false;
@@ -12657,18 +12700,23 @@ pub(crate) fn find_carried_by(
             };
             pass_filter && matches(&needle, n, *kw)
         })
-        .nth(index - 1)
         .map(|(e, _, _, _, _)| e)
+        .collect();
+    sort_newest_first(world, carrier, &mut hits, |e| *e);
+    hits.get(index - 1).copied()
 }
 
 pub(crate) fn find_in_room(world: &mut World, needle: &str, room: Entity) -> Option<Entity> {
     let (index, needle) = parse_indexed_needle(needle);
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-    q.iter(world)
+    let mut hits: Vec<Entity> = q
+        .iter(world)
         .filter(|(_, l, n, kw)| l.0 == room && matches(&needle, n, *kw))
-        .nth(index - 1)
         .map(|(e, _, _, _)| e)
+        .collect();
+    sort_newest_first(world, room, &mut hits, |e| *e);
+    hits.get(index - 1).copied()
 }
 
 /// Find a non-Item entity in `room` (player or mob) for give/attack-style
@@ -12684,7 +12732,8 @@ pub(crate) fn find_actor_in_room(
     let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>, Option<&Item>)>();
     // `exclude` is the looking actor: an actor it cannot see is not a
     // valid name target (legacy `get_char_vis`).
-    q.iter(world)
+    let mut hits: Vec<Entity> = q
+        .iter(world)
         .filter(|(e, l, n, kw, item)| {
             *e != exclude
                 && l.0 == room
@@ -12692,8 +12741,10 @@ pub(crate) fn find_actor_in_room(
                 && matches(&needle, n, *kw)
                 && can_see_player(world, exclude, *e)
         })
-        .nth(index - 1)
         .map(|(e, _, _, _, _)| e)
+        .collect();
+    sort_newest_first(world, room, &mut hits, |e| *e);
+    hits.get(index - 1).copied()
 }
 
 /// Locate any online player by name across the whole world. Returns

@@ -7287,6 +7287,61 @@ mod tests {
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 
+    /// Issue #56: a re-acquired item (old row id, newest arrival) must
+    /// reload as the newest item, so `list_for` orders by the arrival
+    /// stamp `save_inventory_diff` writes, not by row id.
+    #[tokio::test]
+    async fn reacquired_item_reloads_as_newest_arrival() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let object: Option<(i32, i32)> =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some((oz, oid)) = object else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "ord").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &c.id, room);
+        let first = world
+            .spawn((Item, WorldKey { zone: oz, id: oid }, Located(player)))
+            .id();
+        let second = world
+            .spawn((Item, WorldKey { zone: oz, id: oid }, Located(player)))
+            .id();
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let first_id = world.get::<mud_world::PersistedItemId>(first).unwrap().0;
+        let second_id = world.get::<mud_world::PersistedItemId>(second).unwrap().0;
+        assert!(first_id < second_id);
+
+        // Put `first` down and pick it up again: it is now the newest.
+        world.entity_mut(first).insert(Located(room));
+        world.entity_mut(first).insert(Located(player));
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+
+        let rows = mud_db::character_items::list_for(&pool, &c.id)
+            .await
+            .unwrap();
+        let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![second_id, first_id], "oldest arrival first");
+
+        mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
     fn failing_pool() -> PgPool {
         // Connects nowhere, and gives up fast so a "failed save" test
         // doesn't sit in sqlx's default 30s acquire timeout.

@@ -3339,6 +3339,21 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _, _, _, _)| e)
             .collect()
     };
+    // Newest arrival first inside each holder, room before inventory
+    // (matches the order `look` / `inventory` list them in).
+    let mut entity_matches = entity_matches;
+    entity_matches.sort_by_key(|&e| {
+        let holder = world.get::<Located>(e).map(|l| l.0);
+        let in_inv = holder == Some(player);
+        let rank = holder
+            .and_then(|h| {
+                crate::commands::newest_first(world, h)
+                    .iter()
+                    .position(|&x| x == e)
+            })
+            .unwrap_or(usize::MAX);
+        (in_inv, rank)
+    });
     let target = if remaining <= entity_matches.len() {
         Some(entity_matches[remaining - 1])
     } else {
@@ -3862,16 +3877,18 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             out.push_str(&line);
         }
         let contents: Vec<(String, usize)> = {
-            let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
+            let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Item>>();
             // Stack identical contents (matching look's room dedup
             // and inventory's stacking) so a corpse holding three
             // copper coins reads as one entry with `(3)`. ExpandObjs
             // lists each on its own line.
-            let names: Vec<String> = q
+            let mut rows: Vec<(Entity, String)> = q
                 .iter(world)
-                .filter(|(l, _)| l.0 == target)
-                .map(|(_, n)| n.name.clone())
+                .filter(|(_, l, _)| l.0 == target)
+                .map(|(e, _, n)| (e, n.name.clone()))
                 .collect();
+            crate::commands::sort_newest_first(world, target, &mut rows, |r| r.0);
+            let names: Vec<String> = rows.into_iter().map(|(_, n)| n).collect();
             stack_entries(names, has_flag(world, player, PlayerFlag::ExpandObjs))
         };
         if !contents.is_empty() {
@@ -5997,19 +6014,23 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     let other_players: Vec<String> = {
         let mut q =
             world.query_filtered::<(Entity, &Located, &Named, Option<&Posture>), With<Player>>();
-        q.iter(world)
+        let mut rows: Vec<(Entity, String)> = q
+            .iter(world)
             .filter(|(e, l, _, _)| {
                 *e != player && l.0 == room && crate::commands::can_see_player(world, player, *e)
             })
-            .map(|(_, _, n, posture)| {
+            .map(|(e, _, n, posture)| {
                 let p = posture.map_or(PostureKind::Standing, |p| p.0);
-                if p == PostureKind::Standing {
+                let line = if p == PostureKind::Standing {
                     n.name.clone()
                 } else {
                     format!("{} (is {} here)", n.name, p.label())
-                }
+                };
+                (e, line)
             })
-            .collect()
+            .collect();
+        crate::commands::sort_newest_first(world, room, &mut rows, |r| r.0);
+        rows.into_iter().map(|(_, l)| l).collect()
     };
     // Mobs — each gets their own line with their room_description, falling
     // back to the name if Description is missing or empty. Aggressive
@@ -6026,9 +6047,20 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     let mob_lines: Vec<String> = {
         let aggro_threshold = aggro_alignment(world);
         let mut lines: Vec<String> = Vec::new();
-        let mut q = world
-            .query_filtered::<(&Located, &Named, Option<&Description>, Option<&CombatStats>), With<Mob>>();
-        for (_, n, desc, stats) in q.iter(world).filter(|(l, _, _, _)| l.0 == room) {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Located,
+            &Named,
+            Option<&Description>,
+            Option<&CombatStats>,
+        ), With<Mob>>();
+        // Newest arrival first (legacy `char_to_room` pushes the list head).
+        let mut mob_rows: Vec<_> = q
+            .iter(world)
+            .filter(|(_, l, _, _, _)| l.0 == room)
+            .collect();
+        crate::commands::sort_newest_first(world, room, &mut mob_rows, |r| r.0);
+        for (_, _, n, desc, stats) in mob_rows {
             let body = desc
                 .filter(|d| !d.0.trim().is_empty())
                 .map_or_else(|| n.name.clone(), |d| d.0.trim_end().to_string());
@@ -6073,7 +6105,10 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             (Entity, &Located, &Named, Option<&mud_world::ObjectFlags>),
             With<Item>,
         >();
-        for (_e, _l, n, flags) in q.iter(world).filter(|(_, l, _, _)| l.0 == room) {
+        // Newest arrival first (legacy `obj_to_room` pushes the list head).
+        let mut item_rows: Vec<_> = q.iter(world).filter(|(_, l, _, _)| l.0 == room).collect();
+        crate::commands::sort_newest_first(world, room, &mut item_rows, |r| r.0);
+        for (_e, _l, n, flags) in item_rows {
             if !can_see_invis && flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Invisible))
             {
                 continue;
@@ -9852,6 +9887,11 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _, _, _)| e)
             .collect()
     };
+    let item_entities: Vec<Entity> = {
+        let mut v = item_entities;
+        crate::commands::sort_newest_first(world, player, &mut v, |e| *e);
+        v
+    };
     let items: Vec<String> = item_entities
         .iter()
         .map(|&e| {
@@ -10370,6 +10410,11 @@ fn get_from_container(
                 .map(|(e, _, n, _)| (e, n.name.clone()))
                 .collect()
         };
+        let items = {
+            let mut v = items;
+            crate::commands::sort_newest_first(world, container, &mut v, |r| r.0);
+            v
+        };
         // Drain CoinPile first — independent of items so a
         // corpse that holds *only* coin (low-tier mob with no
         // gear) still completes meaningfully instead of
@@ -10550,6 +10595,11 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
             .map(|(e, _, n, _, _)| (e, n.name.clone()))
             .collect()
     };
+    let items = {
+        let mut v = items;
+        crate::commands::sort_newest_first(world, room, &mut v, |r| r.0);
+        v
+    };
     if items.is_empty() {
         if needle.is_empty() {
             send_to(world, player, "There's nothing here to pick up.\r\n");
@@ -10683,6 +10733,11 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
                 })
                 .map(|(e, _, n, _, _)| (e, n.name.clone()))
                 .collect()
+        };
+        let items = {
+            let mut v = items;
+            crate::commands::sort_newest_first(world, player, &mut v, |r| r.0);
+            v
         };
         if items.is_empty() {
             if filter.is_empty() {
@@ -10893,6 +10948,11 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
                 })
                 .map(|(e, _, n, _, _)| (e, n.name.clone()))
                 .collect()
+        };
+        let items = {
+            let mut v = items;
+            crate::commands::sort_newest_first(world, player, &mut v, |r| r.0);
+            v
         };
         if items.is_empty() {
             if filter.is_empty() {
@@ -14918,11 +14978,13 @@ mod tests {
 
     #[test]
     fn give_indexed_item_with_to() {
+        // `second` arrives last, so it is listed first and `2.sword` is
+        // the original.
         let (mut world, _room, player, first, bob) = make_give_world();
         let second = spawn_item(&mut world, "a sword", "sword", player);
         cmd_give(&mut world, player, "2.sword to bob");
-        assert_eq!(world.get::<Located>(first).unwrap().0, player);
-        assert_eq!(world.get::<Located>(second).unwrap().0, bob);
+        assert_eq!(world.get::<Located>(second).unwrap().0, player);
+        assert_eq!(world.get::<Located>(first).unwrap().0, bob);
     }
 
     fn make_bag_world() -> (World, Entity, Entity, Entity) {
@@ -15093,8 +15155,9 @@ mod tests {
     #[test]
     fn get_index_syntax_still_takes_only_the_nth() {
         let (mut world, room, player, _anvil) = make_floor_world();
-        let first = spawn_item(&mut world, "a sword", "sword", room);
+        // Newest arrival is listed first, so `2.sword` is the older one.
         let second = spawn_item(&mut world, "a sword", "sword", room);
+        let first = spawn_item(&mut world, "a sword", "sword", room);
         cmd_get(&mut world, player, "2.sword");
         assert_eq!(count_at(&mut world, player), 1);
         assert_eq!(world.get::<Located>(second).unwrap().0, player);

@@ -870,18 +870,19 @@ mod tests {
         assert!(hp(&world, bob) > 5, "the original was healed");
         assert_eq!(hp(&world, other), 5, "the newcomer was not");
 
-        // And when the original leaves, the newcomer still isn't hit.
+        // And when the resolved target leaves, the other Bob still isn't
+        // hit. The newest arrival is listed (and so matched) first.
         world.entity_mut(bob).insert(Health { hp: 5, max: 50 });
         start_mend(&mut world, caster);
         assert_eq!(
             world.get::<Casting>(caster).unwrap().target,
-            CastTarget::InRoom(bob),
-            "first match is the original"
+            CastTarget::InRoom(other),
+            "first match is the newest arrival"
         );
-        world.entity_mut(bob).insert(Located(elsewhere));
+        world.entity_mut(other).insert(Located(elsewhere));
         run_ticks(&mut world, 40);
-        assert_eq!(hp(&world, other), 5, "never re-resolved onto the newcomer");
-        assert_eq!(hp(&world, bob), 5);
+        assert_eq!(hp(&world, bob), 5, "never re-resolved onto the other Bob");
+        assert_eq!(hp(&world, other), 5);
     }
 
     #[test]
