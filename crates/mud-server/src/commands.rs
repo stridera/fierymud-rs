@@ -79,6 +79,15 @@ pub enum PendingPlayerUpdate {
     /// The character's quest just entered a new phase; credit any
     /// COLLECT objectives from what they already carry.
     QuestPhaseEntered { character_id: String },
+    /// A quest dialogue opened: the mob speaks to the player and, for
+    /// a tree, the conversation is tracked from `open.enter`.
+    DialogueReply {
+        character_id: String,
+        mob_name: String,
+        /// Prototype `(zone, id)` of the speaking mob.
+        mob: (i32, i32),
+        open: crate::quest_dialogue::DialogueOpen,
+    },
 }
 
 impl PendingPlayerUpdate {
@@ -92,7 +101,8 @@ impl PendingPlayerUpdate {
             | Self::SkillPointsDelta { character_id, .. }
             | Self::AbilityKnown { character_id, .. }
             | Self::SpawnItem { character_id, .. }
-            | Self::QuestPhaseEntered { character_id } => character_id,
+            | Self::QuestPhaseEntered { character_id }
+            | Self::DialogueReply { character_id, .. } => character_id,
         }
     }
 }
@@ -173,6 +183,14 @@ pub fn drain_player_updates(world: &mut World) {
             }
             PendingPlayerUpdate::QuestPhaseEntered { .. } => {
                 crate::quest_progress::recheck_collect_objectives(world, entity);
+            }
+            PendingPlayerUpdate::DialogueReply {
+                mob_name,
+                mob,
+                open,
+                ..
+            } => {
+                crate::quest_dialogue::deliver_reply(world, entity, &mob_name, mob, &open);
             }
             PendingPlayerUpdate::SpawnItem {
                 object_zone,
@@ -8195,22 +8213,44 @@ pub(crate) fn bump_collect_quest_progress(
     crate::quest_triggers::dispatch_item_trigger(world, collector, object_zone, object_id);
 }
 
+/// What the speaker said to a mob, for gating `TALK_TO_NPC`
+/// objectives on their dialogue keywords.
+#[derive(Clone)]
+pub(crate) struct TalkContext {
+    pub topic: String,
+    pub mob_name: String,
+    pub catalog: crate::quest_dialogue::DialogueCatalog,
+}
+
 /// Advance any active `TALK_TO_NPC` objectives whose target mob
 /// matches the entity addressed. Called from `cmd_ask` when the
-/// target is a mob.
+/// target is a mob. An objective with a `QuestDialogue` only
+/// advances when `topic` satisfies its keywords, and the mob then
+/// answers with the dialogue (opening the tree, if linked).
 pub(crate) fn bump_talk_quest_progress(
     world: &mut World,
     speaker: Entity,
     mob_zone: i32,
     mob_id: i32,
+    mob_name: &str,
+    topic: &str,
 ) {
-    bump_quest_progress(
+    let talk = TalkContext {
+        topic: topic.to_string(),
+        mob_name: mob_name.to_string(),
+        catalog: world
+            .get_resource::<crate::quest_dialogue::DialogueCatalog>()
+            .cloned()
+            .unwrap_or_default(),
+    };
+    bump_quest_progress_with(
         world,
         speaker,
         QuestObjectiveBump::TalkToNpc {
             zone: mob_zone,
             id: mob_id,
         },
+        Some(&talk),
     );
 }
 
@@ -8219,8 +8259,19 @@ pub(crate) fn bump_talk_quest_progress(
 /// party member, then dispatches one task per member that does
 /// the kind-specific DB read + upsert and sends a progress line
 /// through that member's own outbound channel.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestObjectiveBump) {
+    bump_quest_progress_with(world, actor, kind, None);
+}
+
+/// [`bump_quest_progress`] with the speaker's words for `TALK_TO_NPC`
+/// dialogue gating (`None` for every other kind).
+#[allow(clippy::too_many_lines)]
+fn bump_quest_progress_with(
+    world: &mut World,
+    actor: Entity,
+    kind: QuestObjectiveBump,
+    talk: Option<&TalkContext>,
+) {
     if world.get::<Player>(actor).is_none() {
         return;
     }
@@ -8245,6 +8296,7 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
         let is_actor = entity == actor;
         let pool = pool.clone();
         let update_tx = update_tx_root.clone();
+        let talk = talk.cloned();
         tokio::spawn(async move {
             let rows_res = match kind {
                 QuestObjectiveBump::KillMob { zone, id } => {
@@ -8296,6 +8348,26 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                     return;
                 }
             };
+            // Dialogue gating: an objective bound to a QuestDialogue
+            // only counts when the topic satisfies its keywords; the
+            // first match is the conversation the mob opens.
+            let (rows, opened) = match &talk {
+                Some(t) => crate::quest_dialogue::gate_talk_rows(rows, &t.catalog, &t.topic),
+                None => (rows, None),
+            };
+            if is_actor
+                && let (Some(open), Some(t), Some(tx), QuestObjectiveBump::TalkToNpc { zone, id }) =
+                    (opened, &talk, &update_tx, kind)
+            {
+                let _ = tx
+                    .send(PendingPlayerUpdate::DialogueReply {
+                        character_id: cid.clone(),
+                        mob_name: t.mob_name.clone(),
+                        mob: (zone, id),
+                        open,
+                    })
+                    .await;
+            }
             let notify = crate::quest_progress::Notifier {
                 character_id: cid,
                 out,

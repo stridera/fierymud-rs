@@ -7,11 +7,13 @@
 //! next `say`/`ask` can match against that node's responses.
 //!
 //! Wire-in points:
-//!   - Loader: `init_dialogue_catalog` reads all three tables, plus
+//!   - Loader: `load_catalog` reads all three tables, plus
 //!     `QuestDialogue` for the per-objective binding.
-//!   - `cmd_say` / `cmd_ask` after the usual TALK_TO_NPC progress
-//!     bump: call `try_advance_dialogue` to check whether the
-//!     player's utterance matches a keyword.
+//!   - `cmd_ask` on a mob: [`try_advance_active_tree`] first walks a
+//!     conversation the player is already in; otherwise the TALK_TO_NPC
+//!     bump (`bump_talk_quest_progress`) gates each objective on its
+//!     `QuestDialogue` keywords and opens the conversation via
+//!     [`open_dialogue`].
 
 #![allow(clippy::doc_markdown)]
 
@@ -39,10 +41,8 @@ pub(crate) struct DialogueResponse {
     pub next_node_id: Option<i32>,
     pub match_type: String, // "EXACT" | "CONTAINS" | "STARTS_WITH" | "ANY_OF" | "REGEX"
     pub match_keywords: Vec<String>,
-    /// Optional builder-authored hint surfaced via admin tooling
-    /// (e.g. "say 'yes'"). Currently stored only — no command yet
-    /// exposes it to players.
-    #[allow(dead_code)]
+    /// Optional builder-authored hint shown to the player under the
+    /// NPC's line (e.g. "Ask about the paladin path").
     pub display_hint: Option<String>,
 }
 
@@ -85,13 +85,22 @@ impl DialogueCatalog {
     }
 }
 
+/// Where one player is inside a dialogue tree, and which mob they are
+/// talking to (asking anyone else ends the conversation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveDialogue {
+    pub tree_id: i32,
+    pub node_id: i32,
+    /// Prototype `(zone, id)` of the mob holding the conversation.
+    pub mob: (i32, i32),
+}
+
 /// Per-player tracking of "where is this player in a dialogue
-/// tree?" Keyed by player Entity. Stored as a Resource so the
-/// `say`/`ask` handler can walk the tree across messages.
+/// tree?" Keyed by player Entity bits. Stored as a Resource so the
+/// `ask` handler can walk the tree across messages.
 #[derive(Resource, Default, Debug, Clone)]
 pub(crate) struct ActiveQuestDialogues {
-    /// `Entity` (as u64 bits) → `(tree_id, current_node_id)`.
-    pub by_player: HashMap<u64, (i32, i32)>,
+    pub by_player: HashMap<u64, ActiveDialogue>,
 }
 
 /// String-match dispatch (Wave 4.11). Supported types:
@@ -142,132 +151,200 @@ pub(crate) fn matches(utterance: &str, match_type: &str, keywords: &[String]) ->
     }
 }
 
-/// Fast-path advance when the player is mid-tree (Wave 4.13).
-/// Returns `Some(npc_message)` when an active tree's current node
-/// matches the utterance — bumps the tracker forward and yields
-/// the next node's `npc_message` for the caller to emit. Returns
-/// `None` when no tracker is active, no response matches, or the
-/// tracker walks off the end (terminal node reached).
+/// Does `topic` satisfy the opening keywords of an objective's
+/// dialogue? A binding with no keywords accepts any topic.
+pub(crate) fn binding_matches(row: &mud_db::dialogue::QuestDialogueRow, topic: &str) -> bool {
+    row.match_keywords.is_empty() || matches(topic, &row.match_type, &row.match_keywords)
+}
+
+/// What the NPC says when a conversation is opened, and where in the
+/// tree the player now stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogueOpen {
+    pub message: String,
+    /// Builder hints for the replies the node accepts.
+    pub hints: Vec<String>,
+    /// `(tree, node)` to track from now on; `None` for a single-line
+    /// reply or a terminal node.
+    pub enter: Option<(i32, i32)>,
+}
+
+fn hints_of(node: &DialogueNode) -> Vec<String> {
+    node.responses
+        .iter()
+        .filter_map(|r| r.display_hint.clone())
+        .filter(|h| !h.trim().is_empty())
+        .collect()
+}
+
+/// Open the conversation bound to an objective. With a linked tree the
+/// root node speaks and the player is tracked from it; otherwise the
+/// binding's own `npc_message` is the whole reply.
+pub(crate) fn open_dialogue(
+    catalog: &DialogueCatalog,
+    row: &mud_db::dialogue::QuestDialogueRow,
+) -> DialogueOpen {
+    if let Some(tree_id) = row.dialogue_tree_id
+        && let Some(root) = catalog.root_of(tree_id)
+    {
+        return DialogueOpen {
+            message: root.npc_message.clone(),
+            hints: if root.is_terminal {
+                Vec::new()
+            } else {
+                hints_of(root)
+            },
+            enter: (!root.is_terminal).then_some((tree_id, root.id)),
+        };
+    }
+    DialogueOpen {
+        message: row.npc_message.clone(),
+        hints: Vec::new(),
+        enter: None,
+    }
+}
+
+/// Keep the TALK_TO_NPC rows `topic` is allowed to advance: rows with
+/// no dialogue bound pass through; a bound row needs its opening
+/// keywords matched. Also returns the conversation the first matched
+/// binding opens.
+pub(crate) fn gate_talk_rows(
+    rows: Vec<mud_db::quest_objectives::ObjectiveProgressRow>,
+    catalog: &DialogueCatalog,
+    topic: &str,
+) -> (
+    Vec<mud_db::quest_objectives::ObjectiveProgressRow>,
+    Option<DialogueOpen>,
+) {
+    let mut opened = None;
+    let kept = rows
+        .into_iter()
+        .filter(|row| {
+            let Some(binding) = catalog.lookup_objective(
+                row.quest_zone_id,
+                row.quest_id,
+                row.phase_id,
+                row.objective_id,
+            ) else {
+                return true;
+            };
+            if !binding_matches(binding, topic) {
+                return false;
+            }
+            if opened.is_none() {
+                opened = Some(open_dialogue(catalog, binding));
+            }
+            true
+        })
+        .collect();
+    (kept, opened)
+}
+
+/// Walk the conversation a player is already in (Wave 4.13).
+/// Returns the next node's reply when `utterance` matches one of the
+/// current node's responses, moving (or ending, at a terminal node or
+/// a response with no next node) the tracker. Returns `None` when the
+/// player is not in a conversation with `mob`, or nothing matched, so
+/// the caller falls back to the objective path. Purely in-memory.
 ///
-/// Separate from `try_advance_dialogue` because the mid-tree case
-/// needs zero DB access — purely in-memory catalog walk — and the
-/// caller (synchronous `cmd_ask`) wants to short-circuit before
-/// it spawns the async dialogue-attempt task.
+/// Asking a different mob than the conversation's ends the
+/// conversation.
 pub(crate) fn try_advance_active_tree(
     world: &mut World,
     player: Entity,
+    mob: (i32, i32),
     utterance: &str,
-) -> Option<String> {
+) -> Option<DialogueOpen> {
     let player_bits = player.to_bits();
-    let (tree_id, current_node_id) = world
+    let active = world
         .get_resource::<ActiveQuestDialogues>()?
         .by_player
         .get(&player_bits)
         .copied()?;
-    let catalog = world.get_resource::<DialogueCatalog>()?.clone();
-    let node = catalog.node(tree_id, current_node_id)?;
-    for resp in &node.responses {
-        if !matches(utterance, &resp.match_type, &resp.match_keywords) {
-            continue;
-        }
-        // Walk to the next node when present; otherwise terminate.
-        if let Some(next_id) = resp.next_node_id
-            && let Some(next) = catalog.node(tree_id, next_id)
-        {
-            if next.is_terminal {
-                if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
-                    a.by_player.remove(&player_bits);
-                }
-            } else if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
-                a.by_player.insert(player_bits, (tree_id, next.id));
-            }
-            return Some(next.npc_message.clone());
-        }
-        // Response matched but has no next node — terminate the
-        // active tree. Caller still gets `None` (no reply line)
-        // because the response itself had nothing to say.
-        if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
-            a.by_player.remove(&player_bits);
-        }
+    if active.mob != mob {
+        world
+            .resource_mut::<ActiveQuestDialogues>()
+            .by_player
+            .remove(&player_bits);
         return None;
     }
-    None
+    let catalog = world.get_resource::<DialogueCatalog>()?;
+    let node = catalog.node(active.tree_id, active.node_id)?;
+    let resp = node
+        .responses
+        .iter()
+        .find(|r| matches(utterance, &r.match_type, &r.match_keywords))?;
+    let next = resp
+        .next_node_id
+        .and_then(|id| catalog.node(active.tree_id, id))
+        .cloned();
+    let mut tracker = world.resource_mut::<ActiveQuestDialogues>();
+    let Some(next) = next else {
+        // The response ended the conversation without a reply.
+        tracker.by_player.remove(&player_bits);
+        return None;
+    };
+    let open = DialogueOpen {
+        message: next.npc_message.clone(),
+        hints: if next.is_terminal {
+            Vec::new()
+        } else {
+            hints_of(&next)
+        },
+        enter: (!next.is_terminal).then_some((active.tree_id, next.id)),
+    };
+    match open.enter {
+        Some((tree_id, node_id)) => {
+            tracker.by_player.insert(
+                player_bits,
+                ActiveDialogue {
+                    tree_id,
+                    node_id,
+                    mob,
+                },
+            );
+        }
+        None => {
+            tracker.by_player.remove(&player_bits);
+        }
+    }
+    Some(open)
 }
 
-/// Try to advance the dialogue when a player says/asks something
-/// to a TALK_TO_NPC mob (Wave 4.11). Returns `Some(npc_message)`
-/// when a keyword matched (caller emits it to the room as the NPC
-/// reply); `None` when no match.
-///
-/// Two layers:
-/// 1. If the player is mid-tree (`ActiveQuestDialogues`), match
-///    against the current node's responses; advance to next node
-///    on match.
-/// 2. If not mid-tree, check the QuestDialogue row's own
-///    `match_keywords`; on match, if the row has a linked tree,
-///    enter the tree at its root.
-#[allow(dead_code)] // composed of `try_advance_active_tree` + the dispatch path
-pub(crate) fn try_advance_dialogue(
+/// Show the NPC's line (and any reply hints) to the player.
+pub(crate) fn say_reply(world: &World, player: Entity, mob_name: &str, open: &DialogueOpen) {
+    let mut text = format!("{mob_name} says, \"{}\"\r\n", open.message);
+    for hint in &open.hints {
+        text.push_str(&format!("  - {hint}\r\n"));
+    }
+    crate::commands::send_to(world, player, text);
+}
+
+/// Deliver an opened conversation: show it and, for a tree, start
+/// tracking the player at its current node.
+pub(crate) fn deliver_reply(
     world: &mut World,
     player: Entity,
-    quest_zone: i32,
-    quest_id: i32,
-    phase: i32,
-    objective: i32,
-    utterance: &str,
-) -> Option<String> {
-    let player_bits = player.to_bits();
-    // Snapshot to release the resource borrow before mutating.
-    let active = world
-        .get_resource::<ActiveQuestDialogues>()
-        .and_then(|a| a.by_player.get(&player_bits).copied());
-    let catalog = world.get_resource::<DialogueCatalog>()?.clone();
-    if let Some((tree_id, current_node_id)) = active
-        && let Some(node) = catalog.node(tree_id, current_node_id)
-    {
-        for resp in &node.responses {
-            if matches(utterance, &resp.match_type, &resp.match_keywords) {
-                // Advance.
-                if let Some(next_id) = resp.next_node_id
-                    && let Some(next) = catalog.node(tree_id, next_id)
-                {
-                    if next.is_terminal {
-                        if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
-                            a.by_player.remove(&player_bits);
-                        }
-                    } else if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
-                        a.by_player.insert(player_bits, (tree_id, next.id));
-                    }
-                    return Some(next.npc_message.clone());
-                }
-                // No next node — terminate.
-                if let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>() {
-                    a.by_player.remove(&player_bits);
-                }
-                return None;
-            }
+    mob_name: &str,
+    mob: (i32, i32),
+    open: &DialogueOpen,
+) {
+    say_reply(world, player, mob_name, open);
+    let bits = player.to_bits();
+    if let Some((tree_id, node_id)) = open.enter {
+        if let Some(mut tracker) = world.get_resource_mut::<ActiveQuestDialogues>() {
+            tracker.by_player.insert(
+                bits,
+                ActiveDialogue {
+                    tree_id,
+                    node_id,
+                    mob,
+                },
+            );
         }
-        return None;
+    } else if let Some(mut tracker) = world.get_resource_mut::<ActiveQuestDialogues>() {
+        tracker.by_player.remove(&bits);
     }
-    // Not mid-tree: match against the QuestDialogue row's keywords.
-    let row = catalog.lookup_objective(quest_zone, quest_id, phase, objective)?;
-    if !matches(utterance, &row.match_type, &row.match_keywords) {
-        return None;
-    }
-    // Optionally enter a linked tree at its root.
-    if let Some(tree_id) = row.dialogue_tree_id
-        && let Some(root) = catalog.root_of(tree_id)
-    {
-        if !root.is_terminal
-            && let Some(mut a) = world.get_resource_mut::<ActiveQuestDialogues>()
-        {
-            a.by_player.insert(player_bits, (tree_id, root.id));
-        }
-        return Some(root.npc_message.clone());
-    }
-    // No tree — the QuestDialogue row's own `npc_message` is the
-    // immediate response.
-    Some(row.npc_message.clone())
 }
 
 /// Loader entry: hydrate the DialogueCatalog from the DB. Call
@@ -477,11 +554,190 @@ mod tests {
     #[test]
     fn active_dialogues_tracks_per_player() {
         let mut a = ActiveQuestDialogues::default();
-        a.by_player.insert(123, (1, 5));
-        a.by_player.insert(456, (2, 7));
-        assert_eq!(a.by_player.get(&123).copied(), Some((1, 5)));
-        assert_eq!(a.by_player.get(&456).copied(), Some((2, 7)));
+        let at = |tree_id, node_id| ActiveDialogue {
+            tree_id,
+            node_id,
+            mob: (30, 1),
+        };
+        a.by_player.insert(123, at(1, 5));
+        a.by_player.insert(456, at(2, 7));
+        assert_eq!(a.by_player.get(&123).copied(), Some(at(1, 5)));
+        assert_eq!(a.by_player.get(&456).copied(), Some(at(2, 7)));
         a.by_player.remove(&123);
         assert!(!a.by_player.contains_key(&123));
+    }
+
+    // ---- tree walking (2-node tree) ----
+
+    fn node(id: i32, msg: &str, terminal: bool, responses: Vec<DialogueResponse>) -> DialogueNode {
+        DialogueNode {
+            id,
+            npc_message: msg.into(),
+            is_root: id == 10,
+            is_terminal: terminal,
+            responses,
+        }
+    }
+
+    /// Tree 1: root 10 "Do you seek the path?" --yes--> terminal 11.
+    fn two_node_catalog() -> DialogueCatalog {
+        let mut cat = DialogueCatalog::default();
+        cat.root_node_by_tree.insert(1, 10);
+        cat.nodes_by_tree.insert(
+            1,
+            vec![
+                node(
+                    10,
+                    "Do you seek the path?",
+                    false,
+                    vec![DialogueResponse {
+                        next_node_id: Some(11),
+                        match_type: "ANY_OF".into(),
+                        match_keywords: kw(&["yes", "aye"]),
+                        display_hint: Some("Say yes".into()),
+                    }],
+                ),
+                node(11, "Then go north.", true, vec![]),
+            ],
+        );
+        cat.by_objective
+            .insert((30, 5, 1, 1), binding(Some(1), &["path"]));
+        cat
+    }
+
+    fn binding(tree: Option<i32>, words: &[&str]) -> mud_db::dialogue::QuestDialogueRow {
+        mud_db::dialogue::QuestDialogueRow {
+            id: 1,
+            quest_zone_id: 30,
+            quest_id: 5,
+            phase_id: 1,
+            objective_id: 1,
+            npc_message: "Hello there.".into(),
+            match_type: "CONTAINS".into(),
+            match_keywords: kw(words),
+            dialogue_tree_id: tree,
+        }
+    }
+
+    fn talk_row(objective_id: i32) -> mud_db::quest_objectives::ObjectiveProgressRow {
+        mud_db::quest_objectives::ObjectiveProgressRow {
+            character_quest_id: "cq".into(),
+            quest_zone_id: 30,
+            quest_id: 5,
+            phase_id: 1,
+            objective_id,
+            required_count: 1,
+            scope: "SOLO".into(),
+            show_progress: true,
+            player_description: "talk".into(),
+            current_count: 0,
+        }
+    }
+
+    fn world_with(cat: DialogueCatalog) -> (World, Entity) {
+        let mut world = World::new();
+        world.insert_resource(cat);
+        world.insert_resource(ActiveQuestDialogues::default());
+        let player = world.spawn_empty().id();
+        (world, player)
+    }
+
+    #[test]
+    fn keywords_gate_the_opening_and_empty_keywords_accept_anything() {
+        let b = binding(None, &["paladin"]);
+        assert!(binding_matches(&b, "tell me of the Paladin way"));
+        assert!(!binding_matches(&b, "hello"));
+        assert!(binding_matches(&binding(None, &[]), "hello"));
+    }
+
+    #[test]
+    fn gate_drops_unmatched_bound_rows_and_keeps_unbound_ones() {
+        let cat = two_node_catalog();
+        // Objective 1 is bound (keyword "path"); objective 2 has no dialogue.
+        let rows = vec![talk_row(1), talk_row(2)];
+        let (kept, opened) = gate_talk_rows(rows.clone(), &cat, "hello");
+        assert_eq!(
+            kept.iter().map(|r| r.objective_id).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(opened.is_none(), "nothing matched, nobody speaks");
+
+        let (kept, opened) = gate_talk_rows(rows, &cat, "show me the path");
+        assert_eq!(kept.len(), 2);
+        let open = opened.expect("binding matched");
+        assert_eq!(open.message, "Do you seek the path?");
+        assert_eq!(open.hints, vec!["Say yes".to_string()]);
+        assert_eq!(open.enter, Some((1, 10)));
+    }
+
+    #[test]
+    fn a_binding_without_a_tree_replies_with_its_own_message() {
+        let cat = DialogueCatalog::default();
+        let open = open_dialogue(&cat, &binding(None, &["hi"]));
+        assert_eq!(open.message, "Hello there.");
+        assert_eq!(open.enter, None);
+    }
+
+    #[test]
+    fn two_node_tree_walks_to_the_terminal_node() {
+        let (mut world, player) = world_with(two_node_catalog());
+        let mob = (30, 1);
+        // Opening the conversation starts tracking at the root.
+        let cat = world.resource::<DialogueCatalog>().clone();
+        let open = open_dialogue(&cat, cat.lookup_objective(30, 5, 1, 1).unwrap());
+        deliver_reply(&mut world, player, "Sage", mob, &open);
+        assert_eq!(
+            world.resource::<ActiveQuestDialogues>().by_player[&player.to_bits()],
+            ActiveDialogue {
+                tree_id: 1,
+                node_id: 10,
+                mob
+            }
+        );
+
+        // Off-script words do nothing and keep the conversation open.
+        assert!(try_advance_active_tree(&mut world, player, mob, "banana").is_none());
+        assert!(
+            world
+                .resource::<ActiveQuestDialogues>()
+                .by_player
+                .contains_key(&player.to_bits())
+        );
+
+        // A matching response moves to the terminal node and ends it.
+        let reply = try_advance_active_tree(&mut world, player, mob, "Aye I do").unwrap();
+        assert_eq!(reply.message, "Then go north.");
+        assert_eq!(reply.enter, None);
+        assert!(
+            !world
+                .resource::<ActiveQuestDialogues>()
+                .by_player
+                .contains_key(&player.to_bits())
+        );
+        // Nothing left to walk.
+        assert!(try_advance_active_tree(&mut world, player, mob, "yes").is_none());
+    }
+
+    #[test]
+    fn asking_another_mob_ends_the_conversation() {
+        let (mut world, player) = world_with(two_node_catalog());
+        world
+            .resource_mut::<ActiveQuestDialogues>()
+            .by_player
+            .insert(
+                player.to_bits(),
+                ActiveDialogue {
+                    tree_id: 1,
+                    node_id: 10,
+                    mob: (30, 1),
+                },
+            );
+        assert!(try_advance_active_tree(&mut world, player, (30, 2), "yes").is_none());
+        assert!(
+            world
+                .resource::<ActiveQuestDialogues>()
+                .by_player
+                .is_empty()
+        );
     }
 }

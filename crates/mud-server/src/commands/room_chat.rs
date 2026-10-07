@@ -248,26 +248,18 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
     if world.get::<Mob>(target).is_some()
         && let Some(key) = world.get::<WorldKey>(target).copied()
     {
-        bump_talk_quest_progress(world, player, key.zone, key.id);
-        // Wave 4.13: mid-tree fast path. When the player is
-        // already walking a dialogue tree, match the utterance
-        // against the current node's responses and emit the next
-        // node's `npc_message` in-band. No DB round-trip.
-        if let Some(reply) = crate::quest_dialogue::try_advance_active_tree(world, player, topic) {
-            let target_name = name_of(world, target);
-            send_rendered(
-                world,
-                player,
-                &format!("{target_name} says, \"{reply}\"\r\n"),
-            );
+        // Already in a conversation with this mob? Walk the dialogue
+        // tree in-band (no DB round-trip); nothing else counts.
+        let mob = (key.zone, key.id);
+        if let Some(open) =
+            crate::quest_dialogue::try_advance_active_tree(world, player, mob, topic)
+        {
+            crate::quest_dialogue::say_reply(world, player, &target_name, &open);
         } else {
-            // Not mid-tree (or no response matched). Fall through
-            // to the per-objective QuestDialogue lookup. Async +
-            // fire-and-forget; the NPC reply (if any) lands via
-            // the player's Outbound on the next tick.
-            crate::quest_triggers::dispatch_dialogue_attempt(
-                world, player, key.zone, key.id, topic,
-            );
+            // Opening a conversation: TALK_TO_NPC objectives bound to a
+            // dialogue only advance when `topic` matches its keywords,
+            // and the mob answers (entering the tree, if linked).
+            bump_talk_quest_progress(world, player, key.zone, key.id, &target_name, topic);
         }
     }
 }
