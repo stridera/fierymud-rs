@@ -362,3 +362,44 @@ async fn racing_completions_pay_rewards_once() {
     assert_eq!(text.matches("*** Quest complete! ***").count(), 1, "{text}");
     fx.end().await;
 }
+
+/// Triggers never re-grant a quest the character already has a record
+/// of - in particular not one they abandoned.
+#[tokio::test(flavor = "current_thread")]
+async fn triggers_skip_quests_the_character_has_any_record_of() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    sqlx::query("UPDATE \"Quest\" SET auto_accept = true WHERE zone_id = $1 AND id = $2")
+        .bind(fx.zone)
+        .bind(fx.quest)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let q = mud_db::quests::get_quest(&fx.pool, fx.zone, fx.quest)
+        .await
+        .unwrap()
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    fx.accept().await;
+    let cq = mud_db::quests::find_character_quest(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(mud_db::quests::abandon(&fx.pool, &cq).await.unwrap(), 1);
+
+    crate::quest_triggers::grant_or_offer(&fx.pool, &fx.char_id, &tx, 10, &q, None).await;
+    assert_eq!(fx.status().await, "ABANDONED", "not re-granted");
+    assert!(drain(&mut rx).is_empty(), "no message either");
+
+    // A character with no record at all is still granted it.
+    sqlx::query("DELETE FROM \"CharacterQuest\" WHERE id = $1")
+        .bind(&cq)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    crate::quest_triggers::grant_or_offer(&fx.pool, &fx.char_id, &tx, 10, &q, None).await;
+    assert_eq!(fx.status().await, "IN_PROGRESS");
+    assert!(drain(&mut rx).contains("New quest"));
+    fx.end().await;
+}

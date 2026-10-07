@@ -247,7 +247,7 @@ pub(crate) fn dispatch_auto_trigger(world: &mut World, player: Entity) {
 /// full `accept_for_player` path (which honors prereqs / level /
 /// exclusive groups / cooldown). Otherwise emit a one-line "quest
 /// available — type `qaccept <z> <id>` to take it" prompt.
-async fn grant_or_offer(
+pub(crate) async fn grant_or_offer(
     pool: &mud_db::sqlx::PgPool,
     cid: &str,
     out: &mud_net::Outbound,
@@ -255,15 +255,16 @@ async fn grant_or_offer(
     q: &mud_db::quests::QuestRow,
     update_tx: Option<&tokio::sync::mpsc::Sender<crate::commands::PendingPlayerUpdate>>,
 ) {
-    // Skip if the player is already on (or has finished) this quest.
-    if let Ok(Some((_id, status))) =
-        mud_db::quests::find_character_quest(pool, cid, q.zone_id, q.id).await
-    {
-        // IN_PROGRESS / COMPLETED — nothing to do. ABANDONED rows
-        // would re-eligible, but we keep auto-grant out of that
-        // path so a player who abandons doesn't keep getting
-        // re-grabbed by triggers.
-        if status != "ABANDONED" {
+    // A trigger only ever starts a quest from scratch: skip when the
+    // character already has any record of it (in progress, completed,
+    // failed, or abandoned - a player who abandons must not be
+    // re-grabbed by the next trigger). Re-taking such a quest is a
+    // deliberate `qaccept`.
+    match mud_db::quests::find_character_quest(pool, cid, q.zone_id, q.id).await {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, zone = q.zone_id, id = q.id, "quest record lookup failed");
             return;
         }
     }
