@@ -846,6 +846,9 @@ pub struct ConnRouter {
     /// Max wait for a relogging character's pending save; a field so
     /// tests can shorten it.
     save_wait: Duration,
+    /// Test seam: name of a per-character table whose load should fail
+    /// with an injected error. Always `None` in production.
+    load_fault: Option<&'static str>,
 }
 
 /// Per-connection capability snapshot. Updated by the telnet
@@ -915,6 +918,7 @@ impl ConnRouter {
             auth_rx: Some(auth_rx),
             close_conn: mud_net::close_connection,
             save_wait: PREVIOUS_SAVE_WAIT,
+            load_fault: None,
         }
     }
 
@@ -3321,19 +3325,24 @@ impl ConnRouter {
         if !settled {
             warn!(conn_id, character_id = %char_row.id,
                 "login refused: the previous session's save is still failing");
-            if let Some(ctx) = self.login.remove(&conn_id) {
-                let _ = ctx.outbound.try_send(
-                    b"Your previous session is still being saved; try again in a minute.\r\n"
-                        .to_vec(),
-                );
-            }
-            self.caps.remove(&conn_id);
-            (self.close_conn)(conn_id);
+            self.refuse_login(
+                conn_id,
+                "Your previous session is still being saved; try again in a minute.",
+            );
             return;
         }
         let fresh = reload_character_row(pool, char_row).await;
         self.complete_login_inner(conn_id, world, pool, user, fresh, true)
             .await;
+    }
+
+    /// Tell the connection why its login was refused, then drop it.
+    fn refuse_login(&mut self, conn_id: ConnId, message: &str) {
+        if let Some(ctx) = self.login.remove(&conn_id) {
+            let _ = ctx.outbound.try_send(format!("{message}\r\n").into_bytes());
+        }
+        self.caps.remove(&conn_id);
+        (self.close_conn)(conn_id);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3366,154 +3375,39 @@ impl ConnRouter {
             self.start_save_wait(conn_id, coordinator, user, char_row);
             return;
         }
-        let item_rows = mud_db::character_items::list_for(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "character_items load failed");
-                Vec::new()
-            });
-        // Achievement unlock list. Empty for new characters.
-        let achievement_rows = mud_db::achievements::unlocked_for(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "achievements load failed");
-                Vec::new()
-            });
-        // Lifetime kill counter, persisted in the JSON column on
-        // Characters. Defaults to 0 for new characters / null JSON.
-        let kill_total: i32 = mud_db::characters::load_kill_tracking(pool, &char_row.id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| v.get("total").and_then(serde_json::Value::as_i64))
-            .and_then(|n| i32::try_from(n).ok())
-            .unwrap_or(0);
-        // Drunkenness counter, persisted on Characters.
-        let drunk = mud_db::characters::load_drunkenness(pool, &char_row.id)
-            .await
-            .unwrap_or(0);
-        // Last 10 received tells, newest first. Hydrates TellLog
-        // so `lasttells` shows continuity across reconnects.
-        let recent_tells = mud_db::tell_messages::recent_for(pool, &char_row.id, 10)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "tell history load failed");
-                Vec::new()
-            });
-        // Optional clan membership.
-        let clan = mud_db::clans::membership_for(pool, &char_row.id)
-            .await
-            .unwrap_or(None);
-
-        // Script-vars + trophy JSON blobs. Either may be NULL on
-        // first login or for never-touched characters; the
-        // unwrap_or_else paths log + drop so a one-shot load
-        // failure can't reject login.
-        let script_vars_json = mud_db::characters::load_script_vars(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "script_vars load failed");
-                None
-            });
-        let trophy_json = mud_db::characters::load_trophy(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "trophy load failed");
-                None
-            });
-        let spell_cooldowns_json = mud_db::characters::load_spell_cooldowns(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "spell_cooldowns load failed");
-                None
-            });
-        let cooldowns_json = mud_db::characters::load_cooldowns(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "cooldowns load failed");
-                None
-            });
-        let ignore_list_json = mud_db::characters::load_ignore_list(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "ignore_list load failed");
-                None
-            });
-        let effect_instances_json = mud_db::characters::load_effect_instances(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "effect_instances load failed");
-                None
-            });
-        let pets_json = mud_db::characters::load_pets(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "pets load failed");
-                None
-            });
-
-        // Housing summary — Ok(None) for the typical player who
-        // doesn't own a house. Unwrap-Some path fires the rest of
-        // the housing fetches; an error logs and skips.
-        let house_summary = match mud_db::housing::for_character(pool, &char_row.id).await {
-            Ok(Some(h)) => {
-                let rooms = mud_db::housing::rooms_for_house(pool, h.id)
-                    .await
-                    .unwrap_or_default();
-                let exits = mud_db::housing::exits_for_house(pool, h.id)
-                    .await
-                    .unwrap_or_default();
-                let items = mud_db::housing::items_for_house(pool, h.id)
-                    .await
-                    .unwrap_or_default();
-                let guests = mud_db::housing::guests_for_house(pool, h.id)
-                    .await
-                    .unwrap_or_default();
-                Some((h, rooms, exits, items, guests))
-            }
-            Ok(None) => None,
-            Err(e) => {
-                warn!(conn_id, error = %e, "housing load failed");
-                None
+        // Every per-character table the save path rewrites is loaded
+        // here; a failed load refuses the login instead of continuing
+        // with empty state that the next save would write over the
+        // real rows (the data-loss mode this guards against).
+        let loaded = match load_persisted(pool, &char_row, &user, self.load_fault).await {
+            Ok(l) => l,
+            Err(failure) => {
+                error!(conn_id, character_id = %char_row.id, table = failure.table,
+                    error = %failure.source,
+                    "login refused: per-character table failed to load");
+                self.refuse_login(conn_id, LOAD_FAILED_MESSAGE);
+                return;
             }
         };
-        let mut ability_rows = mud_db::character_abilities::list_for(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "character_abilities load failed");
-                Vec::new()
-            });
-        // Race innates (`RaceAbilities`) are part of the character from
-        // creation: grant any the saved set lacks. Covers new characters
-        // and existing ones alike; the next save persists them.
-        match mud_db::race_abilities::list_for_race(pool, &char_row.race).await {
-            Ok(innates) => {
-                let granted = mud_db::race_abilities::merge_innates(&mut ability_rows, &innates);
-                if granted > 0 {
-                    info!(conn_id, race = %char_row.race, granted, "granted race innates");
-                }
-            }
-            Err(e) => warn!(conn_id, error = %e, "race innates load failed"),
-        }
-        let alias_rows = mud_db::character_aliases::list_for(pool, &char_row.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(conn_id, error = %e, "character_aliases load failed");
-                Vec::new()
-            });
-        // AccountSummary lists all sibling characters on the account.
-        // Empty list when the character has no associated user (some
-        // legacy imports) — the summary just shows the chosen one.
-        let all_chars: Vec<CharacterRow> = if user.id.is_empty() {
-            vec![char_row.clone()]
-        } else {
-            characters::list_for_user(pool, &user.id)
-                .await
-                .unwrap_or_else(|e| {
-                    warn!(conn_id, error = %e, "character list failed");
-                    vec![char_row.clone()]
-                })
-        };
+        let PersistedLoad {
+            item_rows,
+            achievement_rows,
+            kill_total,
+            drunk,
+            recent_tells,
+            clan,
+            script_vars_json,
+            trophy_json,
+            spell_cooldowns_json,
+            cooldowns_json,
+            ignore_list_json,
+            effect_instances_json,
+            pets_json,
+            house_summary,
+            ability_rows,
+            alias_rows,
+            all_chars,
+        } = loaded;
 
         let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
         let entity = spawn_player(world, &user, &char_row, outbound);
@@ -4767,6 +4661,252 @@ pub(crate) fn snapshot_player(
         core_stats_payload,
         now_inst,
         new_time_played,
+    })
+}
+
+/// Shown when a per-character table could not be read at login.
+const LOAD_FAILED_MESSAGE: &str =
+    "The game is having trouble loading your character; please try again in a minute.";
+
+/// A per-character table failed to load; carries which one for the log.
+struct LoadFailure {
+    table: &'static str,
+    source: mud_db::sqlx::Error,
+}
+
+/// Everything read from per-character tables at login.
+struct PersistedLoad {
+    item_rows: Vec<mud_db::character_items::CharacterItemRow>,
+    achievement_rows: Vec<mud_db::achievements::CharacterAchievementRow>,
+    kill_total: i32,
+    drunk: i32,
+    recent_tells: Vec<mud_db::tell_messages::TellMessageRow>,
+    clan: Option<mud_db::clans::ClanMembershipRow>,
+    script_vars_json: Option<serde_json::Value>,
+    trophy_json: Option<serde_json::Value>,
+    spell_cooldowns_json: Option<serde_json::Value>,
+    cooldowns_json: Option<serde_json::Value>,
+    ignore_list_json: Option<serde_json::Value>,
+    effect_instances_json: Option<serde_json::Value>,
+    pets_json: Option<serde_json::Value>,
+    house_summary: Option<HouseBundle>,
+    ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow>,
+    alias_rows: Vec<mud_db::character_aliases::CharacterAliasRow>,
+    all_chars: Vec<CharacterRow>,
+}
+
+type HouseBundle = (
+    mud_db::housing::PlayerHouseRow,
+    Vec<mud_db::housing::PlayerHouseRoomRow>,
+    Vec<mud_db::housing::PlayerHouseExitRow>,
+    Vec<mud_db::housing::PlayerHouseItemRow>,
+    Vec<mud_db::housing::PlayerHouseGuestRow>,
+);
+
+/// Run one table load, mapping its error to a [`LoadFailure`]. `fault`
+/// is the test seam: when it names `table` the load is replaced by an
+/// injected pool-timeout error.
+async fn guarded<T>(
+    fault: Option<&str>,
+    table: &'static str,
+    load: impl std::future::Future<Output = mud_db::sqlx::Result<T>>,
+) -> Result<T, LoadFailure> {
+    let result = if fault == Some(table) {
+        Err(mud_db::sqlx::Error::PoolTimedOut)
+    } else {
+        load.await
+    };
+    result.map_err(|source| LoadFailure { table, source })
+}
+
+/// Housing summary: `None` for the typical player who owns no house.
+async fn load_house(
+    pool: &PgPool,
+    character_id: &str,
+    fault: Option<&str>,
+) -> Result<Option<HouseBundle>, LoadFailure> {
+    let Some(h) = guarded(
+        fault,
+        "player_houses",
+        mud_db::housing::for_character(pool, character_id),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let rooms = guarded(
+        fault,
+        "player_house_rooms",
+        mud_db::housing::rooms_for_house(pool, h.id),
+    )
+    .await?;
+    let exits = guarded(
+        fault,
+        "player_house_exits",
+        mud_db::housing::exits_for_house(pool, h.id),
+    )
+    .await?;
+    let items = guarded(
+        fault,
+        "player_house_items",
+        mud_db::housing::items_for_house(pool, h.id),
+    )
+    .await?;
+    let guests = guarded(
+        fault,
+        "player_house_guests",
+        mud_db::housing::guests_for_house(pool, h.id),
+    )
+    .await?;
+    Ok(Some((h, rooms, exits, items, guests)))
+}
+
+/// Load every per-character table for `char_row`. The save path rewrites
+/// each of these from in-memory state (delete-not-in-memory semantics),
+/// so continuing a login with an empty stand-in for a table that failed to
+/// read would let the next save wipe the real rows: any failure here
+/// aborts the login. Only data the save path never writes back (recent
+/// tells, the account's character list, race innates) falls back softly.
+#[allow(clippy::too_many_lines)]
+async fn load_persisted(
+    pool: &PgPool,
+    char_row: &CharacterRow,
+    user: &User,
+    fault: Option<&str>,
+) -> Result<PersistedLoad, LoadFailure> {
+    let id = char_row.id.as_str();
+    let item_rows = guarded(
+        fault,
+        "character_items",
+        mud_db::character_items::list_for(pool, id),
+    )
+    .await?;
+    let achievement_rows = guarded(
+        fault,
+        "achievements",
+        mud_db::achievements::unlocked_for(pool, id),
+    )
+    .await?;
+    // Lifetime kill counter, persisted in the JSON column on
+    // Characters. Defaults to 0 for new characters / null JSON.
+    let kill_total: i32 = guarded(
+        fault,
+        "kill_tracking",
+        mud_db::characters::load_kill_tracking(pool, id),
+    )
+    .await?
+    .and_then(|v| v.get("total").and_then(serde_json::Value::as_i64))
+    .and_then(|n| i32::try_from(n).ok())
+    .unwrap_or(0);
+    let drunk = guarded(
+        fault,
+        "drunkenness",
+        mud_db::characters::load_drunkenness(pool, id),
+    )
+    .await?;
+    // Last 10 received tells, newest first. Read-only; cosmetic.
+    let recent_tells = mud_db::tell_messages::recent_for(pool, id, 10)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "tell history load failed");
+            Vec::new()
+        });
+    let clan = guarded(
+        fault,
+        "clan_membership",
+        mud_db::clans::membership_for(pool, id),
+    )
+    .await?;
+    // Script-vars / trophy / cooldowns / ignore / effects / pets JSON
+    // blobs. NULL is legitimate (never saved); a read error is not.
+    let script_vars_json = guarded(
+        fault,
+        "script_vars",
+        mud_db::characters::load_script_vars(pool, id),
+    )
+    .await?;
+    let trophy_json = guarded(fault, "trophy", mud_db::characters::load_trophy(pool, id)).await?;
+    let spell_cooldowns_json = guarded(
+        fault,
+        "spell_cooldowns",
+        mud_db::characters::load_spell_cooldowns(pool, id),
+    )
+    .await?;
+    let cooldowns_json = guarded(
+        fault,
+        "cooldowns",
+        mud_db::characters::load_cooldowns(pool, id),
+    )
+    .await?;
+    let ignore_list_json = guarded(
+        fault,
+        "ignore_list",
+        mud_db::characters::load_ignore_list(pool, id),
+    )
+    .await?;
+    let effect_instances_json = guarded(
+        fault,
+        "effect_instances",
+        mud_db::characters::load_effect_instances(pool, id),
+    )
+    .await?;
+    let pets_json = guarded(fault, "pets", mud_db::characters::load_pets(pool, id)).await?;
+    let house_summary = load_house(pool, id, fault).await?;
+    let mut ability_rows = guarded(
+        fault,
+        "character_abilities",
+        mud_db::character_abilities::list_for(pool, id),
+    )
+    .await?;
+    // Race innates (`RaceAbilities`) are part of the character from
+    // creation: grant any the saved set lacks. A read failure here only
+    // delays the grant (nothing is overwritten), so it falls back softly.
+    match mud_db::race_abilities::list_for_race(pool, &char_row.race).await {
+        Ok(innates) => {
+            let granted = mud_db::race_abilities::merge_innates(&mut ability_rows, &innates);
+            if granted > 0 {
+                info!(race = %char_row.race, granted, "granted race innates");
+            }
+        }
+        Err(e) => warn!(error = %e, "race innates load failed"),
+    }
+    let alias_rows = guarded(
+        fault,
+        "character_aliases",
+        mud_db::character_aliases::list_for(pool, id),
+    )
+    .await?;
+    // AccountSummary lists all sibling characters on the account. Empty
+    // when the character has no associated user (some legacy imports);
+    // the summary then shows just the chosen one. Display-only.
+    let all_chars: Vec<CharacterRow> = if user.id.is_empty() {
+        vec![char_row.clone()]
+    } else {
+        characters::list_for_user(pool, &user.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "character list failed");
+                vec![char_row.clone()]
+            })
+    };
+    Ok(PersistedLoad {
+        item_rows,
+        achievement_rows,
+        kill_total,
+        drunk,
+        recent_tells,
+        clan,
+        script_vars_json,
+        trophy_json,
+        spell_cooldowns_json,
+        cooldowns_json,
+        ignore_list_json,
+        effect_instances_json,
+        pets_json,
+        house_summary,
+        ability_rows,
+        alias_rows,
+        all_chars,
     })
 }
 
@@ -8170,5 +8310,165 @@ mod tests {
         assert_eq!(after_expiry.ok(), f(1, false));
         assert_eq!(row.failed_login_attempts, 1);
         assert!(row.locked_until.is_none());
+    }
+
+    thread_local! {
+        static LOAD_CLOSED: std::cell::RefCell<Vec<ConnId>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Router wired so `close_conn` is observable; connection 1 is parked
+    /// mid-login and its output drained.
+    fn load_guard_router(world: &World) -> (ConnRouter, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        LOAD_CLOSED.with(|v| v.borrow_mut().clear());
+        let mut router = ConnRouter::new();
+        router.close_conn = |c| {
+            LOAD_CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, world);
+        drain(&mut orx);
+        (router, orx)
+    }
+
+    fn assert_load_refused(
+        router: &ConnRouter,
+        world: &mut World,
+        orx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+        what: &str,
+    ) {
+        let text = drain(orx);
+        assert!(
+            text.contains(
+                "The game is having trouble loading your character; \
+                 please try again in a minute."
+            ),
+            "{what}: {text}"
+        );
+        assert!(!router.login.contains_key(&1), "{what}: ctx removed");
+        assert_eq!(
+            LOAD_CLOSED.with(|v| v.borrow().clone()),
+            vec![1],
+            "{what}: connection closed"
+        );
+        assert!(
+            world.query::<&Player>().iter(world).next().is_none(),
+            "{what}: no session was spawned"
+        );
+    }
+
+    /// A real (not injected) DB failure while loading the character's
+    /// tables refuses the login instead of starting an empty session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn login_is_refused_when_the_database_is_unreachable() {
+        let mut world = auth_world(3);
+        let (mut router, mut orx) = load_guard_router(&world);
+        let (user, c) = legacy_sentinel();
+        router
+            .complete_login(1, &mut world, &failing_pool(), user, *c.unwrap())
+            .await;
+        assert_load_refused(&router, &mut world, &mut orx, "unreachable db");
+    }
+
+    /// For every per-character table, an injected load failure refuses the
+    /// login and leaves the character's `CharacterAbilities` and
+    /// `CharacterItems` rows untouched (nothing exists to save over them).
+    /// A control load without a fault returns both.
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_table_load_refuses_login_and_keeps_rows() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let ability: Option<i32> =
+            mud_db::sqlx::query_scalar("SELECT id FROM \"Ability\" ORDER BY id LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some(ability_id) = ability else {
+            eprintln!("skipping: no Ability rows");
+            return;
+        };
+        let (user, c) = temp_unlinked_char(&pool, "lg").await;
+        mud_db::sqlx::query(
+            "INSERT INTO \"CharacterAbilities\" (character_id, ability_id, known, proficiency) \
+             VALUES ($1, $2, true, 77)",
+        )
+        .bind(&c.id)
+        .bind(ability_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        mud_db::sqlx::query(
+            "INSERT INTO \"CharacterItems\" (character_id, object_zone_id, object_id, updated_at) \
+             VALUES ($1, $2, $3, NOW())",
+        )
+        .bind(&c.id)
+        .bind(oz)
+        .bind(oid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let abilities = |pool: PgPool, cid: String| async move {
+            mud_db::character_abilities::list_for(&pool, &cid)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.ability_id, r.proficiency))
+                .collect::<Vec<_>>()
+        };
+        let before_items = item_rows(&pool, &[&c.id]).await;
+        assert_eq!(before_items.len(), 1);
+        let before_abilities = abilities(pool.clone(), c.id.clone()).await;
+        assert_eq!(before_abilities, vec![(ability_id, 77)]);
+
+        for table in [
+            "character_abilities",
+            "character_items",
+            "character_aliases",
+            "achievements",
+            "kill_tracking",
+            "drunkenness",
+            "clan_membership",
+            "script_vars",
+            "trophy",
+            "spell_cooldowns",
+            "cooldowns",
+            "ignore_list",
+            "effect_instances",
+            "pets",
+            "player_houses",
+        ] {
+            let mut world = auth_world(3);
+            let (mut router, mut orx) = load_guard_router(&world);
+            router.load_fault = Some(table);
+            router
+                .complete_login(1, &mut world, &pool, user.clone(), (*c).clone())
+                .await;
+            assert_load_refused(&router, &mut world, &mut orx, table);
+            assert_eq!(item_rows(&pool, &[&c.id]).await, before_items, "{table}");
+            assert_eq!(
+                abilities(pool.clone(), c.id.clone()).await,
+                before_abilities,
+                "{table}"
+            );
+        }
+
+        // Control: without a fault the loader returns both tables.
+        let ok = load_persisted(&pool, &c, &user, None)
+            .await
+            .unwrap_or_else(|f| panic!("control load failed at {}: {}", f.table, f.source));
+        assert_eq!(ok.item_rows.len(), 1);
+        assert!(
+            ok.ability_rows
+                .iter()
+                .any(|r| r.ability_id == ability_id && r.proficiency == 77)
+        );
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 }
