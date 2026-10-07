@@ -605,3 +605,21 @@ async fn level_table_is_the_legacy_curve_with_class_factors() {
     assert!((factor("Necromancer") - 1.3).abs() < f64::EPSILON);
     assert!((factor("Paladin") - 1.15).abs() < f64::EPSILON);
 }
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn race_innates_are_granted_to_a_fresh_ability_set() {
+    use mud_db::character_abilities::CharacterAbilityRow;
+    use mud_db::race_abilities::{list_for_race, merge_innates};
+    let innates = list_for_race(&pool().await, "ELF")
+        .await
+        .expect("list elf innates");
+    assert!(
+        innates.iter().any(|r| r.ability_name == "MAGIC_MISSILE"),
+        "elf innate rows: {innates:?}"
+    );
+    let mut rows: Vec<CharacterAbilityRow> = Vec::new();
+    let granted = merge_innates(&mut rows, &innates);
+    assert_eq!(granted, innates.len());
+    assert!(rows.iter().all(|r| r.known && r.proficiency > 0));
+}

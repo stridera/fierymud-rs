@@ -441,9 +441,13 @@ async fn handle_session_create(
     let items = character_items::list_for(&state.pool, &character.id)
         .await
         .unwrap_or_default();
-    let abilities = mud_db::character_abilities::list_for(&state.pool, &character.id)
+    let mut abilities = mud_db::character_abilities::list_for(&state.pool, &character.id)
         .await
         .unwrap_or_default();
+    // Same race-innate grant as a telnet login so virtual sessions match.
+    if let Ok(innates) = mud_db::race_abilities::list_for_race(&state.pool, &character.race).await {
+        mud_db::race_abilities::merge_innates(&mut abilities, &innates);
+    }
     let aliases = mud_db::character_aliases::list_for(&state.pool, &character.id)
         .await
         .unwrap_or_default();

@@ -3477,12 +3477,24 @@ impl ConnRouter {
                 None
             }
         };
-        let ability_rows = mud_db::character_abilities::list_for(pool, &char_row.id)
+        let mut ability_rows = mud_db::character_abilities::list_for(pool, &char_row.id)
             .await
             .unwrap_or_else(|e| {
                 warn!(conn_id, error = %e, "character_abilities load failed");
                 Vec::new()
             });
+        // Race innates (`RaceAbilities`) are part of the character from
+        // creation: grant any the saved set lacks. Covers new characters
+        // and existing ones alike; the next save persists them.
+        match mud_db::race_abilities::list_for_race(pool, &char_row.race).await {
+            Ok(innates) => {
+                let granted = mud_db::race_abilities::merge_innates(&mut ability_rows, &innates);
+                if granted > 0 {
+                    info!(conn_id, race = %char_row.race, granted, "granted race innates");
+                }
+            }
+            Err(e) => warn!(conn_id, error = %e, "race innates load failed"),
+        }
         let alias_rows = mud_db::character_aliases::list_for(pool, &char_row.id)
             .await
             .unwrap_or_else(|e| {
