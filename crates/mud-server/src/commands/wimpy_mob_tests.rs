@@ -127,7 +127,7 @@ fn hurt_wimpy_mob_does_not_start_a_fight_even_with_a_sleeper() {
 }
 
 #[test]
-fn fled_wimpy_mob_does_not_re_aggro_the_awake_player_it_remembers() {
+fn scared_wimpy_mob_does_not_re_attack_a_player_it_remembers() {
     let mut fx = Fx::new();
     // Hurt, grudge-holding wimpy mob (as left behind by a flee).
     let mob = fx.mob(vec![MobBehavior::Wimpy], 20);
@@ -135,8 +135,16 @@ fn fled_wimpy_mob_does_not_re_aggro_the_awake_player_it_remembers() {
     assert!(fx.world.get::<MobMemory>(mob).is_some());
     recheck_aggro_in_room(&mut fx.world, fx.player);
     assert!(!fx.fighting(mob));
-    // Healed past the panic line: still wimpy toward an awake player.
+}
+
+#[test]
+fn healed_wimpy_mob_re_attacks_an_awake_player_it_remembers() {
+    // Legacy `mob_memory_check` has no AWAKE test; only the scared
+    // check (HP below a quarter) stops a grudge attack.
+    let mut fx = Fx::new();
+    let mob = fx.mob(vec![MobBehavior::Wimpy], 20);
+    remember_attacker(&mut fx.world, mob, fx.player);
     fx.world.get_mut::<Health>(mob).unwrap().hp = 100;
     recheck_aggro_in_room(&mut fx.world, fx.player);
-    assert!(!fx.fighting(mob));
+    assert_eq!(fx.world.get::<Fighting>(mob).map(|f| f.0), Some(fx.player));
 }

@@ -18,7 +18,7 @@ const PLAYER_CORPSE_DECAY_SECS: i32 = 7 * 24 * 60 * 60;
 /// claim window rather than piling up. 10 minutes.
 const MOB_CORPSE_DECAY_SECS: i32 = 600;
 use crate::commands::{
-    apply_damage_from, arrival_from, broadcast_room_except_players_rendered,
+    apply_attacker_damage, arrival_from, broadcast_room_except_players_rendered,
     broadcast_room_except_rendered, cmd_flee, damage_color_tag, direction_name,
     disengage_attackers_of, drain_stamina, name_of, send_to, try_insert, try_remove,
 };
@@ -352,7 +352,7 @@ pub(crate) fn remember_attacker(world: &mut World, mob: Entity, attacker: Entity
 /// through and the mob takes the next hit normally. Drops the
 /// mob's `Fighting` so attackers will auto-disengage on the room
 /// mismatch in the next combat tick.
-fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
+pub(crate) fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
     let candidates: Vec<(mud_db::enums::Direction, Entity)> = world
         .get::<Exits>(from_room)
         .map(|e| {
@@ -1391,7 +1391,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // can't one-shot a fully-buffed player from full HP.
     damage = damage.min(MAX_DAMAGE_PER_SWING);
     mit.final_dmg = damage;
-    let (dead, threshold_msg) = apply_damage_from(world, s.target, damage, s.attacker);
+    let (dead, threshold_msg) = apply_attacker_damage(world, s.target, damage, s.attacker);
 
     // Names may carry XML-Lite tags; send_to renders per-recipient so each
     // player gets ANSI or stripped output according to their own COLOR_BLIND
@@ -3346,6 +3346,37 @@ mod tests {
         run_combat_tick(&mut world);
         assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_a));
         assert!(world.get::<Health>(mob).is_some_and(|h| h.hp < 60));
+    }
+
+    #[test]
+    fn spell_damage_below_a_quarter_makes_a_wimpy_mob_flee() {
+        let mut world = World::new();
+        let (_a, room_b, mob) =
+            hurt_mob_under_attack(&mut world, vec![mud_db::enums::MobBehavior::Wimpy], 28);
+        let caster = world.spawn_empty().id();
+        let (dead, _) = crate::commands::apply_damage_from(&mut world, mob, 7, caster);
+        assert!(!dead);
+        assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_b));
+    }
+
+    #[test]
+    fn killing_spell_does_not_make_a_wimpy_mob_flee() {
+        let mut world = World::new();
+        let (room_a, _b, mob) =
+            hurt_mob_under_attack(&mut world, vec![mud_db::enums::MobBehavior::Wimpy], 5);
+        let caster = world.spawn_empty().id();
+        let (dead, _) = crate::commands::apply_damage_from(&mut world, mob, 10, caster);
+        assert!(dead);
+        assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_a));
+    }
+
+    #[test]
+    fn damage_without_an_attacker_does_not_make_a_wimpy_mob_flee() {
+        let mut world = World::new();
+        let (room_a, _b, mob) =
+            hurt_mob_under_attack(&mut world, vec![mud_db::enums::MobBehavior::Wimpy], 28);
+        crate::commands::apply_damage(&mut world, mob, 7);
+        assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_a));
     }
 
     #[test]

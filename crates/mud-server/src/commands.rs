@@ -20110,6 +20110,31 @@ pub(crate) fn apply_damage_from(
     amount: i32,
     attacker: Entity,
 ) -> (bool, Option<&'static str>) {
+    let (dead, msg) = apply_attacker_damage(world, target, amount, attacker);
+    // Legacy `damage()` (fight.cpp:1782): any attacker-sourced hit that
+    // leaves a wimpy, non-charmed mob below a quarter HP makes it flee.
+    // A killing blow does not; DoT / bleed (no attacker) never reach
+    // here. The melee swing path calls `apply_attacker_damage` directly
+    // so it can flee after its hit messages instead.
+    if !dead
+        && amount > 0
+        && attacker != target
+        && wimpy_mob_should_flee(world, target)
+        && let Some(room) = world.get::<Located>(target).map(|l| l.0)
+    {
+        crate::combat::mob_flee(world, target, room);
+    }
+    (dead, msg)
+}
+
+/// [`apply_damage_from`] minus the wimpy-mob flee reaction: kill credit,
+/// invisibility break, then the raw damage.
+pub(crate) fn apply_attacker_damage(
+    world: &mut World,
+    target: Entity,
+    amount: i32,
+    attacker: Entity,
+) -> (bool, Option<&'static str>) {
     if amount > 0 && attacker != target {
         crate::combat::record_damager(world, target, attacker);
         // Legacy `damage()` -> `appear()`: dealing damage of any kind
@@ -20995,7 +21020,7 @@ pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room:
                 l.0 == room
                     && mem.0.contains(&player)
                     && can_see_player(world, *e, player)
-                    && mob_will_start_fight(world, *e, player)
+                    && !wimpy_mob_is_scared(world, *e)
             })
             .map(|(e, _, _)| e)
     };
@@ -21018,7 +21043,8 @@ pub(crate) fn wimpy_mob_is_scared(world: &World, mob: Entity) -> bool {
 }
 
 /// Legacy gate on a mob *starting* a fight with `target` (aggro on
-/// entry, respawn aggro, grudge re-engage). A wimpy mob below its panic
+/// entry, respawn aggro). Grudge re-engage only uses
+/// [`wimpy_mob_is_scared`]: legacy `mob_memory_check` has no awake test. A wimpy mob below its panic
 /// line never starts one (`mobact.cpp:277`), and a wimpy mob is only
 /// willing to attack a target that is asleep (`is_aggr_to`,
 /// `ai_utils.cpp:513` — `MOB_WIMPY && AWAKE(tch)`), unless it is a
