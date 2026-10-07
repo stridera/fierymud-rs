@@ -26,6 +26,7 @@ mod rest;
 mod shops;
 mod sleep;
 mod syslog;
+mod terminal;
 mod tick_stats;
 mod triggers;
 mod wander;
@@ -738,9 +739,9 @@ async fn main() {
                     _ => "inbound:other",
                 };
                 match msg.kind {
-                    InboundKind::Connected { peer, outbound } => {
+                    InboundKind::Connected { peer, outbound, output } => {
                         info!(conn_id = msg.conn, %peer, "client connected");
-                        router.on_connect(msg.conn, outbound, Some(peer), &world);
+                        router.on_connect_with(msg.conn, outbound, Some(peer), output, &world);
                     }
                     InboundKind::Line(text) => {
                         router.on_line(msg.conn, text, &pool, &mut world).await;

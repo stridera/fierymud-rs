@@ -53,6 +53,25 @@ const BANNER_FALLBACK: &str = "\
    <c244>Login with your account email or character name.</>\r\n\
 \r\n\
 ";
+/// Pure-ASCII variant of [`BANNER_FALLBACK`] for clients that aren't
+/// known to render UTF-8. Used when the `LoginMessage` table has no
+/// `WELCOME_BANNER` row at all; with rows present an `ascii` variant
+/// row is preferred, else the default row is transliterated on the way
+/// out by the connection writer.
+const BANNER_FALLBACK_ASCII: &str = concat!(
+    "\n",
+    "<c196>   _____  ___  _____  ____  __   __ __  __  _   _  ____  </>\n",
+    "<c202>  |  ___||_ _|| ____||  _ \\ \\ \\ / /|  \\/  || | | ||  _ \\ </>\n",
+    "<c208>  | |_    | | |  _|  | |_) | \\ V / | |\\/| || | | || | | |</>\n",
+    "<c214>  |  _|   | | | |___ |  _ <   | |  | |  | || |_| || |_| |</>\n",
+    "<c220>  |_|    |___||_____||_| \\_\\  |_|  |_|  |_| \\___/ |____/ </>\n",
+    "\n",
+    "<c220>             A classic fantasy MUD, forged in fire.</>\n",
+    "<c244>                         www.fierymud.org</>\n",
+    "\n",
+    "<c244>Login with your account email or character name.</>\n",
+    "\n",
+);
 /// Combined identifier prompt — accepts either an email or a
 /// character name. Email is detected by the presence of '@' (the
 /// only thing legacy MUD usernames couldn't legally contain).
@@ -194,6 +213,31 @@ fn login_message_bytes(world: &World, stage: &str, fallback: &str) -> Vec<u8> {
         .map_or(fallback, |m| m.get_or(stage, "default", fallback));
     crate::commands::render_color_tags(raw, crate::commands::ColorMode::Ansi).into_bytes()
 }
+/// The connect banner for a client that can (`ascii == false`) or can't
+/// render UTF-8. Data-driven: a `WELCOME_BANNER` row with variant
+/// `ascii` serves plain clients, the `default` row everyone else (and
+/// plain clients too when no `ascii` row exists; the writer then
+/// transliterates it). Compiled-in banners only back an empty table.
+fn welcome_banner_bytes(world: &World, ascii: bool) -> Vec<u8> {
+    const STAGE: &str = "WELCOME_BANNER";
+    let msgs = world.get_resource::<mud_world::LoginMessages>();
+    let ascii_row = msgs
+        .filter(|_| ascii)
+        .and_then(|m| m.by_key.get(&(STAGE.to_string(), "ascii".to_string())));
+    let raw = ascii_row.map_or_else(
+        || {
+            let fallback = if ascii {
+                BANNER_FALLBACK_ASCII
+            } else {
+                BANNER_FALLBACK
+            };
+            msgs.map_or(fallback, |m| m.get_or(STAGE, "default", fallback))
+        },
+        String::as_str,
+    );
+    crate::commands::render_color_tags(raw, crate::commands::ColorMode::Ansi).into_bytes()
+}
+
 /// Rendered plain-telnet security notice (`PLAIN_TELNET_NOTICE` row or
 /// the compiled fallback) with `{tls_port}` substituted from
 /// `server.tls_port`.
@@ -832,6 +876,9 @@ pub struct ConnCapabilities {
     pub eor: bool,
     pub mxp: bool,
     pub utf8: bool,
+    /// Shared output capabilities (colour depth, charset) for this
+    /// connection. The same handle the writer encodes with.
+    pub output: mud_net::OutputHandle,
 }
 
 /// Lock notice for an account whose `locked_until` is in the future.
@@ -904,6 +951,10 @@ impl ConnRouter {
             .find_map(|(cid, e)| if *e == entity { Some(*cid) } else { None })
     }
 
+    /// Accept a connection with the safe default output capabilities
+    /// (16-colour ASCII). Production goes through
+    /// [`Self::on_connect_with`] with the negotiated handle.
+    #[cfg(test)]
     pub fn on_connect(
         &mut self,
         conn_id: ConnId,
@@ -911,11 +962,24 @@ impl ConnRouter {
         peer: Option<SocketAddr>,
         world: &World,
     ) {
-        let _ = outbound.try_send(login_message_bytes(
-            world,
-            "WELCOME_BANNER",
-            BANNER_FALLBACK,
-        ));
+        self.on_connect_with(conn_id, outbound, peer, mud_net::OutputHandle::new(), world);
+    }
+
+    /// Accept a connection. `mud_net` releases `Connected` only once
+    /// capability negotiation has settled (or timed out), so `output`
+    /// already says whether this client can take UTF-8 and the banner
+    /// is picked for it.
+    pub fn on_connect_with(
+        &mut self,
+        conn_id: ConnId,
+        outbound: Outbound,
+        peer: Option<SocketAddr>,
+        output: mud_net::OutputHandle,
+        world: &World,
+    ) {
+        let ascii = output.charset() == mud_net::Charset::Ascii;
+        self.caps.entry(conn_id).or_default().output = output;
+        let _ = outbound.try_send(welcome_banner_bytes(world, ascii));
         let _ = outbound.try_send(login_message_bytes(
             world,
             "EMAIL_PROMPT",
@@ -1088,6 +1152,17 @@ impl ConnRouter {
         if let Ok(mut e) = world.get_entity_mut(entity) {
             e.insert(mud_world::ClientWidth(cols));
         }
+    }
+
+    /// Hand the player entity its connection's output capabilities and
+    /// apply the player's saved `color` / `charset` settings to them.
+    fn attach_output(&self, conn_id: ConnId, entity: Entity, world: &mut World) {
+        if let Some(c) = self.caps.get(&conn_id)
+            && let Ok(mut e) = world.get_entity_mut(entity)
+        {
+            e.insert(crate::terminal::ClientOutput(c.output.clone()));
+        }
+        crate::terminal::sync_output(world, entity);
     }
 
     /// TTYPE / MTTS response. The MTTS cycle yields three
@@ -3171,6 +3246,7 @@ impl ConnRouter {
         world.entity_mut(entity).insert(Connection(outbound));
         self.playing.insert(conn_id, entity);
         self.sync_client_width(conn_id, entity, world);
+        self.attach_output(conn_id, entity, world);
         true
     }
 
@@ -3792,6 +3868,7 @@ impl ConnRouter {
         crate::quest_triggers::dispatch_auto_trigger(world, entity);
         self.playing.insert(conn_id, entity);
         self.sync_client_width(conn_id, entity, world);
+        self.attach_output(conn_id, entity, world);
         commands::send_prompt(world, entity);
         info!(
             conn_id,
@@ -5886,6 +5963,80 @@ mod tests {
         if let Ok(done) = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
             router.on_auth_done(done.unwrap(), pool, world).await;
         }
+    }
+
+    /// First output frame after `on_connect_with` is the banner.
+    fn banner_for(world: &World, handle: mud_net::OutputHandle) -> (String, mud_net::OutputHandle) {
+        let mut router = ConnRouter::new();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(8);
+        router.on_connect_with(1, tx, None, handle.clone(), world);
+        let first = orx.try_recv().expect("banner frame");
+        (String::from_utf8(first).unwrap(), handle)
+    }
+
+    fn messages(rows: &[(&str, &str, &str)]) -> mud_world::LoginMessages {
+        mud_world::LoginMessages {
+            by_key: rows
+                .iter()
+                .map(|(stage, variant, text)| {
+                    (
+                        ((*stage).to_string(), (*variant).to_string()),
+                        (*text).to_string(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn banner_fallback_is_ascii_for_plain_clients_and_blocks_for_utf8() {
+        let world = World::new();
+        let (plain, _) = banner_for(&world, mud_net::OutputHandle::new());
+        assert!(plain.is_ascii(), "plain client got non-ASCII: {plain:?}");
+        assert!(plain.contains("forged in fire"));
+
+        let utf8 = mud_net::OutputHandle::new();
+        utf8.apply_mtts(1 | 4 | 8);
+        let (fancy, _) = banner_for(&world, utf8);
+        assert!(fancy.contains('\u{2588}'), "UTF-8 client lost the logo");
+    }
+
+    #[test]
+    fn banner_prefers_an_ascii_variant_row_for_plain_clients() {
+        let mut world = World::new();
+        world.insert_resource(messages(&[
+            ("WELCOME_BANNER", "default", "FANCY \u{2588}\u{2588}"),
+            ("WELCOME_BANNER", "ascii", "PLAIN ##"),
+        ]));
+        let (plain, _) = banner_for(&world, mud_net::OutputHandle::new());
+        assert_eq!(plain, "PLAIN ##");
+        let utf8 = mud_net::OutputHandle::new();
+        utf8.mark_utf8();
+        let (fancy, _) = banner_for(&world, utf8);
+        assert_eq!(fancy, "FANCY \u{2588}\u{2588}");
+    }
+
+    #[test]
+    fn banner_default_row_is_transliterated_for_plain_clients_when_no_variant() {
+        let mut world = World::new();
+        world.insert_resource(messages(&[(
+            "WELCOME_BANNER",
+            "default",
+            "<c196>\u{2588}\u{2557}</> \u{2014} hi\n",
+        )]));
+        let (text, handle) = banner_for(&world, mud_net::OutputHandle::new());
+        // The router hands over the data-driven row; the connection
+        // writer encodes it for the client.
+        assert!(text.contains('\u{2588}'));
+        let wire = String::from_utf8(handle.encode(text.into_bytes())).unwrap();
+        assert!(wire.is_ascii(), "{wire:?}");
+        assert!(wire.contains("#+") && wire.contains("--"), "{wire:?}");
+        // 256-colour tag downgraded to 16 colours.
+        assert!(wire.contains("\x1b[91m"), "{wire:?}");
+        assert!(
+            wire.ends_with("\r\n") || wire.contains("hi\r\n"),
+            "{wire:?}"
+        );
     }
 
     fn drain(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> String {

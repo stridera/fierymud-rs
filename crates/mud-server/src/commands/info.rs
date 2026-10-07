@@ -1709,12 +1709,39 @@ inventory::submit! {
         required_perm: None,
         category: Category::Settings,
         help: Help {
-            usage: "color",
-            summary: "Toggle ANSI color rendering for your output.",
-            long: "When colors are off, XML-Lite color tags are stripped \
-                   instead of rendered to ANSI. Persists for the session.",
+            usage: "color [off|16|256|truecolor|auto]",
+            summary: "Choose how much color you see.",
+            long: "The server asks your client what it can display and \
+                   adapts: 256-color and truecolor shades are mapped to the \
+                   nearest of the 16 basic colors for clients that only \
+                   do 16. `color off` removes color entirely, `color 16` / \
+                   `color 256` / `color truecolor` pin a depth if your client \
+                   misreports itself, and `color auto` goes back to \
+                   following the client. Saved with your character. `color` \
+                   alone shows the current setting.",
         },
         run: cmd_color,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["charset"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Settings,
+        help: Help {
+            usage: "charset [ascii|utf8|auto]",
+            summary: "Choose plain ASCII or UTF-8 output.",
+            long: "Clients that don't announce UTF-8 support get plain \
+                   ASCII: dashes, arrows, stars and box-drawing characters \
+                   are replaced by look-alikes (-- -> * + - |). If your \
+                   client does display UTF-8, `charset utf8` turns the real \
+                   symbols on; `charset ascii` forces plain text; `charset \
+                   auto` follows what your client reports. Saved with your \
+                   character. `charset` alone shows the current setting.",
+        },
+        run: cmd_charset,
     }
 }
 
@@ -5941,11 +5968,8 @@ fn parse_who_level_filter(args: &str) -> Option<(i32, i32)> {
 }
 
 pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
-    // Width-aware columns: pad the name to NAME_COL visible chars
-    // (skipping XML-Lite color tags via pad_visible) so titles and
-    // flags line up across players regardless of name length or
-    // colors. NAME_COL covers the canonical Characters.name limit.
-    const NAME_COL: usize = 20;
+    // Rows are free-flowing like legacy `who`: the title follows the
+    // name directly (it reads as a last name), not a padded column.
     // Parse optional level filter args. `who` shows everyone;
     // `who N` shows level >= N; `who LO HI` shows the inclusive
     // [LO, HI] range. Garbage args fall through to "show all"
@@ -6009,6 +6033,9 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
                 class_name: prof
                     .and_then(|p| p.class_id)
                     .and_then(|cid| class_lookup.get(&cid).cloned()),
+                race: prof
+                    .map(|p| crate::commands::pretty_effect_label(&p.race).replace(' ', "-"))
+                    .filter(|r| !r.is_empty()),
             })
             .collect()
     };
@@ -6078,9 +6105,17 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
             .then_with(|| b.stars.is_some().cmp(&a.stars.is_some()))
             .then_with(|| a.name.cmp(&b.name))
     });
+    let mut last_was_staff = None;
     for r in &raw_sorted {
         let root = roots.get(&r.entity).copied().unwrap_or(r.entity);
         let in_group = group_size.get(&root).copied().unwrap_or(0) > 1;
+        // Staff are listed first (level sort); a blank line keeps them
+        // apart from the mortals below.
+        let is_staff = r.level >= 100;
+        if last_was_staff == Some(true) && !is_staff {
+            out.push_str("\r\n");
+        }
+        last_was_staff = Some(is_staff);
         out.push_str("  ");
         if let Some(stars) = &r.stars {
             // Level-99 mortal at the XP cap: the class stars replace the
@@ -6100,7 +6135,16 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
         } else {
             out.push_str("       ");
         }
-        out.push_str(&pad_visible(&r.name, NAME_COL));
+        // Name, then the title right after it: titles are written to
+        // read as a surname ("Strider the Wanderer").
+        out.push_str(&r.name);
+        if let Some(t) = r.title.as_deref().filter(|t| !t.trim().is_empty()) {
+            out.push(' ');
+            out.push_str(t.trim());
+        }
+        if let Some(race) = &r.race {
+            out.push_str(&format!(" (<cyan>{race}</>)"));
+        }
         if let Some(class) = &r.class_name {
             // class is the catalog `name` field (carries authored
             // color); render-time mapping turns the tags into ANSI.
@@ -6109,20 +6153,15 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
         if let Some(abbrev) = &r.clan_abbrev {
             out.push_str(&format!(" [<b:yellow>{abbrev}</>]"));
         }
-        if let Some(t) = &r.title {
-            out.push(' ');
-            out.push_str(t);
-        }
         if in_group {
             out.push_str(" [<b:green>G</>]");
         }
-        // Honor-roll mark for endgame / staff tier. The `who_level_color`
-        // band paints the level tag bold-magenta at this threshold; the
-        // star adds a glyph cue so players can spot the honor roll
-        // without having to read level numbers. Bold-yellow leans into
-        // the "gold star" framing rather than re-using magenta.
-        if r.level >= 100 {
-            out.push_str(" [<b:yellow>★</>]");
+        // Honor-roll mark for endgame / staff tier. The glyph is
+        // routed through the connection's charset encoding, so
+        // ASCII clients see `*` instead of a character they can't
+        // render.
+        if is_staff {
+            out.push_str(" [<b:yellow>\u{2605}</>]");
         }
         if r.afk {
             out.push_str(" [<yellow>AFK</>]");
@@ -7540,6 +7579,10 @@ pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You have no player flags slot.\r\n");
         return;
     };
+    if flag == PlayerFlag::ColorBlind {
+        // The colour switch also gates the connection's output encoder.
+        crate::terminal::sync_output(world, player);
+    }
     let label = TOGGLES
         .iter()
         .find(|(f, _)| *f == flag)
@@ -7714,14 +7757,92 @@ pub(crate) fn cmd_deaf(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-pub(crate) fn cmd_color(world: &mut World, player: Entity, _args: &str) {
-    toggle_player_flag(
-        world,
-        player,
-        PlayerFlag::ColorBlind,
-        "Colors are now OFF.",
-        "Colors are now ON.",
-    );
+/// `color [off|16|256|truecolor|auto]`: show or set the colour depth.
+/// "Off" is the `COLOR_BLIND` flag (so `toggle color` is the same
+/// switch); the depth overrides live in `pref.color`.
+pub(crate) fn cmd_color(world: &mut World, player: Entity, args: &str) {
+    use crate::terminal as term;
+
+    let arg = args.trim().to_ascii_lowercase();
+    let (off, pref, msg): (bool, Option<&str>, &str) = match arg.as_str() {
+        "" => {
+            let depth = term::effective_color(world, player);
+            let source = if term::color_override(world, player).is_some() {
+                "set by you"
+            } else {
+                "from your client"
+            };
+            send_to(
+                world,
+                player,
+                format!(
+                    "Color: {} ({source}).\r\n\
+                     Use `color off`, `color 16`, `color 256`, `color truecolor` \
+                     or `color auto`.\r\n",
+                    term::depth_label(depth)
+                ),
+            );
+            return;
+        }
+        "off" | "none" | "no" | "0" => (true, None, "Color is now OFF."),
+        "on" | "auto" | "client" | "default" => {
+            (false, None, "Color now follows what your client supports.")
+        }
+        "16" | "ansi" => (false, Some("16"), "Color is pinned to 16 colors."),
+        "256" => (false, Some("256"), "Color is pinned to 256 colors."),
+        "truecolor" | "24bit" | "true" => {
+            (false, Some("truecolor"), "Color is pinned to truecolor.")
+        }
+        _ => {
+            send_to(
+                world,
+                player,
+                "Usage: color [off|16|256|truecolor|auto]\r\n",
+            );
+            return;
+        }
+    };
+    term::set_color_off(world, player, off);
+    term::set_pref(world, player, mud_world::PREF_COLOR_KEY, pref);
+    term::sync_output(world, player);
+    send_to(world, player, format!("{msg}\r\n"));
+}
+
+/// `charset [ascii|utf8|auto]`: show or set ASCII vs UTF-8 output.
+pub(crate) fn cmd_charset(world: &mut World, player: Entity, args: &str) {
+    use crate::terminal as term;
+
+    let arg = args.trim().to_ascii_lowercase();
+    let (pref, msg): (Option<&str>, &str) = match arg.as_str() {
+        "" => {
+            let cs = term::effective_charset(world, player);
+            let source = if term::pref_charset(world, player).is_some() {
+                "set by you"
+            } else {
+                "from your client"
+            };
+            send_to(
+                world,
+                player,
+                format!(
+                    "Charset: {} ({source}).\r\n\
+                     Use `charset ascii`, `charset utf8` or `charset auto`.\r\n",
+                    term::charset_label(cs)
+                ),
+            );
+            return;
+        }
+        "ascii" | "plain" | "us-ascii" => (Some("ascii"), "Output is now plain ASCII."),
+        "utf8" | "utf-8" | "unicode" => (Some("utf8"), "Output now uses UTF-8 symbols."),
+        "auto" | "client" | "default" => (None, "Charset now follows what your client supports."),
+        _ => {
+            send_to(world, player, "Usage: charset [ascii|utf8|auto]\r\n");
+            return;
+        }
+    };
+    term::set_pref(world, player, mud_world::PREF_CHARSET_KEY, pref);
+    term::sync_output(world, player);
+    send_to(world, player, format!("{msg}\r\n"));
 }
 
 pub(crate) fn cmd_wimpy(world: &mut World, player: Entity, args: &str) {

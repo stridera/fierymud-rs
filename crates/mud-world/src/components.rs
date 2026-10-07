@@ -1336,6 +1336,16 @@ pub struct ClientWidth(pub u16);
 /// `Characters.script_vars` with no schema change.
 pub const PREF_COLUMNS_KEY: &str = "pref.columns";
 
+/// `ScriptVars` key for the player's colour-depth override
+/// (`color 16|256|truecolor`). Absent means "follow the client's
+/// negotiated depth". "Off" is the `COLOR_BLIND` player flag, not a
+/// value here, so `toggle color` and `color off` stay one switch.
+pub const PREF_COLOR_KEY: &str = "pref.color";
+
+/// `ScriptVars` key for the player's charset override
+/// (`charset ascii|utf8`). Absent means "follow the client".
+pub const PREF_CHARSET_KEY: &str = "pref.charset";
+
 /// Marker: the player is flying. Movement treats every sector as
 /// equally easy (sector cost 1 instead of 4-6 for water etc.) but
 /// adds a flat +1 stamina per move on top — flying is great over

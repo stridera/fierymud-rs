@@ -74,6 +74,17 @@ pub mod ttype {
     pub const SEND: u8 = 1;
 }
 
+/// NEW-ENVIRON subnegotiation codes per RFC 1572.
+pub mod environ {
+    pub const IS: u8 = 0;
+    pub const SEND: u8 = 1;
+    pub const INFO: u8 = 2;
+    pub const VAR: u8 = 0;
+    pub const VALUE: u8 = 1;
+    pub const ESC: u8 = 2;
+    pub const USERVAR: u8 = 3;
+}
+
 /// Events the parser surfaces to the connection task. Plain text
 /// bytes (the player's input) come back through `feed`'s return
 /// value, not as events — this keeps the hot path zero-allocation
@@ -354,17 +365,8 @@ pub fn mccp2_start() -> Vec<u8> {
 
 /// Decode an MTTS bitmap response per the standard. Clients
 /// reply to the third TTYPE SEND with `"MTTS <decimal-bitmap>"`.
-/// Bits we care about (per Mudlet's `TermType` doc):
-///   * 0 = ANSI 16-color
-///   * 1 = VT100 / xterm capabilities
-///   * 2 = UTF-8
-///   * 3 = 256-color
-///   * 4 = mouse tracking
-///   * 5 = OSC color palette
-///   * 6 = screen reader
-///   * 7 = proxy reported
-///   * 8 = truecolor (24-bit)
-///   * 9 = MNES (MUD New-Environ Standard)
+/// Flag values are in [`crate::output::mtts`] (1 = ANSI, 2 = VT100,
+/// 4 = UTF-8, 8 = 256 colours, 256 = truecolour, ...).
 ///
 /// Returns the parsed bitmap, or `None` if the payload doesn't
 /// match the `MTTS <num>` shape.
@@ -372,6 +374,84 @@ pub fn mccp2_start() -> Vec<u8> {
 pub fn parse_mtts(payload: &str) -> Option<u32> {
     let rest = payload.strip_prefix("MTTS ")?;
     rest.parse::<u32>().ok()
+}
+
+/// `IAC SB NEW-ENVIRON SEND VAR LANG USERVAR CHARSET USERVAR MTTS
+/// USERVAR TERMINAL_TYPE USERVAR COLORTERM IAC SE` — ask the client for
+/// the few variables that reveal its charset and colour depth.
+#[must_use]
+pub fn environ_send_query() -> Vec<u8> {
+    let mut payload = vec![environ::SEND];
+    for (kind, name) in [
+        (environ::VAR, "LANG"),
+        (environ::USERVAR, "CHARSET"),
+        (environ::USERVAR, "MTTS"),
+        (environ::USERVAR, "TERMINAL_TYPE"),
+        (environ::USERVAR, "COLORTERM"),
+    ] {
+        payload.push(kind);
+        payload.extend_from_slice(name.as_bytes());
+    }
+    subneg(opt::NEW_ENVIRON, &payload)
+}
+
+/// Parse the body of a NEW-ENVIRON `IS` / `INFO` subnegotiation (the
+/// bytes after the option byte) into `(name, value)` pairs. Variables
+/// without a value are skipped; `ESC` quoting is honoured.
+#[must_use]
+pub fn parse_environ(payload: &[u8]) -> Vec<(String, String)> {
+    #[derive(PartialEq)]
+    enum Stage {
+        Idle,
+        Name,
+        Value,
+    }
+    let Some((&code, rest)) = payload.split_first() else {
+        return Vec::new();
+    };
+    if code != environ::IS && code != environ::INFO {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut stage = Stage::Idle;
+    let (mut name, mut value): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+    let finish = |stage: &Stage, name: &mut Vec<u8>, value: &mut Vec<u8>, out: &mut Vec<_>| {
+        if *stage == Stage::Value {
+            out.push((
+                String::from_utf8_lossy(name).into_owned(),
+                String::from_utf8_lossy(value).into_owned(),
+            ));
+        }
+        name.clear();
+        value.clear();
+    };
+    let mut bytes = rest.iter().copied();
+    while let Some(b) = bytes.next() {
+        match b {
+            environ::VAR | environ::USERVAR => {
+                finish(&stage, &mut name, &mut value, &mut out);
+                stage = Stage::Name;
+            }
+            environ::VALUE if stage == Stage::Name => stage = Stage::Value,
+            _ => {
+                let lit = if b == environ::ESC {
+                    match bytes.next() {
+                        Some(n) => n,
+                        None => break,
+                    }
+                } else {
+                    b
+                };
+                match stage {
+                    Stage::Name => name.push(lit),
+                    Stage::Value => value.push(lit),
+                    Stage::Idle => {}
+                }
+            }
+        }
+    }
+    finish(&stage, &mut name, &mut value, &mut out);
+    out
 }
 
 /// Decode an NAWS subnegotiation payload per RFC 1073. The
@@ -529,5 +609,37 @@ mod tests {
             frame,
             vec![IAC, SB, opt::GMCP, b'a', IAC, IAC, b'b', IAC, SE]
         );
+    }
+
+    #[test]
+    fn environ_is_parses_vars_and_uservars() {
+        let mut payload = vec![environ::IS, environ::VAR];
+        payload.extend_from_slice(b"LANG");
+        payload.push(environ::VALUE);
+        payload.extend_from_slice(b"en_US.UTF-8");
+        payload.push(environ::USERVAR);
+        payload.extend_from_slice(b"MTTS");
+        payload.push(environ::VALUE);
+        payload.extend_from_slice(b"2349");
+        // A variable with no value is skipped.
+        payload.push(environ::USERVAR);
+        payload.extend_from_slice(b"CHARSET");
+        assert_eq!(
+            parse_environ(&payload),
+            vec![
+                ("LANG".to_string(), "en_US.UTF-8".to_string()),
+                ("MTTS".to_string(), "2349".to_string()),
+            ]
+        );
+        // SEND frames aren't replies.
+        assert!(parse_environ(&[environ::SEND, environ::VAR, b'X']).is_empty());
+    }
+
+    #[test]
+    fn environ_query_names_the_interesting_vars() {
+        let q = environ_send_query();
+        assert_eq!(&q[..3], &[IAC, SB, opt::NEW_ENVIRON]);
+        let body = String::from_utf8_lossy(&q).into_owned();
+        assert!(body.contains("LANG") && body.contains("MTTS") && body.contains("CHARSET"));
     }
 }

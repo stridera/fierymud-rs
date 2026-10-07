@@ -353,6 +353,9 @@ mod subclass;
 #[path = "commands/tells.rs"]
 mod tells;
 #[cfg(test)]
+#[path = "commands/terminal_tests.rs"]
+mod terminal_tests;
+#[cfg(test)]
 #[path = "commands/test_support.rs"]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -1730,10 +1733,14 @@ pub(crate) fn drain_syslog_to_watchers(world: &mut World) {
     }
 }
 
-/// Decide which `ColorMode` a player should see based on their flags.
-/// `COLOR_BLIND` opts out to plain text; everyone else gets ANSI.
+/// Decide which `ColorMode` a player should see: plain text when they
+/// turned colour off (`COLOR_BLIND`) or their connection can't show any;
+/// otherwise ANSI. Depth (16 / 256 / truecolor) is the connection
+/// writer's job — see `mud_net::output`.
 pub(crate) fn color_mode_for(world: &World, player: Entity) -> ColorMode {
-    if has_flag(world, player, PlayerFlag::ColorBlind) {
+    if has_flag(world, player, PlayerFlag::ColorBlind)
+        || crate::terminal::effective_color(world, player) == mud_net::ColorDepth::None
+    {
         ColorMode::Strip
     } else {
         ColorMode::Ansi
@@ -1762,13 +1769,9 @@ pub(crate) enum ColorMode {
 /// * `Rgb` — 24-bit truecolor. `<#FF8800>` / `<bg#001020>` produce
 ///   these. Emits `38;2;R;G;B` / `48;2;R;G;B`.
 ///
-/// All three are emitted unconditionally — gating on detected client
-/// capability (MTTS truecolor bit) is the renderer caller's job, not
-/// this layer's. Modern clients (Mudlet, `BlightMud`, `MUSHclient`,
-/// every web client) handle all three; legacy 16-color terminals
-/// will quietly down-sample 256/RGB to the nearest match. We don't
-/// try to translate server-side because the client's mapping is
-/// invariably better than ours.
+/// All three are emitted unconditionally; downgrading to what the
+/// client can show (256/RGB to 16 colours, or none) happens in the
+/// connection writer (`mud_net::output`), the single output choke point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Color {
     Ansi16(u8),
@@ -9152,6 +9155,9 @@ pub(crate) struct WhoRow {
     /// player has a class. None for classless characters; the
     /// renderer omits the class slot in that case.
     pub class_name: Option<String>,
+    /// Race label ("Half-Elf"); shown in parentheses after the title
+    /// like legacy `who`.
+    pub race: Option<String>,
 }
 
 pub(crate) fn format_idle(secs: u64) -> String {

@@ -11,10 +11,13 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+pub mod output;
 pub mod telnet;
+pub use output::{Charset, ColorDepth, OutputHandle};
 pub use telnet::{
-    Event as TelnetEvent, Parser as TelnetParser, charset_request_utf8, do_, dont, iac_eor, iac_ga,
-    mccp2_start, negotiate, opt, parse_mtts, parse_naws, subneg, ttype_send, will, wont,
+    Event as TelnetEvent, Parser as TelnetParser, charset_request_utf8, do_, dont,
+    environ_send_query, iac_eor, iac_ga, mccp2_start, negotiate, opt, parse_environ, parse_mtts,
+    parse_naws, subneg, ttype_send, will, wont,
 };
 
 pub type ConnId = u64;
@@ -52,9 +55,17 @@ pub struct Inbound {
 
 #[derive(Debug)]
 pub enum InboundKind {
+    /// Delivered once capability negotiation has settled (or
+    /// `Limits::negotiation_window` has passed), so the greeting the
+    /// server sends in reply can be rendered for what the client
+    /// reported. Negotiation events that arrived first follow it.
     Connected {
         peer: SocketAddr,
         outbound: Outbound,
+        /// The connection's output capabilities (colour depth,
+        /// charset). The writer applies them to every frame; the
+        /// server can read them and layer player overrides on top.
+        output: OutputHandle,
     },
     Line(String),
     /// Client reported its window size via NAWS (RFC 1073).
@@ -114,6 +125,10 @@ pub struct Limits {
     /// so a peer drip-feeding one line per `pre_login_idle` can't hold
     /// a slot forever.
     pub pre_login_total: Duration,
+    /// How long the connect greeting waits for the client's terminal
+    /// capabilities (TTYPE / MTTS) before giving up and assuming the
+    /// safe defaults (16-colour ASCII).
+    pub negotiation_window: Duration,
 }
 
 /// Default per-IP open-connection cap.
@@ -121,6 +136,7 @@ pub const DEFAULT_MAX_PER_IP: usize = 10;
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_PRE_LOGIN_IDLE: Duration = Duration::from_secs(120);
 const DEFAULT_PRE_LOGIN_TOTAL: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_NEGOTIATION_WINDOW: Duration = Duration::from_millis(500);
 
 impl Limits {
     /// Build limits with the given caps and the default timeouts.
@@ -132,6 +148,7 @@ impl Limits {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             pre_login_idle: DEFAULT_PRE_LOGIN_IDLE,
             pre_login_total: DEFAULT_PRE_LOGIN_TOTAL,
+            negotiation_window: DEFAULT_NEGOTIATION_WINDOW,
         }
     }
 }
@@ -708,11 +725,12 @@ pub fn iac_will_mssp() -> Vec<u8> {
 /// Per-connection negotiation state. Tracks which optional
 /// capabilities the client has accepted so the connection task
 /// can gate dependent behavior (EOR emission, MXP tags, MCCP2
-/// compression). Reset on disconnect — every connect re-negotiates
-/// from scratch since clients may differ between sessions.
+/// compression) and holds the shared output capabilities. Reset on
+/// disconnect — every connect re-negotiates from scratch since
+/// clients may differ between sessions.
 // Independent negotiated-capability flags, not a state machine.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct CapsLocal {
     gmcp: bool,
     eor: bool,
@@ -725,6 +743,11 @@ struct CapsLocal {
     /// three; further polls return the same bitmap. We poll up
     /// to three times then stop.
     ttype_polls: u8,
+    /// Previous TTYPE reply; a repeat means the client has run out
+    /// of distinct answers (the MTTS end-of-list convention).
+    last_ttype: Option<String>,
+    /// Colour depth / charset shared with the writer and the server.
+    output: OutputHandle,
 }
 
 /// Queue the full negotiation advertisement on connect. Each
@@ -792,6 +815,7 @@ fn spawn_writer<W>(
     mut write_half: W,
     mut out_rx: mpsc::Receiver<Vec<u8>>,
     mut close: watch::Receiver<bool>,
+    output: OutputHandle,
 ) -> tokio::task::JoinHandle<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
@@ -805,7 +829,7 @@ where
                 biased;
                 msg = out_rx.recv() => {
                     let Some(bytes) = msg else { break };
-                    if !write_frame(&mut write_half, &mut compressor, bytes).await {
+                    if !write_frame(&mut write_half, &mut compressor, &output, bytes).await {
                         break;
                     }
                 }
@@ -813,7 +837,7 @@ where
                     // Server-initiated close: flush whatever is
                     // already queued, then FIN the socket.
                     while let Ok(bytes) = out_rx.try_recv() {
-                        if !write_frame(&mut write_half, &mut compressor, bytes).await {
+                        if !write_frame(&mut write_half, &mut compressor, &output, bytes).await {
                             break;
                         }
                     }
@@ -838,8 +862,12 @@ async fn close_requested(rx: &mut watch::Receiver<bool>) {
 async fn write_frame<W: AsyncWrite + Unpin>(
     write_half: &mut W,
     compressor: &mut Option<flate2::Compress>,
+    output: &OutputHandle,
     bytes: Vec<u8>,
 ) -> bool {
+    // The single output choke point: colour depth / charset / newline
+    // encoding for text frames (telnet frames pass through untouched).
+    let bytes = output.encode(bytes);
     let written = if let Some(z) = compressor.as_mut() {
         let mut out = Vec::with_capacity(bytes.len() + 16);
         if z.compress_vec(&bytes, &mut out, flate2::FlushCompress::Sync)
@@ -976,6 +1004,19 @@ impl LineSplitter {
                 continue;
             }
             match b {
+                // Character-at-a-time clients (and `telnet` once the
+                // server stops echoing) send the erase key as BS or
+                // DEL instead of editing locally. Drop the whole last
+                // character, not one byte of a multi-byte one.
+                0x08 | 0x7f => {
+                    while let Some(last) = self.buf.pop() {
+                        if last & 0xC0 != 0x80 {
+                            break;
+                        }
+                    }
+                }
+                // Ctrl-U kills the line being typed.
+                0x15 => self.buf.clear(),
                 b'\r' | b'\n' => {
                     // A blank line still gets forwarded — players use
                     // `<enter>` to dismiss prompts; the dispatcher
@@ -992,6 +1033,74 @@ impl LineSplitter {
     }
 }
 
+/// Most negotiation events buffered before `Connected` is released.
+const MAX_PENDING_EVENTS: usize = 256;
+
+/// Where a connection's events go. Until the connect greeting is
+/// released ([`Sink::connect`]) events are buffered, so the server sees
+/// `Connected` first and the negotiation results right after it.
+struct Sink<'a> {
+    conn_id: ConnId,
+    inbound: &'a InboundTx,
+    pending: Vec<InboundKind>,
+    /// `Some` until `Connected` has been sent.
+    hello: Option<(SocketAddr, Outbound, OutputHandle)>,
+}
+
+impl Sink<'_> {
+    fn connected(&self) -> bool {
+        self.hello.is_none()
+    }
+
+    /// Deliver (or buffer) one event. False when the server is gone.
+    async fn send(&mut self, kind: InboundKind) -> bool {
+        if self.connected() {
+            return self
+                .inbound
+                .send(Inbound {
+                    conn: self.conn_id,
+                    kind,
+                })
+                .await
+                .is_ok();
+        }
+        self.pending.push(kind);
+        if self.pending.len() >= MAX_PENDING_EVENTS {
+            return self.connect().await;
+        }
+        true
+    }
+
+    /// Release `Connected` and the buffered events. Idempotent.
+    async fn connect(&mut self) -> bool {
+        let Some((peer, outbound, output)) = self.hello.take() else {
+            return true;
+        };
+        let first = Inbound {
+            conn: self.conn_id,
+            kind: InboundKind::Connected {
+                peer,
+                outbound,
+                output,
+            },
+        };
+        if self.inbound.send(first).await.is_err() {
+            return false;
+        }
+        for kind in std::mem::take(&mut self.pending) {
+            let msg = Inbound {
+                conn: self.conn_id,
+                kind,
+            };
+            if self.inbound.send(msg).await.is_err() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 async fn handle_connection<S>(
     conn_id: ConnId,
     peer: SocketAddr,
@@ -1006,42 +1115,64 @@ async fn handle_connection<S>(
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_CAP);
     queue_negotiation(&out_tx);
 
-    if inbound
-        .send(Inbound {
-            conn: conn_id,
-            kind: InboundKind::Connected {
-                peer,
-                outbound: out_tx.clone(),
-            },
-        })
-        .await
-        .is_err()
-    {
-        return;
-    }
+    let mut caps = CapsLocal::default();
+    let mut sink = Sink {
+        conn_id,
+        inbound: &inbound,
+        pending: Vec::new(),
+        hello: Some((peer, out_tx.clone(), caps.output.clone())),
+    };
 
     let mut close_rx = guard.shared.close.subscribe();
-    let writer = spawn_writer(write_half, out_rx, guard.shared.close.subscribe());
+    let writer = spawn_writer(
+        write_half,
+        out_rx,
+        guard.shared.close.subscribe(),
+        caps.output.clone(),
+    );
 
     let mut parser = TelnetParser::new();
-    let mut caps = CapsLocal::default();
     let mut splitter = LineSplitter::new();
     let mut chunk = [0u8; READ_CHUNK];
     let started = Instant::now();
     let mut last_line = started;
+    // The greeting waits for the client's capabilities, but not forever
+    // (raw TCP clients never answer).
+    let connect_deadline = started + limits.negotiation_window;
 
     'conn: loop {
-        let n = match read_chunk(
-            &mut read_half,
-            &mut chunk,
-            &guard,
-            &limits,
-            started,
-            last_line,
-            &mut close_rx,
-        )
-        .await
-        {
+        let outcome = if sink.connected() {
+            read_chunk(
+                &mut read_half,
+                &mut chunk,
+                &guard,
+                &limits,
+                started,
+                last_line,
+                &mut close_rx,
+            )
+            .await
+        } else {
+            tokio::select! {
+                o = read_chunk(
+                    &mut read_half,
+                    &mut chunk,
+                    &guard,
+                    &limits,
+                    started,
+                    last_line,
+                    &mut close_rx,
+                ) => o,
+                () = tokio::time::sleep_until(connect_deadline) => {
+                    caps.output.settle();
+                    if !sink.connect().await {
+                        break 'conn;
+                    }
+                    continue 'conn;
+                }
+            }
+        };
+        let n = match outcome {
             ReadOutcome::Data(n) => n,
             ReadOutcome::Closed => break,
             ReadOutcome::ServerClose => {
@@ -1062,9 +1193,7 @@ async fn handle_connection<S>(
         // Handle telnet events first so any negotiation reply lands
         // before the line we forward upstream.
         for event in events {
-            if !handle_telnet_event(conn_id, &out_tx, &inbound, &mut caps, event).await {
-                // Connection-fatal event (rare — we don't currently
-                // emit any). Bail out of the read loop.
+            if !handle_telnet_event(conn_id, &out_tx, &mut sink, &mut caps, event).await {
                 break 'conn;
             }
         }
@@ -1073,16 +1202,14 @@ async fn handle_connection<S>(
         let overflow = splitter.push(&data, &mut lines).is_err();
         if !lines.is_empty() {
             last_line = Instant::now();
+            // A client already typing doesn't need to be waited for.
+            caps.output.settle();
+            if !sink.connect().await {
+                break 'conn;
+            }
         }
         for line in lines {
-            if inbound
-                .send(Inbound {
-                    conn: conn_id,
-                    kind: InboundKind::Line(line),
-                })
-                .await
-                .is_err()
-            {
+            if !sink.send(InboundKind::Line(line)).await {
                 break 'conn;
             }
         }
@@ -1096,7 +1223,10 @@ async fn handle_connection<S>(
         }
     }
 
-    finish_connection(conn_id, &inbound, writer, &close_rx).await;
+    // A connection that never got its `Connected` was never announced,
+    // so it has nothing to disconnect either.
+    let announced = sink.connected();
+    finish_connection(conn_id, &inbound, writer, &close_rx, announced).await;
 }
 
 /// Tear-down shared by every exit from the read loop: report the
@@ -1109,13 +1239,16 @@ async fn finish_connection(
     inbound: &InboundTx,
     mut writer: tokio::task::JoinHandle<()>,
     close_rx: &watch::Receiver<bool>,
+    announced: bool,
 ) {
-    let _ = inbound
-        .send(Inbound {
-            conn: conn_id,
-            kind: InboundKind::Disconnected,
-        })
-        .await;
+    if announced {
+        let _ = inbound
+            .send(Inbound {
+                conn: conn_id,
+                kind: InboundKind::Disconnected,
+            })
+            .await;
+    }
 
     if *close_rx.borrow() {
         if tokio::time::timeout(CLOSE_FLUSH_TIMEOUT, &mut writer)
@@ -1159,48 +1292,54 @@ fn bytes_are_mccp2_marker(bytes: &[u8]) -> bool {
 async fn handle_telnet_event(
     conn_id: ConnId,
     out_tx: &Outbound,
-    inbound: &InboundTx,
+    sink: &mut Sink<'_>,
     caps: &mut CapsLocal,
     event: TelnetEvent,
 ) -> bool {
     match event {
         TelnetEvent::Negotiate { command, option } => {
-            handle_negotiate(conn_id, out_tx, inbound, caps, command, option).await;
+            handle_negotiate(out_tx, sink, caps, command, option).await
         }
         TelnetEvent::Subneg { option, payload } => {
-            handle_subneg(conn_id, out_tx, inbound, caps, option, &payload).await;
+            handle_subneg(conn_id, out_tx, sink, caps, option, &payload).await
         }
         TelnetEvent::GoAhead | TelnetEvent::EndOfRecord => {
             // Inbound GA / EOR is unusual — modern MUD clients
             // don't send these to the server. Log and ignore.
             debug!(conn_id, ?event, "inbound IAC marker (ignored)");
+            true
         }
     }
-    true
+}
+
+/// Negotiation is over (or the client declined to take part): release
+/// the greeting. Safe to call repeatedly.
+async fn settle(sink: &mut Sink<'_>, caps: &CapsLocal) -> bool {
+    caps.output.settle();
+    sink.connect().await
 }
 
 async fn handle_negotiate(
-    conn_id: ConnId,
     out_tx: &Outbound,
-    inbound: &InboundTx,
+    sink: &mut Sink<'_>,
     caps: &mut CapsLocal,
     command: u8,
     option: u8,
-) {
+) -> bool {
     use telnet::{DO, DONT, WILL, WONT};
     match (command, option) {
         // Client confirms our WILLs (it agrees we may speak this).
         (DO, opt::GMCP) => {
             caps.gmcp = true;
-            forward_capability(inbound, conn_id, "gmcp", true).await;
+            return forward_capability(sink, "gmcp", true).await;
         }
         (DO, opt::EOR) => {
             caps.eor = true;
-            forward_capability(inbound, conn_id, "eor", true).await;
+            return forward_capability(sink, "eor", true).await;
         }
         (DO, opt::MXP) => {
             caps.mxp = true;
-            forward_capability(inbound, conn_id, "mxp", true).await;
+            return forward_capability(sink, "mxp", true).await;
         }
         (DO, opt::CHARSET) => {
             // Client agreed we may negotiate charset; send the
@@ -1208,19 +1347,24 @@ async fn handle_negotiate(
             // ACCEPTED frame (handled in handle_subneg).
             let _ = out_tx.try_send(charset_request_utf8());
         }
+        // The client has no terminal type to report: nothing more to
+        // wait for, so keep the safe 16-colour ASCII defaults.
+        (WONT, opt::TTYPE) => return settle(sink, caps).await,
         // Deliberate no-ops, merged into one arm:
         //  * DO MSSP — payload was already sent unconditionally on
         //    connect.
         //  * DO SGA / WILL SGA — standard line-mode negotiation;
         //    nothing to track.
-        //  * DONT / WONT anything — the client refuses; the tracking
-        //    flag stays false. We don't reply (the protocol says we
-        //    could send the opposite but most clients don't care and
-        //    Mudlet's negotiation history is already settled).
-        //  * WILL NEW-ENVIRON — we agree but don't currently query
-        //    env vars (could send `IAC SB NEW-ENVIRON SEND VAR LANG
-        //    VAR CHARSET IAC SE` here for future use).
-        (DO, opt::MSSP | opt::SGA) | (WILL, opt::SGA | opt::NEW_ENVIRON) | (DONT | WONT, _) => {}
+        //  * DONT / WONT anything else — the client refuses; the
+        //    tracking flag stays false. We don't reply (the protocol
+        //    says we could send the opposite but most clients don't
+        //    care and Mudlet's negotiation history is already settled).
+        (DO, opt::MSSP | opt::SGA) | (WILL, opt::SGA) | (DONT | WONT, _) => {}
+        (WILL, opt::NEW_ENVIRON) => {
+            // Ask for the variables that reveal charset / colour
+            // depth; the reply arrives as SB NEW-ENVIRON IS.
+            let _ = out_tx.try_send(environ_send_query());
+        }
         (DO, opt::MCCP2) => {
             // Client confirmed MCCP2. Push the start-of-compression
             // marker through the outbound channel — the writer
@@ -1229,7 +1373,7 @@ async fn handle_negotiate(
             // follows. Subsequent frames go on the wire compressed
             // automatically; nothing else needs to know.
             let _ = out_tx.try_send(mccp2_start());
-            debug!(conn_id, "MCCP2 enabled (marker queued)");
+            debug!("MCCP2 enabled (marker queued)");
         }
         // Client offers a capability we asked DO for.
         (WILL, opt::NAWS) => {
@@ -1244,28 +1388,44 @@ async fn handle_negotiate(
             caps.ttype_polls = 1;
         }
         _ => {
-            debug!(conn_id, command, option, "unhandled IAC negotiate");
+            debug!(command, option, "unhandled IAC negotiate");
         }
+    }
+    true
+}
+
+/// Client's CHARSET REQUEST (`<sep> name <sep> name ...`): accept
+/// UTF-8 if it is on offer, otherwise reject.
+fn answer_charset_request(out_tx: &Outbound, caps: &mut CapsLocal, list: &[u8]) {
+    let utf8 = list.split_first().is_some_and(|(&sep, rest)| {
+        !rest.starts_with(b"[TTABLE]")
+            && rest
+                .split(|&b| b == sep)
+                .any(|name| name.eq_ignore_ascii_case(b"UTF-8"))
+    });
+    if utf8 {
+        caps.charset_utf8 = true;
+        caps.output.mark_utf8();
+        let mut body = vec![telnet::charset::ACCEPTED];
+        body.extend_from_slice(b"UTF-8");
+        let _ = out_tx.try_send(subneg(opt::CHARSET, &body));
+    } else {
+        let _ = out_tx.try_send(subneg(opt::CHARSET, &[telnet::charset::REJECTED]));
     }
 }
 
 async fn handle_subneg(
     conn_id: ConnId,
     out_tx: &Outbound,
-    inbound: &InboundTx,
+    sink: &mut Sink<'_>,
     caps: &mut CapsLocal,
     option: u8,
     payload: &[u8],
-) {
+) -> bool {
     match option {
         opt::NAWS => {
             if let Some((cols, rows)) = parse_naws(payload) {
-                let _ = inbound
-                    .send(Inbound {
-                        conn: conn_id,
-                        kind: InboundKind::WindowSize { cols, rows },
-                    })
-                    .await;
+                return sink.send(InboundKind::WindowSize { cols, rows }).await;
             }
         }
         opt::TTYPE => {
@@ -1274,31 +1434,62 @@ async fn handle_subneg(
             // poll for the next response in the MTTS cycle.
             if payload.first() == Some(&telnet::ttype::IS) {
                 let value = String::from_utf8_lossy(&payload[1..]).into_owned();
-                let _ = inbound
-                    .send(Inbound {
-                        conn: conn_id,
-                        kind: InboundKind::Terminal {
-                            index: caps.ttype_polls,
-                            value,
-                        },
+                let mtts = parse_mtts(&value);
+                if let Some(bits) = mtts {
+                    caps.output.apply_mtts(bits);
+                } else {
+                    caps.output.apply_term_hint(&value);
+                }
+                let repeat = caps.last_ttype.as_deref() == Some(value.as_str());
+                caps.last_ttype = Some(value.clone());
+                if !sink
+                    .send(InboundKind::Terminal {
+                        index: caps.ttype_polls,
+                        value,
                     })
-                    .await;
-                // Cycle up to 3 polls (name → term → MTTS bitmap).
-                if caps.ttype_polls < 3 {
-                    caps.ttype_polls += 1;
-                    let _ = out_tx.try_send(ttype_send());
+                    .await
+                {
+                    return false;
+                }
+                // Cycle up to 3 polls (name → term → MTTS bitmap), stopping
+                // early at the bitmap or when the client starts repeating
+                // itself (a plain `telnet` only knows $TERM).
+                if mtts.is_some() || repeat || caps.ttype_polls >= 3 {
+                    return settle(sink, caps).await;
+                }
+                caps.ttype_polls += 1;
+                let _ = out_tx.try_send(ttype_send());
+            }
+        }
+        opt::NEW_ENVIRON => {
+            for (name, value) in parse_environ(payload) {
+                match name.to_ascii_uppercase().as_str() {
+                    "LANG" | "LC_ALL" | "LC_CTYPE" | "CHARSET" if output::is_utf8_name(&value) => {
+                        caps.output.mark_utf8();
+                    }
+                    "MTTS" => {
+                        if let Ok(bits) = value.trim().parse::<u32>() {
+                            caps.output.apply_mtts(bits);
+                        }
+                    }
+                    "TERMINAL_TYPE" | "TERM" | "COLORTERM" => caps.output.apply_term_hint(&value),
+                    _ => {}
                 }
             }
         }
         opt::CHARSET => {
-            // First byte: ACCEPTED (2) / REJECTED (3).
+            // First byte: REQUEST (1) / ACCEPTED (2) / REJECTED (3).
             match payload.first() {
                 Some(&telnet::charset::ACCEPTED) => {
                     caps.charset_utf8 = true;
-                    forward_capability(inbound, conn_id, "utf8", true).await;
+                    caps.output.mark_utf8();
+                    return forward_capability(sink, "utf8", true).await;
                 }
                 Some(&telnet::charset::REJECTED) => {
-                    forward_capability(inbound, conn_id, "utf8", false).await;
+                    return forward_capability(sink, "utf8", false).await;
+                }
+                Some(&telnet::charset::REQUEST) => {
+                    answer_charset_request(out_tx, caps, &payload[1..]);
                 }
                 _ => {}
             }
@@ -1311,13 +1502,10 @@ async fn handle_subneg(
                 Some(i) => (s[..i].to_string(), s[i + 1..].to_string()),
                 None => (s.to_string(), String::new()),
             };
-            let _ = inbound
-                .send(Inbound {
-                    conn: conn_id,
-                    kind: InboundKind::Gmcp {
-                        package,
-                        payload: body,
-                    },
+            return sink
+                .send(InboundKind::Gmcp {
+                    package,
+                    payload: body,
                 })
                 .await;
         }
@@ -1325,15 +1513,11 @@ async fn handle_subneg(
             debug!(conn_id, option, len = payload.len(), "unhandled subneg");
         }
     }
+    true
 }
 
-async fn forward_capability(inbound: &InboundTx, conn_id: ConnId, name: &'static str, on: bool) {
-    let _ = inbound
-        .send(Inbound {
-            conn: conn_id,
-            kind: InboundKind::Capability { name, on },
-        })
-        .await;
+async fn forward_capability(sink: &mut Sink<'_>, name: &'static str, on: bool) -> bool {
+    sink.send(InboundKind::Capability { name, on }).await
 }
 
 #[cfg(test)]
@@ -1404,6 +1588,7 @@ mod limit_tests {
             handshake_timeout: Duration::from_millis(100),
             pre_login_idle: Duration::from_millis(200),
             pre_login_total: Duration::from_secs(30),
+            negotiation_window: Duration::from_millis(50),
         }
     }
 
@@ -1693,6 +1878,208 @@ mod limit_tests {
         let mut lines = Vec::new();
         assert!(sp.push(&vec![b'x'; MAX_LINE_LEN], &mut lines).is_ok());
         assert!(sp.push(b"x", &mut lines).is_err());
+    }
+
+    #[test]
+    fn splitter_handles_backspace_and_delete() {
+        // BS and DEL erase the previous character (#10: char-mode clients).
+        assert_eq!(split(&[b"helx\x08lo\r"]), ["hello"]);
+        assert_eq!(split(&[b"helx\x7flo\r\n"]), ["hello"]);
+        // Erasing past the start is harmless.
+        assert_eq!(split(&[b"\x7f\x08ab\r"]), ["ab"]);
+        // A multi-byte character is erased whole, even across reads.
+        assert_eq!(split(&["caf\u{e9}".as_bytes(), b"\x7f\r"]), ["caf"]);
+        // Ctrl-U kills the line.
+        assert_eq!(split(&[b"oops\x15north\r"]), ["north"]);
+    }
+
+    /// Limits with a window long enough to observe the deferral.
+    fn slow_negotiation() -> Limits {
+        Limits {
+            negotiation_window: Duration::from_millis(400),
+            pre_login_idle: Duration::from_secs(5),
+            ..fast_limits()
+        }
+    }
+
+    fn ttype_is(value: &str) -> Vec<u8> {
+        let mut p = vec![telnet::ttype::IS];
+        p.extend_from_slice(value.as_bytes());
+        subneg(opt::TTYPE, &p)
+    }
+
+    /// Wait for `Connected` and return its output handle.
+    async fn connected_output(rx: &mut InboundRx) -> OutputHandle {
+        match next_event(rx).await.kind {
+            InboundKind::Connected { output, .. } => output,
+            other => panic!("expected Connected first, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_waits_out_the_window_for_a_silent_client() {
+        let (addr, _gate, mut rx) = start(slow_negotiation()).await;
+        let t0 = std::time::Instant::now();
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let output = connected_output(&mut rx).await;
+        assert!(
+            t0.elapsed() >= Duration::from_millis(350),
+            "greeting released after only {:?}",
+            t0.elapsed()
+        );
+        // Nothing was learned: safe defaults.
+        assert_eq!(output.color(), ColorDepth::Ansi16);
+        assert_eq!(output.charset(), Charset::Ascii);
+    }
+
+    #[tokio::test]
+    async fn mtts_reply_releases_connect_early_with_capabilities() {
+        let (addr, _gate, mut rx) = start(slow_negotiation()).await;
+        let t0 = std::time::Instant::now();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut hello = will(opt::TTYPE);
+        hello.extend(ttype_is("MTTS 2349"));
+        hello.extend(telnet::subneg(opt::NAWS, &[0, 100, 0, 30]));
+        client.write_all(&hello).await.unwrap();
+        let output = connected_output(&mut rx).await;
+        assert!(
+            t0.elapsed() < Duration::from_millis(300),
+            "should not wait the full window: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(output.color(), ColorDepth::TrueColor);
+        assert_eq!(output.charset(), Charset::Utf8);
+        // Events that raced ahead of Connected are replayed after it.
+        assert!(matches!(
+            next_event(&mut rx).await.kind,
+            InboundKind::Terminal { .. }
+        ));
+        assert!(matches!(
+            next_event(&mut rx).await.kind,
+            InboundKind::WindowSize {
+                cols: 100,
+                rows: 30
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn plain_telnet_term_name_gives_256_colour_ascii() {
+        // GNU telnet answers every TTYPE poll with $TERM.
+        let (addr, _gate, mut rx) = start(slow_negotiation()).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut hello = will(opt::TTYPE);
+        hello.extend(ttype_is("XTERM-256COLOR"));
+        hello.extend(ttype_is("XTERM-256COLOR"));
+        client.write_all(&hello).await.unwrap();
+        let output = connected_output(&mut rx).await;
+        assert_eq!(output.color(), ColorDepth::Ansi256);
+        assert_eq!(output.charset(), Charset::Ascii);
+    }
+
+    #[tokio::test]
+    async fn refusing_ttype_releases_connect_with_defaults() {
+        let (addr, _gate, mut rx) = start(slow_negotiation()).await;
+        let t0 = std::time::Instant::now();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&wont(opt::TTYPE)).await.unwrap();
+        let output = connected_output(&mut rx).await;
+        assert!(t0.elapsed() < Duration::from_millis(300));
+        assert_eq!(output.color(), ColorDepth::Ansi16);
+    }
+
+    #[tokio::test]
+    async fn new_environ_reply_reveals_utf8_locale() {
+        let (addr, _gate, mut rx) = start(slow_negotiation()).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut env = vec![telnet::environ::IS, telnet::environ::VAR];
+        env.extend_from_slice(b"LANG");
+        env.push(telnet::environ::VALUE);
+        env.extend_from_slice(b"en_US.UTF-8");
+        let mut hello = will(opt::NEW_ENVIRON);
+        hello.extend(subneg(opt::NEW_ENVIRON, &env));
+        hello.extend(will(opt::TTYPE));
+        hello.extend(ttype_is("MTTS 1"));
+        client.write_all(&hello).await.unwrap();
+        let output = connected_output(&mut rx).await;
+        assert_eq!(output.charset(), Charset::Utf8);
+        assert_eq!(output.color(), ColorDepth::Ansi16);
+    }
+
+    #[tokio::test]
+    async fn writer_encodes_text_for_the_negotiated_client() {
+        let (addr, _gate, mut rx) = start(fast_limits()).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        // A plain client: nothing negotiated -> 16-colour ASCII.
+        let (outbound, output) = match next_event(&mut rx).await.kind {
+            InboundKind::Connected {
+                outbound, output, ..
+            } => (outbound, output),
+            other => panic!("{other:?}"),
+        };
+        outbound
+            .send(
+                "A \u{2014} B \x1b[38;5;196mred\x1b[0m\n"
+                    .as_bytes()
+                    .to_vec(),
+            )
+            .await
+            .unwrap();
+        // Telnet framing must pass through byte for byte.
+        let gmcp = gmcp_packet("Core.Hello", "{\"x\":\"\u{2014}\"}");
+        outbound.send(gmcp.clone()).await.unwrap();
+        let want_text = b"A -- B \x1b[91mred\x1b[0m\r\n";
+        let mut got = Vec::new();
+        let mut buf = [0u8; 2048];
+        while !contains_seq(&got, &gmcp) {
+            let n = tokio::time::timeout(WAIT, client.read(&mut buf))
+                .await
+                .expect("timed out reading")
+                .unwrap();
+            assert!(n > 0, "closed early");
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert!(
+            contains_seq(&got, want_text),
+            "got {:?}",
+            String::from_utf8_lossy(&got)
+        );
+
+        // A player override flips the same connection to colour off / UTF-8.
+        output.set_color_override(Some(ColorDepth::None));
+        output.set_charset_override(Some(Charset::Utf8));
+        outbound
+            .send("\x1b[31m\u{2605}\x1b[0m\r\n".as_bytes().to_vec())
+            .await
+            .unwrap();
+        let want = "\u{2605}\r\n".as_bytes();
+        let mut got2 = Vec::new();
+        while !contains_seq(&got2, want) {
+            let n = tokio::time::timeout(WAIT, client.read(&mut buf))
+                .await
+                .expect("timed out reading")
+                .unwrap();
+            assert!(n > 0, "closed early");
+            got2.extend_from_slice(&buf[..n]);
+        }
+        assert!(!got2.contains(&0x1b), "colour should be stripped");
+    }
+
+    fn contains_seq(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[tokio::test]
+    async fn disconnect_before_the_greeting_is_never_announced() {
+        let (addr, _gate, mut rx) = start(slow_negotiation()).await;
+        let client = TcpStream::connect(addr).await.unwrap();
+        drop(client);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(800), rx.recv())
+                .await
+                .is_err(),
+            "a connection that never completed negotiation produced events"
+        );
     }
 
     fn v6(i: u128) -> IpAddr {
