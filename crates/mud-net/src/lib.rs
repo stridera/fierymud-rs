@@ -742,6 +742,12 @@ struct CapsLocal {
     sga_will_sent: bool,
     /// We already answered a client-initiated `WILL SGA` with `DO SGA`.
     sga_do_sent: bool,
+    /// We already sent the `CHARSET REQUEST` after the client's `DO CHARSET`
+    /// (RFC 1143: don't re-answer an option that is already enabled).
+    charset_asked: bool,
+    /// We already sent the `NEW-ENVIRON SEND` query after the client's
+    /// `WILL NEW-ENVIRON`.
+    environ_asked: bool,
     /// Number of `IAC SB TTYPE SEND` polls we've sent. Mudlet's
     /// MTTS cycle yields name → terminal → bitmap on the first
     /// three; further polls return the same bitmap. We poll up
@@ -1190,7 +1196,6 @@ async fn handle_connection<S>(
                     &mut close_rx,
                 ) => o,
                 () = tokio::time::sleep_until(connect_deadline) => {
-                    caps.output.settle();
                     if !sink.connect().await {
                         break 'conn;
                     }
@@ -1212,7 +1217,6 @@ async fn handle_connection<S>(
                         .iter()
                         .any(|k| matches!(k, InboundKind::Line(_)))
                 {
-                    caps.output.settle();
                     let _ = sink.connect().await;
                 }
                 break;
@@ -1245,7 +1249,6 @@ async fn handle_connection<S>(
         if !lines.is_empty() {
             last_line = Instant::now();
             // A client already typing doesn't need to be waited for.
-            caps.output.settle();
             if !sink.connect().await {
                 break 'conn;
             }
@@ -1380,13 +1383,6 @@ async fn handle_telnet_event(
     }
 }
 
-/// Negotiation is over (or the client declined to take part): release
-/// the greeting. Safe to call repeatedly.
-async fn settle(sink: &mut Sink<'_>, caps: &CapsLocal) -> bool {
-    caps.output.settle();
-    sink.connect().await
-}
-
 async fn handle_negotiate(
     out_tx: &Outbound,
     sink: &mut Sink<'_>,
@@ -1412,12 +1408,15 @@ async fn handle_negotiate(
         (DO, opt::CHARSET) => {
             // Client agreed we may negotiate charset; send the
             // request now. ACCEPTED comes back as a SB CHARSET
-            // ACCEPTED frame (handled in handle_subneg).
-            let _ = out_tx.try_send(charset_request_utf8());
+            // ACCEPTED frame (handled in handle_subneg). Once only: a
+            // repeated DO is a no-op for an already-enabled option.
+            if !std::mem::replace(&mut caps.charset_asked, true) {
+                let _ = out_tx.try_send(charset_request_utf8());
+            }
         }
         // The client has no terminal type to report: nothing more to
         // wait for, so keep the safe 16-colour ASCII defaults.
-        (WONT, opt::TTYPE) => return settle(sink, caps).await,
+        (WONT, opt::TTYPE) => return sink.connect().await,
         // Deliberate no-ops, merged into one arm:
         //  * DO MSSP — payload was already sent unconditionally on
         //    connect.
@@ -1430,8 +1429,10 @@ async fn handle_negotiate(
         (DO, opt::MSSP) | (DONT | WONT, _) => {}
         (WILL, opt::NEW_ENVIRON) => {
             // Ask for the variables that reveal charset / colour
-            // depth; the reply arrives as SB NEW-ENVIRON IS.
-            let _ = out_tx.try_send(environ_send_query());
+            // depth; the reply arrives as SB NEW-ENVIRON IS. Once only.
+            if !std::mem::replace(&mut caps.environ_asked, true) {
+                let _ = out_tx.try_send(environ_send_query());
+            }
         }
         // The client asked for SGA itself; agree once. The one-shot
         // flags keep a client that re-announces from looping us.
@@ -1535,7 +1536,7 @@ async fn handle_subneg(
                 // early at the bitmap or when the client starts repeating
                 // itself (a plain `telnet` only knows $TERM).
                 if mtts.is_some() || repeat || caps.ttype_polls >= 3 {
-                    return settle(sink, caps).await;
+                    return sink.connect().await;
                 }
                 caps.ttype_polls += 1;
                 let _ = out_tx.try_send(ttype_send());
@@ -2022,6 +2023,37 @@ mod limit_tests {
             in_rx.recv().await.unwrap().kind,
             InboundKind::Gmcp { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn repeated_will_environ_and_do_charset_query_once() {
+        let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (in_tx, _in_rx) = mpsc::channel::<Inbound>(8);
+        let mut sink = Sink {
+            conn_id: 1,
+            inbound: &in_tx,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            hello: None,
+        };
+        let mut caps = CapsLocal::default();
+        for _ in 0..3 {
+            handle_negotiate(
+                &out_tx,
+                &mut sink,
+                &mut caps,
+                telnet::WILL,
+                opt::NEW_ENVIRON,
+            )
+            .await;
+            handle_negotiate(&out_tx, &mut sink, &mut caps, telnet::DO, opt::CHARSET).await;
+        }
+        drop(out_tx);
+        let mut frames = Vec::new();
+        while let Some(f) = out_rx.recv().await {
+            frames.push(f);
+        }
+        assert_eq!(frames, [environ_send_query(), charset_request_utf8()]);
     }
 
     #[tokio::test]

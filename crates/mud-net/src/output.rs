@@ -156,8 +156,6 @@ struct OutputState {
     charset_override: AtomicU8,
     /// An MTTS bitmap arrived; it outranks TERM-name guesses.
     mtts_seen: AtomicBool,
-    /// Capability negotiation finished (or its window expired).
-    settled: AtomicBool,
 }
 
 /// Cheaply cloneable handle on one connection's output capabilities.
@@ -180,7 +178,6 @@ impl OutputHandle {
             color_override: AtomicU8::new(AUTO),
             charset_override: AtomicU8::new(0),
             mtts_seen: AtomicBool::new(false),
-            settled: AtomicBool::new(false),
         }))
     }
 
@@ -259,18 +256,6 @@ impl OutputHandle {
     /// or a UTF-8 locale).
     pub fn mark_utf8(&self) {
         self.0.utf8.store(true, Ordering::Relaxed);
-    }
-
-    /// Mark negotiation finished. True only for the first call.
-    #[allow(clippy::must_use_candidate)]
-    pub fn settle(&self) -> bool {
-        !self.0.settled.swap(true, Ordering::Relaxed)
-    }
-
-    /// Whether negotiation has finished (or timed out).
-    #[must_use]
-    pub fn is_settled(&self) -> bool {
-        self.0.settled.load(Ordering::Relaxed)
     }
 
     /// Encode one outbound frame for this client; see the module docs.
@@ -712,15 +697,6 @@ mod tests {
         h.set_charset_override(None);
         assert_eq!(h.color(), ColorDepth::Ansi256);
         assert_eq!(h.charset(), Charset::Utf8);
-    }
-
-    #[test]
-    fn settle_fires_once() {
-        let h = OutputHandle::new();
-        assert!(!h.is_settled());
-        assert!(h.settle());
-        assert!(!h.settle());
-        assert!(h.is_settled());
     }
 
     #[test]
