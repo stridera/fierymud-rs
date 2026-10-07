@@ -3792,6 +3792,85 @@ mod tests {
     }
 
     #[test]
+    fn room_enemies_spare_the_casters_followers_and_leader() {
+        use super::{AoeScope, aoe_targets_in_room};
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let leader = world
+            .spawn((
+                Player,
+                Named {
+                    name: "Leader".into(),
+                },
+                mud_world::Located(room),
+            ))
+            .id();
+        let caster = world
+            .spawn((
+                Player,
+                Named {
+                    name: "Caster".into(),
+                },
+                mud_world::Located(room),
+                mud_world::Follower(leader),
+            ))
+            .id();
+        let mob = |world: &mut World, name: &str, master: Option<Entity>| {
+            let mut e = world.spawn((
+                mud_world::Mob,
+                Named { name: name.into() },
+                mud_world::Located(room),
+            ));
+            if let Some(m) = master {
+                e.insert(mud_world::Follower(m));
+            }
+        };
+        mob(&mut world, "a charmed wolf", Some(caster));
+        mob(&mut world, "someone else's wolf", Some(leader));
+        mob(&mut world, "a stray dog", None);
+        let names: Vec<String> =
+            aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomEnemies)
+                .into_iter()
+                .map(|(_, n)| n)
+                .collect();
+        assert!(!names.iter().any(|n| n == "a charmed wolf"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "Leader"), "{names:?}");
+        assert!(names.iter().any(|n| n == "a stray dog"), "{names:?}");
+        assert!(
+            names.iter().any(|n| n == "someone else's wolf"),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn aoe_refusal_from_attack_ok_is_sent_once_not_per_target() {
+        use super::test_support::{drain, player_in};
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (caster, mut rx) = player_in(&mut world, room);
+        for n in ["a shopkeeper", "a banker", "a priest"] {
+            world.spawn((
+                mud_world::Mob,
+                Named { name: n.into() },
+                mud_world::Located(room),
+                mud_world::MobBehaviors(vec![mud_db::enums::MobBehavior::Peaceful]),
+            ));
+        }
+        let cast = super::invoke_ability_aoe(
+            &mut world,
+            caster,
+            mud_db::abilities::AbilityKind::Spell,
+            "cast",
+            "fireball",
+            super::AoeScope::RoomEnemies,
+            "Nothing here.\r\n",
+        );
+        assert!(!cast, "nobody attackable: the cast does not land");
+        let text = drain(&mut rx);
+        assert_eq!(text.matches("peaceful feeling").count(), 1, "{text}");
+    }
+
+    #[test]
     fn parse_count_prefix_cases() {
         use crate::commands::parse_count_prefix;
         assert_eq!(parse_count_prefix("2 sword"), (Some(2), "sword"));
@@ -12534,10 +12613,25 @@ pub(crate) fn invoke_ability_aoe(
         return false;
     };
     let room = located.0;
-    let targets: Vec<(Entity, String)> = aoe_targets_in_room(world, caster, room, scope);
+    let mut targets: Vec<(Entity, String)> = aoe_targets_in_room(world, caster, room, scope);
     if targets.is_empty() {
         send_to(world, caster, refusal_when_empty);
         return false;
+    }
+    if matches!(scope, AoeScope::RoomEnemies) {
+        // Legacy `area_attack_target` asks `mass_attack_ok(.., false)`:
+        // anyone `attack_ok` forbids (peaceful mob, someone's pet, a
+        // non-consenting player) is skipped silently, so the per-target
+        // dispatch below never repeats the refusal. If nobody is left,
+        // explain once, using the first refusal.
+        let first = targets.first().map(|(e, _)| *e);
+        targets.retain(|(t, _)| attack_ok::attack_ok(world, caster, *t, false));
+        if targets.is_empty() {
+            if let Some(first) = first {
+                attack_ok::attack_ok(world, caster, first, true);
+            }
+            return false;
+        }
     }
     // Per-target dispatch always passes `aoe_repeat = true` so the
     // recursive `invoke_ability_with` call doesn't re-trigger the
@@ -12734,23 +12828,40 @@ fn aoe_targets_in_room(
     match scope {
         AoeScope::RoomEnemies => {
             // Mobs in the room, plus PK-flagged players (excluding
-            // self / group members).
+            // self / group members). Legacy `area_attack_target` also
+            // spares the caster's followers (charmed pets included) and
+            // the one the caster follows, grouped or not.
+            let leader = world.get::<Follower>(caster).map(|f| f.0);
             let mut names: Vec<(Entity, String)> = Vec::new();
             {
-                let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Mob>>();
-                for (e, l, n) in q.iter(world) {
-                    if l.0 == room && !group.contains(&e) && e != caster {
+                let mut q = world
+                    .query_filtered::<(Entity, &Located, &Named, Option<&Follower>), With<Mob>>();
+                for (e, l, n, f) in q.iter(world) {
+                    if l.0 == room
+                        && !group.contains(&e)
+                        && e != caster
+                        && Some(e) != leader
+                        && f.is_none_or(|f| f.0 != caster)
+                    {
                         names.push((e, n.name.clone()));
                     }
                 }
             }
             {
-                let mut q = world.query_filtered::<
-                    (Entity, &Located, &Named, Option<&PlayerFlags>),
-                    With<Player>,
-                >();
-                for (e, l, n, pf) in q.iter(world) {
-                    if l.0 != room || group.contains(&e) || e == caster {
+                let mut q = world.query_filtered::<(
+                    Entity,
+                    &Located,
+                    &Named,
+                    Option<&PlayerFlags>,
+                    Option<&Follower>,
+                ), With<Player>>();
+                for (e, l, n, pf, f) in q.iter(world) {
+                    if l.0 != room
+                        || group.contains(&e)
+                        || e == caster
+                        || Some(e) == leader
+                        || f.is_some_and(|f| f.0 == caster)
+                    {
                         continue;
                     }
                     if pf.is_some_and(|f| f.has(mud_db::enums::PlayerFlag::PkEnabled)) {
