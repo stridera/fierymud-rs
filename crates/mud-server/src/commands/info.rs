@@ -10945,7 +10945,7 @@ pub(crate) fn cmd_visible(world: &mut World, player: Entity, _args: &str) {
 /// is needed for persistence: the save diff only sees items still
 /// reachable from the player, so the `CharacterItems` rows of the
 /// whole tree are dropped on the next save.
-fn despawn_item_tree(world: &mut World, item: Entity) {
+pub(super) fn despawn_item_tree(world: &mut World, item: Entity) {
     let mut tree = vec![item];
     let mut i = 0;
     while i < tree.len() {

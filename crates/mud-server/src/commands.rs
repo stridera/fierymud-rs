@@ -277,6 +277,8 @@ pub(crate) use admin_reload::shutdown_poll;
 mod admin_world;
 #[path = "commands/balance.rs"]
 mod balance;
+#[path = "commands/banish.rs"]
+mod banish;
 #[path = "commands/boards.rs"]
 mod boards;
 pub(crate) use boards::compose_board_step;
@@ -13819,7 +13821,12 @@ pub(crate) fn invoke_ability_with(
     // halve the duration that's spawned for status/modify/knockdown
     // arms. Self-targeted saves auto-fail (caster doesn't resist
     // their own buff).
-    let save_action = if target_entity == player {
+    // BANISH (`extract`) rolls its own save inside the effect: legacy folds
+    // the save into the resist conditions, so a made save also makes a mob
+    // attack and ends in "Nothing happens." rather than the generic
+    // negation text.
+    let banish_rolls_own_save = effect_specs.iter().any(|s| s.effect_type == "extract");
+    let save_action = if target_entity == player || banish_rolls_own_save {
         SaveOutcome::Failed
     } else {
         save_action_for(world, &def, target_entity, &formula_ctx)
@@ -13853,6 +13860,10 @@ pub(crate) fn invoke_ability_with(
     }
     let halve_duration = matches!(save_action, SaveOutcome::HalfDuration);
     let halve_damage = matches!(save_action, SaveOutcome::HalfDamage);
+    // Set by the banish arm, which writes all of its own caster / victim /
+    // room messages (the generic cast header and success templates would
+    // double them).
+    let mut custom_messaging = false;
     let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
     let mut spawn_count: usize = 0;
     // Set by the teleport arm so the auto-look fires AFTER the cast
@@ -14972,44 +14983,33 @@ pub(crate) fn invoke_ability_with(
                 ));
             }
             "extract" => {
-                // Remove the target from the world. Used by Banish
-                // (and any future "send back to home plane" /
-                // "evict from this dimension" abilities). Players are
-                // never extracted — that path leads to lost data and
-                // is reserved for admin commands. Mobs are despawned
-                // outright; their effects, equipment, and triggers
-                // get the same cleanup as mob death.
-                if world.get::<Player>(target_entity).is_some() {
-                    applied_msgs.push(format!("{pretty} (can't extract a player)"));
-                    continue;
-                }
-                if world.get::<Mob>(target_entity).is_none() {
-                    applied_msgs.push(format!("{pretty} (target isn't a creature)"));
-                    continue;
-                }
-                // Snapshot target name + room BEFORE the despawn
-                // so the broadcast has data to render.
-                let banished_name = name_or(world, target_entity, "the creature");
-                let target_room = world.get::<Located>(target_entity).map(|l| l.0);
-                disengage_attackers_of(world, target_entity);
-                if let Ok(e) = world.get_entity_mut(target_entity) {
-                    e.despawn();
-                }
-                // Room broadcast — banishment is a high-impact
-                // moment; bystanders see the creature evicted
-                // rather than just blinking out without
-                // explanation. Includes the caster's name for
-                // attribution.
-                if let Some(room) = target_room {
-                    let caster_name = actor_name_pre.clone();
-                    let line = format!(
-                        "<b:magenta>{} banishes {} back to the realm whence it came!</>\r\n",
-                        cap_sentence_start(&caster_name),
-                        banished_name,
+                // Legacy `spell_banish` (see `commands/banish.rs`): resist
+                // rules, the success roll, mobs removed (gear destroyed or
+                // dropped), players sent home.
+                custom_messaging = true;
+                let banish_params = banish::BanishParams::parse(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                );
+                let saved = target_entity != player
+                    && matches!(
+                        save_action_for(world, &def, target_entity, &formula_ctx),
+                        SaveOutcome::Negated
                     );
-                    broadcast_room_visual(world, room, player, &[player], &line);
-                }
-                applied_msgs.push(format!("{pretty} (banished {banished_name})"));
+                let outcome = banish::banish(
+                    world,
+                    &banish::Caster {
+                        entity: player,
+                        skill: formula_ctx.skill,
+                        cha_bonus: formula_ctx.cha_bonus,
+                        wis_bonus: formula_ctx.wis_bonus,
+                    },
+                    target_entity,
+                    &banish_params,
+                    saved,
+                    banish::Rolls::random(),
+                );
+                applied_msgs.push(format!("{pretty} ({})", outcome.label()));
             }
             "dismount" => {
                 // Force-end the rider/mount relationship on the
@@ -16884,6 +16884,7 @@ pub(crate) fn invoke_ability_with(
             || lower.contains("(target not dead"))
     });
     if let Some(h) = pending_header
+        && !custom_messaging
         && (any_non_refusal || applied_msgs.is_empty())
     {
         out.insert_str(0, &h);
@@ -16916,7 +16917,7 @@ pub(crate) fn invoke_ability_with(
         crate::commands::cmd_look(world, target_entity, "");
     }
     // Target-side: templated success_to_victim → terse default.
-    if target_entity != player && !applied_msgs.is_empty() {
+    if target_entity != player && !applied_msgs.is_empty() && !custom_messaging {
         let target_template = messages
             .as_ref()
             .and_then(|m| m.success_to_victim.as_deref());
@@ -16948,6 +16949,7 @@ pub(crate) fn invoke_ability_with(
         }
     });
     if !applied_msgs.is_empty()
+        && !custom_messaging
         && let Some(t) = room_template
         && let Some(located) = world.get::<Located>(player).copied()
     {
