@@ -148,7 +148,7 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
             charges,
             liquid_remaining,
             liquid_type,
-            COALESCE((custom_values ->> 'lit')::boolean, FALSE) AS "lit!"
+            COALESCE(custom_values -> 'lit' = 'true'::jsonb, FALSE) AS "lit!"
         FROM "CharacterItems"
         WHERE character_id = $1
         ORDER BY id
@@ -249,8 +249,12 @@ pub async fn save_inventory_diff(
                     liquid_remaining = $5,
                     liquid_type = $6,
                     custom_values = CASE WHEN $8::boolean
-                        THEN custom_values || '{"lit": true}'::jsonb
-                        ELSE custom_values - 'lit' END,
+                        THEN (CASE WHEN jsonb_typeof(custom_values) = 'object'
+                                   THEN custom_values ELSE '{}'::jsonb END)
+                             || '{"lit": true}'::jsonb
+                        ELSE (CASE WHEN jsonb_typeof(custom_values) = 'object'
+                                   THEN custom_values ELSE '{}'::jsonb END) - 'lit'
+                        END,
                     updated_at = NOW()
                 WHERE id = $7
                 RETURNING id

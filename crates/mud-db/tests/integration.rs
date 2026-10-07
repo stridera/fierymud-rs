@@ -123,6 +123,9 @@ async fn lists_object_resets() {
     }
 }
 
+/// Both inventory tests rewrite `TestWarrior`'s items; keep them serial.
+static INVENTORY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Round-trip a small inventory through `CharacterItems`. Uses the seeded
 /// `TestWarrior` account ('testplayer') so we don't need to spin up a fresh
 /// character. Restores whatever was there before so re-running the test
@@ -133,6 +136,7 @@ async fn lists_object_resets() {
 #[tokio::test]
 #[ignore = "requires live fierydev DB"]
 async fn round_trips_character_items() {
+    let _guard = INVENTORY_LOCK.lock().await;
     let pool = pool().await;
 
     // Find TestWarrior's character_id.
@@ -630,4 +634,121 @@ async fn race_innates_are_granted_to_a_fresh_ability_set() {
     let granted = merge_innates(&mut rows, &innates);
     assert_eq!(granted, innates.len());
     assert!(rows.iter().all(|r| r.known && r.proficiency > 0));
+}
+
+/// The lit flag lives in the `lit` key of `custom_values`; toggling it
+/// through the UPDATE path must leave the row's other keys alone, and a
+/// non-object `custom_values` must neither abort the save nor the read.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn lit_flag_preserves_other_custom_values_keys() {
+    let _guard = INVENTORY_LOCK.lock().await;
+    let pool = pool().await;
+    let cid = sqlx::query!(r#"SELECT id FROM "Characters" WHERE name = 'TestWarrior' LIMIT 1"#)
+        .fetch_one(&pool)
+        .await
+        .expect("seed user TestWarrior must exist")
+        .id;
+    let key = sqlx::query!(r#"SELECT zone_id, id FROM "Objects" ORDER BY zone_id, id LIMIT 1"#)
+        .fetch_one(&pool)
+        .await
+        .expect("an Objects row");
+    let before = list_for(&pool, &cid).await.expect("list before");
+    let mut conn = pool.acquire().await.expect("acquire conn");
+
+    let snap = |persisted_id: Option<i32>, lit: bool| CharacterItemSnap {
+        persisted_id,
+        object_zone_id: key.zone_id,
+        object_id: key.id,
+        equipped_location: None,
+        parent_persisted_id: None,
+        parent_idx: None,
+        charges: None,
+        liquid_remaining: None,
+        liquid_type: None,
+        lit,
+    };
+    // Start from an empty inventory, then insert one unlit item.
+    save_inventory_diff(&mut conn, &cid, &[])
+        .await
+        .expect("clear");
+    let assigned = save_inventory_diff(&mut conn, &cid, &[snap(None, false)])
+        .await
+        .expect("insert");
+    let id = assigned[&0];
+
+    let custom = |pool: &sqlx::PgPool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                r#"SELECT custom_values FROM "CharacterItems" WHERE id = $1"#,
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("custom_values")
+        }
+    };
+    sqlx::query(
+        r#"UPDATE "CharacterItems" SET custom_values = '{"note": "keep", "n": 3}' WHERE id = $1"#,
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .expect("seed keys");
+
+    // Toggle lit on, then off, through the UPDATE path.
+    save_inventory_diff(&mut conn, &cid, &[snap(Some(id), true)])
+        .await
+        .expect("lit on");
+    let on = custom(&pool).await;
+    assert_eq!(on["lit"], true);
+    assert_eq!(on["note"], "keep");
+    assert_eq!(on["n"], 3);
+    let row = &list_for(&pool, &cid).await.expect("list")[0];
+    assert!(row.lit);
+
+    save_inventory_diff(&mut conn, &cid, &[snap(Some(id), false)])
+        .await
+        .expect("lit off");
+    let off = custom(&pool).await;
+    assert!(off.get("lit").is_none(), "lit key removed: {off}");
+    assert_eq!(off["note"], "keep");
+    assert_eq!(off["n"], 3);
+
+    // A scalar/null/odd `lit` value never aborts the save or the read.
+    for bad in ["42", "null", r#""x""#, r#"{"lit": "maybe"}"#] {
+        sqlx::query(r#"UPDATE "CharacterItems" SET custom_values = $2::jsonb WHERE id = $1"#)
+            .bind(id)
+            .bind(bad)
+            .execute(&pool)
+            .await
+            .expect("seed bad value");
+        let row = &list_for(&pool, &cid).await.expect("tolerant read")[0];
+        assert!(!row.lit, "{bad} reads as unlit");
+        save_inventory_diff(&mut conn, &cid, &[snap(Some(id), true)])
+            .await
+            .expect("save over bad value");
+        assert_eq!(custom(&pool).await["lit"], true);
+    }
+
+    // Restore the original inventory.
+    let restore: Vec<CharacterItemSnap> = before
+        .iter()
+        .map(|r| CharacterItemSnap {
+            persisted_id: None,
+            object_zone_id: r.object_zone_id,
+            object_id: r.object_id,
+            equipped_location: r.equipped_location.clone(),
+            parent_persisted_id: None,
+            parent_idx: None,
+            charges: (r.charges >= 0).then_some(r.charges),
+            liquid_remaining: r.liquid_type.as_ref().map(|_| r.liquid_remaining),
+            liquid_type: r.liquid_type.clone(),
+            lit: r.lit,
+        })
+        .collect();
+    save_inventory_diff(&mut conn, &cid, &restore)
+        .await
+        .expect("restore");
 }

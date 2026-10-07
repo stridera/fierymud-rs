@@ -4,7 +4,7 @@
 //! order and taking the first entry the typed text was a prefix of
 //! (`interpreter.cpp`, `command_interpreter`): "the order they appear in
 //! the command list" is the priority ("who" before "whisper", "l" is
-//! look, "k" is kill). This module mirrors that table order.
+//! look). This module mirrors that table order.
 //!
 //! Why this lives in code and not in the `Command` table: the Rust command
 //! registry is code-defined (every handler is an `inventory::submit!`ed fn
