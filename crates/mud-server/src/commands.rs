@@ -323,6 +323,9 @@ mod followers;
 #[path = "commands/magic_focus.rs"]
 mod magic_focus;
 pub(crate) use magic_focus::Concentrating;
+#[cfg(test)]
+#[path = "commands/rank_tests.rs"]
+mod rank_tests;
 #[path = "commands/release.rs"]
 mod release;
 #[path = "commands/room_chat.rs"]
@@ -3532,6 +3535,7 @@ mod tests {
                     user_id: "u".into(),
                     character_id: "c".into(),
                     role,
+                    account_role: role,
                     perms: vec![],
                 },
                 Posture(PostureKind::Sitting),

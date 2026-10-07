@@ -597,6 +597,29 @@ impl UserRole {
         self.rank() >= min.rank()
     }
 
+    /// Staff role implied purely by character level. Mirrors the website's
+    /// `calculateRoleFromLevel` (muditor `role-calculator.service.ts`):
+    ///
+    /// | level   | role          |
+    /// |---------|---------------|
+    /// | < 100   | `Player`      |
+    /// | 100     | `Immortal`    |
+    /// | 101-102 | `Builder`     |
+    /// | 103     | `HeadBuilder` |
+    /// | 104     | `Coder`       |
+    /// | >= 105  | `Implementor` |
+    #[must_use]
+    pub const fn from_level(level: i32) -> Self {
+        match level {
+            i32::MIN..=99 => Self::Player,
+            100 => Self::Immortal,
+            101..=102 => Self::Builder,
+            103 => Self::HeadBuilder,
+            104 => Self::Coder,
+            _ => Self::Implementor,
+        }
+    }
+
     /// Display label used by `account` and the role readout.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -1308,5 +1331,80 @@ impl MovementMode {
             Self::Mounted => "mounted",
             Self::Ethereal => "ethereal",
         }
+    }
+}
+
+/// Highest level reachable by experience. Levels at or above
+/// [`MIN_STAFF_LEVEL`] only arrive via staff action (`advance` / `set level`
+/// by an Implementor, the authenticated admin HTTP API, or legacy import).
+pub const MAX_MORTAL_LEVEL: i32 = 99;
+
+/// First level that carries in-game staff rank (see [`UserRole::from_level`]).
+pub const MIN_STAFF_LEVEL: i32 = MAX_MORTAL_LEVEL + 1;
+
+/// In-game staff rank for a character: the higher of the website account
+/// role and the role implied by character level (`UserRole::from_level`).
+///
+/// Security reasoning: character level is authoritative for staff rank so
+/// that god characters whose legacy account was never linked to a website
+/// user (and therefore have no account role) still get their commands. This
+/// is safe only because level >= 100 is unreachable by gameplay: XP-based
+/// level-up is capped at [`MAX_MORTAL_LEVEL`], and every path that sets a
+/// level >= [`MIN_STAFF_LEVEL`] (`advance`, `set level`, admin HTTP
+/// `player/set`) is restricted to Implementors / authenticated admin calls
+/// and audit-logged. The result is never lower than either input, so a
+/// demoted-by-level character still keeps a higher website role.
+///
+/// This is the single place rank is combined; the result is cached in
+/// `Account.role` at login and refreshed whenever a level changes.
+#[must_use]
+pub const fn effective_rank(level: i32, account_role: UserRole) -> UserRole {
+    let by_level = UserRole::from_level(level);
+    if by_level.rank() > account_role.rank() {
+        by_level
+    } else {
+        account_role
+    }
+}
+
+#[cfg(test)]
+mod rank_tests {
+    use super::*;
+
+    #[test]
+    fn effective_rank_table() {
+        use UserRole::{Builder, Coder, HeadBuilder, Immortal, Implementor, Player};
+        let table = [
+            // (level, account role, expected)
+            (1, Player, Player),
+            (99, Player, Player),
+            (100, Player, Immortal),
+            (101, Player, Builder),
+            (102, Player, Builder),
+            (103, Player, HeadBuilder),
+            (104, Player, Coder),
+            (105, Player, Implementor),
+            (110, Player, Implementor),
+            // Account role wins when higher than the level-derived role.
+            (1, Implementor, Implementor),
+            (99, Builder, Builder),
+            (100, Coder, Coder),
+            (104, Implementor, Implementor),
+            // Level wins when higher.
+            (105, Immortal, Implementor),
+            (100, Immortal, Immortal),
+            // Degenerate levels never grant anything.
+            (0, Player, Player),
+            (-5, Player, Player),
+        ];
+        for (level, role, want) in table {
+            assert_eq!(effective_rank(level, role), want, "L{level} {role:?}");
+        }
+    }
+
+    #[test]
+    fn mortal_cap_matches_staff_threshold() {
+        assert_eq!(UserRole::from_level(MAX_MORTAL_LEVEL), UserRole::Player);
+        assert_eq!(UserRole::from_level(MIN_STAFF_LEVEL), UserRole::Immortal);
     }
 }

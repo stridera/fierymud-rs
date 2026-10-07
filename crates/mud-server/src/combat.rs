@@ -2214,11 +2214,70 @@ pub fn trophy_xp_modifier(prior_kills: f32) -> f32 {
 
 /// Check whether `entity`'s `Profile.experience` has crossed the
 /// next-level threshold, and if so promote (possibly multiple
-/// levels in one call) — incrementing `Profile.level`, expanding
-/// `Health.max` and `Stamina.max` by the row's gain values, and
-/// emitting a "you advanced to level N" line per step.
-#[allow(clippy::too_many_lines)]
+/// levels in one call). XP-driven, so it never crosses
+/// [`mud_db::enums::MAX_MORTAL_LEVEL`]: level >= 100 grants staff rank
+/// (`mud_db::enums::effective_rank`) and is reserved to staff action.
 pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
+    level_up_to(world, entity, mud_db::enums::MAX_MORTAL_LEVEL);
+}
+
+/// Recompute the cached effective staff rank in `Account.role` from the
+/// entity's current `Profile.level`. Must be called after anything that
+/// changes a player's level, otherwise permissions go stale until relog.
+pub(crate) fn refresh_account_rank(world: &mut World, entity: Entity) {
+    let Some(level) = world.get::<mud_world::Profile>(entity).map(|p| p.level) else {
+        return;
+    };
+    if let Some(mut acct) = world.get_mut::<mud_world::Account>(entity) {
+        acct.refresh_rank(level);
+    }
+}
+
+/// Authorization for any staff action that sets a character's level to
+/// `new_level` (`advance`, `set <char> level`).
+///
+/// Level >= [`mud_db::enums::MIN_STAFF_LEVEL`] confers in-game staff rank
+/// (`effective_rank`), so setting one is a privilege escalation: it requires
+/// the actor's *effective* rank to be Implementor. This deliberately does not
+/// honor `DevMode` (which waives `min_role` for every account holder) —
+/// DevMode must not become a way to mint gods. Both outcomes are written to
+/// the admin audit log (grant and denial), tagged with target and level.
+/// Levels below 100 need no extra privilege beyond the calling command's own
+/// `min_role`.
+pub(crate) fn authorize_level_change(
+    world: &mut World,
+    actor: Entity,
+    target_name: &str,
+    new_level: i32,
+) -> bool {
+    use mud_db::enums::{MIN_STAFF_LEVEL, UserRole};
+    if new_level < MIN_STAFF_LEVEL {
+        return true;
+    }
+    let allowed = world
+        .get::<mud_world::Account>(actor)
+        .is_some_and(|a| a.role.at_least(UserRole::Implementor));
+    crate::commands::record_admin_action(
+        world,
+        actor,
+        if allowed {
+            "staff_level_grant"
+        } else {
+            "staff_level_grant_denied"
+        },
+        &format!("{target_name} {new_level}"),
+    );
+    allowed
+}
+
+/// Promote `entity` while its XP clears the next threshold and the next
+/// level is `<= max_level` — incrementing `Profile.level`, expanding
+/// `Health.max` and `Stamina.max` by the row's gain values, and
+/// emitting a "you advanced to level N" line per step. Callers
+/// pass `MAX_MORTAL_LEVEL` for XP-driven level-ups; only the
+/// Implementor-gated `advance` command passes a higher cap.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn level_up_to(world: &mut World, entity: Entity, max_level: i32) {
     use mud_world::{LevelTable, Profile};
     let table = world.resource::<LevelTable>().clone_rows();
     loop {
@@ -2227,6 +2286,12 @@ pub(crate) fn check_level_up(world: &mut World, entity: Entity) {
             None => return,
         };
         let next = level + 1;
+        // Hard cap (see doc comment): experience can never carry a
+        // character past the caller's cap, even if the level table gains
+        // rows above 99 or XP is inflated via `set xp`.
+        if next > max_level {
+            return;
+        }
         let Some(next_row) = table.iter().find(|r| r.level == next) else {
             return; // max level
         };

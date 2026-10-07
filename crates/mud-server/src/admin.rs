@@ -1064,11 +1064,34 @@ fn set_player_field(
             }
         }
         "level" => {
+            // Level >= 100 confers in-game staff rank
+            // (`mud_db::enums::effective_rank`). This endpoint is already
+            // authenticated at the HTTP layer (bearer `ADMIN_TOKEN`, or
+            // loopback-only bind), which is the equivalent of the
+            // Implementor requirement on in-game `set`/`advance`. Every
+            // staff-level grant is audit-logged.
+            let new_level = v32.max(1);
+            if new_level >= mud_db::enums::MIN_STAFF_LEVEL {
+                warn!(player = %player_name, new_level, "admin HTTP: staff-level grant");
+                if !world.contains_resource::<commands::AdminAuditLog>() {
+                    world.insert_resource(commands::AdminAuditLog::default());
+                }
+                world
+                    .resource_mut::<commands::AdminAuditLog>()
+                    .push(commands::AdminAuditEntry {
+                        at: std::time::SystemTime::now(),
+                        actor_name: "admin-http".to_string(),
+                        verb: "staff_level_grant",
+                        args: format!("{player_name} {new_level}"),
+                    });
+            }
             if let Some(mut p) = world.get_mut::<Profile>(entity) {
-                p.level = v32.max(1);
+                p.level = new_level;
             } else {
                 applied = false;
             }
+            // Keep the cached effective rank (Account.role) in sync.
+            crate::combat::refresh_account_rank(world, entity);
         }
         "experience" => {
             if let Some(mut p) = world.get_mut::<Profile>(entity) {
@@ -2230,6 +2253,7 @@ mod players_tests {
             user_id: format!("u-{tag}"),
             character_id: format!("c-{tag}"),
             role: UserRole::Player,
+            account_role: UserRole::Player,
             perms: vec![],
         }
     }

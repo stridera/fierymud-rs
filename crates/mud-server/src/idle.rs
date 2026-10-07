@@ -63,6 +63,9 @@ pub fn idle_kick_tick(world: &mut World) {
             (With<Player>, With<Online>),
         >();
         q.iter(world)
+            // Staff (any rank above Player) never idle out. `Account.role`
+            // is the effective rank (max of website role and level-derived
+            // role), so unlinked L100+ god characters are exempt too.
             .filter(|(_, _, _, acct)| {
                 use mud_db::enums::UserRole;
                 acct.role.rank() <= UserRole::Player.rank()
@@ -125,5 +128,51 @@ pub async fn drain_idle_kicks(
             // somehow) — drop it so the next pass doesn't keep retrying.
             e.remove::<IdleKickPending>();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mud_db::enums::{UserRole, effective_rank};
+
+    fn spawn_idle(world: &mut World, level: i32, account_role: UserRole) -> Entity {
+        world
+            .spawn((
+                Player,
+                Online,
+                Account {
+                    user_id: String::new(),
+                    character_id: "c".into(),
+                    role: effective_rank(level, account_role),
+                    account_role,
+                    perms: vec![],
+                },
+                // Idle for a day, well past the 30 minute default.
+                LoggedInAt(
+                    std::time::Instant::now()
+                        .checked_sub(Duration::from_secs(86_400))
+                        .expect("monotonic clock has > 1 day of uptime"),
+                ),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn staff_by_level_are_exempt_from_idle_kick() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(IDLE_CHECK_PERIOD_TICKS));
+        world.insert_resource(mud_world::RuntimeConfig::default());
+        let mortal = spawn_idle(&mut world, 99, UserRole::Player);
+        // Unlinked god characters: Player account role, staff by level.
+        let l100 = spawn_idle(&mut world, 100, UserRole::Player);
+        let l105 = spawn_idle(&mut world, 105, UserRole::Player);
+        // Linked staff account on a low-level character.
+        let linked = spawn_idle(&mut world, 1, UserRole::Builder);
+        idle_kick_tick(&mut world);
+        assert!(world.get::<IdleKickPending>(mortal).is_some());
+        assert!(world.get::<IdleKickPending>(l100).is_none());
+        assert!(world.get::<IdleKickPending>(l105).is_none());
+        assert!(world.get::<IdleKickPending>(linked).is_none());
     }
 }

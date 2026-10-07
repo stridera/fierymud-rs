@@ -5441,6 +5441,7 @@ mod tests {
                     user_id: "u-1".to_string(),
                     character_id: "char-1".to_string(),
                     role: mud_db::enums::UserRole::Player,
+                    account_role: mud_db::enums::UserRole::Player,
                     perms: vec![],
                 },
             ))

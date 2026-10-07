@@ -26,15 +26,30 @@ pub struct Player;
 pub struct Online;
 
 /// Account ownership and authorization data, stamped onto the Player entity
-/// at login. `role` comes from the Users row; `perms` and `character_id`
-/// come from the Characters row. `character_id` is what save-on-disconnect
-/// uses to write state back.
+/// at login. `account_role` comes from the Users row; `perms` and
+/// `character_id` come from the Characters row. `character_id` is what
+/// save-on-disconnect uses to write state back.
+///
+/// `role` is the *effective* in-game staff rank
+/// (`mud_db::enums::effective_rank(level, account_role)`), cached so the
+/// many permission checks stay a plain field read. Every code path that
+/// changes `Profile.level` must call [`Account::refresh_rank`] afterwards.
+/// Read `role` for any permission decision; `account_role` is only the
+/// website role (an unlinked legacy character has `Player` there).
 #[derive(Component, Debug, Clone)]
 pub struct Account {
     pub user_id: String,
     pub character_id: String,
     pub role: mud_db::enums::UserRole,
+    pub account_role: mud_db::enums::UserRole,
     pub perms: Vec<mud_db::enums::Permission>,
+}
+
+impl Account {
+    /// Recompute the cached effective rank after a level change.
+    pub fn refresh_rank(&mut self, level: i32) {
+        self.role = mud_db::enums::effective_rank(level, self.account_role);
+    }
 }
 
 /// Marker: this entity is a non-player mob/NPC instance.

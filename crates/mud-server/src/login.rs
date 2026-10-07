@@ -2411,7 +2411,14 @@ impl ConnRouter {
         let wizlock_active = world
             .get_resource::<mud_world::WizLock>()
             .is_some_and(|w| w.active);
-        if wizlock_active && !user.role.at_least(mud_db::enums::UserRole::Builder) {
+        // A preselected character (name login) is known here, so its level
+        // counts toward staff rank (unlinked god characters have no account
+        // role). The email path has no character yet and falls back to the
+        // account role alone, i.e. it can only be stricter, never looser.
+        let wizlock_rank = preselected.as_ref().map_or(user.role, |c| {
+            mud_db::enums::effective_rank(c.level, user.role)
+        });
+        if wizlock_active && !wizlock_rank.at_least(mud_db::enums::UserRole::Builder) {
             info!(
                 conn_id,
                 user_id = %user.id,
@@ -3828,7 +3835,14 @@ pub(crate) fn spawn_player(
             Account {
                 user_id: user.id.clone(),
                 character_id: c.id.clone(),
-                role: user.role,
+                // Effective in-game staff rank: max(website account role,
+                // role implied by character level). An unlinked legacy god
+                // character has no account role, so level is what grants
+                // its commands. See `mud_db::enums::effective_rank` for
+                // why trusting level is safe (XP capped at 99; staff-only
+                // paths set level >= 100).
+                role: mud_db::enums::effective_rank(c.level, user.role),
+                account_role: user.role,
                 perms: c.permissions.clone(),
             },
             Connection(outbound),
@@ -5573,6 +5587,7 @@ mod tests {
                     user_id: "u".into(),
                     character_id: "c".into(),
                     role: mud_db::enums::UserRole::Player,
+                    account_role: mud_db::enums::UserRole::Player,
                     perms: vec![],
                 },
                 Connection(tx1),

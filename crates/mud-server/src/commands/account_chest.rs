@@ -439,6 +439,7 @@ mod tests {
                     user_id: String::new(),
                     character_id: "char-l".to_string(),
                     role: UserRole::Player,
+                    account_role: UserRole::Player,
                     perms: Vec::new(),
                 },
                 crate::commands::Connection(tx),

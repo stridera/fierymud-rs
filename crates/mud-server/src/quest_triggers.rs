@@ -603,6 +603,7 @@ mod tests {
             user_id: "u".to_string(),
             character_id: cid.to_string(),
             role: mud_db::enums::UserRole::Player,
+            account_role: mud_db::enums::UserRole::Player,
             perms: Vec::new(),
         }
     }

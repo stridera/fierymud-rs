@@ -1758,10 +1758,26 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
     let value_i64 = i64::from(value_i32);
 
     let applied = match field.as_str() {
-        "level" => world
-            .get_mut::<Profile>(target)
-            .map(|mut p| p.level = value_i32.max(1))
-            .is_some(),
+        "level" => {
+            // Level >= 100 confers staff rank: Implementor only, audited.
+            // Lowering is gated by `set`'s own Implementor min_role.
+            let new_level = value_i32.max(1);
+            if !crate::combat::authorize_level_change(world, player, &target_name, new_level) {
+                send_to(
+                    world,
+                    player,
+                    "Only an Implementor can set a level of 100 or above.\r\n",
+                );
+                return;
+            }
+            let applied = world
+                .get_mut::<Profile>(target)
+                .map(|mut p| p.level = new_level)
+                .is_some();
+            // Keep the cached effective rank (Account.role) in sync.
+            crate::combat::refresh_account_rank(world, target);
+            applied
+        }
         "xp" | "exp" | "experience" => world
             .get_mut::<Profile>(target)
             .map(|mut p| p.experience = value_i32.max(0))

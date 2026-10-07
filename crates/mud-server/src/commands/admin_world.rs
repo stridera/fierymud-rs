@@ -1868,6 +1868,17 @@ pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
+    // Raising someone to level >= 100 mints staff rank: Implementor only
+    // (checked on the actor's effective rank, independent of DevMode).
+    let target_name = name_of(world, target);
+    if !crate::combat::authorize_level_change(world, player, &target_name, target_level) {
+        send_to(
+            world,
+            player,
+            "Only an Implementor can advance someone to level 100 or above.\r\n",
+        );
+        return;
+    }
     // Look up the XP threshold for the target level. If the level
     // table doesn't have it we refuse rather than silently no-op.
     let threshold = world
@@ -1887,8 +1898,10 @@ pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
     if let Some(mut p) = world.get_mut::<Profile>(target) {
         p.experience = p.experience.max(threshold);
     }
-    crate::combat::check_level_up(world, target);
-    let target_name = name_of(world, target);
+    // Capped at the requested level so a large pre-existing XP total
+    // can't carry the target past what the caller authorized.
+    crate::combat::level_up_to(world, target, target_level);
+    crate::combat::refresh_account_rank(world, target);
     send_rendered(
         world,
         player,

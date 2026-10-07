@@ -1383,6 +1383,7 @@ mod tests {
                     user_id: "u".into(),
                     character_id: "c".into(),
                     role,
+                    account_role: role,
                     perms: vec![],
                 },
                 mud_world::Posture(PostureKind::Standing),
