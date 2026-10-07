@@ -1487,6 +1487,7 @@ impl ConnRouter {
             // Async pre-dispatch: a tight allow-list of commands that
             // need DB access (mail today). Returns true when handled
             // here; falls through to the sync dispatcher otherwise.
+            commands::note_player_input(world, entity);
             commands::dispatch_with_async(world, entity, pool, &text).await;
             // `quit` flags the player; save, despawn and close the socket.
             if world.get::<commands::Quitting>(entity).is_some() {

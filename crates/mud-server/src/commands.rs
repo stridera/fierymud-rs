@@ -453,6 +453,9 @@ mod parser_tests;
 #[path = "commands/progression_tests.rs"]
 mod progression_tests;
 #[cfg(test)]
+#[path = "commands/prompt_spacing_tests.rs"]
+mod prompt_spacing_tests;
+#[cfg(test)]
 #[path = "commands/quest_runtime_tests.rs"]
 mod quest_runtime_tests;
 #[cfg(test)]
@@ -1688,7 +1691,20 @@ pub(crate) fn require_linked_account(
 pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
     let text = text.into();
     if let Some(conn) = world.get::<Connection>(target) {
-        let _ = conn.0.try_send(text.clone().into_bytes());
+        // Output that lands while the player's prompt is still the last
+        // thing on their screen (combat rounds, arrivals, other
+        // players' chatter) must first break past the prompt line, or
+        // it gets glued onto it (legacy `process_output` prepends CRLF
+        // to every non-prompt-mode write).
+        let wire = if world
+            .get_resource::<PromptState>()
+            .is_some_and(|s| s.note_output(target))
+        {
+            format!("\r\n{text}")
+        } else {
+            text.clone()
+        };
+        let _ = conn.0.try_send(wire.into_bytes());
     }
     // Switch puppet: when admin has used `switch <mob>`, the mob
     // doesn't have its own Connection — forward the bytes to the
@@ -1720,6 +1736,68 @@ pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
     PROMPT_RECIPIENTS.with(|r| {
         r.borrow_mut().insert(target);
     });
+}
+
+/// Per-world bookkeeping for prompt spacing (issue #53). Interior
+/// mutability because the output choke point (`send_raw`) only has
+/// `&World`. Absent in bare test worlds, where spacing is simply off.
+#[derive(Resource, Default)]
+pub(crate) struct PromptState(std::sync::Mutex<PromptStateInner>);
+
+#[derive(Default)]
+struct PromptStateInner {
+    /// Players whose last write was a prompt: their cursor sits at the
+    /// end of the prompt line until they type something or output
+    /// forces a line break.
+    prompt_open: std::collections::HashSet<Entity>,
+    /// Players who got output since their last prompt; the next prompt
+    /// is set off from it by a blank line unless they are in COMPACT.
+    output_pending: std::collections::HashSet<Entity>,
+}
+
+impl PromptState {
+    fn lock(&self) -> std::sync::MutexGuard<'_, PromptStateInner> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Record output to `target`. Returns true when the write must be
+    /// prefixed with CRLF because it lands on an open prompt line.
+    fn note_output(&self, target: Entity) -> bool {
+        let mut inner = self.lock();
+        inner.output_pending.insert(target);
+        inner.prompt_open.remove(&target)
+    }
+
+    /// The player submitted a line: their client echo moved them off
+    /// the prompt line, so the next reply needs no leading CRLF.
+    pub(crate) fn note_input(&self, target: Entity) {
+        self.lock().prompt_open.remove(&target);
+    }
+
+    /// A prompt is about to be written. Returns true when it needs a
+    /// blank line first (output since the last prompt), and marks the
+    /// prompt line open.
+    fn note_prompt(&self, target: Entity) -> bool {
+        let mut inner = self.lock();
+        inner.prompt_open.insert(target);
+        inner.output_pending.remove(&target)
+    }
+
+    /// Forget a player who left the world.
+    fn forget(&self, target: Entity) {
+        let mut inner = self.lock();
+        inner.prompt_open.remove(&target);
+        inner.output_pending.remove(&target);
+    }
+}
+
+/// Tell the spacing bookkeeping that `player` just typed a line.
+pub(crate) fn note_player_input(world: &World, player: Entity) {
+    if let Some(state) = world.get_resource::<PromptState>() {
+        state.note_input(player);
+    }
 }
 
 thread_local! {
@@ -1841,6 +1919,8 @@ pub(crate) fn flush_prompts(world: &mut World) {
     for entity in recipients {
         if world.get_entity(entity).is_ok() {
             send_prompt(world, entity);
+        } else if let Some(state) = world.get_resource::<PromptState>() {
+            state.forget(entity);
         }
     }
 }
@@ -7705,6 +7785,18 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     let final_prompt = match cast_prefix {
         Some(prefix) => format!("{prefix}{rendered}"),
         None => rendered,
+    };
+    // Legacy `process_output`: unless COMPACT, a blank line separates
+    // the last block of output from the prompt. Only after actual
+    // output, so a bare <enter> just redraws the prompt.
+    let blank_line = world
+        .get_resource::<PromptState>()
+        .is_some_and(|s| s.note_prompt(target))
+        && !has_flag(world, target, PlayerFlag::Compact);
+    let final_prompt = if blank_line {
+        format!("\r\n{final_prompt}")
+    } else {
+        final_prompt
     };
     // Prompts can carry color tags both directly in the template
     // (`prompt <red>%h</>`) and indirectly via %r / %n (room and player

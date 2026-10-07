@@ -6251,10 +6251,11 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             out.push_str(&format!("{}\r\n", render_color_tags(&line, mode)));
         }
     }
-    // Blank line between description / weather and the actor block
-    // so mob lines don't read as another sentence of the description.
-    // Only inserted when there's actually something to separate.
-    if !mob_lines.is_empty() {
+    // Blank line between description / weather and the occupant / item
+    // block (legacy prints the description with its own trailing
+    // blank), so those lines don't read as another sentence of the
+    // description. Only inserted when there's something to separate.
+    if !mob_lines.is_empty() || !other_players.is_empty() || !items.is_empty() {
         out.push_str("\r\n");
     }
     for line in &mob_lines {
