@@ -11212,12 +11212,13 @@ pub(crate) fn ordinal_suffix(n: i64) -> &'static str {
 }
 
 /// Carry capacity in pounds. Level-scaled: a fresh character can
-/// haul ~100 lbs, an endgame character ~600. Mobs and entities
-/// without a `Profile` default to 100 — the gate only applies to
-/// players via `cmd_get` anyway, but the helper stays total so
-/// callers don't have to special-case absence.
+/// haul ~100 lbs, an endgame character ~600. Players use their
+/// `Profile.level`; mobs use the level of their spawn prototype
+/// (`effective_level`), so a level-40 ogre carries what a level-40
+/// player would rather than the level-1 floor. Anything with neither
+/// (synthetic entities) gets the level-1 floor so the helper stays total.
 pub(crate) fn carry_capacity(world: &World, actor: Entity) -> f64 {
-    let level = world.get::<Profile>(actor).map_or(1, |p| p.level.max(1));
+    let level = mud_world::effective_level(world, actor).max(1);
     100.0 + f64::from(level) * 5.0
 }
 
@@ -21293,7 +21294,7 @@ mod slot_guard_tests {
 
 #[cfg(test)]
 mod mob_prototype_lookup_tests {
-    use super::{race_movement_verb, test_support};
+    use super::{carry_capacity, race_movement_verb, test_support};
     use bevy_ecs::prelude::*;
     use mud_world::{MobPrototypes, RaceCatalog, RaceDef, WorldKey};
 
@@ -21332,5 +21333,18 @@ mod mob_prototype_lookup_tests {
         let (world, mob) = world_with_mob(10, "human");
         assert_eq!(race_movement_verb(&world, mob, false), "leaves");
         assert_eq!(race_movement_verb(&world, mob, true), "arrives");
+    }
+
+    #[test]
+    fn mob_carry_capacity_scales_with_prototype_level() {
+        let (world, mob) = world_with_mob(40, "human");
+        assert!((carry_capacity(&world, mob) - 300.0).abs() < f64::EPSILON);
+        let bare = {
+            let mut w = World::new();
+            w.insert_resource(MobPrototypes::default());
+            let e = w.spawn_empty().id();
+            carry_capacity(&w, e)
+        };
+        assert!((bare - 105.0).abs() < f64::EPSILON);
     }
 }
