@@ -168,13 +168,13 @@ pub(crate) fn cmd_rent(world: &mut World, player: Entity, args: &str) {
 /// First receptionist mob standing in `room`, identified by the
 /// `Receptionist` profession on its prototype.
 fn receptionist_in_room(world: &mut World, room: Entity) -> Option<Entity> {
-    let mobs: Vec<(Entity, WorldKey)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &WorldKey), With<Mob>>();
-        q.iter(world)
-            .filter(|(_, l, _)| l.0 == room)
-            .map(|(e, _, k)| (e, *k))
-            .collect()
-    };
+    // Scan only the room's `Contents` index, not every mob in the world.
+    let mobs: Vec<(Entity, WorldKey)> = world
+        .get::<mud_world::Contents>(room)?
+        .iter()
+        .filter(|e| world.get::<Mob>(*e).is_some())
+        .filter_map(|e| world.get::<WorldKey>(e).map(|k| (e, *k)))
+        .collect();
     let protos = world.get_resource::<MobPrototypes>()?;
     mobs.into_iter().find_map(|(e, k)| {
         protos
@@ -344,6 +344,20 @@ mod tests {
         ));
         let (player, rx) = test_support::player_in(&mut world, room);
         (world, player, rx)
+    }
+
+    #[test]
+    fn receptionist_lookup_is_scoped_to_the_room() {
+        let (mut world, player, _rx) = world_with_clerk(false);
+        let here = world.get::<Located>(player).unwrap().0;
+        let clerk = receptionist_in_room(&mut world, here).expect("clerk in this room");
+        assert!(world.get::<Mob>(clerk).is_some());
+        // A receptionist in another room is not found from here.
+        let elsewhere = world.spawn_empty().id();
+        assert!(receptionist_in_room(&mut world, elsewhere).is_none());
+        // A room with no contents index at all is fine too.
+        let empty = world.spawn_empty().id();
+        assert!(receptionist_in_room(&mut world, empty).is_none());
     }
 
     #[test]
