@@ -677,6 +677,29 @@ pub async fn admin_complete(pool: &PgPool, character_quest_id: &str) -> sqlx::Re
     Ok(result.rows_affected())
 }
 
+/// Staff reset: delete the character's whole record of one quest
+/// (status, objective progress via cascade, variables), as if they had
+/// never touched it. Returns the number of quest rows removed.
+pub async fn admin_reset(
+    pool: &PgPool,
+    character_id: &str,
+    zone_id: i32,
+    quest_id: i32,
+) -> sqlx::Result<u64> {
+    let result = sqlx::query!(
+        r#"
+        DELETE FROM "CharacterQuest"
+        WHERE character_id = $1 AND quest_zone_id = $2 AND quest_id = $3
+        "#,
+        character_id,
+        zone_id,
+        quest_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Active (and recently completed) quests for one character. The
 /// `Quest` join supplies the display name + short description so the
 /// listing render doesn't need a second query. Sorted with active

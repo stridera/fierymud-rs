@@ -23,6 +23,7 @@ inventory::submit! {
             "qaccept" => Some(Box::pin(cmd_qaccept(world, player, pool, args))),
             "qgive" => Some(Box::pin(cmd_qgive(world, player, pool, args))),
             "qcomplete" => Some(Box::pin(cmd_qcomplete(world, player, pool, args))),
+            "qreset" => Some(Box::pin(cmd_qreset(world, player, pool, args))),
             "qreward" => Some(Box::pin(cmd_qreward(world, player, pool, args))),
             _ => None,
         },
@@ -183,10 +184,34 @@ inventory::submit! {
         category: Category::Admin,
         help: Help {
             usage: "qcomplete <#>",
-            summary: "Admin: force-complete an in-progress quest.",
+            summary: "Admin: force-complete an in-progress quest and pay its rewards.",
             long: "Slot number from the `quests` in-progress section. \
-                   Flips IN_PROGRESS → COMPLETED, stamps completed_at, \
-                   bumps completion_count.",
+                   Flips IN_PROGRESS -> COMPLETED, stamps completed_at, \
+                   bumps completion_count and pays the quest's \
+                   unconditional rewards exactly as a real completion \
+                   would (conditional and choice rewards stay behind \
+                   `qreward`). Objectives and phases are not run.",
+        },
+        run: cmd_mail_stub,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["qreset"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "qreset <player> <zone> <quest-id>",
+            summary: "Admin: wipe a player's record of a quest.",
+            long: "Deletes the character's whole record of the quest: \
+                   status, objective progress and quest variables, so \
+                   it can be given or accepted from scratch (`qload`, \
+                   `qgive` and `qaccept` refuse while any record \
+                   exists). Works on offline characters. Rewards \
+                   already paid are not taken back. `zone:id` is \
+                   accepted in place of `<zone> <quest-id>`.",
         },
         run: cmd_mail_stub,
     }
@@ -744,10 +769,10 @@ pub(crate) async fn cmd_qgive(
 }
 
 /// `qcomplete <#>`: admin command — force-complete an in-progress
-/// quest the caller's character has accepted. Slot is 1-based
-/// against the `quests` in-progress section, same as `abandon`.
-/// Useful for verifying reward / completion flow end-to-end without
-/// the full objective-resolution pipeline.
+/// quest the caller's character has accepted and pay its rewards.
+/// Slot is 1-based against the `quests` in-progress section, same as
+/// `abandon`. Useful for verifying the reward / completion flow
+/// end-to-end without the full objective-resolution pipeline.
 pub(crate) async fn cmd_qcomplete(
     world: &mut World,
     player: Entity,
@@ -803,10 +828,107 @@ pub(crate) async fn cmd_qcomplete(
                 player,
                 format!("Force-completed quest: {}.\r\n", target.quest_name),
             );
+            // Same payout as finishing the last objective.
+            if let Some(notify) = crate::quest_progress::Notifier::for_player(world, player) {
+                crate::quest_progress::grant_completion_rewards(
+                    pool,
+                    &notify,
+                    target.quest_zone_id,
+                    target.quest_id,
+                )
+                .await;
+            }
         }
         Err(e) => {
             send_to(world, player, format!("Complete failed: {e}\r\n"));
         }
+    }
+}
+
+/// Parse a quest reference given as `<zone> <id>` or `<zone>:<id>`.
+fn parse_quest_ref<'a>(mut parts: impl Iterator<Item = &'a str>) -> Option<(i32, i32)> {
+    let first = parts.next()?;
+    if let Some((z, i)) = first.split_once(':') {
+        return Some((z.parse().ok()?, i.parse().ok()?));
+    }
+    Some((first.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// `qreset <player> <zone> <quest-id>`: staff wipe of one character's
+/// record of a quest. Works on offline characters (resolved by name).
+pub(crate) async fn cmd_qreset(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let mut parts = args.split_whitespace();
+    let Some(target_word) = parts.next() else {
+        send_to(
+            world,
+            player,
+            "Usage: qreset <player> <zone> <quest-id>\r\n",
+        );
+        return;
+    };
+    let Some((zone, id)) = parse_quest_ref(parts) else {
+        send_to(
+            world,
+            player,
+            "Usage: qreset <player> <zone> <quest-id>\r\n",
+        );
+        return;
+    };
+    let online = {
+        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .find(|(_, n)| n.name.eq_ignore_ascii_case(target_word))
+            .map(|(e, _)| e)
+    };
+    let character_id = match online {
+        Some(e) => world.get::<Account>(e).map(|a| a.character_id.clone()),
+        None => match mud_db::characters::find_by_name(pool, target_word).await {
+            Ok(row) => row.map(|r| r.id),
+            Err(e) => {
+                send_to(world, player, format!("Character lookup failed: {e}\r\n"));
+                return;
+            }
+        },
+    };
+    let Some(character_id) = character_id else {
+        send_to(
+            world,
+            player,
+            format!("No character named '{target_word}'.\r\n"),
+        );
+        return;
+    };
+    match mud_db::quests::admin_reset(pool, &character_id, zone, id).await {
+        Ok(0) => send_to(
+            world,
+            player,
+            format!("{target_word} has no record of Quest ({zone}, {id}).\r\n"),
+        ),
+        Ok(_) => {
+            // Drop the cached script variables too, so a fresh run
+            // does not inherit them (or flush them back).
+            if let Some(mut cache) = world.get_resource_mut::<mud_world::QuestVariableCache>() {
+                cache.reset_quest(&character_id, zone, id);
+            }
+            send_to(
+                world,
+                player,
+                format!("Reset Quest ({zone}, {id}) for {target_word}.\r\n"),
+            );
+            if let Some(e) = online.filter(|&e| e != player) {
+                send_to(
+                    world,
+                    e,
+                    format!("An immortal resets your progress on quest ({zone}, {id}).\r\n"),
+                );
+            }
+        }
+        Err(e) => send_to(world, player, format!("Reset failed: {e}\r\n")),
     }
 }
 

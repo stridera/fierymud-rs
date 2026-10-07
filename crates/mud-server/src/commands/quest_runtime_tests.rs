@@ -9,7 +9,7 @@ use std::time::Duration;
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_db::sqlx::{self, PgPool};
-use mud_world::{Account, Located, Named, Player, WorldKey};
+use mud_world::{Account, Located, Named, Online, Player, WorldKey};
 
 use super::test_support::{Rx, drain};
 use super::{Connection, DbPool};
@@ -99,6 +99,10 @@ impl Fx {
 
     /// A world holding the fixture player standing in a room entity.
     fn world(&self) -> (World, Entity, Entity, Rx) {
+        self.world_as(UserRole::Player)
+    }
+
+    fn world_as(&self, role: UserRole) -> (World, Entity, Entity, Rx) {
         let mut world = World::new();
         world.insert_resource(DbPool(self.pool.clone()));
         let room = world
@@ -111,14 +115,15 @@ impl Fx {
         let player = world
             .spawn((
                 Player,
+                Online,
                 Named {
                     name: "Quester".into(),
                 },
                 Account {
                     user_id: "u".into(),
                     character_id: self.char_id.clone(),
-                    role: UserRole::Player,
-                    account_role: UserRole::Player,
+                    role,
+                    account_role: role,
                     perms: Vec::new(),
                 },
                 Connection(tx),
@@ -126,6 +131,31 @@ impl Fx {
             ))
             .id();
         (world, player, room, rx)
+    }
+
+    /// Pay 50 XP + 7 gold on completion.
+    async fn rewards(&self) {
+        for (ty, amount) in [("EXPERIENCE", 50), ("GOLD", 7)] {
+            sqlx::query(
+                "INSERT INTO \"QuestReward\" (quest_zone_id, quest_id, phase_id, reward_type, amount) \
+                 VALUES ($1, $2, 1, $3::\"QuestRewardType\", $4)",
+            )
+            .bind(self.zone)
+            .bind(self.quest)
+            .bind(ty)
+            .bind(amount)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn paid(&self) -> (i32, i64) {
+        sqlx::query_as("SELECT experience, wealth FROM \"Characters\" WHERE id = $1")
+            .bind(&self.char_id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
     }
 
     async fn accept(&self) {
@@ -207,5 +237,91 @@ async fn visit_room_counts_entries_after_an_earlier_visit() {
     let out = drain(&mut rx);
     assert!(out.contains("Quest objective: visit (1/2)"), "{out}");
     assert!(out.contains("*** Quest complete! ***"), "{out}");
+    fx.end().await;
+}
+
+/// `qcomplete` is a staff shortcut to completion, so it pays the same
+/// rewards a real completion does.
+#[tokio::test(flavor = "current_thread")]
+async fn qcomplete_pays_the_quest_rewards() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    fx.rewards().await;
+    let (mut world, player, _room, mut rx) = fx.world_as(UserRole::Builder);
+    fx.accept().await;
+    let before = fx.paid().await;
+
+    let handled = super::try_dispatch_async(&mut world, player, &fx.pool, "qcomplete 1").await;
+    assert!(handled);
+    assert_eq!(fx.status().await, "COMPLETED");
+    let after = fx.paid().await;
+    assert_eq!(after.0 - before.0, 50, "experience paid");
+    assert_eq!(after.1 - before.1, 7, "gold paid");
+    let out = drain(&mut rx);
+    assert!(out.contains("Force-completed quest"), "{out}");
+    assert!(out.contains("+50 experience"), "{out}");
+    assert!(out.contains("+7 gold"), "{out}");
+    fx.end().await;
+}
+
+/// `qreset` wipes the character's record so the quest can be given
+/// again; mortals cannot use it.
+#[tokio::test(flavor = "current_thread")]
+async fn qreset_clears_a_players_quest_state() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    let (mut world, player, _room, mut rx) = fx.world_as(UserRole::Builder);
+    fx.accept().await;
+    let cq = mud_db::quests::find_character_quest(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    mud_db::quest_objectives::upsert_progress(&fx.pool, &cq, fx.zone, fx.quest, 1, 1, 1, true)
+        .await
+        .unwrap();
+    let cmd = format!("qreset Quester {} {}", fx.zone, fx.quest);
+
+    // A mortal is refused and nothing changes.
+    let (mut mw, mortal, _r, mut mrx) = fx.world_as(UserRole::Player);
+    super::try_dispatch_async(&mut mw, mortal, &fx.pool, &cmd).await;
+    assert!(drain(&mut mrx).contains("You can't do that."));
+    assert!(
+        mud_db::quests::find_character_quest(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Staff resets it (the target is the online "Quester").
+    super::try_dispatch_async(&mut world, player, &fx.pool, &cmd).await;
+    let out = drain(&mut rx);
+    assert!(out.contains("Reset Quest"), "{out}");
+    assert!(
+        mud_db::quests::find_character_quest(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+            .await
+            .unwrap()
+            .is_none(),
+        "record gone"
+    );
+    let progress: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM \"CharacterQuestObjective\" WHERE character_quest_id = $1",
+    )
+    .bind(&cq)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(progress, 0, "objective progress gone");
+
+    // A clean slate: staff can load it again, and a second reset says so.
+    assert!(
+        mud_db::quests::admin_assign(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let _ = mud_db::quests::admin_reset(&fx.pool, &fx.char_id, fx.zone, fx.quest).await;
+    super::try_dispatch_async(&mut world, player, &fx.pool, &cmd).await;
+    assert!(drain(&mut rx).contains("no record"));
     fx.end().await;
 }
