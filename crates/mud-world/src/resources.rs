@@ -692,7 +692,7 @@ impl Default for RaceStatCaps {
 /// is distilled at hydration into a typed `ElementType` map; the
 /// raw JSON is kept alongside in case authoring metadata needs to
 /// round-trip without lossiness.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct RaceDef {
     /// Raw `Race` enum text — same shape as `Profile.race`.

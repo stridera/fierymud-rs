@@ -20812,7 +20812,8 @@ pub(crate) fn sector_movement_cost(s: Sector) -> i32 {
 /// arrival verb (`Races.enter_verb`, default `"arrives"`). The
 /// verb is composed with the directional phrase at the call site
 /// — so "leaves north" / "arrives from the south" are the
-/// composed forms. Mover without a `Profile.race`, race not in
+/// composed forms. Mobs use their prototype's race
+/// (`effective_race`). Mover without a race, race not in
 /// the catalog, or empty override falls back to the generic verb.
 ///
 /// Returns an owned `String` because the override comes from the
@@ -20820,10 +20821,14 @@ pub(crate) fn sector_movement_cost(s: Sector) -> i32 {
 /// value anyway.
 pub(crate) fn race_movement_verb(world: &World, mover: Entity, is_arrival: bool) -> String {
     let default: &str = if is_arrival { "arrives" } else { "leaves" };
-    let Some(prof) = world.get::<mud_world::Profile>(mover) else {
-        return default.to_string();
-    };
-    let Some(def) = world.resource::<mud_world::RaceCatalog>().get(&prof.race) else {
+    // Players carry the raw enum text; mob prototypes store it
+    // lower-cased, so fall back to the upper-cased key.
+    let race = mud_world::effective_race(world, mover);
+    let catalog = world.resource::<mud_world::RaceCatalog>();
+    let Some(def) = catalog
+        .get(&race)
+        .or_else(|| catalog.get(&race.to_ascii_uppercase()))
+    else {
         return default.to_string();
     };
     let verb = if is_arrival {
@@ -21283,5 +21288,49 @@ mod slot_guard_tests {
         let (mut world, caster, _id) = caster_with_hold();
         drop(SlotGuard::new(&mut world, caster, None));
         assert_eq!(state(&world, caster), (1, 0));
+    }
+}
+
+#[cfg(test)]
+mod mob_prototype_lookup_tests {
+    use super::{race_movement_verb, test_support};
+    use bevy_ecs::prelude::*;
+    use mud_world::{MobPrototypes, RaceCatalog, RaceDef, WorldKey};
+
+    fn world_with_mob(level: i32, race: &str) -> (World, Entity) {
+        let mut world = World::new();
+        let mut proto = test_support::mob_proto(7, 9, mud_db::enums::MobProfession::Banker);
+        proto.level = level;
+        proto.race = race.to_string();
+        let mut protos = MobPrototypes::default();
+        protos.by_key.insert((7, 9), proto);
+        world.insert_resource(protos);
+        let mut races = RaceCatalog::default();
+        races.by_race.insert(
+            "SNAKE".to_string(),
+            RaceDef {
+                race: "SNAKE".to_string(),
+                enter_verb: Some("slithers in".to_string()),
+                leave_verb: Some("slithers".to_string()),
+                ..RaceDef::default()
+            },
+        );
+        world.insert_resource(races);
+        let mob = world.spawn(WorldKey { zone: 7, id: 9 }).id();
+        (world, mob)
+    }
+
+    #[test]
+    fn mob_movement_verb_comes_from_its_prototype_race() {
+        let (world, mob) = world_with_mob(10, "snake");
+        assert_eq!(race_movement_verb(&world, mob, false), "slithers");
+        assert_eq!(race_movement_verb(&world, mob, true), "slithers in");
+    }
+
+    #[test]
+    fn mob_of_unlisted_race_uses_generic_verbs() {
+        let (world, mob) = world_with_mob(10, "human");
+        assert_eq!(race_movement_verb(&world, mob, false), "leaves");
+        assert_eq!(race_movement_verb(&world, mob, true), "arrives");
     }
 }
