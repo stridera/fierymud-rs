@@ -16,9 +16,9 @@ inventory::submit! {
             usage: "recall",
             summary: "Teleport to your recall point.",
             long: "Move instantly to your saved recall room. If you haven't \
-                   bound one yet you're told so — `touch <touchstone>` in a \
-                   sanctuary room to bind your recall there. Builders can \
-                   use `setrecall` from any room.",
+                   bound one yet you go to your race's start room — `touch \
+                   <touchstone>` in a sanctuary room to bind your recall \
+                   there. Builders can use `setrecall` from any room.",
         },
         run: cmd_recall,
     }
@@ -62,7 +62,14 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "Some power blocks your recall.\r\n");
         return;
     }
-    let Some(target) = world.get::<RecallPoint>(player).map(|r| r.0) else {
+    // A bound point whose room is gone is dropped; recall then falls back to
+    // the race start room like the respawn chain.
+    if let Some(bound) = world.get::<RecallPoint>(player).map(|r| r.0)
+        && world.get_entity(bound).is_err()
+    {
+        try_remove::<RecallPoint>(world, player);
+    }
+    let Some(target) = recall_room(world, player) else {
         send_to(
             world,
             player,
@@ -72,11 +79,6 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     };
-    if world.get_entity(target).is_err() {
-        send_to(world, player, "Your recall point has vanished.\r\n");
-        try_remove::<RecallPoint>(world, player);
-        return;
-    }
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere; can't recall.\r\n");
         return;
@@ -121,4 +123,56 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
 
     send_to(world, player, "The world swirls around you...\r\n");
     cmd_look(world, player, "");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::{drain, player_in};
+    use mud_world::Named;
+
+    #[test]
+    fn unbound_player_recalls_to_the_race_start_room() {
+        let mut world = World::new();
+        let here = world
+            .spawn(Named {
+                name: "Here".into(),
+            })
+            .id();
+        let start = world
+            .spawn(Named {
+                name: "The Temple".into(),
+            })
+            .id();
+        let mut rooms = WorldKeyIndex::default();
+        rooms.rooms.insert((30, 1), start);
+        world.insert_resource(rooms);
+        let mut defaults = RaceDefaults::default();
+        defaults.start_room_by_race.insert("HUMAN".into(), (30, 1));
+        world.insert_resource(defaults);
+        let (player, mut rx) = player_in(&mut world, here);
+        world.entity_mut(player).insert(Profile {
+            level: 5,
+            class_id: None,
+            race: "HUMAN".into(),
+            experience: 0,
+            gender: "neutral".into(),
+        });
+        assert!(world.get::<RecallPoint>(player).is_none());
+        cmd_recall(&mut world, player, "");
+        assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(start));
+        let text = drain(&mut rx);
+        assert!(text.contains("The world swirls around you"), "{text}");
+        assert!(!text.contains("no recall point"), "{text}");
+    }
+
+    #[test]
+    fn no_bound_point_and_no_race_start_room_is_refused() {
+        let mut world = World::new();
+        let here = world.spawn_empty().id();
+        let (player, mut rx) = player_in(&mut world, here);
+        cmd_recall(&mut world, player, "");
+        assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(here));
+        assert!(drain(&mut rx).contains("no recall point"));
+    }
 }
