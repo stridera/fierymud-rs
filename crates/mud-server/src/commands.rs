@@ -12718,6 +12718,40 @@ pub(crate) fn settle_slot(world: &mut World, player: Entity, hold: Option<u64>, 
     }
 }
 
+/// Scope guard over a cast's slot reservation. Owns the `&mut World`
+/// for the duration of the cast body (which re-borrows it) and, on drop,
+/// releases the reservation unless it was handed off ([`Self::disarm`],
+/// the wind-up queue path that parks it in `Casting`). Explicit
+/// [`settle_slot`] calls stay in place and win: a committed or already
+/// released id is a no-op for the release here, because reservation ids
+/// are unique. The guard means a new early `return` (or a panic
+/// unwinding through the cast) can never leak a held slot.
+struct SlotGuard<'w> {
+    world: &'w mut World,
+    player: Entity,
+    hold: Option<u64>,
+    armed: bool,
+}
+
+impl<'w> SlotGuard<'w> {
+    fn new(world: &'w mut World, player: Entity, hold: Option<u64>) -> Self {
+        Self {
+            world,
+            player,
+            hold,
+            armed: hold.is_some(),
+        }
+    }
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            settle_slot(self.world, self.player, self.hold, false);
+        }
+    }
+}
+
 /// AOE scope an ability fans out over, from `Ability.target_scope`
 /// (falling back to `is_area` + `violent` for legacy rows).
 fn aoe_scope_for(def: &mud_world::AbilityDef) -> Option<AoeScope> {
@@ -13563,6 +13597,13 @@ pub(crate) fn invoke_ability_with(
         }
     }
 
+    // From here every exit path releases the reservation unless a
+    // settle already resolved it or the queue branch hands it to
+    // `Casting`. `world` is re-borrowed from the guard's field; the
+    // guard's other fields stay independently reachable.
+    let mut slot_guard = SlotGuard::new(world, player, slot_hold);
+    let world: &mut World = &mut *slot_guard.world;
+
     // Cast queue install. All the refusal gates have passed and the
     // slot is held. From here we either queue the wind-up and bail
     // (player-typed spell with `cast_time_rounds > 0`), or fall
@@ -13587,6 +13628,9 @@ pub(crate) fn invoke_ability_with(
             recognized_by,
             slot_reservation: slot_hold,
         });
+        // The reservation now lives in `Casting`; `casting_tick` /
+        // `abort_casting` settle it.
+        slot_guard.armed = false;
         let secs = (total_ticks / 10).max(1);
         let quick_note = if quick {
             " Your quick chant hastens the spell."
@@ -21030,5 +21074,71 @@ mod scroll_recall_tests {
         // Scroll with no recall data.
         let plain = RecallScrollSource { zone: 30, id: 58 };
         assert_eq!(scroll_recall_room(&world, plain, player), None);
+    }
+}
+
+#[cfg(test)]
+mod slot_guard_tests {
+    use super::{SlotGuard, settle_slot};
+    use bevy_ecs::prelude::*;
+    use mud_world::SpellSlots;
+
+    fn caster_with_hold() -> (World, Entity, u64) {
+        let mut world = World::new();
+        let mut slots = SpellSlots::default();
+        let id = slots.reserve(1, 30);
+        let caster = world.spawn(slots).id();
+        (world, caster, id)
+    }
+
+    fn state(world: &World, caster: Entity) -> (usize, usize) {
+        let s = world.get::<SpellSlots>(caster).unwrap();
+        (s.reserved.len(), s.in_flight.len())
+    }
+
+    /// A cast body that bails early without settling anything.
+    fn cast_that_returns_early(world: &mut World, caster: Entity, hold: Option<u64>) {
+        let guard = SlotGuard::new(world, caster, hold);
+        let world: &mut World = &mut *guard.world;
+        if world.get::<SpellSlots>(caster).is_some() {
+            return;
+        }
+        settle_slot(world, caster, hold, true);
+    }
+
+    #[test]
+    fn early_return_releases_the_reservation() {
+        let (mut world, caster, id) = caster_with_hold();
+        assert_eq!(state(&world, caster), (1, 0));
+        cast_that_returns_early(&mut world, caster, Some(id));
+        assert_eq!(state(&world, caster), (0, 0), "released, not committed");
+    }
+
+    #[test]
+    fn explicit_commit_survives_the_guard() {
+        let (mut world, caster, id) = caster_with_hold();
+        {
+            let guard = SlotGuard::new(&mut world, caster, Some(id));
+            let world: &mut World = &mut *guard.world;
+            settle_slot(world, caster, Some(id), true);
+        }
+        assert_eq!(state(&world, caster), (0, 1), "committed into recovery");
+    }
+
+    #[test]
+    fn disarmed_guard_leaves_the_reservation_for_its_new_owner() {
+        let (mut world, caster, id) = caster_with_hold();
+        {
+            let mut guard = SlotGuard::new(&mut world, caster, Some(id));
+            guard.armed = false;
+        }
+        assert_eq!(state(&world, caster), (1, 0));
+    }
+
+    #[test]
+    fn guard_without_a_hold_does_nothing() {
+        let (mut world, caster, _id) = caster_with_hold();
+        drop(SlotGuard::new(&mut world, caster, None));
+        assert_eq!(state(&world, caster), (1, 0));
     }
 }
