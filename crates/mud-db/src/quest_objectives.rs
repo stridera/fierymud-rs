@@ -868,10 +868,10 @@ pub async fn upsert_progress(
     sqlx::query!(
         r#"
         INSERT INTO "CharacterQuestObjective"
-            (character_quest_id, quest_zone_id, quest_id, phase_id,
+            (id, character_quest_id, quest_zone_id, quest_id, phase_id,
              objective_id, current_count, completed,
              completed_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7,
+        VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, $7,
                 CASE WHEN $7 THEN NOW() ELSE NULL END)
         ON CONFLICT (character_quest_id, quest_zone_id, quest_id, phase_id, objective_id)
         DO UPDATE SET
