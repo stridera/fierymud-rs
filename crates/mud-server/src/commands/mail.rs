@@ -384,7 +384,7 @@ pub(crate) async fn cmd_readmail(
     out.push_str("---\r\n");
     out.push_str(row.body.trim_end());
     out.push_str("\r\n---\r\n");
-    send_to(world, player, out);
+    crate::commands::send_prose(world, player, out);
     if let Err(e) = mud_db::mail::mark_read(pool, row.id).await {
         tracing::warn!(error = %e, mail_id = row.id, "mark_read failed");
     }

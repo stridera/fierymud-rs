@@ -1323,6 +1323,19 @@ pub struct SnoopedBy(pub Entity);
 #[derive(Component, Debug, Clone, Default)]
 pub struct ScriptVars(pub std::collections::BTreeMap<String, String>);
 
+/// Terminal width the player's client reported via NAWS (RFC 1073).
+/// Updated on every resize; absent until the first report. Display
+/// code reads it (through `layout::wrap_width`) to word-wrap prose to
+/// the viewport. Session-scoped: the client re-reports on reconnect.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ClientWidth(pub u16);
+
+/// `ScriptVars` key holding the player's persisted wrap-width
+/// preference (`columns <N>`). Absent means "follow the client's
+/// reported width". Stored in `ScriptVars` so it round-trips through
+/// `Characters.script_vars` with no schema change.
+pub const PREF_COLUMNS_KEY: &str = "pref.columns";
+
 /// Marker: the player is flying. Movement treats every sector as
 /// equally easy (sector cost 1 instead of 4-6 for water etc.) but
 /// adds a flat +1 stamina per move on top — flying is great over

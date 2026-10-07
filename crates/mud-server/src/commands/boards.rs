@@ -653,7 +653,7 @@ pub(crate) async fn cmd_read_board_msg(
     out.push_str("---\r\n");
     out.push_str(msg.content.trim_end());
     out.push_str("\r\n---\r\n");
-    send_to(world, player, out);
+    send_prose(world, player, out);
 }
 
 /// `look <board>` / `examine <board>`: render the board's message
@@ -871,7 +871,7 @@ pub(crate) async fn cmd_board(
         out.push_str("---\r\n");
         out.push_str(msg.content.trim_end());
         out.push_str("\r\n---\r\n");
-        send_to(world, player, out);
+        send_prose(world, player, out);
         return;
     }
     if messages.is_empty() {

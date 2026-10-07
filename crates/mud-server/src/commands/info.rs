@@ -1585,7 +1585,8 @@ inventory::submit! {
             usage: "toggle <flag>",
             summary: "Flip a player flag on or off.",
             long: "Examples: `toggle afk`, `toggle deaf`, `toggle notell`. \
-                   `flags` lists all currently-set flags. Recognised names \
+                   `toggle columns <n>` sets the text wrap width (see \
+                   `columns`). `flags` lists all currently-set flags. Recognised names \
                    include AFK, DEAF, NO_TELL/NOTELL, BRIEF, COMPACT, \
                    AUTO_LOOT, AUTO_GOLD, AUTO_EXIT, WIMPY, QUEST, PK, MSP, \
                    MXP, HOLY_LIGHT, COLOR_BLIND, SHOW_DICE_ROLLS, SHOW_IDS, \
@@ -1828,6 +1829,27 @@ inventory::submit! {
                    and shows just the title + exits + occupants.",
         },
         run: cmd_brief,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["columns", "wrap"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Settings,
+        help: Help {
+            usage: "columns [<40-250>|auto]",
+            summary: "Set the width long text is word-wrapped to.",
+            long: "The server wraps room descriptions, help and other prose \
+                   to your client's reported window width (80 if it \
+                   doesn't report one). `columns 100` pins a fixed width \
+                   instead, which reads better on very wide windows; \
+                   `columns auto` goes back to following the client. The \
+                   setting is saved with your character. `toggle columns \
+                   <n>` works too.",
+        },
+        run: cmd_columns,
     }
 }
 
@@ -2491,7 +2513,7 @@ fn render_social_help(world: &mut World, player: Entity, social: &SocialDef) {
     }
 
     out.push_str("\r\n  <cyan>Category:</> <dim>Social</>\r\n");
-    send_to(world, player, out);
+    send_prose(world, player, out);
 }
 
 /// Render a DB-backed `HelpEntry`. Matches the per-command help page
@@ -2526,7 +2548,7 @@ fn render_help_entry(
     if let Some(usage) = command_usage {
         out.push_str(&format!("\r\n<dim>Command usage:</> {usage}\r\n"));
     }
-    send_to(world, player, out);
+    send_prose(world, player, out);
 }
 
 /// Render an `AbilityDef` as a help card. Pulled into a helper so
@@ -2644,7 +2666,7 @@ fn render_ability_help(world: &mut World, player: Entity, def: &mud_world::Abili
             render_color_tags(&line, mode),
         ));
     }
-    send_to(world, player, out);
+    send_prose(world, player, out);
 }
 
 /// `help classes` body — overview of every class in the catalog,
@@ -2805,7 +2827,7 @@ fn render_class_help(world: &mut World, player: Entity, def: &mud_world::ClassDe
             ));
         }
     }
-    send_to(world, player, out);
+    send_prose(world, player, out);
 }
 
 /// Player-side help: every category except Admin.
@@ -2856,7 +2878,6 @@ impl HelpScope {
 
 fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
     const HELP_INDEX_COL_WIDTH: usize = 16;
-    const HELP_INDEX_COLS_PER_ROW: usize = 4;
     let (role, perms) = world
         .get::<Account>(player)
         .map_or((UserRole::Player, Vec::new()), |a| {
@@ -2881,22 +2902,16 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
         // single-line `join(", ")` form was the SUGGESTIONS overflow
         // bullet.
         let mode = color_mode_for(world, player);
+        let width = crate::layout::wrap_width(world, player);
         let mut out = format!("\r\n<b:cyan>{}</>\r\n", scope.index_title());
         for cat in Category::ORDER {
             if let Some(cmds) = by_cat.get(cat) {
                 out.push_str(&format!("\r\n  <b:yellow>{}</>\r\n", cat.label()));
                 let mut names: Vec<&str> = cmds.iter().map(|c| c.names[0]).collect();
                 names.sort_unstable();
-                for chunk in names.chunks(HELP_INDEX_COLS_PER_ROW) {
-                    out.push_str("    ");
-                    for n in chunk {
-                        // Pad in XML-Lite space, render after — same
-                        // rationale as the spells listing: pad first
-                        // because visible_width understands tag spans
-                        // but ANSI escapes throw it off.
-                        let padded = pad_visible(&format!("<cyan>{n}</>"), HELP_INDEX_COL_WIDTH);
-                        out.push_str(&render_color_tags(&padded, mode));
-                    }
+                let cells: Vec<String> = names.iter().map(|n| format!("<cyan>{n}</>")).collect();
+                for row in crate::layout::format_grid(&cells, HELP_INDEX_COL_WIDTH, 4, width) {
+                    out.push_str(&render_color_tags(&row, mode));
                     out.push_str("\r\n");
                 }
             }
@@ -2985,7 +3000,7 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
             "  <cyan>Category:</> <dim>{}</>\r\n",
             cmd.category.label()
         ));
-        send_to(world, player, out);
+        send_prose(world, player, out);
         return;
     }
 
@@ -3350,9 +3365,13 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // — render_color_tags handles nested layers correctly.
     let mut out = format!("\r\nYou look at <b:cyan>{name_rendered}</>.\r\n");
     if !description.trim().is_empty() {
+        let width = crate::layout::wrap_width(world, player);
         out.push_str(&format!(
             "{}\r\n",
-            render_color_tags(description.trim_end(), mode)
+            render_color_tags(
+                &crate::layout::wrap_lines(description.trim_end(), width),
+                mode
+            )
         ));
     }
     if let Some(p) = posture
@@ -5720,9 +5739,15 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // BRIEF flag suppresses the description — name/occupants/exits only.
     // CircleMUD-standard "brief mode".
     if !has_flag(world, player, PlayerFlag::Brief) && !room_desc.trim().is_empty() {
+        // Legacy layout: 3-space first-line indent, paragraphs
+        // separated by a blank line, reflowed to the viewport.
+        let width = crate::layout::wrap_width(world, player);
         out.push_str(&format!(
             "{}\r\n",
-            render_color_tags(room_desc.trim_end(), mode)
+            render_color_tags(
+                &crate::layout::format_room_description(&room_desc, width),
+                mode
+            )
         ));
     }
     // Subtle flavor lines for "exceptional" room flags. The other
@@ -7250,13 +7275,13 @@ const PROMPT_TEMPLATES: &[(&str, &str)] = &[
     ("compact", "[%h/%H %v/%V] "),
     ("bars", "%B %M "),
     ("vitals", "<red>%h</>/%H hp <green>%v</>/%V mv "),
-    ("verbose", "<%n %h/%H hp %v/%V mv %g cp @ %r> "),
-    ("location", "[%r] <%h/%H hp> "),
-    ("worldclock", "<%h/%H %v/%V — %s %t %d> "),
+    ("verbose", "<%n %h/%H hp %v/%V mv %w @ %R> "),
+    ("location", "[%R] <%h/%H hp> "),
+    ("worldclock", "<%h/%H %v/%V — %s %y %Y> "),
     // Combat preset: same vitals as `classic` plus the opponent's
-    // name + HP bar + percent. Out of combat the enemy codes render
-    // `-` / "[----------]" so the line stays readable.
-    ("combat", "<%h/%H hp %v/%V mv | %N %K %p%%> "),
+    // name + HP bar. Out of combat `%O` is empty and `%K` renders
+    // "[----------]" so the line stays readable.
+    ("combat", "<%h/%H hp %v/%V mv | %O %K> "),
     ("minimal", "> "),
 ];
 
@@ -7308,16 +7333,25 @@ pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
                  \r\n\
                  Built-in templates: try `prompt list` for a menu.\r\n\
                  \r\n\
-                 Format codes:\r\n\
-                 Vitals:    %h current HP   %H max HP   \
-                 %B 10-cell HP bar (color-graded)\r\n\
-                 \x20          %v current stamina  %V max stamina  \
-                 %M 10-cell stamina bar\r\n\
-                 Identity:  %n character name   %r room name\r\n\
-                 Wealth:    %g on-hand copper\r\n\
-                 Calendar:  %t hour (00-23)   %s season   %d day/night\r\n\
-                 Combat:    %N enemy name   %e/%E enemy HP   %p enemy HP%%   \
-                 %K 10-cell enemy HP bar\r\n\
+                 Format codes (same as the legacy game):\r\n\
+                 Vitals:    %h/%H hit points (current/max)   %v/%V stamina\r\n\
+                 \x20          %ph %pH %pv %pV  percent of hit points / stamina\r\n\
+                 \x20          %B %M  10-cell HP / stamina bar\r\n\
+                 Identity:  %n name   %N real name   %k class   %# level\r\n\
+                 \x20          %a %A alignment   %i %I hiddenness   %r rage\r\n\
+                 Place:     %z %Z zone   %R room\r\n\
+                 Progress:  %e experience bar   %E experience message\r\n\
+                 Wealth:    %w coins held   %W coins banked\r\n\
+                 \x20          %cp %cg %cs %cc held platinum/gold/silver/copper\r\n\
+                 \x20          %cP %cG %cS %cC the same, banked\r\n\
+                 Combat:    %o opponent + condition   %O opponent name\r\n\
+                 \x20          %t opponent's target + condition   %T target name\r\n\
+                 \x20          %g group leader + condition   %G leader name\r\n\
+                 \x20          %K 10-cell opponent HP bar\r\n\
+                 \x20          %dX cooldown bar (X = a-y, 1-7)   %l %L active effects\r\n\
+                 Flags:     %x puts the wizi/AFK flags inline (else a line above)\r\n\
+                 Calendar:  %s season   %y hour (00-23)   %Y day/night\r\n\
+                 Layout:    %_ newline   %- space\r\n\
                  Literal:   %% emits a single `%`.\r\n"
             ),
         );
@@ -7335,6 +7369,13 @@ pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
             player,
             "Toggle which flag? Try `flags` to see what's set, or `help toggle`.\r\n",
         );
+        return;
+    }
+    // `toggle wrap` / `toggle columns <n>`: the wrap width is a numeric
+    // setting, not a flag; hand it to `columns`.
+    let (head, rest) = raw.split_once(char::is_whitespace).unwrap_or((raw, ""));
+    if head.eq_ignore_ascii_case("wrap") || head.eq_ignore_ascii_case("columns") {
+        cmd_columns(world, player, rest);
         return;
     }
     let Some(flag) = PlayerFlag::from_label(raw) else {
@@ -7629,6 +7670,67 @@ pub(crate) fn cmd_brief(world: &mut World, player: Entity, _args: &str) {
         "Room descriptions will now be terse on `look`.",
         "Full room descriptions restored.",
     );
+}
+
+/// `columns [<n>|auto]` (alias `wrap`): show or set the width prose is
+/// word-wrapped to. Persisted in `ScriptVars` under
+/// [`mud_world::PREF_COLUMNS_KEY`], so it saves with the character.
+pub(crate) fn cmd_columns(world: &mut World, player: Entity, args: &str) {
+    use crate::layout::{MAX_COLS, MIN_COLS, pref_columns, wrap_width};
+
+    let arg = args.trim().to_ascii_lowercase();
+    if arg.is_empty() {
+        let width = wrap_width(world, player);
+        let source = if pref_columns(world, player).is_some() {
+            "set by you"
+        } else if world.get::<mud_world::ClientWidth>(player).is_some() {
+            "reported by your client"
+        } else {
+            "default; your client has not reported a width"
+        };
+        send_to(
+            world,
+            player,
+            format!(
+                "Text wraps at {width} columns ({source}).\r\n\
+                 Use `columns <{MIN_COLS}-{MAX_COLS}>` to pin a width or `columns auto` \
+                 to follow your client.\r\n"
+            ),
+        );
+        return;
+    }
+    if matches!(arg.as_str(), "auto" | "off" | "default" | "client") {
+        if let Some(mut vars) = world.get_mut::<mud_world::ScriptVars>(player) {
+            vars.0.remove(mud_world::PREF_COLUMNS_KEY);
+        }
+        let width = wrap_width(world, player);
+        send_to(
+            world,
+            player,
+            format!("Text now follows your client width ({width} columns).\r\n"),
+        );
+        return;
+    }
+    let Some(n) = arg
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (MIN_COLS..=MAX_COLS).contains(n))
+    else {
+        send_to(
+            world,
+            player,
+            format!("Usage: columns <{MIN_COLS}-{MAX_COLS}|auto>\r\n"),
+        );
+        return;
+    };
+    if world.get::<mud_world::ScriptVars>(player).is_none() {
+        try_insert(world, player, mud_world::ScriptVars::default());
+    }
+    if let Some(mut vars) = world.get_mut::<mud_world::ScriptVars>(player) {
+        vars.0
+            .insert(mud_world::PREF_COLUMNS_KEY.to_string(), n.to_string());
+    }
+    send_to(world, player, format!("Text will wrap at {n} columns.\r\n"));
 }
 
 pub(crate) fn cmd_compact(world: &mut World, player: Entity, _args: &str) {
@@ -11703,13 +11805,10 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
             "\r\n<b:cyan>All loaded spells</> <dim>({})</>:\r\n",
             entries.len(),
         );
-        let column_width = name_column_width(&entries);
-        for chunk in entries.chunks(3) {
-            out.push_str("  ");
-            for n in chunk {
-                let padded = pad_visible(n, column_width);
-                out.push_str(&render_color_tags(&padded, mode));
-            }
+        let width = crate::layout::wrap_width(world, player);
+        let column_width = name_column_width(std::iter::once(entries.as_slice()));
+        for row in crate::layout::format_grid(&entries, column_width, 2, width) {
+            out.push_str(&render_color_tags(&row, mode));
             out.push_str("\r\n");
         }
         send_to(world, player, out);
@@ -11775,8 +11874,14 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
 
     let total: usize = by_circle.values().map(Vec::len).sum();
     let mut out = format!("\r\n<b:cyan>Spells you know</> <dim>({total})</>:\r\n");
-    for (circle, names) in &mut by_circle {
+    for names in by_circle.values_mut() {
         names.sort_unstable();
+    }
+    // One column width for the whole listing so every circle's
+    // columns line up with the ones above and below it.
+    let width = crate::layout::wrap_width(world, player);
+    let column_width = name_column_width(by_circle.values().map(Vec::as_slice));
+    for (circle, names) in &by_circle {
         let header = if *circle == 0 {
             String::from("(no circle for your class)")
         } else {
@@ -11787,13 +11892,8 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
             header,
             names.len(),
         ));
-        let column_width = name_column_width(names);
-        for chunk in names.chunks(3) {
-            out.push_str("  ");
-            for n in chunk {
-                let padded = pad_visible(n, column_width);
-                out.push_str(&render_color_tags(&padded, mode));
-            }
+        for row in crate::layout::format_grid(names, column_width, 2, width) {
+            out.push_str(&render_color_tags(&row, mode));
             out.push_str("\r\n");
         }
     }
@@ -11844,17 +11944,11 @@ pub(crate) fn format_ability_with_sphere(def: &mud_world::AbilityDef) -> String 
 }
 
 /// Pick the column width for an ability-list grid. Sized to the
-/// widest *visible* name in the page plus a 2-space gutter, with a
-/// 22-char floor so short-name pages don't render too cramped.
-fn name_column_width(names: &[String]) -> usize {
-    const MIN_WIDTH: usize = 22;
-    const GUTTER: usize = 2;
-    let widest = names
-        .iter()
-        .map(|n| visible_width(n))
-        .max()
-        .unwrap_or(MIN_WIDTH);
-    widest.saturating_add(GUTTER).max(MIN_WIDTH)
+/// widest *visible* name across every list on the page plus a 2-space
+/// gutter, with a 22-char floor so short-name pages don't render too
+/// cramped.
+fn name_column_width<'a>(lists: impl IntoIterator<Item = &'a [String]>) -> usize {
+    crate::layout::grid_col_width(lists, 2, 22)
 }
 
 pub(crate) fn cmd_skills(world: &mut World, player: Entity, args: &str) {
@@ -13440,19 +13534,10 @@ pub(crate) fn cmd_abilities_kind(
         format!("<b:cyan>{}s you know</>", capitalize(kind_label))
     };
     let mut out = format!("\r\n{header} <dim>({})</>:\r\n", names.len());
-    let column_width = name_column_width(&names);
-    for chunk in names.chunks(3) {
-        out.push_str("  ");
-        for n in chunk {
-            // Same XML-Lite-pad-then-render order as cmd_spells's
-            // grid (2bb9a1a) — visible_width understands the
-            // `<tag>` markers but not the ANSI escapes
-            // render_color_tags emits, so padding must happen
-            // before rendering.
-            let padded = pad_visible(n, column_width);
-            let rendered = render_color_tags(&padded, mode);
-            out.push_str(&rendered);
-        }
+    let width = crate::layout::wrap_width(world, player);
+    let column_width = name_column_width(std::iter::once(names.as_slice()));
+    for row in crate::layout::format_grid(&names, column_width, 2, width) {
+        out.push_str(&render_color_tags(&row, mode));
         out.push_str("\r\n");
     }
     send_to(world, player, out);

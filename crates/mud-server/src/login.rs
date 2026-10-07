@@ -810,7 +810,7 @@ pub struct ConnRouter {
 /// to the client (table widths, color depth gating, EOR-after-
 /// prompt). All fields default to "we don't know yet" — a fresh
 /// connection that hasn't replied to NAWS shows `cols == 0`,
-/// which calling code interprets as "fall back to 80".
+/// which `layout::wrap_width` treats as "fall back to 80".
 #[derive(Debug, Default, Clone)]
 #[allow(clippy::struct_excessive_bools)] // independent capability flags
 pub struct ConnCapabilities {
@@ -832,19 +832,6 @@ pub struct ConnCapabilities {
     pub eor: bool,
     pub mxp: bool,
     pub utf8: bool,
-}
-
-impl ConnCapabilities {
-    /// Effective column count for layout — 80 if NAWS hasn't
-    /// landed yet, otherwise whatever the client reported. Width
-    /// 0 from a misbehaving client also collapses to the default.
-    /// Currently unused (no width-aware renderers); kept public
-    /// for when the score sheet / box renderers learn to adapt.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn effective_cols(&self) -> u16 {
-        if self.cols == 0 { 80 } else { self.cols }
-    }
 }
 
 /// Lock notice for an account whose `locked_until` is in the future.
@@ -1073,12 +1060,29 @@ impl ConnRouter {
 
     /// NAWS payload — the client reported its terminal viewport.
     /// Re-fires on every resize, so the snapshot tracks the live
-    /// state. Width drives table layouts (`who`, `score`, `look`)
-    /// at command time via [`ConnCapabilities::effective_cols`].
-    pub fn on_window_size(&mut self, conn_id: ConnId, cols: u16, rows: u16, _world: &mut World) {
+    /// state. The width is mirrored onto the player as `ClientWidth`
+    /// and drives server-side word wrap via `layout::wrap_width`.
+    pub fn on_window_size(&mut self, conn_id: ConnId, cols: u16, rows: u16, world: &mut World) {
         let entry = self.caps.entry(conn_id).or_default();
         entry.cols = cols;
         entry.rows = rows;
+        if let Some(&entity) = self.playing.get(&conn_id) {
+            self.sync_client_width(conn_id, entity, world);
+        }
+    }
+
+    /// Mirror the connection's NAWS width onto the player entity as
+    /// [`mud_world::ClientWidth`] so command code (which only sees the
+    /// ECS world) can word-wrap to the viewport. No-op until the
+    /// client has reported a non-zero width.
+    fn sync_client_width(&self, conn_id: ConnId, entity: Entity, world: &mut World) {
+        let cols = self.caps.get(&conn_id).map_or(0, |c| c.cols);
+        if cols == 0 {
+            return;
+        }
+        if let Ok(mut e) = world.get_entity_mut(entity) {
+            e.insert(mud_world::ClientWidth(cols));
+        }
     }
 
     /// TTYPE / MTTS response. The MTTS cycle yields three
@@ -3158,6 +3162,7 @@ impl ConnRouter {
         // channel; the entity itself (items, state) is untouched.
         world.entity_mut(entity).insert(Connection(outbound));
         self.playing.insert(conn_id, entity);
+        self.sync_client_width(conn_id, entity, world);
         true
     }
 
@@ -3778,6 +3783,7 @@ impl ConnRouter {
         // to re-fire every login.
         crate::quest_triggers::dispatch_auto_trigger(world, entity);
         self.playing.insert(conn_id, entity);
+        self.sync_client_width(conn_id, entity, world);
         commands::send_prompt(world, entity);
         info!(
             conn_id,
@@ -4027,7 +4033,7 @@ pub(crate) fn spawn_player(
                 _ => PostureKind::Standing,
             }),
             PlayerFlags(c.player_flags.clone()),
-            Prompt(commands::sanitize_prompt_template(&c.prompt)),
+            Prompt(crate::prompt::sanitize_prompt_template(&c.prompt)),
             LoggedInAt(std::time::Instant::now()),
             (
                 Profile {

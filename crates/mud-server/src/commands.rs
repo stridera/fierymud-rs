@@ -350,6 +350,9 @@ mod tells;
 #[cfg(test)]
 #[path = "commands/test_support.rs"]
 pub(crate) mod test_support;
+#[cfg(test)]
+#[path = "commands/text_layout_tests.rs"]
+mod text_layout_tests;
 #[path = "commands/unban.rs"]
 mod unban;
 #[path = "commands/writing.rs"]
@@ -1115,6 +1118,21 @@ pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
     let mode = color_mode_for(world, target);
     let rendered = render_color_tags(&text.into(), mode);
     send_raw(world, target, rendered);
+}
+
+/// [`send_to`] for prose: word-wraps to the player's width (their
+/// `columns` preference, else the client's NAWS width, else 80) before
+/// rendering colour tags. Wrapping is opt-in per call site so
+/// pre-formatted tables and ASCII art keep using plain [`send_to`];
+/// individual hand-formatted lines inside prose are also left alone
+/// (see `layout::wrap_lines`).
+pub(crate) fn send_prose(world: &World, target: Entity, text: impl Into<String>) {
+    let width = crate::layout::wrap_width(world, target);
+    send_to(
+        world,
+        target,
+        crate::layout::wrap_lines(&text.into(), width),
+    );
 }
 
 /// Default website URL quoted in the "link your character" hint.
@@ -1942,14 +1960,13 @@ pub(crate) fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColorMode, FormulaCtx, PromptCtx, amount_from_blob, apply_damage, apply_heal_hp,
-        apply_heal_stamina, apply_knockdown_posture, check_ability_restrictions, check_target_type,
-        condition_label, direction_name, duration_from_blob, evaluate_formula,
-        evaluate_simple_formula, format_idle, has_effect_named, is_being_attacked, is_immobilized,
-        normalize_dice_notation, parse_direction, remove_effect_named, render_color_tags,
-        render_prompt, resolve_dispel_filter, resolve_dispel_scope, resolve_effect_conditions,
-        resolve_effect_resource, resolve_knockdown_posture, resolve_redirect_aggro,
-        sector_movement_cost,
+        ColorMode, FormulaCtx, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
+        apply_knockdown_posture, check_ability_restrictions, check_target_type, condition_label,
+        direction_name, duration_from_blob, evaluate_formula, evaluate_simple_formula, format_idle,
+        has_effect_named, is_being_attacked, is_immobilized, normalize_dice_notation,
+        parse_direction, remove_effect_named, render_color_tags, resolve_dispel_filter,
+        resolve_dispel_scope, resolve_effect_conditions, resolve_effect_resource,
+        resolve_knockdown_posture, resolve_redirect_aggro, sector_movement_cost,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -2841,132 +2858,6 @@ mod tests {
         // Swimming: 4 / underwater: 6.
         assert_eq!(sector_movement_cost(Sector::Water), 4);
         assert_eq!(sector_movement_cost(Sector::Underwater), 6);
-    }
-
-    #[test]
-    fn sanitize_prompt_template_collapses_double_percent_for_known_vars() {
-        // The schema's old default was `<%%h/%%Hhp %%v/%%Vmv>`; that
-        // text after the two-pass render produces literal `%h` etc.
-        // Sanitizer collapses each `%%X` (X = known variable) to `%X`
-        // so the next render hits the actual substitution path.
-        assert_eq!(
-            super::sanitize_prompt_template("<%%h/%%Hhp %%v/%%Vmv>"),
-            "<%h/%Hhp %v/%Vmv>"
-        );
-        // All known variables: h/H/v/V/B/M/n/r/g/t/s/d.
-        for v in ['h', 'H', 'v', 'V', 'B', 'M', 'n', 'r', 'g', 't', 's', 'd'] {
-            let input = format!("%%{v}");
-            let want = format!("%{v}");
-            assert_eq!(super::sanitize_prompt_template(&input), want);
-        }
-        // Unknown letter after `%%` stays untouched (the `%%` is a
-        // valid literal-percent escape in render_prompt for that case).
-        assert_eq!(super::sanitize_prompt_template("100%%"), "100%%");
-        assert_eq!(super::sanitize_prompt_template("%%X"), "%%X");
-        // Already-correct templates pass through.
-        assert_eq!(super::sanitize_prompt_template("<%h/%H>"), "<%h/%H>");
-        // Mixed: only the known-variable form collapses.
-        assert_eq!(
-            super::sanitize_prompt_template("100%% complete <%%h/%%H>"),
-            "100%% complete <%h/%H>"
-        );
-    }
-
-    #[test]
-    fn render_prompt_substitutes_hp_and_stamina() {
-        // Use a healthy ratio (>=50%) so vitals don't get colored.
-        // Color-threshold cases live in their own test below.
-        let ctx = PromptCtx {
-            hp: Some(Health { hp: 80, max: 100 }),
-            stamina: Some(Stamina {
-                current: 40,
-                max: 50,
-            }),
-            name: Some("Strider"),
-            room: Some("The Void"),
-            wealth: Some(12345i64),
-            hour: Some(7),
-            season: Some("Winter"),
-            day_night: Some("day"),
-            enemy_name: None,
-            enemy_hp: None,
-        };
-        assert_eq!(render_prompt("<%h/%H>", ctx), "<80/100> ");
-        assert_eq!(render_prompt("<%v/%V mv>", ctx), "<40/50 mv> ");
-        assert_eq!(render_prompt("<%h/%H %v/%V>", ctx), "<80/100 40/50> ");
-        // Trailing space already present — don't double-add.
-        assert_eq!(render_prompt("<%h> ", ctx), "<80> ");
-        // Literal percent.
-        assert_eq!(render_prompt("100%%", ctx), "100% ");
-        // Name substitution.
-        assert_eq!(render_prompt("[%n]", ctx), "[Strider] ");
-        // Room substitution.
-        assert_eq!(render_prompt("[%r]", ctx), "[The Void] ");
-        // Wealth substitution: raw copper.
-        assert_eq!(render_prompt("[%g cp]", ctx), "[12345 cp] ");
-        // Hour substitution: zero-padded.
-        assert_eq!(render_prompt("[%t]", ctx), "[07] ");
-        // Season + day/night.
-        assert_eq!(render_prompt("[%s %d]", ctx), "[Winter day] ");
-        // Unknown variable: pass through literally so the player sees they
-        // typed something we don't implement.
-        assert_eq!(render_prompt("[%z]", ctx), "[%z] ");
-        // Missing Health: question marks.
-        assert_eq!(
-            render_prompt("<%h/%H>", PromptCtx { hp: None, ..ctx }),
-            "<?/?> "
-        );
-        // Missing Stamina: question marks for v/V.
-        assert_eq!(
-            render_prompt(
-                "<%v/%V>",
-                PromptCtx {
-                    stamina: None,
-                    ..ctx
-                }
-            ),
-            "<?/?> "
-        );
-        // Missing name: question mark.
-        assert_eq!(
-            render_prompt("[%n]", PromptCtx { name: None, ..ctx }),
-            "[?] "
-        );
-        // Missing room: question mark.
-        assert_eq!(
-            render_prompt("[%r]", PromptCtx { room: None, ..ctx }),
-            "[?] "
-        );
-        // Missing wealth: question mark.
-        assert_eq!(
-            render_prompt(
-                "[%g]",
-                PromptCtx {
-                    wealth: None,
-                    ..ctx
-                }
-            ),
-            "[?] "
-        );
-        // Missing hour: question mark.
-        assert_eq!(
-            render_prompt("[%t]", PromptCtx { hour: None, ..ctx }),
-            "[?] "
-        );
-        // Empty template still gets a trailing space.
-        assert_eq!(render_prompt("", ctx), " ");
-        // Combat codes render `-` out of combat.
-        assert_eq!(render_prompt("%N %e/%E %p%%", ctx), "- -/- -% ");
-        // In combat: enemy fields populated.
-        let combat_ctx = PromptCtx {
-            enemy_name: Some("an orc"),
-            enemy_hp: Some(Health { hp: 75, max: 100 }),
-            ..ctx
-        };
-        assert_eq!(
-            render_prompt("%N %e/%E %p%%", combat_ctx),
-            "an orc 75/100 75% ",
-        );
     }
 
     #[test]
@@ -7149,54 +7040,13 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     };
     let template = world
         .get::<Prompt>(target)
-        .map(|p| p.0.as_str())
+        .map(|p| p.0.clone())
         .filter(|t| !t.is_empty())
-        .unwrap_or("<%h/%H> ");
-    let hp = world.get::<Health>(target).copied();
-    let stamina = world.get::<Stamina>(target).copied();
-    let name = world.get::<Named>(target).map(|n| n.name.as_str());
-    let room = world
-        .get::<Located>(target)
-        .and_then(|l| world.get::<Named>(l.0))
-        .map(|n| n.name.as_str());
-    let wealth = world.get::<Wealth>(target).map(|w| w.0);
-    let clock = world.get_resource::<mud_world::MudClock>();
-    let hour = clock.map(|c| c.hour);
-    let season = clock.map(|c| c.season().label());
-    let day_night = hour.map(|h| {
-        if matches!(h, 0..=4 | 22..=23) {
-            "night"
-        } else {
-            "day"
-        }
-    });
-    // Opponent info for the combat-style prompts. `Fighting` points
-    // at the live target Entity; resolve to its name + HP. Out of
-    // combat both fields stay None and the `%e`/`%N`/etc. codes
-    // render `-`.
-    let enemy = world
-        .get::<Fighting>(target)
-        .map(|f| f.0)
-        .filter(|e| world.get_entity(*e).is_ok());
-    let enemy_name = enemy
-        .and_then(|e| world.get::<Named>(e))
-        .map(|n| n.name.as_str());
-    let enemy_hp = enemy.and_then(|e| world.get::<Health>(e)).copied();
-    let rendered = render_prompt(
-        template,
-        PromptCtx {
-            hp,
-            stamina,
-            name,
-            room,
-            wealth,
-            hour,
-            season,
-            day_night,
-            enemy_name,
-            enemy_hp,
-        },
-    );
+        .unwrap_or_else(|| "<%h/%H> ".to_string());
+    let ctx = crate::prompt::build_prompt_ctx(world, target);
+    let name = ctx.real_name.clone();
+    let name = name.as_deref();
+    let rendered = crate::prompt::render_prompt(&template, &ctx);
     // K1.1: if the player is mid-cast, prefix the prompt with a
     // small `[Casting Spell N/M] ` countdown so the wind-up is
     // visible without having to chant under one's breath. Ticks
@@ -8571,221 +8421,6 @@ pub(crate) fn sphere_color_tag(sphere: &str) -> Option<&'static str> {
         // GENERIC / unmapped: caller's dim fallback wins.
         _ => None,
     }
-}
-
-/// Bag of substitutions the prompt template can read. Bundled in
-/// a struct so adding new variables (`%t`, `%s`, …) doesn't keep
-/// growing the function signature; older callers can keep building
-/// it inline with `..PromptCtx::default()`.
-#[derive(Default, Clone, Copy)]
-pub(crate) struct PromptCtx<'a> {
-    pub hp: Option<Health>,
-    pub stamina: Option<Stamina>,
-    pub name: Option<&'a str>,
-    pub room: Option<&'a str>,
-    pub wealth: Option<i64>,
-    /// In-game hour 0..=23. Surfaces as `%t` zero-padded ("07").
-    pub hour: Option<i32>,
-    /// Season label ("Winter") for `%s`. Read off `MudClock`.
-    pub season: Option<&'a str>,
-    /// "day" or "night" — surfaces as `%d`. Matches `room_is_dark`'s
-    /// 22..=05 window so players can theme prompts by daylight.
-    pub day_night: Option<&'a str>,
-    /// Current opponent's display name. `Some` only while the
-    /// player has a live `Fighting` link; surfaces as `%N`.
-    pub enemy_name: Option<&'a str>,
-    /// Current opponent's vitals. Drives `%e` (current HP),
-    /// `%E` (max), `%p` (percent), `%K` (10-cell HP bar). All
-    /// suppress (render `-`) when out of combat so the combat
-    /// preset stays readable.
-    pub enemy_hp: Option<Health>,
-}
-
-/// Repair `%%X` patterns where X is a recognized prompt variable.
-///
-/// Background: an early version of the schema set
-/// `Characters.prompt @default("<%%h/%%Hhp %%v/%%Vmv>")` thinking
-/// Prisma would unescape `%%` → `%`. Prisma stores the literal,
-/// so every newly-created character (including all seeded test
-/// users) ended up with a prompt template that — after the
-/// `%%` → literal-`%` rule in `render_prompt` — displays
-/// literal `%h` / `%H` instead of HP values.
-///
-/// Login calls this on the loaded template before constructing the
-/// `Prompt` component; the next save persists the cleaned form so
-/// the broken row repairs itself across one disconnect cycle. New
-/// characters get the corrected default from the schema.
-///
-/// Conservative scope: only collapses `%%X` where X is a known
-/// prompt variable letter. A user who genuinely wants `%h` as
-/// literal text in their prompt loses that capability — but no
-/// player has ever wanted that.
-#[must_use]
-pub(crate) fn sanitize_prompt_template(template: &str) -> String {
-    const KNOWN: &[char] = &[
-        'h', 'H', 'v', 'V', 'B', 'M', 'n', 'r', 'g', 't', 's', 'd', 'N', 'e', 'E', 'p', 'K',
-    ];
-    let chars: Vec<char> = template.chars().collect();
-    let mut out = String::with_capacity(template.len());
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '%'
-            && chars.get(i + 1) == Some(&'%')
-            && chars.get(i + 2).is_some_and(|c| KNOWN.contains(c))
-        {
-            // Saw `%%X` where X is a known variable — collapse to `%X`.
-            out.push('%');
-            out.push(chars[i + 2]);
-            i += 3;
-        } else {
-            out.push(chars[i]);
-            i += 1;
-        }
-    }
-    out
-}
-
-#[allow(clippy::too_many_lines)]
-pub(crate) fn render_prompt(template: &str, ctx: PromptCtx<'_>) -> String {
-    let mut out = String::with_capacity(template.len() + 16);
-    let mut chars = template.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            match chars.next() {
-                Some('h') => match ctx.hp {
-                    Some(hp) => {
-                        // Color-grade current HP by ratio so a
-                        // glance at the prompt warns the player
-                        // before they get themselves killed. Tags
-                        // render through render_color_tags which
-                        // strips them for color-off clients.
-                        let tag = vital_color_tag(hp.hp, hp.max);
-                        if let Some(open) = tag {
-                            out.push_str(open);
-                            out.push_str(&hp.hp.to_string());
-                            out.push_str("</>");
-                        } else {
-                            out.push_str(&hp.hp.to_string());
-                        }
-                    }
-                    None => out.push('?'),
-                },
-                Some('H') => match ctx.hp {
-                    Some(hp) => out.push_str(&hp.max.to_string()),
-                    None => out.push('?'),
-                },
-                // %B = 10-cell health bar like `[####______]`,
-                // colored by ratio (red/yellow/green-default).
-                Some('B') => match ctx.hp {
-                    Some(hp) => out.push_str(&render_vital_bar(hp.hp, hp.max)),
-                    None => out.push_str("[??????????]"),
-                },
-                // %M = 10-cell stamina bar.
-                Some('M') => match ctx.stamina {
-                    Some(s) => out.push_str(&render_vital_bar(s.current, s.max)),
-                    None => out.push_str("[??????????]"),
-                },
-                Some('v') => match ctx.stamina {
-                    Some(s) => {
-                        let tag = vital_color_tag(s.current, s.max);
-                        if let Some(open) = tag {
-                            out.push_str(open);
-                            out.push_str(&s.current.to_string());
-                            out.push_str("</>");
-                        } else {
-                            out.push_str(&s.current.to_string());
-                        }
-                    }
-                    None => out.push('?'),
-                },
-                Some('V') => match ctx.stamina {
-                    Some(s) => out.push_str(&s.max.to_string()),
-                    None => out.push('?'),
-                },
-                Some('n') => match ctx.name {
-                    Some(n) => out.push_str(n),
-                    None => out.push('?'),
-                },
-                Some('r') => match ctx.room {
-                    Some(r) => out.push_str(r),
-                    None => out.push('?'),
-                },
-                // %g = on-hand wealth in copper (raw integer; players
-                // do their own math). Skipped denomination split here
-                // because the prompt is a tight one-line readout.
-                Some('g') => match ctx.wealth {
-                    Some(w) => out.push_str(&w.to_string()),
-                    None => out.push('?'),
-                },
-                // %t = in-game hour, zero-padded. Lets a player put
-                // a clock in their prompt without `time` round-trips.
-                Some('t') => match ctx.hour {
-                    Some(h) => out.push_str(&format!("{h:02}")),
-                    None => out.push('?'),
-                },
-                // %s = season label ("Winter"). Tracks the calendar.
-                Some('s') => match ctx.season {
-                    Some(s) => out.push_str(s),
-                    None => out.push('?'),
-                },
-                // %d = "day" or "night" — same hour window as the
-                // dark-room gate, so a `<%d>` prompt theme matches
-                // the light flag the world uses for `look`.
-                Some('d') => match ctx.day_night {
-                    Some(d) => out.push_str(d),
-                    None => out.push('?'),
-                },
-                // %N = enemy name; renders `-` out of combat.
-                Some('N') => out.push_str(ctx.enemy_name.unwrap_or("-")),
-                // %e = enemy current HP, color-graded like %h.
-                Some('e') => match ctx.enemy_hp {
-                    Some(hp) => {
-                        let tag = vital_color_tag(hp.hp, hp.max);
-                        if let Some(open) = tag {
-                            out.push_str(open);
-                            out.push_str(&hp.hp.to_string());
-                            out.push_str("</>");
-                        } else {
-                            out.push_str(&hp.hp.to_string());
-                        }
-                    }
-                    None => out.push('-'),
-                },
-                // %E = enemy max HP.
-                Some('E') => match ctx.enemy_hp {
-                    Some(hp) => out.push_str(&hp.max.to_string()),
-                    None => out.push('-'),
-                },
-                // %p = enemy HP percent (no decimals).
-                Some('p') => match ctx.enemy_hp {
-                    Some(hp) if hp.max > 0 => {
-                        let pct = (hp.hp.max(0) * 100) / hp.max;
-                        out.push_str(&pct.to_string());
-                    }
-                    _ => out.push('-'),
-                },
-                // %K = 10-cell enemy HP bar, color-graded.
-                Some('K') => match ctx.enemy_hp {
-                    Some(hp) => out.push_str(&render_vital_bar(hp.hp, hp.max)),
-                    None => out.push_str("[----------]"),
-                },
-                Some('%') | None => out.push('%'),
-                Some(other) => {
-                    // Unknown variable: leave the literal `%X` so it's
-                    // visible the template wants something we don't yet
-                    // implement.
-                    out.push('%');
-                    out.push(other);
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    if !out.ends_with(' ') {
-        out.push(' ');
-    }
-    out
 }
 
 pub(crate) fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool {
