@@ -3302,6 +3302,11 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 if !(l.0 == room || l.0 == player) {
                     return false;
                 }
+                // Actors the looker cannot see (invisible, wizinvis)
+                // cannot be examined; items never carry the markers.
+                if !crate::commands::can_see_player(world, player, *e) {
+                    return false;
+                }
                 if !can_see_invis
                     && flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Invisible))
                 {

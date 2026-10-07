@@ -1278,11 +1278,19 @@ mod tests {
         let (caster, _rx) = caster_in(&mut world, room);
         let (bob, _b) = bob_in(&mut world, room);
         world.entity_mut(bob).insert(mud_world::Invisible);
+        // The caster needs detect-invisible to name Bob as a target.
+        world.entity_mut(caster).insert(mud_world::DetectInvis);
+        // Staff recognise the spell and its target, but gods see
+        // invisible actors, so the real name shows for them ...
         let mut wrx = staff_watcher(&mut world, room);
         start_mend(&mut world, caster);
         let out = drain(&mut wrx);
-        assert!(out.contains("someone"), "{out:?}");
-        assert!(!out.contains("Bob"), "{out:?}");
+        assert!(out.contains("Bob"), "{out:?}");
+        // ... and an observer who can't see Bob gets neither the
+        // name nor a way to make him out.
+        let (plain, _prx) = player_in(&mut world, room);
+        assert!(!can_make_out(&world, plain, bob, false));
+        assert!(can_make_out(&world, plain, caster, false));
     }
 
     #[test]

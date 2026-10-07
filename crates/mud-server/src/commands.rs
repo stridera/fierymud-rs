@@ -429,6 +429,9 @@ pub(crate) use magic_focus::Concentrating;
 #[path = "commands/god_zone_tests.rs"]
 mod god_zone_tests;
 #[cfg(test)]
+#[path = "commands/invisibility_tests.rs"]
+mod invisibility_tests;
+#[cfg(test)]
 #[path = "commands/parser_tests.rs"]
 mod parser_tests;
 #[cfg(test)]
@@ -6789,7 +6792,7 @@ pub(crate) fn send_room_players_snapshot(world: &mut World, viewer: Entity) {
     {
         let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Player>>();
         for (e, loc, named) in q.iter(world) {
-            if loc.0 == room && e != viewer {
+            if loc.0 == room && e != viewer && can_see_player(world, viewer, e) {
                 let plain = render_color_tags(&named.name, ColorMode::Strip)
                     .replace('\\', "\\\\")
                     .replace('"', "\\\"");
@@ -6827,7 +6830,7 @@ pub(crate) fn broadcast_room_player_diff(
     let recipients: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
-            .filter(|(e, loc)| loc.0 == room && *e != subject)
+            .filter(|(e, loc)| loc.0 == room && *e != subject && can_see_player(world, *e, subject))
             .map(|(e, _)| e)
             .collect()
     };
@@ -10722,31 +10725,148 @@ pub(crate) fn player_can_see_in_dark(world: &World, entity: Entity) -> bool {
     has_flag(world, entity, PlayerFlag::HolyLight)
 }
 
-/// True when `viewer` is allowed to see `target` for the purpose
-/// of player-facing listings (who / look / scan). Returns false
-/// when `target` carries `WizInvis(N)` and viewer's `Profile.level`
-/// is below `N`. Targets without a `WizInvis` component are always
-/// visible. Used by every place we render another actor's name
-/// to a player so a wiz-invised admin actually disappears.
+/// True when `observer` perceives through magical invisibility: the
+/// `DetectInvis` marker (spell/flag), `HOLY_LIGHT`, or an Immortal+
+/// account (gods see all). Legacy `INVIS_OK` / `PRF_HOLYLIGHT`.
+#[must_use]
+pub(crate) fn pierces_invisibility(world: &World, observer: Entity) -> bool {
+    world.get::<mud_world::DetectInvis>(observer).is_some()
+        || has_flag(world, observer, PlayerFlag::HolyLight)
+        || crate::room_access::is_immortal(world, observer)
+}
+
+/// True when `target` is magically invisible and `viewer` cannot
+/// perceive that (the "Someone" case). A pure subset of
+/// `!can_see_player`: it ignores wizinvis, which hides an actor
+/// completely rather than anonymising it.
+#[must_use]
+pub(crate) fn hidden_by_magic_from(world: &World, viewer: Entity, target: Entity) -> bool {
+    viewer != target
+        && world.get::<mud_world::Invisible>(target).is_some()
+        && !pierces_invisibility(world, viewer)
+}
+
+/// THE shared visibility predicate (legacy `CAN_SEE`): may `viewer`
+/// perceive `target`? An actor always sees itself; a magically
+/// invisible `target` (`Invisible`) is hidden from anyone who does not
+/// pierce invisibility ([`pierces_invisibility`]); a `WizInvis(N)`
+/// target is hidden from viewers whose `Profile.level` is below `N`.
+/// Every room listing, name-based target resolver, aggro check and
+/// per-observer message goes through this one function.
 #[must_use]
 pub(crate) fn can_see_player(world: &World, viewer: Entity, target: Entity) -> bool {
-    // Magical invisibility (INVISIBLE / MASS_INVIS): the target
-    // disappears unless the viewer carries `DetectInvis` (spell)
-    // or `HOLY_LIGHT` (admin bypass). Sits before the wizinvis
-    // check because spell-invis is the more common gate; either
-    // failing hides the target.
-    if world.get::<mud_world::Invisible>(target).is_some() {
-        let can_pierce = world.get::<mud_world::DetectInvis>(viewer).is_some()
-            || has_flag(world, viewer, PlayerFlag::HolyLight);
-        if !can_pierce {
-            return false;
-        }
-    }
-    let Some(invis) = world.get::<mud_world::WizInvis>(target).map(|w| w.0) else {
+    if viewer == target {
         return true;
+    }
+    !hidden_by_magic_from(world, viewer, target) && !wiz_hidden_from(world, viewer, target)
+}
+
+/// True when `target`'s `WizInvis` level hides it from `viewer`
+/// entirely (no message at all, not even "Someone").
+#[must_use]
+pub(crate) fn wiz_hidden_from(world: &World, viewer: Entity, target: Entity) -> bool {
+    let Some(invis) = world.get::<mud_world::WizInvis>(target).map(|w| w.0) else {
+        return false;
     };
     let viewer_level = world.get::<Profile>(viewer).map_or(0, |p| p.level);
-    viewer_level >= invis
+    viewer_level < invis
+}
+
+/// How `observer` sees `actor` in a message: the real `name` when
+/// [`can_see_player`] holds, otherwise `"someone"` (legacy `$n` ->
+/// "someone"). Callers capitalise at sentence start with
+/// [`cap_sentence_start`].
+#[must_use]
+pub(crate) fn seen_name(world: &World, observer: Entity, actor: Entity, name: &str) -> String {
+    if can_see_player(world, observer, actor) {
+        name.to_string()
+    } else {
+        "someone".to_string()
+    }
+}
+
+/// Rewrite `raw_msg` for `observer`, replacing each `(actor, name)`
+/// pair's name with "someone" ("Someone" at the very start of the
+/// message) when the observer cannot see that actor.
+#[must_use]
+pub(crate) fn anonymise_for(
+    world: &World,
+    observer: Entity,
+    actors: &[(Entity, &str)],
+    raw_msg: &str,
+) -> String {
+    let mut out = raw_msg.to_string();
+    for &(actor, name) in actors {
+        if name.is_empty() || can_see_player(world, observer, actor) {
+            continue;
+        }
+        let cap = cap_sentence_start(name);
+        let tail = if let Some(rest) = out.strip_prefix(&cap) {
+            Some(rest.to_string())
+        } else {
+            out.strip_prefix(name).map(str::to_string)
+        };
+        out = match tail {
+            Some(rest) => format!("Someone{}", rest.replace(name, "someone")),
+            None => out.replace(name, "someone"),
+        };
+    }
+    out
+}
+
+/// Re-push the `Room.Players` panel to every player in `room` (after
+/// someone's visibility changed).
+pub(crate) fn refresh_room_players(world: &mut World, room: Entity) {
+    let viewers: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        q.iter(world)
+            .filter(|(_, l)| l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for v in viewers {
+        send_room_players_snapshot(world, v);
+    }
+}
+
+/// Legacy `appear()`: drop magical invisibility from `entity` (an
+/// attack or hostile spell breaks it). Despawns the invisibility
+/// effect instances (reversing their stat deltas), removes the
+/// `Invisible` marker and tells the room. No-op when not invisible.
+pub(crate) fn break_invisibility(world: &mut World, entity: Entity) {
+    if world.get::<mud_world::Invisible>(entity).is_none() {
+        return;
+    }
+    let sources: Vec<Entity> = {
+        let mut q =
+            world.query_filtered::<(Entity, &AppliedTo), With<mud_world::InvisibleSource>>();
+        q.iter(world)
+            .filter(|(_, a)| a.0 == entity)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for src in sources {
+        if let Some(d) = world.get::<mud_world::ModifyDelta>(src).cloned() {
+            apply_modify_delta(world, entity, &d.target, -d.amount);
+        }
+        if let Ok(em) = world.get_entity_mut(src) {
+            em.despawn();
+        }
+    }
+    // Remove the marker before computing observers so everyone can
+    // now see the actor.
+    try_remove::<mud_world::Invisible>(world, entity);
+    send_to(world, entity, "You snap into visibility.\r\n");
+    if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
+        let name = cap_sentence_start(&name_of(world, entity));
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[entity],
+            &format!("{name} snaps into visibility.\r\n"),
+        );
+        refresh_room_players(world, room);
+    }
 }
 
 /// True if anyone in `room` (any actor, plus loose items on the
@@ -12420,9 +12540,15 @@ pub(crate) fn find_actor_in_room(
     let (index, needle) = parse_indexed_needle(needle);
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>, Option<&Item>)>();
+    // `exclude` is the looking actor: an actor it cannot see is not a
+    // valid name target (legacy `get_char_vis`).
     q.iter(world)
         .filter(|(e, l, n, kw, item)| {
-            *e != exclude && l.0 == room && item.is_none() && matches(&needle, n, *kw)
+            *e != exclude
+                && l.0 == room
+                && item.is_none()
+                && matches(&needle, n, *kw)
+                && can_see_player(world, exclude, *e)
         })
         .nth(index - 1)
         .map(|(e, _, _, _, _)| e)
@@ -13861,6 +13987,11 @@ pub(crate) fn invoke_ability_with(
         settle_slot(world, player, slot_hold, false);
         return;
     };
+    // Legacy `aggro_lose_spells`: casting hostile magic at someone
+    // else breaks the caster's invisibility.
+    if target_entity != player && ability_is_hostile(world, &def) {
+        break_invisibility(world, player);
+    }
     // (The legacy "requires:" informational block was removed once
     // the rules became live — the messages are written as failure
     // text, so showing them on success is misleading. The player
@@ -15219,6 +15350,9 @@ pub(crate) fn invoke_ability_with(
                 let _ = bundle;
                 if is_invisibility_source {
                     try_insert(world, target_entity, mud_world::Invisible);
+                    if let Some(room) = world.get::<Located>(target_entity).map(|l| l.0) {
+                        refresh_room_players(world, room);
+                    }
                 }
                 spawn_count += 1;
                 applied_msgs.push(match (target_stat.as_deref(), applied_amount) {
@@ -19577,6 +19711,29 @@ pub(crate) fn broadcast_room_except_rendered(
     }
 }
 
+/// [`broadcast_room_except_rendered`] with per-observer "Someone": each
+/// recipient who cannot see one of `actors` gets that actor's name
+/// replaced by "someone" ([`anonymise_for`]).
+pub(crate) fn broadcast_room_anonymised(
+    world: &mut World,
+    room: Entity,
+    except: &[Entity],
+    actors: &[(Entity, &str)],
+    raw_msg: &str,
+) {
+    let targets: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Located)>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == room && !except.contains(e))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for t in targets {
+        let msg = anonymise_for(world, t, actors, raw_msg);
+        send_to(world, t, msg);
+    }
+}
+
 /// `broadcast_room_except_rendered`, with a `Player` filter on the
 /// query. Used for messages that semantically don't apply to mobs
 /// (whisper bystanders, posture announcements, social emotes, etc.) —
@@ -20694,7 +20851,9 @@ pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room:
             (With<Mob>, Without<Fighting>),
         >();
         q.iter(world)
-            .find(|(_, l, mem)| l.0 == room && mem.0.contains(&player))
+            .find(|(e, l, mem)| {
+                l.0 == room && mem.0.contains(&player) && can_see_player(world, *e, player)
+            })
             .map(|(e, _, _)| e)
     };
     let Some(mob) = grudger else { return false };
@@ -20754,17 +20913,21 @@ pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entit
     let defender_name = name_of(world, defender);
     try_insert(world, attacker, Fighting(defender));
     try_insert(world, defender, Fighting(attacker));
-    let attacker_cap = cap_sentence_start(&attacker_name);
+    let attacker_cap = cap_sentence_start(&seen_name(world, defender, attacker, &attacker_name));
     send_to(
         world,
         defender,
         format!("{attacker_cap} sees you and attacks!\r\n"),
     );
-    broadcast_room_except_rendered(
+    broadcast_room_anonymised(
         world,
         room,
         &[defender],
-        &format!("{attacker_cap} sees {defender_name} and attacks!\r\n"),
+        &[(attacker, &attacker_name), (defender, &defender_name)],
+        &format!(
+            "{} sees {defender_name} and attacks!\r\n",
+            cap_sentence_start(&attacker_name)
+        ),
     );
 }
 
@@ -20799,8 +20962,10 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
             (Entity, &Located, &CombatStats, Option<&WorldKey>),
             (With<Mob>, Without<Fighting>),
         >();
+        // A mob cannot aggro what it cannot see (invisible player, no
+        // detect-invisible).
         q.iter(world)
-            .filter(|(_, l, _, _)| l.0 == room)
+            .filter(|(e, l, _, _)| l.0 == room && can_see_player(world, *e, player))
             .map(|(e, _, cs, wk)| (e, cs.alignment, wk.map(|k| (k.zone, k.id))))
             .collect()
     };

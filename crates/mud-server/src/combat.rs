@@ -1200,15 +1200,18 @@ fn apply_swing(world: &mut World, s: &Swing) {
             s.attacker,
             format!("{target_cap} {via}s your attack!\r\n{tail}"),
         );
+        let attacker_seen =
+            crate::commands::seen_name(world, s.target, s.attacker, &s.attacker_name);
         send_to(
             world,
             s.target,
-            format!("You {via} {}'s attack!\r\n{target_tail}", s.attacker_name),
+            format!("You {via} {attacker_seen}'s attack!\r\n{target_tail}"),
         );
-        broadcast_room_except_rendered(
+        crate::commands::broadcast_room_anonymised(
             world,
             room,
             &[s.attacker, s.target],
+            &[(s.attacker, &s.attacker_name), (s.target, &target_name)],
             &format!("{target_cap} {via}s {attacker_cap}'s attack.\r\n"),
         );
         drain_stamina(world, s.attacker, 1);
@@ -1237,15 +1240,22 @@ fn apply_swing(world: &mut World, s: &Swing) {
         );
         let attacker_cap = crate::commands::cap_sentence_start(&s.attacker_name);
         let target_cap_for_room = crate::commands::cap_sentence_start(&target_name);
+        let attacker_to_target = crate::commands::cap_sentence_start(&crate::commands::seen_name(
+            world,
+            s.target,
+            s.attacker,
+            &s.attacker_name,
+        ));
         send_to(
             world,
             s.target,
-            format!("<dim>{attacker_cap} swings at you but misses.</>\r\n{target_tail}"),
+            format!("<dim>{attacker_to_target} swings at you but misses.</>\r\n{target_tail}"),
         );
-        broadcast_room_except_rendered(
+        crate::commands::broadcast_room_anonymised(
             world,
             room,
             &[s.attacker, s.target],
+            &[(s.attacker, &s.attacker_name), (s.target, &target_name)],
             &format!("<dim>{attacker_cap} swings at {target_cap_for_room} but misses.</>\r\n",),
         );
         // Stamina still drains — you swung, you spent the breath.
@@ -1429,11 +1439,17 @@ fn apply_swing(world: &mut World, s: &Swing) {
         format!("You hit <b:cyan>{target_name}</> for {damage_label} damage{crit_tag}.\r\n{tail}"),
     );
     let attacker_name_cap = crate::commands::cap_sentence_start(&s.attacker_name);
+    let attacker_to_target = crate::commands::cap_sentence_start(&crate::commands::seen_name(
+        world,
+        s.target,
+        s.attacker,
+        &s.attacker_name,
+    ));
     send_to(
         world,
         s.target,
         format!(
-            "{attacker_name_cap} {attacker_verb_third} you for {damage_label} damage{crit_tag}.\r\n{target_tail}",
+            "{attacker_to_target} {attacker_verb_third} you for {damage_label} damage{crit_tag}.\r\n{target_tail}",
         ),
     );
     if was_sleeping && !dead {
@@ -1471,10 +1487,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
     } else {
         ""
     };
-    broadcast_room_except_rendered(
+    crate::commands::broadcast_room_anonymised(
         world,
         room,
         &[s.attacker, s.target],
+        &[(s.attacker, &s.attacker_name), (s.target, &target_name)],
         &format!("{attacker_name_cap} {attacker_verb_third} {target_name}{room_crit_tag}.\r\n"),
     );
 

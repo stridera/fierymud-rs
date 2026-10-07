@@ -1077,6 +1077,7 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
                 *e != player
                     && l.0 == located.0
                     && n.name.to_ascii_lowercase().contains(&target_lower)
+                    && crate::commands::can_see_player(world, player, *e)
             })
             .map(|(e, _, _)| e)
     };
@@ -1179,12 +1180,17 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
     }
     drain_stamina(world, player, cost);
 
+    // Attacking breaks the attacker's invisibility (legacy
+    // `aggro_lose_spells` -> `appear`) before the attack lines go out,
+    // so they name the attacker.
+    crate::commands::break_invisibility(world, player);
     send_to(world, player, format!("You attack {actual_name}!\r\n"));
     send_rendered(world, target, &format!("{player_name} attacks you!\r\n"));
-    broadcast_room_except_rendered(
+    crate::commands::broadcast_room_anonymised(
         world,
         located.0,
         &[player, target],
+        &[(player, &player_name), (target, &actual_name)],
         &format!("{player_name} attacks {actual_name}.\r\n"),
     );
 

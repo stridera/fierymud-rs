@@ -287,8 +287,9 @@ pub fn respawn_tick(world: &mut World) {
                 Option<&mud_world::Fighting>,
             ), (With<mud_world::Player>, With<mud_world::Online>)>();
             q.iter(world)
-                .filter(|(_, l, account, fighting)| {
+                .filter(|(e, l, account, fighting)| {
                     l.0 == room
+                        && crate::commands::can_see_player(world, mob, *e)
                         && fighting.is_none()
                         && account.is_some_and(|a| {
                             a.role.rank() <= mud_db::enums::UserRole::Player.rank()
