@@ -184,13 +184,15 @@ inventory::submit! {
         category: Category::Admin,
         help: Help {
             usage: "qcomplete <#>",
-            summary: "Admin: force-complete an in-progress quest and pay its rewards.",
+            summary: "Admin: force-complete an in-progress quest (coder+ pays rewards).",
             long: "Slot number from the `quests` in-progress section. \
-                   Flips IN_PROGRESS -> COMPLETED, stamps completed_at, \
-                   bumps completion_count and pays the quest's \
-                   unconditional rewards exactly as a real completion \
-                   would (conditional and choice rewards stay behind \
-                   `qreward`). Objectives and phases are not run.",
+                   Flips IN_PROGRESS -> COMPLETED, stamps completed_at \
+                   and bumps completion_count. Coder rank and above \
+                   also get the quest's unconditional rewards exactly \
+                   as a real completion pays them (conditional and \
+                   choice rewards stay behind `qreward`); lower ranks \
+                   complete it without rewards. Objectives and phases \
+                   are not run. Audited.",
         },
         run: cmd_mail_stub,
     }
@@ -209,9 +211,11 @@ inventory::submit! {
                    status, objective progress and quest variables, so \
                    it can be given or accepted from scratch (`qload`, \
                    `qgive` and `qaccept` refuse while any record \
-                   exists). Works on offline characters. Rewards \
-                   already paid are not taken back. `zone:id` is \
-                   accepted in place of `<zone> <quest-id>`.",
+                   exists). Builders may reset their own character \
+                   only; coder rank and above may reset anyone, \
+                   including offline characters. Rewards already paid \
+                   are not taken back. `zone:id` is accepted in place \
+                   of `<zone> <quest-id>`. Audited.",
         },
         run: cmd_mail_stub,
     }
@@ -537,6 +541,8 @@ pub(crate) async fn cmd_qload(
         send_to(world, player, "No account info; can't assign.\r\n");
         return;
     };
+    let me = name_of(world, player);
+    record_admin_action(world, player, "qload", &format!("{me} {zone}:{id}"));
     match mud_db::quests::admin_assign(pool, &character_id, zone, id).await {
         Ok(Some(_)) => {
             send_to(
@@ -743,6 +749,12 @@ pub(crate) async fn cmd_qgive(
         return;
     };
     let target_name = name_of(world, target);
+    record_admin_action(
+        world,
+        player,
+        "qgive",
+        &format!("{target_name} {zone}:{id}"),
+    );
     match mud_db::quests::admin_assign(pool, &target_char_id, zone, id).await {
         Ok(Some(_)) => {
             send_to(
@@ -814,6 +826,19 @@ pub(crate) async fn cmd_qcomplete(
         );
         return;
     };
+    let pays = has_quest_admin_rank(world, player);
+    let me = name_of(world, player);
+    record_admin_action(
+        world,
+        player,
+        "qcomplete",
+        &format!(
+            "{me} {}:{} rewards={}",
+            target.quest_zone_id,
+            target.quest_id,
+            if pays { "paid" } else { "withheld" }
+        ),
+    );
     match mud_db::quests::admin_complete(pool, &target.id).await {
         Ok(0) => {
             send_to(
@@ -828,8 +853,16 @@ pub(crate) async fn cmd_qcomplete(
                 player,
                 format!("Force-completed quest: {}.\r\n", target.quest_name),
             );
-            // Same payout as finishing the last objective.
-            if let Some(notify) = crate::quest_progress::Notifier::for_player(world, player) {
+            // Same payout as finishing the last objective - for ranks
+            // trusted with it.
+            if !pays {
+                send_to(
+                    world,
+                    player,
+                    "Rewards withheld: paying quest rewards by hand needs coder rank.\r\n",
+                );
+            } else if let Some(notify) = crate::quest_progress::Notifier::for_player(world, player)
+            {
                 crate::quest_progress::grant_completion_rewards(
                     pool,
                     &notify,
@@ -843,6 +876,18 @@ pub(crate) async fn cmd_qcomplete(
             send_to(world, player, format!("Complete failed: {e}\r\n"));
         }
     }
+}
+
+/// Rank needed to pay quest rewards by hand (`qcomplete`) or to touch
+/// another player's quest record (`qreset`). Builders get the testing
+/// tools on their own character only, so they cannot mint XP, gold or
+/// items for themselves or anyone else.
+const QUEST_ADMIN_RANK: UserRole = UserRole::Coder;
+
+fn has_quest_admin_rank(world: &World, player: Entity) -> bool {
+    world
+        .get::<Account>(player)
+        .is_some_and(|a| a.role.at_least(QUEST_ADMIN_RANK))
 }
 
 /// Parse a quest reference given as `<zone> <id>` or `<zone>:<id>`.
@@ -903,6 +948,22 @@ pub(crate) async fn cmd_qreset(
         );
         return;
     };
+    let own_id = world.get::<Account>(player).map(|a| a.character_id.clone());
+    if own_id.as_deref() != Some(character_id.as_str()) && !has_quest_admin_rank(world, player) {
+        send_to(
+            world,
+            player,
+            "You can only reset your own quests; resetting another player's needs coder rank.\r\n",
+        );
+        return;
+    }
+    let me = name_of(world, player);
+    record_admin_action(
+        world,
+        player,
+        "qreset",
+        &format!("{me} -> {target_word} {zone}:{id}"),
+    );
     match mud_db::quests::admin_reset(pool, &character_id, zone, id).await {
         Ok(0) => send_to(
             world,

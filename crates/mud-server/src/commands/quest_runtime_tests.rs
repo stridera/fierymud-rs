@@ -323,7 +323,7 @@ async fn qcomplete_pays_the_quest_rewards() {
     let Some(fx) = fixture().await else { return };
     fx.visit_objective(1).await;
     fx.rewards().await;
-    let (mut world, player, _room, mut rx) = fx.world_as(UserRole::Builder);
+    let (mut world, player, _room, mut rx) = fx.world_as(UserRole::Coder);
     fx.accept().await;
     let before = fx.paid().await;
 
@@ -566,5 +566,146 @@ async fn collect_items_cannot_be_passed_to_an_alt_to_complete_twice() {
     assert_eq!(alt_status, "IN_PROGRESS");
     assert_eq!(item_count(&mut world, key), 0);
     let _ = alt;
+    fx.end().await;
+}
+
+/// Below coder rank `qcomplete` completes the quest but withholds the
+/// rewards (a builder cannot mint XP / gold for themselves).
+#[tokio::test(flavor = "current_thread")]
+async fn qcomplete_withholds_rewards_below_coder() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    fx.rewards().await;
+    let (mut world, player, _room, mut rx) = fx.world_as(UserRole::HeadBuilder);
+    fx.accept().await;
+    let before = fx.paid().await;
+
+    super::try_dispatch_async(&mut world, player, &fx.pool, "qcomplete 1").await;
+    assert_eq!(fx.status().await, "COMPLETED");
+    assert_eq!(fx.paid().await, before, "nothing paid");
+    let out = drain(&mut rx);
+    assert!(out.contains("Rewards withheld"), "{out}");
+    assert!(!out.contains("+50 experience"), "{out}");
+    fx.end().await;
+}
+
+/// Builders may reset their own record for testing, but only coder+
+/// may reset another player's.
+#[tokio::test(flavor = "current_thread")]
+async fn qreset_of_other_players_needs_coder() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    fx.accept().await;
+    let alt_id = fx.alt().await;
+    let alt_name: String = sqlx::query_scalar("SELECT name FROM \"Characters\" WHERE id = $1")
+        .bind(&alt_id)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    let cmd = format!("qreset {alt_name} {} {}", fx.zone, fx.quest);
+    let has_record = || async {
+        mud_db::quests::find_character_quest(&fx.pool, &alt_id, fx.zone, fx.quest)
+            .await
+            .unwrap()
+            .is_some()
+    };
+
+    let (mut world, builder, _room, mut rx) = fx.world_as(UserRole::Builder);
+    super::try_dispatch_async(&mut world, builder, &fx.pool, &cmd).await;
+    let out = drain(&mut rx);
+    assert!(out.contains("needs coder rank"), "{out}");
+    assert!(has_record().await, "builder could not reset another player");
+
+    // ...but can reset themselves.
+    let own = format!("qreset Quester {} {}", fx.zone, fx.quest);
+    super::try_dispatch_async(&mut world, builder, &fx.pool, &own).await;
+    assert!(drain(&mut rx).contains("Reset Quest"));
+
+    let (mut world, coder, _room, mut rx) = fx.world_as(UserRole::Coder);
+    super::try_dispatch_async(&mut world, coder, &fx.pool, &cmd).await;
+    assert!(drain(&mut rx).contains("Reset Quest"));
+    assert!(!has_record().await);
+    fx.end().await;
+}
+
+/// Every qload / qgive / qcomplete / qreset use is audited, in the
+/// runtime ring and in the `AuditLogs` table.
+#[tokio::test(flavor = "current_thread")]
+async fn quest_staff_commands_are_audited() {
+    let Some(fx) = fixture().await else { return };
+    let Ok(user) = sqlx::query_scalar::<_, String>("SELECT id FROM \"Users\" LIMIT 1")
+        .fetch_one(&fx.pool)
+        .await
+    else {
+        return;
+    };
+    fx.visit_objective(1).await;
+    let (mut world, coder, room, _rx) = fx.world_as(UserRole::Coder);
+    world.get_mut::<Account>(coder).unwrap().user_id = user.clone();
+    let alt_id = format!("{}-alt", fx.char_id);
+    let alt_name = format!("Zza{}", &fx.char_id[fx.char_id.len() - 12..]);
+    sqlx::query("INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())")
+        .bind(&alt_id)
+        .bind(&alt_name)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let (tx2, _rx2) = tokio::sync::mpsc::channel(64);
+    world.spawn((
+        Player,
+        Online,
+        Named {
+            name: alt_name.clone(),
+        },
+        Account {
+            user_id: "u2".into(),
+            character_id: alt_id,
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: Vec::new(),
+        },
+        Connection(tx2),
+        Located(room),
+    ));
+    let (z, q) = (fx.zone, fx.quest);
+    for cmd in [
+        format!("qload {z} {q}"),
+        "qcomplete 1".to_string(),
+        format!("qreset Quester {z} {q}"),
+        format!("qgive {alt_name} {z} {q}"),
+    ] {
+        assert!(super::try_dispatch_async(&mut world, coder, &fx.pool, &cmd).await);
+    }
+    let log = world.resource::<super::AdminAuditLog>();
+    let verbs: Vec<&str> = log.entries.iter().map(|e| e.verb).collect();
+    for verb in ["qload", "qcomplete", "qreset", "qgive"] {
+        assert!(verbs.contains(&verb), "{verb} not audited: {verbs:?}");
+    }
+    // Persisted (fire-and-forget): wait for the rows.
+    let needle = format!("%{z}:{q}%");
+    let mut rows = 0;
+    for _ in 0..40 {
+        rows = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM \"AuditLogs\" WHERE user_id = $1 \
+             AND action IN ('qload','qcomplete','qreset','qgive') \
+             AND new_values->>'args' LIKE $2",
+        )
+        .bind(&user)
+        .bind(&needle)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        if rows >= 4 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    sqlx::query("DELETE FROM \"AuditLogs\" WHERE user_id = $1 AND new_values->>'args' LIKE $2")
+        .bind(&user)
+        .bind(&needle)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 4, "one AuditLogs row per command");
     fx.end().await;
 }
