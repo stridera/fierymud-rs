@@ -21,7 +21,7 @@ use mud_world::{
 };
 
 use crate::TickCount;
-use crate::commands::{broadcast_room_except_players_rendered, direction_name, opposite};
+use crate::commands::{arrival_from, broadcast_room_except_players_rendered, direction_name};
 
 /// One wander check every 300 ticks (= 30s real-time at 10Hz).
 /// Each tick a fixed fraction of eligible mobs actually move —
@@ -157,9 +157,7 @@ pub fn wander_tick(world: &mut World) {
         if world.get::<Located>(mob).is_some() {
             world.entity_mut(mob).insert(Located(target_room));
         }
-        let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
-            format!("the {}", direction_name(d))
-        });
+        let arrival_dir = arrival_from(dir);
         broadcast_room_except_players_rendered(
             world,
             target_room,

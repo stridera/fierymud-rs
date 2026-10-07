@@ -18,9 +18,9 @@ const PLAYER_CORPSE_DECAY_SECS: i32 = 7 * 24 * 60 * 60;
 /// claim window rather than piling up. 10 minutes.
 const MOB_CORPSE_DECAY_SECS: i32 = 600;
 use crate::commands::{
-    apply_damage_from, broadcast_room_except_players_rendered, broadcast_room_except_rendered,
-    cmd_flee, damage_color_tag, direction_name, disengage_attackers_of, drain_stamina, name_of,
-    opposite, send_to, try_insert, try_remove,
+    apply_damage_from, arrival_from, broadcast_room_except_players_rendered,
+    broadcast_room_except_rendered, cmd_flee, damage_color_tag, direction_name,
+    disengage_attackers_of, drain_stamina, name_of, send_to, try_insert, try_remove,
 };
 
 /// Four real-time seconds per swing (40 ticks at 10Hz) — matches legacy
@@ -386,9 +386,7 @@ fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
     if world.get::<Located>(mob).is_some() {
         world.entity_mut(mob).insert(Located(target_room));
     }
-    let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
-        format!("the {}", direction_name(d))
-    });
+    let arrival_dir = arrival_from(dir);
     broadcast_room_except_players_rendered(
         world,
         target_room,

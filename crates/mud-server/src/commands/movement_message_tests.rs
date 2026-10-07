@@ -1,0 +1,145 @@
+//! Movement broadcast wording (issue #52): legacy `do_simple_move` says
+//! "X leaves north." / "X arrives from the south." (up and down read
+//! "from below" / "from above"), and exit-keyword alternatives such as
+//! "gate metal" only ever show their first word. Test-only.
+
+use std::collections::HashMap;
+
+use bevy_ecs::prelude::*;
+use mud_db::enums::{Direction, ExitState, UserRole};
+use mud_world::{Account, ExitData, Exits, Named, Room};
+
+use crate::commands::test_support::{Rx, drain, player_in};
+use crate::commands::{arrival_from, cmd_move, exit_noun_phrase};
+
+fn exit(to: Option<Entity>, state: ExitState, keywords: &[&str]) -> ExitData {
+    ExitData {
+        to,
+        state,
+        key: None,
+        description: None,
+        keywords: keywords.iter().map(|s| (*s).to_string()).collect(),
+        is_hidden: false,
+        is_pickproof: false,
+        is_bashable: false,
+        hit_points: None,
+    }
+}
+
+fn account() -> Account {
+    Account {
+        user_id: "u".into(),
+        character_id: "c".into(),
+        role: UserRole::Player,
+        account_role: UserRole::Player,
+        perms: vec![],
+    }
+}
+
+/// Mover "Tester" in room A, watcher "Bob" in A, watcher "Cara" in B,
+/// joined by one exit `dir` (state/keywords as given).
+fn setup(dir: Direction, state: ExitState, keywords: &[&str]) -> (World, Entity, Rx, Rx, Rx) {
+    let mut world = World::new();
+    world.insert_resource(mud_world::ObjectPrototypes::default());
+    world.insert_resource(mud_world::RaceCatalog::default());
+    let a = world.spawn((Room, Exits::default())).id();
+    let b = world.spawn((Room, Exits::default())).id();
+    world.entity_mut(a).insert(Exits(HashMap::from([(
+        dir,
+        exit(Some(b), state, keywords),
+    )])));
+    let (mover, mrx) = player_in(&mut world, a);
+    world.entity_mut(mover).insert(account());
+    let (bob, brx) = player_in(&mut world, a);
+    world
+        .entity_mut(bob)
+        .insert((Named { name: "Bob".into() }, account()));
+    let (cara, crx) = player_in(&mut world, b);
+    world.entity_mut(cara).insert((
+        Named {
+            name: "Cara".into(),
+        },
+        account(),
+    ));
+    (world, mover, mrx, brx, crx)
+}
+
+fn assert_walk(dir: Direction, leaves: &str, arrives: &str) {
+    let (mut world, mover, _mrx, mut brx, mut crx) = setup(dir, ExitState::Open, &[]);
+    cmd_move(&mut world, mover, dir);
+    let left = drain(&mut brx);
+    assert!(
+        left.contains(&format!("Tester leaves {leaves}.\r\n")),
+        "{left:?}"
+    );
+    let came = drain(&mut crx);
+    assert!(
+        came.contains(&format!("Tester arrives from {arrives}.\r\n")),
+        "{came:?}"
+    );
+}
+
+#[test]
+fn cardinal_moves_read_leaves_dir_and_arrives_from_the_opposite() {
+    assert_walk(Direction::North, "north", "the south");
+    assert_walk(Direction::South, "south", "the north");
+    assert_walk(Direction::East, "east", "the west");
+    assert_walk(Direction::West, "west", "the east");
+}
+
+#[test]
+fn diagonal_moves_arrive_from_the_opposite_corner() {
+    assert_walk(Direction::Northeast, "northeast", "the southwest");
+    assert_walk(Direction::Northwest, "northwest", "the southeast");
+    assert_walk(Direction::Southeast, "southeast", "the northwest");
+    assert_walk(Direction::Southwest, "southwest", "the northeast");
+}
+
+#[test]
+fn going_up_arrives_from_below_and_going_down_from_above() {
+    assert_walk(Direction::Up, "up", "below");
+    assert_walk(Direction::Down, "down", "above");
+}
+
+#[test]
+fn arrival_phrase_never_leaks_a_debug_direction_name() {
+    for d in [
+        Direction::North,
+        Direction::Up,
+        Direction::Down,
+        Direction::In,
+        Direction::Out,
+        Direction::Portal,
+    ] {
+        let p = arrival_from(d);
+        assert_eq!(p, p.to_lowercase(), "{d:?} -> {p}");
+        assert!(!p.contains("the up") && !p.contains("the down"), "{p}");
+    }
+    assert_eq!(arrival_from(Direction::Portal), "nearby");
+}
+
+#[test]
+fn closed_exit_names_only_the_first_keyword_alternative() {
+    // Issue #52: keyword "gate metal" must read "The gate", not
+    // "The gate metal".
+    let (mut world, mover, mut mrx, _b, _c) =
+        setup(Direction::North, ExitState::Closed, &["gate metal"]);
+    cmd_move(&mut world, mover, Direction::North);
+    assert_eq!(drain(&mut mrx), "The gate is closed.\r\n");
+}
+
+#[test]
+fn locked_exit_uses_first_word_of_first_keyword() {
+    let (mut world, mover, mut mrx, _b, _c) =
+        setup(Direction::Down, ExitState::Locked, &["grate iron", "other"]);
+    cmd_move(&mut world, mover, Direction::Down);
+    assert_eq!(drain(&mut mrx), "The grate is locked.\r\n");
+}
+
+#[test]
+fn noun_phrase_skips_blank_entries_and_falls_back_to_the_way() {
+    let ed = exit(None, ExitState::Closed, &["  ", "curtain beads"]);
+    assert_eq!(exit_noun_phrase(&ed), "The curtain");
+    let plain = exit(None, ExitState::Closed, &[]);
+    assert_eq!(exit_noun_phrase(&plain), "The way");
+}

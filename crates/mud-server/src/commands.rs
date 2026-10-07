@@ -435,6 +435,9 @@ mod invisibility_tests;
 #[path = "commands/look_mob_tests.rs"]
 mod look_mob_tests;
 #[cfg(test)]
+#[path = "commands/movement_message_tests.rs"]
+mod movement_message_tests;
+#[cfg(test)]
 #[path = "commands/norepeat_tests.rs"]
 mod norepeat_tests;
 #[cfg(test)]
@@ -8765,17 +8768,16 @@ pub(crate) fn colorize_default(s: &str, open: &str) -> String {
 /// "The curtain" / "The gate" / "The way" — sentence-leading noun
 /// phrase for an exit, used by closed / locked feedback so a doorway
 /// with a builder-set keyword reads as itself ("The curtain is
-/// closed.") instead of the generic fallback. First keyword wins;
-/// blank / missing keywords fall back to "The way".
+/// closed.") instead of the generic fallback. A keyword entry is a
+/// space-separated list of alternatives ("gate metal"); only the first
+/// word is ever shown (legacy `fname`). Blank / missing keywords fall
+/// back to "The way".
 #[must_use]
 pub(crate) fn exit_noun_phrase(ed: &mud_world::ExitData) -> String {
-    for k in &ed.keywords {
-        let trimmed = k.trim();
-        if !trimmed.is_empty() {
-            return format!("The {trimmed}");
-        }
-    }
-    "The way".to_string()
+    ed.keywords
+        .iter()
+        .find_map(|k| k.split_whitespace().next())
+        .map_or_else(|| "The way".to_string(), |w| format!("The {w}"))
 }
 
 /// XML-Lite open tag matching an exit's state. Open exits read
@@ -20717,9 +20719,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     }
 
     let dir_name = direction_name(dir);
-    let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
-        format!("the {}", direction_name(d))
-    });
+    let arrival_dir = arrival_from(dir);
 
     // Notify the source room of each mover departing (in chain order).
     // Use the sender-aware broadcast so wiz-invised admins stay
@@ -21169,6 +21169,23 @@ pub(crate) fn direction_name(d: Direction) -> &'static str {
         Out => "out",
         Portal => "portal",
         Direction::None => "(none)",
+    }
+}
+
+/// Origin phrase for an arrival broadcast after moving `dir`, as legacy
+/// `do_simple_move` words it: "the south" after going north, "below" after
+/// going up, "above" after going down. `In`/`Out` read from the far side of
+/// the threshold; portals and unknown directions fall back to "nearby".
+pub(crate) fn arrival_from(dir: Direction) -> String {
+    match dir {
+        Direction::Up => "below".to_string(),
+        Direction::Down => "above".to_string(),
+        Direction::In => "outside".to_string(),
+        Direction::Out => "inside".to_string(),
+        _ => opposite(dir).map_or_else(
+            || "nearby".to_string(),
+            |d| format!("the {}", direction_name(d)),
+        ),
     }
 }
 
