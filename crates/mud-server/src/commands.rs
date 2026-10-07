@@ -79,6 +79,13 @@ pub enum PendingPlayerUpdate {
     /// The character's quest just entered a new phase; credit any
     /// COLLECT objectives from what they already carry.
     QuestPhaseEntered { character_id: String },
+    /// Quests a trigger (level, item, room, skill, event, auto) found
+    /// for the character: gate them on their availability requirement
+    /// and offer or auto-accept the survivors.
+    TriggerCandidates {
+        character_id: String,
+        quests: Vec<mud_db::quests::QuestRow>,
+    },
     /// A `COLLECT_ITEM` objective was claimed as complete: take the
     /// required items from the pack (or give the claim back if they
     /// are gone) and carry on with the quest.
@@ -120,6 +127,7 @@ impl PendingPlayerUpdate {
             | Self::SpawnItem { character_id, .. }
             | Self::QuestPhaseEntered { character_id }
             | Self::CollectClaimed { character_id, .. }
+            | Self::TriggerCandidates { character_id, .. }
             | Self::QuestAccepted { character_id, .. }
             | Self::DialogueReply { character_id, .. } => character_id,
         }
@@ -203,6 +211,9 @@ pub fn drain_player_updates(world: &mut World) {
             }
             PendingPlayerUpdate::QuestPhaseEntered { .. } => {
                 crate::quest_progress::recheck_collect_objectives(world, entity);
+            }
+            PendingPlayerUpdate::TriggerCandidates { quests, .. } => {
+                crate::quest_triggers::offer_candidates(world, entity, quests);
             }
             PendingPlayerUpdate::CollectClaimed { obj, object, .. } => {
                 crate::quest_progress::finish_collect(world, entity, &obj, object);
@@ -375,7 +386,7 @@ mod movement_directions;
 #[path = "commands/priority.rs"]
 mod priority;
 #[path = "commands/quests.rs"]
-mod quests;
+pub(crate) mod quests;
 #[path = "commands/recall.rs"]
 mod recall;
 #[path = "commands/rent.rs"]

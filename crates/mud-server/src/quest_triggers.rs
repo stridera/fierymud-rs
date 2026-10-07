@@ -26,10 +26,59 @@ use mud_world::{Account, Online, Player, Profile};
 
 use crate::commands::{Connection, DbPool};
 
-/// Dispatch LEVEL-trigger quests for `player` at the moment their
-/// `Profile.level` becomes `new_level`. Fired from
-/// `combat::check_level_up` after the level field is bumped.
-pub(crate) fn dispatch_level_trigger(world: &mut World, player: Entity, new_level: i32) {
+/// Look quests up in the background and hand the visible ones to the
+/// world thread as trigger candidates. The world thread decides what
+/// the character may actually be offered ([`offer_candidates`]): that
+/// needs the Lua host for availability requirements.
+fn spawn_candidate_lookup<F, Fut>(world: &World, player: Entity, what: &'static str, lookup: F)
+where
+    F: FnOnce(mud_db::sqlx::PgPool) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = mud_db::sqlx::Result<Vec<mud_db::quests::QuestRow>>>
+        + Send
+        + 'static,
+{
+    let Some(cid) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
+        return;
+    };
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        return;
+    };
+    let Some(tx) = world
+        .get_resource::<crate::commands::PlayerUpdateTx>()
+        .map(|t| t.0.clone())
+    else {
+        return;
+    };
+    tokio::spawn(async move {
+        let quests = match lookup(pool).await {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!(error = %e, "{what} quest lookup failed");
+                return;
+            }
+        };
+        let quests: Vec<_> = quests.into_iter().filter(|q| !q.hidden).collect();
+        if quests.is_empty() {
+            return;
+        }
+        let _ = tx
+            .send(crate::commands::PendingPlayerUpdate::TriggerCandidates {
+                character_id: cid,
+                quests,
+            })
+            .await;
+    });
+}
+
+/// World-thread half of every trigger: gate the candidate quests by
+/// their availability requirement (the same check `qaccept` runs;
+/// fails closed on a script error), then offer or auto-accept the
+/// survivors in the background.
+pub(crate) fn offer_candidates(
+    world: &mut World,
+    player: Entity,
+    quests: Vec<mud_db::quests::QuestRow>,
+) {
     let Some(cid) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
         return;
     };
@@ -39,23 +88,49 @@ pub(crate) fn dispatch_level_trigger(world: &mut World, player: Entity, new_leve
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
+    let level = world.get::<Profile>(player).map_or(1, |p| p.level);
     let update_tx = world
         .get_resource::<crate::commands::PlayerUpdateTx>()
         .map(|t| t.0.clone());
-    tokio::spawn(async move {
-        let quests = match mud_db::quests::list_by_trigger_level(&pool, new_level).await {
-            Ok(q) => q,
-            Err(e) => {
-                tracing::warn!(error = %e, "level-trigger quest lookup failed");
-                return;
-            }
-        };
-        for q in quests {
-            if q.hidden {
-                continue;
-            }
-            grant_or_offer(&pool, &cid, &out, new_level, &q, update_tx.as_ref()).await;
+    let mut allowed = Vec::new();
+    for q in quests {
+        if q.hidden {
+            continue;
         }
+        if let Some(expr) = q
+            .availability_requirement
+            .as_deref()
+            .filter(|e| !e.trim().is_empty())
+            && !crate::commands::quests::eval_quest_availability(
+                world,
+                player,
+                expr,
+                &format!(
+                    "quest ({}, {}) availability requirement (trigger)",
+                    q.zone_id, q.id
+                ),
+            )
+        {
+            continue;
+        }
+        allowed.push(q);
+    }
+    if allowed.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        for q in &allowed {
+            grant_or_offer(&pool, &cid, &out, level, q, update_tx.as_ref()).await;
+        }
+    });
+}
+
+/// Dispatch LEVEL-trigger quests for `player` at the moment their
+/// `Profile.level` becomes `new_level`. Fired from
+/// `combat::check_level_up` after the level field is bumped.
+pub(crate) fn dispatch_level_trigger(world: &mut World, player: Entity, new_level: i32) {
+    spawn_candidate_lookup(world, player, "level-trigger", move |pool| async move {
+        mud_db::quests::list_by_trigger_level(&pool, new_level).await
     });
 }
 
@@ -68,33 +143,8 @@ pub(crate) fn dispatch_item_trigger(
     item_zone: i32,
     item_id: i32,
 ) {
-    let Some(cid) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
-        return;
-    };
-    let Some(out) = world.get::<Connection>(player).map(|c| c.0.clone()) else {
-        return;
-    };
-    let level = world.get::<Profile>(player).map_or(1, |p| p.level);
-    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
-        return;
-    };
-    let update_tx = world
-        .get_resource::<crate::commands::PlayerUpdateTx>()
-        .map(|t| t.0.clone());
-    tokio::spawn(async move {
-        let quests = match mud_db::quests::list_by_trigger_item(&pool, item_zone, item_id).await {
-            Ok(q) => q,
-            Err(e) => {
-                tracing::warn!(error = %e, "item-trigger quest lookup failed");
-                return;
-            }
-        };
-        for q in quests {
-            if q.hidden {
-                continue;
-            }
-            grant_or_offer(&pool, &cid, &out, level, &q, update_tx.as_ref()).await;
-        }
+    spawn_candidate_lookup(world, player, "item-trigger", move |pool| async move {
+        mud_db::quests::list_by_trigger_item(&pool, item_zone, item_id).await
     });
 }
 
@@ -106,33 +156,8 @@ pub(crate) fn dispatch_room_trigger(
     room_zone: i32,
     room_id: i32,
 ) {
-    let Some(cid) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
-        return;
-    };
-    let Some(out) = world.get::<Connection>(player).map(|c| c.0.clone()) else {
-        return;
-    };
-    let level = world.get::<Profile>(player).map_or(1, |p| p.level);
-    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
-        return;
-    };
-    let update_tx = world
-        .get_resource::<crate::commands::PlayerUpdateTx>()
-        .map(|t| t.0.clone());
-    tokio::spawn(async move {
-        let quests = match mud_db::quests::list_by_trigger_room(&pool, room_zone, room_id).await {
-            Ok(q) => q,
-            Err(e) => {
-                tracing::warn!(error = %e, "room-trigger quest lookup failed");
-                return;
-            }
-        };
-        for q in quests {
-            if q.hidden {
-                continue;
-            }
-            grant_or_offer(&pool, &cid, &out, level, &q, update_tx.as_ref()).await;
-        }
+    spawn_candidate_lookup(world, player, "room-trigger", move |pool| async move {
+        mud_db::quests::list_by_trigger_room(&pool, room_zone, room_id).await
     });
 }
 
@@ -140,33 +165,8 @@ pub(crate) fn dispatch_room_trigger(
 /// uses ability `ability_id`. Fired from `bump_use_skill_quest_progress`'s
 /// caller.
 pub(crate) fn dispatch_skill_trigger(world: &mut World, player: Entity, ability_id: i32) {
-    let Some(cid) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
-        return;
-    };
-    let Some(out) = world.get::<Connection>(player).map(|c| c.0.clone()) else {
-        return;
-    };
-    let level = world.get::<Profile>(player).map_or(1, |p| p.level);
-    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
-        return;
-    };
-    let update_tx = world
-        .get_resource::<crate::commands::PlayerUpdateTx>()
-        .map(|t| t.0.clone());
-    tokio::spawn(async move {
-        let quests = match mud_db::quests::list_by_trigger_ability(&pool, ability_id).await {
-            Ok(q) => q,
-            Err(e) => {
-                tracing::warn!(error = %e, "skill-trigger quest lookup failed");
-                return;
-            }
-        };
-        for q in quests {
-            if q.hidden {
-                continue;
-            }
-            grant_or_offer(&pool, &cid, &out, level, &q, update_tx.as_ref()).await;
-        }
+    spawn_candidate_lookup(world, player, "skill-trigger", move |pool| async move {
+        mud_db::quests::list_by_trigger_ability(&pool, ability_id).await
     });
 }
 
@@ -175,71 +175,22 @@ pub(crate) fn dispatch_skill_trigger(world: &mut World, player: Entity, ability_
 /// edge of an `Events.active` flip — see `events.rs` for the
 /// polling / edge-detection contract.
 pub(crate) fn dispatch_event_trigger(world: &mut World, event_id: i32) {
-    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
-        return;
+    let players: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
+        q.iter(world).collect()
     };
-    let update_tx = world
-        .get_resource::<crate::commands::PlayerUpdateTx>()
-        .map(|t| t.0.clone());
-    // Snapshot every online player so the spawn doesn't have to walk
-    // ECS state from the tokio task.
-    let recipients: Vec<(String, mud_net::Outbound, i32)> = {
-        let mut q = world
-            .query_filtered::<(&Account, &Connection, &Profile), (With<Player>, With<Online>)>();
-        q.iter(world)
-            .map(|(a, c, p)| (a.character_id.clone(), c.0.clone(), p.level))
-            .collect()
-    };
-    tokio::spawn(async move {
-        let quests = match mud_db::quests::list_by_trigger_event(&pool, event_id).await {
-            Ok(q) => q,
-            Err(e) => {
-                tracing::warn!(error = %e, "event-trigger quest lookup failed");
-                return;
-            }
-        };
-        if quests.is_empty() {
-            return;
-        }
-        for (cid, out, level) in recipients {
-            for q in &quests {
-                if q.hidden {
-                    continue;
-                }
-                grant_or_offer(&pool, &cid, &out, level, q, update_tx.as_ref()).await;
-            }
-        }
-    });
+    for player in players {
+        spawn_candidate_lookup(world, player, "event-trigger", move |pool| async move {
+            mud_db::quests::list_by_trigger_event(&pool, event_id).await
+        });
+    }
 }
 
-/// Dispatch AUTO-trigger quests at character creation time. Should
-/// be called once per new character. (For login of an existing
-/// character, AUTO quests are already on the row from prior runs.)
+/// Dispatch AUTO-trigger quests at login. Quests the character already
+/// holds are skipped per row.
 pub(crate) fn dispatch_auto_trigger(world: &mut World, player: Entity) {
-    let Some(cid) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
-        return;
-    };
-    let Some(out) = world.get::<Connection>(player).map(|c| c.0.clone()) else {
-        return;
-    };
-    let level = world.get::<Profile>(player).map_or(1, |p| p.level);
-    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
-        return;
-    };
-    let update_tx = world
-        .get_resource::<crate::commands::PlayerUpdateTx>()
-        .map(|t| t.0.clone());
-    tokio::spawn(async move {
-        let quests = match mud_db::quests::list_auto_trigger(&pool).await {
-            Ok(q) => q,
-            Err(e) => {
-                tracing::warn!(error = %e, "auto-trigger quest lookup failed");
-                return;
-            }
-        };
-        for q in quests {
-            grant_or_offer(&pool, &cid, &out, level, &q, update_tx.as_ref()).await;
-        }
+    spawn_candidate_lookup(world, player, "auto-trigger", |pool| async move {
+        mud_db::quests::list_auto_trigger(&pool).await
     });
 }
 

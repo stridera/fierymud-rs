@@ -249,9 +249,10 @@ impl Fx {
         .bind(&self.char_id)
         .bind(self.zone)
         .bind(self.quest)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .unwrap()
+        .unwrap_or_else(|| "NONE".to_string())
     }
 
     /// Poll until the quest reaches `want` (async bump tasks run in the
@@ -707,5 +708,77 @@ async fn quest_staff_commands_are_audited() {
         .await
         .unwrap();
     assert_eq!(rows, 4, "one AuditLogs row per command");
+    fx.end().await;
+}
+
+/// Trigger auto-accept runs the quest's availability requirement like
+/// `qaccept`, and fails closed on a script error.
+#[tokio::test(flavor = "current_thread")]
+async fn trigger_auto_accept_honours_the_availability_requirement() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    sqlx::query("UPDATE \"Quest\" SET auto_accept = true WHERE zone_id = $1 AND id = $2")
+        .bind(fx.zone)
+        .bind(fx.quest)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let (mut world, player, _room, mut rx) = fx.world();
+    Fx::with_updates(&mut world);
+    world.insert_resource(mud_script::LuaHost::default());
+    let tx = world.resource::<super::PlayerUpdateTx>().0.clone();
+    let record = || async {
+        mud_db::quests::find_character_quest(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+            .await
+            .unwrap()
+    };
+
+    for denied in ["false", "((syntax error", "1", "error('boom')"] {
+        sqlx::query(
+            "UPDATE \"Quest\" SET availability_requirement = $3 WHERE zone_id = $1 AND id = $2",
+        )
+        .bind(fx.zone)
+        .bind(fx.quest)
+        .bind(denied)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        let q = mud_db::quests::get_quest(&fx.pool, fx.zone, fx.quest)
+            .await
+            .unwrap()
+            .unwrap();
+        tx.send(super::PendingPlayerUpdate::TriggerCandidates {
+            character_id: fx.char_id.clone(),
+            quests: vec![q],
+        })
+        .await
+        .unwrap();
+        super::drain_player_updates(&mut world);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(record().await.is_none(), "`{denied}` must deny the grant");
+    }
+    assert!(drain(&mut rx).is_empty(), "no offer text either");
+
+    sqlx::query(
+        "UPDATE \"Quest\" SET availability_requirement = 'true' WHERE zone_id = $1 AND id = $2",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let q = mud_db::quests::get_quest(&fx.pool, fx.zone, fx.quest)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.send(super::PendingPlayerUpdate::TriggerCandidates {
+        character_id: fx.char_id.clone(),
+        quests: vec![q],
+    })
+    .await
+    .unwrap();
+    super::drain_player_updates(&mut world);
+    assert_eq!(fx.wait_for_status("IN_PROGRESS").await, "IN_PROGRESS");
+    assert!(drain(&mut rx).contains("New quest"));
     fx.end().await;
 }
