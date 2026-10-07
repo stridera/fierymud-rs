@@ -323,13 +323,15 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     }
 }
 pub(crate) fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
-    if crate::casting::cancel_own_cast(world, player) {
+    if world.get::<mud_world::Casting>(player).is_some() {
+        send_to(world, player, "You abort your spell!\r\n");
+        crate::casting::cancel_own_cast(world, player);
         return;
     }
     send_to(
         world,
         player,
-        "You aren't casting anything. (Use `cancel <effect>` to drop an active buff.)\r\n",
+        "You're not even casting a spell right now. (Use `cancel <effect>` to drop an active buff.)\r\n",
     );
 }
 #[allow(clippy::too_many_lines)]

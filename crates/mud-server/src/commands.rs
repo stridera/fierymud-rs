@@ -522,11 +522,15 @@ pub async fn try_dispatch_async(
     // registry entry (every async command registers a sync stub that
     // carries `min_role`) has to happen here or a mortal could run any
     // async admin command.
-    if let Some(cmd) = REGISTRY.get(head.as_str())
-        && !command_permitted(world, player, cmd)
-    {
-        send_to(world, player, "You can't do that.\r\n");
-        return true;
+    if let Some(cmd) = REGISTRY.get(head.as_str()) {
+        if !command_permitted(world, player, cmd) {
+            send_to(world, player, "You can't do that.\r\n");
+            return true;
+        }
+        if casting_blocks(world, player, cmd) {
+            send_to(world, player, CASTING_BUSY_MSG);
+            return true;
+        }
     }
 
     // Iterate every distributed `AsyncCommand`. The first one whose
@@ -689,6 +693,12 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     });
     let Some((cmd, n_consumed)) = cmd_n_consumed else {
         // Fall through to socials before declaring unknown.
+        if world.get::<mud_world::Casting>(player).is_some()
+            && world.resource::<SocialRegistry>().get(tokens[0]).is_some()
+        {
+            send_to(world, player, CASTING_BUSY_MSG);
+            return;
+        }
         if try_dispatch_social(world, player, tokens[0], skip_n_tokens(trimmed, 1)) {
             return;
         }
@@ -719,6 +729,15 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         return;
     }
 
+    // Casting lock: while a spell winds up only the legacy allow-list
+    // runs (`abort` / `flee` / `look` / info + channels). Anything else
+    // is refused so walking or swinging can't break the cast by
+    // accident.
+    if casting_blocks(world, player, cmd) {
+        send_to(world, player, CASTING_BUSY_MSG);
+        return;
+    }
+
     // Debug-command gate: even Implementor-tier commands that execute
     // arbitrary code or dump full server state can be turned off with
     // `security.enable_debug_commands=false`. Default true (legacy
@@ -744,6 +763,17 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     let _g = span.enter();
     let args = skip_n_tokens(trimmed, n_consumed);
     (cmd.run)(world, player, args);
+}
+
+/// Legacy interpreter refusal for a non-`CMD_CAST` command mid-cast.
+const CASTING_BUSY_MSG: &str = "You are busy spellcasting...\r\n";
+
+/// True when `player` is winding up a cast and `cmd` is not on the
+/// legacy `CMD_CAST` allow-list. Staff commands are never blocked.
+fn casting_blocks(world: &World, player: Entity, cmd: &Command) -> bool {
+    world.get::<mud_world::Casting>(player).is_some()
+        && cmd.min_role == UserRole::Player
+        && !crate::casting::allowed_while_casting(cmd.names[0])
 }
 
 /// Where the line currently being dispatched came from. Anything other
@@ -3153,7 +3183,11 @@ mod tests {
             ))
             .id();
 
-        let names = aoe_targets_in_room(&mut world, caster, room_a, AoeScope::RoomEnemies);
+        let names: Vec<String> =
+            aoe_targets_in_room(&mut world, caster, room_a, AoeScope::RoomEnemies)
+                .into_iter()
+                .map(|(_, n)| n)
+                .collect();
         assert!(
             names.iter().any(|n| n == "a stray dog"),
             "stray dog in enemy list: {names:?}"
@@ -3349,7 +3383,11 @@ mod tests {
             ))
             .id();
 
-        let names = aoe_targets_in_room(&mut world, caster, room_a, AoeScope::RoomAllies);
+        let names: Vec<String> =
+            aoe_targets_in_room(&mut world, caster, room_a, AoeScope::RoomAllies)
+                .into_iter()
+                .map(|(_, n)| n)
+                .collect();
         assert!(
             names.iter().any(|n| n == "Caster"),
             "caster included in RoomAllies: {names:?}"
@@ -3405,7 +3443,10 @@ mod tests {
             ))
             .id();
 
-        let names = aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomAll);
+        let names: Vec<String> = aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomAll)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
         assert!(
             !names.iter().any(|n| n == "Caster"),
             "caster excluded from RoomAll: {names:?}"
@@ -3447,7 +3488,11 @@ mod tests {
             aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomAll).is_empty(),
             "RoomAll in an empty room is empty (only caster present, who is excluded)"
         );
-        let allies = aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomAllies);
+        let allies: Vec<String> =
+            aoe_targets_in_room(&mut world, caster, room, AoeScope::RoomAllies)
+                .into_iter()
+                .map(|(_, n)| n)
+                .collect();
         assert_eq!(
             allies,
             vec!["Solo".to_string()],
@@ -12363,7 +12408,7 @@ pub(crate) fn invoke_ability(
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
 ) {
-    invoke_ability_with(world, player, args, kind, verb, false, false, false);
+    invoke_ability_with(world, player, args, kind, verb, false, false, false, None);
 }
 
 /// Resolution entry called by `casting_tick` when a queued cast
@@ -12375,8 +12420,21 @@ pub(crate) fn resolve_queued_cast(
     args: &str,
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
+    target: mud_world::CastTarget,
 ) {
-    invoke_ability_with(world, player, args, kind, verb, false, false, true);
+    use mud_world::CastTarget;
+    // The target was locked when the wind-up started; `args` only
+    // carries the free-text part (recipe words, ...). `Area` casts
+    // pick their victims from the room at the moment they land.
+    let forced = match target {
+        CastTarget::Area => None,
+        CastTarget::Caster => Some(player),
+        CastTarget::InRoom(e)
+        | CastTarget::World(e)
+        | CastTarget::Fighting(e)
+        | CastTarget::Carried(e) => Some(e),
+    };
+    invoke_ability_with(world, player, args, kind, verb, false, false, true, forced);
 }
 
 /// Entry point for item-driven casts (scroll/wand/staff). Bypasses
@@ -12390,7 +12448,7 @@ pub(crate) fn invoke_ability_from_item(
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
 ) {
-    invoke_ability_with(world, player, args, kind, verb, false, true, true);
+    invoke_ability_with(world, player, args, kind, verb, false, true, true, None);
 }
 
 /// Target-set selectors for AOE ability dispatch. Names match the
@@ -12445,7 +12503,7 @@ pub(crate) fn invoke_ability_aoe(
         return;
     };
     let room = located.0;
-    let targets: Vec<String> = aoe_targets_in_room(world, caster, room, scope);
+    let targets: Vec<(Entity, String)> = aoe_targets_in_room(world, caster, room, scope);
     if targets.is_empty() {
         send_to(world, caster, refusal_when_empty);
         return;
@@ -12458,7 +12516,7 @@ pub(crate) fn invoke_ability_aoe(
     // isn't itself flagged is_area=true. That's the right shape
     // for AOEs anyway — one cumulative effect, not N description
     // boxes.
-    for target_name in &targets {
+    for (target, target_name) in &targets {
         invoke_ability_with(
             world,
             caster,
@@ -12468,21 +12526,37 @@ pub(crate) fn invoke_ability_aoe(
             true,
             false,
             true,
+            Some(*target),
         );
     }
 }
 
+/// AOE scope an ability fans out over, from `Ability.target_scope`
+/// (falling back to `is_area` + `violent` for legacy rows).
+fn aoe_scope_for(def: &mud_world::AbilityDef) -> Option<AoeScope> {
+    match def.target_scope.as_str() {
+        "ROOM_ENEMIES" => Some(AoeScope::RoomEnemies),
+        "ROOM_ALLIES" => Some(AoeScope::RoomAllies),
+        "ROOM_ALL" => Some(AoeScope::RoomAll),
+        _ if def.is_area => Some(if def.violent {
+            AoeScope::RoomEnemies
+        } else {
+            AoeScope::RoomAllies
+        }),
+        _ => None,
+    }
+}
+
 /// Resolve `scope` against `room` from `caster`'s perspective and
-/// return the list of target *names* in the room. Names rather
-/// than entities so the per-target dispatch can re-resolve through
-/// the standard `find_actor_in_room` path (handles room-mismatch /
-/// despawn races identically to single-target dispatch).
+/// return the targets in the room as `(entity, name)` pairs. The
+/// per-target dispatch uses the entity directly: re-resolving by name
+/// would send every hit to the first of several same-named mobs.
 fn aoe_targets_in_room(
     world: &mut World,
     caster: Entity,
     room: Entity,
     scope: AoeScope,
-) -> Vec<String> {
+) -> Vec<(Entity, String)> {
     let group_root_e = group_root(world, caster);
     let group: std::collections::HashSet<Entity> =
         group_members(world, group_root_e).into_iter().collect();
@@ -12490,12 +12564,12 @@ fn aoe_targets_in_room(
         AoeScope::RoomEnemies => {
             // Mobs in the room, plus PK-flagged players (excluding
             // self / group members).
-            let mut names: Vec<String> = Vec::new();
+            let mut names: Vec<(Entity, String)> = Vec::new();
             {
                 let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Mob>>();
                 for (e, l, n) in q.iter(world) {
                     if l.0 == room && !group.contains(&e) && e != caster {
-                        names.push(n.name.clone());
+                        names.push((e, n.name.clone()));
                     }
                 }
             }
@@ -12509,7 +12583,7 @@ fn aoe_targets_in_room(
                         continue;
                     }
                     if pf.is_some_and(|f| f.has(mud_db::enums::PlayerFlag::PkEnabled)) {
-                        names.push(n.name.clone());
+                        names.push((e, n.name.clone()));
                     }
                 }
             }
@@ -12521,18 +12595,18 @@ fn aoe_targets_in_room(
             let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Player>>();
             q.iter(world)
                 .filter(|(e, l, _)| l.0 == room && group.contains(e))
-                .map(|(_, _, n)| n.name.clone())
+                .map(|(e, _, n)| (e, n.name.clone()))
                 .collect()
         }
         AoeScope::RoomAll => {
             // Everyone in the room except the caster — Players
             // and Mobs alike. Used by chaos / admin abilities.
-            let mut names: Vec<String> = Vec::new();
+            let mut names: Vec<(Entity, String)> = Vec::new();
             {
                 let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Mob>>();
                 for (e, l, n) in q.iter(world) {
                     if l.0 == room && e != caster {
-                        names.push(n.name.clone());
+                        names.push((e, n.name.clone()));
                     }
                 }
             }
@@ -12540,7 +12614,7 @@ fn aoe_targets_in_room(
                 let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Player>>();
                 for (e, l, n) in q.iter(world) {
                     if l.0 == room && e != caster {
-                        names.push(n.name.clone());
+                        names.push((e, n.name.clone()));
                     }
                 }
             }
@@ -12654,6 +12728,243 @@ pub fn lua_attack_all(world: &mut World, attacker: Entity) {
     }
 }
 
+/// Resolve the single target of a cast and run the target-dependent
+/// gates (peaceful room, `AbilityTargeting`, `AbilityRestrictions`).
+/// Sends the refusal to the caster and returns `None` when the cast
+/// can't go ahead. `forced_target` is the entity locked in when the
+/// wind-up started (or the AOE fan-out's per-victim entity): it is
+/// used as-is and the name in `target_word` is never looked up again.
+/// The returned [`mud_world::CastTarget`] says where that entity has
+/// to still be for a wind-up to complete.
+#[allow(clippy::too_many_lines)]
+fn resolve_and_gate_target(
+    world: &mut World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+    verb: &str,
+    target_word: Option<&str>,
+    forced_target: Option<Entity>,
+) -> Option<(Entity, mud_world::CastTarget)> {
+    // Resolve the target. Empty / "me" / "self" → the caster
+    // (or the caster's mount when the ability targets RIDER —
+    // BUCK is the canonical case: `cast buck` with no arg should
+    // unseat *your* current rider). Anything else → if the
+    // ability's targeting list includes OBJECT_INV, look up a
+    // carried item by keyword first (covers `cast identify
+    // brooch` and friends); otherwise fall through to actor-in-
+    // room. If nothing resolves, abort before applying any
+    // effects.
+    let valid_targets: Vec<String> = world
+        .resource::<AbilityCatalog>()
+        .targeting
+        .get(&def.id)
+        .map(|r| r.valid_targets.iter().map(|s| s.to_uppercase()).collect())
+        .unwrap_or_default();
+    // OBJECT_INV explicit-allow OR permissive fallback for non-violent
+    // abilities with no AbilityTargeting row at all. IDENTIFY /
+    // LOCATE_OBJECT / similar utility spells don't carry a targeting
+    // row in the seed data (9/408 abilities do), so the strict
+    // "must be in valid_targets" check would force `cast identify
+    // robe` to fail with "you don't see 'robe' here" even though
+    // the robe is in the caster's inventory. Hostile abilities
+    // never get the fallback — `cast burning hands sword` would be
+    // nonsensical.
+    let allows_inventory_target = valid_targets.iter().any(|t| t == "OBJECT_INV")
+        || (valid_targets.is_empty() && !def.violent);
+    let prefers_rider_default = valid_targets.iter().any(|t| t == "RIDER");
+    // Hostile abilities (any ENEMY_* / AREA_FOES targeting) refuse
+    // in PeacefulRoom — same contract cmd_attack and engage_combat
+    // honor. Beneficial casts (FRIEND_PC / SELF / etc.) still work
+    // so a healer can patch up a party in a sanctuary.
+    //
+    // Only 9/408 abilities currently carry an AbilityTargeting row,
+    // so when valid_targets is empty we fall back to `def.violent`
+    // as the signal. Without this fallback, an unattributed violent
+    // spell (Burning Hands, Web, Fireball) reads as non-hostile and
+    // the no-target gate below silently routes the cast onto the
+    // caster — instant suicide. See G2.1 / G2.2 in remaining-work.md.
+    let is_hostile_ability = if valid_targets.is_empty() {
+        def.violent
+    } else {
+        valid_targets
+            .iter()
+            .any(|t| t.starts_with("ENEMY") || t == "AREA_FOES" || t == "AREA_HOSTILE")
+    };
+    if is_hostile_ability
+        && let Some(located) = world.get::<Located>(player)
+        && world.get::<mud_world::PeacefulRoom>(located.0).is_some()
+    {
+        send_to(
+            world,
+            player,
+            "A peaceful aura forbids hostile magic here.\r\n",
+        );
+        return None;
+    }
+    // Self-name detection: the AOE dispatcher passes per-target
+    // *names* and re-resolves through this branch. RoomAllies /
+    // RoomAll include the caster, so a per-target call may carry
+    // the caster's own display name as the target word — match
+    // that to self alongside the literal "me" / "self" strings.
+    let caster_self_name = name_of(world, player);
+    // Hostile abilities with no target word: auto-target the
+    // caster's current Fighting opponent when one exists (a sorc
+    // in melee with an orc who casts `burning hands` clearly means
+    // "at the orc"), and refuse with a hint otherwise. Without the
+    // Fighting fallback, the type gate below routes the cast onto
+    // the caster — see the G2.1 / G2.2 bug report.
+    let default_combat_target: Option<Entity> =
+        if forced_target.is_none() && is_hostile_ability && target_word.is_none() {
+            let opponent = world.get::<Fighting>(player).map(|f| f.0);
+            if let Some(opp) = opponent
+                && world.get_entity(opp).is_ok()
+            {
+                Some(opp)
+            } else {
+                let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
+                send_to(
+                    world,
+                    player,
+                    format!(
+                        "{} needs a target. Try: {verb} '{display}' <target>.\r\n",
+                        def.name
+                    ),
+                );
+                return None;
+            }
+        } else {
+            None
+        };
+    let target_entity = if let Some(locked) = forced_target {
+        locked
+    } else if let Some(opp) = default_combat_target {
+        opp
+    } else if let Some(word) = target_word
+        && !word.eq_ignore_ascii_case("me")
+        && !word.eq_ignore_ascii_case("self")
+        && !word.eq_ignore_ascii_case(&caster_self_name)
+    {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere; can't target.\r\n");
+            return None;
+        };
+        let inv_match = if allows_inventory_target {
+            find_carried_by(world, word, player, EquipFilter::Anywhere)
+        } else {
+            None
+        };
+        let in_room = inv_match.or_else(|| find_actor_in_room(world, word, located.0, player));
+        // SUMMON-class spells need to reach players in *other* rooms
+        // (that's literally the point). When the in-room lookup
+        // misses, fall back to a global online-player search before
+        // the non-violent default-to-self branch fires — otherwise
+        // every cross-room summon collapses to a self-target and
+        // L1.2's self-gate refuses. The summon gate set still
+        // enforces same-zone, mob-NoSummon, etc. once we have a
+        // candidate target.
+        let summon_remote = if in_room.is_none() && def.plain_name.eq_ignore_ascii_case("SUMMON") {
+            find_online_player_anywhere(world, word, player)
+        } else {
+            None
+        };
+        match in_room.or(summon_remote) {
+            Some(found) => found,
+            None if def.plain_name.eq_ignore_ascii_case("SUMMON") => {
+                // SUMMON specifically — surface a clearer message
+                // since the global lookup failed too. "You don't see
+                // X here" would be misleading; the right answer is
+                // "no online player by that name."
+                send_to(
+                    world,
+                    player,
+                    format!("There's no one named '{word}' online to summon.\r\n"),
+                );
+                return None;
+            }
+            None if !def.violent => {
+                // Non-violent / utility spell with an unresolved arg
+                // (e.g. `cast 'minor creation' bread` — the arg is
+                // recipe content, not a room target). Fall through
+                // to self-cast rather than refusing. Hostile spells
+                // still error so a misspelled enemy keyword can't
+                // silently hit the caster.
+                player
+            }
+            None => {
+                send_to(
+                    world,
+                    player,
+                    format!("You don't see '{word}' here to target.\r\n"),
+                );
+                return None;
+            }
+        }
+    } else if prefers_rider_default
+        && let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(player).copied()
+    {
+        // RIDER target with no arg: default to the caster's mount.
+        // BUCK reads "you buck *your* rider off"; without this default
+        // the cast resolves to caster and trips the targeting gate.
+        mount
+    } else {
+        player
+    };
+    // (The "target: X" line was part of the removed descriptor box —
+    // the success message already names the target.)
+    // AbilityTargeting gate: refuse if the resolved target doesn't
+    // match the schema's `valid_targets` list. Only enforces the
+    // recognized types (ENEMY_PC, ENEMY_NPC); CORPSE / RIDER /
+    // OBJECT_INV / UNCONSCIOUS pass silently until those entity
+    // categories are modeled. Abilities without a row pass through.
+    if let Some(rule) = world
+        .resource::<AbilityCatalog>()
+        .targeting
+        .get(&def.id)
+        .cloned()
+        && let Some(refusal) = check_target_type(world, player, target_entity, &rule.valid_targets)
+    {
+        send_to(world, player, format!("{refusal}\r\n"));
+        return None;
+    }
+    // Live gate: walk AbilityRestrictions and refuse the cast on the
+    // first failing rule, emitting that rule's `message` to the
+    // caster. Unknown rule types pass — the runtime grows interpretation
+    // incrementally. Falls back to no-op for abilities without a
+    // restrictions row.
+    if let Some(rules) = world
+        .resource::<AbilityCatalog>()
+        .restriction_rules
+        .get(&def.id)
+        .cloned()
+        && let Some(refusal) = check_ability_restrictions(world, player, target_entity, &rules)
+    {
+        let actor_name = name_of(world, player);
+        let target_name = if target_entity == player {
+            actor_name.clone()
+        } else {
+            name_or(world, target_entity, "(unknown)")
+        };
+        let rendered =
+            render_ability_template(&refusal, &actor_name, &target_name, target_entity == player);
+        send_to(world, player, format!("{rendered}\r\n"));
+        return None;
+    }
+    let in_caster_room = world.get::<Located>(target_entity).map(|l| l.0)
+        == world.get::<Located>(player).map(|l| l.0);
+    let lock = if target_entity == player {
+        mud_world::CastTarget::Caster
+    } else if world.get::<Item>(target_entity).is_some() {
+        mud_world::CastTarget::Carried(target_entity)
+    } else if default_combat_target.is_some() {
+        mud_world::CastTarget::Fighting(target_entity)
+    } else if in_caster_room {
+        mud_world::CastTarget::InRoom(target_entity)
+    } else {
+        mud_world::CastTarget::World(target_entity)
+    };
+    Some((target_entity, lock))
+}
+
 /// Same as [`invoke_ability`] but treats the call as a non-first
 /// dispatch in an AOE batch:
 ///   - skips the leading description-box header (so `cmd_roar` over
@@ -12675,6 +12986,7 @@ pub(crate) fn invoke_ability_with(
     aoe_repeat: bool,
     from_item: bool,
     skip_queue: bool,
+    forced_target: Option<Entity>,
 ) {
     // Quoted phrases (`cast 'magic missile' goblin`) collapse to a
     // single token; otherwise behaves like the legacy whitespace
@@ -12868,6 +13180,27 @@ pub(crate) fn invoke_ability_with(
         }
     }
 
+    // Wind-up pre-flight: a player-typed cast that will queue resolves
+    // its target *now*, before a slot is spent, so a typo or a target
+    // that isn't here is refused up front (not after the whole chant)
+    // and the wind-up is locked to that exact entity. Room-wide
+    // spells lock nothing; they pick their victims when they land.
+    let queue_wind_up = !skip_queue
+        && !from_item
+        && !aoe_repeat
+        && !matches!(kind, mud_db::abilities::AbilityKind::Skill)
+        && def.cast_time_rounds > 0;
+    let mut cast_target = mud_world::CastTarget::Area;
+    if queue_wind_up && aoe_scope_for(&def).is_none() {
+        let Some((_, lock)) =
+            resolve_and_gate_target(world, player, &def, verb, target_word, forced_target)
+        else {
+            return;
+        };
+        cast_target = lock;
+    }
+    let mut slot_circle: Option<i32> = None;
+
     // Slot gate: legacy slot-pool model. When the ability is a Spell
     // AND the caster's class has it in `ClassAbilities` (i.e. it
     // lands in a circle for this class), refuse the cast unless the
@@ -12928,6 +13261,7 @@ pub(crate) fn invoke_ability_with(
                     secs_remaining: recover,
                     total_secs: recover,
                 };
+                slot_circle = Some(circle);
                 if let Some(mut s) = world.get_mut::<mud_world::SpellSlots>(player) {
                     s.in_flight.push(cd);
                 } else {
@@ -13078,13 +13412,11 @@ pub(crate) fn invoke_ability_with(
     // this branch and the earlier slot-consumption block, since
     // `casting_tick` is calling us *because* the slot was already
     // paid. SKILL kind and item / AOE-sub casts always skip too.
-    if !skip_queue
-        && !from_item
-        && !aoe_repeat
-        && !matches!(kind, mud_db::abilities::AbilityKind::Skill)
-        && def.cast_time_rounds > 0
-    {
-        let total_ticks = def.cast_time_rounds * crate::casting::COMBAT_ROUND_TICKS;
+    if queue_wind_up {
+        let roll = rand::random_range(1..=110);
+        let (total_ticks, quick) = crate::casting::wind_up_ticks(world, player, &def, roll);
+        let recognized_by =
+            crate::casting::announce_cast_start(world, player, &def, verb, cast_target);
         world.entity_mut(player).insert(mud_world::Casting {
             ability_id: def.id,
             ability_name: def.name.clone(),
@@ -13093,12 +13425,23 @@ pub(crate) fn invoke_ability_with(
             verb: verb.to_string(),
             ticks_remaining: total_ticks,
             ticks_total: total_ticks,
+            target: cast_target,
+            recognized_by,
+            slot_circle,
         });
-        let secs = (def.cast_time_rounds * 4).max(1);
+        let secs = (total_ticks / 10).max(1);
+        let quick_note = if quick {
+            " Your quick chant hastens the spell."
+        } else {
+            ""
+        };
         send_to(
             world,
             player,
-            format!("You begin {verb}ing {}...  (about {secs}s)\r\n", def.name,),
+            format!(
+                "You begin {verb}ing {}...  (about {secs}s){quick_note}\r\n",
+                def.name,
+            ),
         );
         return;
     }
@@ -13113,17 +13456,7 @@ pub(crate) fn invoke_ability_with(
     // is_area + non-violent → ROOM_ALLIES. `aoe_repeat` is the
     // recursion guard — invoke_ability_aoe iterates back through
     // this function once per target with aoe_repeat = true.
-    let inferred_scope: Option<AoeScope> = match def.target_scope.as_str() {
-        "ROOM_ENEMIES" => Some(AoeScope::RoomEnemies),
-        "ROOM_ALLIES" => Some(AoeScope::RoomAllies),
-        "ROOM_ALL" => Some(AoeScope::RoomAll),
-        _ if def.is_area => Some(if def.violent {
-            AoeScope::RoomEnemies
-        } else {
-            AoeScope::RoomAllies
-        }),
-        _ => None,
-    };
+    let inferred_scope = aoe_scope_for(&def);
     if !aoe_repeat && let Some(scope) = inferred_scope {
         let refusal = if matches!(scope, AoeScope::RoomEnemies | AoeScope::RoomAll) {
             format!("Nothing here to {verb} {}.\r\n", def.name)
@@ -13140,207 +13473,11 @@ pub(crate) fn invoke_ability_with(
     // that it felt like reading a help card on every swing. The
     // success message + per-effect line below carry the same payoff
     // without the noise; details are still reachable via `help <ability>`.
-    // Resolve the target. Empty / "me" / "self" → the caster
-    // (or the caster's mount when the ability targets RIDER —
-    // BUCK is the canonical case: `cast buck` with no arg should
-    // unseat *your* current rider). Anything else → if the
-    // ability's targeting list includes OBJECT_INV, look up a
-    // carried item by keyword first (covers `cast identify
-    // brooch` and friends); otherwise fall through to actor-in-
-    // room. If nothing resolves, abort before applying any
-    // effects.
-    let valid_targets: Vec<String> = world
-        .resource::<AbilityCatalog>()
-        .targeting
-        .get(&def.id)
-        .map(|r| r.valid_targets.iter().map(|s| s.to_uppercase()).collect())
-        .unwrap_or_default();
-    // OBJECT_INV explicit-allow OR permissive fallback for non-violent
-    // abilities with no AbilityTargeting row at all. IDENTIFY /
-    // LOCATE_OBJECT / similar utility spells don't carry a targeting
-    // row in the seed data (9/408 abilities do), so the strict
-    // "must be in valid_targets" check would force `cast identify
-    // robe` to fail with "you don't see 'robe' here" even though
-    // the robe is in the caster's inventory. Hostile abilities
-    // never get the fallback — `cast burning hands sword` would be
-    // nonsensical.
-    let allows_inventory_target = valid_targets.iter().any(|t| t == "OBJECT_INV")
-        || (valid_targets.is_empty() && !def.violent);
-    let prefers_rider_default = valid_targets.iter().any(|t| t == "RIDER");
-    // Hostile abilities (any ENEMY_* / AREA_FOES targeting) refuse
-    // in PeacefulRoom — same contract cmd_attack and engage_combat
-    // honor. Beneficial casts (FRIEND_PC / SELF / etc.) still work
-    // so a healer can patch up a party in a sanctuary.
-    //
-    // Only 9/408 abilities currently carry an AbilityTargeting row,
-    // so when valid_targets is empty we fall back to `def.violent`
-    // as the signal. Without this fallback, an unattributed violent
-    // spell (Burning Hands, Web, Fireball) reads as non-hostile and
-    // the no-target gate below silently routes the cast onto the
-    // caster — instant suicide. See G2.1 / G2.2 in remaining-work.md.
-    let is_hostile_ability = if valid_targets.is_empty() {
-        def.violent
-    } else {
-        valid_targets
-            .iter()
-            .any(|t| t.starts_with("ENEMY") || t == "AREA_FOES" || t == "AREA_HOSTILE")
-    };
-    if is_hostile_ability
-        && let Some(located) = world.get::<Located>(player)
-        && world.get::<mud_world::PeacefulRoom>(located.0).is_some()
-    {
-        send_to(
-            world,
-            player,
-            "A peaceful aura forbids hostile magic here.\r\n",
-        );
+    let Some((target_entity, _)) =
+        resolve_and_gate_target(world, player, &def, verb, target_word, forced_target)
+    else {
         return;
-    }
-    // Self-name detection: the AOE dispatcher passes per-target
-    // *names* and re-resolves through this branch. RoomAllies /
-    // RoomAll include the caster, so a per-target call may carry
-    // the caster's own display name as the target word — match
-    // that to self alongside the literal "me" / "self" strings.
-    let caster_self_name = name_of(world, player);
-    // Hostile abilities with no target word: auto-target the
-    // caster's current Fighting opponent when one exists (a sorc
-    // in melee with an orc who casts `burning hands` clearly means
-    // "at the orc"), and refuse with a hint otherwise. Without the
-    // Fighting fallback, the type gate below routes the cast onto
-    // the caster — see the G2.1 / G2.2 bug report.
-    let default_combat_target: Option<Entity> = if is_hostile_ability && target_word.is_none() {
-        let opponent = world.get::<Fighting>(player).map(|f| f.0);
-        if let Some(opp) = opponent
-            && world.get_entity(opp).is_ok()
-        {
-            Some(opp)
-        } else {
-            let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
-            send_to(
-                world,
-                player,
-                format!(
-                    "{} needs a target. Try: {verb} '{display}' <target>.\r\n",
-                    def.name
-                ),
-            );
-            return;
-        }
-    } else {
-        None
     };
-    let target_entity = if let Some(opp) = default_combat_target {
-        opp
-    } else if let Some(word) = target_word
-        && !word.eq_ignore_ascii_case("me")
-        && !word.eq_ignore_ascii_case("self")
-        && !word.eq_ignore_ascii_case(&caster_self_name)
-    {
-        let Some(located) = world.get::<Located>(player).copied() else {
-            send_to(world, player, "You are nowhere; can't target.\r\n");
-            return;
-        };
-        let inv_match = if allows_inventory_target {
-            find_carried_by(world, word, player, EquipFilter::Anywhere)
-        } else {
-            None
-        };
-        let in_room = inv_match.or_else(|| find_actor_in_room(world, word, located.0, player));
-        // SUMMON-class spells need to reach players in *other* rooms
-        // (that's literally the point). When the in-room lookup
-        // misses, fall back to a global online-player search before
-        // the non-violent default-to-self branch fires — otherwise
-        // every cross-room summon collapses to a self-target and
-        // L1.2's self-gate refuses. The summon gate set still
-        // enforces same-zone, mob-NoSummon, etc. once we have a
-        // candidate target.
-        let summon_remote = if in_room.is_none() && def.plain_name.eq_ignore_ascii_case("SUMMON") {
-            find_online_player_anywhere(world, word, player)
-        } else {
-            None
-        };
-        match in_room.or(summon_remote) {
-            Some(found) => found,
-            None if def.plain_name.eq_ignore_ascii_case("SUMMON") => {
-                // SUMMON specifically — surface a clearer message
-                // since the global lookup failed too. "You don't see
-                // X here" would be misleading; the right answer is
-                // "no online player by that name."
-                send_to(
-                    world,
-                    player,
-                    format!("There's no one named '{word}' online to summon.\r\n"),
-                );
-                return;
-            }
-            None if !def.violent => {
-                // Non-violent / utility spell with an unresolved arg
-                // (e.g. `cast 'minor creation' bread` — the arg is
-                // recipe content, not a room target). Fall through
-                // to self-cast rather than refusing. Hostile spells
-                // still error so a misspelled enemy keyword can't
-                // silently hit the caster.
-                player
-            }
-            None => {
-                send_to(
-                    world,
-                    player,
-                    format!("You don't see '{word}' here to target.\r\n"),
-                );
-                return;
-            }
-        }
-    } else if prefers_rider_default
-        && let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(player).copied()
-    {
-        // RIDER target with no arg: default to the caster's mount.
-        // BUCK reads "you buck *your* rider off"; without this default
-        // the cast resolves to caster and trips the targeting gate.
-        mount
-    } else {
-        player
-    };
-    // (The "target: X" line was part of the removed descriptor box —
-    // the success message already names the target.)
-    // AbilityTargeting gate: refuse if the resolved target doesn't
-    // match the schema's `valid_targets` list. Only enforces the
-    // recognized types (ENEMY_PC, ENEMY_NPC); CORPSE / RIDER /
-    // OBJECT_INV / UNCONSCIOUS pass silently until those entity
-    // categories are modeled. Abilities without a row pass through.
-    if let Some(rule) = world
-        .resource::<AbilityCatalog>()
-        .targeting
-        .get(&def.id)
-        .cloned()
-        && let Some(refusal) = check_target_type(world, player, target_entity, &rule.valid_targets)
-    {
-        send_to(world, player, format!("{refusal}\r\n"));
-        return;
-    }
-    // Live gate: walk AbilityRestrictions and refuse the cast on the
-    // first failing rule, emitting that rule's `message` to the
-    // caster. Unknown rule types pass — the runtime grows interpretation
-    // incrementally. Falls back to no-op for abilities without a
-    // restrictions row.
-    if let Some(rules) = world
-        .resource::<AbilityCatalog>()
-        .restriction_rules
-        .get(&def.id)
-        .cloned()
-        && let Some(refusal) = check_ability_restrictions(world, player, target_entity, &rules)
-    {
-        let actor_name = name_of(world, player);
-        let target_name = if target_entity == player {
-            actor_name.clone()
-        } else {
-            name_or(world, target_entity, "(unknown)")
-        };
-        let rendered =
-            render_ability_template(&refusal, &actor_name, &target_name, target_entity == player);
-        send_to(world, player, format!("{rendered}\r\n"));
-        return;
-    }
     // (The legacy "requires:" informational block was removed once
     // the rules became live — the messages are written as failure
     // text, so showing them on success is misleading. The player
@@ -19516,9 +19653,10 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "No way!  You're fighting for your life!\r\n");
         return;
     }
-    // Casting lock: walking breaks concentration. The cast is
-    // interrupted with a flavor line; movement still happens this
-    // tick.
+    // Typed movement never gets here mid-cast (the dispatcher refuses
+    // it). This catches movement the dispatcher doesn't see — a
+    // follower dragged along by its leader — which still breaks
+    // concentration.
     if world.get::<mud_world::Casting>(player).is_some() {
         crate::casting::interrupt_cast(world, player, "you start walking");
     }

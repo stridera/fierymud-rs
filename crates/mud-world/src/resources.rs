@@ -1512,6 +1512,18 @@ impl ClassSkillsData {
 }
 
 impl SpellSlotData {
+    /// Highest circle a character of `level` has slots for — legacy
+    /// `level_to_circle`, read off the slot progression table.
+    #[must_use]
+    pub fn max_circle_at_level(&self, level: i32) -> i32 {
+        self.progression
+            .iter()
+            .filter(|((lvl, _), slots)| *lvl == level && **slots > 0)
+            .map(|((_, circle), _)| *circle)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Minimum circle this ability appears at across every class
     /// that can cast it — mirrors legacy `SINFO.lowest_level` used
     /// by the globe-absorb gate. Returns `None` for abilities with

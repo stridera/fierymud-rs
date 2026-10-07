@@ -2981,7 +2981,12 @@ pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
     );
 }
 
-pub(crate) fn cmd_disengage(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_disengage(world: &mut World, player: Entity, args: &str) {
+    // Legacy: while casting, `disengage` is just another way to abort.
+    if world.get::<mud_world::Casting>(player).is_some() {
+        crate::commands::spells::cmd_abort(world, player, args);
+        return;
+    }
     if world.get::<Fighting>(player).is_none() {
         send_to(world, player, "You aren't fighting anyone.\r\n");
         return;

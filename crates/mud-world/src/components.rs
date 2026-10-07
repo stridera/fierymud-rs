@@ -752,6 +752,41 @@ pub struct Casting {
     pub ticks_remaining: i32,
     /// Original wind-up length so the prompt can render N/M progress.
     pub ticks_total: i32,
+    /// Target resolved once when the cast started. The raw `args`
+    /// text is never used to pick the target again: resolving by name
+    /// at completion would let a same-named mob that wandered in
+    /// (or a target that moved) receive the spell.
+    pub target: CastTarget,
+    /// Players who recognised the spell from its chant (legacy
+    /// `see_spell`). They see its true name when the cast completes.
+    pub recognized_by: Vec<Entity>,
+    /// Circle of the spell slot this cast spent when it started.
+    /// Handed back if the wind-up is aborted: like legacy, only a
+    /// completed spell burns its slot.
+    pub slot_circle: Option<i32>,
+}
+
+/// What a wind-up is locked onto, and where the target has to still be
+/// when the cast completes. Mirrors the legacy `target_status` values
+/// (`TARGET_IN_ROOM` / `TARGET_IN_WORLD` / `TARGET_SELF` /
+/// `TARGET_FIGHTING` / `TARGET_IN_INV`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastTarget {
+    /// No single target: room-wide spells (which pick their victims
+    /// from whoever is in the room when they land) and spells that
+    /// take no target at all.
+    Area,
+    /// The caster.
+    Caster,
+    /// An actor that must still be alive and in the caster's room.
+    InRoom(Entity),
+    /// An actor that must still be alive; may be anywhere (summon).
+    World(Entity),
+    /// The caster's current opponent; must still be the caster's
+    /// opponent.
+    Fighting(Entity),
+    /// An item that must still be carried (or worn) by the caster.
+    Carried(Entity),
 }
 
 /// Marker: this entity is stunned and skips combat swings. Inserted by
