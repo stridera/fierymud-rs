@@ -17125,12 +17125,7 @@ pub(crate) fn invoke_ability_with(
                 // marker is removed in `effects_tick` once the last
                 // backing EffectInstance fades — mirroring the
                 // Stunned tick pattern.
-                if pretty.eq_ignore_ascii_case("hidden")
-                    || pretty.eq_ignore_ascii_case("sneak")
-                    || flag == "hidden"
-                    || flag == "sneak"
-                    || flag == "concealment"
-                {
+                if pretty.eq_ignore_ascii_case("hidden") || pretty.eq_ignore_ascii_case("sneak") {
                     try_insert(world, target_entity, mud_world::Stealth);
                 }
                 // Marker flags (fly, bless, sanctuary, detect_invisible,

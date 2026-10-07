@@ -419,3 +419,139 @@ fn where_name_hides_invisible_players_from_mortals_but_not_gods() {
     let out = drain(&mut fx.wrx);
     assert!(out.contains("Ghost is in"), "{out}");
 }
+
+// -- MobDefaultEffects: importer `flags` array ----------------------------
+
+fn status_effect_catalog() -> mud_world::EffectCatalog {
+    let mut effects = mud_world::EffectCatalog::default();
+    effects.by_id.insert(
+        4,
+        mud_world::EffectDef {
+            id: 4,
+            name: "status".into(),
+            description: None,
+            effect_type: "status".into(),
+            tags: vec![],
+            presence_override: None,
+            default_params: serde_json::json!({"duration": "level * 2"}),
+            prevents_speaking: false,
+            prevents_casting: false,
+            prevents_movement: false,
+            on_apply: None,
+            on_tick: None,
+            on_remove: None,
+        },
+    );
+    effects
+}
+
+fn defaults_with(flags: &serde_json::Value) -> mud_world::MobDefaultEffectCatalog {
+    let mut defaults = mud_world::MobDefaultEffectCatalog::default();
+    defaults.by_key.insert(
+        (30, 1),
+        vec![mud_world::MobDefaultEffect {
+            effect_id: 4,
+            strength: 1,
+            modifier_data: serde_json::json!({ "flags": flags }),
+        }],
+    );
+    defaults
+}
+
+#[test]
+fn flags_array_installs_every_mapped_marker_and_ignores_unknown_flags() {
+    let mut fx = Fx::new();
+    fx.world.insert_resource(status_effect_catalog());
+    fx.world.insert_resource(defaults_with(&serde_json::json!([
+        "detect_invisible",
+        "sanctuary",
+        "infravision",
+        "poisoned",
+        "sleeping",
+        "not_a_real_flag"
+    ])));
+    let wolf = fx.mob("a wolf", 0);
+    mud_world::mob_effects::apply_mob_default_effects(&mut fx.world, wolf, (30, 1));
+    assert!(fx.world.get::<DetectInvis>(wolf).is_some());
+    assert!(fx.world.get::<mud_world::Sanctuary>(wolf).is_some());
+    // Flags without a marker spawn nothing: no source-less poison tick,
+    // no permanent sleep fighting the mob's posture.
+    let names: Vec<String> = {
+        let mut q = fx
+            .world
+            .query::<(&mud_world::EffectInstance, &mud_world::AppliedTo)>();
+        q.iter(&fx.world)
+            .filter(|(_, a)| a.0 == wolf)
+            .map(|(e, _)| e.name.clone())
+            .collect()
+    };
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(
+        names
+            .iter()
+            .all(|n| n == "detect_invisible" || n == "sanctuary")
+    );
+}
+
+#[test]
+fn default_invisible_is_stripped_when_the_mob_attacks_like_legacy() {
+    let mut fx = Fx::new();
+    fx.world.insert_resource(status_effect_catalog());
+    fx.world
+        .insert_resource(defaults_with(&serde_json::json!(["invisible"])));
+    let imp = fx.mob("an imp", 0);
+    mud_world::mob_effects::apply_mob_default_effects(&mut fx.world, imp, (30, 1));
+    assert!(fx.world.get::<Invisible>(imp).is_some());
+    assert!(!can_see_player(&fx.world, fx.watcher, imp));
+    super::apply_damage_from(&mut fx.world, fx.watcher, 3, imp);
+    assert!(fx.world.get::<Invisible>(imp).is_none());
+    // The permanent backing effect is gone too, so it can't come back.
+    let left = {
+        let mut q = fx.world.query::<&mud_world::AppliedTo>();
+        q.iter(&fx.world).filter(|a| a.0 == imp).count()
+    };
+    assert_eq!(left, 0);
+}
+
+/// Against the live dev DB: every mob proto whose rows list
+/// `detect_invisible` ends up with `DetectInvis`. Skips when fierydev is
+/// unreachable.
+#[tokio::test]
+async fn live_db_default_effects_install_detect_invis() {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
+    let Ok(Ok(pool)) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), mud_db::connect(&url)).await
+    else {
+        return;
+    };
+    let Ok(effects) = mud_world::loader::load_effect_catalog(&pool).await else {
+        return;
+    };
+    let Ok(defaults) = mud_world::loader::load_mob_default_effect_catalog(&pool).await else {
+        return;
+    };
+    let keys: Vec<(i32, i32)> = defaults.by_key.keys().copied().collect();
+    let mut world = World::new();
+    world.insert_resource(effects);
+    world.insert_resource(defaults);
+    let mut with_detect = 0;
+    for key in &keys {
+        let mob = world.spawn(Mob).id();
+        mud_world::mob_effects::apply_mob_default_effects(&mut world, mob, *key);
+        if world.get::<DetectInvis>(mob).is_some() {
+            with_detect += 1;
+        }
+    }
+    eprintln!(
+        "live DB: {} mobs with default effects, {with_detect} got DetectInvis",
+        keys.len()
+    );
+    if !keys.is_empty() {
+        assert!(
+            with_detect > 0,
+            "no mob got DetectInvis from {} rows",
+            keys.len()
+        );
+    }
+}
