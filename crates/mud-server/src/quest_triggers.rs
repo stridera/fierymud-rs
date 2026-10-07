@@ -99,7 +99,7 @@ pub(crate) fn dispatch_item_trigger(
 }
 
 /// Dispatch ROOM-trigger quests when `player` enters a room with
-/// prototype `(room_zone, room_id)`. Fired from `mark_room_visited`.
+/// prototype `(room_zone, room_id)`. Fired from `note_room_entry` on every entry.
 pub(crate) fn dispatch_room_trigger(
     world: &mut World,
     player: Entity,

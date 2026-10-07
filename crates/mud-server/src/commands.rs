@@ -387,6 +387,9 @@ mod parser_tests;
 #[path = "commands/progression_tests.rs"]
 mod progression_tests;
 #[cfg(test)]
+#[path = "commands/quest_runtime_tests.rs"]
+mod quest_runtime_tests;
+#[cfg(test)]
 #[path = "commands/rank_tests.rs"]
 mod rank_tests;
 #[path = "commands/release.rs"]
@@ -7997,11 +8000,8 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
         return;
     }
     // God zones grant no exploration credit: nothing is persisted and no
-    // `zone_<N>_cleared` can fire. Quest visit objectives and room triggers
-    // are a separate system and still run (first visit only, as below).
+    // `zone_<N>_cleared` can fire.
     if mud_world::room_in_god_zone(world, room) {
-        bump_visit_quest_progress(world, player, key.zone, key.id);
-        crate::quest_triggers::dispatch_room_trigger(world, player, key.zone, key.id);
         return;
     }
     let total_in_zone = world
@@ -8041,13 +8041,24 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
         let code = format!("zone_{}_cleared", key.zone);
         grant_achievement(world, player, &code);
     }
-    // Quest objective: VISIT_ROOM. Same group-walk path as kill,
-    // gated by the SOLO/PARTY scope so a scout in a group brings
-    // the rest of the party along on shared visit objectives.
+}
+
+/// Quest side of walking into `room`, run on EVERY entry (the
+/// exploration set in [`mark_room_visited`] only remembers the first):
+///
+/// - `VISIT_ROOM` objectives of quests the player holds count the entry
+///   whether or not they have been here before. Same group-walk path as
+///   kill, gated by the SOLO/PARTY scope.
+/// - `ROOM`-triggered quests are offered (or auto-accepted); the
+///   dispatcher skips quests the player already holds or has finished.
+pub(crate) fn note_room_entry(world: &mut World, player: Entity, room: Entity) {
+    if world.get::<Player>(player).is_none() {
+        return;
+    }
+    let Some(key) = world.get::<WorldKey>(room).copied() else {
+        return;
+    };
     bump_visit_quest_progress(world, player, key.zone, key.id);
-    // Quest trigger: ROOM (Wave 4.1). Any quest authored with
-    // `triggerType = ROOM` and a matching `triggerRoom*` key is
-    // offered when the player first enters here.
     crate::quest_triggers::dispatch_room_trigger(world, player, key.zone, key.id);
 }
 
@@ -20262,6 +20273,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // Followers who happen to be NPCs are filtered inside the helper.
     for &mover in &movers {
         mark_room_visited(world, mover, target);
+        note_room_entry(world, mover, target);
     }
     // Room environmental effects: apply each linked effect to
     // every player mover. Short duration so leaving the room
