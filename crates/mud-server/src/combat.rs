@@ -380,6 +380,8 @@ fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
                 .collect()
         })
         .unwrap_or_default();
+    let mut candidates = candidates;
+    crate::room_access::retain_admitted(world, &[mob], &mut candidates);
     if candidates.is_empty() {
         return;
     }

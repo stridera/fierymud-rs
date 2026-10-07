@@ -47,6 +47,7 @@ fn room_is_aquatic(world: &World, room: Entity) -> bool {
         .is_some_and(|s| matches!(s.0, Sector::Shallows | Sector::Water | Sector::Underwater))
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn wander_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(WANDER_PERIOD_TICKS) {
@@ -136,6 +137,11 @@ pub fn wander_tick(world: &mut World) {
             .map(|n| n.name.clone())
             .unwrap_or_default();
         if mob_name.is_empty() {
+            continue;
+        }
+        // Mobs are mortals as far as entry restrictions go (legacy GODROOM
+        // kept every sub-immortal mob out). Cheap unless the room has one.
+        if !crate::room_access::entry_allowed(world, mob, target_room) {
             continue;
         }
         broadcast_room_except_players_rendered(

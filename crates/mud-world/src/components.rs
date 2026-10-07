@@ -7,6 +7,45 @@ use mud_db::enums::{Direction, ExitState, Sector};
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Zone;
 
+/// Marker on zone entities with `Zones.is_god_zone = true`: staff-only
+/// content. Hidden from mortals in every zone/room listing, grants no
+/// exploration credit, and is never a random teleport destination.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GodZone;
+
+/// `Room.capacity` (maximum occupants). The importer maps legacy PRIVATE to
+/// 2 and TUNNEL to 1, so a small capacity marks a private room. Today only
+/// random-teleport destination picking reads it (walking does not enforce
+/// occupancy).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RoomCapacity(pub i32);
+
+/// True when `room` belongs to a zone flagged `Zones.is_god_zone`.
+/// Rooms with no `Located` zone (house interiors, limbo) are never god
+/// rooms by this test.
+#[must_use]
+pub fn room_in_god_zone(world: &World, room: Entity) -> bool {
+    world
+        .get::<Located>(room)
+        .is_some_and(|zone| world.get::<GodZone>(zone.0).is_some())
+}
+
+/// True when the zone with schema id `zone_id` is a god zone.
+#[must_use]
+pub fn zone_is_god(world: &World, zone_id: i32) -> bool {
+    world
+        .get_resource::<crate::resources::WorldKeyIndex>()
+        .and_then(|idx| idx.zones.get(&zone_id).copied())
+        .is_some_and(|zone| world.get::<GodZone>(zone).is_some())
+}
+
+/// `Room.entry_restriction`: Lua body that must return `true` for a
+/// non-staff actor to enter this room (legacy GODROOM imports as
+/// `return actor:is_god()`). Enforced on every movement path by
+/// `room_access` in mud-server.
+#[derive(Component, Debug, Clone)]
+pub struct EntryRestriction(pub String);
+
 /// Per-zone climate. Loaded from `Zones.climate` at startup. Used by
 /// `cmd_weather` to render atmospheric flavor for the player's
 /// current zone (snowfall in subarctic, dust storms in arid, etc.).

@@ -88,6 +88,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 ZoneClimate(z.climate),
             ))
             .id();
+        if z.is_god_zone {
+            world.entity_mut(entity).insert(crate::GodZone);
+        }
         zone_index.insert(z.id, entity);
         weather
             .by_zone
@@ -1769,6 +1772,23 @@ pub async fn load_ability_catalog(pool: &PgPool) -> sqlx::Result<AbilityCatalog>
     Ok(ability_catalog)
 }
 
+/// Attach the access-control components of a `Room` row: its occupancy
+/// limit and the Lua entry restriction (blank means none).
+fn apply_room_access(world: &mut World, entity: Entity, r: &rooms::Room) {
+    if r.capacity > 0 {
+        world
+            .entity_mut(entity)
+            .insert(crate::RoomCapacity(r.capacity));
+    }
+    if let Some(expr) = r.entry_restriction.as_deref().map(str::trim)
+        && !expr.is_empty()
+    {
+        world
+            .entity_mut(entity)
+            .insert(crate::EntryRestriction(expr.to_string()));
+    }
+}
+
 /// Attach the room-boolean / layout / inn components implied by a `Rooms` row.
 /// Negative-polarity flags (`allows_*`) attach only when false; positive-polarity
 /// flags (`is_*`) attach only when true. Shared by the boot loader and reload.
@@ -1820,6 +1840,7 @@ fn apply_room_flags(world: &mut World, entity: Entity, r: &rooms::Room) {
     if !r.allows_scanning {
         world.entity_mut(entity).insert(crate::NoScanningRoom);
     }
+    apply_room_access(world, entity, r);
     if r.base_light_level != 0 {
         world
             .entity_mut(entity)
@@ -2376,6 +2397,8 @@ fn clear_room_flags(world: &mut World, entity: Entity) {
         crate::BaseLightLevel,
         crate::RoomLayout,
         crate::InnRoom,
+        crate::EntryRestriction,
+        crate::RoomCapacity,
     )>();
 }
 
@@ -2477,6 +2500,11 @@ pub async fn reload_zones(
                 },
                 ZoneClimate(z.climate),
             ));
+            if z.is_god_zone {
+                em.insert(crate::GodZone);
+            } else {
+                em.remove::<crate::GodZone>();
+            }
             stats.zones_updated += 1;
         } else {
             let entity = world
@@ -2489,6 +2517,9 @@ pub async fn reload_zones(
                     ZoneClimate(z.climate),
                 ))
                 .id();
+            if z.is_god_zone {
+                world.entity_mut(entity).insert(crate::GodZone);
+            }
             world
                 .resource_mut::<WorldKeyIndex>()
                 .zones

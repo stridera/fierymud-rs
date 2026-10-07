@@ -326,6 +326,9 @@ mod followers;
 mod magic_focus;
 pub(crate) use magic_focus::Concentrating;
 #[cfg(test)]
+#[path = "commands/god_zone_tests.rs"]
+mod god_zone_tests;
+#[cfg(test)]
 #[path = "commands/parser_tests.rs"]
 mod parser_tests;
 #[cfg(test)]
@@ -7679,9 +7682,11 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             .map_or((-1, -1), |k| (k.zone, k.id));
         let num = room_composite_num(zone_id, room_id);
         // Zone display name: walk to the zone entity via WorldKeyIndex.
+        // God zones are not on any mortal map: no area name for them.
         let area_name = world
             .get_resource::<WorldKeyIndex>()
             .and_then(|idx| idx.zones.get(&zone_id).copied())
+            .filter(|_| crate::room_access::room_visible_to(world, target, room))
             .and_then(|zone_e| world.get::<Named>(zone_e).map(|n| n.name.clone()))
             .unwrap_or_default();
         let area_plain = render_color_tags(&area_name, ColorMode::Strip)
@@ -7699,6 +7704,13 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         if let Some(exits) = world.get::<Exits>(room) {
             for (dir, data) in &exits.0 {
                 if data.is_hidden {
+                    continue;
+                }
+                // Exits into a god zone are not mapped for mortals.
+                if data
+                    .to
+                    .is_some_and(|dest| !crate::room_access::room_visible_to(world, target, dest))
+                {
                     continue;
                 }
                 let dir_name = direction_name(*dir);
@@ -7930,6 +7942,14 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
         .get_mut::<mud_world::ZoneVisits>(player)
         .is_some_and(|mut v| v.by_zone.entry(key.zone).or_default().insert(key.id));
     if !newly_inserted {
+        return;
+    }
+    // God zones grant no exploration credit: nothing is persisted and no
+    // `zone_<N>_cleared` can fire. Quest visit objectives and room triggers
+    // are a separate system and still run (first visit only, as below).
+    if mud_world::room_in_god_zone(world, room) {
+        bump_visit_quest_progress(world, player, key.zone, key.id);
+        crate::quest_triggers::dispatch_room_trigger(world, player, key.zone, key.id);
         return;
     }
     let total_in_zone = world
@@ -15120,6 +15140,19 @@ pub(crate) fn invoke_ability_with(
                         continue;
                     }
 
+                    // Gate 4b: the caster's room may bar the summoned (a
+                    // god room's entry restriction). Refuse up front so the
+                    // caster hears about it instead of a silent offer.
+                    if !crate::room_access::entry_allowed(world, target_entity, caster_room) {
+                        send_to(
+                            world,
+                            player,
+                            "A mysterious powerful force keeps your summons from taking hold.\r\n",
+                        );
+                        applied_msgs.push(format!("{pretty} (refused: entry restricted)"));
+                        continue;
+                    }
+
                     // Gate 5: arena asymmetry. Don't drag
                     // non-combatants into a PK arena; arena-to-arena
                     // is fine, non-arena-to-non-arena is fine.
@@ -15307,36 +15340,79 @@ pub(crate) fn invoke_ability_with(
                         }
                     }
                     Some("random") => {
-                        // Pick a random loaded non-peaceful room, distinct
-                        // from the caster's current room. Bounded retries
-                        // so a world that's mostly peaceful (sanctuaries,
-                        // arenas) doesn't loop forever — after 16 tries,
-                        // give up and let the destination-not-resolvable
-                        // path fire.
-                        let cur = world.get::<Located>(target_entity).map(|l| l.0);
-                        let candidates: Vec<Entity> = world
-                            .resource::<WorldKeyIndex>()
-                            .rooms
-                            .values()
-                            .copied()
-                            .collect();
-                        let mut pick: Option<Entity> = None;
-                        for _ in 0..16 {
-                            if candidates.is_empty() {
-                                break;
-                            }
-                            let idx = rand::random_range(0..candidates.len());
-                            let e = candidates[idx];
-                            if Some(e) == cur {
-                                continue;
-                            }
-                            if world.get::<mud_world::PeacefulRoom>(e).is_some() {
-                                continue;
-                            }
-                            pick = Some(e);
-                            break;
+                        // Legacy `perform_teleport_spell` (spells.cpp), with the
+                        // reach and success roll read from the effect params:
+                        // `range` = "zone" | "world", `success_base_pct` /
+                        // `success_per_skill_pct` for the skill-based fail chance.
+                        let params = crate::room_access::parse_random_params(
+                            spec.override_params.as_ref(),
+                            Some(&spec.default_params),
+                        );
+                        let caster_name = name_or(world, player, "Someone");
+                        let victim_name = name_or(world, target_entity, "Someone");
+                        let victim_room = world.get::<Located>(target_entity).map(|l| l.0);
+                        // A no-teleport room pins the caster (and whoever is
+                        // being moved) in place; staff are exempt.
+                        if crate::room_access::teleport_blocked_here(world, player)
+                            || crate::room_access::teleport_blocked_here(world, target_entity)
+                        {
+                            send_to(
+                                world,
+                                player,
+                                "A strange force in this place smothers the spell.\r\n",
+                            );
+                            applied_msgs.push(format!("{pretty} (refused: no-teleport room)"));
+                            continue;
                         }
-                        pick
+                        // Skill-based failure: "swirls about and dies away".
+                        let roll = rand::random_range(1..=100);
+                        if !crate::room_access::teleport_roll_succeeds(
+                            &params,
+                            formula_ctx.skill,
+                            roll,
+                        ) {
+                            send_to(world, player, "The spell swirls about and dies away.\r\n");
+                            if let Some(room) = victim_room {
+                                let line = if target_entity == player {
+                                    format!(
+                                        "{caster_name} tries to teleport themself, but fails.\r\n"
+                                    )
+                                } else {
+                                    format!(
+                                        "{caster_name} tries to teleport {victim_name}, but fails.\r\n"
+                                    )
+                                };
+                                broadcast_room_visual(world, room, player, &[player], &line);
+                            }
+                            applied_msgs.push(format!("{pretty} (refused: the spell fizzled)"));
+                            continue;
+                        }
+                        let picked = crate::room_access::pick_random_destination(
+                            world,
+                            target_entity,
+                            params.range,
+                            crate::room_access::RANDOM_TELEPORT_TRIES,
+                        );
+                        if picked.is_none() {
+                            // Nothing qualified within the retry budget.
+                            send_to(world, target_entity, "The spell sputters out.\r\n");
+                            if target_entity != player {
+                                send_to(world, player, "The spell sputters out.\r\n");
+                            }
+                            if let Some(room) = victim_room {
+                                broadcast_room_visual(
+                                    world,
+                                    room,
+                                    target_entity,
+                                    &[target_entity],
+                                    &format!("{victim_name} flickers briefly.\r\n"),
+                                );
+                            }
+                            applied_msgs
+                                .push(format!("{pretty} (refused: the spell sputters out)"));
+                            continue;
+                        }
+                        picked
                     }
                     _ => None,
                 };
@@ -15353,6 +15429,20 @@ pub(crate) fn invoke_ability_with(
                     // is misleading when nothing actually moved.
                     send_to(world, target_entity, "You are already there.\r\n");
                     applied_msgs.push(format!("{pretty} (already there)"));
+                    continue;
+                }
+                // Every destination kind (recall, summon, fixed, random)
+                // honours the room's entry restriction.
+                if !crate::room_access::entry_allowed(world, target_entity, dest_room) {
+                    send_to(world, target_entity, crate::room_access::ENTRY_REFUSED);
+                    if target_entity != player {
+                        send_to(
+                            world,
+                            player,
+                            "A mysterious powerful force repels your magic.\r\n",
+                        );
+                    }
+                    applied_msgs.push(format!("{pretty} (refused: entry restricted)"));
                     continue;
                 }
                 if world.get::<Located>(target_entity).is_some() {
@@ -15982,10 +16072,36 @@ pub(crate) fn invoke_ability_with(
                                 .is_some_and(|r| r.has(mud_db::enums::ObjectRestriction::NoLocate));
                             !nolocate && matches(&keyword, n, *kw)
                         })
-                        .take(max_results)
                         .map(|(e, l, n, _, _)| (e, n.name.clone(), l.0))
                         .collect()
                 };
+                // Items sitting in a god zone (on the floor, or carried by
+                // someone standing there) are invisible to mortals' scrying.
+                let hits: Vec<(Entity, String, Entity)> = hits
+                    .into_iter()
+                    .filter(|(_, _, host)| {
+                        let mut cur = *host;
+                        for _ in 0..8 {
+                            if world.get::<mud_world::Item>(cur).is_none() {
+                                break;
+                            }
+                            match world.get::<Located>(cur) {
+                                Some(l) => cur = l.0,
+                                None => return true,
+                            }
+                        }
+                        let room = if world.get::<WorldKey>(cur).is_some()
+                            && world.get::<mud_world::Player>(cur).is_none()
+                            && world.get::<mud_world::Mob>(cur).is_none()
+                        {
+                            Some(cur)
+                        } else {
+                            world.get::<Located>(cur).map(|l| l.0)
+                        };
+                        room.is_none_or(|r| crate::room_access::room_visible_to(world, player, r))
+                    })
+                    .take(max_results)
+                    .collect();
                 if hits.is_empty() {
                     send_to(world, player, "You sense nothing.\r\n");
                     applied_msgs.push(format!("{pretty} (no matches for '{keyword}')"));
@@ -19959,6 +20075,12 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         return;
     };
 
+    // Room entry restriction (legacy GODROOM: "a mysterious powerful force
+    // pushes you back"). Staff bypass; fails closed on a script error.
+    if crate::room_access::refuse_entry(world, player, target) {
+        return;
+    }
+
     // Stamina pre-flight: cost depends on the target room's sector.
     // Followers along for the ride aren't checked — they go where the leader
     // goes; the leader pays the cost. `Flying` flattens sector cost to
@@ -20040,7 +20162,13 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 .collect()
         };
         for f in new_followers {
-            movers.push(f);
+            // A follower the room refuses stays behind (legacy checks each
+            // mover); followers of a deity already inside are admitted.
+            if crate::room_access::entry_allowed_following(world, f, target, Some(leader)) {
+                movers.push(f);
+            } else {
+                send_to(world, f, crate::room_access::ENTRY_REFUSED);
+            }
         }
     }
 

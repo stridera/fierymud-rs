@@ -3458,6 +3458,7 @@ pub(crate) fn cmd_zlist(world: &mut World, player: Entity, _args: &str) {
     let mut rows: Vec<(i32, String)> = {
         let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Zone>>();
         q.iter(world)
+            .filter(|(k, _)| crate::room_access::zone_visible_to(world, player, k.zone))
             .map(|(k, n)| (k.zone, n.name.clone()))
             .collect()
     };
@@ -3482,6 +3483,7 @@ pub(crate) fn cmd_znum(world: &mut World, player: Entity, args: &str) {
     let hit: Option<(i32, String)> = {
         let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Zone>>();
         q.iter(world)
+            .filter(|(k, _)| crate::room_access::zone_visible_to(world, player, k.zone))
             .find(|(_, n)| {
                 let plain =
                     crate::commands::render_color_tags(&n.name, crate::commands::ColorMode::Strip);
@@ -3515,6 +3517,7 @@ pub(crate) fn cmd_zsearch(world: &mut World, player: Entity, args: &str) {
     let mut hits: Vec<(i32, String)> = {
         let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Zone>>();
         q.iter(world)
+            .filter(|(k, _)| crate::room_access::zone_visible_to(world, player, k.zone))
             .filter(|(_, n)| {
                 let plain =
                     crate::commands::render_color_tags(&n.name, crate::commands::ColorMode::Strip);

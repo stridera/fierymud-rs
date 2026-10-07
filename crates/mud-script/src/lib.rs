@@ -2270,6 +2270,16 @@ fn format_args(args: &Variadic<Value>) -> String {
 // LuaActor userdata
 // ---------------------------------------------------------------------------
 
+/// Staff = effective rank Immortal or above (cached on `Account.role`), or,
+/// for an entity with no `Account`, a `Profile` at level 100+ (the legacy
+/// `LVL_IMMORT` threshold). Mobs without a `Profile` are never staff.
+fn entity_is_staff(world: &World, entity: Entity) -> bool {
+    if let Some(account) = world.get::<mud_world::Account>(entity) {
+        return account.role.at_least(mud_db::enums::UserRole::Immortal);
+    }
+    world.get::<Profile>(entity).is_some_and(|p| p.level >= 100)
+}
+
 #[derive(Clone, Copy)]
 pub struct LuaActor {
     pub entity: Entity,
@@ -3220,6 +3230,14 @@ impl UserData for LuaActor {
             },
         );
 
+        // `actor:is_god()` — true for staff (Immortal or above). This is the
+        // body of the entry restriction legacy GODROOM rooms import as
+        // (`return actor:is_god()`); the movement gate also bypasses staff
+        // before evaluating it, so this only decides for mortals and mobs.
+        methods.add_method("is_god", |lua, this, ()| -> mlua::Result<bool> {
+            world_from_lua(lua, |w| entity_is_staff(w, this.entity))
+        });
+
         // Field access (`self.room`, `self.id`, `self.zone_id`,
         // `self.name`, `self.hp`, `self.max_hp`). The DG-Script-converted
         // corpus uses `obj.field` syntax, not `obj:field()`. Returning
@@ -3501,6 +3519,10 @@ impl UserData for LuaActor {
                                 .unwrap_or_default()
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
+                    }
+                    // `actor.is_immortal` (templace gate corpus ref) — staff.
+                    "is_immortal" => {
+                        world_from_lua(lua, |w| Value::Boolean(entity_is_staff(w, this.entity)))
                     }
                     // 211 corpus refs.
                     "is_player" => world_from_lua(lua, |w| {

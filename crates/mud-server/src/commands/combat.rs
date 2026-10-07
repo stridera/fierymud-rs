@@ -1591,6 +1591,8 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
                 .collect()
         })
         .unwrap_or_default();
+    let mut candidates = candidates;
+    crate::room_access::retain_admitted(world, &same_room, &mut candidates);
     if candidates.is_empty() {
         send_to(world, player, "There's nowhere to run!\r\n");
         return;
@@ -1662,6 +1664,8 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
                 .collect()
         })
         .unwrap_or_default();
+    let mut candidates = candidates;
+    crate::room_access::retain_admitted(world, &[player], &mut candidates);
 
     if candidates.is_empty() {
         send_to(world, player, "There's nowhere to run!\r\n");
@@ -2530,6 +2534,9 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "That exit goes nowhere.\r\n");
         return;
     };
+    if crate::room_access::refuse_entry(world, player, target) {
+        return;
+    }
 
     let dir_name = direction_name(dir);
     let mover_name = name_of(world, player);

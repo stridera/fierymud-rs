@@ -716,6 +716,12 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
             return;
         };
         let name = name_or(world, located.0, "(unknown)");
+        // A mortal standing in a god zone is told the room, never the
+        // zone/id coordinates (god zones are not on any mortal map).
+        if !crate::room_access::room_visible_to(world, player, located.0) {
+            send_rendered(world, player, &format!("You are in: {name}\r\n"));
+            return;
+        }
         let (zone, id) = world
             .get::<WorldKey>(located.0)
             .map_or((-1, -1), |k| (k.zone, k.id));
@@ -743,6 +749,7 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
         let mut rows: Vec<(String, String)> = {
             let mut q = world.query_filtered::<(&Named, &Located), (With<Player>, With<Online>)>();
             q.iter(world)
+                .filter(|(_, l)| crate::room_access::room_visible_to(world, player, l.0))
                 .map(|(n, l)| {
                     let room_name = name_or(world, l.0, "(unknown)");
                     (n.name.clone(), room_name)
@@ -772,6 +779,9 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
             .find(|(_, n, _)| n.name.eq_ignore_ascii_case(&needle))
             .map(|(e, _, l)| (e, l.0))
     };
+    // A target standing in a god zone reads as offline to mortals.
+    let target =
+        target.filter(|(_, room)| crate::room_access::room_visible_to(world, player, *room));
     let Some((target_entity, room)) = target else {
         send_to(world, player, format!("'{arg}' isn't online.\r\n"));
         return;
@@ -2806,6 +2816,16 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
     // the flag before they can `goto` into a no-teleport room.
     if world.get::<mud_world::NoTeleportRoom>(target).is_some() {
         send_to(world, player, "That room refuses inbound teleports.\r\n");
+        return;
+    }
+    // Legacy do_goto: below the god ranks a restricted (GODROOM) room is
+    // off limits. Immortal+ bypass inside `entry_allowed`.
+    if !crate::room_access::entry_allowed(world, player, target) {
+        send_to(
+            world,
+            player,
+            "You are not godly enough to use that room!\r\n",
+        );
         return;
     }
     let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);

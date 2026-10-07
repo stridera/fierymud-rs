@@ -13,6 +13,11 @@ pub struct Room {
     pub sector: Sector,
     pub base_light_level: i32,
     pub capacity: i32,
+    /// `Room.entry_restriction` — Lua body evaluated for every actor that
+    /// moves into the room (legacy GODROOM imports as
+    /// `return actor:is_god()`). Must return `true` to admit; staff bypass.
+    /// Stored as an `EntryRestriction` component; blank is treated as none.
+    pub entry_restriction: Option<String>,
     /// Schema's `is_peaceful` flag — combat is refused in these
     /// rooms (sanctuaries, shop interiors, quest hubs). Loaded
     /// into a `PeacefulRoom` marker on the spawned room entity.
@@ -104,6 +109,7 @@ pub async fn list_rooms(pool: &PgPool) -> sqlx::Result<Vec<Room>> {
             sector AS "sector: Sector",
             base_light_level,
             capacity,
+            entry_restriction,
             is_peaceful,
             allows_magic,
             allows_recall,

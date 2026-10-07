@@ -12,6 +12,9 @@ pub struct Zone {
     pub reset_mode: ResetMode,
     pub hemisphere: Hemisphere,
     pub climate: Climate,
+    /// `Zones.is_god_zone` — staff-only content: hidden from mortals, grants
+    /// no exploration credit, never a random teleport destination.
+    pub is_god_zone: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
@@ -28,6 +31,7 @@ pub async fn list_zones(pool: &PgPool) -> sqlx::Result<Vec<Zone>> {
             "resetMode" AS "reset_mode: ResetMode",
             hemisphere AS "hemisphere: Hemisphere",
             climate AS "climate: Climate",
+            is_god_zone,
             "created_at" AS "created_at: DateTime<Utc>",
             "updated_at" AS "updated_at: DateTime<Utc>",
             "deleted_at" AS "deleted_at: DateTime<Utc>"

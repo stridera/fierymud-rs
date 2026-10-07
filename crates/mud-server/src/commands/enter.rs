@@ -143,6 +143,9 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
+    if crate::room_access::refuse_entry(world, player, dest) {
+        return;
+    }
     let mover_name = name_of(world, player);
     let mover_capped = crate::commands::cap_sentence_start(&mover_name);
     let portal_name = proto.name.clone();

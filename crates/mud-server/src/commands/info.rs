@@ -5261,6 +5261,10 @@ pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
             if world.get::<mud_world::NoScanningRoom>(to_room).is_some() {
                 break;
             }
+            // God zones are invisible to mortals; scanning stops at the edge.
+            if !crate::room_access::room_visible_to(world, player, to_room) {
+                break;
+            }
             found += scan_room_actors(world, &mut out, to_room, dis, dir, player);
             from_room = to_room;
         }
@@ -8168,8 +8172,10 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
         .iter()
         .filter(|(d, ed)| !exit_is_hidden_to(world, player, located.0, **d, ed))
         .map(|(dir, ed)| {
+            // Rooms in a god zone read as "(beyond)" to mortals.
             let target_name = ed
                 .to
+                .filter(|e| crate::room_access::room_visible_to(world, player, *e))
                 .and_then(|e| world.get::<Named>(e).map(|n| n.name.clone()))
                 .unwrap_or_else(|| "(beyond)".to_string());
             (*dir, target_name, ed.state)
@@ -9102,6 +9108,10 @@ pub(crate) fn cmd_world(world: &mut World, player: Entity, _args: &str) {
     let zones = world
         .query_filtered::<Entity, With<mud_world::Zone>>()
         .iter(world)
+        .filter(|z| {
+            world.get::<mud_world::GodZone>(*z).is_none()
+                || crate::room_access::is_immortal(world, player)
+        })
         .count();
     let rooms = world
         .query_filtered::<Entity, With<mud_world::Room>>()
@@ -12417,6 +12427,16 @@ pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
         if world.get_entity(summon.dest_room).is_err() {
             try_remove::<mud_world::PendingSummon>(world, player);
             send_to(world, player, "The destination has crumbled away.\r\n");
+            return;
+        }
+        // The summoner may stand in a room that bars the summoned (a god
+        // room): re-check at the moment of the move, not just at cast time.
+        if world.get::<Located>(player).map(|l| l.0) != Some(summon.dest_room)
+            && !crate::room_access::entry_allowed(world, player, summon.dest_room)
+        {
+            try_remove::<mud_world::PendingSummon>(world, player);
+            send_to(world, player, crate::room_access::ENTRY_REFUSED);
+            send_to(world, summon.from, "The summons fizzles out.\r\n");
             return;
         }
         let cur_room = world.get::<Located>(player).map(|l| l.0);

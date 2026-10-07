@@ -64,6 +64,9 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "You're already at your recall point.\r\n");
         return;
     }
+    if crate::room_access::refuse_entry(world, player, target) {
+        return;
+    }
 
     let mover_name = name_of(world, player);
     let mover_capped = crate::commands::cap_sentence_start(&mover_name);

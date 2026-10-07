@@ -23,6 +23,7 @@ mod quest_vars;
 mod regen;
 mod respawn;
 mod rest;
+mod room_access;
 mod shops;
 mod sleep;
 mod syslog;

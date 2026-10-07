@@ -745,7 +745,9 @@ pub(crate) fn build_prompt_ctx(world: &mut World, target: Entity) -> PromptCtx {
     let room = located
         .and_then(|r| world.get::<Named>(r))
         .map(|n| n.name.clone());
+    // `%z`: a mortal inside a god zone gets no zone name.
     let zone_name = located
+        .filter(|r| crate::room_access::room_visible_to(world, target, *r))
         .and_then(|r| world.get::<Located>(r))
         .and_then(|z| world.get::<Named>(z.0))
         .map(|n| n.name.clone());
