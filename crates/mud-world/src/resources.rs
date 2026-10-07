@@ -2289,6 +2289,28 @@ pub struct MobProto {
     pub aggression_formula: Option<String>,
 }
 
+/// The level of any creature. Players carry it on `Profile`; spawned mobs
+/// have no `Profile` (their level lives on the prototype they were spawned
+/// from, found through `WorldKey`). Falls back to 1 for anything else.
+/// Use this instead of reading `Profile` directly wherever the entity may be
+/// a mob.
+#[must_use]
+pub fn effective_level(world: &World, entity: Entity) -> i32 {
+    if let Some(p) = world.get::<crate::components::Profile>(entity) {
+        return p.level;
+    }
+    world
+        .get::<crate::components::WorldKey>(entity)
+        .and_then(|wk| {
+            world
+                .get_resource::<MobPrototypes>()?
+                .by_key
+                .get(&(wk.zone, wk.id))
+                .map(|p| p.level)
+        })
+        .unwrap_or(1)
+}
+
 impl MobProto {
     /// Average-roll HP from the dice expression `NdM+B`: `N*(M+1)/2 + B`,
     /// matching `avg_damage`'s shape. Deterministic — boss mobs spawn
@@ -3477,6 +3499,30 @@ mod tests {
         assert_eq!(cat.stat_cap("GIANT", "Wisdom", i32::MAX), 60);
         // Unknown stat token: caller's fallback wins.
         assert_eq!(cat.stat_cap("GIANT", "luck", 42), 42);
+    }
+
+    #[test]
+    fn effective_level_reads_profile_else_falls_back() {
+        let mut world = World::new();
+        world.insert_resource(MobPrototypes::default());
+        // A mob whose prototype isn't loaded: the floor of 1 (the prototype
+        // path is covered by the banish tests, which build real prototypes).
+        let mob = world
+            .spawn(crate::components::WorldKey { zone: 5, id: 9 })
+            .id();
+        assert_eq!(effective_level(&world, mob), 1);
+        let player = world
+            .spawn(crate::components::Profile {
+                level: 12,
+                class_id: None,
+                race: "Human".into(),
+                experience: 0,
+                gender: "neutral".into(),
+            })
+            .id();
+        assert_eq!(effective_level(&world, player), 12);
+        let other = world.spawn_empty().id();
+        assert_eq!(effective_level(&world, other), 1);
     }
 
     #[test]

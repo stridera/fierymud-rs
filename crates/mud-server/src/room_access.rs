@@ -58,6 +58,45 @@ pub(crate) fn room_visible_to(world: &World, viewer: Entity, room: Entity) -> bo
 // Entry restrictions
 // ---------------------------------------------------------------------------
 
+/// Does the Lua source contain a `return` *keyword* (as opposed to the word
+/// inside a string, a comment, or a longer identifier such as `returning`)?
+/// A body with one is a statement chunk and runs as-is; a bare expression is
+/// wrapped in `return (...)`.
+fn has_return_statement(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'[' if b.get(i + 1) == Some(&b'[') => {
+                i = src[i + 2..].find("]]").map_or(b.len(), |n| i + 2 + n + 2);
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                    i += 1;
+                }
+                if &src[start..i] == "return" {
+                    return true;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 /// Evaluate an entry-restriction body for `mover` in the read-only condition
 /// environment (`LuaHost::eval_condition`): `actor` can be queried but not
 /// acted through, nothing can yield or be parked, and the instruction budget
@@ -65,10 +104,10 @@ pub(crate) fn room_visible_to(world: &World, viewer: Entity, room: Entity) -> bo
 /// everything else (false, non-boolean, yield attempt, error, no host)
 /// refuses.
 fn evaluate_restriction(world: &mut World, mover: Entity, dest: Entity, expr: &str) -> bool {
-    let body = if expr.contains("return") {
+    let body = if has_return_statement(expr) {
         expr.to_string()
     } else {
-        format!("return ({expr})")
+        format!("return ({expr}\n)")
     };
     let room = world.get::<WorldKey>(dest).map(|k| (k.zone, k.id));
     if !world.contains_resource::<mud_script::LuaHost>() {
@@ -310,4 +349,22 @@ pub(crate) fn teleport_blocked_here(world: &World, entity: Entity) -> bool {
         && world
             .get::<Located>(entity)
             .is_some_and(|l| world.get::<NoTeleportRoom>(l.0).is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_return_statement;
+
+    #[test]
+    fn return_is_a_keyword_not_a_substring() {
+        assert!(has_return_statement("return actor:is_god()"));
+        assert!(has_return_statement("  return(true)"));
+        assert!(has_return_statement("if a then return true end"));
+        assert!(!has_return_statement(r#"actor:has_effect("returning")"#));
+        assert!(!has_return_statement(r"actor:has_effect('return')"));
+        assert!(!has_return_statement("actor.returning_home"));
+        assert!(!has_return_statement("actor.level > 5 -- return later"));
+        assert!(!has_return_statement("actor.name == [[return]]"));
+        assert!(!has_return_statement(r#"actor.name == "a\"return""#));
+    }
 }

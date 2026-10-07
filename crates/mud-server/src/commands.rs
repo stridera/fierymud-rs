@@ -275,6 +275,8 @@ mod admin_reload;
 pub(crate) use admin_reload::shutdown_poll;
 #[path = "commands/admin_world.rs"]
 mod admin_world;
+#[path = "commands/attack_ok.rs"]
+mod attack_ok;
 #[path = "commands/balance.rs"]
 mod balance;
 #[path = "commands/banish.rs"]
@@ -13183,6 +13185,16 @@ fn resolve_and_gate_target(
         send_to(world, player, format!("{rendered}\r\n"));
         return None;
     }
+    // Legacy `attack_ok`: hostile magic obeys the same PK / peaceful-mob /
+    // pet rules as melee.
+    if is_hostile_ability
+        && target_entity != player
+        && (world.get::<Player>(target_entity).is_some()
+            || world.get::<Mob>(target_entity).is_some())
+        && !attack_ok::attack_ok(world, player, target_entity, true)
+    {
+        return None;
+    }
     let in_caster_room = world.get::<Located>(target_entity).map(|l| l.0)
         == world.get::<Located>(player).map(|l| l.0);
     let lock = if target_entity == player {
@@ -13742,7 +13754,7 @@ pub(crate) fn invoke_ability_with(
     // target's `Health` (or `Stamina` when `resource = "move"`); other
     // types (`status`, `modify`, ...) spawn an `EffectInstance` whose
     // duration the effect/regen ticks decrement.
-    let caster_level = world.get::<Profile>(player).map_or(1, |p| p.level.max(1));
+    let caster_level = mud_world::effective_level(world, player).max(1);
     let known_entries: Option<usize> = world.get::<KnownAbilities>(player).map(|k| k.entries.len());
     // Schema stores proficiency in 0..=1000; spell formulas
     // (`pow(skill, 1.25)`, `(skill*skill)/Y`) were authored against
@@ -15177,8 +15189,8 @@ pub(crate) fn invoke_ability_with(
                     // formula_ctx already evaluates skill scaling
                     // elsewhere; a per-spell skill lookup is a
                     // follow-up). Legacy: target_level > skill + 3.
-                    let target_level = world.get::<Profile>(target_entity).map_or(1, |p| p.level);
-                    let caster_level = world.get::<Profile>(player).map_or(1, |p| p.level);
+                    let target_level = mud_world::effective_level(world, target_entity);
+                    let caster_level = mud_world::effective_level(world, player);
                     if target_level > caster_level + 3 {
                         send_to(
                             world,
@@ -17141,7 +17153,7 @@ pub(crate) fn save_action_for(
     let Some(dc) = evaluate_simple_formula_ctx(&save.dc_formula, formula_ctx) else {
         return SaveOutcome::Failed;
     };
-    let target_level = world.get::<Profile>(target).map_or(1, |p| p.level.max(1));
+    let target_level = mud_world::effective_level(world, target).max(1);
     // Roll a d20 plus target's level. Save succeeds if total ≥ DC.
     let roll = rand::random_range(1..=20);
     let total = roll + target_level;

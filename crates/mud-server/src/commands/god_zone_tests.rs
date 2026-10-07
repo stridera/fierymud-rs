@@ -336,6 +336,30 @@ fn restriction_decides_by_its_script_for_non_staff() {
 }
 
 #[test]
+fn an_expression_that_merely_mentions_return_is_still_an_expression() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let square = fx.room(town, 30, 1);
+    let vault = fx.room(town, 30, 2);
+    let (mortal, _rx) = fx.person("Mortal", 20, square);
+    let (veteran, _vrx) = fx.person("Veteran", 60, square);
+    // "return" inside a string and "returning" as an identifier part.
+    restrict(&mut fx, vault, r#"actor.level >= 50 and #"return" == 6"#);
+    assert!(!entry_allowed(&mut fx.world, mortal, vault));
+    assert!(entry_allowed(&mut fx.world, veteran, vault));
+    restrict(&mut fx, vault, "actor.level >= 50 -- no return here");
+    assert!(entry_allowed(&mut fx.world, veteran, vault));
+    // A real statement chunk still runs as written.
+    restrict(
+        &mut fx,
+        vault,
+        "if actor.level >= 50 then return true end return false",
+    );
+    assert!(!entry_allowed(&mut fx.world, mortal, vault));
+    assert!(entry_allowed(&mut fx.world, veteran, vault));
+}
+
+#[test]
 fn restriction_fails_closed_on_script_errors() {
     let mut fx = Fx::new();
     let town = fx.zone(30, false);

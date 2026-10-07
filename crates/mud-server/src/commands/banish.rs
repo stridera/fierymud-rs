@@ -21,11 +21,12 @@
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    Contents, EffectInstance, EquippedSlot, Fighting, Follower, Item, Located, Mob, MobBehaviors,
+    Contents, EquippedSlot, Fighting, Follower, FromMobReset, Item, Located, Mob, MobBehaviors,
     MobPrototypes, Mounted, Player, Profile, RaceDefaults, RecallPoint, RiddenBy, WorldKey,
     WorldKeyIndex,
 };
 
+use super::attack_ok::{attack_ok, is_charmed};
 use super::{
     broadcast_room_except_rendered, broadcast_room_visual, cap_sentence_start,
     disengage_attackers_of, engage_combat, name_of, send_to, try_remove,
@@ -107,6 +108,8 @@ pub(super) enum Resist {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Outcome {
+    /// `attack_ok` refused (peaceful room / mob, PK rules, ...).
+    NotAllowed,
     /// Casting it on yourself does nothing (legacy returns before the shout).
     SelfTarget,
     Resisted(Resist),
@@ -123,6 +126,7 @@ pub(super) enum Outcome {
 impl Outcome {
     pub(super) fn label(self) -> &'static str {
         match self {
+            Self::NotAllowed => "refused: not allowed",
             Self::SelfTarget => "self target",
             Self::Resisted(_) => "refused: resisted",
             Self::Failed => "refused: nothing happens",
@@ -191,13 +195,6 @@ fn mob_is_charm_immune(world: &World, mob: Entity) -> bool {
         })
 }
 
-/// `EFF_CHARM`: a `charmed` status effect sits on the entity.
-fn is_charmed(world: &mut World, entity: Entity) -> bool {
-    let mut q = world.query::<(&EffectInstance, &mud_world::AppliedTo)>();
-    q.iter(world)
-        .any(|(i, a)| a.0 == entity && i.name.eq_ignore_ascii_case("charmed"))
-}
-
 /// `random(0,100) + skill + cha_bonus - victim_level` (spells.cpp:204).
 pub(super) fn success_total(caster: &Caster, victim_level: i32, roll: i32) -> i32 {
     roll + caster.skill + caster.cha_bonus - victim_level
@@ -218,6 +215,10 @@ pub(super) fn banish(
     saved: bool,
     rolls: Rolls,
 ) -> Outcome {
+    // Legacy opens with `attack_ok(ch, victim, true)`; a refusal costs nothing.
+    if !attack_ok(world, caster.entity, victim, true) {
+        return Outcome::NotAllowed;
+    }
     if victim == caster.entity {
         return Outcome::SelfTarget;
     }
@@ -261,7 +262,7 @@ pub(super) fn banish(
         // "Nothing happens.".
         return nothing_happens(world, caster.entity, room, Outcome::Resisted(why));
     }
-    let level = world.get::<Profile>(victim).map_or(1, |p| p.level);
+    let level = mud_world::effective_level(world, victim);
     if success_total(caster, level, rolls.success) <= params.success_threshold {
         return nothing_happens(world, caster.entity, room, Outcome::Failed);
     }
@@ -317,6 +318,20 @@ fn extract_mob(world: &mut World, mob: Entity, room: Entity, destroy_gear: bool)
     };
     for f in followers {
         try_remove::<Follower>(world, f);
+    }
+    // A banished mount drops its rider (legacy `extract_char` dismounts).
+    if let Some(RiddenBy(rider)) = world.get::<RiddenBy>(mob).copied() {
+        try_remove::<Mounted>(world, rider);
+    }
+    if let Some(Mounted(mount)) = world.get::<Mounted>(mob).copied() {
+        try_remove::<RiddenBy>(world, mount);
+    }
+    // The reset row's respawn timer starts now, exactly as after a death.
+    if let Some(reset_id) = world.get::<FromMobReset>(mob).map(|f| f.0) {
+        let now = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
+        if let Some(mut timers) = world.get_resource_mut::<crate::respawn::MobRespawnTimers>() {
+            timers.last_death_tick.insert(reset_id, now);
+        }
     }
     disengage_attackers_of(world, mob);
     if let Ok(e) = world.get_entity_mut(mob) {
@@ -418,7 +433,7 @@ mod tests {
     use crate::commands::Connection;
     use crate::commands::test_support::{Rx, drain};
     use mud_db::enums::MobBehavior;
-    use mud_world::{Named, NoSummonRoom, Room};
+    use mud_world::{EffectInstance, Named, NoSummonRoom, Room};
 
     struct Fx {
         world: World,
@@ -457,6 +472,18 @@ mod tests {
         Fx { world, here, home }
     }
 
+    impl Fx {
+        /// The server-wide `pk_allowed` toggle (`game pk on`).
+        fn pk_on(&mut self) {
+            let mut rc = mud_world::RuntimeConfig::default();
+            rc.by_key.insert(
+                ("social".into(), "pk_allowed".into()),
+                mud_world::ConfigValue::Bool(true),
+            );
+            self.world.insert_resource(rc);
+        }
+    }
+
     fn person(f: &mut Fx, name: &str, level: i32) -> (Entity, Rx) {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
         let e = f
@@ -478,19 +505,23 @@ mod tests {
         (e, rx)
     }
 
+    /// A spawned mob the way `respawn_tick` builds one: no `Profile`; its level
+    /// is on the prototype it was spawned from.
     fn mob(f: &mut Fx, name: &str, level: i32) -> Entity {
+        let n = i32::try_from(f.world.resource::<MobPrototypes>().by_key.len()).unwrap();
+        let mut proto =
+            crate::commands::test_support::mob_proto(77, n, mud_db::enums::MobProfession::Banker);
+        proto.level = level;
+        f.world
+            .resource_mut::<MobPrototypes>()
+            .by_key
+            .insert((77, n), proto);
         f.world
             .spawn((
                 Mob,
                 Named { name: name.into() },
+                WorldKey { zone: 77, id: n },
                 Located(f.here),
-                Profile {
-                    level,
-                    class_id: None,
-                    race: "Humanoid".into(),
-                    experience: 0,
-                    gender: "neutral".into(),
-                },
             ))
             .id()
     }
@@ -642,6 +673,7 @@ mod tests {
     #[test]
     fn charmed_pet_with_master_in_the_room_resists_but_not_when_master_is_away() {
         let mut f = fx();
+        f.pk_on();
         let (c, _rx) = person(&mut f, "Cleric", 50);
         let (master, _mrx) = person(&mut f, "Druid", 40);
         let pet = mob(&mut f, "a wolf", 10);
@@ -827,6 +859,7 @@ mod tests {
     #[test]
     fn a_banished_player_is_sent_home_not_refused() {
         let mut f = fx();
+        f.pk_on();
         let (c, mut crx) = person(&mut f, "Cleric", 50);
         let (v, mut vrx) = person(&mut f, "Victim", 10);
         let (_b, mut brx) = person(&mut f, "Bystander", 5);
@@ -843,6 +876,7 @@ mod tests {
     #[test]
     fn a_banished_player_falls_back_when_home_is_unset_and_when_home_is_barred() {
         let mut f = fx();
+        f.pk_on();
         let (c, _crx) = person(&mut f, "Cleric", 50);
         let (v, _vrx) = person(&mut f, "Victim", 10);
         // No recall point, no race start, no void: nowhere to go.
@@ -868,6 +902,7 @@ mod tests {
     #[test]
     fn banishing_a_fighting_player_ends_the_fight_and_dismounts() {
         let mut f = fx();
+        f.pk_on();
         let (c, _crx) = person(&mut f, "Cleric", 50);
         let (v, _vrx) = person(&mut f, "Victim", 10);
         let foe = mob(&mut f, "an orc", 5);
@@ -897,6 +932,7 @@ mod tests {
     #[test]
     fn an_invisible_banished_player_is_not_announced_to_those_who_cannot_see_them() {
         let mut f = fx();
+        f.pk_on();
         let (c, _crx) = person(&mut f, "Cleric", 50);
         let (v, _vrx) = person(&mut f, "Victim", 10);
         let (_b, mut brx) = person(&mut f, "Bystander", 5);
@@ -910,6 +946,213 @@ mod tests {
         assert!(text.contains("I banish thee!"), "{text}");
         // ... the flash of light is not.
         assert!(!text.contains("disappears in a flash"), "{text}");
+    }
+
+    // -- attack_ok --------------------------------------------------------
+
+    #[test]
+    fn a_mortal_cannot_banish_a_non_pk_player() {
+        let mut f = fx();
+        let (c, mut rx) = person(&mut f, "Cleric", 50);
+        let (v, _vrx) = person(&mut f, "Victim", 10);
+        f.world.entity_mut(v).insert(RecallPoint(f.home));
+        let out = banish(&mut f.world, &caster_of(c), v, &P, false, HIT);
+        assert_eq!(out, Outcome::NotAllowed);
+        assert_eq!(f.world.get::<Located>(v).map(|l| l.0), Some(f.here));
+        let text = drain(&mut rx);
+        assert!(text.contains("player killing isn't allowed"), "{text}");
+        assert!(!text.contains("I banish thee"), "{text}");
+    }
+
+    #[test]
+    fn two_pk_flagged_players_may_banish_each_other() {
+        let mut f = fx();
+        let (c, _rx) = person(&mut f, "Cleric", 50);
+        let (v, _vrx) = person(&mut f, "Victim", 10);
+        for e in [c, v] {
+            f.world.entity_mut(e).insert(mud_world::PlayerFlags(vec![
+                mud_db::enums::PlayerFlag::PkEnabled,
+            ]));
+        }
+        f.world.entity_mut(v).insert(RecallPoint(f.home));
+        assert_eq!(
+            banish(&mut f.world, &caster_of(c), v, &P, false, HIT),
+            Outcome::PlayerSentHome
+        );
+    }
+
+    #[test]
+    fn arena_rooms_allow_player_versus_player() {
+        let mut f = fx();
+        let (c, _rx) = person(&mut f, "Cleric", 50);
+        let (v, _vrx) = person(&mut f, "Victim", 10);
+        f.world.entity_mut(f.here).insert(mud_world::ArenaRoom);
+        f.world.entity_mut(v).insert(RecallPoint(f.home));
+        assert_eq!(
+            banish(&mut f.world, &caster_of(c), v, &P, false, HIT),
+            Outcome::PlayerSentHome
+        );
+    }
+
+    #[test]
+    fn a_peaceful_mob_such_as_a_shopkeeper_cannot_be_banished() {
+        let mut f = fx();
+        let (c, mut rx) = person(&mut f, "Cleric", 50);
+        let m = mob(&mut f, "the shopkeeper", 10);
+        f.world
+            .entity_mut(m)
+            .insert(MobBehaviors(vec![MobBehavior::Peaceful]));
+        let out = banish(&mut f.world, &caster_of(c), m, &P, false, HIT);
+        assert_eq!(out, Outcome::NotAllowed);
+        assert!(f.world.get_entity(m).is_ok());
+        let text = drain(&mut rx);
+        assert!(text.contains("calm, peaceful feeling"), "{text}");
+    }
+
+    #[test]
+    fn a_peaceful_room_forbids_banishing() {
+        let mut f = fx();
+        let (c, mut rx) = person(&mut f, "Cleric", 50);
+        let m = mob(&mut f, "a demon", 10);
+        f.world.entity_mut(f.here).insert(mud_world::PeacefulRoom);
+        assert_eq!(
+            banish(&mut f.world, &caster_of(c), m, &P, false, HIT),
+            Outcome::NotAllowed
+        );
+        assert!(drain(&mut rx).contains("ashamed"));
+    }
+
+    #[test]
+    fn another_players_pet_cannot_be_banished_but_your_own_can() {
+        let mut f = fx();
+        let (c, mut rx) = person(&mut f, "Cleric", 50);
+        let (master, _mrx) = person(&mut f, "Druid", 40);
+        let pet = mob(&mut f, "a wolf", 10);
+        charm(&mut f, pet, master);
+        let out = banish(&mut f.world, &caster_of(c), pet, &P, false, HIT);
+        assert_eq!(out, Outcome::NotAllowed);
+        assert!(drain(&mut rx).contains("someone else's pet"));
+        assert!(f.world.get_entity(pet).is_ok());
+        // Your own pet: allowed past attack_ok; the charm-with-master rule
+        // then makes it resist (legacy).
+        assert_eq!(
+            banish(&mut f.world, &caster_of(master), pet, &P, false, HIT),
+            Outcome::Resisted(Resist::CharmedPet)
+        );
+    }
+
+    #[test]
+    fn a_pet_never_attacks_its_master_and_the_dead_are_off_limits() {
+        let mut f = fx();
+        let (master, _mrx) = person(&mut f, "Druid", 40);
+        let pet = mob(&mut f, "a wolf", 10);
+        f.world.entity_mut(pet).insert(Follower(master));
+        assert!(!attack_ok(&mut f.world, pet, master, false));
+        let (c, _crx) = person(&mut f, "Cleric", 50);
+        f.pk_on();
+        let (v, _vrx) = person(&mut f, "Victim", 10);
+        f.world.entity_mut(v).insert(mud_world::Ghost);
+        assert!(!attack_ok(&mut f.world, c, v, false));
+    }
+
+    // -- mob levels, respawn, mounts --------------------------------------
+
+    #[test]
+    fn the_victim_level_comes_from_the_mob_prototype_not_a_profile() {
+        let mut f = fx();
+        let (c, _rx) = person(&mut f, "Cleric", 50);
+        let weak = mob(&mut f, "an imp", 1);
+        let strong = mob(&mut f, "an archdemon", 100);
+        assert!(f.world.get::<Profile>(weak).is_none());
+        // roll 60 + skill 50 - level: lands against level 1, not against 100.
+        let roll = Rolls {
+            success: 60,
+            gear: 0,
+        };
+        assert!(matches!(
+            banish(&mut f.world, &caster_of(c), weak, &P, false, roll),
+            Outcome::MobBanished { .. }
+        ));
+        assert_eq!(
+            banish(&mut f.world, &caster_of(c), strong, &P, false, roll),
+            Outcome::Failed
+        );
+    }
+
+    #[test]
+    fn a_banished_mob_starts_its_reset_row_respawn_timer() {
+        let mut f = fx();
+        let (c, _rx) = person(&mut f, "Cleric", 50);
+        let m = mob(&mut f, "a demon", 10);
+        f.world.entity_mut(m).insert(FromMobReset(42));
+        f.world.insert_resource(crate::TickCount(1234));
+        f.world
+            .insert_resource(crate::respawn::MobRespawnTimers::default());
+        banish(&mut f.world, &caster_of(c), m, &P, false, HIT);
+        assert!(f.world.get_entity(m).is_err());
+        assert_eq!(
+            f.world
+                .resource::<crate::respawn::MobRespawnTimers>()
+                .last_death_tick
+                .get(&42),
+            Some(&1234)
+        );
+    }
+
+    #[test]
+    fn banishing_a_mount_unseats_its_rider() {
+        let mut f = fx();
+        let (c, _rx) = person(&mut f, "Cleric", 50);
+        let (rider, _rrx) = person(&mut f, "Rider", 10);
+        let steed = mob(&mut f, "a horse", 5);
+        f.world.entity_mut(rider).insert(Mounted(steed));
+        f.world.entity_mut(steed).insert(RiddenBy(rider));
+        f.pk_on();
+        banish(&mut f.world, &caster_of(c), steed, &P, false, HIT);
+        assert!(f.world.get_entity(steed).is_err());
+        assert!(f.world.get::<Mounted>(rider).is_none());
+    }
+
+    #[test]
+    fn a_violent_spell_at_a_peaceful_mob_is_refused_by_the_cast_path() {
+        let mut f = fx();
+        let (c, mut rx) = person(&mut f, "Cleric", 50);
+        let m = mob(&mut f, "the shopkeeper", 10);
+        f.world.entity_mut(m).insert((
+            MobBehaviors(vec![MobBehavior::Peaceful]),
+            mud_world::Keywords(vec!["shopkeeper".into()]),
+        ));
+        banish_spell(
+            &mut f,
+            c,
+            serde_json::json!({"success_threshold": -1000}),
+            false,
+        );
+        cast_at(&mut f, c, "shopkeeper");
+        let text = drain(&mut rx);
+        assert!(text.contains("calm, peaceful feeling"), "{text}");
+        assert!(!text.contains("I banish thee"), "{text}");
+        assert!(f.world.get_entity(m).is_ok());
+    }
+
+    #[test]
+    fn a_violent_spell_at_a_non_pk_player_is_refused_by_the_cast_path() {
+        let mut f = fx();
+        let (c, mut rx) = person(&mut f, "Cleric", 50);
+        let (v, _vrx) = person(&mut f, "Victim", 10);
+        f.world.entity_mut(v).insert((
+            RecallPoint(f.home),
+            mud_world::Keywords(vec!["victim".into()]),
+        ));
+        banish_spell(
+            &mut f,
+            c,
+            serde_json::json!({"success_threshold": -1000}),
+            false,
+        );
+        cast_at(&mut f, c, "victim");
+        assert!(drain(&mut rx).contains("player killing isn't allowed"));
+        assert_eq!(f.world.get::<Located>(v).map(|l| l.0), Some(f.here));
     }
 
     // -- end to end through the spell pipeline ----------------------------
@@ -1055,6 +1298,7 @@ mod tests {
     #[test]
     fn the_spell_sends_a_player_home() {
         let mut f = fx();
+        f.pk_on();
         let (c, _rx) = person(&mut f, "Cleric", 50);
         let (v, mut vrx) = person(&mut f, "Victim", 10);
         f.world.entity_mut(v).insert((
