@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(out, Outcome::NotAllowed);
         assert_eq!(f.world.get::<Located>(v).map(|l| l.0), Some(f.here));
         let text = drain(&mut rx);
-        assert!(text.contains("player killing isn't allowed"), "{text}");
+        assert!(text.contains("You must turn on PK first"), "{text}");
         assert!(!text.contains("I banish thee"), "{text}");
     }
 
@@ -1151,7 +1151,7 @@ mod tests {
             false,
         );
         cast_at(&mut f, c, "victim");
-        assert!(drain(&mut rx).contains("player killing isn't allowed"));
+        assert!(drain(&mut rx).contains("You must turn on PK first"));
         assert_eq!(f.world.get::<Located>(v).map(|l| l.0), Some(f.here));
     }
 

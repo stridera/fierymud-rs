@@ -20009,6 +20009,12 @@ pub(crate) fn auto_assist_followers_of(
             .map(|(e, _, _, _, _)| e)
             .collect()
     };
+
+    // A follower only joins when the PK rule would let them hit the attacker.
+    let helpers: Vec<Entity> = helpers
+        .into_iter()
+        .filter(|h| attack_ok::attack_ok(world, *h, attacker, false))
+        .collect();
     let attacker_name = name_or(world, attacker, "(unknown)");
     for helper in helpers {
         try_insert(world, helper, Fighting(attacker));
@@ -20058,6 +20064,9 @@ pub(crate) fn engage_skill_shim(
         send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
         return;
     };
+    if !attack_ok::attack_ok(world, player, target, true) {
+        return;
+    }
     if !check_stamina(world, player, cost, skill) {
         return;
     }

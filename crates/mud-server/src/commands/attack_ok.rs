@@ -150,15 +150,203 @@ pub(crate) fn attack_ok(world: &mut World, ch: Entity, victim: Entity, verbose: 
         if is_pk_consenting(world, attacker) && is_pk_consenting(world, target) {
             return true;
         }
-        say(
-            world,
-            if pet {
-                "Sorry, you can't attack someone else's pet!\r\n".into()
-            } else {
-                "Sorry, player killing isn't allowed.\r\n".into()
-            },
-        );
+        let msg = if pet {
+            "Sorry, you can't attack someone else's pet!\r\n".to_string()
+        } else if !is_pk_consenting(world, attacker) {
+            "You must turn on PK first (type pk).\r\n".to_string()
+        } else {
+            let n = cap_sentence_start(&name_of(world, target));
+            format!("{n} is not a player killer.\r\n")
+        };
+        say(world, msg);
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::info::cmd_pk;
+    use crate::commands::test_support::{drain, player_in};
+    use mud_world::{Fighting, Named};
+
+    fn pk_on(world: &mut World, e: Entity) {
+        world
+            .entity_mut(e)
+            .insert(PlayerFlags(vec![PlayerFlag::PkEnabled]));
+    }
+
+    fn has_pk(world: &World, e: Entity) -> bool {
+        world
+            .get::<PlayerFlags>(e)
+            .is_some_and(|f| f.has(PlayerFlag::PkEnabled))
+    }
+
+    /// Two players in one room; neither has any flags yet.
+    fn duo() -> (World, Entity, Entity, crate::commands::test_support::Rx) {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (a, rx) = player_in(&mut world, room);
+        let (b, _brx) = player_in(&mut world, room);
+        world.entity_mut(b).insert(Named {
+            name: "Victim".into(),
+        });
+        world.entity_mut(a).insert(PlayerFlags(vec![]));
+        world.entity_mut(b).insert(PlayerFlags(vec![]));
+        (world, a, b, rx)
+    }
+
+    #[test]
+    fn pk_toggles_and_sets_the_persisted_flag() {
+        let (mut world, a, _b, mut rx) = duo();
+        cmd_pk(&mut world, a, "");
+        assert!(has_pk(&world, a));
+        assert!(drain(&mut rx).contains("Player killing is now ON"));
+        cmd_pk(&mut world, a, "");
+        assert!(!has_pk(&world, a));
+        assert!(drain(&mut rx).contains("Player killing is now OFF"));
+        cmd_pk(&mut world, a, "on");
+        assert!(has_pk(&world, a));
+        cmd_pk(&mut world, a, "on");
+        assert!(has_pk(&world, a), "explicit on is idempotent");
+        assert!(drain(&mut rx).contains("already ON"));
+        cmd_pk(&mut world, a, "off");
+        assert!(!has_pk(&world, a));
+        cmd_pk(&mut world, a, "bogus");
+        assert!(drain(&mut rx).contains("Usage: pk"));
+        assert!(!has_pk(&world, a));
+    }
+
+    #[test]
+    fn pk_off_is_refused_while_fighting_a_player() {
+        let (mut world, a, b, mut rx) = duo();
+        pk_on(&mut world, a);
+        pk_on(&mut world, b);
+        world.entity_mut(a).insert(Fighting(b));
+        cmd_pk(&mut world, a, "off");
+        assert!(has_pk(&world, a));
+        assert!(drain(&mut rx).contains("Not while you're fighting!"));
+        // The one being attacked can't slip away either.
+        world.entity_mut(a).remove::<Fighting>();
+        world.entity_mut(b).insert(Fighting(a));
+        cmd_pk(&mut world, a, "off");
+        assert!(has_pk(&world, a));
+        // Fight over: allowed again.
+        world.entity_mut(b).remove::<Fighting>();
+        cmd_pk(&mut world, a, "off");
+        assert!(!has_pk(&world, a));
+    }
+
+    #[test]
+    fn pk_off_is_allowed_while_fighting_a_mob() {
+        let (mut world, a, _b, _rx) = duo();
+        pk_on(&mut world, a);
+        let room = world.get::<Located>(a).unwrap().0;
+        let m = world
+            .spawn((Mob, Named { name: "rat".into() }, Located(room)))
+            .id();
+        world.entity_mut(a).insert(Fighting(m));
+        cmd_pk(&mut world, a, "off");
+        assert!(!has_pk(&world, a));
+    }
+
+    #[test]
+    fn players_fight_only_when_both_have_pk() {
+        let (mut world, a, b, mut rx) = duo();
+        // Neither: refused, attacker told to turn PK on.
+        assert!(!attack_ok(&mut world, a, b, true));
+        assert!(drain(&mut rx).contains("You must turn on PK first (type pk)."));
+        // Victim only: the attacker is still the one who is out.
+        pk_on(&mut world, b);
+        assert!(!attack_ok(&mut world, a, b, true));
+        assert!(drain(&mut rx).contains("You must turn on PK first"));
+        // Attacker only: the victim is not a player killer.
+        world.entity_mut(b).insert(PlayerFlags(vec![]));
+        pk_on(&mut world, a);
+        assert!(!attack_ok(&mut world, a, b, true));
+        assert!(drain(&mut rx).contains("Victim is not a player killer."));
+        // Both: allowed, in both directions.
+        pk_on(&mut world, b);
+        assert!(attack_ok(&mut world, a, b, true));
+        assert!(attack_ok(&mut world, b, a, true));
+    }
+
+    #[test]
+    fn melee_commands_obey_the_pk_rule() {
+        let (mut world, a, b, mut rx) = duo();
+        world
+            .entity_mut(b)
+            .insert(mud_world::CombatStats::default());
+        crate::commands::combat_commands::cmd_attack(&mut world, a, "victim");
+        assert!(world.get::<Fighting>(a).is_none());
+        assert!(world.get::<Fighting>(b).is_none());
+        assert!(drain(&mut rx).contains("You must turn on PK first"));
+    }
+
+    #[test]
+    fn mobs_are_unaffected_by_the_pk_rule() {
+        let (mut world, a, _b, _rx) = duo();
+        let room = world.get::<Located>(a).unwrap().0;
+        let m = world
+            .spawn((Mob, Named { name: "rat".into() }, Located(room)))
+            .id();
+        // A player without PK can attack a mob, and a mob can attack them.
+        assert!(attack_ok(&mut world, a, m, false));
+        assert!(attack_ok(&mut world, m, a, false));
+    }
+
+    #[test]
+    fn aoe_skips_players_who_fail_the_mutual_rule() {
+        let (mut world, a, b, mut rx) = duo();
+        let room = world.get::<Located>(a).unwrap().0;
+        // A non-PK player is never an AOE target.
+        let targets = crate::commands::aoe_targets_in_room(
+            &mut world,
+            a,
+            room,
+            crate::commands::AoeScope::RoomEnemies,
+        );
+        assert!(targets.is_empty());
+        // A PK-on victim is listed but filtered out when the caster has PK
+        // off; the caster is told once, not per target.
+        pk_on(&mut world, b);
+        let cast = crate::commands::invoke_ability_aoe(
+            &mut world,
+            a,
+            mud_db::abilities::AbilityKind::Spell,
+            "cast",
+            "fireball",
+            crate::commands::AoeScope::RoomEnemies,
+            "Nothing here.\r\n",
+        );
+        assert!(!cast);
+        let text = drain(&mut rx);
+        assert_eq!(
+            text.matches("You must turn on PK first").count(),
+            1,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn auto_assist_follower_without_pk_does_not_join_a_pk_fight() {
+        let (mut world, a, b, _rx) = duo();
+        let room = world.get::<Located>(a).unwrap().0;
+        let (h, _hrx) = player_in(&mut world, room);
+        world
+            .entity_mut(h)
+            .insert((Follower(b), PlayerFlags(vec![PlayerFlag::AutoAssist])));
+        pk_on(&mut world, a);
+        pk_on(&mut world, b);
+        crate::commands::auto_assist_followers_of(&mut world, b, a, room);
+        assert!(world.get::<Fighting>(h).is_none());
+        pk_on(&mut world, h);
+        world.entity_mut(h).insert(PlayerFlags(vec![
+            PlayerFlag::AutoAssist,
+            PlayerFlag::PkEnabled,
+        ]));
+        crate::commands::auto_assist_followers_of(&mut world, b, a, room);
+        assert!(world.get::<Fighting>(h).is_some());
+    }
 }

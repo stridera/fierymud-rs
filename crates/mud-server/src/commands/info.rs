@@ -1961,15 +1961,16 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["pk"],
+        names: &["pk", "pkill"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Settings,
         help: Help {
-            usage: "pk",
+            usage: "pk [on|off]",
             summary: "Toggle player-kill participation.",
-            long: "Sets PK_ENABLED. Once the PK gate lands, this is the \
-                   self-elected switch for inter-player combat.",
+            long: "Sets PK_ENABLED. Two players can fight each other only \
+                   while BOTH have PK on. You can't turn it off while \
+                   fighting another player.",
         },
         run: cmd_pk,
     }
@@ -8107,14 +8108,56 @@ pub(crate) fn cmd_dicerolls(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
-pub(crate) fn cmd_pk(world: &mut World, player: Entity, _args: &str) {
+/// `pk [on|off]`: opt in or out of player killing. Two players can fight
+/// only while both have `PkEnabled` (see `attack_ok`), so switching it off
+/// mid-duel is refused: it would be an escape hatch.
+pub(crate) fn cmd_pk(world: &mut World, player: Entity, args: &str) {
+    let currently_on = world
+        .get::<PlayerFlags>(player)
+        .is_some_and(|f| f.has(PlayerFlag::PkEnabled));
+    let want_on = match args.trim().to_ascii_lowercase().as_str() {
+        "" => !currently_on,
+        "on" | "yes" | "enable" => true,
+        "off" | "no" | "disable" => false,
+        _ => {
+            send_to(world, player, "Usage: pk [on|off]\r\n");
+            return;
+        }
+    };
+    if want_on == currently_on {
+        send_to(
+            world,
+            player,
+            format!(
+                "Player killing is already {}.\r\n",
+                if currently_on { "ON" } else { "OFF" }
+            ),
+        );
+        return;
+    }
+    if !want_on && fighting_another_player(world, player) {
+        send_to(world, player, "Not while you're fighting!\r\n");
+        return;
+    }
     toggle_player_flag(
         world,
         player,
         PlayerFlag::PkEnabled,
-        "PK is now enabled — you may attack and be attacked by other players.",
-        "PK is now disabled.",
+        "Player killing is now ON. Players who also have PK on may attack you, and you them.",
+        "Player killing is now OFF.",
     );
+}
+
+/// Is `player` in a fight with another player (either as attacker or target)?
+fn fighting_another_player(world: &mut World, player: Entity) -> bool {
+    if world
+        .get::<mud_world::Fighting>(player)
+        .is_some_and(|f| f.0 != player && world.get::<mud_world::Player>(f.0).is_some())
+    {
+        return true;
+    }
+    let mut q = world.query_filtered::<&mud_world::Fighting, With<mud_world::Player>>();
+    q.iter(world).any(|f| f.0 == player)
 }
 
 pub(crate) fn cmd_quest_flag(world: &mut World, player: Entity, _args: &str) {

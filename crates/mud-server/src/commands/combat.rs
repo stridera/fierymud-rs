@@ -1041,6 +1041,9 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
         return;
     }
 
+    if !super::attack_ok::attack_ok(world, player, target, true) {
+        return;
+    }
     let actual_name = name_of(world, target);
     let player_name = name_of(world, player);
 
@@ -1300,6 +1303,9 @@ fn perform_class_strike(
         send_to(world, player, "Ouch, that would hurt.\r\n");
         return;
     }
+    if !super::attack_ok::attack_ok(world, player, target, true) {
+        return;
+    }
     let player_level = world.get::<Profile>(player).map_or(1, |p| p.level);
     // Damage band: low = level + 5, high = level + 20. A 95% skill
     // success rate at all levels keeps the kit feeling reliable;
@@ -1433,6 +1439,12 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
             player,
             "Shopkeepers keep their coin a little too well guarded.\r\n",
         );
+        return;
+    }
+    // Legacy: player-stealing is only allowed during PK.
+    if world.get::<mud_world::Player>(target).is_some()
+        && !super::attack_ok::attack_ok(world, player, target, true)
+    {
         return;
     }
     if world.get::<mud_world::PeacefulRoom>(room).is_some() {
@@ -2070,6 +2082,9 @@ pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're already fighting; no surprise.\r\n");
         return;
     }
+    if !super::attack_ok::attack_ok(world, player, target, true) {
+        return;
+    }
     let cost = skill_stamina_cost(world, "springleap", SPRINGLEAP_COST);
     if !check_stamina(world, player, cost, "springleap") {
         return;
@@ -2126,6 +2141,9 @@ pub(crate) fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're too alert.\r\n");
         return;
     }
+    if !super::attack_ok::attack_ok(world, player, target, true) {
+        return;
+    }
     let cost = skill_stamina_cost(world, "throatcut", THROATCUT_COST);
     if !check_stamina(world, player, cost, "throatcut") {
         return;
@@ -2178,6 +2196,9 @@ pub(crate) fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
     };
     if world.get::<Fighting>(target).is_some() {
         send_to(world, player, "They're too alert to backstab.\r\n");
+        return;
+    }
+    if !super::attack_ok::attack_ok(world, player, target, true) {
         return;
     }
     let cost = skill_stamina_cost(world, "backstab", BACKSTAB_COST);
@@ -2809,6 +2830,10 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         return;
     };
 
+    if !super::attack_ok::attack_ok(world, player, target, true) {
+        return;
+    }
+
     // Engage if not already.
     let already_fighting = world.get::<Fighting>(player).is_some();
     if !already_fighting && let Ok(mut e) = world.get_entity_mut(player) {
@@ -2937,6 +2962,9 @@ pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
             player,
             format!("{n} simply ignores your provocation.\r\n"),
         );
+        return;
+    }
+    if !super::attack_ok::attack_ok(world, player, target, true) {
         return;
     }
     drain_stamina(world, player, cost);
