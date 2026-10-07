@@ -76,6 +76,9 @@ pub enum PendingPlayerUpdate {
         object_id: i32,
         quantity: i32,
     },
+    /// The character's quest just entered a new phase; credit any
+    /// COLLECT objectives from what they already carry.
+    QuestPhaseEntered { character_id: String },
 }
 
 impl PendingPlayerUpdate {
@@ -88,7 +91,8 @@ impl PendingPlayerUpdate {
             | Self::WealthDelta { character_id, .. }
             | Self::SkillPointsDelta { character_id, .. }
             | Self::AbilityKnown { character_id, .. }
-            | Self::SpawnItem { character_id, .. } => character_id,
+            | Self::SpawnItem { character_id, .. }
+            | Self::QuestPhaseEntered { character_id } => character_id,
         }
     }
 }
@@ -166,6 +170,9 @@ pub fn drain_player_updates(world: &mut World) {
                 {
                     k.entries.push((ability_id, 1, true));
                 }
+            }
+            PendingPlayerUpdate::QuestPhaseEntered { .. } => {
+                crate::quest_progress::recheck_collect_objectives(world, entity);
             }
             PendingPlayerUpdate::SpawnItem {
                 object_zone,
@@ -8289,187 +8296,22 @@ pub(crate) fn bump_quest_progress(world: &mut World, actor: Entity, kind: QuestO
                     return;
                 }
             };
-            for row in rows {
+            let notify = crate::quest_progress::Notifier {
+                character_id: cid,
+                out,
+                update_tx,
+            };
+            let prefix = if is_actor { "" } else { "(party) " };
+            for row in &rows {
                 let new_count = (row.current_count + 1).min(row.required_count);
-                let completed = new_count >= row.required_count;
-                if let Err(e) = mud_db::quest_objectives::upsert_progress(
+                crate::quest_progress::record_progress(
                     &pool,
-                    &row.character_quest_id,
-                    row.quest_zone_id,
-                    row.quest_id,
-                    row.phase_id,
-                    row.objective_id,
+                    &notify,
+                    &crate::quest_progress::ObjectiveRef::from(row),
                     new_count,
-                    completed,
+                    prefix,
                 )
-                .await
-                {
-                    tracing::warn!(error = %e, "objective upsert failed");
-                    continue;
-                }
-                // After a completing bump, try advancing the phase
-                // (or finishing the quest entirely).
-                if completed {
-                    match mud_db::quest_objectives::try_advance_phase(
-                        &pool,
-                        &row.character_quest_id,
-                    )
-                    .await
-                    {
-                        Ok(mud_db::quest_objectives::PhaseAdvance::Advanced { name, .. }) => {
-                            let _ = out.try_send(
-                                format!("Quest phase complete — moving to: {name}\r\n")
-                                    .into_bytes(),
-                            );
-                        }
-                        Ok(mud_db::quest_objectives::PhaseAdvance::QuestComplete) => {
-                            let _ = out.try_send(b"*** Quest complete! ***\r\n".to_vec());
-                            // Grant simple rewards (XP/gold/skill
-                            // points/ability) via DB; announce all
-                            // including ITEM/HOUSING which the
-                            // questgiver still needs to hand out.
-                            //
-                            // Wave 4.10: conditional rewards
-                            // (`condition` Lua non-null) need a
-                            // `&mut World` to evaluate, which
-                            // isn't reachable from this tokio task.
-                            // Defer them — surface a "claim with
-                            // qreward" hint and let the synchronous
-                            // claim path do the condition check.
-                            let all_rewards = mud_db::quest_objectives::list_quest_rewards(
-                                &pool,
-                                row.quest_zone_id,
-                                row.quest_id,
-                            )
-                            .await
-                            .unwrap_or_default();
-                            let (deferred, rewards): (Vec<_>, Vec<_>) =
-                                all_rewards.into_iter().partition(|r| {
-                                    r.condition.as_deref().is_some_and(|c| !c.trim().is_empty())
-                                });
-                            if !deferred.is_empty() {
-                                let _ = out.try_send(
-                                    format!(
-                                        "Conditional rewards available — \
-                                         type `qreward {} {}` to view and claim.\r\n",
-                                        row.quest_zone_id, row.quest_id
-                                    )
-                                    .into_bytes(),
-                                );
-                            }
-                            if !rewards.is_empty() {
-                                if let Err(e) = mud_db::quest_objectives::grant_simple_rewards(
-                                    &pool, &cid, &rewards,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(error = %e, "reward grant failed");
-                                }
-                                // Mirror the DB updates onto the
-                                // running ECS components so the
-                                // player sees the gain immediately
-                                // (without logout/login).
-                                for r in &rewards {
-                                    let update = match r.reward_type.as_str() {
-                                        "EXPERIENCE" => {
-                                            r.amount.map(|a| PendingPlayerUpdate::ExperienceDelta {
-                                                character_id: cid.clone(),
-                                                amount: a,
-                                            })
-                                        }
-                                        "GOLD" => {
-                                            r.amount.map(|a| PendingPlayerUpdate::WealthDelta {
-                                                character_id: cid.clone(),
-                                                amount: i64::from(a),
-                                            })
-                                        }
-                                        "SKILL_POINTS" => r.amount.map(|a| {
-                                            PendingPlayerUpdate::SkillPointsDelta {
-                                                character_id: cid.clone(),
-                                                amount: a,
-                                            }
-                                        }),
-                                        "ABILITY" => r.ability_id.map(|id| {
-                                            PendingPlayerUpdate::AbilityKnown {
-                                                character_id: cid.clone(),
-                                                ability_id: id,
-                                            }
-                                        }),
-                                        "ITEM" => match (r.object_zone_id, r.object_id) {
-                                            (Some(z), Some(id)) => {
-                                                Some(PendingPlayerUpdate::SpawnItem {
-                                                    character_id: cid.clone(),
-                                                    object_zone: z,
-                                                    object_id: id,
-                                                    quantity: r.quantity,
-                                                })
-                                            }
-                                            _ => None,
-                                        },
-                                        _ => None,
-                                    };
-                                    if let (Some(u), Some(tx)) = (update, update_tx.as_ref()) {
-                                        // Bounded channel — await until the tick drains
-                                        // a slot. Failure means the receiver dropped
-                                        // (server shutting down); silently ignore.
-                                        let _ = tx.send(u).await;
-                                    }
-                                }
-                                let mut buf = String::from("Rewards:\r\n");
-                                for r in &rewards {
-                                    let line = match (r.reward_type.as_str(), r.amount, r.quantity)
-                                    {
-                                        ("EXPERIENCE", Some(a), _) => {
-                                            format!("  +{a} experience\r\n")
-                                        }
-                                        ("GOLD", Some(a), _) => format!("  +{a} gold\r\n"),
-                                        ("SKILL_POINTS", Some(a), _) => {
-                                            format!("  +{a} skill points\r\n")
-                                        }
-                                        ("ABILITY", _, _) => "  +1 new ability\r\n".to_string(),
-                                        ("ITEM", _, q) => {
-                                            format!("  +{q} item(s) — see questgiver\r\n")
-                                        }
-                                        ("HOUSING", _, _) => {
-                                            "  +housing access — see questgiver\r\n".to_string()
-                                        }
-                                        _ => continue,
-                                    };
-                                    buf.push_str(&line);
-                                }
-                                if buf.len() > "Rewards:\r\n".len() {
-                                    let _ = out.try_send(buf.into_bytes());
-                                }
-                            }
-                        }
-                        Ok(mud_db::quest_objectives::PhaseAdvance::Pending) => {}
-                        Err(e) => {
-                            tracing::warn!(error = %e, "phase advance check failed");
-                        }
-                    }
-                }
-                let prefix = if is_actor {
-                    String::new()
-                } else {
-                    "(party) ".to_string()
-                };
-                let line = if completed {
-                    format!(
-                        "{prefix}Quest objective complete: {}\r\n",
-                        row.player_description
-                    )
-                } else if row.show_progress {
-                    format!(
-                        "{prefix}Quest objective: {} ({}/{})\r\n",
-                        row.player_description, new_count, row.required_count
-                    )
-                } else {
-                    format!(
-                        "{prefix}Quest objective updated: {}\r\n",
-                        row.player_description
-                    )
-                };
-                let _ = out.try_send(line.into_bytes());
+                .await;
             }
         });
     }

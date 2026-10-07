@@ -18,6 +18,7 @@ mod login;
 mod memorize;
 mod prompt;
 mod quest_dialogue;
+mod quest_progress;
 mod quest_triggers;
 mod quest_vars;
 mod regen;

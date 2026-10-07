@@ -39,6 +39,9 @@ pub(crate) fn dispatch_level_trigger(world: &mut World, player: Entity, new_leve
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
+    let update_tx = world
+        .get_resource::<crate::commands::PlayerUpdateTx>()
+        .map(|t| t.0.clone());
     tokio::spawn(async move {
         let quests = match mud_db::quests::list_by_trigger_level(&pool, new_level).await {
             Ok(q) => q,
@@ -51,7 +54,7 @@ pub(crate) fn dispatch_level_trigger(world: &mut World, player: Entity, new_leve
             if q.hidden {
                 continue;
             }
-            grant_or_offer(&pool, &cid, &out, new_level, &q).await;
+            grant_or_offer(&pool, &cid, &out, new_level, &q, update_tx.as_ref()).await;
         }
     });
 }
@@ -75,6 +78,9 @@ pub(crate) fn dispatch_item_trigger(
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
+    let update_tx = world
+        .get_resource::<crate::commands::PlayerUpdateTx>()
+        .map(|t| t.0.clone());
     tokio::spawn(async move {
         let quests = match mud_db::quests::list_by_trigger_item(&pool, item_zone, item_id).await {
             Ok(q) => q,
@@ -87,7 +93,7 @@ pub(crate) fn dispatch_item_trigger(
             if q.hidden {
                 continue;
             }
-            grant_or_offer(&pool, &cid, &out, level, &q).await;
+            grant_or_offer(&pool, &cid, &out, level, &q, update_tx.as_ref()).await;
         }
     });
 }
@@ -110,6 +116,9 @@ pub(crate) fn dispatch_room_trigger(
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
+    let update_tx = world
+        .get_resource::<crate::commands::PlayerUpdateTx>()
+        .map(|t| t.0.clone());
     tokio::spawn(async move {
         let quests = match mud_db::quests::list_by_trigger_room(&pool, room_zone, room_id).await {
             Ok(q) => q,
@@ -122,7 +131,7 @@ pub(crate) fn dispatch_room_trigger(
             if q.hidden {
                 continue;
             }
-            grant_or_offer(&pool, &cid, &out, level, &q).await;
+            grant_or_offer(&pool, &cid, &out, level, &q, update_tx.as_ref()).await;
         }
     });
 }
@@ -141,6 +150,9 @@ pub(crate) fn dispatch_skill_trigger(world: &mut World, player: Entity, ability_
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
+    let update_tx = world
+        .get_resource::<crate::commands::PlayerUpdateTx>()
+        .map(|t| t.0.clone());
     tokio::spawn(async move {
         let quests = match mud_db::quests::list_by_trigger_ability(&pool, ability_id).await {
             Ok(q) => q,
@@ -153,7 +165,7 @@ pub(crate) fn dispatch_skill_trigger(world: &mut World, player: Entity, ability_
             if q.hidden {
                 continue;
             }
-            grant_or_offer(&pool, &cid, &out, level, &q).await;
+            grant_or_offer(&pool, &cid, &out, level, &q, update_tx.as_ref()).await;
         }
     });
 }
@@ -166,6 +178,9 @@ pub(crate) fn dispatch_event_trigger(world: &mut World, event_id: i32) {
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
+    let update_tx = world
+        .get_resource::<crate::commands::PlayerUpdateTx>()
+        .map(|t| t.0.clone());
     // Snapshot every online player so the spawn doesn't have to walk
     // ECS state from the tokio task.
     let recipients: Vec<(String, mud_net::Outbound, i32)> = {
@@ -191,7 +206,7 @@ pub(crate) fn dispatch_event_trigger(world: &mut World, event_id: i32) {
                 if q.hidden {
                     continue;
                 }
-                grant_or_offer(&pool, &cid, &out, level, q).await;
+                grant_or_offer(&pool, &cid, &out, level, q, update_tx.as_ref()).await;
             }
         }
     });
@@ -317,6 +332,9 @@ pub(crate) fn dispatch_auto_trigger(world: &mut World, player: Entity) {
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
+    let update_tx = world
+        .get_resource::<crate::commands::PlayerUpdateTx>()
+        .map(|t| t.0.clone());
     tokio::spawn(async move {
         let quests = match mud_db::quests::list_auto_trigger(&pool).await {
             Ok(q) => q,
@@ -326,7 +344,7 @@ pub(crate) fn dispatch_auto_trigger(world: &mut World, player: Entity) {
             }
         };
         for q in quests {
-            grant_or_offer(&pool, &cid, &out, level, &q).await;
+            grant_or_offer(&pool, &cid, &out, level, &q, update_tx.as_ref()).await;
         }
     });
 }
@@ -341,6 +359,7 @@ async fn grant_or_offer(
     out: &mud_net::Outbound,
     level: i32,
     q: &mud_db::quests::QuestRow,
+    update_tx: Option<&tokio::sync::mpsc::Sender<crate::commands::PendingPlayerUpdate>>,
 ) {
     // Skip if the player is already on (or has finished) this quest.
     if let Ok(Some((_id, status))) =
@@ -362,6 +381,15 @@ async fn grant_or_offer(
                     q.plain_name, q.zone_id, q.id
                 );
                 let _ = out.try_send(line.into_bytes());
+                // Items already carried count towards a first-phase
+                // COLLECT objective.
+                if let Some(tx) = update_tx {
+                    let _ = tx
+                        .send(crate::commands::PendingPlayerUpdate::QuestPhaseEntered {
+                            character_id: cid.to_string(),
+                        })
+                        .await;
+                }
             }
             Ok(_) => {
                 // Refused (level, cooldown, exclusive, prereq).
@@ -559,36 +587,13 @@ pub(crate) fn quest_custom_lua_drain(world: &mut World) {
             continue;
         }
         let Some(pool) = pool.clone() else { continue };
-        let Some(out) = world.get::<Connection>(entity).map(|c| c.0.clone()) else {
+        let Some(notify) = crate::quest_progress::Notifier::for_player(world, entity) else {
             continue;
         };
         let new_count = (row.current_count + 1).min(row.required_count);
-        let completed = new_count >= row.required_count;
-        let cqid = row.character_quest_id.clone();
-        let desc = row.player_description.clone();
-        let show = row.show_progress;
-        let zone = row.quest_zone_id;
-        let qid = row.quest_id;
-        let pid = row.phase_id;
-        let oid = row.objective_id;
-        let req = row.required_count;
+        let obj = crate::quest_progress::ObjectiveRef::from(&row);
         tokio::spawn(async move {
-            if let Err(e) = mud_db::quest_objectives::upsert_progress(
-                &pool, &cqid, zone, qid, pid, oid, new_count, completed,
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "CUSTOM_LUA upsert failed");
-                return;
-            }
-            if completed {
-                let _ = mud_db::quest_objectives::try_advance_phase(&pool, &cqid).await;
-                let _ = out.try_send(format!("Quest objective complete: {desc}\r\n").into_bytes());
-            } else if show {
-                let _ = out.try_send(
-                    format!("Quest objective: {desc} ({new_count}/{req})\r\n").into_bytes(),
-                );
-            }
+            crate::quest_progress::record_progress(&pool, &notify, &obj, new_count, "").await;
         });
     }
 }

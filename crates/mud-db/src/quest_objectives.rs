@@ -61,6 +61,13 @@ pub async fn list_kill_mob_progress(
            AND cqo.objective_id = qo.id
         WHERE cq.character_id = $1
           AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.phase_id = COALESCE(
+                cq.current_phase_id,
+                (SELECT qp.id FROM "QuestPhase" qp
+                  WHERE qp.quest_zone_id = cq.quest_zone_id
+                    AND qp.quest_id = cq.quest_id
+                  ORDER BY qp."order" ASC, qp.id ASC
+                  LIMIT 1))
           AND qo.objective_type = 'KILL_MOB'::"QuestObjectiveType"
           AND qo.target_mob_zone_id = $2
           AND qo.target_mob_id = $3
@@ -117,6 +124,13 @@ pub async fn list_collect_item_progress(
            AND cqo.objective_id = qo.id
         WHERE cq.character_id = $1
           AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.phase_id = COALESCE(
+                cq.current_phase_id,
+                (SELECT qp.id FROM "QuestPhase" qp
+                  WHERE qp.quest_zone_id = cq.quest_zone_id
+                    AND qp.quest_id = cq.quest_id
+                  ORDER BY qp."order" ASC, qp.id ASC
+                  LIMIT 1))
           AND qo.objective_type = 'COLLECT_ITEM'::"QuestObjectiveType"
           AND qo.target_object_zone_id = $2
           AND qo.target_object_id = $3
@@ -127,6 +141,76 @@ pub async fn list_collect_item_progress(
         object_zone,
         object_id,
         is_collector,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// One in-progress COLLECT_ITEM objective in the character's
+/// CURRENT phase, with its target prototype. Used to credit items the
+/// character already holds when a phase is entered (pickups made
+/// before the phase began never counted towards it).
+#[derive(Debug, Clone)]
+pub struct CollectObjectiveRow {
+    pub character_quest_id: String,
+    pub quest_zone_id: i32,
+    pub quest_id: i32,
+    pub phase_id: i32,
+    pub objective_id: i32,
+    pub required_count: i32,
+    pub show_progress: bool,
+    pub player_description: String,
+    pub current_count: i32,
+    pub object_zone_id: i32,
+    pub object_id: i32,
+}
+
+/// All unfinished COLLECT_ITEM objectives in the current phase of every
+/// IN_PROGRESS quest the character holds.
+pub async fn list_current_collect_objectives(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Vec<CollectObjectiveRow>> {
+    sqlx::query_as!(
+        CollectObjectiveRow,
+        r#"
+        SELECT
+            cq.id AS "character_quest_id!: String",
+            qo.quest_zone_id AS "quest_zone_id!: i32",
+            qo.quest_id AS "quest_id!: i32",
+            qo.phase_id AS "phase_id!: i32",
+            qo.id AS "objective_id!: i32",
+            qo.required_count AS "required_count!: i32",
+            qo.show_progress AS "show_progress!: bool",
+            qo.player_description AS "player_description!: String",
+            COALESCE(cqo.current_count, 0) AS "current_count!: i32",
+            qo.target_object_zone_id AS "object_zone_id!: i32",
+            qo.target_object_id AS "object_id!: i32"
+        FROM "CharacterQuest" cq
+        JOIN "QuestObjective" qo
+            ON qo.quest_zone_id = cq.quest_zone_id
+           AND qo.quest_id = cq.quest_id
+        LEFT JOIN "CharacterQuestObjective" cqo
+            ON cqo.character_quest_id = cq.id
+           AND cqo.quest_zone_id = qo.quest_zone_id
+           AND cqo.quest_id = qo.quest_id
+           AND cqo.phase_id = qo.phase_id
+           AND cqo.objective_id = qo.id
+        WHERE cq.character_id = $1
+          AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.phase_id = COALESCE(
+                cq.current_phase_id,
+                (SELECT qp.id FROM "QuestPhase" qp
+                  WHERE qp.quest_zone_id = cq.quest_zone_id
+                    AND qp.quest_id = cq.quest_id
+                  ORDER BY qp."order" ASC, qp.id ASC
+                  LIMIT 1))
+          AND qo.objective_type = 'COLLECT_ITEM'::"QuestObjectiveType"
+          AND qo.target_object_zone_id IS NOT NULL
+          AND qo.target_object_id IS NOT NULL
+          AND COALESCE(cqo.completed, false) = false
+        "#,
+        character_id,
     )
     .fetch_all(pool)
     .await
@@ -166,6 +250,13 @@ pub async fn list_use_skill_progress(
            AND cqo.objective_id = qo.id
         WHERE cq.character_id = $1
           AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.phase_id = COALESCE(
+                cq.current_phase_id,
+                (SELECT qp.id FROM "QuestPhase" qp
+                  WHERE qp.quest_zone_id = cq.quest_zone_id
+                    AND qp.quest_id = cq.quest_id
+                  ORDER BY qp."order" ASC, qp.id ASC
+                  LIMIT 1))
           AND qo.objective_type = 'USE_SKILL'::"QuestObjectiveType"
           AND qo.target_ability_id = $2
           AND COALESCE(cqo.completed, false) = false
@@ -217,6 +308,13 @@ pub async fn list_deliver_item_progress(
            AND cqo.objective_id = qo.id
         WHERE cq.character_id = $1
           AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.phase_id = COALESCE(
+                cq.current_phase_id,
+                (SELECT qp.id FROM "QuestPhase" qp
+                  WHERE qp.quest_zone_id = cq.quest_zone_id
+                    AND qp.quest_id = cq.quest_id
+                  ORDER BY qp."order" ASC, qp.id ASC
+                  LIMIT 1))
           AND qo.objective_type = 'DELIVER_ITEM'::"QuestObjectiveType"
           AND qo.target_object_zone_id = $2
           AND qo.target_object_id = $3
@@ -273,6 +371,13 @@ pub async fn list_talk_to_npc_progress(
            AND cqo.objective_id = qo.id
         WHERE cq.character_id = $1
           AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.phase_id = COALESCE(
+                cq.current_phase_id,
+                (SELECT qp.id FROM "QuestPhase" qp
+                  WHERE qp.quest_zone_id = cq.quest_zone_id
+                    AND qp.quest_id = cq.quest_id
+                  ORDER BY qp."order" ASC, qp.id ASC
+                  LIMIT 1))
           AND qo.objective_type = 'TALK_TO_NPC'::"QuestObjectiveType"
           AND qo.target_mob_zone_id = $2
           AND qo.target_mob_id = $3
@@ -325,6 +430,13 @@ pub async fn list_visit_room_progress(
            AND cqo.objective_id = qo.id
         WHERE cq.character_id = $1
           AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.phase_id = COALESCE(
+                cq.current_phase_id,
+                (SELECT qp.id FROM "QuestPhase" qp
+                  WHERE qp.quest_zone_id = cq.quest_zone_id
+                    AND qp.quest_id = cq.quest_id
+                  ORDER BY qp."order" ASC, qp.id ASC
+                  LIMIT 1))
           AND qo.objective_type = 'VISIT_ROOM'::"QuestObjectiveType"
           AND qo.target_room_zone_id = $2
           AND qo.target_room_id = $3
@@ -472,6 +584,13 @@ pub async fn list_custom_lua_for_character(
            AND cqo.objective_id = qo.id
         WHERE cq.character_id = $1
           AND cq.status = 'IN_PROGRESS'::"QuestStatus"
+          AND qo.phase_id = COALESCE(
+                cq.current_phase_id,
+                (SELECT qp.id FROM "QuestPhase" qp
+                  WHERE qp.quest_zone_id = cq.quest_zone_id
+                    AND qp.quest_id = cq.quest_id
+                  ORDER BY qp."order" ASC, qp.id ASC
+                  LIMIT 1))
           AND qo.objective_type = 'CUSTOM_LUA'::"QuestObjectiveType"
           AND qo.lua_expression IS NOT NULL
           AND COALESCE(cqo.completed, false) = false
@@ -773,57 +892,73 @@ pub async fn try_advance_phase(
         .await?;
         row.id
     };
-    // Are all objectives in the current phase marked complete?
-    // Note: rows that don't exist in CharacterQuestObjective count
-    // as not-complete (LEFT JOIN + COALESCE).
-    let pending = sqlx::query!(
-        r#"
-        SELECT COUNT(*) AS "n!: i64"
-        FROM "QuestObjective" qo
-        LEFT JOIN "CharacterQuestObjective" cqo
-            ON cqo.character_quest_id = $1
-           AND cqo.quest_zone_id = qo.quest_zone_id
-           AND cqo.quest_id = qo.quest_id
-           AND cqo.phase_id = qo.phase_id
-           AND cqo.objective_id = qo.id
-        WHERE qo.quest_zone_id = $2
-          AND qo.quest_id = $3
-          AND qo.phase_id = $4
-          AND COALESCE(cqo.completed, false) = false
-        "#,
-        character_quest_id,
-        cq.quest_zone_id,
-        cq.quest_id,
-        current_phase_id,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-    if pending.n > 0 {
-        tx.commit().await?;
-        return Ok(PhaseAdvance::Pending);
-    }
-    // Phase complete. Find the next phase by order; tie-break on id.
-    let next = sqlx::query!(
-        r#"
-        SELECT next.id, next.name
-        FROM "QuestPhase" cur
-        JOIN "QuestPhase" next
-          ON next.quest_zone_id = cur.quest_zone_id
-         AND next.quest_id = cur.quest_id
-         AND (next."order", next.id) > (cur."order", cur.id)
-        WHERE cur.quest_zone_id = $1
-          AND cur.quest_id = $2
-          AND cur.id = $3
-        ORDER BY next."order" ASC, next.id ASC
-        LIMIT 1
-        "#,
-        cq.quest_zone_id,
-        cq.quest_id,
-        current_phase_id,
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some(next) = next {
+    // Walk forward while the current phase is fully satisfied. One
+    // completing bump normally finishes exactly one phase, but a phase
+    // can also be satisfied the moment it is entered (a COLLECT
+    // objective whose items are already held, or progress recorded
+    // before phase gating existed), so re-evaluate after every hop.
+    let mut current_phase_id = current_phase_id;
+    let mut advanced: Option<(i32, String)> = None;
+    loop {
+        // Are all objectives in the current phase marked complete?
+        // Rows that don't exist in CharacterQuestObjective count as
+        // not-complete (LEFT JOIN + COALESCE). A phase with no
+        // objectives is never "done": nothing can complete it.
+        let counts = sqlx::query!(
+            r#"
+            SELECT
+                COUNT(*) AS "total!: i64",
+                COUNT(*) FILTER (WHERE COALESCE(cqo.completed, false) = false)
+                    AS "pending!: i64"
+            FROM "QuestObjective" qo
+            LEFT JOIN "CharacterQuestObjective" cqo
+                ON cqo.character_quest_id = $1
+               AND cqo.quest_zone_id = qo.quest_zone_id
+               AND cqo.quest_id = qo.quest_id
+               AND cqo.phase_id = qo.phase_id
+               AND cqo.objective_id = qo.id
+            WHERE qo.quest_zone_id = $2
+              AND qo.quest_id = $3
+              AND qo.phase_id = $4
+            "#,
+            character_quest_id,
+            cq.quest_zone_id,
+            cq.quest_id,
+            current_phase_id,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if counts.total == 0 || counts.pending > 0 {
+            tx.commit().await?;
+            return Ok(match advanced {
+                Some((new_phase_id, name)) => PhaseAdvance::Advanced { new_phase_id, name },
+                None => PhaseAdvance::Pending,
+            });
+        }
+        // Phase complete. Find the next phase by order; tie-break on id.
+        let next = sqlx::query!(
+            r#"
+            SELECT next.id, next.name
+            FROM "QuestPhase" cur
+            JOIN "QuestPhase" next
+              ON next.quest_zone_id = cur.quest_zone_id
+             AND next.quest_id = cur.quest_id
+             AND (next."order", next.id) > (cur."order", cur.id)
+            WHERE cur.quest_zone_id = $1
+              AND cur.quest_id = $2
+              AND cur.id = $3
+            ORDER BY next."order" ASC, next.id ASC
+            LIMIT 1
+            "#,
+            cq.quest_zone_id,
+            cq.quest_id,
+            current_phase_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(next) = next else {
+            break;
+        };
         sqlx::query!(
             r#"UPDATE "CharacterQuest" SET current_phase_id = $1 WHERE id = $2"#,
             next.id,
@@ -831,11 +966,8 @@ pub async fn try_advance_phase(
         )
         .execute(&mut *tx)
         .await?;
-        tx.commit().await?;
-        return Ok(PhaseAdvance::Advanced {
-            new_phase_id: next.id,
-            name: next.name,
-        });
+        current_phase_id = next.id;
+        advanced = Some((next.id, next.name));
     }
     // No next phase — quest done.
     sqlx::query!(

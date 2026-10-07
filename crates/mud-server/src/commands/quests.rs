@@ -372,6 +372,7 @@ pub(crate) async fn cmd_qaccept(
                 return;
             }
         };
+    let accepted = outcome == mud_db::quests::AcceptOutcome::Accepted;
     let line = match outcome {
         mud_db::quests::AcceptOutcome::Accepted => {
             format!("Quest ({zone}, {id}) accepted.\r\n")
@@ -417,6 +418,11 @@ pub(crate) async fn cmd_qaccept(
         }
     };
     send_to(world, player, line);
+    if accepted {
+        // Items already in the pack count towards a first-phase
+        // COLLECT objective.
+        crate::quest_progress::recheck_collect_objectives(world, player);
+    }
 }
 
 /// Evaluate `availability_requirement` Lua for `player` (Wave 4.4).
@@ -487,11 +493,14 @@ pub(crate) async fn cmd_qload(
         return;
     };
     match mud_db::quests::admin_assign(pool, &character_id, zone, id).await {
-        Ok(Some(_)) => send_to(
-            world,
-            player,
-            format!("Assigned Quest ({zone}, {id}) to your character.\r\n"),
-        ),
+        Ok(Some(_)) => {
+            send_to(
+                world,
+                player,
+                format!("Assigned Quest ({zone}, {id}) to your character.\r\n"),
+            );
+            crate::quest_progress::recheck_collect_objectives(world, player);
+        }
         Ok(None) => send_to(
             world,
             player,
@@ -703,6 +712,7 @@ pub(crate) async fn cmd_qgive(
                     "An immortal grants you a quest: ({zone}, {id}). Type `quests` to view.\r\n"
                 ),
             );
+            crate::quest_progress::recheck_collect_objectives(world, target);
         }
         Ok(None) => send_to(
             world,
