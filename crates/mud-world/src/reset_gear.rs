@@ -51,6 +51,8 @@ pub struct ContentEntry {
     pub object_zone_id: i32,
     pub object_id: i32,
     pub quantity: i32,
+    /// World-wide cap on live copies of this object (legacy `P` max).
+    pub cap: i32,
 }
 
 /// Container contents per `ObjectResets.id`.
@@ -117,6 +119,7 @@ pub fn build_content_entries(rows: &[ObjectResetContent]) -> HashMap<i32, Vec<Co
             object_zone_id: r.object_zone_id,
             object_id: r.object_id,
             quantity: r.quantity,
+            cap: r.max_instances.max(1),
         });
     }
     by_reset
@@ -237,8 +240,17 @@ pub fn outfit_mob(
 /// each of `containers` (the entity spawned by that `ObjectResets`
 /// row). Handles arbitrary nesting: a row whose parent content row has
 /// not been spawned yet waits for a later sweep. Rows whose parent or
-/// prototype cannot be resolved are counted as skipped.
-pub fn fill_container(world: &mut World, containers: &[Entity], reset_id: i32) -> GearStats {
+/// prototype cannot be resolved, and copies that would exceed the row's
+/// world-wide `cap`, are counted as skipped (legacy `P` only loads
+/// while the live count is below `max`). `counts` is the running world
+/// count from [`object_world_counts`]; it is updated for every spawn.
+#[allow(clippy::implicit_hasher)]
+pub fn fill_container(
+    world: &mut World,
+    containers: &[Entity],
+    reset_id: i32,
+    counts: &mut HashMap<(i32, i32), i32>,
+) -> GearStats {
     let mut stats = GearStats::default();
     let Some(rows) = world
         .get_resource::<ObjectContentsCatalog>()
@@ -262,9 +274,10 @@ pub fn fill_container(world: &mut World, containers: &[Entity], reset_id: i32) -
                     p.clone()
                 }
             };
+            let key = (row.object_zone_id, row.object_id);
             let proto = world
                 .get_resource::<ObjectPrototypes>()
-                .and_then(|p| p.by_key.get(&(row.object_zone_id, row.object_id)).cloned());
+                .and_then(|p| p.by_key.get(&key).cloned());
             let Some(proto) = proto else {
                 stats.skipped += 1;
                 continue;
@@ -273,7 +286,12 @@ pub fn fill_container(world: &mut World, containers: &[Entity], reset_id: i32) -
             let mut made: Vec<Entity> = Vec::with_capacity(parents.len() * qty);
             for parent in parents {
                 for _ in 0..qty {
+                    if counts.get(&key).copied().unwrap_or(0) >= row.cap {
+                        stats.skipped += 1;
+                        continue;
+                    }
                     made.push(spawn_item(world, &proto, parent, None));
+                    *counts.entry(key).or_insert(0) += 1;
                     stats.spawned += 1;
                 }
             }

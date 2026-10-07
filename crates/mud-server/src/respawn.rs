@@ -398,10 +398,13 @@ pub fn respawn_tick(world: &mut World) {
         }
         let spawned = bundle.id();
         crate::item_decay::attach_timer_if_decaying(world, spawned, &proto);
-        // A container that comes back gets its authored contents again.
-        fill_container(world, &[spawned], entry.reset_id);
-        reset_id_alive.insert(entry.reset_id);
+        // A container that comes back gets its authored contents again,
+        // minus any whose world-wide cap is already met. The container
+        // is counted first (a container may hold copies of itself) and
+        // the contents extend the same running map.
         *object_world_counts.entry(proto_key).or_insert(0) += 1;
+        fill_container(world, &[spawned], entry.reset_id, &mut object_world_counts);
+        reset_id_alive.insert(entry.reset_id);
         object_refilled += 1;
     }
     if object_refilled > 0 {
@@ -726,6 +729,7 @@ mod tests {
                 object_zone_id: 1,
                 object_id: POUCH,
                 quantity: 1,
+                max_instances: 99,
             },
             // Listed before its parent on purpose: order must not matter.
             ObjectResetContent {
@@ -735,6 +739,7 @@ mod tests {
                 object_zone_id: 1,
                 object_id: GEM,
                 quantity: 3,
+                max_instances: 99,
             },
             ObjectResetContent {
                 id: 2,
@@ -743,6 +748,7 @@ mod tests {
                 object_zone_id: 1,
                 object_id: BREAD,
                 quantity: 2,
+                max_instances: 99,
             },
         ];
         let entries: Vec<ContentEntry> =
@@ -781,5 +787,45 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(kids(&mut world, pouch), vec![GEM, GEM, GEM]);
+    }
+
+    #[test]
+    fn container_contents_honour_the_world_cap() {
+        let (mut world, room) = base_world();
+        for reset_id in [7, 8] {
+            world
+                .resource_mut::<ObjectResetCatalog>()
+                .entries
+                .push(ObjectResetEntry {
+                    reset_id,
+                    object_zone_id: 1,
+                    object_id: CHEST,
+                    room_entity: room,
+                    max_instances: 2,
+                });
+            let rows = vec![ObjectResetContent {
+                id: reset_id,
+                reset_id,
+                parent_content_id: None,
+                object_zone_id: 1,
+                object_id: GEM,
+                quantity: 2,
+                // Legacy `P` max 3: two chests of 2 gems -> only 3 exist.
+                max_instances: 3,
+            }];
+            let entries = mud_world::reset_gear::build_content_entries(&rows)
+                .remove(&reset_id)
+                .unwrap();
+            world
+                .resource_mut::<ObjectContentsCatalog>()
+                .by_reset
+                .insert(reset_id, entries);
+        }
+        run_respawn(&mut world, 6000);
+        let gems = |world: &mut World| *object_world_counts(world).get(&(1, GEM)).unwrap_or(&0);
+        assert_eq!(gems(&mut world), 3);
+        // Further cycles do not mint more while the cap is met.
+        run_respawn(&mut world, 12000);
+        assert_eq!(gems(&mut world), 3);
     }
 }

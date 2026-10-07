@@ -1285,7 +1285,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     });
     for (reset_id, containers) in &objects_by_reset {
         if contents_by_reset.contains_key(reset_id) {
-            let filled = fill_container(world, containers, *reset_id);
+            let filled = fill_container(world, containers, *reset_id, &mut gear_counts);
             stats.object_contents_spawned += filled.spawned;
             stats.object_contents_skipped += filled.skipped;
         }

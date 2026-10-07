@@ -22,6 +22,8 @@ pub struct ObjectResetContent {
     pub object_zone_id: i32,
     pub object_id: i32,
     pub quantity: i32,
+    /// Legacy `P` max: world-wide cap on live copies of this object.
+    pub max_instances: i32,
 }
 
 pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<ObjectResetContent>> {
@@ -34,7 +36,8 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<ObjectResetContent>> {
             parent_content_id,
             object_zone_id,
             object_id,
-            quantity
+            quantity,
+            max_instances
         FROM "ObjectResetContents"
         ORDER BY id
         "#
