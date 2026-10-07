@@ -440,7 +440,8 @@ pub enum AcceptOutcome {
 /// On success, stamps `expires_at = NOW() + time_limit_minutes`
 /// when the quest has a time limit (Wave 4.2). Existing rows are
 /// revived in-place: status flips back to `IN_PROGRESS`, `accepted_at`
-/// gets a fresh stamp, `variables` resets to `{}`.
+/// gets a fresh stamp, `variables` resets to `{}` and the previous run's
+/// objective progress is deleted.
 #[allow(clippy::too_many_lines)]
 pub async fn accept_for_player(
     pool: &PgPool,
@@ -574,7 +575,8 @@ pub async fn accept_for_player(
     let expires_at: Option<chrono::NaiveDateTime> = quest
         .time_limit_minutes
         .map(|mins| chrono::Utc::now().naive_utc() + chrono::Duration::minutes(i64::from(mins)));
-    sqlx::query!(
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query!(
         r#"
         INSERT INTO "CharacterQuest"
             (id, character_id, quest_zone_id, quest_id, status, expires_at, variables)
@@ -587,14 +589,24 @@ pub async fn accept_for_player(
             current_phase_id = NULL,
             expires_at = EXCLUDED.expires_at,
             variables = '{}'::jsonb
+        RETURNING id
         "#,
         character_id,
         zone_id,
         quest_id,
         expires_at,
     )
-    .execute(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    // A revived row (repeat after cooldown, or after failure/abandon)
+    // must start from zero: drop the previous run's objective counts.
+    sqlx::query!(
+        r#"DELETE FROM "CharacterQuestObjective" WHERE character_quest_id = $1"#,
+        row.id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(AcceptOutcome::Accepted)
 }
 

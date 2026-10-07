@@ -11,6 +11,9 @@ use mud_db::quest_objectives::{
 use mud_db::quests::{AcceptOutcome, accept_for_player};
 use sqlx::PgPool;
 
+/// Keeps ids unique between tests running in parallel.
+static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 struct Fx {
     pool: PgPool,
     char_id: String,
@@ -44,7 +47,8 @@ async fn fixture() -> Option<Fx> {
     let tag = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos();
+        .as_nanos()
+        + u128::from(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let char_id = format!("zz-qrt-c-{tag}");
     sqlx::query("INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())")
         .bind(&char_id)
@@ -302,5 +306,65 @@ async fn collect_recheck_lists_only_the_current_phase() {
         PhaseAdvance::QuestComplete
     );
     assert!(list().await.is_empty());
+    fx.end().await;
+}
+
+/// Re-accepting a finished (repeatable) quest starts from zero instead
+/// of keeping the old run's finished objectives.
+#[tokio::test]
+async fn reaccept_after_completion_resets_objective_counts() {
+    let Some(fx) = fixture().await else { return };
+    fx.phase(1, 0).await;
+    fx.kill(1, 1, 0).await;
+    assert_eq!(fx.accept().await, AcceptOutcome::Accepted);
+    let cq = fx.cq_id().await;
+    fx.complete(&cq, 1, 1).await;
+    assert_eq!(
+        try_advance_phase(&fx.pool, &cq).await.unwrap(),
+        PhaseAdvance::QuestComplete
+    );
+    assert_eq!(fx.kill_rows(0).await, 0, "finished objective is not listed");
+
+    assert_eq!(fx.accept().await, AcceptOutcome::Accepted, "repeatable");
+    assert_eq!(fx.cq_id().await, cq, "the row is revived in place");
+    let rows = list_kill_mob_progress(&fx.pool, &fx.char_id, fx.mobs[0].0, fx.mobs[0].1, true)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "objective is open again");
+    assert_eq!(rows[0].current_count, 0);
+    fx.end().await;
+}
+
+/// The same reset applies after an abandon, which is how a
+/// non-repeatable quest is retried.
+#[tokio::test]
+async fn reaccept_after_abandon_resets_partial_progress() {
+    let Some(fx) = fixture().await else { return };
+    fx.phase(1, 0).await;
+    sqlx::query(
+        "INSERT INTO \"QuestObjective\" (quest_zone_id, quest_id, phase_id, id, \
+         objective_type, player_description, required_count, \
+         target_mob_zone_id, target_mob_id) \
+         VALUES ($1, $2, 1, 1, 'KILL_MOB'::\"QuestObjectiveType\", 'kill', 3, $3, $4)",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .bind(fx.mobs[0].0)
+    .bind(fx.mobs[0].1)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(fx.accept().await, AcceptOutcome::Accepted);
+    let cq = fx.cq_id().await;
+    upsert_progress(&fx.pool, &cq, fx.zone, fx.quest, 1, 1, 2, false)
+        .await
+        .unwrap();
+    assert_eq!(mud_db::quests::abandon(&fx.pool, &cq).await.unwrap(), 1);
+
+    assert_eq!(fx.accept().await, AcceptOutcome::Accepted);
+    let rows = list_kill_mob_progress(&fx.pool, &fx.char_id, fx.mobs[0].0, fx.mobs[0].1, true)
+        .await
+        .unwrap();
+    assert_eq!(rows[0].current_count, 0, "partial progress was wiped");
     fx.end().await;
 }
