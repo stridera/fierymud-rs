@@ -9,7 +9,7 @@ use mud_world::{
     ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, Shopkeeper, Wealth,
 };
 
-use super::info::{cmd_buy, cmd_list};
+use super::info::{cmd_buy, cmd_list, cmd_mount};
 use super::test_support::{Rx, drain, mob_proto, object_proto, player_in};
 
 const SHOP: (i32, i32) = (30, 91);
@@ -169,4 +169,116 @@ fn buying_something_the_stable_does_not_have_is_refused_without_charge() {
     assert!(out.contains("doesn't have 'dragon' for hire"), "{out}");
     assert_eq!(world.get::<Wealth>(player).unwrap().0, 1_000);
     assert!(followers_of(&mut world, player).is_empty());
+}
+
+fn mixed_shop() -> ShopDef {
+    // Items: sword (1). Pets: mare (2), kitten (3).
+    shop_def(
+        vec![ShopOffering {
+            object_zone_id: 30,
+            object_id: 7,
+            amount: -1,
+            price: 0,
+        }],
+        vec![
+            ShopPetOffering {
+                mob_zone_id: 30,
+                mob_id: 81,
+                amount: -1,
+                price: 0,
+            },
+            ShopPetOffering {
+                mob_zone_id: 30,
+                mob_id: 90,
+                amount: -1,
+                price: 0,
+            },
+        ],
+    )
+}
+
+#[test]
+fn list_numbers_pets_after_the_items() {
+    let (mut world, player, mut rx) = world_with_shop(mixed_shop(), 1_000);
+    cmd_list(&mut world, player, "");
+    let out = drain(&mut rx);
+    let row = |needle: &str| {
+        out.lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} missing in {out}"))
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(row("a steel sword"), "1");
+    assert_eq!(row("a stout mare"), "2");
+    assert_eq!(row("a kitten"), "3");
+}
+
+#[test]
+fn buy_number_uses_the_unified_numbering() {
+    let (mut world, player, mut rx) = world_with_shop(mixed_shop(), 1_000);
+    cmd_buy(&mut world, player, "3");
+    assert!(drain(&mut rx).contains("You hire a kitten"));
+    cmd_buy(&mut world, player, "1");
+    assert!(drain(&mut rx).contains("You buy a steel sword"));
+    cmd_buy(&mut world, player, "2");
+    assert!(drain(&mut rx).contains("You hire a stout mare"));
+    cmd_buy(&mut world, player, "4");
+    let out = drain(&mut rx);
+    assert!(out.contains("doesn't have '4' for hire"), "{out}");
+    assert_eq!(followers_of(&mut world, player).len(), 2);
+}
+
+#[test]
+fn keyword_matching_both_prefers_the_item_and_pet_only_keyword_hires() {
+    let (mut world, player, mut rx) = world_with_shop(mixed_shop(), 1_000);
+    // Give the mare the keyword "sword" too: the item still wins.
+    world
+        .resource_mut::<MobPrototypes>()
+        .by_key
+        .get_mut(&(30, 81))
+        .unwrap()
+        .keywords
+        .push("sword".to_string());
+    cmd_buy(&mut world, player, "sword");
+    assert!(drain(&mut rx).contains("You buy a steel sword"));
+    assert!(followers_of(&mut world, player).is_empty());
+    cmd_buy(&mut world, player, "kitten");
+    assert!(drain(&mut rx).contains("You hire a kitten"));
+}
+
+#[test]
+fn only_trait_tagged_mobs_are_mountable() {
+    let mut tagged = mob_proto(1, 1, MobProfession::Shopkeeper);
+    tagged.traits = vec![MobTrait::Mount];
+    assert!(tagged.is_mountable());
+    let mut mountain = mob_proto(1, 2, MobProfession::Shopkeeper);
+    mountain.keywords = vec!["mountain".to_string(), "horse".to_string()];
+    assert!(!mountain.is_mountable());
+}
+
+#[test]
+fn persisted_mount_is_rideable_after_relog() {
+    let (mut world, player, mut rx) = world_with_shop(shop_def(Vec::new(), Vec::new()), 0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let persisted: crate::login::PersistedPets = serde_json::from_value(serde_json::json!({
+        "saved_at_unix": now,
+        "pets": [{
+            "proto_zone_id": 30, "proto_id": 81,
+            "name": "Tester's a stout mare", "hp": 10, "max_hp": 10
+        }]
+    }))
+    .unwrap();
+    crate::login::restore_persisted_pets(&mut world, player, persisted);
+    let pets = followers_of(&mut world, player);
+    assert_eq!(pets.len(), 1);
+    assert!(world.get::<Mountable>(pets[0]).is_some());
+    cmd_mount(&mut world, player, "mare");
+    let out = drain(&mut rx);
+    assert!(out.contains("You mount"), "{out}");
 }

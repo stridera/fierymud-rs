@@ -639,6 +639,9 @@ pub(crate) fn restore_persisted_pets(world: &mut World, player: Entity, persiste
         if !proto.examine_description.trim().is_empty() {
             pet_entity.insert(mud_world::ExamineText(proto.examine_description.clone()));
         }
+        if proto.is_mountable() {
+            pet_entity.insert(mud_world::Mountable);
+        }
     }
 }
 

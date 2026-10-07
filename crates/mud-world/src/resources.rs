@@ -2391,24 +2391,15 @@ pub fn effective_race(world: &World, entity: Entity) -> String {
 }
 
 impl MobProto {
-    /// Whether instances of this proto can be ridden: tagged with
-    /// `MobTrait::Mount`, or (for content not yet tagged) carrying a
-    /// horse-like keyword. Shared by the world spawn, the respawn pass and
-    /// pet-shop `hire` so a bought steed is as mountable as a wild one.
+    /// Whether instances of this proto can be ridden: the mob carries
+    /// `MobTrait::Mount` (fierylib maps the legacy MOUNTABLE flag onto it, and
+    /// builders set it in Muditor). Shared by the world spawn, the respawn
+    /// pass, pet-shop `hire` and login pet restore.
     #[must_use]
     pub fn is_mountable(&self) -> bool {
         self.traits
             .iter()
             .any(|t| matches!(t, mud_db::enums::MobTrait::Mount))
-            || self.keywords.iter().any(|k| {
-                let lc = k.to_ascii_lowercase();
-                lc.contains("horse")
-                    || lc.contains("steed")
-                    || lc.contains("mount")
-                    || lc.contains("donkey")
-                    || lc.contains("mare")
-                    || lc.contains("nightmare")
-            })
     }
 
     /// Average-roll HP from the dice expression `NdM+B`: `N*(M+1)/2 + B`,

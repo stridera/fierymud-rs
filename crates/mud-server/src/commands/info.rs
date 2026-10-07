@@ -4189,13 +4189,13 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
             };
             out.push_str(&format!(
                 "  {:<3} {:<40} {:<28} {}\r\n",
-                i + 1,
+                shop.items.len() + i + 1,
                 mob_name,
                 price_str,
                 stock_str
             ));
         }
-        out.push_str("\r\nUse `hire <#|name>` to hire one as a pet.\r\n");
+        out.push_str("\r\nUse `buy <#|name>` (or `hire`) to take one along.\r\n");
     }
     if shop.items.is_empty() && shop.pets.is_empty() {
         send_rendered(
@@ -4428,12 +4428,11 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let mob_protos = world.resource::<MobPrototypes>().by_key.clone();
+    // Pets are numbered after the shop's items in `list`, so `#` here is
+    // the same unified number `buy` accepts.
     let offer_idx: Option<usize> = if let Ok(n) = arg.parse::<usize>() {
-        if n == 0 || n > shop.pets.len() {
-            None
-        } else {
-            Some(n - 1)
-        }
+        n.checked_sub(shop.items.len() + 1)
+            .filter(|i| *i < shop.pets.len())
     } else {
         let lc = arg.to_ascii_lowercase();
         shop.pets.iter().position(|o| {
