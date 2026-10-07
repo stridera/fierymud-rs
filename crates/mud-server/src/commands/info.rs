@@ -505,7 +505,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["drop", "dr"],
+        names: &["drop"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Inventory,
@@ -573,7 +573,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["wear", "we"],
+        names: &["wear"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Inventory,
@@ -1582,15 +1582,16 @@ inventory::submit! {
         required_perm: None,
         category: Category::Settings,
         help: Help {
-            usage: "toggle <flag>",
-            summary: "Flip a player flag on or off.",
-            long: "Examples: `toggle afk`, `toggle deaf`, `toggle notell`. \
+            usage: "toggle [<flag>]",
+            summary: "List your toggles, or flip one on or off.",
+            long: "With no argument, lists every toggle with its ON/OFF \
+                   state. `toggle <name>` flips one: names are matched \
+                   like command abbreviations (`toggle auto` reaches the \
+                   first AutoXxx in the list) and don't need underscores \
+                   (`toggle showdicerolls`, `toggle dice`, \
+                   `toggle show_dice_rolls` all work). \
                    `toggle columns <n>` sets the text wrap width (see \
-                   `columns`). `flags` lists all currently-set flags. Recognised names \
-                   include AFK, DEAF, NO_TELL/NOTELL, BRIEF, COMPACT, \
-                   AUTO_LOOT, AUTO_GOLD, AUTO_EXIT, WIMPY, QUEST, PK, MSP, \
-                   MXP, HOLY_LIGHT, COLOR_BLIND, SHOW_DICE_ROLLS, SHOW_IDS, \
-                   NO_SUMMON, CONSENT, NO_REPEAT.",
+                   `columns`).",
         },
         run: cmd_toggle,
     }
@@ -1639,11 +1640,15 @@ inventory::submit! {
             summary: "Define a command shortcut.",
             long: "With no args, lists every alias you've defined. With \
                    `alias <name>`, shows that alias's expansion. With \
-                   `alias <name> <command>`, sets the alias — typing \
-                   `<name> [args]` will be rewritten to \
-                   `<command> [args]` before dispatch. Aliases persist \
-                   across sessions. v1 expands once (no $1/$* yet) and \
-                   the first token is replaced wholesale.",
+                   `alias <name> <command>`, sets the alias (`unalias <name>` \
+                   removes it). A plain alias replaces \
+                   whatever you type (extra words are dropped). Put `$*` \
+                   where the rest of your line should go, `$1`..`$9` for \
+                   single words, and `;` between commands to chain them: \
+                   `alias gg get all corpse;put all bag` or \
+                   `alias k kill $1;kill $2`. An alias never re-triggers \
+                   itself, so `alias look look $*` wraps the real command. \
+                   Aliases persist across sessions.",
         },
         run: cmd_alias,
     }
@@ -1715,7 +1720,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["wimpy", "wi"],
+        names: &["wimpy"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Settings,
@@ -2041,15 +2046,17 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["quit", "qu"],
+        names: &["quit"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Settings,
         help: Help {
             usage: "quit",
-            summary: "Disconnect from the game.",
-            long: "Sends a goodbye message; close your client to fully \
-                   disconnect.",
+            summary: "Save your character and leave the game.",
+            long: "Saves your character, says goodbye and drops the \
+                   connection. You can't quit while fighting (staff \
+                   excepted) or while casting. The whole word is required; \
+                   `q`, `qu` and `qui` only remind you of that.",
         },
         run: cmd_quit,
     }
@@ -7149,18 +7156,37 @@ pub(crate) fn cmd_roles(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
-pub(crate) fn cmd_quit(world: &mut World, player: Entity, _args: &str) {
-    // Save happens automatically on disconnect via the
-    // ConnRouter::on_disconnect path; the autosave tick also
-    // runs every 5 minutes so anything since the last save is
-    // safe even on Ctrl-C. Spelling it out here so a player who
-    // just types `quit` without closing the client doesn't worry
-    // about losing progress.
-    send_to(
-        world,
-        player,
-        "Goodbye! Your character is auto-saved on disconnect — close your client to log out.\r\n",
-    );
+/// Legacy `do_quit` (`act.other.cpp`): shapechanged / switched characters
+/// can't quit; mortals can't quit mid-fight (staff can); otherwise say
+/// goodbye and flag the session as quitting. The connection layer notices
+/// the [`Quitting`] marker right after this command returns and runs the
+/// canonical `on_disconnect` save + despawn path, then closes the socket
+/// (`ConnRouter::finish_quit`). Everything the character carries is saved,
+/// so unlike legacy nothing is dropped on the floor.
+///
+/// Only the whole word works: `q`, `qu`, `qui` are answered by the
+/// dispatcher's safety reply (legacy hidden `qui` entry).
+pub(crate) fn cmd_quit(world: &mut World, player: Entity, args: &str) {
+    if world.get::<Player>(player).is_none() {
+        send_to(world, player, "You can't quit while shapechanged!\r\n");
+        return;
+    }
+    let first = args.split_whitespace().next().unwrap_or("");
+    if !first.is_empty() && !first.eq_ignore_ascii_case("yes") {
+        send_to(world, player, "Just type 'quit' to leave the world.\r\n");
+        return;
+    }
+    let is_staff = world
+        .get::<mud_world::Account>(player)
+        .is_some_and(|a| a.role.rank() > mud_db::enums::UserRole::Player.rank());
+    if !is_staff && world.get::<Fighting>(player).is_some() {
+        send_to(world, player, "No way!  You're fighting for your life!\r\n");
+        return;
+    }
+    send_to(world, player, "Goodbye, friend.  Come back soon!\r\n");
+    if let Ok(mut e) = world.get_entity_mut(player) {
+        e.insert(crate::commands::Quitting);
+    }
 }
 
 /// Built-in prompt templates a player can pick by short name.
@@ -7361,14 +7387,113 @@ pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, format!("Prompt set to: {template}\r\n"));
 }
 
+/// Every player toggle in the order `toggle` lists them, with the
+/// legacy-style display name (no underscores: `ShowDiceRolls`, not
+/// `SHOW_DICE_ROLLS`). Legacy `do_toggle` (`prefs.cpp`) showed this table
+/// for a bare `toggle`; the list order follows its `fields[]`.
+const TOGGLES: &[(PlayerFlag, &str)] = &[
+    (PlayerFlag::NoSummon, "NoSummon"),
+    (PlayerFlag::Brief, "Brief"),
+    (PlayerFlag::Compact, "Compact"),
+    (PlayerFlag::NoTell, "NoTell"),
+    (PlayerFlag::Afk, "AFK"),
+    (PlayerFlag::Deaf, "Deaf"),
+    (PlayerFlag::Quest, "Quest"),
+    (PlayerFlag::NoRepeat, "NoRepeat"),
+    (PlayerFlag::HolyLight, "HolyLight"),
+    (PlayerFlag::AutoExit, "AutoExit"),
+    (PlayerFlag::AutoSplit, "AutoSplit"),
+    (PlayerFlag::AutoGold, "AutoGold"),
+    (PlayerFlag::AutoLoot, "AutoLoot"),
+    (PlayerFlag::AutoAssist, "AutoAssist"),
+    (PlayerFlag::Wimpy, "Wimpy"),
+    (PlayerFlag::ShowDiceRolls, "ShowDiceRolls"),
+    (PlayerFlag::PkEnabled, "PK"),
+    (PlayerFlag::Consent, "Consent"),
+    (PlayerFlag::ColorBlind, "ColorBlind"),
+    (PlayerFlag::Msp, "MSP"),
+    (PlayerFlag::MxpEnabled, "MXP"),
+    (PlayerFlag::ShowIds, "ShowIds"),
+    (PlayerFlag::Muted, "Muted"),
+];
+
+/// Lowercase with the `_` / `-` separators removed, so `show_dice_rolls`,
+/// `Show-Dice-Rolls` and `ShowDiceRolls` all compare equal.
+fn toggle_key(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Whether `player` may see and flip `flag` (god-only flags need Builder+).
+fn toggle_allowed(world: &World, player: Entity, flag: PlayerFlag) -> bool {
+    !flag.is_god_only()
+        || world
+            .get::<mud_world::Account>(player)
+            .is_some_and(|a| a.role.at_least(UserRole::Builder))
+}
+
+/// Resolve what the player typed to a flag the way legacy did: exact name
+/// first, then the first toggle (in list order) the text abbreviates. The
+/// canonical `SCREAMING_SNAKE` labels and their short aliases still work.
+fn resolve_toggle(world: &World, player: Entity, raw: &str) -> Option<PlayerFlag> {
+    let key = toggle_key(raw);
+    if key.is_empty() {
+        return None;
+    }
+    let visible = || {
+        TOGGLES
+            .iter()
+            .filter(|(f, _)| toggle_allowed(world, player, *f))
+    };
+    visible()
+        .find(|(_, n)| toggle_key(n) == key)
+        .or_else(|| visible().find(|(_, n)| toggle_key(n).starts_with(&key)))
+        .map(|(f, _)| *f)
+        .or_else(|| PlayerFlag::from_label(raw))
+}
+
+/// The bare-`toggle` table: every toggle the player can use with its
+/// ON/OFF state, three to a row.
+fn render_toggle_list(world: &World, player: Entity) -> String {
+    let flags = world.get::<PlayerFlags>(player);
+    let mut out = String::from(
+        "\r\n             FieryMUD TOGGLES!  (See HELP TOGGLE)\r\n\
+         ===============================================================\r\n",
+    );
+    let mut column = 0;
+    for (flag, name) in TOGGLES {
+        if !toggle_allowed(world, player, *flag) {
+            continue;
+        }
+        let on = flags.is_some_and(|pf| pf.has(*flag));
+        let state = if on {
+            "<b:white>  ON</>"
+        } else {
+            "<dim> OFF</>"
+        };
+        out.push_str(&format!(" {name:>13} {state}"));
+        column += 1;
+        if column == 3 {
+            column = 0;
+            out.push_str("\r\n");
+        } else {
+            out.push_str(" |");
+        }
+    }
+    if column != 0 {
+        out.push_str("\r\n");
+    }
+    out.push_str("===============================================================\r\n");
+    out
+}
+
 pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
     let raw = args.trim();
     if raw.is_empty() {
-        send_to(
-            world,
-            player,
-            "Toggle which flag? Try `flags` to see what's set, or `help toggle`.\r\n",
-        );
+        let list = render_toggle_list(world, player);
+        send_to(world, player, list);
         return;
     }
     // `toggle wrap` / `toggle columns <n>`: the wrap width is a numeric
@@ -7378,25 +7503,24 @@ pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
         cmd_columns(world, player, rest);
         return;
     }
-    let Some(flag) = PlayerFlag::from_label(raw) else {
-        send_to(world, player, format!("Unknown flag '{raw}'.\r\n"));
+    let Some(flag) = resolve_toggle(world, player, raw) else {
+        send_to(
+            world,
+            player,
+            "Toggle what!?  Type `toggle` for the list.\r\n",
+        );
         return;
     };
     // God-only flags (HOLY_LIGHT, SHOW_IDS) are gated on the
     // dedicated cmd_holylight / cmd_showids commands; the generic
     // toggle path must not become a bypass.
-    if flag.is_god_only() {
-        let allowed = world
-            .get::<mud_world::Account>(player)
-            .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder));
-        if !allowed {
-            send_to(
-                world,
-                player,
-                format!("'{raw}' is not a flag you can toggle.\r\n"),
-            );
-            return;
-        }
+    if !toggle_allowed(world, player, flag) {
+        send_to(
+            world,
+            player,
+            format!("'{raw}' is not a flag you can toggle.\r\n"),
+        );
+        return;
     }
     let now_on = world
         .get_mut::<PlayerFlags>(player)
@@ -7405,7 +7529,10 @@ pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You have no player flags slot.\r\n");
         return;
     };
-    let label = flag.label();
+    let label = TOGGLES
+        .iter()
+        .find(|(f, _)| *f == flag)
+        .map_or_else(|| flag.label(), |(_, n)| *n);
     if now_on {
         send_to(world, player, format!("{label} is now ON.\r\n"));
     } else {

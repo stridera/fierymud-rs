@@ -412,7 +412,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-    names: &["rescue", "res"],
+    names: &["rescue"],
     min_role: UserRole::Player,
     required_perm: None,
     category: Category::Combat,

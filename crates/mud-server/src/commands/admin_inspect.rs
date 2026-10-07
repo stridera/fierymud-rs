@@ -62,7 +62,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["mob-ai", "mai"],
+        names: &["mob-ai"],
         min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Admin,

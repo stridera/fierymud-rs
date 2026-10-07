@@ -33,7 +33,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["reply", "r"],
+        names: &["reply"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Communication,

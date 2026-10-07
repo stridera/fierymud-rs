@@ -307,6 +307,8 @@ mod mail;
 pub(crate) use mail::{cmd_mail_stub, compose_mail_step};
 #[path = "commands/movement_directions.rs"]
 mod movement_directions;
+#[path = "commands/priority.rs"]
+mod priority;
 #[path = "commands/quests.rs"]
 mod quests;
 #[path = "commands/recall.rs"]
@@ -323,6 +325,9 @@ mod followers;
 #[path = "commands/magic_focus.rs"]
 mod magic_focus;
 pub(crate) use magic_focus::Concentrating;
+#[cfg(test)]
+#[path = "commands/parser_tests.rs"]
+mod parser_tests;
 #[cfg(test)]
 #[path = "commands/progression_tests.rs"]
 mod progression_tests;
@@ -517,8 +522,27 @@ pub async fn try_dispatch_async(
     }
 
     let mut parts = trimmed.splitn(2, char::is_whitespace);
-    let head = parts.next().unwrap_or("").to_ascii_lowercase();
+    let mut head = parts.next().unwrap_or("").to_ascii_lowercase();
     let args = parts.next().unwrap_or("").trim();
+
+    // An abbreviation of an async command (`mailb`, `rea`) resolves by the
+    // same legacy priority as the sync dispatcher; the handlers match on
+    // the canonical name. Anything that isn't an exact name or social and
+    // doesn't resolve to a registered command falls through untouched.
+    let is_social = world
+        .get_resource::<SocialRegistry>()
+        .is_some_and(|r| r.get(&head).is_some());
+    if !REGISTRY.contains_key(head.as_str()) && !is_social {
+        let (role, perms) = world.get::<Account>(player).map_or_else(
+            || (UserRole::Player, Vec::new()),
+            |a| (a.role, a.perms.clone()),
+        );
+        if let Some(cmd) = resolve_by_prefix(&head, role, &perms)
+            && abbrev_allowed(cmd)
+        {
+            head = cmd.names[0].to_string();
+        }
+    }
 
     // Permission gate. Async handlers are claimed before the sync
     // dispatcher runs, so the role / permission check on the command's
@@ -558,8 +582,91 @@ pub(crate) enum ComposeStep {
     BodyAdded,
 }
 
-#[allow(clippy::too_many_lines)]
+/// Marker set by `quit` once a player has said goodbye. The connection
+/// layer drains it straight after the command (save, despawn, close the
+/// socket); until then it also stops any remaining alias-chain commands.
+#[derive(Component)]
+pub(crate) struct Quitting;
+
 pub fn dispatch(world: &mut World, player: Entity, line: &str) {
+    let mut run = AliasRun::default();
+    dispatch_line(world, player, line, &mut run);
+}
+
+/// The player-input entry point: aliases expand first, then each resulting
+/// line goes to the async command hook (mail, bank, ...) and, when no async
+/// handler claims it, the sync dispatcher. Lines typed while composing a
+/// mail or board post are never alias-expanded.
+pub async fn dispatch_with_async(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    line: &str,
+) {
+    let mut run = AliasRun::default();
+    dispatch_async_line(world, player, pool, line, &mut run).await;
+}
+
+fn dispatch_async_line<'a>(
+    world: &'a mut World,
+    player: Entity,
+    pool: &'a mud_db::sqlx::PgPool,
+    line: &'a str,
+    run: &'a mut AliasRun,
+) -> DispatchFuture<'a> {
+    Box::pin(async move {
+        let composing =
+            world.get::<MailDraft>(player).is_some() || world.get::<BoardDraft>(player).is_some();
+        if !composing
+            && let Some((name, lines)) = expand_alias(world, player, line.trim(), &run.active)
+        {
+            if run.active.len() >= MAX_ALIAS_DEPTH {
+                send_to(world, player, "Your aliases are nested too deeply.\r\n");
+                return;
+            }
+            run.active.push(name);
+            for expanded in lines {
+                if run.queued >= MAX_ALIAS_COMMANDS {
+                    send_to(
+                        world,
+                        player,
+                        "Alias expansion stopped: too many commands.\r\n",
+                    );
+                    break;
+                }
+                if world.get_entity(player).is_err() || world.get::<Quitting>(player).is_some() {
+                    break;
+                }
+                run.queued += 1;
+                dispatch_async_line(world, player, pool, &expanded, run).await;
+            }
+            run.active.pop();
+            return;
+        }
+        if !try_dispatch_async(world, player, pool, line).await {
+            dispatch_line(world, player, line, run);
+        }
+    })
+}
+
+/// Alias expansion bookkeeping for one typed line: which aliases are
+/// mid-expansion (an alias never re-expands itself, so `alias look look $*`
+/// wraps the real command instead of looping) and how many commands the
+/// whole expansion has queued. The caps stop a mutually recursive pair of
+/// aliases from flooding the server; legacy had no guard at all.
+#[derive(Default)]
+struct AliasRun {
+    active: Vec<String>,
+    queued: usize,
+}
+
+/// Longest alias-in-alias chain followed for one typed line.
+const MAX_ALIAS_DEPTH: usize = 8;
+/// Most commands one typed line may expand into across all aliases.
+const MAX_ALIAS_COMMANDS: usize = 32;
+
+#[allow(clippy::too_many_lines)]
+fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasRun) {
     // Whatever happens (success, error, unknown command, empty input), the
     // typing player gets a prompt at end-of-turn via flush_prompts. Marking
     // here also dedupes against any send_to(player, …) inside the handler.
@@ -569,6 +676,37 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     try_insert(world, player, LastInputAt(std::time::Instant::now()));
     let trimmed = line.trim();
     if trimmed.is_empty() {
+        return;
+    }
+
+    // Per-character alias expansion (legacy `perform_alias`): the typist's
+    // aliases are consulted before `switch` retargeting so they keep
+    // working while puppeteering. Each expanded line is dispatched in turn
+    // as if the player had typed it (same origin, so an alias can never
+    // reach a command its owner couldn't type).
+    if let Some((name, lines)) = expand_alias(world, player, trimmed, &run.active) {
+        if run.active.len() >= MAX_ALIAS_DEPTH {
+            send_to(world, player, "Your aliases are nested too deeply.\r\n");
+            return;
+        }
+        run.active.push(name);
+        for expanded in lines {
+            if run.queued >= MAX_ALIAS_COMMANDS {
+                send_to(
+                    world,
+                    player,
+                    "Alias expansion stopped: too many commands.\r\n",
+                );
+                break;
+            }
+            // `quit` (or a despawn) ends the session: drop the rest.
+            if world.get_entity(player).is_err() || world.get::<Quitting>(player).is_some() {
+                break;
+            }
+            run.queued += 1;
+            dispatch_line(world, player, &expanded, run);
+        }
+        run.active.pop();
         return;
     }
 
@@ -590,13 +728,6 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     } else {
         player
     };
-
-    // Per-character alias expansion: rewrite `<alias> <args>` to
-    // `<command> <args>` once before lookup. v1 is plain prefix
-    // replacement (no $1/$* substitution). One pass only — no recursion
-    // into a chain of aliases.
-    let expanded = expand_alias(world, player, trimmed);
-    let trimmed = expanded.as_deref().unwrap_or(trimmed);
 
     // Lower-case the input so the registry (which is case-sensitive) matches
     // however the player typed it.
@@ -683,17 +814,41 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
         }
     }
 
+    // Exact name first (longest multi-word name wins), then an exact social,
+    // then an abbreviation resolved by legacy priority order
+    // ([`resolve_by_prefix`]).
     let cmd_n_consumed = longest_prefix_match(&tokens).or_else(|| {
-        // No exact name match. Try resolving the first token as a
-        // prefix abbreviation against commands the player can see
-        // (G1.6). When unique + not on the destructive denylist,
-        // dispatch as if the player had typed the canonical name.
+        if world
+            .get_resource::<SocialRegistry>()
+            .is_some_and(|r| r.get(tokens[0]).is_some())
+        {
+            return None;
+        }
         let (role, perms) = world.get::<Account>(player).map_or_else(
             || (UserRole::Player, Vec::new()),
             |a| (a.role, a.perms.clone()),
         );
-        resolve_by_prefix(tokens[0], role, &perms).map(|cmd| (cmd, 1usize))
+        let winner = resolve_by_prefix(tokens[0], role, &perms)?;
+        Some((winner, usize::from(abbrev_allowed(winner))))
     });
+    // Destructive commands never fire from an abbreviation. `q`/`qu`/`qui`
+    // get the legacy safety reply instead of "unknown command".
+    if let Some((cmd, 0)) = cmd_n_consumed {
+        if cmd.names[0] == "quit" {
+            send_to(
+                world,
+                player,
+                "For safety purposes, you must type out 'quit'.\r\n",
+            );
+            return;
+        }
+        send_to(
+            world,
+            player,
+            format!("Type the whole command to use it: {}\r\n", cmd.names[0]),
+        );
+        return;
+    }
     let Some((cmd, n_consumed)) = cmd_n_consumed else {
         // Fall through to socials before declaring unknown.
         if world.get::<mud_world::Casting>(player).is_some()
@@ -765,7 +920,41 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     let span = info_span!("cmd", name = cmd.names[0]);
     let _g = span.enter();
     let args = skip_n_tokens(trimmed, n_consumed);
+    // Legacy fill words: "get the sword from the corpse" is "get sword
+    // from corpse". Only for verbs that take an item / target phrase.
+    if ARTICLE_VERBS.contains(&cmd.names[0]) && has_article(args) {
+        let stripped = strip_articles(args);
+        (cmd.run)(world, player, &stripped);
+        return;
+    }
     (cmd.run)(world, player, args);
+}
+
+/// Verbs whose arguments are an item / target phrase and so skip the
+/// legacy `the` fill word.
+const ARTICLE_VERBS: &[&str] = &[
+    "get", "drop", "put", "give", "junk", "wear", "wield", "hold", "remove", "eat", "drink",
+    "quaff", "sip", "look", "examine", "sell", "buy", "value", "open", "close", "lock", "unlock",
+    "pick", "use", "recite", "light", "attack", "consider", "assist", "rescue",
+];
+
+fn is_article(tok: &str) -> bool {
+    tok.eq_ignore_ascii_case("the")
+}
+
+fn has_article(args: &str) -> bool {
+    args.split_whitespace().any(is_article)
+}
+
+/// `args` without its bare `the` tokens (a trailing lone `the` stays so
+/// `get the` still reads as "get what?" rather than "get").
+fn strip_articles(args: &str) -> String {
+    let kept: Vec<&str> = args.split_whitespace().filter(|t| !is_article(t)).collect();
+    if kept.is_empty() {
+        args.to_string()
+    } else {
+        kept.join(" ")
+    }
 }
 
 /// Legacy interpreter refusal for a non-`CMD_CAST` command mid-cast.
@@ -850,23 +1039,69 @@ fn command_permitted(world: &World, player: Entity, cmd: &Command) -> bool {
     }
 }
 
-/// If the first whitespace-delimited token of `line` matches one of
-/// the player's defined aliases, return a new line with the alias
-/// replaced by its expansion. Returns `None` if no expansion applies.
-pub(crate) fn expand_alias(world: &World, player: Entity, line: &str) -> Option<String> {
+/// Legacy alias expansion (`interpreter.cpp`, `perform_alias` /
+/// `perform_complex_alias`). If the first word of `line` is one of the
+/// player's aliases (and isn't already mid-expansion, see [`AliasRun`]),
+/// returns the alias name and the command lines it expands to.
+///
+/// * A *simple* alias (replacement has no `$` and no `;`) replaces the
+///   whole line; anything typed after the alias is dropped, as in legacy.
+///   Use `$*` to pass arguments through.
+/// * A *complex* alias substitutes `$*` (everything typed after the alias)
+///   and `$1`..`$9` (that whitespace-separated word, empty when missing),
+///   and `;` splits the replacement into several commands. `$$` is a
+///   literal `$`.
+pub(crate) fn expand_alias(
+    world: &World,
+    player: Entity,
+    line: &str,
+    active: &[String],
+) -> Option<(String, Vec<String>)> {
     let aliases = world.get::<mud_world::Aliases>(player)?;
     if aliases.entries.is_empty() {
         return None;
     }
     let mut parts = line.splitn(2, char::is_whitespace);
     let head = parts.next()?;
-    let expansion = aliases.get(head)?;
-    let rest = parts.next().unwrap_or("");
-    if rest.is_empty() {
-        Some(expansion.to_string())
-    } else {
-        Some(format!("{expansion} {rest}"))
+    if active.iter().any(|a| a.eq_ignore_ascii_case(head)) {
+        return None;
     }
+    let expansion = aliases.get(head)?;
+    let rest = parts.next().unwrap_or("").trim();
+    Some((head.to_ascii_lowercase(), apply_alias(expansion, rest)))
+}
+
+/// Expand one alias replacement against the arguments typed after it.
+pub(crate) fn apply_alias(replacement: &str, args: &str) -> Vec<String> {
+    if !replacement.contains(['$', ';']) {
+        return vec![replacement.trim().to_string()];
+    }
+    let words: Vec<&str> = args.split_whitespace().take(9).collect();
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    let mut chars = replacement.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ';' => lines.push(std::mem::take(&mut cur)),
+            '$' => match chars.next() {
+                Some('*') => cur.push_str(args),
+                Some('$') | None => cur.push('$'),
+                Some(d @ '1'..='9') => {
+                    let idx = d as usize - '1' as usize;
+                    cur.push_str(words.get(idx).copied().unwrap_or(""));
+                }
+                // Legacy drops the `$` and keeps the character.
+                Some(other) => cur.push(other),
+            },
+            other => cur.push(other),
+        }
+    }
+    lines.push(cur);
+    lines
+        .into_iter()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 /// Names of commands considered "debug" — arbitrary-code or
@@ -946,13 +1181,6 @@ pub(crate) fn longest_prefix_match(tokens: &[&str]) -> Option<(&'static Command,
     None
 }
 
-/// Commands a player has to type in full — auto-abbreviation never
-/// resolves to these. Picked for blast radius: an inadvertently
-/// abbreviated `q` should not log the player out, `del` should not
-/// delete account data, etc. Mortal-visible verbs first; admin
-/// verbs follow. Aliases (`quit` covers `quit`; the abbrev path
-/// queries canonical `names[0]`) — adding the canonical name here
-/// blocks every alias as well.
 /// Minor Creation keyword table — index drives the proto id under
 /// zone 10 (`Objects` zone 10 ids 0..39). Mirrors legacy
 /// `minor_creation_items[]` in `fierymud_legacy/src/constants.cpp:28`.
@@ -1010,18 +1238,19 @@ const MINOR_CREATION_KEYWORDS: [&str; 40] = [
     "bracer",
 ];
 
+/// Commands that never fire from an abbreviation: the player has to type
+/// the full verb. Picked for blast radius: an inadvertent `q` must not log
+/// the player out (legacy guarded this with a hidden `qui` entry), `del`
+/// must not delete account data, staff verbs must not be fat-fingered.
+/// Only the canonical `names[0]` is checked, so this blocks every alias
+/// too. Mortal verbs the legacy game let you abbreviate (`dr`, `fl`, ...)
+/// are deliberately not listed.
 const ABBREV_DENYLIST: &[&str] = &[
     // Mortal
     "quit",
     "delete",
     "release",
-    "drop",
     "junk",
-    "give",
-    "remove",
-    // Combat lifecycle
-    "flee",
-    "wimpy",
     // Admin / staff
     "shutdown",
     "reboot",
@@ -1044,49 +1273,63 @@ const ABBREV_DENYLIST: &[&str] = &[
     "zdelete",
 ];
 
-/// Resolve a typed verb by unique prefix among commands the player
-/// can see. Returns `Some(&Command)` only when exactly one canonical
-/// command matches and that command isn't on the destructive
-/// denylist. Multiple matches, zero matches, or a denylisted target
-/// all return `None` so the caller falls through to the
-/// social-dispatch / unknown-command path.
-///
-/// Tokens 1–2 chars are too aggressive to auto-resolve safely
-/// (a stray `n` would expand to `north` even when the player meant
-/// to type a single letter into a draft); minimum is 3.
+/// False for destructive commands that must be typed in full.
+fn abbrev_allowed(cmd: &Command) -> bool {
+    !abbrev_blocked(cmd.names[0])
+}
+
+/// True when the canonical command name is on the [`ABBREV_DENYLIST`].
+pub(crate) fn abbrev_blocked(canonical: &str) -> bool {
+    ABBREV_DENYLIST.contains(&canonical)
+}
+
+/// Priority key for a candidate name: its legacy table position. Names
+/// the legacy table never had (Rust-only commands and extra aliases like
+/// `trash`) rank after every legacy name, by length then alphabetically so
+/// the pick never depends on link order. A new alias therefore can't steal
+/// an abbreviation (`tra`) from the legacy command that owned it.
+fn prefix_rank(name: &'static str) -> (usize, usize, &'static str) {
+    (
+        priority::legacy_rank(name).unwrap_or(usize::MAX),
+        name.len(),
+        name,
+    )
+}
+
+/// Resolve a typed verb as an abbreviation among the commands the player
+/// can see, the way legacy `command_interpreter` did: any non-empty prefix
+/// of a command name, and when several commands share the prefix the one
+/// the legacy `cmd_info[]` order lists first wins ([`priority`]). Returns
+/// `None` when nothing matches. The winner may be on the destructive
+/// [`ABBREV_DENYLIST`]; callers check [`abbrev_allowed`] and refuse
+/// instead of running it. Callers try an exact name match first.
 pub(crate) fn resolve_by_prefix(
     typed: &str,
     role: UserRole,
     perms: &[Permission],
 ) -> Option<&'static Command> {
-    if typed.len() < 3 {
+    if typed.is_empty() {
         return None;
     }
     let needle = typed; // already lowercased at call site
-    // Walk every visible command; collect unique canonical names whose
-    // primary name begins with `needle`. Aliases that match are noise
-    // here — they'd resolve to the same canonical and produce false
-    // collisions in the unique-match check. Only `names[0]` counts.
-    let mut hit: Option<&'static Command> = None;
+    let mut best: Option<((usize, usize, &'static str), &'static Command)> = None;
     for cmd in all_commands() {
         if !visible(cmd, role, perms) {
             continue;
         }
-        if !cmd.names[0].starts_with(needle) {
-            continue;
-        }
-        if ABBREV_DENYLIST.contains(&cmd.names[0]) {
-            // Denylisted: even if it's the only prefix match, refuse.
-            // Player has to type the full verb to fire it.
-            return None;
-        }
-        match hit {
-            None => hit = Some(cmd),
-            Some(prev) if std::ptr::eq(prev, cmd) => {}
-            Some(_) => return None, // ambiguous
+        for &name in cmd.names {
+            // Multi-word names (`clan storage list`) only match whole,
+            // through `longest_prefix_match`.
+            if name.contains(char::is_whitespace) || !name.starts_with(needle) {
+                continue;
+            }
+            let key = prefix_rank(name);
+            if best.is_none_or(|(b, _)| key < b) {
+                best = Some((key, cmd));
+            }
         }
     }
-    hit
+    best.map(|(_, cmd)| cmd)
 }
 
 pub(crate) fn skip_n_tokens(s: &str, n: usize) -> &str {
@@ -2300,7 +2543,6 @@ mod tests {
             "tell",
             "t",
             "reply",
-            "r",
             "ignore",
             "unignore",
             "lasttells",
@@ -10879,16 +11121,18 @@ pub(crate) fn is_container_entity(world: &World, item: Entity) -> bool {
 }
 
 /// Find an item Located on `container` whose Named or Keywords
-/// match `needle` (case-insensitive substring).
+/// match `needle` (case-insensitive substring); `N.needle` picks the Nth.
 pub(crate) fn find_in_container(
     world: &mut World,
     needle: &str,
     container: Entity,
 ) -> Option<Entity> {
+    let (index, needle) = parse_indexed_needle(needle);
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
     q.iter(world)
-        .find(|(_, l, n, kw)| l.0 == container && matches(&needle, n, *kw))
+        .filter(|(_, l, n, kw)| l.0 == container && matches(&needle, n, *kw))
+        .nth(index - 1)
         .map(|(e, _, _, _)| e)
 }
 

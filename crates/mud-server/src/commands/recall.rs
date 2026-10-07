@@ -8,7 +8,7 @@ use crate::commands::{Category, Command, Help, cmd_look, name_of, send_to, try_r
 
 inventory::submit! {
     Command {
-        names: &["recall", "home", "rec"],
+        names: &["recall", "home"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Movement,

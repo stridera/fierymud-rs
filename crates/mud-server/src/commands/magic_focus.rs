@@ -30,7 +30,7 @@ const SCRIBE_MIN_PROFICIENCY: i32 = 50;
 
 inventory::submit! {
     Command {
-        names: &["concentrate", "conc"],
+        names: &["concentrate"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Magic,

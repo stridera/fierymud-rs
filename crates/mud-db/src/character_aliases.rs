@@ -1,7 +1,8 @@
 //! Player-defined command aliases. Each row is `(alias, command)` —
-//! when the player types `<alias> <args>`, the dispatcher rewrites it
-//! to `<command> <args>` before lookup. v1 is plain prefix replacement;
-//! positional substitution (`$1`, `$*` legacy-style) can land later.
+//! when the player types `<alias> <args>`, the dispatcher expands it the
+//! legacy way before lookup: a plain command replaces the line, `$*` /
+//! `$1`..`$9` substitute the typed words and `;` chains commands (see
+//! `mud-server`'s `expand_alias`).
 
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;

@@ -67,7 +67,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["whisper", "wh"],
+        names: &["whisper"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Communication,

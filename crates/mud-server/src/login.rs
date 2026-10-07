@@ -1017,14 +1017,19 @@ impl ConnRouter {
             if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
                 commands::broadcast_room_player_diff(world, room, entity, "RemovePlayer");
                 let player_name = commands::name_of(world, entity);
+                // A deliberate `quit` gets the legacy departure line; a
+                // dropped link / kick keeps the "fades from view" one.
+                let departure = if world.get::<commands::Quitting>(entity).is_some() {
+                    format!("{player_name} has left the game.\r\n")
+                } else {
+                    format!("{player_name} fades from view, retiring to dreams.\r\n")
+                };
                 commands::broadcast_room_visual(
                     world,
                     room,
                     entity,
                     &[entity],
-                    &commands::cap_sentence_start(&format!(
-                        "{player_name} fades from view, retiring to dreams.\r\n"
-                    )),
+                    &commands::cap_sentence_start(&departure),
                 );
             }
             // Disconnect path — player is gone before we could
@@ -1373,8 +1378,11 @@ impl ConnRouter {
             // Async pre-dispatch: a tight allow-list of commands that
             // need DB access (mail today). Returns true when handled
             // here; falls through to the sync dispatcher otherwise.
-            if !commands::try_dispatch_async(world, entity, pool, &text).await {
-                commands::dispatch(world, entity, &text);
+            commands::dispatch_with_async(world, entity, pool, &text).await;
+            // `quit` flags the player; save, despawn and close the socket.
+            if world.get::<commands::Quitting>(entity).is_some() {
+                self.on_disconnect(world, conn_id, pool).await;
+                (self.close_conn)(conn_id);
             }
             // dispatch marks the player for prompt at its start; flush
             // sends one prompt each to the player and to everyone else
@@ -6115,6 +6123,103 @@ mod tests {
         let (tx3, _rx3) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
         router.on_connect(3, tx3, None, &world);
         assert!(!router.try_takeover(&mut world, 3, "other"));
+    }
+
+    /// A connected, playing character standing in `room` on connection `conn`.
+    fn playing_in(
+        router: &mut ConnRouter,
+        world: &mut World,
+        room: Entity,
+        conn: ConnId,
+        name: &str,
+    ) -> (Entity, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let entity = world
+            .spawn((
+                Player,
+                Named {
+                    name: name.to_string(),
+                },
+                Located(room),
+                Health { hp: 10, max: 10 },
+                Account {
+                    user_id: format!("u-{name}"),
+                    character_id: format!("c-{name}"),
+                    role: mud_db::enums::UserRole::Player,
+                    account_role: mud_db::enums::UserRole::Player,
+                    perms: vec![],
+                },
+                Connection(tx),
+            ))
+            .id();
+        router.playing.insert(conn, entity);
+        (entity, rx)
+    }
+
+    thread_local! {
+        static QUIT_CLOSED: std::cell::RefCell<Vec<ConnId>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn quit_goes_through_disconnect_closes_socket_and_despawns() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        let pool = failing_pool();
+        world.insert_resource(SaveCoordinator::default());
+        let mut router = ConnRouter::new();
+        QUIT_CLOSED.with(|v| v.borrow_mut().clear());
+        router.close_conn = |c| {
+            QUIT_CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
+        let room = world.spawn(mud_world::Room).id();
+        let (leaver, mut rx_leaver) = playing_in(&mut router, &mut world, room, 1, "Leaver");
+        let (watcher, mut rx_watcher) = playing_in(&mut router, &mut world, room, 2, "Watcher");
+
+        router.on_line(1, "quit".into(), &pool, &mut world).await;
+
+        // Same teardown as a dropped link: saved (the failed write is handed
+        // to the background retry), despawned, detached, socket closed.
+        assert!(world.get_entity(leaver).is_err());
+        assert_eq!(world.resource::<SaveCoordinator>().pending(), 1);
+        assert!(!router.playing.contains_key(&1));
+        assert_eq!(QUIT_CLOSED.with(|v| v.borrow().clone()), vec![1]);
+        let out = drain(&mut rx_leaver);
+        assert!(out.contains("Goodbye, friend.  Come back soon!"), "{out}");
+        // Bystanders get the legacy departure line, not the link-drop one.
+        let seen = drain(&mut rx_watcher);
+        assert!(seen.contains("Leaver has left the game."), "{seen}");
+        assert!(!seen.contains("fades from view"), "{seen}");
+        // Everyone else is untouched.
+        assert!(world.get_entity(watcher).is_ok());
+        assert_eq!(router.playing.get(&2), Some(&watcher));
+        // The late Disconnected event from the closed socket is a no-op.
+        router.on_disconnect(&mut world, 1, &pool).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refused_quit_keeps_the_connection_open() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        QUIT_CLOSED.with(|v| v.borrow_mut().clear());
+        router.close_conn = |c| {
+            QUIT_CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
+        let room = world.spawn(mud_world::Room).id();
+        let (fighter, mut rx) = playing_in(&mut router, &mut world, room, 1, "Fighter");
+        let foe = world.spawn((mud_world::Mob, Located(room))).id();
+        world.entity_mut(fighter).insert(mud_world::Fighting(foe));
+
+        router.on_line(1, "quit".into(), &pool, &mut world).await;
+
+        assert!(world.get_entity(fighter).is_ok());
+        assert_eq!(router.playing.get(&1), Some(&fighter));
+        assert!(QUIT_CLOSED.with(|v| v.borrow().is_empty()));
+        assert!(drain(&mut rx).contains("No way!  You're fighting for your life!"));
     }
 
     // ---- device-code / game-password-only login ----
