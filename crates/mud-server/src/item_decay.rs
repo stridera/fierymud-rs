@@ -110,7 +110,12 @@ pub fn item_decay_tick(world: &mut World) {
 /// or to the room (the carrier's room when the container is carried).
 /// A container with no resolvable place (unrooted) takes its contents
 /// with it. Items nested deeper stay with their own parent.
-fn release_contents(world: &mut World, container: Entity, holder: Entity, kind: &HolderKind) {
+pub(crate) fn release_contents(
+    world: &mut World,
+    container: Entity,
+    holder: Entity,
+    kind: &HolderKind,
+) {
     let contents: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
         q.iter(world)
@@ -141,7 +146,7 @@ fn release_contents(world: &mut World, container: Entity, holder: Entity, kind: 
 }
 
 #[derive(Debug)]
-enum HolderKind {
+pub(crate) enum HolderKind {
     Player,
     Room,
     Container,
@@ -150,7 +155,7 @@ enum HolderKind {
 
 /// Classify what an item is Located on so the decay tick picks
 /// the right announcement path.
-fn location_kind(world: &World, item: Entity) -> (Entity, HolderKind) {
+pub(crate) fn location_kind(world: &World, item: Entity) -> (Entity, HolderKind) {
     let Some(loc) = world.get::<Located>(item).map(|l| l.0) else {
         return (item, HolderKind::Unknown);
     };

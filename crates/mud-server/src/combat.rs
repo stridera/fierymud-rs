@@ -23,6 +23,8 @@ use crate::commands::{
     send_to, try_insert, try_remove,
 };
 
+/// Four real-time seconds per swing (40 ticks at 10Hz) — matches legacy
+/// `PULSE_VIOLENCE` so the DB-authored damage values stay calibrated.
 const COMBAT_PERIOD_TICKS: u64 = 40;
 
 /// Maximum per-swing damage. Mirrors legacy `defines.hpp:349`'s
@@ -149,14 +151,14 @@ pub fn seed_test_items(world: &mut World) {
     info!("seeded test items in The Void");
 }
 
-/// Exclusive system: every `COMBAT_PERIOD_TICKS` world ticks, every entity with
-/// Fighting takes a swing at its target.
-/// Four real-time seconds per swing (40 ticks at 10Hz) — matches legacy
-/// `PULSE_VIOLENCE` so the DB-authored damage values stay calibrated. Decrements
-/// every `CorpseDecay.remaining_secs`; on hitting 0 re-Locates any
-/// items inside the corpse to the corpse's room, broadcasts a decay
-/// line, and despawns the corpse entity. Ephemeral — corpses don't
-/// survive server restart.
+/// Counts down every `CorpseDecay`. On expiry follows legacy
+/// `extract_corpse` (limits.cpp): the corpse's contents are moved out
+/// rather than destroyed — to the room for a corpse lying on the floor
+/// ("A quivering horde of maggots consumes $p."), to the carrier's room
+/// for a carried one ("$p decays in your hands."), to the enclosing
+/// container otherwise — then the corpse itself is removed. Player and
+/// mob corpses share the path; they differ only in their starting timer.
+/// Ephemeral aside from the corpse snapshot.
 pub fn corpse_decay_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(10) {
@@ -190,44 +192,29 @@ pub fn corpse_decay_tick(world: &mut World) {
         if new_remaining > 0 {
             continue;
         }
-        // Expired — items inside disintegrate alongside the
-        // corpse. Persistent items (e.g. quest items flagged
-        // `Permanent`) survive: they're released to the room so
-        // the player can still recover them. Everything else
-        // despawns. Matches the legacy "decay alongside the
-        // corpse unless looted in time" semantic — the cost of
-        // ignoring a corpse is real.
-        let contents: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
-            q.iter(world)
-                .filter(|(_, l)| l.0 == corpse)
-                .map(|(e, _)| e)
-                .collect()
-        };
-        let mut decayed = 0usize;
-        let spilled = 0usize;
-        for it in contents {
-            // For now there's no Permanent marker; treat all
-            // contents as decayable. When the schema models a
-            // permanent flag (or quest-item tag), branch here.
-            if let Ok(em) = world.get_entity_mut(it) {
-                em.despawn();
+        let (holder, kind) = crate::item_decay::location_kind(world, corpse);
+        match kind {
+            crate::item_decay::HolderKind::Room => {
+                broadcast_room_except_rendered(
+                    world,
+                    holder,
+                    &[],
+                    &format!("A quivering horde of maggots consumes {name}.\r\n"),
+                );
             }
-            decayed += 1;
+            crate::item_decay::HolderKind::Player => {
+                crate::commands::send_to(
+                    world,
+                    holder,
+                    format!(
+                        "{} decays in your hands.\r\n",
+                        crate::commands::cap_sentence_start(&name)
+                    ),
+                );
+            }
+            _ => {}
         }
-        let line = if spilled > 0 {
-            format!(
-                "{} crumbles to dust, scattering {spilled} item(s) across the floor.\r\n",
-                crate::commands::cap_sentence_start(&name),
-            )
-        } else {
-            format!(
-                "{} crumbles to dust, taking its contents with it.\r\n",
-                crate::commands::cap_sentence_start(&name),
-            )
-        };
-        broadcast_room_except_rendered(world, room, &[], &line);
-        let _ = decayed;
+        crate::item_decay::release_contents(world, corpse, holder, &kind);
         if let Ok(em) = world.get_entity_mut(corpse) {
             em.despawn();
         }
@@ -3598,6 +3585,66 @@ mod tests {
         // Mixed example: avg attacker accuracy 75 vs defender 50 →
         // margin 25 → +12 (integer division) → 62%.
         assert_eq!(hit_chance_pct(75, 50), 62);
+    }
+
+    fn corpse_with_loot(world: &mut World, at: Entity, secs: i32) -> (Entity, Entity) {
+        let corpse = world
+            .spawn((
+                Item,
+                Corpse,
+                Named {
+                    name: "the corpse of a goblin".into(),
+                },
+                Located(at),
+                CorpseDecay {
+                    remaining_secs: secs,
+                },
+            ))
+            .id();
+        let loot = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a dagger".into(),
+                },
+                Located(corpse),
+            ))
+            .id();
+        (corpse, loot)
+    }
+
+    #[test]
+    fn expired_mob_corpse_drops_its_loot_on_the_floor() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(10));
+        let room = world.spawn(mud_world::Room).id();
+        let (corpse, loot) = corpse_with_loot(&mut world, room, 1);
+        corpse_decay_tick(&mut world);
+        assert!(world.get_entity(corpse).is_err(), "corpse removed");
+        assert_eq!(world.get::<Located>(loot).unwrap().0, room);
+    }
+
+    #[test]
+    fn expired_player_corpse_drops_its_loot_on_the_floor() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(10));
+        let room = world.spawn(mud_world::Room).id();
+        let (corpse, loot) = corpse_with_loot(&mut world, room, 1);
+        world.entity_mut(corpse).insert(mud_world::PlayerCorpse);
+        corpse_decay_tick(&mut world);
+        assert!(world.get_entity(corpse).is_err());
+        assert_eq!(world.get::<Located>(loot).unwrap().0, room);
+    }
+
+    #[test]
+    fn unexpired_corpse_keeps_its_loot() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(10));
+        let room = world.spawn(mud_world::Room).id();
+        let (corpse, loot) = corpse_with_loot(&mut world, room, 50);
+        corpse_decay_tick(&mut world);
+        assert!(world.get_entity(corpse).is_ok());
+        assert_eq!(world.get::<Located>(loot).unwrap().0, corpse);
     }
 
     #[test]
