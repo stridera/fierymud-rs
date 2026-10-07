@@ -6928,14 +6928,11 @@ mod tests {
             eprintln!("skipping: dev database unavailable");
             return;
         };
-        let Ok(Some(uid)) = mud_db::sqlx::query_scalar::<_, String>(
-            "SELECT id FROM \"Users\" WHERE deleted_at IS NULL \
-             AND email NOT LIKE '%@example.invalid' ORDER BY id LIMIT 1",
-        )
-        .fetch_optional(&pool)
-        .await
-        else {
-            eprintln!("skipping: no Users row");
+        // Own throwaway account: borrowing "the first Users row" races
+        // with other tests that create and delete users (FK violation on
+        // the code insert -> "not awaiting web approval").
+        let Some(uid) = temp_user(&pool, "dctest").await else {
+            eprintln!("skipping: could not create temp user");
             return;
         };
         let mut world = auth_world(0);
@@ -7033,6 +7030,7 @@ mod tests {
         mud_db::game_login_code::delete(&pool, &code_id)
             .await
             .unwrap();
+        temp_cleanup(&pool, &[], &[], &[&uid]).await;
     }
 
     /// Temp website account for the unlinked-character flow tests.
@@ -7976,14 +7974,11 @@ mod tests {
             eprintln!("skipping: dev database unavailable");
             return;
         };
-        let Ok(Some(uid)) = mud_db::sqlx::query_scalar::<_, String>(
-            "SELECT id FROM \"Users\" WHERE deleted_at IS NULL \
-             AND email NOT LIKE '%@example.invalid' ORDER BY id LIMIT 1",
-        )
-        .fetch_optional(&pool)
-        .await
-        else {
-            eprintln!("skipping: no Users row");
+        // Own throwaway account: borrowing "the first Users row" races
+        // with other tests that create and delete users (FK violation on
+        // the code insert -> "not awaiting web approval").
+        let Some(uid) = temp_user(&pool, "dctest").await else {
+            eprintln!("skipping: could not create temp user");
             return;
         };
         let mut world = auth_world(0);
@@ -8056,6 +8051,7 @@ mod tests {
         mud_db::game_login_code::delete(&pool, &code_id)
             .await
             .unwrap();
+        temp_cleanup(&pool, &[], &[], &[&uid]).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -8064,14 +8060,11 @@ mod tests {
             eprintln!("skipping: dev database unavailable");
             return;
         };
-        let Ok(Some(uid)) = mud_db::sqlx::query_scalar::<_, String>(
-            "SELECT id FROM \"Users\" WHERE deleted_at IS NULL \
-             AND email NOT LIKE '%@example.invalid' ORDER BY id LIMIT 1",
-        )
-        .fetch_optional(&pool)
-        .await
-        else {
-            eprintln!("skipping: no Users row");
+        // Own throwaway account: borrowing "the first Users row" races
+        // with other tests that create and delete users (FK violation on
+        // the code insert -> "not awaiting web approval").
+        let Some(uid) = temp_user(&pool, "dctest").await else {
+            eprintln!("skipping: could not create temp user");
             return;
         };
         let mut world = auth_world(0);
@@ -8080,7 +8073,7 @@ mod tests {
         router.on_connect(1, tx, Some("203.0.113.9:1000".parse().unwrap()), &world);
         drain(&mut orx);
         let mut user = linked_user();
-        user.id = uid;
+        user.id = uid.clone();
         let mut ids = Vec::new();
         for i in 0..=CODE_RATE_MAX {
             router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
@@ -8106,6 +8099,7 @@ mod tests {
         for id in ids {
             mud_db::game_login_code::delete(&pool, &id).await.unwrap();
         }
+        temp_cleanup(&pool, &[], &[], &[&uid]).await;
     }
 
     // ---- lockout interplay with device-code login ----
@@ -8164,14 +8158,11 @@ mod tests {
             eprintln!("skipping: dev database unavailable");
             return;
         };
-        let Ok(Some(uid)) = mud_db::sqlx::query_scalar::<_, String>(
-            "SELECT id FROM \"Users\" WHERE deleted_at IS NULL \
-             AND email NOT LIKE '%@example.invalid' ORDER BY id LIMIT 1",
-        )
-        .fetch_optional(&pool)
-        .await
-        else {
-            eprintln!("skipping: no Users row");
+        // Own throwaway account: borrowing "the first Users row" races
+        // with other tests that create and delete users (FK violation on
+        // the code insert -> "not awaiting web approval").
+        let Some(uid) = temp_user(&pool, "dctest").await else {
+            eprintln!("skipping: could not create temp user");
             return;
         };
         let mut world = auth_world(3);
@@ -8182,7 +8173,7 @@ mod tests {
         // One more wrong password would drop the connection...
         router.login.get_mut(&1).unwrap().failed_attempts = MAX_FAILED_PASSWORDS_PER_CONN - 1;
         let mut user = locked_user(3);
-        user.id = uid;
+        user.id = uid.clone();
         router.login.get_mut(&1).unwrap().stage = Stage::AwaitingPassword {
             user,
             preselected: None,
@@ -8197,6 +8188,7 @@ mod tests {
         mud_db::game_login_code::delete(&pool, &code_id)
             .await
             .unwrap();
+        temp_cleanup(&pool, &[], &[], &[&uid]).await;
     }
 
     #[tokio::test(flavor = "current_thread")]

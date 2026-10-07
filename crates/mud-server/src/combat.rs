@@ -420,12 +420,28 @@ pub(crate) enum SwingOutcome {
     Miss,
 }
 
+/// The d100 hit roll. Production draws from the thread RNG; unit
+/// tests can pin it (per test thread) via `FORCED_HIT_ROLL` so a
+/// "the swing lands" assertion isn't subject to the 1% clamp-floor miss.
+fn hit_roll() -> i32 {
+    #[cfg(test)]
+    if let Some(r) = FORCED_HIT_ROLL.with(std::cell::Cell::get) {
+        return r;
+    }
+    rand::random_range(1..=100)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_HIT_ROLL: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
 /// Resolve one swing under the accuracy/evasion d100 contest from
 /// docs/design/combat.md. `crit_chance` is a separate post-hit
 /// d100 against the attacker's `crit_chance` field.
 fn resolve_swing_acc_ev(accuracy: i32, evasion: i32, crit_chance: i32) -> SwingDetail {
     let chance = hit_chance_pct(accuracy, evasion);
-    let roll = rand::random_range(1..=100);
+    let roll = hit_roll();
     let (outcome, crit_roll) = if roll <= chance {
         let cr = rand::random_range(1..=100);
         if cr <= crit_chance {
@@ -2624,11 +2640,9 @@ mod tests {
                 Fighting(target),
                 CombatStats {
                     // accuracy 200 vs default evasion 50 = +75
-                    // chance margin → clamped 99% hit. Equivalent
-                    // to the old `hit_roll: 100` ceiling: tests
-                    // still rely on the swing landing, which is
-                    // true at 99% but not 100% — flake-check this
-                    // if a CI run misses 1/100.
+                    // chance margin → clamped 99% hit. The residual
+                    // 1% miss is removed in tests by `run_combat_tick`,
+                    // which pins the hit roll to 1 (see `hit_roll`).
                     accuracy: 200,
                     ..Default::default()
                 },
@@ -2657,7 +2671,11 @@ mod tests {
     fn run_combat_tick(world: &mut World) {
         // combat_tick fires only on multiples of COMBAT_PERIOD_TICKS (40).
         world.insert_resource(TickCount(COMBAT_PERIOD_TICKS));
+        // Deterministic hit roll (thread-local, so parallel tests are
+        // unaffected): every swing at <=99% chance lands.
+        FORCED_HIT_ROLL.with(|c| c.set(Some(1)));
         combat_tick(world);
+        FORCED_HIT_ROLL.with(|c| c.set(None));
     }
 
     /// A6: a hidden attacker's swing applies an opening-strike
@@ -3271,7 +3289,6 @@ mod tests {
         // below 0 or trigger a second death event.
         let mut world = World::new();
         let room = make_room(&mut world);
-        world.insert_resource(TickCount(COMBAT_PERIOD_TICKS));
         let player = world
             .spawn((
                 Player,
@@ -3287,7 +3304,7 @@ mod tests {
         let _attacker_a = make_attacker(&mut world, room, player, 50);
         let _attacker_b = make_attacker(&mut world, room, player, 50);
 
-        combat_tick(&mut world);
+        run_combat_tick(&mut world);
 
         assert!(
             world.get::<Ghost>(player).is_some(),
