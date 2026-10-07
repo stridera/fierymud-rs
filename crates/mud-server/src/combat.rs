@@ -18,9 +18,9 @@ const PLAYER_CORPSE_DECAY_SECS: i32 = 7 * 24 * 60 * 60;
 /// claim window rather than piling up. 10 minutes.
 const MOB_CORPSE_DECAY_SECS: i32 = 600;
 use crate::commands::{
-    apply_damage, broadcast_room_except_players_rendered, broadcast_room_except_rendered, cmd_flee,
-    damage_color_tag, direction_name, disengage_attackers_of, drain_stamina, name_of, opposite,
-    send_to, try_insert, try_remove,
+    apply_damage_from, broadcast_room_except_players_rendered, broadcast_room_except_rendered,
+    cmd_flee, damage_color_tag, direction_name, disengage_attackers_of, drain_stamina, name_of,
+    opposite, send_to, try_insert, try_remove,
 };
 
 /// Four real-time seconds per swing (40 ticks at 10Hz) — matches legacy
@@ -1383,7 +1383,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // can't one-shot a fully-buffed player from full HP.
     damage = damage.min(MAX_DAMAGE_PER_SWING);
     mit.final_dmg = damage;
-    let (dead, threshold_msg) = apply_damage(world, s.target, damage);
+    let (dead, threshold_msg) = apply_damage_from(world, s.target, damage, s.attacker);
 
     // Names may carry XML-Lite tags; send_to renders per-recipient so each
     // player gets ANSI or stripped output according to their own COLOR_BLIND
@@ -1553,6 +1553,57 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
 }
 
+/// How long a recorded damage source stays eligible for kill credit.
+/// Bounds stale attribution (a hit minutes ago must not claim a later
+/// drowning / bleed death).
+const DAMAGER_CREDIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The last Player that damaged this entity, stamped by
+/// `apply_damage_from`. Lets `handle_death` credit a kill to the
+/// actual damage source instead of inferring it from a `Fighting`
+/// link, which a spell / skill kill from outside combat never has.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct DamagedBy {
+    pub attacker: Entity,
+    pub at: std::time::Instant,
+}
+
+/// Record `attacker` as the most recent damage source of `victim`.
+/// Only Players are credited with kills, so other sources are ignored.
+pub(crate) fn record_damager(world: &mut World, victim: Entity, attacker: Entity) {
+    if world.get::<Player>(attacker).is_none() {
+        return;
+    }
+    try_insert(
+        world,
+        victim,
+        DamagedBy {
+            attacker,
+            at: std::time::Instant::now(),
+        },
+    );
+}
+
+/// Resolve who gets credit for `victim`'s death: the most recent
+/// recorded Player damager (recent, still present and in `room`),
+/// otherwise a Player currently `Fighting` the victim. Resolved once
+/// per death so XP, coin, loot-claim and autoloot all agree on a
+/// single killer.
+fn resolve_killer(world: &mut World, victim: Entity, room: Entity) -> Option<Entity> {
+    if let Some(d) = world.get::<DamagedBy>(victim).copied()
+        && d.attacker != victim
+        && d.at.elapsed() <= DAMAGER_CREDIT_WINDOW
+        && world.get::<Player>(d.attacker).is_some()
+        && world.get::<mud_world::Located>(d.attacker).map(|l| l.0) == Some(room)
+    {
+        return Some(d.attacker);
+    }
+    let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
+    q.iter(world)
+        .find(|(e, f)| f.0 == victim && *e != victim)
+        .map(|(e, _)| e)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Entity) {
     let is_player = world.get::<Player>(victim).is_some();
@@ -1675,12 +1726,8 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // self-styled "neutral" players. The killer is whoever
         // had Fighting(victim) at death-time and is themselves
         // a Player.
-        let pvp_killer: Option<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
-            q.iter(world)
-                .find(|(e, f)| f.0 == victim && *e != victim)
-                .map(|(e, _)| e)
-        };
+        let pvp_killer: Option<Entity> = resolve_killer(world, victim, room);
+        try_remove::<DamagedBy>(world, victim);
         if let Some(killer) = pvp_killer
             && let Some(mut cs) = world.get_mut::<CombatStats>(killer)
         {
@@ -1770,15 +1817,14 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 crate::commands::cap_sentence_start(victim_name),
             ),
         );
-        award_kill_xp(world, victim, victim_name);
+        // Resolve the killer once, before any Fighting links are torn
+        // down, and hand the same identity to XP, coin and autoloot.
+        let killer = resolve_killer(world, victim, room);
+        award_kill_xp(world, victim, victim_name, killer);
         // Achievement hooks: first_kill and (eventually)
         // milestone-kill counters. Fire on the player who's
         // currently Fighting the victim — same target as the
         // kill-coin / loot-claim attribution.
-        let killer: Option<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
-            q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
-        };
         if let Some(killer) = killer {
             crate::commands::grant_achievement(world, killer, "first_kill");
             crate::commands::bump_kill_count(world, killer);
@@ -1853,7 +1899,7 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // the coin can still be claimed via `get all from corpse`.
         // Runs after the corpse is spawned so the CoinPile has
         // somewhere to attach.
-        award_kill_coin(world, victim, victim_name, corpse);
+        award_kill_coin(world, victim, victim_name, corpse, killer);
         // Auto-loot: if the killer has the flag, immediately
         // pull every item out of the corpse onto them. Quiet —
         // players opted in.
@@ -1900,7 +1946,13 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
 /// (`AUTO_GOLD` on, default) or the freshly-spawned corpse via
 /// `CoinPile` (`AUTO_GOLD` off — claimed via `get all from corpse`).
 /// No-op when the mob has no wealth, no proto, or no player attacker.
-fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str, corpse: Entity) {
+fn award_kill_coin(
+    world: &mut World,
+    victim: Entity,
+    victim_name: &str,
+    corpse: Entity,
+    killer: Option<Entity>,
+) {
     let coin = world
         .get::<WorldKey>(victim)
         .and_then(|k| {
@@ -1912,10 +1964,6 @@ fn award_kill_coin(world: &mut World, victim: Entity, victim_name: &str, corpse:
     if coin <= 0 {
         return;
     }
-    let killer: Option<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
-        q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
-    };
     let Some(killer) = killer else {
         // No player engaged — coin still needs a home so it can be
         // claimed if a player walks in later (or it just decays
@@ -2055,7 +2103,7 @@ fn apply_protected_kill_penalty(world: &mut World, killer: Entity, victim: Entit
 }
 
 #[allow(clippy::too_many_lines)]
-fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
+fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str, killer: Option<Entity>) {
     use mud_db::enums::MobRole;
     let proto = world.get::<WorldKey>(victim).and_then(|k| {
         world
@@ -2076,10 +2124,6 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str) {
     if xp <= 0 {
         return;
     }
-    let killer: Option<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
-        q.iter(world).find(|(_, f)| f.0 == victim).map(|(e, _)| e)
-    };
     let Some(killer) = killer else { return };
 
     // Group XP share: walk the killer's group (rooted at the
@@ -2825,6 +2869,39 @@ mod tests {
             world.get::<Fighting>(attacker).is_none(),
             "attacker's Fighting cleared after target died"
         );
+    }
+
+    #[test]
+    fn melee_kill_still_autoloots_for_the_fighter() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "Target".to_string(),
+                },
+                Located(room),
+                Health { hp: 5, max: 5 },
+            ))
+            .id();
+        let item = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a rusty dagger".to_string(),
+                },
+                Located(target),
+            ))
+            .id();
+        let attacker = make_attacker(&mut world, room, target, 100);
+        world.entity_mut(attacker).insert((
+            Player,
+            mud_world::PlayerFlags(vec![mud_db::enums::PlayerFlag::AutoLoot]),
+        ));
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(target).is_err(), "target died");
+        assert_eq!(world.get::<Located>(item).map(|l| l.0), Some(attacker));
     }
 
     #[test]

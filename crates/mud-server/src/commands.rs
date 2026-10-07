@@ -14616,7 +14616,7 @@ pub(crate) fn invoke_ability_with(
                     // the real delta.
                     let pre_hp = world.get::<Health>(target_entity).map_or(0, |h| h.hp);
                     let (dead, threshold_msg) =
-                        crate::commands::apply_damage(world, target_entity, amount);
+                        crate::commands::apply_damage_from(world, target_entity, amount, player);
                     // Lifesteal: heal the caster by the actual damage
                     // dealt. At max HP, legacy spills excess into
                     // overheal via a polynomial that approaches zero
@@ -19799,6 +19799,23 @@ pub(crate) fn alignment_protection_factor(world: &World, attacker: Entity, victi
         return 0.8;
     }
     1.0
+}
+
+/// `apply_damage` with the damage source recorded on the victim
+/// (`combat::DamagedBy`). `handle_death` resolves the killer from this
+/// so a spell / skill kill credits (XP, coin, autoloot) the attacker
+/// even when no `Fighting` link exists between the two — e.g. a caster
+/// one-shotting a mob they were not yet engaged with.
+pub(crate) fn apply_damage_from(
+    world: &mut World,
+    target: Entity,
+    amount: i32,
+    attacker: Entity,
+) -> (bool, Option<&'static str>) {
+    if amount > 0 && attacker != target {
+        crate::combat::record_damager(world, target, attacker);
+    }
+    apply_damage(world, target, amount)
 }
 
 pub(crate) fn apply_damage(

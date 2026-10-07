@@ -12,7 +12,7 @@ use crate::commands::{
     ATTACK_COST, AoeScope, BACKSTAB_COST, BANDAGE_COST, BASH_COST, BERSERK_COST, Category, Command,
     DISARM_COST, DOORBASH_COST, GOUGE_COST, HITALL_COST, Help, KICK_COST, LAYHANDS_COST, REND_COST,
     RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST, TAUNT_COST,
-    THROATCUT_COST, TRIPUP_COST, aggro_alignment, apply_damage, auto_assist_followers_of,
+    THROATCUT_COST, TRIPUP_COST, aggro_alignment, apply_damage_from, auto_assist_followers_of,
     broadcast_room_except_players_rendered, broadcast_room_except_rendered, check_stamina,
     cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
     find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_aoe,
@@ -1465,7 +1465,7 @@ fn perform_class_strike(
             target,
             &format!("{player_name} {verb_other} you for {dam} damage!\r\n"),
         );
-        let (dead, _msg) = apply_damage(world, target, dam);
+        let (dead, _msg) = apply_damage_from(world, target, dam, player);
         if dead && let Some(loc) = world.get::<Located>(target).copied() {
             crate::combat::handle_death(world, target, &target_name, loc.0);
             return;
@@ -1947,7 +1947,7 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
 
     let player_name = name_of(world, player);
     let target_name = name_or(world, target, "(unknown)");
-    let (dead, _) = apply_damage(world, target, dmg);
+    let (dead, _) = apply_damage_from(world, target, dmg, player);
 
     if !dead && let Ok(mut e) = world.get_entity_mut(target) {
         e.insert(Posture(PostureKind::Sitting));
@@ -2065,7 +2065,7 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
     let count = targets.len();
     for t in targets {
         let target_name = name_or(world, t, "(unknown)");
-        let (dead, _) = apply_damage(world, t, dmg);
+        let (dead, _) = apply_damage_from(world, t, dmg, player);
         if dead {
             crate::combat::handle_death(world, t, &target_name, room);
         } else if let Ok(mut e) = world.get_entity_mut(t) {
@@ -2406,7 +2406,7 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
     let mut hits: Vec<(String, bool)> = Vec::with_capacity(mob_targets.len());
     for target in &mob_targets {
         let target_name = name_or(world, *target, "(unknown)");
-        let (dead, _msg) = apply_damage(world, *target, dmg);
+        let (dead, _msg) = apply_damage_from(world, *target, dmg, player);
         hits.push((target_name.clone(), dead));
         if dead {
             crate::combat::handle_death(world, *target, &target_name, room);
@@ -2986,7 +2986,7 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     let target_name = name_of(world, target);
     let player_name = name_of(world, player);
 
-    let (dead, threshold_msg) = apply_damage(world, target, damage);
+    let (dead, threshold_msg) = apply_damage_from(world, target, damage, player);
 
     // Knockdown — set target to Sitting.
     if !dead && let Ok(mut e) = world.get_entity_mut(target) {

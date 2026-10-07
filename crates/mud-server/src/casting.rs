@@ -1461,4 +1461,177 @@ mod tests {
         }
         assert!(halved > 20, "quick chant fires most of the time: {halved}");
     }
+
+    // ---- Kill credit for spell damage outside combat (issue #55) ----
+
+    const ZAP: i32 = 3;
+    const ZAP_EFFECT: i32 = 11;
+
+    /// World with a one-shot violent damage spell "zap" known to casters
+    /// built by `zapper_in`.
+    fn world_with_zap() -> (World, Entity) {
+        let (mut world, room, _) = world_with_spell(1);
+        let mut zap = ability_def(ZAP, "Zap", AbilityKind::Spell);
+        zap.violent = true;
+        world
+            .resource_mut::<AbilityCatalog>()
+            .by_name
+            .insert("zap".to_string(), zap);
+        world.resource_mut::<AbilityCatalog>().effects_for.insert(
+            ZAP,
+            vec![(ZAP_EFFECT, Some(serde_json::json!({ "amount": 500 })))],
+        );
+        world.resource_mut::<EffectCatalog>().by_id.insert(
+            ZAP_EFFECT,
+            EffectDef {
+                id: ZAP_EFFECT,
+                name: "zap".to_string(),
+                description: None,
+                effect_type: "damage".to_string(),
+                tags: Vec::new(),
+                presence_override: None,
+                default_params: serde_json::json!({}),
+                prevents_speaking: false,
+                prevents_casting: false,
+                prevents_movement: false,
+                on_apply: None,
+                on_tick: None,
+                on_remove: None,
+            },
+        );
+        (world, room)
+    }
+
+    fn zapper_in(world: &mut World, room: Entity, flags: Vec<mud_db::enums::PlayerFlag>) -> Entity {
+        let (caster, rx) = player_in(world, room);
+        // Keep the receiver alive so sends do not hit a closed channel.
+        std::mem::forget(rx);
+        world.entity_mut(caster).insert((
+            Health { hp: 50, max: 50 },
+            KnownAbilities {
+                entries: vec![(ZAP, 500, true)],
+            },
+            mud_world::PlayerFlags(flags),
+        ));
+        caster
+    }
+
+    /// A 5 HP goblin in `room` carrying one item.
+    fn goblin_with_loot(world: &mut World, room: Entity) -> (Entity, Entity) {
+        let goblin = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a goblin".to_string(),
+                },
+                mud_world::Keywords(vec!["goblin".to_string()]),
+                Located(room),
+                Health { hp: 5, max: 5 },
+                mud_world::CombatStats::default(),
+            ))
+            .id();
+        let item = world
+            .spawn((
+                mud_world::Item,
+                Named {
+                    name: "a rusty dagger".to_string(),
+                },
+                Located(goblin),
+            ))
+            .id();
+        (goblin, item)
+    }
+
+    fn zap(world: &mut World, caster: Entity, target: &str) {
+        crate::commands::invoke_ability_with(
+            world,
+            caster,
+            &format!("'zap' {target}"),
+            AbilityKind::Spell,
+            "cast",
+            false,
+            false,
+            true,
+            None,
+        );
+    }
+
+    #[test]
+    fn spell_one_shot_outside_combat_autoloots_for_the_caster() {
+        let (mut world, room) = world_with_zap();
+        let caster = zapper_in(&mut world, room, vec![mud_db::enums::PlayerFlag::AutoLoot]);
+        let (goblin, item) = goblin_with_loot(&mut world, room);
+        assert!(world.get::<Fighting>(caster).is_none());
+        zap(&mut world, caster, "goblin");
+        assert!(world.get_entity(goblin).is_err(), "goblin died to the zap");
+        assert_eq!(
+            world.get::<Located>(item).map(|l| l.0),
+            Some(caster),
+            "autoloot moved the item onto the caster"
+        );
+    }
+
+    #[test]
+    fn spell_kill_without_autoloot_leaves_loot_in_the_corpse() {
+        let (mut world, room) = world_with_zap();
+        let caster = zapper_in(&mut world, room, vec![]);
+        let (goblin, item) = goblin_with_loot(&mut world, room);
+        zap(&mut world, caster, "goblin");
+        assert!(world.get_entity(goblin).is_err());
+        let holder = world.get::<Located>(item).map(|l| l.0).unwrap();
+        assert_ne!(holder, caster, "autoloot off: caster loots nothing");
+        assert!(
+            world.get::<mud_world::Corpse>(holder).is_some(),
+            "item stays in the corpse"
+        );
+    }
+
+    #[test]
+    fn spell_kill_outside_combat_claims_the_corpse_for_the_caster() {
+        let (mut world, room) = world_with_zap();
+        let caster = zapper_in(&mut world, room, vec![]);
+        let (_goblin, item) = goblin_with_loot(&mut world, room);
+        zap(&mut world, caster, "goblin");
+        let corpse = world.get::<Located>(item).map(|l| l.0).unwrap();
+        let claim = world.get::<mud_world::LootClaim>(corpse).expect("claim");
+        assert_eq!(claim.owner, caster);
+    }
+
+    #[test]
+    fn aoe_spell_kills_credit_and_autoloot_for_the_caster() {
+        let (mut world, room) = world_with_zap();
+        let caster = zapper_in(&mut world, room, vec![mud_db::enums::PlayerFlag::AutoLoot]);
+        let (g1, i1) = goblin_with_loot(&mut world, room);
+        let (g2, i2) = goblin_with_loot(&mut world, room);
+        let cast = crate::commands::invoke_ability_aoe(
+            &mut world,
+            caster,
+            AbilityKind::Spell,
+            "cast",
+            "zap",
+            crate::commands::AoeScope::RoomEnemies,
+            "Nothing here.\r\n",
+        );
+        assert!(cast);
+        assert!(world.get_entity(g1).is_err() && world.get_entity(g2).is_err());
+        for item in [i1, i2] {
+            assert_eq!(world.get::<Located>(item).map(|l| l.0), Some(caster));
+        }
+    }
+
+    #[test]
+    fn stale_damage_source_does_not_claim_a_later_kill() {
+        // A recorded damager from a different room is not credited.
+        let (mut world, room) = world_with_zap();
+        let other_room = world.spawn_empty().id();
+        let caster = zapper_in(
+            &mut world,
+            other_room,
+            vec![mud_db::enums::PlayerFlag::AutoLoot],
+        );
+        let (goblin, item) = goblin_with_loot(&mut world, room);
+        crate::combat::record_damager(&mut world, goblin, caster);
+        crate::combat::handle_death(&mut world, goblin, "a goblin", room);
+        assert_ne!(world.get::<Located>(item).map(|l| l.0), Some(caster));
+    }
 }
