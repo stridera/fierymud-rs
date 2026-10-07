@@ -11695,6 +11695,17 @@ pub(crate) fn invoke_object_abilities(
     // Fire USE on the item before spell dispatch — bodies may
     // gate (return false) or emit additional flavor.
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Use);
+    // Tell the teleport effect which scroll is being read so a
+    // recall scroll lands in its own town. Cleared right after the
+    // dispatch loop (the loop never returns early).
+    try_insert(
+        world,
+        player,
+        RecallScrollSource {
+            zone: key.zone,
+            id: key.id,
+        },
+    );
     for ability_id in bindings {
         let ability_name = world
             .resource::<AbilityCatalog>()
@@ -11718,6 +11729,7 @@ pub(crate) fn invoke_object_abilities(
             "cast",
         );
     }
+    try_remove::<RecallScrollSource>(world, player);
     if single_use {
         if let Ok(e) = world.get_entity_mut(item) {
             e.despawn();
@@ -15230,12 +15242,18 @@ pub(crate) fn invoke_ability_with(
                 );
                 let dest_room: Option<Entity> = match destination.as_deref() {
                     Some("recall" | "home") => {
-                        // Explicit recall point wins; fall back to the
+                        // A scroll of recall carries its own town:
+                        // the guild hall matching the target's class
+                        // (`Objects.values."Recall Rooms"`). It wins
+                        // over the character's bound recall point.
+                        // Then the explicit recall point; then the
                         // race's start room so a new player without a
                         // bound touchstone still has somewhere to land.
                         world
-                            .get::<RecallPoint>(target_entity)
-                            .map(|r| r.0)
+                            .get::<RecallScrollSource>(player)
+                            .copied()
+                            .and_then(|src| scroll_recall_room(world, src, target_entity))
+                            .or_else(|| world.get::<RecallPoint>(target_entity).map(|r| r.0))
                             .or_else(|| {
                                 let race =
                                     world.get::<Profile>(target_entity).map(|p| p.race.clone());
@@ -17351,6 +17369,49 @@ pub(crate) fn resolve_teleport_destination(
             .map(str::to_ascii_lowercase)
     };
     pick(override_params).or_else(|| pick(default_params))
+}
+
+/// Marker on the caster while `recite` / `wave` / `tap` dispatches an
+/// item's abilities: the proto key of the item being used. The
+/// teleport effect reads it to resolve per-scroll recall rooms.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct RecallScrollSource {
+    pub zone: i32,
+    pub id: i32,
+}
+
+/// Room a recall scroll sends `target` to, from the scroll proto's
+/// `recall_rooms` and the target's class (falling back to the parent
+/// class for subclasses, then the scroll's town default). `None` when
+/// the scroll has no recall data, the target is a mob without a class,
+/// or the chosen room isn't loaded; callers then use the normal
+/// recall-point fallback.
+fn scroll_recall_room(world: &World, source: RecallScrollSource, target: Entity) -> Option<Entity> {
+    let rooms = world
+        .get_resource::<ObjectPrototypes>()?
+        .by_key
+        .get(&(source.zone, source.id))?
+        .recall_rooms
+        .as_ref()?;
+    let mut names: Vec<&str> = Vec::new();
+    if let Some(classes) = world.get_resource::<mud_world::ClassCatalog>() {
+        let mut class = world
+            .get::<Profile>(target)
+            .and_then(|p| p.class_id)
+            .and_then(|id| classes.by_id.get(&id));
+        // Subclass first, then ancestors; bounded in case of bad data.
+        for _ in 0..4 {
+            let Some(c) = class else { break };
+            names.push(c.plain_name.as_str());
+            class = c.parent_class_id.and_then(|id| classes.by_id.get(&id));
+        }
+    }
+    let (zone, id) = rooms.room_for(&names)?;
+    world
+        .get_resource::<WorldKeyIndex>()?
+        .rooms
+        .get(&(zone, id))
+        .copied()
 }
 
 /// Read `destination_zone` + `destination_id` from a teleport effect's
@@ -20658,5 +20719,139 @@ mod carried_weight_tests {
         item(&mut world, (1, 7), player);
         item(&mut world, (1, 9), player);
         assert!((carried_weight(&mut world, player) - 11.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod scroll_recall_tests {
+    use super::{RecallScrollSource, scroll_recall_room, test_support};
+    use bevy_ecs::prelude::*;
+    use mud_db::enums::ObjectType;
+    use mud_world::{
+        ClassCatalog, ClassDef, ObjectPrototypes, Profile, RecallRooms, WorldKeyIndex,
+    };
+    use std::collections::HashMap;
+
+    fn class(id: i32, name: &str, parent: Option<i32>) -> ClassDef {
+        ClassDef {
+            id,
+            name: name.into(),
+            plain_name: name.into(),
+            is_subclass: parent.is_some(),
+            parent_class_id: parent,
+            description: None,
+            hit_dice: "1d8".into(),
+            primary_stat: None,
+            hp_per_level: 10,
+            exp_gain_factor: 1.0,
+            resistances: HashMap::new(),
+        }
+    }
+
+    /// Two scrolls ((30,56) green: town A; (30,57) red: town B), three
+    /// rooms, classes Sorcerer(1), Warrior(4) and a Conjurer(13)
+    /// subclass of Sorcerer.
+    fn setup() -> (World, Entity, Entity, [Entity; 3]) {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        let mut green = test_support::object_proto(30, 56, ObjectType::Scroll);
+        green.recall_rooms = Some(RecallRooms {
+            default: Some((30, 22)),
+            by_class: HashMap::from([("sorcerer".to_string(), (30, 46))]),
+        });
+        protos.by_key.insert((30, 56), green);
+        let mut red = test_support::object_proto(30, 57, ObjectType::Scroll);
+        red.recall_rooms = Some(RecallRooms {
+            default: Some((62, 49)),
+            by_class: HashMap::from([("sorcerer".to_string(), (62, 31))]),
+        });
+        protos.by_key.insert((30, 57), red);
+        // A scroll with no recall data.
+        protos.by_key.insert(
+            (30, 58),
+            test_support::object_proto(30, 58, ObjectType::Scroll),
+        );
+        world.insert_resource(protos);
+
+        let mut classes = ClassCatalog::default();
+        classes.by_id.insert(1, class(1, "Sorcerer", None));
+        classes.by_id.insert(4, class(4, "Warrior", None));
+        classes.by_id.insert(13, class(13, "Conjurer", Some(1)));
+        world.insert_resource(classes);
+
+        let start = world.spawn_empty().id();
+        let rooms = [
+            world.spawn_empty().id(),
+            world.spawn_empty().id(),
+            world.spawn_empty().id(),
+        ];
+        let mut index = WorldKeyIndex::default();
+        index.rooms.insert((30, 46), rooms[0]);
+        index.rooms.insert((30, 22), rooms[1]);
+        index.rooms.insert((62, 31), rooms[2]);
+        world.insert_resource(index);
+        let (player, _rx) = test_support::player_in(&mut world, start);
+        (world, player, start, rooms)
+    }
+
+    fn as_class(world: &mut World, who: Entity, class_id: i32) {
+        world.entity_mut(who).insert(Profile {
+            level: 20,
+            class_id: Some(class_id),
+            race: "HUMAN".into(),
+            experience: 0,
+            gender: "male".into(),
+        });
+    }
+
+    fn green() -> RecallScrollSource {
+        RecallScrollSource { zone: 30, id: 56 }
+    }
+
+    #[test]
+    fn scroll_sends_a_class_to_its_guild_hall() {
+        let (mut world, player, _start, rooms) = setup();
+        as_class(&mut world, player, 1);
+        assert_eq!(scroll_recall_room(&world, green(), player), Some(rooms[0]));
+    }
+
+    #[test]
+    fn unlisted_class_gets_the_town_default() {
+        let (mut world, player, _start, rooms) = setup();
+        as_class(&mut world, player, 4);
+        assert_eq!(scroll_recall_room(&world, green(), player), Some(rooms[1]));
+    }
+
+    #[test]
+    fn subclass_uses_its_parent_classes_hall() {
+        let (mut world, player, _start, rooms) = setup();
+        as_class(&mut world, player, 13);
+        assert_eq!(scroll_recall_room(&world, green(), player), Some(rooms[0]));
+    }
+
+    #[test]
+    fn each_scroll_targets_its_own_town() {
+        let (mut world, player, _start, rooms) = setup();
+        as_class(&mut world, player, 1);
+        let red = RecallScrollSource { zone: 30, id: 57 };
+        assert_eq!(scroll_recall_room(&world, red, player), Some(rooms[2]));
+        assert_ne!(
+            scroll_recall_room(&world, green(), player),
+            scroll_recall_room(&world, red, player)
+        );
+    }
+
+    #[test]
+    fn classless_target_and_unloaded_rooms_fall_back_cleanly() {
+        let (world, player, _start, rooms) = setup();
+        // No Profile: town default.
+        assert_eq!(scroll_recall_room(&world, green(), player), Some(rooms[1]));
+        // Red town default (62,49) isn't loaded: None so the caller
+        // uses the recall point.
+        let red = RecallScrollSource { zone: 30, id: 57 };
+        assert_eq!(scroll_recall_room(&world, red, player), None);
+        // Scroll with no recall data.
+        let plain = RecallScrollSource { zone: 30, id: 58 };
+        assert_eq!(scroll_recall_room(&world, plain, player), None);
     }
 }

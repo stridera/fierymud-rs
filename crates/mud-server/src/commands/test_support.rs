@@ -47,6 +47,7 @@ pub(crate) fn object_proto(zone: i32, id: i32, kind: ObjectType) -> ObjectProto 
         examine_description: None,
         weight: 0.0,
         weight_reduction: 0.0,
+        recall_rooms: None,
         level: 1,
         wear_flags: vec![],
         weapon_dice_num: 0,

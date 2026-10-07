@@ -48,7 +48,7 @@ pub use resources::{
     MobResetEntry, MudClock, ObjectAbilityBinding, ObjectAbilityCatalog, ObjectGrantedEffect,
     ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry, PendingDiscordLink,
     PendingDiscordLinks, PrecipKind, QuestVariableCache, RaceCatalog, RaceDef, RaceDefaults,
-    RaceStatCaps, RoomEnvironmentalEffects, RuntimeConfig, SavingThrow, ScriptError,
+    RaceStatCaps, RecallRooms, RoomEnvironmentalEffects, RuntimeConfig, SavingThrow, ScriptError,
     ScriptErrorLog, Season, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering,
     SocialDef, SocialRegistry, SpellSlotData, SystemTextEntry, SystemTexts, TargetingRule,
     TempBand, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, TriggerHistoryEntry,

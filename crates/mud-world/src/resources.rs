@@ -971,6 +971,11 @@ pub struct ObjectProto {
     /// hole). Read from `Objects.values."Weight Reduction"`; legacy
     /// `VAL_CONTAINER_WEIGHT_REDUCTION`. Zero for ordinary items.
     pub weight_reduction: f64,
+    /// Scroll-of-recall destinations (`Objects.values."Recall Rooms"`):
+    /// where reciting this scroll lands the target, by class. `None`
+    /// for ordinary items; recall scrolls without it fall back to the
+    /// target's recall point.
+    pub recall_rooms: Option<RecallRooms>,
     pub level: i32,
     /// Wear-slot flags from the schema; spawned items derive a single
     /// primary `WearableIn` from the first relevant flag (see
@@ -1083,6 +1088,29 @@ pub struct ObjectProto {
     /// consumed on camp completion, its tier folding into
     /// `computeCampTier`.
     pub camp_kit_tier: Option<i32>,
+}
+
+/// Per-town destinations of a scroll of recall: the guild hall that
+/// matches the target's class, with a town-wide default. Keys of
+/// `by_class` are lowercased `Class.plain_name`s.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecallRooms {
+    pub default: Option<(i32, i32)>,
+    pub by_class: HashMap<String, (i32, i32)>,
+}
+
+impl RecallRooms {
+    /// Destination for a target whose class is described by
+    /// `class_names` (most specific first, e.g. subclass then parent;
+    /// any case). The first name with an entry wins; otherwise the
+    /// town default.
+    #[must_use]
+    pub fn room_for(&self, class_names: &[&str]) -> Option<(i32, i32)> {
+        class_names
+            .iter()
+            .find_map(|n| self.by_class.get(&n.to_ascii_lowercase()).copied())
+            .or(self.default)
+    }
 }
 
 /// One `ObjectEffects` row, denormalized into the proto.

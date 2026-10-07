@@ -1532,6 +1532,11 @@ pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototy
                 examine_description: row.examine_description.as_deref().map(strip_ansi),
                 weight: row.weight,
                 weight_reduction: parse_weight_reduction(&row.values),
+                recall_rooms: if matches!(row.r#type, mud_db::enums::ObjectType::Scroll) {
+                    parse_recall_rooms(&row.values)
+                } else {
+                    None
+                },
                 level: row.level,
                 wear_flags: row.wear_flags,
                 weapon_dice_num: row.weapon_dice_num,
@@ -2201,6 +2206,35 @@ fn parse_weight_reduction(values: &serde_json::Value) -> f64 {
     }
 }
 
+/// Parse a recall scroll's destinations from its `values` JSONB:
+/// `{"Recall Rooms": {"default": {"zone": 30, "id": 22},
+/// "classes": {"sorcerer": {"zone": 30, "id": 46}}}}`. Class keys are
+/// matched case-insensitively against `Class.plain_name`. Entries
+/// without integer `zone` / `id` are skipped; `None` when the key is
+/// absent or yields no destination at all.
+fn parse_recall_rooms(values: &serde_json::Value) -> Option<crate::resources::RecallRooms> {
+    let block = values.get("Recall Rooms")?.as_object()?;
+    let room = |v: &serde_json::Value| -> Option<(i32, i32)> {
+        let zone = i32::try_from(v.get("zone")?.as_i64()?).ok()?;
+        let id = i32::try_from(v.get("id")?.as_i64()?).ok()?;
+        Some((zone, id))
+    };
+    let default = block.get("default").and_then(room);
+    let by_class: std::collections::HashMap<String, (i32, i32)> = block
+        .get("classes")
+        .and_then(serde_json::Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| room(v).map(|r| (k.to_ascii_lowercase(), r)))
+                .collect()
+        })
+        .unwrap_or_default();
+    if default.is_none() && by_class.is_empty() {
+        return None;
+    }
+    Some(crate::resources::RecallRooms { default, by_class })
+}
+
 fn parse_liquid(values: &serde_json::Value) -> Option<LiquidProto> {
     let liquid = values
         .get("Liquid")?
@@ -2717,5 +2751,29 @@ mod weight_reduction_tests {
                 < f64::EPSILON
         );
         assert!(parse_weight_reduction(&json!({"Weight Reduction": "x"})).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod recall_rooms_tests {
+    use super::parse_recall_rooms;
+    use serde_json::json;
+
+    #[test]
+    fn parses_default_and_class_rooms() {
+        let v = json!({"Spells": ["RECALL"], "Recall Rooms": {
+            "default": {"zone": 30, "id": 22},
+            "classes": {"Sorcerer": {"zone": 30, "id": 46}, "bad": {"zone": 1}}
+        }});
+        let r = parse_recall_rooms(&v).expect("recall rooms");
+        assert_eq!(r.default, Some((30, 22)));
+        assert_eq!(r.by_class.get("sorcerer"), Some(&(30, 46)));
+        assert_eq!(r.by_class.len(), 1, "entry without an id is skipped");
+    }
+
+    #[test]
+    fn absent_or_empty_is_none() {
+        assert!(parse_recall_rooms(&json!({"Spells": ["RECALL"]})).is_none());
+        assert!(parse_recall_rooms(&json!({"Recall Rooms": {}})).is_none());
     }
 }
