@@ -490,6 +490,9 @@ pub(crate) mod test_support;
 mod text_layout_tests;
 #[path = "commands/unban.rs"]
 mod unban;
+#[cfg(test)]
+#[path = "commands/wimpy_mob_tests.rs"]
+mod wimpy_mob_tests;
 #[path = "commands/writing.rs"]
 mod writing;
 
@@ -20938,13 +20941,60 @@ pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room:
         >();
         q.iter(world)
             .find(|(e, l, mem)| {
-                l.0 == room && mem.0.contains(&player) && can_see_player(world, *e, player)
+                l.0 == room
+                    && mem.0.contains(&player)
+                    && can_see_player(world, *e, player)
+                    && mob_will_start_fight(world, *e, player)
             })
             .map(|(e, _, _)| e)
     };
     let Some(mob) = grudger else { return false };
     engage_combat(world, mob, player, room);
     true
+}
+
+/// Legacy `MOB_WIMPY` panic line: HP below a quarter of max
+/// (`GET_HIT(ch) < (GET_MAX_HIT(ch) >> 2)`, mobact.cpp:277 and
+/// fight.cpp:1782). False for non-wimpy mobs and non-mobs.
+pub(crate) fn wimpy_mob_is_scared(world: &World, mob: Entity) -> bool {
+    world.get::<Mob>(mob).is_some()
+        && world
+            .get::<mud_world::MobBehaviors>(mob)
+            .is_some_and(|b| b.has(mud_db::enums::MobBehavior::Wimpy))
+        && world
+            .get::<Health>(mob)
+            .is_some_and(|h| h.hp < (h.max >> 2))
+}
+
+/// Legacy gate on a mob *starting* a fight with `target` (aggro on
+/// entry, respawn aggro, grudge re-engage). A wimpy mob below its panic
+/// line never starts one (`mobact.cpp:277`), and a wimpy mob is only
+/// willing to attack a target that is asleep (`is_aggr_to`,
+/// `ai_utils.cpp:513` — `MOB_WIMPY && AWAKE(tch)`), unless it is a
+/// protector or peacekeeper. Non-wimpy mobs are unaffected.
+pub(crate) fn mob_will_start_fight(world: &World, mob: Entity, target: Entity) -> bool {
+    use mud_db::enums::MobBehavior;
+    let Some(behaviors) = world.get::<mud_world::MobBehaviors>(mob) else {
+        return true;
+    };
+    if !behaviors.has(MobBehavior::Wimpy) {
+        return true;
+    }
+    if wimpy_mob_is_scared(world, mob) {
+        return false;
+    }
+    if behaviors.has(MobBehavior::Protector) || behaviors.has(MobBehavior::Peacekeeper) {
+        return true;
+    }
+    world
+        .get::<Posture>(target)
+        .is_some_and(|p| p.0 == PostureKind::Sleeping)
+}
+
+/// Whether a mob's damage-response should make it flee: legacy
+/// fight.cpp:1782-1785 — wimpy, below the panic line, not charmed.
+pub(crate) fn wimpy_mob_should_flee(world: &mut World, mob: Entity) -> bool {
+    wimpy_mob_is_scared(world, mob) && !attack_ok::is_charmed(world, mob)
 }
 
 /// Default alignment threshold below which a mob auto-swings on
@@ -21051,7 +21101,11 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
         // A mob cannot aggro what it cannot see (invisible player, no
         // detect-invisible).
         q.iter(world)
-            .filter(|(e, l, _, _)| l.0 == room && can_see_player(world, *e, player))
+            .filter(|(e, l, _, _)| {
+                l.0 == room
+                    && can_see_player(world, *e, player)
+                    && mob_will_start_fight(world, *e, player)
+            })
             .map(|(e, _, cs, wk)| (e, cs.alignment, wk.map(|k| (k.zone, k.id))))
             .collect()
     };

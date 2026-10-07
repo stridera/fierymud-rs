@@ -1526,19 +1526,10 @@ fn apply_swing(world: &mut World, s: &Swing) {
         .get::<mud_world::WimpyThreshold>(s.target)
         .map_or(25, |w| w.0)
         .clamp(1, 99);
-    // Mob auto-flee at <20% HP. Trivial mobs (max HP < 30) can't
-    // really flee meaningfully — they'd die on the next swing
-    // anyway. Boss-tier mobs (max HP > 200) hold ground; without a
-    // proper role flag this absolute-HP heuristic cleanly separates
-    // wildlife from set-piece encounters. 50% per-swing roll gives
-    // players a window to finish rather than chasing through rooms.
-    if target_is_mob
-        && let Some(hp) = world.get::<Health>(s.target).copied()
-        && hp.hp > 0
-        && (30..=200).contains(&hp.max)
-        && hp.hp * 5 < hp.max
-        && rand::random_range(0..2) == 0
-    {
+    // Mob auto-flee: legacy `MOB_WIMPY` (fight.cpp:1782) — a wimpy,
+    // non-charmed mob whose HP just dropped below a quarter of max
+    // flees. Mobs without the flag hold their ground.
+    if target_is_mob && crate::commands::wimpy_mob_should_flee(world, s.target) {
         mob_flee(world, s.target, room);
         return;
     }
@@ -3291,6 +3282,83 @@ mod tests {
             world.get::<Health>(target).unwrap().hp < 50,
             "swing landed before the auto-stand"
         );
+    }
+
+    /// Two rooms joined by one open exit, plus a mob in the first
+    /// that carries `behaviors` at `hp`/100 HP and is being hit by a
+    /// 7-damage attacker. Returns `(room_a, room_b, mob)`.
+    fn hurt_mob_under_attack(
+        world: &mut World,
+        behaviors: Vec<mud_db::enums::MobBehavior>,
+        hp: i32,
+    ) -> (Entity, Entity, Entity) {
+        let room_a = world.spawn(Exits::default()).id();
+        let room_b = world.spawn(Exits::default()).id();
+        world.get_mut::<Exits>(room_a).unwrap().0.insert(
+            mud_db::enums::Direction::North,
+            mud_world::ExitData {
+                to: Some(room_b),
+                state: mud_db::enums::ExitState::Open,
+                key: None,
+                description: None,
+                keywords: Vec::new(),
+                is_hidden: false,
+                is_pickproof: false,
+                is_bashable: false,
+                hit_points: None,
+            },
+        );
+        let mob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a jackal".to_string(),
+                },
+                Located(room_a),
+                Health { hp, max: 100 },
+                CombatStats::default(),
+                Posture(PostureKind::Standing),
+                mud_world::MobBehaviors(behaviors),
+            ))
+            .id();
+        let attacker = make_attacker(world, room_a, mob, 7);
+        try_insert(world, mob, Fighting(attacker));
+        (room_a, room_b, mob)
+    }
+
+    #[test]
+    fn wimpy_mob_flees_when_hp_drops_below_a_quarter() {
+        let mut world = World::new();
+        // 28 -> 21 after a 7-point hit: below 100 >> 2 = 25.
+        let (_a, room_b, mob) =
+            hurt_mob_under_attack(&mut world, vec![mud_db::enums::MobBehavior::Wimpy], 28);
+        run_combat_tick(&mut world);
+        assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_b));
+        assert!(world.get::<Fighting>(mob).is_none());
+    }
+
+    #[test]
+    fn wimpy_mob_above_the_threshold_keeps_fighting() {
+        let mut world = World::new();
+        // 60 -> 53: well above 25.
+        let (room_a, _b, mob) =
+            hurt_mob_under_attack(&mut world, vec![mud_db::enums::MobBehavior::Wimpy], 60);
+        run_combat_tick(&mut world);
+        assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_a));
+        assert!(world.get::<Health>(mob).is_some_and(|h| h.hp < 60));
+    }
+
+    #[test]
+    fn non_wimpy_mob_does_not_flee_below_the_threshold() {
+        let mut world = World::new();
+        let (room_a, _b, mob) = hurt_mob_under_attack(&mut world, vec![], 28);
+        for _ in 0..8 {
+            run_combat_tick(&mut world);
+            if world.get::<Health>(mob).is_none_or(|h| h.hp <= 0) {
+                break;
+            }
+            assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_a));
+        }
     }
 
     #[test]
