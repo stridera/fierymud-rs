@@ -7,7 +7,15 @@
 //!   set the `RestSource` to `Inn` immediately (tier 1) or stash a
 //!   `PendingRentConfirm` component and prompt the player to confirm
 //!   (tier > 1).
-//! - Outside an `is_inn` room: "There's nothing to rent here."
+//! - Outside an `is_inn` room: "There's nothing to rent here." — unless
+//!   a receptionist is present, who explains that belongings are kept
+//!   free of charge and points at `quit`.
+//!
+//! Legacy `rent` at a receptionist saved the character and quit. That
+//! verb is claimed by the inn tiers above (see the Rest / Repose design:
+//! leaving is free and penalty-free everywhere), so the legacy flow is
+//! not ported: `quit` already saves and disconnects, and `offer` answers
+//! the "what does it cost to store my things?" question.
 //!
 //! Per ADR 0001 §3 the fee is **flat per tier**, NOT per-night. The
 //! player who returns in a year pays the same as the player who
@@ -17,9 +25,9 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{RestSource, UserRole};
-use mud_world::{InnRoom, Located, RestState, Wealth};
+use mud_world::{InnRoom, Located, Mob, MobPrototypes, RestState, Wealth, WorldKey};
 
-use crate::commands::{Category, Command, Help, send_rendered, send_to};
+use crate::commands::{Category, Command, Help, name_of, send_rendered, send_to};
 
 /// Copper-per-gold conversion. Wealth is stored in copper; inn
 /// `fee_gp` is authored in gold pieces. Centralized so a future
@@ -50,6 +58,26 @@ inventory::submit! {
     }
 }
 
+inventory::submit! {
+    Command {
+        names: &["offer"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Settings,
+        help: Help {
+            usage: "offer",
+            summary: "Ask a receptionist what it costs to store your belongings.",
+            long: "Speak to a receptionist (or stand in an inn) to hear \
+                   the terms. Your character and belongings are saved \
+                   automatically and cost nothing to keep: `quit` \
+                   anywhere to save and leave. Inns additionally sell \
+                   prepaid rest tiers; `offer` lists them, `rent <name>` \
+                   books one.",
+        },
+        run: cmd_offer,
+    }
+}
+
 /// Set on the player when `rent <tier>` matched a tier in 1..=3
 /// pending the y/n confirmation step. Carries the resolved tier
 /// index, name, and fee so the confirm handler doesn't need to
@@ -69,7 +97,11 @@ pub(crate) fn cmd_rent(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let inn = world.get::<InnRoom>(room).cloned();
     let Some(inn) = inn else {
-        send_to(world, player, "There's nothing to rent here.\r\n");
+        if let Some(clerk) = receptionist_in_room(world, room) {
+            tell_no_rent_due(world, player, clerk);
+        } else {
+            send_to(world, player, "There's nothing to rent here.\r\n");
+        }
         return;
     };
     let arg = args.trim();
@@ -131,6 +163,75 @@ pub(crate) fn cmd_rent(world: &mut World, player: Entity, args: &str) {
         return;
     }
     finalize_rent(world, player, &chosen.name, chosen.tier, chosen.fee_gp);
+}
+
+/// First receptionist mob standing in `room`, identified by the
+/// `Receptionist` profession on its prototype.
+fn receptionist_in_room(world: &mut World, room: Entity) -> Option<Entity> {
+    let mobs: Vec<(Entity, WorldKey)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &WorldKey), With<Mob>>();
+        q.iter(world)
+            .filter(|(_, l, _)| l.0 == room)
+            .map(|(e, _, k)| (e, *k))
+            .collect()
+    };
+    let protos = world.get_resource::<MobPrototypes>()?;
+    mobs.into_iter().find_map(|(e, k)| {
+        protos
+            .by_key
+            .get(&(k.zone, k.id))
+            .filter(|p| {
+                p.professions
+                    .contains(&mud_db::enums::MobProfession::Receptionist)
+            })
+            .map(|_| e)
+    })
+}
+
+/// The receptionist's standing answer: no rent is owed, `quit` saves.
+fn tell_no_rent_due(world: &mut World, player: Entity, clerk: Entity) {
+    let clerk_name = name_of(world, clerk);
+    send_rendered(
+        world,
+        player,
+        &format!(
+            "{clerk_name} tells you, 'No rent is due here. Your belongings are saved \
+             automatically and keep for free. Just type <b:white>quit</> whenever you are \
+             ready to leave.'\r\n"
+        ),
+    );
+}
+
+/// `offer`: what the receptionist will do for you. Reports that
+/// storage is free and, in an inn, lists the prepaid rest tiers.
+pub(crate) fn cmd_offer(world: &mut World, player: Entity, _args: &str) {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let room = located.0;
+    let clerk = receptionist_in_room(world, room);
+    let inn = world.get::<InnRoom>(room).cloned();
+    if clerk.is_none() && inn.is_none() {
+        send_to(
+            world,
+            player,
+            "There's no one here to make you an offer.\r\n",
+        );
+        return;
+    }
+    if let Some(clerk) = clerk {
+        tell_no_rent_due(world, player, clerk);
+    } else {
+        send_to(
+            world,
+            player,
+            "No rent is due: your belongings are saved automatically. Type quit to leave.\r\n",
+        );
+    }
+    if let Some(inn) = inn {
+        render_tier_menu(world, player, &inn);
+    }
 }
 
 /// Apply the rent: deduct gold, set RestSource=Inn, restTier=chosen.
@@ -207,4 +308,78 @@ fn render_tier_menu(world: &mut World, player: Entity, inn: &InnRoom) {
     }
     out.push_str("Use `rent <name>` to book one. Tiers 2 and 3 ask to confirm.\r\n");
     send_to(world, player, out);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::{self, drain};
+    use mud_world::{InnTier, MobProto};
+
+    fn world_with_clerk(inn: bool) -> (World, Entity, test_support::Rx) {
+        let mut world = World::new();
+        let mut protos = MobPrototypes::default();
+        let proto: MobProto =
+            test_support::mob_proto(1, 5, mud_db::enums::MobProfession::Receptionist);
+        protos.by_key.insert((1, 5), proto);
+        world.insert_resource(protos);
+        let room = world.spawn_empty().id();
+        if inn {
+            world.entity_mut(room).insert(InnRoom {
+                inn_name: "The Inn".into(),
+                tiers: vec![InnTier {
+                    name: "basic".into(),
+                    tier: 1,
+                    fee_gp: 5,
+                }],
+            });
+        }
+        world.spawn((
+            Mob,
+            WorldKey { zone: 1, id: 5 },
+            Located(room),
+            mud_world::Named {
+                name: "the receptionist".into(),
+            },
+        ));
+        let (player, rx) = test_support::player_in(&mut world, room);
+        (world, player, rx)
+    }
+
+    #[test]
+    fn rent_at_a_receptionist_without_an_inn_points_at_quit() {
+        let (mut world, player, mut rx) = world_with_clerk(false);
+        cmd_rent(&mut world, player, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("No rent is due"), "{out}");
+        assert!(out.contains("quit"), "{out}");
+        assert!(!out.contains("nothing to rent"), "{out}");
+    }
+
+    #[test]
+    fn rent_with_no_receptionist_still_says_nothing_to_rent() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (player, mut rx) = test_support::player_in(&mut world, room);
+        cmd_rent(&mut world, player, "");
+        assert!(drain(&mut rx).contains("nothing to rent"));
+    }
+
+    #[test]
+    fn offer_reports_free_storage_and_lists_inn_tiers() {
+        let (mut world, player, mut rx) = world_with_clerk(true);
+        cmd_offer(&mut world, player, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("No rent is due"), "{out}");
+        assert!(out.contains("basic") && out.contains("5 gp"), "{out}");
+    }
+
+    #[test]
+    fn offer_with_nobody_to_ask_refuses() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (player, mut rx) = test_support::player_in(&mut world, room);
+        cmd_offer(&mut world, player, "");
+        assert!(drain(&mut rx).contains("no one here"));
+    }
 }
