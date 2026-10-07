@@ -505,3 +505,19 @@ fn staff_xp_does_not_burn_repose_or_rest_source() {
     assert_eq!(after.source, mud_db::enums::RestSource::Inn);
     assert_eq!(after.tier, 2);
 }
+
+#[test]
+fn forced_and_scripted_quit_are_refused() {
+    let mut world = World::new();
+    world.insert_resource(DevMode(true));
+    let boss = spawn(&mut world, "Boss", 105, UserRole::Player);
+    let bob = spawn(&mut world, "Bob", 5, UserRole::Player);
+    dispatch(&mut world, boss, "force Bob quit");
+    assert!(world.get::<crate::commands::Quitting>(bob).is_none());
+    assert!(world.get_entity(bob).is_ok());
+    run_lua_command(&mut world, bob, "quit");
+    assert!(world.get::<crate::commands::Quitting>(bob).is_none());
+    // Typed by the player themself still works.
+    dispatch(&mut world, bob, "quit");
+    assert!(world.get::<crate::commands::Quitting>(bob).is_some());
+}

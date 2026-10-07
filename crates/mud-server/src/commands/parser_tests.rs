@@ -223,7 +223,7 @@ fn positional_arguments_substitute_one_to_nine() {
 
 #[test]
 fn missing_positional_argument_expands_to_nothing() {
-    use crate::commands::apply_alias as apply;
+    let apply = |r: &str, a: &str| crate::commands::apply_alias(r, a, 16 * 1024).unwrap();
     assert_eq!(apply("say $1 and $3", "a b"), vec!["say a and"]);
     assert_eq!(apply("say $$ $x", "a"), vec!["say $ x"]);
     assert_eq!(apply("look", "ignored"), vec!["look"]);
@@ -621,5 +621,78 @@ fn look_and_examine_take_an_index() {
         let out = drain(&mut rx);
         assert!(out.contains("bent"), "`{verb} 2.sword`: {out}");
         assert!(!out.contains("rusty"), "`{verb} 2.sword`: {out}");
+    }
+}
+
+// ---- alias expansion bounds ----
+
+#[test]
+fn alias_dos_attack_is_rejected_with_bounded_work() {
+    let (mut world, _room, p, mut rx) = setup(UserRole::Player);
+    // `$*` 2000 times per alias would copy the argument 2000x per level.
+    let body = "$*".repeat(128);
+    set_aliases(
+        &mut world,
+        p,
+        &[("a", body.as_str()), ("b", "a $*"), ("c", "b $*;b $*;b $*")],
+    );
+    let args = "x".repeat(200);
+    let start = std::time::Instant::now();
+    dispatch(&mut world, p, &format!("c {args}"));
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    let out = drain(&mut rx);
+    assert!(out.contains("Alias expansion refused"), "{out}");
+    // Direct apply: the same 2000x `$*` is refused before allocating it.
+    let huge = "$*".repeat(2000);
+    let args = "y".repeat(1000);
+    assert!(crate::commands::apply_alias(&huge, &args, 16 * 1024).is_err());
+}
+
+#[test]
+fn alias_run_budget_spans_nested_levels() {
+    use crate::commands::{AliasLimit, apply_alias};
+    // Each line fits (<4096) but together they pass the budget.
+    let args = "z".repeat(3000);
+    let r = apply_alias("say $*;say $*", &args, 4000);
+    assert_eq!(r, Err(AliasLimit::BudgetExceeded));
+    let r = apply_alias("say $*$*", &"z".repeat(3000), 16 * 1024);
+    assert_eq!(r, Err(AliasLimit::LineTooLong));
+    assert!(apply_alias("say $*;say $*", &"z".repeat(1000), 16 * 1024).is_ok());
+}
+
+#[test]
+fn alias_definition_limits_are_enforced_and_normal_aliases_work() {
+    let (mut world, _room, p, mut rx) = setup(UserRole::Player);
+    let long = "x".repeat(257);
+    dispatch(&mut world, p, &format!("alias big say {long}"));
+    assert!(drain(&mut rx).contains("limited to 256"));
+    assert!(
+        world
+            .get::<Aliases>(p)
+            .is_none_or(|a| a.get("big").is_none())
+    );
+    dispatch(&mut world, p, "alias tb toggle brief");
+    assert!(drain(&mut rx).contains("Alias 'tb' set"));
+    dispatch(&mut world, p, "tb");
+    assert!(has(&world, p, PlayerFlag::Brief));
+    // 50 aliases max; redefining an existing one is still fine.
+    for i in 0..49 {
+        dispatch(&mut world, p, &format!("alias n{i} look"));
+    }
+    assert_eq!(world.get::<Aliases>(p).unwrap().entries.len(), 50);
+    drain(&mut rx);
+    dispatch(&mut world, p, "alias extra look");
+    assert!(drain(&mut rx).contains("more than 50"));
+    dispatch(&mut world, p, "alias tb toggle compact");
+    assert!(drain(&mut rx).contains("updated"));
+}
+
+#[test]
+fn staff_verbs_need_the_full_word() {
+    let (mut world, _room, p, mut rx) = setup(UserRole::Implementor);
+    for typed in ["zr", "ad", "du", "rer", "sla", "dev", "rena", "areloa"] {
+        dispatch(&mut world, p, typed);
+        let out = drain(&mut rx);
+        assert!(out.contains("Type the whole command"), "`{typed}`: {out}");
     }
 }

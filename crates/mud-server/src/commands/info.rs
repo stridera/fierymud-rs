@@ -7171,6 +7171,17 @@ pub(crate) fn cmd_quit(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can't quit while shapechanged!\r\n");
         return;
     }
+    // Only the connection that typed `quit` drains the `Quitting` marker, so a
+    // forced or scripted quit would strand the player half-quit. Players
+    // leave on their own; staff use the disconnect tools.
+    if !command_is_typed() {
+        send_to(
+            world,
+            player,
+            "You can't quit on someone else's say-so.\r\n",
+        );
+        return;
+    }
     let first = args.split_whitespace().next().unwrap_or("");
     if !first.is_empty() && !first.eq_ignore_ascii_case("yes") {
         send_to(world, player, "Just type 'quit' to leave the world.\r\n");
@@ -7598,6 +7609,47 @@ pub(crate) fn cmd_alias(world: &mut World, player: Entity, args: &str) {
             world,
             player,
             format!("'{name}' can't be aliased — reserved.\r\n"),
+        );
+        return;
+    }
+
+    if name.len() > MAX_ALIAS_NAME_LEN {
+        send_to(
+            world,
+            player,
+            format!(
+                "Alias names are limited to {MAX_ALIAS_NAME_LEN} characters.
+"
+            ),
+        );
+        return;
+    }
+    if expansion.chars().count() > MAX_ALIAS_DEFINITION_LEN {
+        send_to(
+            world,
+            player,
+            format!(
+                "Alias definitions are limited to {MAX_ALIAS_DEFINITION_LEN} characters.
+"
+            ),
+        );
+        return;
+    }
+    let is_new = world
+        .get::<mud_world::Aliases>(player)
+        .is_none_or(|a| a.get(&name).is_none());
+    if is_new
+        && world
+            .get::<mud_world::Aliases>(player)
+            .is_some_and(|a| a.entries.len() >= MAX_ALIASES_PER_CHARACTER)
+    {
+        send_to(
+            world,
+            player,
+            format!(
+                "You can't have more than {MAX_ALIASES_PER_CHARACTER} aliases; unalias one first.
+"
+            ),
         );
         return;
     }

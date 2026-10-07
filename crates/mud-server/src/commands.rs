@@ -617,9 +617,14 @@ fn dispatch_async_line<'a>(
     Box::pin(async move {
         let composing =
             world.get::<MailDraft>(player).is_some() || world.get::<BoardDraft>(player).is_some();
-        if !composing
-            && let Some((name, lines)) = expand_alias(world, player, line.trim(), &run.active)
-        {
+        if !composing && let Some(expanded) = expand_alias(world, player, line.trim(), run) {
+            let (name, lines) = match expanded {
+                Ok(pair) => pair,
+                Err(limit) => {
+                    send_to(world, player, limit.message());
+                    return;
+                }
+            };
             if run.active.len() >= MAX_ALIAS_DEPTH {
                 send_to(world, player, "Your aliases are nested too deeply.\r\n");
                 return;
@@ -658,6 +663,40 @@ fn dispatch_async_line<'a>(
 struct AliasRun {
     active: Vec<String>,
     queued: usize,
+    /// Bytes of expanded command text produced so far across every
+    /// alias level of this typed line (see [`MAX_ALIAS_RUN_BYTES`]).
+    bytes: usize,
+}
+
+/// Longest alias definition (replacement text) a character may store.
+pub(crate) const MAX_ALIAS_DEFINITION_LEN: usize = 256;
+/// Longest alias name.
+pub(crate) const MAX_ALIAS_NAME_LEN: usize = 32;
+/// Most aliases one character may define.
+pub(crate) const MAX_ALIASES_PER_CHARACTER: usize = 50;
+/// Longest single command line an alias may expand to. Legacy capped input
+/// lines at `MAX_INPUT_LENGTH` (1000); a little headroom is kept for long
+/// `say`/`tell` arguments passed through `$*`.
+pub(crate) const MAX_ALIAS_LINE_LEN: usize = 4096;
+/// Total expanded bytes one typed line may generate across all nested
+/// alias levels. Legacy had no guard; `$*` repeated in nested aliases
+/// multiplies the argument text, so this bounds the worst case.
+pub(crate) const MAX_ALIAS_RUN_BYTES: usize = 16 * 1024;
+
+/// Why an alias expansion was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AliasLimit {
+    LineTooLong,
+    BudgetExceeded,
+}
+
+impl AliasLimit {
+    fn message(self) -> &'static str {
+        match self {
+            Self::LineTooLong => "Alias expansion refused: the expanded line is too long.\r\n",
+            Self::BudgetExceeded => "Alias expansion refused: it grew too large.\r\n",
+        }
+    }
 }
 
 /// Longest alias-in-alias chain followed for one typed line.
@@ -684,7 +723,14 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     // working while puppeteering. Each expanded line is dispatched in turn
     // as if the player had typed it (same origin, so an alias can never
     // reach a command its owner couldn't type).
-    if let Some((name, lines)) = expand_alias(world, player, trimmed, &run.active) {
+    if let Some(expanded) = expand_alias(world, player, trimmed, run) {
+        let (name, lines) = match expanded {
+            Ok(pair) => pair,
+            Err(limit) => {
+                send_to(world, player, limit.message());
+                return;
+            }
+        };
         if run.active.len() >= MAX_ALIAS_DEPTH {
             send_to(world, player, "Your aliases are nested too deeply.\r\n");
             return;
@@ -1005,6 +1051,12 @@ pub(crate) fn with_command_origin<R>(origin: CommandOrigin, f: impl FnOnce() -> 
     f()
 }
 
+/// True when the line being dispatched was typed by the acting character
+/// (not queued by a script or forced by another character).
+pub(crate) fn command_is_typed() -> bool {
+    COMMAND_ORIGIN.with(std::cell::Cell::get) == CommandOrigin::Direct
+}
+
 /// Role / permission gate shared by the sync and async dispatchers.
 /// Players check `Account.role` (+ `required_perm`); mobs (no `Account`)
 /// are allowed Player-level commands only; `DevMode` grants every command
@@ -1051,57 +1103,90 @@ fn command_permitted(world: &World, player: Entity, cmd: &Command) -> bool {
 ///   and `$1`..`$9` (that whitespace-separated word, empty when missing),
 ///   and `;` splits the replacement into several commands. `$$` is a
 ///   literal `$`.
-pub(crate) fn expand_alias(
+fn expand_alias(
     world: &World,
     player: Entity,
     line: &str,
-    active: &[String],
-) -> Option<(String, Vec<String>)> {
+    run: &mut AliasRun,
+) -> Option<Result<(String, Vec<String>), AliasLimit>> {
     let aliases = world.get::<mud_world::Aliases>(player)?;
     if aliases.entries.is_empty() {
         return None;
     }
     let mut parts = line.splitn(2, char::is_whitespace);
     let head = parts.next()?;
-    if active.iter().any(|a| a.eq_ignore_ascii_case(head)) {
+    if run.active.iter().any(|a| a.eq_ignore_ascii_case(head)) {
         return None;
     }
     let expansion = aliases.get(head)?;
     let rest = parts.next().unwrap_or("").trim();
-    Some((head.to_ascii_lowercase(), apply_alias(expansion, rest)))
+    let budget = MAX_ALIAS_RUN_BYTES.saturating_sub(run.bytes);
+    Some(apply_alias(expansion, rest, budget).map(|lines| {
+        run.bytes += lines.iter().map(String::len).sum::<usize>();
+        (head.to_ascii_lowercase(), lines)
+    }))
 }
 
 /// Expand one alias replacement against the arguments typed after it.
-pub(crate) fn apply_alias(replacement: &str, args: &str) -> Vec<String> {
+/// Fails (without building the oversized text) when any resulting line
+/// exceeds [`MAX_ALIAS_LINE_LEN`] or the lines together exceed `budget`.
+pub(crate) fn apply_alias(
+    replacement: &str,
+    args: &str,
+    budget: usize,
+) -> Result<Vec<String>, AliasLimit> {
     if !replacement.contains(['$', ';']) {
-        return vec![replacement.trim().to_string()];
+        let line = replacement.trim();
+        if line.len() > MAX_ALIAS_LINE_LEN {
+            return Err(AliasLimit::LineTooLong);
+        }
+        if line.len() > budget {
+            return Err(AliasLimit::BudgetExceeded);
+        }
+        return Ok(vec![line.to_string()]);
     }
     let words: Vec<&str> = args.split_whitespace().take(9).collect();
     let mut lines = Vec::new();
+    let mut total = 0usize;
     let mut cur = String::new();
+    // Appends `piece` to the line being built, refusing before any
+    // allocation when a limit would be crossed.
+    let push = |cur: &mut String, total: usize, piece: &str| -> Result<(), AliasLimit> {
+        if cur.len() + piece.len() > MAX_ALIAS_LINE_LEN {
+            return Err(AliasLimit::LineTooLong);
+        }
+        if total + cur.len() + piece.len() > budget {
+            return Err(AliasLimit::BudgetExceeded);
+        }
+        cur.push_str(piece);
+        Ok(())
+    };
     let mut chars = replacement.chars();
     while let Some(c) = chars.next() {
         match c {
-            ';' => lines.push(std::mem::take(&mut cur)),
+            ';' => {
+                total += cur.len();
+                lines.push(std::mem::take(&mut cur));
+            }
             '$' => match chars.next() {
-                Some('*') => cur.push_str(args),
-                Some('$') | None => cur.push('$'),
+                Some('*') => push(&mut cur, total, args)?,
+                Some('$') | None => push(&mut cur, total, "$")?,
                 Some(d @ '1'..='9') => {
                     let idx = d as usize - '1' as usize;
-                    cur.push_str(words.get(idx).copied().unwrap_or(""));
+                    push(&mut cur, total, words.get(idx).copied().unwrap_or(""))?;
                 }
                 // Legacy drops the `$` and keeps the character.
-                Some(other) => cur.push(other),
+                Some(other) => push(&mut cur, total, other.encode_utf8(&mut [0; 4]))?,
             },
-            other => cur.push(other),
+            other => push(&mut cur, total, other.encode_utf8(&mut [0; 4]))?,
         }
     }
     lines.push(cur);
-    lines
+    Ok(lines
         .into_iter()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
-        .collect()
+        .collect())
 }
 
 /// Names of commands considered "debug" — arbitrary-code or
@@ -1271,6 +1356,18 @@ const ABBREV_DENYLIST: &[&str] = &[
     "mdelete",
     "odelete",
     "zdelete",
+    "zreset",
+    "advance",
+    "reroll",
+    "slay",
+    "rrestore",
+    "hrevoke",
+    "rename",
+    "devmode",
+    "dumpworld",
+    "areload",
+    "reloadzone",
+    "reloadallzones",
 ];
 
 /// False for destructive commands that must be typed in full.
