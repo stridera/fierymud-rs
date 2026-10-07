@@ -2311,6 +2311,26 @@ pub fn effective_level(world: &World, entity: Entity) -> i32 {
         .unwrap_or(1)
 }
 
+/// The race of any creature: `Profile.race` for players, the spawn
+/// prototype's race for mobs (see [`effective_level`]). Empty for anything
+/// else.
+#[must_use]
+pub fn effective_race(world: &World, entity: Entity) -> String {
+    if let Some(p) = world.get::<crate::components::Profile>(entity) {
+        return p.race.clone();
+    }
+    world
+        .get::<crate::components::WorldKey>(entity)
+        .and_then(|wk| {
+            world
+                .get_resource::<MobPrototypes>()?
+                .by_key
+                .get(&(wk.zone, wk.id))
+                .map(|p| p.race.clone())
+        })
+        .unwrap_or_default()
+}
+
 impl MobProto {
     /// Average-roll HP from the dice expression `NdM+B`: `N*(M+1)/2 + B`,
     /// matching `avg_damage`'s shape. Deterministic — boss mobs spawn

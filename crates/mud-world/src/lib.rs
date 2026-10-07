@@ -59,6 +59,6 @@ pub use resources::{
     SocialDef, SocialRegistry, SpellSlotData, SystemTextEntry, SystemTexts, TargetingRule,
     TempBand, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, TriggerHistoryEntry,
     TriggerHistoryLog, WeatherCatalog, WeatherDriftLocks, WeatherState, WizLock, WorldKeyIndex,
-    effective_level, parse_resistance_json,
+    effective_level, effective_race, parse_resistance_json,
 };
 pub use resources::{class_exp_factor, exp_to_reach, is_starstar, scale_exp, stars_for_name};

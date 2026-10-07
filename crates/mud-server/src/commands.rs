@@ -3843,6 +3843,33 @@ mod tests {
     }
 
     #[test]
+    fn effective_level_and_race_read_the_mob_prototype() {
+        use super::test_support::mob_proto;
+        let mut world = World::new();
+        let mut protos = mud_world::MobPrototypes::default();
+        let mut p = mob_proto(3, 4, mud_db::enums::MobProfession::Trainer);
+        p.level = 37;
+        p.race = "elf".into();
+        protos.by_key.insert((3, 4), p);
+        world.insert_resource(protos);
+        let pet = world.spawn(mud_world::WorldKey { zone: 3, id: 4 }).id();
+        assert_eq!(mud_world::effective_level(&world, pet), 37);
+        assert_eq!(mud_world::effective_race(&world, pet), "elf");
+        let player = world
+            .spawn(mud_world::Profile {
+                level: 9,
+                class_id: None,
+                race: "HUMAN".into(),
+                experience: 0,
+                gender: "neutral".into(),
+            })
+            .id();
+        assert_eq!(mud_world::effective_race(&world, player), "HUMAN");
+        let nobody = world.spawn_empty().id();
+        assert_eq!(mud_world::effective_race(&world, nobody), "");
+    }
+
+    #[test]
     fn aoe_refusal_from_attack_ok_is_sent_once_not_per_target() {
         use super::test_support::{drain, player_in};
         let mut world = World::new();
@@ -6865,11 +6892,9 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
         let plain = render_color_tags(&raw, ColorMode::Strip)
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
-        let level = world.get::<Profile>(m).map_or(0, |p| p.level);
-        let race = world
-            .get::<Profile>(m)
-            .map(|p| p.race.clone())
-            .unwrap_or_default();
+        // Pets are mobs: their level and race live on the prototype.
+        let level = mud_world::effective_level(world, m);
+        let race = mud_world::effective_race(world, m);
         let class = world
             .get::<Profile>(m)
             .and_then(|p| p.class_id)
@@ -15437,15 +15462,17 @@ pub(crate) fn invoke_ability_with(
                             .and_then(|src| scroll_recall_room(world, src, target_entity))
                             .or_else(|| world.get::<RecallPoint>(target_entity).map(|r| r.0))
                             .or_else(|| {
-                                let race =
-                                    world.get::<Profile>(target_entity).map(|p| p.race.clone());
-                                let start = race.and_then(|r| {
-                                    world
-                                        .resource::<mud_world::RaceDefaults>()
-                                        .start_room_by_race
-                                        .get(&r)
-                                        .copied()
-                                });
+                                // Mob prototypes carry a lower-cased race;
+                                // `start_room_by_race` is keyed by the enum
+                                // spelling players' profiles use.
+                                let race = mud_world::effective_race(world, target_entity);
+                                let by_race = &world
+                                    .resource::<mud_world::RaceDefaults>()
+                                    .start_room_by_race;
+                                let start = by_race
+                                    .get(&race)
+                                    .or_else(|| by_race.get(&race.to_ascii_uppercase()))
+                                    .copied();
                                 start.and_then(|(z, i)| {
                                     world
                                         .resource::<WorldKeyIndex>()
