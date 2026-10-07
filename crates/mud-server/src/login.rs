@@ -261,7 +261,14 @@ fn plain_telnet_notice_bytes(world: &World) -> Vec<u8> {
             )
         })
         .replace("{tls_port}", &port.to_string());
-    crate::commands::render_color_tags(&raw, crate::commands::ColorMode::Ansi).into_bytes()
+    let mut text = crate::commands::render_color_tags(&raw, crate::commands::ColorMode::Ansi);
+    // The prompt that follows is written straight after this block, so
+    // a row without a trailing line break glued "Password:" onto the
+    // notice (#49). Prompts are the only login text left unterminated.
+    if !text.ends_with('\n') {
+        text.push_str("\r\n");
+    }
+    text.into_bytes()
 }
 
 /// Verify a plaintext password against a stored hash, transparently
@@ -6301,6 +6308,31 @@ mod tests {
             wire.ends_with("\r\n") || wire.contains("hi\r\n"),
             "{wire:?}"
         );
+    }
+
+    #[test]
+    fn plain_telnet_notice_is_line_terminated_so_the_prompt_starts_a_new_line() {
+        // DB row as seeded: one paragraph, no trailing newline (#49).
+        let mut world = World::new();
+        world.insert_resource(messages(&[(
+            "PLAIN_TELNET_NOTICE",
+            "default",
+            "Not encrypted. Use TLS port {tls_port}.",
+        )]));
+        let notice = String::from_utf8(plain_telnet_notice_bytes(&world)).unwrap();
+        assert_eq!(notice, "Not encrypted. Use TLS port 4443.\r\n");
+
+        // Compiled fallback and an already-terminated row are untouched.
+        let fallback = plain_telnet_notice_bytes(&World::new());
+        assert!(fallback.ends_with(b"\r\n"));
+        world.insert_resource(messages(&[("PLAIN_TELNET_NOTICE", "default", "Hi\n")]));
+        assert_eq!(plain_telnet_notice_bytes(&world), b"Hi\n");
+
+        // The prompt itself stays unterminated, like every other prompt.
+        let prompt = login_message_bytes(&world, "PASSWORD_PROMPT", PASSWORD_PROMPT_FALLBACK);
+        assert_eq!(prompt, b"Password: ");
+        let ident = login_message_bytes(&world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
+        assert!(ident.ends_with(b": "));
     }
 
     fn drain(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> String {

@@ -6,7 +6,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -503,6 +503,7 @@ async fn accept_plain(
     let mut next_id: ConnId = 1;
     loop {
         let (stream, peer) = listener.accept().await?;
+        set_nodelay(&stream, peer);
         let conn_id = next_id;
         next_id += 1;
         // On refusal the socket is closed (after a short notice for
@@ -519,6 +520,16 @@ async fn accept_plain(
         tokio::spawn(async move {
             handle_connection(conn_id, peer, stream, inbound, guard, limits).await;
         });
+    }
+}
+
+/// Disable Nagle on an accepted socket. The server writes many small
+/// frames back to back (notice, then prompt; negotiation bytes), and with
+/// Nagle on, every frame after the first waits for the client's delayed
+/// ACK before it is sent, which shows up as output trickling in (#49).
+fn set_nodelay(stream: &TcpStream, peer: SocketAddr) {
+    if let Err(e) = stream.set_nodelay(true) {
+        debug!(%peer, error = %e, "set_nodelay failed");
     }
 }
 
@@ -590,6 +601,7 @@ pub async fn serve_tls(
         // (a flood that exhausts plain TCP shouldn't fall through
         // to TLS, and vice versa).
         let (stream, peer) = listener.accept().await?;
+        set_nodelay(&stream, peer);
         let conn_id = next_id;
         next_id += 1;
         // The notice goes out in plaintext, before any TLS handshake.
@@ -1665,7 +1677,7 @@ mod iac_tests {
 mod limit_tests {
     use super::*;
     use std::net::Ipv6Addr;
-    use tokio::net::{TcpSocket, TcpStream};
+    use tokio::net::TcpSocket;
 
     const WAIT: Duration = Duration::from_secs(5);
 
@@ -2205,6 +2217,17 @@ mod limit_tests {
             InboundKind::Line(l) => assert_eq!(l, "Mukashi"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn accepted_sockets_have_nagle_disabled() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let (server_side, peer) = listener.accept().await.unwrap();
+        assert!(!server_side.nodelay().unwrap());
+        set_nodelay(&server_side, peer);
+        assert!(server_side.nodelay().unwrap());
     }
 
     #[test]
