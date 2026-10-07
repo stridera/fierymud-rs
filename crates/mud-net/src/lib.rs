@@ -738,6 +738,10 @@ struct CapsLocal {
     naws: bool,
     ttype: bool,
     charset_utf8: bool,
+    /// We already answered a client-initiated `DO SGA` with `WILL SGA`.
+    sga_will_sent: bool,
+    /// We already answered a client-initiated `WILL SGA` with `DO SGA`.
+    sga_do_sent: bool,
     /// Number of `IAC SB TTYPE SEND` polls we've sent. Mudlet's
     /// MTTS cycle yields name → terminal → bitmap on the first
     /// three; further polls return the same bitmap. We poll up
@@ -759,11 +763,11 @@ struct CapsLocal {
 /// EOR (prompt boundary marker), CHARSET (for UTF-8 confirmation),
 /// MXP (clickable links — optional). Options we send DO for:
 /// NAWS (window size), TTYPE (terminal type / MTTS), NEW-ENVIRON
-/// (env vars). Suppress-Go-Ahead is mutually negotiated — both
-/// WILL and DO so each side knows the other won't send GA.
+/// (env vars). Suppress-Go-Ahead is deliberately NOT offered: a
+/// plain line-mode telnet client that sees `WILL SGA` switches to
+/// character-at-a-time mode and loses local echo and line editing.
+/// If the client itself asks for SGA we agree (see `handle_negotiate`).
 fn queue_negotiation(out_tx: &Outbound) {
-    let _ = out_tx.try_send(will(opt::SGA));
-    let _ = out_tx.try_send(do_(opt::SGA));
     let _ = out_tx.try_send(will(opt::GMCP));
     let _ = out_tx.try_send(will(opt::MSSP));
     let _ = out_tx.try_send(will(opt::MCCP2));
@@ -1140,6 +1144,10 @@ async fn handle_connection<S>(
     // (raw TCP clients never answer).
     let connect_deadline = started + limits.negotiation_window;
 
+    // Set when the client half-closes (read EOF): the session ends but
+    // the writer is allowed to drain what is already queued.
+    let mut drain = false;
+
     'conn: loop {
         let outcome = if sink.connected() {
             read_chunk(
@@ -1174,7 +1182,23 @@ async fn handle_connection<S>(
         };
         let n = match outcome {
             ReadOutcome::Data(n) => n,
-            ReadOutcome::Closed => break,
+            ReadOutcome::Closed => {
+                drain = true;
+                // A bare probe that connects and closes is never
+                // announced, but a client that sent input before its
+                // half-close (`echo look | nc`) must still reach the
+                // world layer and get its reply.
+                if !sink.connected()
+                    && sink
+                        .pending
+                        .iter()
+                        .any(|k| matches!(k, InboundKind::Line(_)))
+                {
+                    caps.output.settle();
+                    let _ = sink.connect().await;
+                }
+                break;
+            }
             ReadOutcome::ServerClose => {
                 debug!(conn_id, %peer, "server-initiated close");
                 break;
@@ -1226,7 +1250,15 @@ async fn handle_connection<S>(
     // A connection that never got its `Connected` was never announced,
     // so it has nothing to disconnect either.
     let announced = sink.connected();
-    finish_connection(conn_id, &inbound, writer, &close_rx, announced).await;
+    finish_connection(
+        conn_id,
+        &inbound,
+        writer,
+        &close_rx,
+        announced,
+        drain.then_some(out_tx),
+    )
+    .await;
 }
 
 /// Tear-down shared by every exit from the read loop: report the
@@ -1234,12 +1266,18 @@ async fn handle_connection<S>(
 /// writer is given time to flush queued output and shut the socket down
 /// (bounded, in case the client has stopped reading); otherwise it's
 /// aborted immediately.
+///
+/// `drain_tx` is `Some` after a client half-close (read EOF): its sender
+/// is dropped so the writer ends on its own once the world layer has
+/// released its clone, having written everything queued first (bounded
+/// by [`EOF_DRAIN_TIMEOUT`]). Write errors still end the writer at once.
 async fn finish_connection(
     conn_id: ConnId,
     inbound: &InboundTx,
     mut writer: tokio::task::JoinHandle<()>,
     close_rx: &watch::Receiver<bool>,
     announced: bool,
+    drain_tx: Option<Outbound>,
 ) {
     if announced {
         let _ = inbound
@@ -1250,7 +1288,15 @@ async fn finish_connection(
             .await;
     }
 
-    if *close_rx.borrow() {
+    if drain_tx.is_some() {
+        drop(drain_tx);
+        if tokio::time::timeout(EOF_DRAIN_TIMEOUT, &mut writer)
+            .await
+            .is_err()
+        {
+            writer.abort();
+        }
+    } else if *close_rx.borrow() {
         if tokio::time::timeout(CLOSE_FLUSH_TIMEOUT, &mut writer)
             .await
             .is_err()
@@ -1265,6 +1311,10 @@ async fn finish_connection(
 /// How long a server-initiated close waits for the writer to flush
 /// pending output to a client that may have stopped reading.
 const CLOSE_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long the writer may keep draining queued output after the client
+/// half-closes its side (e.g. `nc` hitting stdin EOF).
+const EOF_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// True if `bytes` is exactly the MCCP2 start-of-compression
 /// marker — `IAC SB 86 IAC SE`, 5 bytes — produced by
@@ -1353,17 +1403,29 @@ async fn handle_negotiate(
         // Deliberate no-ops, merged into one arm:
         //  * DO MSSP — payload was already sent unconditionally on
         //    connect.
-        //  * DO SGA / WILL SGA — standard line-mode negotiation;
-        //    nothing to track.
+        //  * DO MSSP is covered here; DO SGA / WILL SGA are answered
+        //    in their own arms below (we never offer SGA ourselves).
         //  * DONT / WONT anything else — the client refuses; the
         //    tracking flag stays false. We don't reply (the protocol
         //    says we could send the opposite but most clients don't
         //    care and Mudlet's negotiation history is already settled).
-        (DO, opt::MSSP | opt::SGA) | (WILL, opt::SGA) | (DONT | WONT, _) => {}
+        (DO, opt::MSSP) | (DONT | WONT, _) => {}
         (WILL, opt::NEW_ENVIRON) => {
             // Ask for the variables that reveal charset / colour
             // depth; the reply arrives as SB NEW-ENVIRON IS.
             let _ = out_tx.try_send(environ_send_query());
+        }
+        // The client asked for SGA itself; agree once. The one-shot
+        // flags keep a client that re-announces from looping us.
+        (DO, opt::SGA) => {
+            if !std::mem::replace(&mut caps.sga_will_sent, true) {
+                let _ = out_tx.try_send(will(opt::SGA));
+            }
+        }
+        (WILL, opt::SGA) => {
+            if !std::mem::replace(&mut caps.sga_do_sent, true) {
+                let _ = out_tx.try_send(do_(opt::SGA));
+            }
         }
         (DO, opt::MCCP2) => {
             // Client confirmed MCCP2. Push the start-of-compression
@@ -1850,6 +1912,146 @@ mod limit_tests {
             assert!(sp.push(c, &mut lines).is_ok());
         }
         lines
+    }
+
+    #[test]
+    fn splitter_backspace_and_del_remove_previous_char() {
+        assert_eq!(split(&[b"helo\x08lo\r"]), ["hello"]);
+        assert_eq!(split(&[b"abcx\x7f\r"]), ["abc"]);
+        // Editing works across read boundaries.
+        assert_eq!(split(&[b"nort", b"\x08\x08rth\r"]), ["north"]);
+        // Several in a row.
+        assert_eq!(split(&[b"abc\x08\x7f\x08\r"]), [""]);
+    }
+
+    #[test]
+    fn splitter_backspace_removes_whole_multibyte_char() {
+        // 'é' is 2 bytes, '€' 3, '😀' 4.
+        assert_eq!(split(&["caf\u{e9}\x08\r".as_bytes()]), ["caf"]);
+        assert_eq!(split(&["a\u{20ac}\x7f\r".as_bytes()]), ["a"]);
+        assert_eq!(split(&["a\u{1f600}\x08b\r".as_bytes()]), ["ab"]);
+        // Multibyte char split across reads, then erased.
+        let e = "\u{e9}".as_bytes();
+        assert_eq!(split(&[&e[..1], &[e[1], 0x08, b'x', b'\r']]), ["x"]);
+    }
+
+    #[test]
+    fn splitter_backspace_on_empty_buffer_is_noop() {
+        assert_eq!(split(&[b"\x08\x7f\x08hi\r"]), ["hi"]);
+        // Does not reach back past a completed line.
+        assert_eq!(split(&[b"ab\r\x08\x7fcd\r"]), ["ab", "cd"]);
+        assert_eq!(split(&[b"\x7f\r"]), [""]);
+    }
+
+    #[test]
+    fn connect_negotiation_does_not_offer_sga_but_keeps_other_options() {
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_CAP);
+        queue_negotiation(&tx);
+        drop(tx);
+        let mut wire = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            wire.extend_from_slice(&frame);
+        }
+        let has = |needle: &[u8]| wire.windows(needle.len()).any(|w| w == needle);
+        assert!(!has(&[0xff, 0xfb, 0x03]), "IAC WILL SGA offered");
+        assert!(!has(&[0xff, 0xfd, 0x03]), "IAC DO SGA requested");
+        for (cmd, option) in [
+            (telnet::WILL, opt::GMCP),
+            (telnet::WILL, opt::MSSP),
+            (telnet::WILL, opt::MCCP2),
+            (telnet::WILL, opt::EOR),
+            (telnet::WILL, opt::CHARSET),
+            (telnet::WILL, opt::MXP),
+            (telnet::DO, opt::NAWS),
+            (telnet::DO, opt::TTYPE),
+            (telnet::DO, opt::NEW_ENVIRON),
+        ] {
+            assert!(has(&[telnet::IAC, cmd, option]), "missing {cmd} {option}");
+        }
+        assert!(has(&[telnet::IAC, telnet::SB, opt::MSSP]), "MSSP payload");
+    }
+
+    #[tokio::test]
+    async fn client_initiated_sga_is_accepted_once_without_looping() {
+        let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (in_tx, _in_rx) = mpsc::channel::<Inbound>(8);
+        let mut sink = Sink {
+            conn_id: 1,
+            inbound: &in_tx,
+            pending: Vec::new(),
+            hello: None,
+        };
+        let mut caps = CapsLocal::default();
+        for _ in 0..3 {
+            handle_negotiate(&out_tx, &mut sink, &mut caps, telnet::DO, opt::SGA).await;
+            handle_negotiate(&out_tx, &mut sink, &mut caps, telnet::WILL, opt::SGA).await;
+        }
+        drop(out_tx);
+        let mut frames = Vec::new();
+        while let Some(f) = out_rx.recv().await {
+            frames.push(f);
+        }
+        assert_eq!(
+            frames,
+            [
+                vec![telnet::IAC, telnet::WILL, opt::SGA],
+                vec![telnet::IAC, telnet::DO, opt::SGA],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn client_half_close_still_receives_all_queued_output() {
+        let (addr, gate, mut rx) = start(fast_limits()).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        // Send a command then half-close, like `echo look | nc`. (A
+        // client that closes without sending anything is never
+        // announced, since the greeting is deferred.)
+        client.write_all(b"look\r\n").await.unwrap();
+        client.shutdown().await.unwrap();
+        let (conn, out) = match next_event(&mut rx).await {
+            Inbound {
+                conn,
+                kind: InboundKind::Connected { outbound, .. },
+            } => (conn, outbound),
+            other => panic!("unexpected {other:?}"),
+        };
+        // Queue a large banner (stand-in for the world layer's reply),
+        // well past what a single write/segment would carry.
+        let banner = "x".repeat(2900) + "\r\nWelcome\r\n";
+        out.try_send(banner.clone().into_bytes()).unwrap();
+        // The buffered input is delivered, and the session still ends...
+        assert!(matches!(
+            next_event(&mut rx).await.kind,
+            InboundKind::Line(ref l) if l == "look"
+        ));
+        assert!(matches!(
+            next_event(&mut rx).await.kind,
+            InboundKind::Disconnected
+        ));
+        // ...and the world layer releases its sender afterwards.
+        out.try_send(b"late reply\r\n".to_vec()).unwrap();
+        drop(out);
+
+        let mut got = Vec::new();
+        tokio::time::timeout(WAIT, client.read_to_end(&mut got))
+            .await
+            .expect("client never saw EOF")
+            .unwrap();
+        let text = String::from_utf8_lossy(&got);
+        assert!(
+            text.contains(&banner),
+            "banner truncated: {} bytes",
+            got.len()
+        );
+        assert!(text.contains("late reply\r\n"), "late reply lost");
+        // Negotiation burst was delivered too.
+        assert!(
+            got.windows(3)
+                .any(|w| w == [telnet::IAC, telnet::WILL, opt::GMCP])
+        );
+        wait_active(&gate, 0).await;
+        let _ = conn;
     }
 
     #[test]
