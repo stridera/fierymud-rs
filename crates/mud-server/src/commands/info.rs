@@ -1932,9 +1932,11 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "norepeat",
-            summary: "Suppress consecutive duplicate output lines.",
-            long: "Sets NO_REPEAT. Renderers that respect it collapse \
-                   identical back-to-back lines into one.",
+            summary: "Don't echo your own say/tell/channel text back.",
+            long: "Toggles NO_REPEAT. While on, say, tell, reply, whisper, \
+                   ask, gsay and the global channels answer you with just \
+                   \"Ok.\" instead of repeating what you typed. Others see \
+                   your message as usual.",
         },
         run: cmd_norepeat,
     }
@@ -8427,8 +8429,8 @@ pub(crate) fn cmd_norepeat(world: &mut World, player: Entity, _args: &str) {
         world,
         player,
         PlayerFlag::NoRepeat,
-        "Suppressing duplicate consecutive lines.",
-        "All output lines will be shown.",
+        "Your own speech will no longer be echoed back.",
+        "Your own speech will be echoed back.",
     );
 }
 

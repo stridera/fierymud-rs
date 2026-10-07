@@ -243,7 +243,9 @@ fn broadcast_global(
         // Channel tag colors the verb + body together so the line
         // is unmistakable in a busy log. Speaker name keeps any
         // authored color via render-on-send.
-        let line = if t == player {
+        let line = if t == player && has_flag(world, player, PlayerFlag::NoRepeat) {
+            "Ok.\r\n".to_string()
+        } else if t == player {
             format!("{channel_tag}You {verb_self}, \"{message}\"</>\r\n")
         } else {
             format!("{channel_tag}{player_name} {verb_other}, \"{message}\"</>\r\n")

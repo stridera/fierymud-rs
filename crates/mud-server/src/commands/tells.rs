@@ -185,11 +185,15 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
     let player_name = name_of(world, player);
     let target_name = name_of(world, target);
 
-    send_rendered(
-        world,
-        player,
-        &format!("<cyan>You tell <b:cyan>{target_name}</>, \"{message}\"</>\r\n"),
-    );
+    if has_flag(world, player, PlayerFlag::NoRepeat) {
+        send_to(world, player, "Ok.\r\n");
+    } else {
+        send_rendered(
+            world,
+            player,
+            &format!("<cyan>You tell <b:cyan>{target_name}</>, \"{message}\"</>\r\n"),
+        );
+    }
     if has_flag(world, target, PlayerFlag::Afk) {
         send_rendered(
             world,

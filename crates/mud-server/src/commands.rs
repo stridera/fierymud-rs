@@ -435,6 +435,9 @@ mod invisibility_tests;
 #[path = "commands/look_mob_tests.rs"]
 mod look_mob_tests;
 #[cfg(test)]
+#[path = "commands/norepeat_tests.rs"]
+mod norepeat_tests;
+#[cfg(test)]
 #[path = "commands/parser_tests.rs"]
 mod parser_tests;
 #[cfg(test)]

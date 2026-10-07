@@ -4,13 +4,13 @@
 //! and are read together in code review.
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::UserRole;
+use mud_db::enums::{PlayerFlag, UserRole};
 use mud_world::{Located, Mob, Player, WorldKey};
 
 use crate::commands::{
     Category, Command, Help, Prevent, broadcast_room_except_players_rendered,
     bump_talk_quest_progress, effect_prevents, find_actor_in_room, group_members, group_root,
-    name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to,
+    has_flag, name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to,
 };
 
 inventory::submit! {
@@ -159,12 +159,15 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
             .collect()
     };
     let gmcp_text = format!("{speaker} says, \"{message}\"");
+    let norepeat = has_flag(world, player, PlayerFlag::NoRepeat);
     for target in targets {
         // Say/says verb framed in green (room-local speech reads
         // friendly / open vs the louder yellow/red wide channels).
         // Speaker name emphasized so the eye lands on who's
         // talking; message body inherits authored color.
-        let line = if target == player {
+        let line = if target == player && norepeat {
+            "Ok.\r\n".to_string()
+        } else if target == player {
             format!("<green>You say,</> \"{message}\"\r\n")
         } else {
             format!("<b:green>{speaker}</> <green>says,</> \"{message}\"\r\n")
@@ -226,11 +229,15 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
     };
     let target_name = name_of(world, target);
     let player_name = name_of(world, player);
-    send_to(
-        world,
-        player,
-        format!("You ask {target_name} about \"{topic}\".\r\n"),
-    );
+    if has_flag(world, player, PlayerFlag::NoRepeat) {
+        send_to(world, player, "Ok.\r\n");
+    } else {
+        send_to(
+            world,
+            player,
+            format!("You ask {target_name} about \"{topic}\".\r\n"),
+        );
+    }
     broadcast_room_except_players_rendered(
         world,
         located.0,
@@ -289,11 +296,15 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
     };
     let speaker = name_of(world, player);
     let target_name = name_of(world, target);
-    send_rendered(
-        world,
-        player,
-        &format!("You whisper to {target_name}, \"{message}\"\r\n"),
-    );
+    if has_flag(world, player, PlayerFlag::NoRepeat) {
+        send_to(world, player, "Ok.\r\n");
+    } else {
+        send_rendered(
+            world,
+            player,
+            &format!("You whisper to {target_name}, \"{message}\"\r\n"),
+        );
+    }
     send_to(
         world,
         target,
@@ -429,8 +440,11 @@ fn cmd_gsay(world: &mut World, player: Entity, args: &str) {
     }
     let speaker = name_of(world, player);
     let gmcp_text = format!("{speaker} group-says, \"{message}\"");
+    let norepeat = has_flag(world, player, PlayerFlag::NoRepeat);
     for m in members {
-        let line = if m == player {
+        let line = if m == player && norepeat {
+            "Ok.\r\n".to_string()
+        } else if m == player {
             format!("You group-say, \"{message}\"\r\n")
         } else {
             format!("({speaker} group-says) \"{message}\"\r\n")
