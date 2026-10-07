@@ -9931,7 +9931,7 @@ fn get_from_container(
             {
                 continue;
             }
-            let w = item_weight(world, *item);
+            let w = net_weight_gain(world, player, *item);
             if !bypass_encumbrance && running + w > cap {
                 skipped += 1;
                 continue;
@@ -10000,7 +10000,8 @@ fn get_from_container(
         return;
     }
     if !crate::commands::is_staff(world, player)
-        && carried_weight(world, player) + item_weight(world, item) > carry_capacity(world, player)
+        && carried_weight(world, player) + net_weight_gain(world, player, item)
+            > carry_capacity(world, player)
     {
         send_rendered(
             world,
@@ -13938,14 +13939,14 @@ pub(crate) fn cmd_abilities_kind(
 #[cfg(test)]
 mod tests {
     use super::{
-        cmd_drop, cmd_get, cmd_give, cmd_look, cmd_put, cmd_sell, has_object_flag, has_restriction,
-        item_drop_blocked, parse_who_level_filter,
+        carried_weight, cmd_drop, cmd_get, cmd_give, cmd_look, cmd_put, cmd_sell, has_object_flag,
+        has_restriction, item_drop_blocked, parse_who_level_filter,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::{ObjectFlag, ObjectRestriction, Sector};
     use mud_world::{
         Corpse, Item, Keywords, Located, Mob, Named, ObjectFlags, ObjectPrototypes,
-        ObjectRestrictions, Player, Room, RoomSector, ShopCatalog, Shopkeeper,
+        ObjectRestrictions, Player, Room, RoomSector, ShopCatalog, Shopkeeper, WorldKey,
     };
 
     #[test]
@@ -14539,6 +14540,106 @@ mod tests {
         assert_eq!(world.get::<Located>(first).unwrap().0, room);
     }
 
+    /// Build a player (capacity 105 at level 1) carrying a bag that holds
+    /// one heavy item, with real prototype weights.
+    fn heavy_item_in_carried_bag(reduction: f64) -> (World, Entity, Entity, Entity) {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        let mut bag_proto =
+            crate::commands::test_support::object_proto(1, 1, mud_db::enums::ObjectType::Container);
+        bag_proto.weight = 5.0;
+        bag_proto.weight_reduction = reduction;
+        let mut rock_proto =
+            crate::commands::test_support::object_proto(1, 2, mud_db::enums::ObjectType::Other);
+        rock_proto.weight = 90.0;
+        protos.by_key.insert((1, 1), bag_proto);
+        protos.by_key.insert((1, 2), rock_proto);
+        world.insert_resource(protos);
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let player = world
+            .spawn((
+                Player,
+                Named {
+                    name: "Strider".to_string(),
+                },
+                Located(room),
+            ))
+            .id();
+        let bag = world
+            .spawn((
+                Item,
+                WorldKey { zone: 1, id: 1 },
+                Named {
+                    name: "a leather bag".to_string(),
+                },
+                Keywords(vec!["bag".to_string()]),
+                Located(player),
+            ))
+            .id();
+        let rock = world
+            .spawn((
+                Item,
+                WorldKey { zone: 1, id: 2 },
+                Named {
+                    name: "a boulder".to_string(),
+                },
+                Keywords(vec!["boulder".to_string()]),
+                Located(bag),
+            ))
+            .id();
+        (world, player, bag, rock)
+    }
+
+    #[test]
+    fn get_from_carried_bag_does_not_double_count_weight() {
+        // Carried: bag 5 + boulder 90 = 95 of 105. Taking the boulder out
+        // of the bag leaves the total at 95; the old check tested
+        // 95 + 90 = 185 and refused.
+        let (mut world, player, _bag, rock) = heavy_item_in_carried_bag(0.0);
+        cmd_get(&mut world, player, "boulder from bag");
+        assert_eq!(world.get::<Located>(rock).unwrap().0, player);
+        assert!((carried_weight(&mut world, player) - 95.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn get_all_from_carried_bag_does_not_double_count_weight() {
+        let (mut world, player, _bag, rock) = heavy_item_in_carried_bag(0.0);
+        cmd_get(&mut world, player, "all from bag");
+        assert_eq!(world.get::<Located>(rock).unwrap().0, player);
+    }
+
+    #[test]
+    fn get_from_carried_bag_with_reduction_nets_out_the_discount() {
+        // 50% bag: boulder counted as 45 inside, 90 outside. Carried is
+        // 5 + 45 = 50; after the move 95. Still under the cap.
+        let (mut world, player, _bag, rock) = heavy_item_in_carried_bag(50.0);
+        cmd_get(&mut world, player, "boulder from bag");
+        assert_eq!(world.get::<Located>(rock).unwrap().0, player);
+        assert!((carried_weight(&mut world, player) - 95.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn get_from_floor_bag_still_enforces_the_cap() {
+        let (mut world, player, bag, rock) = heavy_item_in_carried_bag(0.0);
+        let room = world.get::<Located>(player).unwrap().0;
+        world.entity_mut(bag).insert(Located(room));
+        // Carrying a 20 lb pack makes 20 + 90 > 105.
+        let mut p = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(1, 1))
+            .unwrap()
+            .clone();
+        p.weight = 20.0;
+        world
+            .resource_mut::<ObjectPrototypes>()
+            .by_key
+            .insert((1, 3), p);
+        world.spawn((Item, WorldKey { zone: 1, id: 3 }, Located(player)));
+        cmd_get(&mut world, player, "boulder from bag");
+        assert_eq!(world.get::<Located>(rock).unwrap().0, bag);
+    }
+
     #[test]
     fn get_count_with_all_ignores_count() {
         let (mut world, room, player, _anvil) = make_floor_world();
@@ -14591,12 +14692,13 @@ mod god_eat_tests {
     fn setup(level: i32) -> (World, Entity, test_support::Rx, test_support::Rx) {
         let mut world = World::new();
         let mut protos = ObjectPrototypes::default();
-        protos
-            .by_key
-            .insert((1, 1), test_support::object_proto(1, 1, ObjectType::Weapon));
+        protos.by_key.insert(
+            (1, 1),
+            crate::commands::test_support::object_proto(1, 1, ObjectType::Weapon),
+        );
         protos.by_key.insert(
             (1, 2),
-            test_support::object_proto(1, 2, ObjectType::Container),
+            crate::commands::test_support::object_proto(1, 2, ObjectType::Container),
         );
         protos
             .by_key

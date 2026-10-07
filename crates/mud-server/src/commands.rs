@@ -11182,6 +11182,40 @@ fn effective_weight(world: &World, item: Entity, depth: u32) -> f64 {
     total
 }
 
+/// Weight `item` adds to `actor`'s carried total once it is in the
+/// actor's inventory, minus what it already contributes there. Taking
+/// an item out of a bag the actor is carrying already counts it (scaled
+/// by each enclosing container's weight reduction), so the encumbrance
+/// gate must test `carried + this`, not `carried + item_weight`.
+/// For an item that is not under `actor` this is just `item_weight`.
+pub(crate) fn net_weight_gain(world: &World, actor: Entity, item: Entity) -> f64 {
+    let full = item_weight(world, item);
+    let mut already = full;
+    let mut cur = item;
+    for _ in 0..MAX_CONTAINER_DEPTH {
+        let Some(parent) = world.get::<Located>(cur).map(|l| l.0) else {
+            return full;
+        };
+        if parent == actor {
+            return full - already;
+        }
+        // `parent` is a container the item sits in: its reduction
+        // discounts everything inside it.
+        let reduction = world
+            .get::<WorldKey>(parent)
+            .and_then(|wk| {
+                world
+                    .resource::<ObjectPrototypes>()
+                    .by_key
+                    .get(&(wk.zone, wk.id))
+            })
+            .map_or(0.0, |p| p.weight_reduction.clamp(0.0, 100.0));
+        already *= 1.0 - reduction / 100.0;
+        cur = parent;
+    }
+    full
+}
+
 /// Sum the effective weight of every item rooted at `actor` —
 /// inventory, equipped slots, and the contents of any container
 /// they're carrying, recursively, after each container's weight
