@@ -46,37 +46,39 @@ pub fn entity_matches(needle: &str, name: &str, keywords: Option<&[String]>) -> 
     }
 }
 
-/// Resolve `needle` against a set of ability names (already
-/// underscore/lowercase normalised or not; both sides are normalised here).
-/// An exact (normalised) match wins; otherwise the first prefix match in
-/// alphabetical order, so the result never depends on map iteration order.
+/// How a typed ability name relates to a candidate name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameRank {
+    /// Same words, case-insensitively (`_` and spaces are equivalent).
+    Exact,
+    /// Each typed word is a prefix of the corresponding candidate word, in
+    /// order (`c l` -> `cure_light`, `fire` -> `fire_breath`).
+    Prefix,
+    None,
+}
+
+/// Rank `needle` against one ability name, legacy word-by-word style.
 #[must_use]
-pub fn best_name_match<'a, I>(needle: &str, names: I) -> Option<&'a str>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let norm = |s: &str| {
+pub fn rank_ability_name(needle: &str, name: &str) -> NameRank {
+    let split = |s: &'_ str| -> Vec<String> {
         s.split(|c: char| c == '_' || c.is_whitespace())
             .filter(|p| !p.is_empty())
-            .collect::<Vec<_>>()
-            .join("_")
-            .to_ascii_lowercase()
+            .map(str::to_ascii_lowercase)
+            .collect()
     };
-    let needle = norm(needle);
-    if needle.is_empty() {
-        return None;
+    let typed = split(needle);
+    let words = split(name);
+    if typed.is_empty() || typed.len() > words.len() {
+        return NameRank::None;
     }
-    let mut best: Option<(&'a str, String)> = None;
-    for name in names {
-        let n = norm(name);
-        if n == needle {
-            return Some(name);
-        }
-        if is_abbrev(&needle, &n) && best.as_ref().is_none_or(|(_, b)| n < *b) {
-            best = Some((name, n));
-        }
+    if !typed.iter().zip(&words).all(|(t, w)| is_abbrev(t, w)) {
+        return NameRank::None;
     }
-    best.map(|(name, _)| name)
+    if typed == words {
+        NameRank::Exact
+    } else {
+        NameRank::Prefix
+    }
 }
 
 #[cfg(test)]
@@ -137,32 +139,25 @@ mod tests {
     }
 
     #[test]
-    fn exact_ability_name_beats_prefix() {
-        let names = [
-            "invisibility",
-            "mass_invisibility",
-            "invis",
-            "invisible_stalker",
-        ];
+    fn ability_rank_is_word_by_word() {
+        assert_eq!(rank_ability_name("c l", "cure_light"), NameRank::Prefix);
+        assert_eq!(rank_ability_name("cure l", "CURE_LIGHT"), NameRank::Prefix);
         assert_eq!(
-            best_name_match("invis", names.iter().copied()),
-            Some("invis")
+            rank_ability_name("cure_light", "cure_light"),
+            NameRank::Exact
+        );
+        assert_eq!(rank_ability_name("fire", "fire"), NameRank::Exact);
+        assert_eq!(rank_ability_name("fire", "fire_breath"), NameRank::Prefix);
+        assert_eq!(
+            rank_ability_name("invis", "mass_invisibility"),
+            NameRank::None
         );
         assert_eq!(
-            best_name_match(
-                "invis",
-                ["mass_invisibility", "invisibility"].iter().copied()
-            ),
-            Some("invisibility")
+            rank_ability_name("sibility", "invisibility"),
+            NameRank::None
         );
-        assert_eq!(
-            best_name_match("mass inv", names.iter().copied()),
-            Some("mass_invisibility")
-        );
-        assert_eq!(best_name_match("sibility", names.iter().copied()), None);
-        assert_eq!(
-            best_name_match("cure l", ["cure_light", "cure_critic"].iter().copied()),
-            Some("cure_light")
-        );
+        assert_eq!(rank_ability_name("l c", "cure_light"), NameRank::None);
+        assert_eq!(rank_ability_name("a b c", "a_b"), NameRank::None);
+        assert_eq!(rank_ability_name("", "a"), NameRank::None);
     }
 }

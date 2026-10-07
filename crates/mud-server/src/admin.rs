@@ -1027,12 +1027,7 @@ fn set_player_field(
     field: &str,
     value: i64,
 ) -> AdminResponse {
-    let Some(entity) = find_actor_by_name(world, player_name) else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("no actor matching '{player_name}'"),
-        ));
-    };
+    let entity = find_actor_by_name(world, player_name)?;
     let clamped = value.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
     let v32: i32 = i32::try_from(clamped).unwrap_or(0);
     let mut applied = true;
@@ -1215,15 +1210,53 @@ fn set_player_field(
     }))
 }
 
-/// Resolve an actor by case-insensitive name match against any
-/// Mob or Player. Used by `fire_trigger` self/actor binding.
-fn find_actor_by_name(world: &mut World, name: &str) -> Option<Entity> {
-    let needle = name.to_ascii_lowercase();
-    let mut q = world
-        .query_filtered::<(Entity, &Named), bevy_ecs::prelude::Or<(With<Mob>, With<Player>)>>();
-    q.iter(world)
-        .find(|(_, n)| mud_world::targeting::names_match(&needle, std::iter::once(n.name.as_str())))
-        .map(|(e, _)| e)
+/// Resolve an actor by name against any Mob or Player. Used by the
+/// write paths (`player/set`, `triggers/fire`) and `inspect_actor`, so
+/// it must never guess: an exact (case-insensitive) name wins, players
+/// before mobs; otherwise the typed words must be a prefix match for
+/// exactly one distinct name. Ambiguity is a 409 listing candidates.
+fn find_actor_by_name(world: &mut World, name: &str) -> Result<Entity, (StatusCode, String)> {
+    let needle = name.trim().to_ascii_lowercase();
+    let mut q =
+        world.query_filtered::<(Entity, &Named, Has<Player>), Or<(With<Mob>, With<Player>)>>();
+    let all: Vec<(Entity, String, bool)> = q
+        .iter(world)
+        .map(|(e, n, is_player)| (e, n.name.clone(), is_player))
+        .collect();
+    let not_found = || (StatusCode::NOT_FOUND, format!("no actor matching '{name}'"));
+    if needle.is_empty() {
+        return Err(not_found());
+    }
+    let exact = |want_player: bool| {
+        all.iter()
+            .find(|(_, n, p)| *p == want_player && n.to_ascii_lowercase() == needle)
+            .map(|(e, _, _)| *e)
+    };
+    if let Some(e) = exact(true).or_else(|| exact(false)) {
+        return Ok(e);
+    }
+    let hits: Vec<&(Entity, String, bool)> = all
+        .iter()
+        .filter(|(_, n, _)| mud_world::targeting::names_match(&needle, std::iter::once(n.as_str())))
+        .collect();
+    let mut distinct: Vec<&str> = hits.iter().map(|(_, n, _)| n.as_str()).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    match distinct.len() {
+        0 => Err(not_found()),
+        1 => {
+            // Same display name on several entities: prefer a player.
+            let pick = hits.iter().find(|(_, _, p)| *p).or_else(|| hits.first());
+            pick.map(|(e, _, _)| *e).ok_or_else(not_found)
+        }
+        _ => {
+            distinct.truncate(10);
+            Err((
+                StatusCode::CONFLICT,
+                format!("'{name}' is ambiguous; matches: {}", distinct.join(", ")),
+            ))
+        }
+    }
 }
 
 /// Manually invoke a trigger body. Looks up `(zone_id, id)` in the
@@ -1248,19 +1281,9 @@ fn fire_trigger(
         };
         def.commands.clone()
     };
-    let Some(self_entity) = find_actor_by_name(world, self_name) else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("no actor matching '{self_name}'"),
-        ));
-    };
+    let self_entity = find_actor_by_name(world, self_name)?;
     let actor_entity = match actor_name {
-        Some(n) => match find_actor_by_name(world, n) {
-            Some(e) => e,
-            None => {
-                return Err((StatusCode::NOT_FOUND, format!("no actor matching '{n}'")));
-            }
-        },
+        Some(n) => find_actor_by_name(world, n)?,
         None => self_entity,
     };
     let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
@@ -1635,15 +1658,7 @@ fn look_room(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
 }
 
 fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
-    let needle = name.to_ascii_lowercase();
-    let mut q = world.query_filtered::<(Entity, &Named), Or<(With<Mob>, With<Player>)>>();
-    let entity = q
-        .iter(world)
-        .find(|(_, n)| mud_world::targeting::names_match(&needle, std::iter::once(n.name.as_str())))
-        .map(|(e, _)| e);
-    let Some(entity) = entity else {
-        return Err((StatusCode::NOT_FOUND, format!("no actor matching '{name}'")));
-    };
+    let entity = find_actor_by_name(world, name)?;
     let actor_name = name_of(world, entity);
     let world_key = world
         .get::<WorldKey>(entity)
@@ -2407,5 +2422,60 @@ mod players_tests {
         let v = online_players(&mut world);
         assert_eq!(v["count"], 0);
         assert_eq!(v["players"].as_array().map(Vec::len), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod actor_lookup_tests {
+    use super::*;
+
+    fn spawn(world: &mut World, name: &str, player: bool) -> Entity {
+        let named = Named {
+            name: name.to_string(),
+        };
+        if player {
+            world.spawn((Player, named)).id()
+        } else {
+            world.spawn((Mob, named)).id()
+        }
+    }
+
+    #[test]
+    fn exact_name_wins_over_longer_prefix_match() {
+        let mut w = World::new();
+        let sam = spawn(&mut w, "Sam", true);
+        let _samui = spawn(&mut w, "Samui", true);
+        assert_eq!(find_actor_by_name(&mut w, "sam").unwrap(), sam);
+    }
+
+    #[test]
+    fn exact_player_beats_exact_mob() {
+        let mut w = World::new();
+        let _mob = spawn(&mut w, "Sam", false);
+        let player = spawn(&mut w, "Sam", true);
+        assert_eq!(find_actor_by_name(&mut w, "SAM").unwrap(), player);
+    }
+
+    #[test]
+    fn unique_prefix_resolves_substring_does_not() {
+        let mut w = World::new();
+        let samui = spawn(&mut w, "Samui", true);
+        assert_eq!(find_actor_by_name(&mut w, "sam").unwrap(), samui);
+        assert_eq!(
+            find_actor_by_name(&mut w, "amui").unwrap_err().0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn ambiguous_prefix_is_refused_and_lists_candidates() {
+        let mut w = World::new();
+        spawn(&mut w, "Samui", true);
+        spawn(&mut w, "Samantha", true);
+        let (code, msg) = find_actor_by_name(&mut w, "sam").unwrap_err();
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert!(msg.contains("Samui") && msg.contains("Samantha"), "{msg}");
+        // The write path refuses too.
+        assert!(set_player_field(&mut w, "sam", "hp", 1).is_err());
     }
 }

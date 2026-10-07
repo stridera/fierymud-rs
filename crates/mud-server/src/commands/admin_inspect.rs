@@ -1182,15 +1182,7 @@ fn resolve_mob_target(world: &mut World, player: Entity, args: &str) -> Option<(
         .resource::<MobPrototypes>()
         .by_key
         .iter()
-        .find(|(_, p)| {
-            mud_world::targeting::names_match(
-                &needle,
-                p.keywords
-                    .iter()
-                    .map(String::as_str)
-                    .chain([p.name.as_str()]),
-            )
-        })
+        .find(|(_, p)| mud_world::targeting::entity_matches(&needle, &p.name, Some(&p.keywords)))
         .map(|(k, _)| *k);
     if hit.is_none() {
         send_to(
@@ -1230,15 +1222,7 @@ fn resolve_object_target(world: &mut World, player: Entity, args: &str) -> Optio
         .resource::<ObjectPrototypes>()
         .by_key
         .iter()
-        .find(|(_, p)| {
-            mud_world::targeting::names_match(
-                &needle,
-                p.keywords
-                    .iter()
-                    .map(String::as_str)
-                    .chain([p.name.as_str()]),
-            )
-        })
+        .find(|(_, p)| mud_world::targeting::entity_matches(&needle, &p.name, Some(&p.keywords)))
         .map(|(k, _)| *k);
     if hit.is_none() {
         send_to(

@@ -2254,17 +2254,6 @@ fn actor_emit_with_perspective(
     })
 }
 
-/// Script-side name test: prefix-anchored (never substring) against the
-/// entity's keywords and the words of its display name.
-fn script_name_matches(needle: &str, name: &str, kw: Option<&Keywords>) -> bool {
-    mud_world::targeting::names_match(
-        needle,
-        kw.into_iter()
-            .flat_map(|k| k.0.iter().map(String::as_str))
-            .chain(std::iter::once(name)),
-    )
-}
-
 /// Walk every non-Item entity in the world and return the first
 /// whose `Named` or `Keywords` match `needle` (case-insensitive
 /// word prefix). Returns nil if none.
@@ -2276,7 +2265,9 @@ fn find_actor(lua: &Lua, needle: &str) -> mlua::Result<Value> {
     let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
         let mut q = world.query_filtered::<(Entity, &Named, Option<&Keywords>), Without<Item>>();
         q.iter(world)
-            .find(|(_, n, kw)| script_name_matches(&needle, &n.name, *kw))
+            .find(|(_, n, kw)| {
+                mud_world::targeting::entity_matches(&needle, &n.name, kw.map(|k| k.0.as_slice()))
+            })
             .map(|(e, _, _)| e)
     })?;
     match entity {
@@ -2310,7 +2301,11 @@ fn destroy_item(lua: &Lua, actor: Entity, needle: &str) -> mlua::Result<()> {
                 if l.0 != actor {
                     continue;
                 }
-                let matches = script_name_matches(&keyword, &n.name, kw);
+                let matches = mud_world::targeting::entity_matches(
+                    &keyword,
+                    &n.name,
+                    kw.map(|k| k.0.as_slice()),
+                );
                 if matches {
                     to_remove.push(e);
                     if !all {
@@ -2586,7 +2581,11 @@ impl UserData for LuaActor {
                             .find(|(e, l, n, kw)| {
                                 *e != this.entity
                                     && l.0 == located.0
-                                    && (script_name_matches(&needle, &n.name, *kw))
+                                    && (mud_world::targeting::entity_matches(
+                                        &needle,
+                                        &n.name,
+                                        kw.map(|k| k.0.as_slice()),
+                                    ))
                             })
                             .map(|(e, _, n, _)| (e, n.name.clone()))
                     };
@@ -4257,7 +4256,12 @@ impl UserData for LuaRoom {
                     >();
                     q.iter(world)
                         .find(|(_, l, n, kw)| {
-                            l.0 == this.entity && (script_name_matches(&needle, &n.name, *kw))
+                            l.0 == this.entity
+                                && (mud_world::targeting::entity_matches(
+                                    &needle,
+                                    &n.name,
+                                    kw.map(|k| k.0.as_slice()),
+                                ))
                         })
                         .map(|(e, _, _, _)| e)
                 })?;
@@ -4388,7 +4392,7 @@ impl UserData for LuaRoom {
                     q.iter(world)
                         .find(|(_, l, n, kw)| {
                             l.0 == this.entity
-                                && (script_name_matches(&needle, &n.name, *kw))
+                                && (mud_world::targeting::entity_matches(&needle, &n.name, kw.map(|k| k.0.as_slice())))
                         })
                         .map(|(e, _, _, _)| e)
                 })?;

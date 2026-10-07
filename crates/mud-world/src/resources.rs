@@ -2010,25 +2010,45 @@ pub struct AbilityCatalog {
 }
 
 impl AbilityCatalog {
-    /// Resolve a typed ability name (`invis`, `cure l`, `magic missile`)
-    /// with legacy semantics: an exact (underscore-normalised) match wins,
-    /// otherwise the alphabetically-first ability whose name the typed
-    /// words are a prefix of. `kind` restricts the search when given.
+    /// Resolve a typed ability name (`invis`, `c l`, `magic missile`) with
+    /// legacy semantics. An exact name wins; otherwise each typed word must
+    /// prefix the corresponding word of the ability name, in order. Among
+    /// prefix matches, abilities `known` by the caster win, then
+    /// alphabetical order, so the result never depends on map iteration
+    /// order. `kind` restricts the search when given.
     #[must_use]
     pub fn find_by_prefix(
         &self,
         needle: &str,
         kind: Option<mud_db::abilities::AbilityKind>,
+        known: Option<&crate::components::KnownAbilities>,
     ) -> Option<&AbilityDef> {
-        let names = self
+        use crate::targeting::{NameRank, rank_ability_name};
+        let key = |d: &AbilityDef| d.plain_name.to_ascii_lowercase();
+        let mut exact: Option<&AbilityDef> = None;
+        // Sort key: (not known, lowercase plain name).
+        let mut prefix: Option<((bool, String), &AbilityDef)> = None;
+        for d in self
             .by_name
             .values()
             .filter(|d| kind.is_none_or(|k| d.kind == k))
-            .map(|d| d.plain_name.as_str());
-        let best = crate::targeting::best_name_match(needle, names)?;
-        self.by_name
-            .values()
-            .find(|d| d.plain_name == best && kind.is_none_or(|k| d.kind == k))
+        {
+            match rank_ability_name(needle, &d.plain_name) {
+                NameRank::Exact => {
+                    if exact.is_none_or(|e| key(d) < key(e)) {
+                        exact = Some(d);
+                    }
+                }
+                NameRank::Prefix => {
+                    let k = (!known.is_some_and(|kn| kn.has_any(d.id)), key(d));
+                    if prefix.as_ref().is_none_or(|(pk, _)| k < *pk) {
+                        prefix = Some((k, d));
+                    }
+                }
+                NameRank::None => {}
+            }
+        }
+        exact.or_else(|| prefix.map(|(_, d)| d))
     }
 }
 

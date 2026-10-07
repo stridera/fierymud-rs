@@ -12448,10 +12448,18 @@ pub(crate) fn find_online_player_anywhere(
         return None;
     }
     let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<mud_world::Online>)>();
-    let mut hits = q.iter(world).filter(|(e, n)| {
-        *e != exclude
-            && mud_world::targeting::names_match(&needle, std::iter::once(n.name.as_str()))
-    });
+    let cands: Vec<(Entity, &str)> = q
+        .iter(world)
+        .filter(|(e, _)| *e != exclude)
+        .map(|(e, n)| (e, n.name.as_str()))
+        .collect();
+    // An exact name wins outright (`Sam` while `Samui` is also online).
+    if let Some((e, _)) = cands.iter().find(|(_, n)| n.eq_ignore_ascii_case(&needle)) {
+        return Some(*e);
+    }
+    let mut hits = cands
+        .iter()
+        .filter(|(_, n)| mud_world::targeting::names_match(&needle, std::iter::once(*n)));
     let first = hits.next()?;
     // Ambiguity check — if a second match exists, refuse so the
     // caster can disambiguate by typing the full name. Cheap: stops
@@ -13423,7 +13431,7 @@ pub(crate) fn invoke_ability_with(
     // `mass_invisibility`).
     let def = world
         .resource::<AbilityCatalog>()
-        .find_by_prefix(&needle, Some(kind))
+        .find_by_prefix(&needle, Some(kind), world.get::<KnownAbilities>(player))
         .cloned();
     let Some(def) = def else {
         send_to(

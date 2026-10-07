@@ -716,7 +716,7 @@ fn ability_lookup_is_prefix_anchored_and_exact_wins() {
             .by_name
             .insert(name.to_string(), ability_def(id, name, Spell));
     }
-    let find = |n: &str| catalog.find_by_prefix(n, Some(Spell)).map(|d| d.id);
+    let find = |n: &str| catalog.find_by_prefix(n, Some(Spell), None).map(|d| d.id);
     assert_eq!(
         find("invis"),
         Some(1),
@@ -728,4 +728,74 @@ fn ability_lookup_is_prefix_anchored_and_exact_wins() {
     assert_eq!(find("fire"), Some(5), "exact beats prefix");
     assert_eq!(find("fireb"), Some(6));
     assert_eq!(find("FIRE"), Some(5));
+    assert_eq!(find("c l"), Some(3), "word-by-word abbreviation");
+    assert_eq!(find("c c"), Some(4));
+}
+
+#[test]
+fn ability_prefix_prefers_spells_the_caster_knows() {
+    use crate::commands::test_support::ability_def;
+    use mud_db::abilities::AbilityKind::Spell;
+    use mud_world::{AbilityCatalog, KnownAbilities};
+
+    let mut catalog = AbilityCatalog::default();
+    for (id, name) in [(1, "fire_breath"), (2, "fireball"), (3, "fire_shield")] {
+        catalog
+            .by_name
+            .insert(name.to_string(), ability_def(id, name, Spell));
+    }
+    // Fireball-only caster: `fire` is not an exact name, so the known
+    // prefix match beats the alphabetically-first catalog entry.
+    let known = KnownAbilities {
+        entries: vec![(2, 100, true)],
+    };
+    let id =
+        |k: Option<&KnownAbilities>| catalog.find_by_prefix("fire", Some(Spell), k).map(|d| d.id);
+    assert_eq!(id(Some(&known)), Some(2));
+    // Nothing known: alphabetical catalog fallback.
+    assert_eq!(id(None), Some(1));
+    assert_eq!(id(Some(&KnownAbilities::default())), Some(1));
+}
+
+#[test]
+fn online_player_lookup_exact_name_beats_longer_prefix() {
+    use crate::commands::find_online_player_anywhere;
+    use mud_world::{Online, Player};
+    let mut world = World::new();
+    let me = world
+        .spawn((Player, Online, Named { name: "Me".into() }))
+        .id();
+    let sam = world
+        .spawn((Player, Online, Named { name: "Sam".into() }))
+        .id();
+    let samui = world
+        .spawn((
+            Player,
+            Online,
+            Named {
+                name: "Samui".into(),
+            },
+        ))
+        .id();
+    assert_eq!(
+        find_online_player_anywhere(&mut world, "sam", me),
+        Some(sam)
+    );
+    assert_eq!(
+        find_online_player_anywhere(&mut world, "samu", me),
+        Some(samui)
+    );
+    assert_eq!(find_online_player_anywhere(&mut world, "amui", me), None);
+    // Without the exact `Sam`, the prefix is ambiguous and refused.
+    world.despawn(sam);
+    let _samantha = world
+        .spawn((
+            Player,
+            Online,
+            Named {
+                name: "Samantha".into(),
+            },
+        ))
+        .id();
+    assert_eq!(find_online_player_anywhere(&mut world, "sam", me), None);
 }
