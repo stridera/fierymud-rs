@@ -41,6 +41,7 @@ Counts are approximate because many legacy entries are pure aliases (`go` → `d
 | boards / board / post / delpost / editpost | boards.rs | |
 | breathe | combat.rs | |
 | brief / compact / norepeat | info.rs (toggles) | |
+| expandmobs / expandobjs | info.rs (toggles) | `toggle expandmobs` / `expandobjs`: list identical mobs / objects one per line instead of `(N)` stacks |
 | bribe | info.rs | |
 | buck | combat.rs | |
 | bug / idea / typo / petition | feedback.rs | |

@@ -3861,23 +3861,14 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             let mut q = world.query_filtered::<(&Located, &Named), With<Item>>();
             // Stack identical contents (matching look's room dedup
             // and inventory's stacking) so a corpse holding three
-            // copper coins reads as one entry with `(3)`.
-            let mut order: Vec<String> = Vec::new();
-            let mut counts: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
-            for (_, n) in q.iter(world).filter(|(l, _)| l.0 == target) {
-                if !counts.contains_key(&n.name) {
-                    order.push(n.name.clone());
-                }
-                *counts.entry(n.name.clone()).or_insert(0) += 1;
-            }
-            order
-                .into_iter()
-                .map(|name| {
-                    let n = counts.get(&name).copied().unwrap_or(1);
-                    (name, n)
-                })
-                .collect()
+            // copper coins reads as one entry with `(3)`. ExpandObjs
+            // lists each on its own line.
+            let names: Vec<String> = q
+                .iter(world)
+                .filter(|(l, _)| l.0 == target)
+                .map(|(_, n)| n.name.clone())
+                .collect();
+            stack_entries(names, has_flag(world, player, PlayerFlag::ExpandObjs))
         };
         if !contents.is_empty() {
             out.push_str(&format!("\r\n<cyan>{name_rendered} contains:</>\r\n"));
@@ -6017,8 +6008,7 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // same order it always did.
     let mob_lines: Vec<String> = {
         let aggro_threshold = aggro_alignment(world);
-        let mut order: Vec<String> = Vec::new();
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut lines: Vec<String> = Vec::new();
         let mut q = world
             .query_filtered::<(&Located, &Named, Option<&Description>, Option<&CombatStats>), With<Mob>>();
         for (_, n, desc, stats) in q.iter(world).filter(|(l, _, _, _)| l.0 == room) {
@@ -6035,15 +6025,11 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             } else {
                 body
             };
-            if !counts.contains_key(&line) {
-                order.push(line.clone());
-            }
-            *counts.entry(line).or_insert(0) += 1;
+            lines.push(line);
         }
-        order
+        stack_entries(lines, has_flag(world, player, PlayerFlag::ExpandMobs))
             .into_iter()
-            .map(|line| {
-                let n = counts.get(&line).copied().unwrap_or(1);
+            .map(|(line, n)| {
                 if n > 1 {
                     format!("<dim>({n})</> {line}")
                 } else {
@@ -6065,8 +6051,7 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // pipeline exists.
     let can_see_invis = crate::commands::player_can_see_in_dark(world, player);
     let items: Vec<String> = {
-        let mut order: Vec<String> = Vec::new();
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut names: Vec<String> = Vec::new();
         let mut q = world.query_filtered::<
             (Entity, &Located, &Named, Option<&mud_world::ObjectFlags>),
             With<Item>,
@@ -6076,15 +6061,11 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             {
                 continue;
             }
-            if !counts.contains_key(&n.name) {
-                order.push(n.name.clone());
-            }
-            *counts.entry(n.name.clone()).or_insert(0) += 1;
+            names.push(n.name.clone());
         }
-        order
+        stack_entries(names, has_flag(world, player, PlayerFlag::ExpandObjs))
             .into_iter()
-            .map(|name| {
-                let n = counts.get(&name).copied().unwrap_or(1);
+            .map(|(name, n)| {
                 if n > 1 {
                     format!("<dim>({n})</> {name}")
                 } else {
@@ -7831,6 +7812,8 @@ const TOGGLES: &[(PlayerFlag, &str)] = &[
     (PlayerFlag::AutoSplit, "AutoSplit"),
     (PlayerFlag::AutoGold, "AutoGold"),
     (PlayerFlag::AutoLoot, "AutoLoot"),
+    (PlayerFlag::ExpandObjs, "ExpandObjs"),
+    (PlayerFlag::ExpandMobs, "ExpandMobs"),
     (PlayerFlag::AutoAssist, "AutoAssist"),
     (PlayerFlag::Wimpy, "Wimpy"),
     (PlayerFlag::ShowDiceRolls, "ShowDiceRolls"),
@@ -9861,14 +9844,10 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
                 .unwrap_or_default()
         })
         .collect();
-    let mut order: Vec<String> = Vec::new();
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for name in &items {
-        if !counts.contains_key(name) {
-            order.push(name.clone());
-        }
-        *counts.entry(name.clone()).or_insert(0) += 1;
-    }
+    let stacked = stack_entries(
+        items.iter().cloned(),
+        has_flag(world, player, PlayerFlag::ExpandObjs),
+    );
     let weight = carried_weight(world, player);
     let mut raw = if items.is_empty() {
         if filter.is_empty() {
@@ -9887,9 +9866,8 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
             items.len(),
         )
     };
-    for name in &order {
-        let n = counts.get(name).copied().unwrap_or(1);
-        if n > 1 {
+    for (name, n) in &stacked {
+        if *n > 1 {
             // Stack count dimmed so the eye lands on the item name.
             raw.push_str(&format!("  <dim>({n})</> {name}\r\n"));
         } else {

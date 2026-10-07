@@ -426,6 +426,9 @@ mod followers;
 mod magic_focus;
 pub(crate) use magic_focus::Concentrating;
 #[cfg(test)]
+#[path = "commands/expand_tests.rs"]
+mod expand_tests;
+#[cfg(test)]
 #[path = "commands/god_zone_tests.rs"]
 mod god_zone_tests;
 #[cfg(test)]
@@ -8957,6 +8960,28 @@ pub(crate) fn has_flag(world: &World, entity: Entity, flag: PlayerFlag) -> bool 
         .is_some_and(|f| f.has(flag))
 }
 
+/// Fold identical listing lines into `(line, count)` pairs, first-seen
+/// order preserved. With `expand` set (legacy `PRF_EXPAND_MOBS` /
+/// `PRF_EXPAND_OBJS`) nothing folds: every entry keeps its own line.
+pub(crate) fn stack_entries(
+    lines: impl IntoIterator<Item = String>,
+    expand: bool,
+) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for line in lines {
+        if !expand && let Some(&i) = index.get(&line) {
+            out[i].1 += 1;
+            continue;
+        }
+        if !expand {
+            index.insert(line.clone(), out.len());
+        }
+        out.push((line, 1));
+    }
+    out
+}
+
 pub(crate) fn visible(cmd: &Command, role: UserRole, perms: &[Permission]) -> bool {
     role.at_least(cmd.min_role) && cmd.required_perm.is_none_or(|p| perms.contains(&p))
 }
@@ -11119,8 +11144,13 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
     {
         out.push_str(&format!("  {formatted}\r\n"));
     }
-    for item_name in &items {
-        out.push_str(&format!("  {item_name}\r\n"));
+    let expand = has_flag(world, player, PlayerFlag::ExpandObjs);
+    for (item_name, count) in stack_entries(items, expand) {
+        if count > 1 {
+            out.push_str(&format!("  <dim>({count})</> {item_name}\r\n"));
+        } else {
+            out.push_str(&format!("  {item_name}\r\n"));
+        }
     }
     send_rendered(world, player, &out);
 }

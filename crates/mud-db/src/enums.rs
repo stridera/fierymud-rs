@@ -710,6 +710,12 @@ pub enum PlayerFlag {
     Brief,
     Compact,
     NoRepeat,
+    /// Legacy `PRF_EXPAND_MOBS`: list identical mobs one per line in
+    /// room listings instead of stacking them as `(N) <mob>`.
+    ExpandMobs,
+    /// Legacy `PRF_EXPAND_OBJS`: list identical objects one per line in
+    /// room / inventory / container listings instead of `(N) <item>`.
+    ExpandObjs,
     AutoLoot,
     AutoGold,
     AutoSplit,
@@ -755,6 +761,8 @@ impl PlayerFlag {
             "BRIEF" => Some(Self::Brief),
             "COMPACT" => Some(Self::Compact),
             "NO_REPEAT" | "NOREPEAT" => Some(Self::NoRepeat),
+            "EXPAND_MOBS" | "EXPANDMOBS" => Some(Self::ExpandMobs),
+            "EXPAND_OBJS" | "EXPANDOBJS" | "EXPAND_OBJECTS" => Some(Self::ExpandObjs),
             "AUTO_LOOT" | "AUTOLOOT" => Some(Self::AutoLoot),
             "AUTO_GOLD" | "AUTOGOLD" => Some(Self::AutoGold),
             "AUTO_SPLIT" | "AUTOSPLIT" => Some(Self::AutoSplit),
@@ -793,6 +801,8 @@ impl PlayerFlag {
             Self::Brief => "BRIEF",
             Self::Compact => "COMPACT",
             Self::NoRepeat => "NO_REPEAT",
+            Self::ExpandMobs => "EXPAND_MOBS",
+            Self::ExpandObjs => "EXPAND_OBJS",
             Self::AutoLoot => "AUTO_LOOT",
             Self::AutoGold => "AUTO_GOLD",
             Self::AutoSplit => "AUTO_SPLIT",
