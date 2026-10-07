@@ -966,6 +966,11 @@ pub struct ObjectProto {
     /// Long description shown by `examine`. None means "fall back to name".
     pub examine_description: Option<String>,
     pub weight: f64,
+    /// Percentage (0..=100) of the weight of everything inside this
+    /// item that the carrier does NOT feel (bag of holding, portable
+    /// hole). Read from `Objects.values."Weight Reduction"`; legacy
+    /// `VAL_CONTAINER_WEIGHT_REDUCTION`. Zero for ordinary items.
+    pub weight_reduction: f64,
     pub level: i32,
     /// Wear-slot flags from the schema; spawned items derive a single
     /// primary `WearableIn` from the first relevant flag (see

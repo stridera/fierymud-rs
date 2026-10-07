@@ -1531,6 +1531,7 @@ pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototy
                 room_description: strip_ansi(&row.room_description),
                 examine_description: row.examine_description.as_deref().map(strip_ansi),
                 weight: row.weight,
+                weight_reduction: parse_weight_reduction(&row.values),
                 level: row.level,
                 wear_flags: row.wear_flags,
                 weapon_dice_num: row.weapon_dice_num,
@@ -2183,6 +2184,23 @@ fn parse_light_fuel(values: &serde_json::Value) -> crate::resources::LightFuelPr
     }
 }
 
+/// Parse a container's weight-reduction percentage from its `values`
+/// JSONB (`{"Weight Reduction": 90.0}`). Number or numeric string;
+/// missing / unparseable / non-positive → 0 (no reduction). Clamped to
+/// 0..=100 so a bad row can't make a bag weigh a negative amount.
+fn parse_weight_reduction(values: &serde_json::Value) -> f64 {
+    let raw = match values.get("Weight Reduction") {
+        Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        Some(serde_json::Value::String(s)) => s.trim().parse().unwrap_or(0.0),
+        _ => 0.0,
+    };
+    if raw.is_finite() {
+        raw.clamp(0.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
 fn parse_liquid(values: &serde_json::Value) -> Option<LiquidProto> {
     let liquid = values
         .get("Liquid")?
@@ -2674,5 +2692,30 @@ mod reload_tests {
         assert_eq!(existing[&(1, 1)], "old");
         assert_eq!(existing[&(2, 1)], "new");
         assert_eq!(existing[&(3, 1)], "new");
+    }
+}
+
+#[cfg(test)]
+mod weight_reduction_tests {
+    use super::parse_weight_reduction;
+    use serde_json::json;
+
+    #[test]
+    fn reads_the_legacy_key_as_a_percentage() {
+        let v = json!({"Capacity": 100_000, "Weight Reduction": 90.0});
+        assert!((parse_weight_reduction(&v) - 90.0).abs() < f64::EPSILON);
+        let s = json!({"Weight Reduction": "25"});
+        assert!((parse_weight_reduction(&s) - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn missing_or_nonsense_means_no_reduction() {
+        assert!(parse_weight_reduction(&json!({})).abs() < f64::EPSILON);
+        assert!(parse_weight_reduction(&json!({"Weight Reduction": -5})).abs() < f64::EPSILON);
+        assert!(
+            (parse_weight_reduction(&json!({"Weight Reduction": 400})) - 100.0).abs()
+                < f64::EPSILON
+        );
+        assert!(parse_weight_reduction(&json!({"Weight Reduction": "x"})).abs() < f64::EPSILON);
     }
 }

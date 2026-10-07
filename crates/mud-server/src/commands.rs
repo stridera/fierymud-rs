@@ -11101,10 +11101,21 @@ pub(crate) fn carry_capacity(world: &World, actor: Entity) -> f64 {
     100.0 + f64::from(level) * 5.0
 }
 
-/// Look up the prototype weight of a single item — zero for
-/// synthetic items without a `WorldKey`. Used by the encumbrance
-/// gate to test whether one more item would overload the carrier.
+/// Effective weight of a single item, including anything inside it
+/// (after container weight reduction) — zero for synthetic items
+/// without a `WorldKey` and no contents. Used by the encumbrance gate
+/// to test whether one more item would overload the carrier.
 pub(crate) fn item_weight(world: &World, item: Entity) -> f64 {
+    effective_weight(world, item, 0)
+}
+
+/// Deepest container nesting `effective_weight` follows. A cycle in
+/// `Located` is impossible by construction, but the cap keeps a
+/// corrupted world from recursing without bound.
+const MAX_CONTAINER_DEPTH: u32 = 32;
+
+/// Prototype weight of `item` alone, ignoring anything inside it.
+fn base_weight(world: &World, item: Entity) -> f64 {
     world
         .get::<WorldKey>(item)
         .and_then(|wk| {
@@ -11116,42 +11127,61 @@ pub(crate) fn item_weight(world: &World, item: Entity) -> f64 {
         .map_or(0.0, |p| p.weight)
 }
 
-/// Sum the prototype weight of every item rooted at `actor` —
+/// Weight `item` adds to whoever carries it: its own weight plus the
+/// weight of everything inside it, with each container discounting
+/// its direct contents by its `weight_reduction` percentage (legacy
+/// `obj_to_obj`, handler.cpp). The discount applies to a child's
+/// *effective* weight, so a bag of holding inside a bag of holding
+/// compounds. Walks the `Contents` reverse index of `Located`, so
+/// the cost is O(items inside), independent of world size.
+fn effective_weight(world: &World, item: Entity, depth: u32) -> f64 {
+    let mut total = base_weight(world, item);
+    if depth >= MAX_CONTAINER_DEPTH {
+        return total;
+    }
+    let Some(contents) = world.get::<mud_world::Contents>(item) else {
+        return total;
+    };
+    let reduction = world
+        .get::<WorldKey>(item)
+        .and_then(|wk| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(wk.zone, wk.id))
+        })
+        .map_or(0.0, |p| p.weight_reduction.clamp(0.0, 100.0));
+    let keep = 1.0 - reduction / 100.0;
+    for child in contents.iter() {
+        if world.get::<Item>(child).is_some() {
+            total += effective_weight(world, child, depth + 1) * keep;
+        }
+    }
+    total
+}
+
+/// Sum the effective weight of every item rooted at `actor` —
 /// inventory, equipped slots, and the contents of any container
-/// they're carrying, recursively. Items missing a `WorldKey` (rare:
-/// synthetic seed items) contribute zero. Used by `inventory` for
-/// the readout, and reusable when pickup enforcement lands later.
+/// they're carrying, recursively, after each container's weight
+/// reduction (see [`effective_weight`]). Items missing a `WorldKey`
+/// (rare: synthetic seed items) contribute zero but still nest. Used
+/// by `inventory`, pickup enforcement and movement.
 pub(crate) fn carried_weight(world: &mut World, actor: Entity) -> f64 {
     // Walk the `Contents` reverse index of `Located` (kept in sync by
     // bevy's relationship hooks) instead of scanning every item in the
     // world: cost is O(carried items), independent of world size. This
     // runs on every move, so the old O(world items x carried) scan was a
     // per-step tick cost that grew with the whole world's population.
-    let mut visited: std::collections::HashSet<Entity> = std::collections::HashSet::new();
-    let mut total = 0.0_f64;
-    let mut frontier: Vec<Entity> = vec![actor];
-    while let Some(parent) = frontier.pop() {
-        let Some(contents) = world.get::<mud_world::Contents>(parent) else {
-            continue;
-        };
-        for e in contents.iter() {
-            // `Contents` also lists non-items (mobs/players standing in a
-            // room); only items weigh anything or nest further.
-            if world.get::<Item>(e).is_none() || !visited.insert(e) {
-                continue;
-            }
-            if let Some(wk) = world.get::<WorldKey>(e)
-                && let Some(proto) = world
-                    .resource::<ObjectPrototypes>()
-                    .by_key
-                    .get(&(wk.zone, wk.id))
-            {
-                total += proto.weight;
-            }
-            frontier.push(e);
-        }
-    }
-    total
+    let Some(contents) = world.get::<mud_world::Contents>(actor) else {
+        return 0.0;
+    };
+    // `Contents` also lists non-items (mobs/players standing in a
+    // room); only items weigh anything.
+    contents
+        .iter()
+        .filter(|e| world.get::<Item>(*e).is_some())
+        .map(|e| effective_weight(world, e, 0))
+        .sum()
 }
 
 /// Split `input` around the first standalone preposition from
@@ -20437,6 +20467,7 @@ pub(crate) fn opposite(d: Direction) -> Option<Direction> {
 #[cfg(test)]
 mod carried_weight_tests {
     use super::{carried_weight, test_support};
+    use crate::commands::item_weight;
     use bevy_ecs::prelude::*;
     use mud_db::enums::ObjectType;
     use mud_world::{Contents, Item, Located, ObjectPrototypes, WorldKey};
@@ -20569,5 +20600,63 @@ mod carried_weight_tests {
         );
         assert!((now - oracle).abs() < f64::EPSILON, "{now} vs {oracle}");
         assert!((carried_weight(&mut world, player) - (13.5 - 1.5 - 0.5)).abs() < f64::EPSILON);
+    }
+
+    /// World with a 90% "portable hole" (id 7, weight 1), a 50% bag
+    /// (id 8, weight 2), and plain 10 lb stones (id 9).
+    fn reduction_world() -> (World, Entity) {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        let mut hole = test_support::object_proto(1, 7, ObjectType::Container);
+        hole.weight = 1.0;
+        hole.weight_reduction = 90.0;
+        protos.by_key.insert((1, 7), hole);
+        let mut bag = test_support::object_proto(1, 8, ObjectType::Container);
+        bag.weight = 2.0;
+        bag.weight_reduction = 50.0;
+        protos.by_key.insert((1, 8), bag);
+        let mut stone = test_support::object_proto(1, 9, ObjectType::Other);
+        stone.weight = 10.0;
+        protos.by_key.insert((1, 9), stone);
+        world.insert_resource(protos);
+        let room = world.spawn_empty().id();
+        let (player, _rx) = test_support::player_in(&mut world, room);
+        (world, player)
+    }
+
+    #[test]
+    fn portable_hole_hides_ninety_percent_of_its_contents() {
+        let (mut world, player) = reduction_world();
+        let hole = item(&mut world, (1, 7), player);
+        assert!((carried_weight(&mut world, player) - 1.0).abs() < 1e-9);
+        item(&mut world, (1, 9), hole);
+        item(&mut world, (1, 9), hole);
+        // 1 (hole) + 20 * (1 - 0.9)
+        assert!((carried_weight(&mut world, player) - 3.0).abs() < 1e-9);
+        // Taking the hole off the player drops the lot.
+        let room = world.get::<Located>(player).unwrap().0;
+        world.entity_mut(hole).insert(Located(room));
+        assert!(carried_weight(&mut world, player).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nested_containers_compound_their_reductions() {
+        let (mut world, player) = reduction_world();
+        let hole = item(&mut world, (1, 7), player);
+        let bag = item(&mut world, (1, 8), hole);
+        item(&mut world, (1, 9), bag);
+        // bag effective = 2 + 10 * 0.5 = 7; hole = 1 + 7 * 0.1 = 1.7
+        assert!((carried_weight(&mut world, player) - 1.7).abs() < 1e-9);
+        // item_weight (pickup gate) agrees with the carrier's view.
+        assert!((item_weight(&world, hole) - 1.7).abs() < 1e-9);
+        assert!((item_weight(&world, bag) - 7.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn items_outside_reducing_containers_weigh_in_full() {
+        let (mut world, player) = reduction_world();
+        item(&mut world, (1, 7), player);
+        item(&mut world, (1, 9), player);
+        assert!((carried_weight(&mut world, player) - 11.0).abs() < 1e-9);
     }
 }
