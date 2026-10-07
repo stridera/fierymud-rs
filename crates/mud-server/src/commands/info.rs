@@ -5486,6 +5486,14 @@ pub(crate) fn cmd_glance(world: &mut World, player: Entity, args: &str) {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
+    // `look at <x>` ≡ `look <x>` for every target. Only strip when
+    // something follows ("at" alone stays a literal needle).
+    let arg = match arg.get(..3) {
+        Some(head) if head.eq_ignore_ascii_case("at ") && !arg[3..].trim().is_empty() => {
+            arg[3..].trim_start()
+        }
+        _ => arg,
+    };
     if !arg.is_empty() {
         if let Some(dir) = parse_direction(arg) {
             look_direction(world, player, dir);
@@ -5506,8 +5514,7 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         // scattered weather/time/season readouts into one line. Done
         // before the examine fallthrough so it works even though
         // there's no `sky` entity to find.
-        let stripped = lower.strip_prefix("at ").unwrap_or(&lower);
-        if matches!(stripped, "sky" | "stars" | "horizon" | "heavens") {
+        if matches!(lower.as_str(), "sky" | "stars" | "horizon" | "heavens") {
             look_at_sky(world, player);
             return;
         }
@@ -9057,7 +9064,199 @@ fn drain_coin_pile(world: &mut World, container: Entity, player: Entity) -> Opti
     Some(amount)
 }
 
+/// True for the words that name a container's coin pile.
+fn is_coin_word(word: &str) -> bool {
+    ["coin", "coins", "gold", "money"]
+        .iter()
+        .any(|w| word.trim().eq_ignore_ascii_case(w))
+}
+
+/// Drain `container`'s `CoinPile` into `player`'s wealth and tell
+/// them. Returns the amount taken, or `None` when there was no pile.
+fn collect_coin_pile(
+    world: &mut World,
+    container: Entity,
+    player: Entity,
+    container_name: &str,
+) -> Option<i64> {
+    let amount = drain_coin_pile(world, container, player)?;
+    let msg = render_color_tags(
+        &crate::commands::format_wealth(amount).unwrap_or_else(|| "no coin".to_string()),
+        color_mode_for(world, player),
+    );
+    send_rendered(
+        world,
+        player,
+        &format!("You collect {msg} from {container_name}.\r\n"),
+    );
+    Some(amount)
+}
+
+/// Resolve the prepositionless `get <needle> <container>` form: when
+/// nothing on the floor matches the whole string and the LAST word
+/// names a container (carried or in the room), returns
+/// `(needle, container)`.
+fn resolve_implicit_container<'a>(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    trimmed: &'a str,
+) -> Option<(&'a str, Entity)> {
+    let (needle, last_word) = trimmed.rsplit_once(char::is_whitespace)?;
+    if needle.trim().is_empty() || find_in_room(world, trimmed, room).is_some() {
+        return None;
+    }
+    let container = find_in_room(world, last_word, room)
+        .or_else(|| find_carried_by(world, last_word, player, EquipFilter::Anywhere))?;
+    is_container_entity(world, container).then_some((needle.trim(), container))
+}
+
+/// `get [N] <item> [from] [container]`. A bare leading count takes up
+/// to N matching items (`get 2 sword`); `N.item` is the index syntax
+/// and is handled by the lookup helpers, not here.
 pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
+    let (count, rest) = parse_count_prefix(args.trim());
+    let Some(n) = count else {
+        get_plain(world, player, rest);
+        return;
+    };
+    // `get 2 all` / `get 2 all.x`: count is meaningless, sweep as usual.
+    let from_pair = split_preposition(rest, &["from"]);
+    let item_part = from_pair.map_or(rest, |(i, _)| i);
+    if parse_all_filter(item_part).is_some() {
+        get_plain(world, player, rest);
+        return;
+    }
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        return;
+    };
+    let target = if let Some((needle, container_word)) = from_pair {
+        find_in_room(world, container_word, room)
+            .or_else(|| find_carried_by(world, container_word, player, EquipFilter::Anywhere))
+            .map(|c| (needle, Some(c)))
+    } else if let Some((needle, c)) = resolve_implicit_container(world, player, room, rest) {
+        Some((needle, Some(c)))
+    } else {
+        Some((rest, None))
+    };
+    let Some((needle, container)) = target else {
+        // Unresolvable container: the plain path reports it.
+        get_plain(world, player, rest);
+        return;
+    };
+    for i in 0..n {
+        let before = match container {
+            Some(c) => find_in_container(world, needle, c),
+            None => find_in_room(world, needle, room),
+        };
+        let Some(before) = before else {
+            // Nothing (more) to take. Surface the usual message
+            // only when not a single item was available.
+            if i == 0 {
+                get_plain(world, player, rest);
+            }
+            return;
+        };
+        match container {
+            Some(c) => get_from_container(world, player, room, needle, c),
+            None => get_plain(world, player, needle),
+        }
+        // Item refused (NO_TAKE, too heavy, claimed corpse): stop
+        // rather than repeating the same rejection N times.
+        let still_there = world
+            .get::<Located>(before)
+            .is_some_and(|l| l.0 == container.unwrap_or(room));
+        if still_there {
+            return;
+        }
+    }
+}
+
+/// `drop [N] <item>`: with a bare leading count, drops up to N
+/// matching carried items through the single-item path.
+pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
+    let (count, rest) = parse_count_prefix(args.trim());
+    let Some(n) = count else {
+        drop_plain(world, player, rest);
+        return;
+    };
+    if parse_all_filter(rest).is_some() {
+        drop_plain(world, player, rest);
+        return;
+    }
+    repeat_carried(world, player, rest, n, |w, p| drop_plain(w, p, rest));
+}
+
+/// `put [N] <item> [in|into|on] <container>`.
+pub(crate) fn cmd_put(world: &mut World, player: Entity, args: &str) {
+    let (count, rest) = parse_count_prefix(args.trim());
+    let Some(n) = count else {
+        put_plain(world, player, rest);
+        return;
+    };
+    let (item_word, _) = split_put_args(rest).unwrap_or((rest, ""));
+    if parse_all_filter(item_word).is_some() {
+        put_plain(world, player, rest);
+        return;
+    }
+    repeat_carried(world, player, item_word, n, |w, p| put_plain(w, p, rest));
+}
+
+/// `give [N] <item> [to] <target>`.
+pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
+    let (count, rest) = parse_count_prefix(args.trim());
+    let Some(n) = count else {
+        give_plain(world, player, rest);
+        return;
+    };
+    let (item_word, _) = split_give_args(rest).unwrap_or((rest, ""));
+    repeat_carried(world, player, item_word, n, |w, p| give_plain(w, p, rest));
+}
+
+/// Split `put` arguments into `(item, container)`.
+fn split_put_args(args: &str) -> Option<(&str, &str)> {
+    if let Some(pair) = split_preposition(args, &["in", "into", "on"]) {
+        return Some(pair);
+    }
+    let (item, container) = args.split_once(char::is_whitespace)?;
+    (!container.trim().is_empty()).then_some((item.trim(), container.trim()))
+}
+
+/// Split `give` arguments into `(item, target)`.
+fn split_give_args(args: &str) -> Option<(&str, &str)> {
+    if let Some(pair) = split_preposition(args, &["to"]) {
+        return Some(pair);
+    }
+    let (item, target) = args.split_once(char::is_whitespace)?;
+    (!target.trim().is_empty()).then_some((item.trim(), target.trim()))
+}
+
+/// Run `action` up to `n` times against successive matches of
+/// `item_word` in the player's inventory. Stops as soon as there is
+/// nothing left to act on or the item did not leave the player's
+/// hands (a gate refused it), so rejections are not repeated.
+fn repeat_carried(
+    world: &mut World,
+    player: Entity,
+    item_word: &str,
+    n: usize,
+    action: impl Fn(&mut World, Entity),
+) {
+    for i in 0..n {
+        let Some(before) = find_carried_by(world, item_word, player, EquipFilter::Inventory) else {
+            if i == 0 {
+                action(world, player);
+            }
+            return;
+        };
+        action(world, player);
+        if world.get::<Located>(before).is_some_and(|l| l.0 == player) {
+            return;
+        }
+    }
+}
+
+fn get_plain(world: &mut World, player: Entity, args: &str) {
     let trimmed = args.trim();
     if trimmed.is_empty() {
         send_to(world, player, "Get what?\r\n");
@@ -9069,9 +9268,10 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
 
     // `get <item> from <container>` — pull from a container the
-    // player is carrying or which sits in the room. `all` as the
-    // item word loots everything inside.
-    if let Some((needle, container_word)) = split_from_keyword(trimmed) {
+    // player is carrying or which sits in the room. `all` /
+    // `all.<filter>` as the item word loots everything (matching)
+    // inside.
+    if let Some((needle, container_word)) = split_preposition(trimmed, &["from"]) {
         let container = find_in_room(world, container_word, room)
             .or_else(|| find_carried_by(world, container_word, player, EquipFilter::Anywhere));
         let Some(container) = container else {
@@ -9082,209 +9282,17 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
             );
             return;
         };
-        let container_name = name_of(world, container);
-        let player_name = name_of(world, player);
+        get_from_container(world, player, room, needle, container);
+        return;
+    }
 
-        // Loot-claim gate: corpses with an active LootClaim refuse
-        // anyone other than the owner until the window expires.
-        // Past the deadline the component still exists; we just
-        // don't enforce it. The despawn-on-decay path cleans it up.
-        if let Some(claim) = world.get::<mud_world::LootClaim>(container).copied()
-            && claim.expires_at > std::time::Instant::now()
-            && claim.owner != player
-        {
-            let owner_name = name_or(world, claim.owner, "another");
-            send_to(
-                world,
-                player,
-                format!(
-                    "{container_name} is claimed by {owner_name}; \
-                     you cannot loot it yet.\r\n"
-                ),
-            );
-            return;
-        }
-
-        // Player-corpse consent gate. Mirrors legacy CONSENT: only
-        // the dead player themselves (matched by name extracted
-        // from "the corpse of X") or staff can loot a player
-        // corpse. Stops opportunistic gear theft when a player
-        // dies; uncollected items still drop to the room on decay.
-        let is_pc = world.get::<mud_world::PlayerCorpse>(container).is_some();
-        if is_pc && !crate::commands::is_staff(world, player) {
-            let owner_name = container_name
-                .strip_prefix("the corpse of ")
-                .unwrap_or("")
-                .trim();
-            if !owner_name.eq_ignore_ascii_case(player_name.as_str()) {
-                send_to(
-                    world,
-                    player,
-                    format!(
-                        "{container_name} isn't yours to loot — \
-                         disturbing another adventurer's remains \
-                         requires their consent.\r\n"
-                    ),
-                );
-                return;
-            }
-        }
-
-        // `get all from <container>`: snapshot every item inside,
-        // re-Located to the player, broadcast a single line with the
-        // count. Also drains a `CoinPile` if the container carries
-        // one (e.g. a corpse from a non-AutoGold kill). Empty
-        // containers report the obvious "nothing in there" rather
-        // than failing the keyword lookup.
-        if needle.eq_ignore_ascii_case("all") {
-            let items: Vec<(Entity, String)> = {
-                let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Item>>();
-                q.iter(world)
-                    .filter(|(_, l, _)| l.0 == container)
-                    .map(|(e, _, n)| (e, n.name.clone()))
-                    .collect()
-            };
-            // Drain CoinPile first — independent of items so a
-            // corpse that holds *only* coin (low-tier mob with no
-            // gear) still completes meaningfully instead of
-            // reporting "nothing in there".
-            let coin_drained = drain_coin_pile(world, container, player);
-            if let Some(amount) = coin_drained {
-                let msg = render_color_tags(
-                    &crate::commands::format_wealth(amount)
-                        .unwrap_or_else(|| "no coin".to_string()),
-                    color_mode_for(world, player),
-                );
-                send_rendered(
-                    world,
-                    player,
-                    &format!("You collect {msg} from {container_name}.\r\n"),
-                );
-            }
-            if items.is_empty() {
-                if coin_drained.is_none() {
-                    send_rendered(
-                        world,
-                        player,
-                        &format!("There's nothing in {container_name}.\r\n"),
-                    );
-                }
-                return;
-            }
-            let cap = carry_capacity(world, player);
-            let mut running = carried_weight(world, player);
-            let mut moved = 0usize;
-            let mut skipped = 0usize;
-            // Staff bypass — gods don't get encumbered. The cap +
-            // running tally still update so the score sheet stays
-            // honest, but the gate doesn't reject.
-            let bypass_encumbrance = crate::commands::is_staff(world, player);
-            for (item, item_name) in &items {
-                // NO_TAKE items inside containers also stay put.
-                // Plausible: a fixed lectern inside a shrine, a
-                // welded gear inside a clockwork chassis. Staff
-                // bypass mirrors the floor sweep.
-                if !bypass_encumbrance
-                    && has_restriction(world, *item, mud_db::enums::ObjectRestriction::NoTake)
-                {
-                    continue;
-                }
-                let w = item_weight(world, *item);
-                if !bypass_encumbrance && running + w > cap {
-                    skipped += 1;
-                    continue;
-                }
-                running += w;
-                if let Some(mut l) = world.get_mut::<Located>(*item) {
-                    l.0 = player;
-                }
-                send_rendered(
-                    world,
-                    player,
-                    &format!("You take {item_name} from {container_name}.\r\n"),
-                );
-                crate::triggers::fire_item_event(
-                    world,
-                    *item,
-                    player,
-                    mud_world::TriggerEvent::Get,
-                );
-                if let Some(key) = world.get::<WorldKey>(*item).copied() {
-                    bump_collect_quest_progress(world, player, key.zone, key.id);
-                }
-                moved += 1;
-            }
-            if moved > 0 {
-                broadcast_room_except_rendered(
-                    world,
-                    room,
-                    &[player],
-                    &format!("{player_name} loots {moved} item(s) from {container_name}.\r\n"),
-                );
-            }
-            if skipped > 0 {
-                send_to(
-                    world,
-                    player,
-                    format!("You're too encumbered to carry {skipped} more item(s).\r\n"),
-                );
-            }
-            return;
-        }
-
-        let item = find_in_container(world, needle, container);
-        let Some(item) = item else {
-            send_rendered(
-                world,
-                player,
-                &format!("There's no '{needle}' in {container_name}.\r\n"),
-            );
-            return;
-        };
-        let item_name = name_of(world, item);
-        // NO_TAKE — same fixture gate as the floor path.
-        if !crate::commands::is_staff(world, player)
-            && has_restriction(world, item, mud_db::enums::ObjectRestriction::NoTake)
-        {
-            send_rendered(
-                world,
-                player,
-                &format!("{item_name} is fixed in place.\r\n"),
-            );
-            return;
-        }
-        if !crate::commands::is_staff(world, player)
-            && carried_weight(world, player) + item_weight(world, item)
-                > carry_capacity(world, player)
-        {
-            send_rendered(
-                world,
-                player,
-                &format!(
-                    "{item_name} is too heavy — you'd be encumbered. \
-                 Drop something with `drop <item>`, or train Strength.\r\n"
-                ),
-            );
-            return;
-        }
-        if let Some(mut l) = world.get_mut::<Located>(item) {
-            l.0 = player;
-        }
-        send_rendered(
-            world,
-            player,
-            &format!("You take {item_name} from {container_name}.\r\n"),
-        );
-        broadcast_room_except_rendered(
-            world,
-            room,
-            &[player],
-            &format!("{player_name} takes {item_name} from {container_name}.\r\n"),
-        );
-        crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Get);
-        if let Some(key) = world.get::<WorldKey>(item).copied() {
-            bump_collect_quest_progress(world, player, key.zone, key.id);
-        }
+    // Legacy phrasing without the preposition: `get all corpse`,
+    // `get sword corpse`. When nothing on the floor matches the
+    // whole string and the LAST word resolves to a container, treat
+    // it as `get <rest> from <last>`. Anything else falls through
+    // to the plain floor path below, unchanged.
+    if let Some((needle, container)) = resolve_implicit_container(world, player, room, trimmed) {
+        get_from_container(world, player, room, needle, container);
         return;
     }
 
@@ -9370,6 +9378,231 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
         room,
         &[player],
         &format!("{player_name} picks up {item_name}.\r\n"),
+    );
+    crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Get);
+    if let Some(key) = world.get::<WorldKey>(item).copied() {
+        bump_collect_quest_progress(world, player, key.zone, key.id);
+    }
+}
+
+/// Take `needle` out of `container` (a carried or in-room container /
+/// corpse). `needle` may be a keyword, `N.keyword`, bare `all`, or
+/// `all.<filter>` (substring against name / keywords). Applies the
+/// loot-claim and player-corpse consent gates before anything moves.
+fn get_from_container(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    needle: &str,
+    container: Entity,
+) {
+    let container_name = name_of(world, container);
+    let player_name = name_of(world, player);
+
+    // Loot-claim gate: corpses with an active LootClaim refuse
+    // anyone other than the owner until the window expires.
+    // Past the deadline the component still exists; we just
+    // don't enforce it. The despawn-on-decay path cleans it up.
+    if let Some(claim) = world.get::<mud_world::LootClaim>(container).copied()
+        && claim.expires_at > std::time::Instant::now()
+        && claim.owner != player
+    {
+        let owner_name = name_or(world, claim.owner, "another");
+        send_to(
+            world,
+            player,
+            format!(
+                "{container_name} is claimed by {owner_name}; \
+                 you cannot loot it yet.\r\n"
+            ),
+        );
+        return;
+    }
+
+    // Player-corpse consent gate. Mirrors legacy CONSENT: only
+    // the dead player themselves (matched by name extracted
+    // from "the corpse of X") or staff can loot a player
+    // corpse. Stops opportunistic gear theft when a player
+    // dies; uncollected items still drop to the room on decay.
+    let is_pc = world.get::<mud_world::PlayerCorpse>(container).is_some();
+    if is_pc && !crate::commands::is_staff(world, player) {
+        let owner_name = container_name
+            .strip_prefix("the corpse of ")
+            .unwrap_or("")
+            .trim();
+        if !owner_name.eq_ignore_ascii_case(player_name.as_str()) {
+            send_to(
+                world,
+                player,
+                format!(
+                    "{container_name} isn't yours to loot — \
+                     disturbing another adventurer's remains \
+                     requires their consent.\r\n"
+                ),
+            );
+            return;
+        }
+    }
+
+    // `get all from <container>`: snapshot every item inside,
+    // re-Located to the player, broadcast a single line with the
+    // count. Also drains a `CoinPile` if the container carries
+    // one (e.g. a corpse from a non-AutoGold kill). Empty
+    // containers report the obvious "nothing in there" rather
+    // than failing the keyword lookup. `all.<filter>` restricts
+    // the sweep to items whose name / keywords contain the filter
+    // (the coin pile is drained for bare `all` and for coin words
+    // such as `all.coin`).
+    if let Some(filter) = parse_all_filter(needle) {
+        let items: Vec<(Entity, String)> = {
+            let mut q =
+                world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+            q.iter(world)
+                .filter(|(_, l, n, kw)| {
+                    l.0 == container && (filter.is_empty() || matches(&filter, n, *kw))
+                })
+                .map(|(e, _, n, _)| (e, n.name.clone()))
+                .collect()
+        };
+        // Drain CoinPile first — independent of items so a
+        // corpse that holds *only* coin (low-tier mob with no
+        // gear) still completes meaningfully instead of
+        // reporting "nothing in there".
+        let coin_drained = if filter.is_empty() || is_coin_word(&filter) {
+            collect_coin_pile(world, container, player, &container_name)
+        } else {
+            None
+        };
+        if items.is_empty() {
+            if coin_drained.is_none() {
+                if filter.is_empty() {
+                    send_rendered(
+                        world,
+                        player,
+                        &format!("There's nothing in {container_name}.\r\n"),
+                    );
+                } else {
+                    send_rendered(
+                        world,
+                        player,
+                        &format!("There's nothing matching '{filter}' in {container_name}.\r\n"),
+                    );
+                }
+            }
+            return;
+        }
+        let cap = carry_capacity(world, player);
+        let mut running = carried_weight(world, player);
+        let mut moved = 0usize;
+        let mut skipped = 0usize;
+        // Staff bypass — gods don't get encumbered. The cap +
+        // running tally still update so the score sheet stays
+        // honest, but the gate doesn't reject.
+        let bypass_encumbrance = crate::commands::is_staff(world, player);
+        for (item, item_name) in &items {
+            // NO_TAKE items inside containers also stay put.
+            // Plausible: a fixed lectern inside a shrine, a
+            // welded gear inside a clockwork chassis. Staff
+            // bypass mirrors the floor sweep.
+            if !bypass_encumbrance
+                && has_restriction(world, *item, mud_db::enums::ObjectRestriction::NoTake)
+            {
+                continue;
+            }
+            let w = item_weight(world, *item);
+            if !bypass_encumbrance && running + w > cap {
+                skipped += 1;
+                continue;
+            }
+            running += w;
+            if let Some(mut l) = world.get_mut::<Located>(*item) {
+                l.0 = player;
+            }
+            send_rendered(
+                world,
+                player,
+                &format!("You take {item_name} from {container_name}.\r\n"),
+            );
+            crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Get);
+            if let Some(key) = world.get::<WorldKey>(*item).copied() {
+                bump_collect_quest_progress(world, player, key.zone, key.id);
+            }
+            moved += 1;
+        }
+        if moved > 0 {
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[player],
+                &format!("{player_name} loots {moved} item(s) from {container_name}.\r\n"),
+            );
+        }
+        if skipped > 0 {
+            send_to(
+                world,
+                player,
+                format!("You're too encumbered to carry {skipped} more item(s).\r\n"),
+            );
+        }
+        return;
+    }
+
+    // Coin words (`coin`, `coins`, `gold`, `money`) drain the pile;
+    // any item that also matches the word is taken afterwards.
+    let coin_drained = if is_coin_word(needle) {
+        collect_coin_pile(world, container, player, &container_name)
+    } else {
+        None
+    };
+    let item = find_in_container(world, needle, container);
+    let Some(item) = item else {
+        if coin_drained.is_none() {
+            send_rendered(
+                world,
+                player,
+                &format!("There's no '{needle}' in {container_name}.\r\n"),
+            );
+        }
+        return;
+    };
+    let item_name = name_of(world, item);
+    // NO_TAKE — same fixture gate as the floor path.
+    if !crate::commands::is_staff(world, player)
+        && has_restriction(world, item, mud_db::enums::ObjectRestriction::NoTake)
+    {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} is fixed in place.\r\n"),
+        );
+        return;
+    }
+    if !crate::commands::is_staff(world, player)
+        && carried_weight(world, player) + item_weight(world, item) > carry_capacity(world, player)
+    {
+        send_rendered(
+            world,
+            player,
+            &format!(
+                "{item_name} is too heavy — you'd be encumbered. \
+             Drop something with `drop <item>`, or train Strength.\r\n"
+            ),
+        );
+        return;
+    }
+    if let Some(mut l) = world.get_mut::<Located>(item) {
+        l.0 = player;
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("You take {item_name} from {container_name}.\r\n"),
+    );
+    broadcast_room_except_rendered(
+        world,
+        room,
+        &[player],
+        &format!("{player_name} takes {item_name} from {container_name}.\r\n"),
     );
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Get);
     if let Some(key) = world.get::<WorldKey>(item).copied() {
@@ -9479,20 +9712,22 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
 
 /// `put <item> <container>`: move a carried item into a container
 /// the player is carrying or which sits in the room.
-pub(crate) fn cmd_put(world: &mut World, player: Entity, args: &str) {
-    // Support both `put <item> <container>` and `put <item> in <container>`.
-    // The "in" keyword form is natural and matches how players type it.
+fn put_plain(world: &mut World, player: Entity, args: &str) {
+    // Support `put <item> <container>` and `put <item> in|into|on
+    // <container>`. The preposition forms are natural and match how
+    // players type it.
     let trimmed = args.trim();
-    let (item_word, container_word) = if let Some(pair) = split_in_keyword(trimmed) {
-        pair
-    } else {
-        let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
-        if parts.len() != 2 || parts[1].trim().is_empty() {
-            send_to(world, player, "Usage: put <item> in <container>\r\n");
-            return;
-        }
-        (parts[0].trim(), parts[1].trim())
-    };
+    let (item_word, container_word) =
+        if let Some(pair) = split_preposition(trimmed, &["in", "into", "on"]) {
+            pair
+        } else {
+            let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+            if parts.len() != 2 || parts[1].trim().is_empty() {
+                send_to(world, player, "Usage: put <item> in <container>\r\n");
+                return;
+            }
+            (parts[0].trim(), parts[1].trim())
+        };
 
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
@@ -9514,21 +9749,41 @@ pub(crate) fn cmd_put(world: &mut World, player: Entity, args: &str) {
 
     // `put all in <container>` — store every carried (non-equipped)
     // item in the target. Skips the container itself.
-    if item_word.eq_ignore_ascii_case("all") {
+    // `put all.<filter> in <container>` restricts to items whose
+    // name or keywords contain the filter.
+    if let Some(filter) = parse_all_filter(item_word) {
         let items: Vec<(Entity, String)> = {
-            let mut q = world
-                .query_filtered::<(Entity, &Located, &Named, Option<&EquippedSlot>), With<Item>>();
+            let mut q = world.query_filtered::<(
+                Entity,
+                &Located,
+                &Named,
+                Option<&Keywords>,
+                Option<&EquippedSlot>,
+            ), With<Item>>();
             q.iter(world)
-                .filter(|(e, l, _, eq)| l.0 == player && eq.is_none() && *e != container)
-                .map(|(e, _, n, _)| (e, n.name.clone()))
+                .filter(|(e, l, n, kw, eq)| {
+                    l.0 == player
+                        && eq.is_none()
+                        && *e != container
+                        && (filter.is_empty() || matches(&filter, n, *kw))
+                })
+                .map(|(e, _, n, _, _)| (e, n.name.clone()))
                 .collect()
         };
         if items.is_empty() {
-            send_to(
-                world,
-                player,
-                "You aren't carrying anything to put away.\r\n",
-            );
+            if filter.is_empty() {
+                send_to(
+                    world,
+                    player,
+                    "You aren't carrying anything to put away.\r\n",
+                );
+            } else {
+                send_to(
+                    world,
+                    player,
+                    format!("You aren't carrying anything matching '{filter}'.\r\n"),
+                );
+            }
             return;
         }
         let count = items.len();
@@ -9694,7 +9949,7 @@ pub(crate) fn item_drop_blocked(world: &World, item: Entity) -> bool {
         || has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound)
 }
 
-pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
+fn drop_plain(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Drop what?\r\n");
@@ -9707,17 +9962,34 @@ pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     let player_name = name_of(world, player);
 
     // `drop all` — drop every carried (non-equipped) item.
-    if target_word.eq_ignore_ascii_case("all") {
+    // `drop all.<filter>` — same, restricted to items whose name or
+    // keywords contain the filter.
+    if let Some(filter) = parse_all_filter(target_word) {
         let items: Vec<(Entity, String)> = {
-            let mut q = world
-                .query_filtered::<(Entity, &Located, &Named, Option<&EquippedSlot>), With<Item>>();
+            let mut q = world.query_filtered::<(
+                Entity,
+                &Located,
+                &Named,
+                Option<&Keywords>,
+                Option<&EquippedSlot>,
+            ), With<Item>>();
             q.iter(world)
-                .filter(|(_, l, _, eq)| l.0 == player && eq.is_none())
-                .map(|(e, _, n, _)| (e, n.name.clone()))
+                .filter(|(_, l, n, kw, eq)| {
+                    l.0 == player && eq.is_none() && (filter.is_empty() || matches(&filter, n, *kw))
+                })
+                .map(|(e, _, n, _, _)| (e, n.name.clone()))
                 .collect()
         };
         if items.is_empty() {
-            send_to(world, player, "You aren't carrying anything to drop.\r\n");
+            if filter.is_empty() {
+                send_to(world, player, "You aren't carrying anything to drop.\r\n");
+            } else {
+                send_to(
+                    world,
+                    player,
+                    format!("You aren't carrying anything matching '{filter}'.\r\n"),
+                );
+            }
             return;
         }
         let mut dropped = 0usize;
@@ -9817,14 +10089,21 @@ pub(crate) fn cmd_drop(world: &mut World, player: Entity, args: &str) {
     refresh_player_items_gmcp(world, player);
 }
 
-pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
-    let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
-    if parts.len() != 2 || parts[1].trim().is_empty() {
-        send_to(world, player, "Usage: give <item> <target>\r\n");
-        return;
-    }
-    let item_word = parts[0].trim();
-    let target_word = parts[1].trim();
+fn give_plain(world: &mut World, player: Entity, args: &str) {
+    // `give <item> [to] <target>`. The `to` form is tried first so
+    // multi-word items (`give rusty sword to bob`) work; otherwise
+    // fall back to the legacy two-token split.
+    let args = args.trim();
+    let (item_word, target_word) = if let Some(pair) = split_preposition(args, &["to"]) {
+        pair
+    } else {
+        let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
+        if parts.len() != 2 || parts[1].trim().is_empty() {
+            send_to(world, player, "Usage: give <item> [to] <target>\r\n");
+            return;
+        }
+        (parts[0].trim(), parts[1].trim())
+    };
 
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
@@ -13145,14 +13424,14 @@ pub(crate) fn cmd_abilities_kind(
 #[cfg(test)]
 mod tests {
     use super::{
-        cmd_drop, cmd_get, cmd_sell, has_object_flag, has_restriction, item_drop_blocked,
-        parse_who_level_filter,
+        cmd_drop, cmd_get, cmd_give, cmd_look, cmd_put, cmd_sell, has_object_flag, has_restriction,
+        item_drop_blocked, parse_who_level_filter,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::{ObjectFlag, ObjectRestriction, Sector};
     use mud_world::{
-        Item, Keywords, Located, Mob, Named, ObjectFlags, ObjectPrototypes, ObjectRestrictions,
-        Player, Room, RoomSector, ShopCatalog, Shopkeeper,
+        Corpse, Item, Keywords, Located, Mob, Named, ObjectFlags, ObjectPrototypes,
+        ObjectRestrictions, Player, Room, RoomSector, ShopCatalog, Shopkeeper,
     };
 
     #[test]
@@ -13415,5 +13694,374 @@ mod tests {
         assert!(item_drop_blocked(&world, no_drop));
         assert!(item_drop_blocked(&world, bound));
         assert!(item_drop_blocked(&world, both));
+    }
+
+    // ---------------------------------------------------------------
+    // Optional prepositions / bulk filters in object commands.
+    // ---------------------------------------------------------------
+
+    fn spawn_item(world: &mut World, name: &str, kw: &str, loc: Entity) -> Entity {
+        world
+            .spawn((
+                Item,
+                Named {
+                    name: name.to_string(),
+                },
+                Keywords(vec![kw.to_string()]),
+                Located(loc),
+            ))
+            .id()
+    }
+
+    fn spawn_corpse(world: &mut World, room: Entity) -> Entity {
+        world
+            .spawn((
+                Item,
+                Corpse,
+                Named {
+                    name: "the corpse of a goblin".to_string(),
+                },
+                Keywords(vec!["corpse".to_string()]),
+                Located(room),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn split_preposition_edge_cases() {
+        use crate::commands::split_preposition;
+        let preps = ["from", "in"];
+        assert_eq!(
+            split_preposition("sword from chest", &preps),
+            Some(("sword", "chest"))
+        );
+        // Case-insensitive.
+        assert_eq!(
+            split_preposition("all.coin FROM the Corpse", &preps),
+            Some(("all.coin", "the Corpse"))
+        );
+        // Leading / trailing prepositions are not separators.
+        assert_eq!(split_preposition("from corpse", &preps), None);
+        assert_eq!(split_preposition("sword from", &preps), None);
+        assert_eq!(split_preposition("sword from  ", &preps), None);
+        // Only whole tokens count.
+        assert_eq!(split_preposition("window inn", &preps), None);
+        // First occurrence wins.
+        assert_eq!(
+            split_preposition("a in b from c", &preps),
+            Some(("a", "b from c"))
+        );
+        assert_eq!(split_preposition("", &preps), None);
+        assert_eq!(split_preposition("sword bob", &["to"]), None);
+        assert_eq!(
+            split_preposition("2.sword  to   bob", &["to"]),
+            Some(("2.sword", "bob"))
+        );
+    }
+
+    #[test]
+    fn get_all_corpse_without_from() {
+        let (mut world, room, player, anvil) = make_floor_world();
+        let corpse = spawn_corpse(&mut world, room);
+        let a = spawn_item(&mut world, "a rusty sword", "sword", corpse);
+        let b = spawn_item(&mut world, "a gold coin", "coin", corpse);
+        cmd_get(&mut world, player, "all corpse");
+        assert_eq!(world.get::<Located>(a).unwrap().0, player);
+        assert_eq!(world.get::<Located>(b).unwrap().0, player);
+        assert_eq!(world.get::<Located>(anvil).unwrap().0, room);
+    }
+
+    #[test]
+    fn get_single_item_from_corpse_without_from() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let corpse = spawn_corpse(&mut world, room);
+        let a = spawn_item(&mut world, "a rusty sword", "sword", corpse);
+        let b = spawn_item(&mut world, "a gold coin", "coin", corpse);
+        cmd_get(&mut world, player, "sword corpse");
+        assert_eq!(world.get::<Located>(a).unwrap().0, player);
+        assert_eq!(world.get::<Located>(b).unwrap().0, corpse);
+    }
+
+    #[test]
+    fn get_all_filter_from_corpse() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let corpse = spawn_corpse(&mut world, room);
+        let a = spawn_item(&mut world, "a rusty sword", "sword", corpse);
+        let b = spawn_item(&mut world, "a gold coin", "coin", corpse);
+        let c = spawn_item(&mut world, "a silver coin", "coin", corpse);
+        cmd_get(&mut world, player, "all.coin from corpse");
+        assert_eq!(world.get::<Located>(a).unwrap().0, corpse);
+        assert_eq!(world.get::<Located>(b).unwrap().0, player);
+        assert_eq!(world.get::<Located>(c).unwrap().0, player);
+        // Prepositionless form takes the filter too.
+        let d = spawn_item(&mut world, "a bronze coin", "coin", corpse);
+        cmd_get(&mut world, player, "all.sword corpse");
+        assert_eq!(world.get::<Located>(a).unwrap().0, player);
+        assert_eq!(world.get::<Located>(d).unwrap().0, corpse);
+    }
+
+    #[test]
+    fn get_two_word_floor_item_is_not_treated_as_container() {
+        // `get rusty sword` — the last word ("sword") resolves to a
+        // floor item that is not a container, so the plain floor
+        // path must win.
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let sword = spawn_item(&mut world, "a rusty sword", "sword", room);
+        cmd_get(&mut world, player, "rusty sword");
+        assert_eq!(world.get::<Located>(sword).unwrap().0, player);
+    }
+
+    #[test]
+    fn get_two_word_container_name_still_picks_up_container() {
+        // `get big corpse`: a floor item matches the whole string, so
+        // it is picked up rather than reinterpreted as a container get.
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let corpse = world
+            .spawn((
+                Item,
+                Corpse,
+                Named {
+                    name: "a big corpse".to_string(),
+                },
+                Keywords(vec!["corpse".to_string()]),
+                Located(room),
+            ))
+            .id();
+        let inner = spawn_item(&mut world, "a coin", "coin", corpse);
+        cmd_get(&mut world, player, "big corpse");
+        assert_eq!(world.get::<Located>(corpse).unwrap().0, player);
+        assert_eq!(world.get::<Located>(inner).unwrap().0, corpse);
+    }
+
+    fn make_give_world() -> (World, Entity, Entity, Entity, Entity) {
+        let (mut world, room, player, sword) = make_inventory_world();
+        let bob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "Bob".to_string(),
+                },
+                Keywords(vec!["bob".to_string()]),
+                Located(room),
+            ))
+            .id();
+        (world, room, player, sword, bob)
+    }
+
+    #[test]
+    fn give_with_and_without_to() {
+        let (mut world, _room, player, sword, bob) = make_give_world();
+        cmd_give(&mut world, player, "sword to bob");
+        assert_eq!(world.get::<Located>(sword).unwrap().0, bob);
+        world.get_mut::<Located>(sword).unwrap().0 = player;
+        cmd_give(&mut world, player, "sword bob");
+        assert_eq!(world.get::<Located>(sword).unwrap().0, bob);
+    }
+
+    #[test]
+    fn give_indexed_item_with_to() {
+        let (mut world, _room, player, first, bob) = make_give_world();
+        let second = spawn_item(&mut world, "a sword", "sword", player);
+        cmd_give(&mut world, player, "2.sword to bob");
+        assert_eq!(world.get::<Located>(first).unwrap().0, player);
+        assert_eq!(world.get::<Located>(second).unwrap().0, bob);
+    }
+
+    fn make_bag_world() -> (World, Entity, Entity, Entity) {
+        let (mut world, room, player, _sword) = make_inventory_world();
+        let bag = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a leather bag".to_string(),
+                },
+                Keywords(vec!["bag".to_string()]),
+                Located(room),
+            ))
+            .id();
+        (world, room, player, bag)
+    }
+
+    #[test]
+    fn put_all_and_prepositions() {
+        let (mut world, _room, player, bag) = make_bag_world();
+        let apple = spawn_item(&mut world, "an apple", "apple", player);
+        cmd_put(&mut world, player, "all in bag");
+        assert_eq!(world.get::<Located>(apple).unwrap().0, bag);
+        // Container itself never moves into itself.
+        assert_eq!(
+            world.get::<Located>(bag).unwrap().0,
+            world.get::<Located>(player).unwrap().0
+        );
+        // `into` and `on` are accepted.
+        world.get_mut::<Located>(apple).unwrap().0 = player;
+        cmd_put(&mut world, player, "apple into bag");
+        assert_eq!(world.get::<Located>(apple).unwrap().0, bag);
+        world.get_mut::<Located>(apple).unwrap().0 = player;
+        cmd_put(&mut world, player, "apple on bag");
+        assert_eq!(world.get::<Located>(apple).unwrap().0, bag);
+    }
+
+    #[test]
+    fn put_all_filter() {
+        let (mut world, _room, player, bag) = make_bag_world();
+        let apple = spawn_item(&mut world, "an apple", "apple", player);
+        let pear = spawn_item(&mut world, "a pear", "pear", player);
+        cmd_put(&mut world, player, "all.apple in bag");
+        assert_eq!(world.get::<Located>(apple).unwrap().0, bag);
+        assert_eq!(world.get::<Located>(pear).unwrap().0, player);
+    }
+
+    #[test]
+    fn drop_all_filter() {
+        let (mut world, room, player, sword) = make_inventory_world();
+        let apple = spawn_item(&mut world, "an apple", "apple", player);
+        cmd_drop(&mut world, player, "all.sword");
+        assert_eq!(world.get::<Located>(sword).unwrap().0, room);
+        assert_eq!(world.get::<Located>(apple).unwrap().0, player);
+        // Same gates as `drop all`: NO_DROP items stay.
+        let cursed = spawn_item(&mut world, "a cursed sword", "sword", player);
+        world
+            .entity_mut(cursed)
+            .insert(ObjectRestrictions(vec![ObjectRestriction::NoDrop]));
+        cmd_drop(&mut world, player, "all.sword");
+        assert_eq!(world.get::<Located>(cursed).unwrap().0, player);
+    }
+
+    #[test]
+    fn look_at_matches_plain_look() {
+        use crate::commands::test_support::{drain, player_in};
+        let mut world = World::new();
+        world.insert_resource(ObjectPrototypes::default());
+        let room = world.spawn((Room, RoomSector(Sector::City))).id();
+        let (player, mut rx) = player_in(&mut world, room);
+        spawn_item(&mut world, "a sword", "sword", room);
+        cmd_look(&mut world, player, "sword");
+        let plain = drain(&mut rx);
+        cmd_look(&mut world, player, "at sword");
+        let with_at = drain(&mut rx);
+        assert!(!plain.is_empty());
+        assert!(!plain.contains("don't see"), "plain look failed: {plain}");
+        assert_eq!(plain, with_at);
+    }
+
+    #[test]
+    fn get_coins_from_corpse_drains_pile_only() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let corpse = spawn_corpse(&mut world, room);
+        let sword = spawn_item(&mut world, "a rusty sword", "sword", corpse);
+        world.entity_mut(corpse).insert(mud_world::CoinPile(120));
+        cmd_get(&mut world, player, "coins corpse");
+        assert!(world.get::<mud_world::CoinPile>(corpse).is_none());
+        assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 120);
+        assert_eq!(world.get::<Located>(sword).unwrap().0, corpse);
+    }
+
+    #[test]
+    fn get_all_coin_from_corpse_drains_pile_and_matching_items() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let corpse = spawn_corpse(&mut world, room);
+        let sword = spawn_item(&mut world, "a rusty sword", "sword", corpse);
+        let coin = spawn_item(&mut world, "a rare coin", "coin", corpse);
+        world.entity_mut(corpse).insert(mud_world::CoinPile(75));
+        cmd_get(&mut world, player, "all.coin from corpse");
+        assert!(world.get::<mud_world::CoinPile>(corpse).is_none());
+        assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 75);
+        assert_eq!(world.get::<Located>(coin).unwrap().0, player);
+        assert_eq!(world.get::<Located>(sword).unwrap().0, corpse);
+    }
+
+    fn count_at(world: &mut World, loc: Entity) -> usize {
+        let mut q = world.query_filtered::<&Located, With<Item>>();
+        q.iter(world).filter(|l| l.0 == loc).count()
+    }
+
+    #[test]
+    fn get_count_takes_first_n_floor_items() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        for _ in 0..3 {
+            spawn_item(&mut world, "a sword", "sword", room);
+        }
+        cmd_get(&mut world, player, "2 sword");
+        assert_eq!(count_at(&mut world, player), 2);
+        // anvil + the one remaining sword.
+        assert_eq!(count_at(&mut world, room), 2);
+    }
+
+    #[test]
+    fn get_count_larger_than_available_takes_all_matching() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        for _ in 0..2 {
+            spawn_item(&mut world, "a sword", "sword", room);
+        }
+        cmd_get(&mut world, player, "5 sword");
+        assert_eq!(count_at(&mut world, player), 2);
+        assert_eq!(count_at(&mut world, room), 1);
+    }
+
+    #[test]
+    fn get_count_from_container_with_and_without_from() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let corpse = spawn_corpse(&mut world, room);
+        for _ in 0..3 {
+            spawn_item(&mut world, "a sword", "sword", corpse);
+        }
+        cmd_get(&mut world, player, "2 sword corpse");
+        assert_eq!(count_at(&mut world, player), 2);
+        assert_eq!(count_at(&mut world, corpse), 1);
+        cmd_get(&mut world, player, "2 sword from corpse");
+        assert_eq!(count_at(&mut world, player), 3);
+        assert_eq!(count_at(&mut world, corpse), 0);
+    }
+
+    #[test]
+    fn get_index_syntax_still_takes_only_the_nth() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let first = spawn_item(&mut world, "a sword", "sword", room);
+        let second = spawn_item(&mut world, "a sword", "sword", room);
+        cmd_get(&mut world, player, "2.sword");
+        assert_eq!(count_at(&mut world, player), 1);
+        assert_eq!(world.get::<Located>(second).unwrap().0, player);
+        assert_eq!(world.get::<Located>(first).unwrap().0, room);
+    }
+
+    #[test]
+    fn get_count_with_all_ignores_count() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        for _ in 0..3 {
+            spawn_item(&mut world, "a sword", "sword", room);
+        }
+        cmd_get(&mut world, player, "2 all.sword");
+        assert_eq!(count_at(&mut world, player), 3);
+    }
+
+    #[test]
+    fn drop_count_drops_n_matching_items() {
+        let (mut world, room, player, _sword) = make_inventory_world();
+        spawn_item(&mut world, "a sword", "sword", player);
+        spawn_item(&mut world, "a sword", "sword", player);
+        cmd_drop(&mut world, player, "2 sword");
+        assert_eq!(count_at(&mut world, room), 2);
+        assert_eq!(count_at(&mut world, player), 1);
+    }
+
+    #[test]
+    fn put_count_moves_n_items() {
+        let (mut world, _room, player, bag) = make_bag_world();
+        spawn_item(&mut world, "an apple", "apple", player);
+        spawn_item(&mut world, "an apple", "apple", player);
+        spawn_item(&mut world, "an apple", "apple", player);
+        cmd_put(&mut world, player, "2 apple in bag");
+        assert_eq!(count_at(&mut world, bag), 2);
+    }
+
+    #[test]
+    fn give_count_gives_n_items() {
+        let (mut world, _room, player, _sword, bob) = make_give_world();
+        spawn_item(&mut world, "a sword", "sword", player);
+        spawn_item(&mut world, "a sword", "sword", player);
+        cmd_give(&mut world, player, "2 sword to bob");
+        assert_eq!(count_at(&mut world, bob), 2);
+        assert_eq!(count_at(&mut world, player), 1);
     }
 }

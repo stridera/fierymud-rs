@@ -3390,6 +3390,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_count_prefix_cases() {
+        use crate::commands::parse_count_prefix;
+        assert_eq!(parse_count_prefix("2 sword"), (Some(2), "sword"));
+        assert_eq!(
+            parse_count_prefix("  3   rusty sword "),
+            (Some(3), "rusty sword")
+        );
+        // Index syntax is not a count.
+        assert_eq!(parse_count_prefix("2.sword"), (None, "2.sword"));
+        // Needs a following token.
+        assert_eq!(parse_count_prefix("2"), (None, "2"));
+        assert_eq!(parse_count_prefix("2   "), (None, "2   "));
+        // Zero and non-digits are not counts.
+        assert_eq!(parse_count_prefix("0 sword"), (None, "0 sword"));
+        assert_eq!(parse_count_prefix("-1 sword"), (None, "-1 sword"));
+        assert_eq!(parse_count_prefix("two sword"), (None, "two sword"));
+        assert_eq!(parse_count_prefix("sword 2"), (None, "sword 2"));
+        assert_eq!(parse_count_prefix(""), (None, ""));
+    }
+
+    #[test]
     fn parse_indexed_needle_recognizes_dotted_prefix() {
         use super::parse_indexed_needle;
         // Bare needle defaults to index 1 (first match).
@@ -11016,21 +11037,73 @@ pub(crate) fn carried_weight(world: &mut World, actor: Entity) -> f64 {
     total
 }
 
-/// Split `<item> from <container>` into `(item, container)` if the
-/// `from` keyword appears as a separator. Returns None for inputs
-/// without the keyword.
-pub(crate) fn split_from_keyword(input: &str) -> Option<(&str, &str)> {
-    let lower = input.to_ascii_lowercase();
-    let pat = " from ";
-    let i = lower.find(pat)?;
-    let (a, _) = input.split_at(i);
-    let b = &input[i + pat.len()..];
-    let a = a.trim();
-    let b = b.trim();
-    if a.is_empty() || b.is_empty() {
-        return None;
+/// Split `input` around the first standalone preposition from
+/// `preps` (bare lowercase words such as `"from"`, `"in"`, `"to"`).
+/// Matching is case-insensitive and whitespace-delimited, so a
+/// preposition at the very start or end of the input never counts.
+/// Returns `(before, after)`, both trimmed and non-empty; `None`
+/// when no preposition separates two non-empty halves.
+pub(crate) fn split_preposition<'a>(input: &'a str, preps: &[&str]) -> Option<(&'a str, &'a str)> {
+    let mut start: Option<usize> = None;
+    let bytes_end = input.len();
+    // Walk whitespace-delimited tokens with their byte spans.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (i, c) in input.char_indices() {
+        if c.is_whitespace() {
+            if let Some(s) = start.take() {
+                spans.push((s, i));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
     }
-    Some((a, b))
+    if let Some(s) = start {
+        spans.push((s, bytes_end));
+    }
+    for &(s, e) in &spans {
+        let tok = &input[s..e];
+        if !preps.iter().any(|p| tok.eq_ignore_ascii_case(p)) {
+            continue;
+        }
+        let before = input[..s].trim();
+        let after = input[e..].trim();
+        if !before.is_empty() && !after.is_empty() {
+            return Some((before, after));
+        }
+    }
+    None
+}
+
+/// Parse the `all` / `all.<filter>` bulk-item syntax. Returns
+/// `Some("")` for bare `all`, `Some(<lowercased filter>)` for
+/// `all.<filter>`, and `None` for anything else.
+pub(crate) fn parse_all_filter(input: &str) -> Option<String> {
+    let lower = input.trim().to_ascii_lowercase();
+    if lower == "all" {
+        return Some(String::new());
+    }
+    match lower.strip_prefix("all.") {
+        Some(rest) if !rest.is_empty() => Some(rest.to_string()),
+        _ => None,
+    }
+}
+
+/// True when `item` is something you can reach inside: a corpse or
+/// an `ObjectType::Container` object. Mirrors `look_in_container`.
+pub(crate) fn is_container_entity(world: &World, item: Entity) -> bool {
+    if world.get::<mud_world::Corpse>(item).is_some() {
+        return true;
+    }
+    world
+        .get::<WorldKey>(item)
+        .and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| p.r#type)
+        })
+        .is_some_and(|t| matches!(t, mud_db::enums::ObjectType::Container))
 }
 
 /// Find an item Located on `container` whose Named or Keywords
@@ -11045,23 +11118,6 @@ pub(crate) fn find_in_container(
     q.iter(world)
         .find(|(_, l, n, kw)| l.0 == container && matches(&needle, n, *kw))
         .map(|(e, _, _, _)| e)
-}
-
-/// Mirror of `split_from_keyword` for the `in` preposition. Returns
-/// `Some((before, after))` when the input contains a standalone ` in `
-/// separator. Used by `put` to support `put X in Y` natural phrasing.
-pub(crate) fn split_in_keyword(input: &str) -> Option<(&str, &str)> {
-    let lower = input.to_ascii_lowercase();
-    let pat = " in ";
-    let i = lower.find(pat)?;
-    let (a, _) = input.split_at(i);
-    let b = &input[i + pat.len()..];
-    let a = a.trim();
-    let b = b.trim();
-    if a.is_empty() || b.is_empty() {
-        return None;
-    }
-    Some((a, b))
 }
 
 /// `eat <item>` / `quaff <item>`: consume a Food / Potion. Looks up
@@ -11922,6 +11978,25 @@ pub(crate) fn parse_indexed_needle(input: &str) -> (usize, &str) {
         return (n, tail);
     }
     (1, input)
+}
+
+/// Parse a leading bare-count token: `2 sword` -> `(Some(2), "sword")`.
+/// Distinct from the `2.sword` index syntax (`parse_indexed_needle`).
+/// Requires digits only, a positive value, and at least one following
+/// token; anything else returns `(None, input)` untouched.
+#[must_use]
+pub(crate) fn parse_count_prefix(input: &str) -> (Option<usize>, &str) {
+    let trimmed = input.trim_start();
+    if let Some((head, rest)) = trimmed.split_once(char::is_whitespace)
+        && !head.is_empty()
+        && head.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(n) = head.parse::<usize>()
+        && n >= 1
+        && !rest.trim().is_empty()
+    {
+        return (Some(n), rest.trim());
+    }
+    (None, input)
 }
 
 pub(crate) fn find_carried_by(
