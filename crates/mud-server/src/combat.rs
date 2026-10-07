@@ -3636,6 +3636,119 @@ mod tests {
         assert_eq!(world.get::<Located>(loot).unwrap().0, room);
     }
 
+    /// Loose coin piles lying in `room`: `(entity, copper, timer)`.
+    fn floor_coin_piles(world: &mut World, room: Entity) -> Vec<(Entity, i64, i32)> {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Located,
+            &mud_world::CoinPile,
+            Option<&mud_world::ItemTimer>,
+        ), With<Item>>();
+        q.iter(world)
+            .filter(|(_, l, _, _)| l.0 == room)
+            .map(|(e, _, c, t)| (e, c.0, t.map_or(0, |t| t.remaining_secs)))
+            .collect()
+    }
+
+    #[test]
+    fn expired_mob_corpse_coins_fall_to_the_room_and_rot() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(10));
+        let room = world.spawn(mud_world::Room).id();
+        let (corpse, _) = corpse_with_loot(&mut world, room, 1);
+        world.entity_mut(corpse).insert(mud_world::CoinPile(250));
+        corpse_decay_tick(&mut world);
+        assert!(world.get_entity(corpse).is_err());
+        let piles = floor_coin_piles(&mut world, room);
+        assert_eq!(piles.len(), 1, "one loose pile on the floor");
+        assert_eq!(piles[0].1, 250);
+        assert!(piles[0].2 > 0, "pile carries an item-decay timer");
+    }
+
+    #[test]
+    fn expired_player_corpse_coins_fall_to_the_room() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(10));
+        let room = world.spawn(mud_world::Room).id();
+        let (corpse, _) = corpse_with_loot(&mut world, room, 1);
+        world
+            .entity_mut(corpse)
+            .insert((mud_world::CoinPile(900), mud_world::PlayerCorpse));
+        corpse_decay_tick(&mut world);
+        let piles = floor_coin_piles(&mut world, room);
+        assert_eq!(piles.iter().map(|p| p.1).sum::<i64>(), 900);
+    }
+
+    #[test]
+    fn expired_corpse_with_coins_and_items_releases_both() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(10));
+        let room = world.spawn(mud_world::Room).id();
+        let (corpse, loot) = corpse_with_loot(&mut world, room, 1);
+        world.entity_mut(corpse).insert(mud_world::CoinPile(40));
+        corpse_decay_tick(&mut world);
+        assert_eq!(world.get::<Located>(loot).unwrap().0, room);
+        let piles = floor_coin_piles(&mut world, room);
+        assert_eq!(piles.len(), 1);
+        assert_eq!(piles[0].1, 40);
+    }
+
+    #[test]
+    fn unexpired_corpse_keeps_its_coins() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(10));
+        let room = world.spawn(mud_world::Room).id();
+        let (corpse, _) = corpse_with_loot(&mut world, room, 50);
+        world.entity_mut(corpse).insert(mud_world::CoinPile(40));
+        corpse_decay_tick(&mut world);
+        assert_eq!(world.get::<mud_world::CoinPile>(corpse).unwrap().0, 40);
+        assert!(
+            floor_coin_piles(&mut world, room)
+                .iter()
+                .all(|p| p.0 == corpse),
+            "only the corpse itself"
+        );
+    }
+
+    #[test]
+    fn corpse_coins_inside_a_container_merge_into_it() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(10));
+        let room = world.spawn(mud_world::Room).id();
+        let chest = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a chest".into(),
+                },
+                Located(room),
+                mud_world::CoinPile(5),
+            ))
+            .id();
+        let (corpse, _) = corpse_with_loot(&mut world, chest, 1);
+        world.entity_mut(corpse).insert(mud_world::CoinPile(40));
+        corpse_decay_tick(&mut world);
+        assert_eq!(world.get::<mud_world::CoinPile>(chest).unwrap().0, 45);
+        assert_eq!(
+            floor_coin_piles(&mut world, room).len(),
+            1,
+            "only the chest itself, no extra loose pile"
+        );
+    }
+
+    #[test]
+    fn unclaimed_loose_coin_pile_rots_on_the_item_timer() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let pile = crate::item_decay::spawn_loose_coin_pile(&mut world, room, 10);
+        world
+            .get_mut::<mud_world::ItemTimer>(pile)
+            .unwrap()
+            .remaining_secs = 1;
+        crate::item_decay::item_decay_tick(&mut world);
+        assert!(world.get_entity(pile).is_err());
+    }
+
     #[test]
     fn unexpired_corpse_keeps_its_loot() {
         let mut world = World::new();

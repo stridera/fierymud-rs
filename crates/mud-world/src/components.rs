@@ -914,13 +914,12 @@ pub struct ItemTimer {
     pub decompose_window_secs: i32,
 }
 
-/// Coin amount (in copper) lying on a container. Today it's only
-/// attached to corpses by the mob-death path when the killer
-/// doesn't have `AutoGold`; `get all from <corpse>` drains it onto
-/// the player's `Wealth`. Kept as its own component (rather than
-/// stored on `Corpse`) so the same shape can later attach to a
-/// loose pile-of-coins item dropped on the floor without growing
-/// the corpse type. Decays with the corpse.
+/// Coin amount (in copper). On a corpse (or other container) it is
+/// the money inside, claimed by `get all from <corpse>` onto the
+/// player's `Wealth`. On a standalone `Item` it is a loose pile on the
+/// floor (what a decayed corpse leaves behind), which `get` converts
+/// to `Wealth` and which rots on its `ItemTimer`. When a corpse
+/// decays its pile falls to the room like any other content.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CoinPile(pub i64);
 

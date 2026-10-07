@@ -9590,6 +9590,25 @@ fn drain_coin_pile(world: &mut World, container: Entity, player: Entity) -> Opti
     Some(amount)
 }
 
+/// If `item` is a loose pile of coins (an `Item` carrying a
+/// `CoinPile`, e.g. what a decayed corpse leaves on the floor), add
+/// it to `player`'s `Wealth`, remove the pile, and return the amount.
+fn take_loose_coins(world: &mut World, player: Entity, item: Entity) -> Option<i64> {
+    world.get::<Item>(item)?;
+    let amount = world.get::<CoinPile>(item)?.0;
+    if amount > 0 {
+        if let Some(mut w) = world.get_mut::<Wealth>(player) {
+            w.0 = w.0.saturating_add(amount);
+        } else {
+            try_insert(world, player, Wealth(amount));
+        }
+    }
+    if let Ok(em) = world.get_entity_mut(item) {
+        em.despawn();
+    }
+    (amount > 0).then_some(amount)
+}
+
 /// True for the words that name a container's coin pile.
 fn is_coin_word(word: &str) -> bool {
     ["coin", "coins", "gold", "money"]
@@ -9863,6 +9882,20 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
     // the mob's inventory before the player can retrieve it. Players
     // and staff aren't gated.
     if world.get::<Mob>(player).is_some() && world.get::<Corpse>(item).is_some() {
+        return;
+    }
+
+    // A loose pile of coins (a decayed corpse's money) goes straight
+    // into the purse rather than the inventory.
+    if let Some(amount) = take_loose_coins(world, player, item) {
+        let coin = crate::commands::format_wealth(amount).unwrap_or_else(|| "no coin".to_string());
+        send_rendered(world, player, &format!("You pick up {coin}.\r\n"));
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} picks up {item_name}.\r\n"),
+        );
         return;
     }
 
@@ -10189,6 +10222,13 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
     let mut skipped = 0usize;
     let bypass_encumbrance = crate::commands::is_staff(world, player);
     for (item, item_name) in &items {
+        if let Some(amount) = take_loose_coins(world, player, *item) {
+            let coin =
+                crate::commands::format_wealth(amount).unwrap_or_else(|| "no coin".to_string());
+            send_rendered(world, player, &format!("You pick up {coin}.\r\n"));
+            moved += 1;
+            continue;
+        }
         // NO_TAKE fixtures skip silently in the bulk path — the
         // singular `get <item>` path surfaces the message. Staff
         // bypass mirrors the singular path: builders sometimes
@@ -14608,6 +14648,24 @@ mod tests {
         assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 75);
         assert_eq!(world.get::<Located>(coin).unwrap().0, player);
         assert_eq!(world.get::<Located>(sword).unwrap().0, corpse);
+    }
+
+    #[test]
+    fn get_coins_picks_up_a_loose_floor_pile_into_wealth() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let pile = crate::item_decay::spawn_loose_coin_pile(&mut world, room, 130);
+        cmd_get(&mut world, player, "coins");
+        assert!(world.get_entity(pile).is_err(), "pile consumed");
+        assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 130);
+    }
+
+    #[test]
+    fn get_all_sweeps_a_loose_floor_pile_into_wealth() {
+        let (mut world, room, player, _anvil) = make_floor_world();
+        let pile = crate::item_decay::spawn_loose_coin_pile(&mut world, room, 55);
+        cmd_get(&mut world, player, "all");
+        assert!(world.get_entity(pile).is_err());
+        assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 55);
     }
 
     fn count_at(world: &mut World, loc: Entity) -> usize {

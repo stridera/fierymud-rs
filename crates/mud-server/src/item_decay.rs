@@ -11,7 +11,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::ObjectFlag;
-use mud_world::{Item, ItemTimer, Located, Named, ObjectProto};
+use mud_world::{CoinPile, Description, Item, ItemTimer, Keywords, Located, Named, ObjectProto};
 
 use crate::commands::{broadcast_room_except_rendered, send_to};
 
@@ -123,7 +123,8 @@ pub(crate) fn release_contents(
             .map(|(e, _)| e)
             .collect()
     };
-    if contents.is_empty() {
+    let coins = world.get::<CoinPile>(container).map_or(0, |p| p.0).max(0);
+    if contents.is_empty() && coins == 0 {
         return;
     }
     let dest = match kind {
@@ -131,6 +132,9 @@ pub(crate) fn release_contents(
         HolderKind::Player => world.get::<Located>(holder).map(|l| l.0),
         HolderKind::Unknown => None,
     };
+    if coins > 0 {
+        release_coins(world, dest, kind, coins);
+    }
     for item in contents {
         match dest {
             Some(d) => {
@@ -143,6 +147,56 @@ pub(crate) fn release_contents(
             }
         }
     }
+}
+
+/// Legacy `extract_corpse` treats a corpse's money like any other
+/// content (`obj_to_obj` into the enclosing container, else
+/// `obj_to_room` + `start_decomposing`). Coins here live as a
+/// `CoinPile` component on their container, so: an enclosing
+/// container absorbs them into its own pile (merging with one it
+/// already has), a room gets a loose pile item that rots on the
+/// normal item timer, and an unrooted corpse takes them with it.
+fn release_coins(world: &mut World, dest: Option<Entity>, kind: &HolderKind, coins: i64) {
+    let Some(dest) = dest else {
+        return;
+    };
+    if matches!(kind, HolderKind::Container) {
+        let held = world.get::<CoinPile>(dest).map_or(0, |p| p.0.max(0));
+        if let Ok(mut em) = world.get_entity_mut(dest) {
+            em.insert(CoinPile(held.saturating_add(coins)));
+        }
+        return;
+    }
+    spawn_loose_coin_pile(world, dest, coins);
+}
+
+/// Legacy `start_decomposing` on a level-0 object: 11 MUD hours.
+const LOOSE_COIN_DECAY_HOURS: i32 = 11;
+
+/// Drop `coins` copper as a pickup-able pile on the floor of `room`.
+/// `get`/`get all` convert it straight into the taker's `Wealth`.
+/// Carries an `ItemTimer` so an unclaimed pile rots away.
+pub(crate) fn spawn_loose_coin_pile(world: &mut World, room: Entity, coins: i64) -> Entity {
+    world
+        .spawn((
+            Item,
+            CoinPile(coins),
+            Named {
+                name: "a pile of coins".to_string(),
+            },
+            Keywords(
+                ["coins", "coin", "pile", "gold", "money"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+            Description("A pile of coins is lying here.".to_string()),
+            Located(room),
+            ItemTimer {
+                remaining_secs: LOOSE_COIN_DECAY_HOURS * SECS_PER_MUD_HOUR,
+                decompose_window_secs: 0,
+            },
+        ))
+        .id()
 }
 
 #[derive(Debug)]
