@@ -22,7 +22,7 @@ use mud_db::enums::UserRole;
 use mud_world::{Account, AccountWealth, BankWealth, Online, Player};
 
 use crate::commands::{
-    Category, Command, DbPool, Help, format_wealth, require_linked_account, send_to,
+    Category, Command, DbPool, Help, format_amount, format_wealth, require_linked_account, send_to,
 };
 
 inventory::submit! {
@@ -199,7 +199,7 @@ fn account_transfer(world: &mut World, player: Entity, args: &str, direction: Ac
     send_to(
         world,
         player,
-        format!("{verb} {amount} copper {suffix}.\r\n"),
+        format!("{verb} {} {suffix}.\r\n", format_amount(amount)),
     );
 }
 

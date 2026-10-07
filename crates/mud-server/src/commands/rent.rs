@@ -151,8 +151,9 @@ pub(crate) fn cmd_rent(world: &mut World, player: Entity, args: &str) {
             world,
             player,
             format!(
-                "You can't afford the {} ({} gp).\r\n",
-                chosen.name, chosen.fee_gp
+                "You can't afford the {} ({}).\r\n",
+                chosen.name,
+                crate::commands::format_amount(fee_copper)
             ),
         );
         return;
@@ -330,7 +331,10 @@ pub(crate) fn finalize_rent(
         send_to(
             world,
             player,
-            format!("You can't afford the {tier_name} ({fee_gp} gp).\r\n"),
+            format!(
+                "You can't afford the {tier_name} ({}).\r\n",
+                crate::commands::format_amount(fee_copper)
+            ),
         );
         return;
     }

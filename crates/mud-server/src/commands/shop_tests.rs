@@ -9,7 +9,7 @@ use mud_world::{
     ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, Shopkeeper, Wealth,
 };
 
-use super::info::{cmd_buy, cmd_inspect, cmd_list, cmd_mount};
+use super::info::{cmd_buy, cmd_inspect, cmd_list, cmd_mount, cmd_wealth};
 use super::test_support::{Rx, drain, mob_proto, object_proto, player_in};
 
 const SHOP: (i32, i32) = (30, 91);
@@ -303,8 +303,32 @@ fn inspect_without_argument_lists_wares_with_a_tenth_fee() {
     assert!(out.contains("Jorhan will inspect"), "{out}");
     assert!(out.contains("a steel sword"), "{out}");
     // Sword costs 100 at profit 1.0 -> fee 10 copper.
-    assert!(out.contains("1 silver"), "{out}");
+    assert!(out.contains("silver"), "{out}");
+    assert!(
+        out.contains("\x1b[1;37m1"),
+        "silver count coloured: {out:?}"
+    );
     assert_eq!(world.get::<Wealth>(player).unwrap().0, 1_000);
+}
+
+#[test]
+fn wealth_is_coloured_for_ansi_clients_and_clean_for_plain_text() {
+    let (mut world, player, mut rx) = world_with_shop(sword_shop(), 1_234);
+    cmd_wealth(&mut world, player, "");
+    let ansi = drain(&mut rx);
+    assert!(ansi.contains("\x1b[1;36m1"), "platinum coloured: {ansi:?}");
+    assert!(ansi.contains("\x1b[33m4"), "copper coloured: {ansi:?}");
+
+    let mut flags = mud_world::PlayerFlags::default();
+    flags.toggle(mud_db::enums::PlayerFlag::ColorBlind);
+    world.entity_mut(player).insert(flags);
+    cmd_wealth(&mut world, player, "");
+    let plain = drain(&mut rx);
+    assert!(
+        plain.contains("You have 1 platinum, 2 gold, 3 silver, 4 copper."),
+        "{plain:?}"
+    );
+    assert!(!plain.contains('\x1b') && !plain.contains('<'), "{plain:?}");
 }
 
 #[test]

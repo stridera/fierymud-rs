@@ -257,7 +257,11 @@ async fn cmd_house_expand(world: &mut World, player: Entity, pool: &mud_db::sqlx
         send_to(
             world,
             player,
-            format!("You need {cost} copper on hand to expand (you have {on_hand}).\r\n"),
+            format!(
+                "You need {} on hand to expand (you have {}).\r\n",
+                crate::commands::format_amount(cost),
+                crate::commands::format_amount(on_hand)
+            ),
         );
         return;
     }

@@ -4088,14 +4088,15 @@ pub(crate) fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
     send_rendered(
         world,
         player,
-        &format!("You hand {amount} copper to {target_name}.\r\n"),
+        &format!("You hand {} to {target_name}.\r\n", format_amount(amount)),
     );
     send_rendered(
         world,
         target,
         &format!(
-            "{} bribes you with {amount} copper.\r\n",
-            name_of(world, player)
+            "{} bribes you with {}.\r\n",
+            name_of(world, player),
+            format_amount(amount)
         ),
     );
     // Fire BRIBE on target with the amount as a Lua extras global.
@@ -10012,10 +10013,7 @@ fn collect_coin_pile(
     container_name: &str,
 ) -> Option<i64> {
     let amount = drain_coin_pile(world, container, player)?;
-    let msg = render_color_tags(
-        &crate::commands::format_wealth(amount).unwrap_or_else(|| "no coin".to_string()),
-        color_mode_for(world, player),
-    );
+    let msg = format_amount(amount);
     send_rendered(
         world,
         player,
@@ -13363,7 +13361,7 @@ pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("You only have {wealth} coppers to split.\r\n"),
+            format!("You only have {} to split.\r\n", format_amount(wealth)),
         );
         return;
     }
@@ -13412,8 +13410,10 @@ pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
         world,
         player,
         format!(
-            "You split {amount} coppers among {} member(s); each receives {share}.\r\n",
-            here.len()
+            "You split {} among {} member(s); each receives {}.\r\n",
+            format_amount(amount),
+            here.len(),
+            format_amount(share)
         ),
     );
     for m in &here {
@@ -13423,7 +13423,10 @@ pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             *m,
-            format!("{player_name} splits coin with the group; you gain {share} copper(s).\r\n"),
+            format!(
+                "{player_name} splits coin with the group; you gain {}.\r\n",
+                format_amount(share)
+            ),
         );
     }
 }

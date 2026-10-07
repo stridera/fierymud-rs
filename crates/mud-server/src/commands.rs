@@ -5809,8 +5809,8 @@ mod tests {
     fn format_wealth_decomposes_in_canonical_order() {
         // 1234 copper = 1 platinum, 2 gold, 3 silver, 4 copper.
         assert_eq!(
-            super::format_wealth(1234),
-            Some("1 platinum, 2 gold, 3 silver, 4 copper".to_string()),
+            strip(&super::format_wealth(1234).unwrap()),
+            "1 platinum, 2 gold, 3 silver, 4 copper",
         );
     }
 
@@ -5818,10 +5818,40 @@ mod tests {
     fn format_wealth_omits_zero_denominations() {
         // 1100 copper = 1 platinum, 1 gold (no silver, no copper).
         assert_eq!(
-            super::format_wealth(1100),
-            Some("1 platinum, 1 gold".to_string()),
+            strip(&super::format_wealth(1100).unwrap()),
+            "1 platinum, 1 gold",
         );
-        assert_eq!(super::format_wealth(7), Some("7 copper".to_string()));
+        assert_eq!(strip(&super::format_wealth(7).unwrap()), "7 copper");
+        let tagged = super::format_wealth(1100).unwrap();
+        assert!(!tagged.contains("silver") && !tagged.contains("copper"));
+    }
+
+    #[test]
+    fn format_wealth_uses_the_legacy_colour_per_denomination() {
+        // Legacy coindefs[]: plat &6&b, gold &3&b, silver &7&b, copper &3.
+        // Only the count is coloured (statemoney's APPENDCOIN).
+        let out = ansi(&super::format_wealth(1234).unwrap());
+        for (count, code) in [
+            ("1", "\x1b[1;36m"),
+            ("2", "\x1b[1;33m"),
+            ("3", "\x1b[1;37m"),
+            ("4", "\x1b[33m"),
+        ] {
+            assert!(
+                out.contains(&format!("{code}{count}")),
+                "{count} should follow {code:?}: {out:?}"
+            );
+        }
+        assert!(!out.contains('<'), "no raw tags left: {out:?}");
+    }
+
+    #[test]
+    fn format_amount_falls_back_when_empty_and_matches_format_wealth() {
+        assert_eq!(super::format_amount(0), "no coin");
+        assert_eq!(
+            super::format_amount(1234),
+            super::format_wealth(1234).unwrap()
+        );
     }
 
     #[test]
@@ -9219,7 +9249,11 @@ pub(crate) fn bank_transfer(world: &mut World, player: Entity, args: &str, direc
         } else {
             try_insert(world, player, BankWealth(amount));
         }
-        send_to(world, player, format!("Deposited {amount} copper.\r\n"));
+        send_to(
+            world,
+            player,
+            format!("Deposited {}.\r\n", format_amount(amount)),
+        );
     } else {
         if let Some(mut b) = world.get_mut::<BankWealth>(player) {
             b.0 -= amount;
@@ -9229,41 +9263,56 @@ pub(crate) fn bank_transfer(world: &mut World, player: Entity, args: &str, direc
         } else {
             try_insert(world, player, Wealth(amount));
         }
-        send_to(world, player, format!("Withdrew {amount} copper.\r\n"));
+        send_to(
+            world,
+            player,
+            format!("Withdrew {}.\r\n", format_amount(amount)),
+        );
     }
 }
 
 // `balance` body lives in commands/balance.rs (inventory-distributed).
 
-/// Split an on-hand copper total into the four denominations and
-/// render as `"X platinum, Y gold, Z silver, W copper"`. Returns
-/// None when the total is zero or negative so callers can render
-/// the empty case differently.
+/// Legacy per-denomination colour tags (`coindefs[]` in
+/// `fierymud_legacy/src/money.cpp`): platinum `&6&b`, gold `&3&b`,
+/// silver `&7&b`, copper `&3`. Highest denomination first.
+const COIN_DENOMINATIONS: [(i64, &str, &str); 4] = [
+    (1000, "platinum", "<b:cyan>"),
+    (100, "gold", "<b:yellow>"),
+    (10, "silver", "<b:white>"),
+    (1, "copper", "<yellow>"),
+];
+
+/// The one place a copper amount becomes player-facing text. Splits
+/// `total` into the four denominations and renders
+/// `"X platinum, Y gold, Z silver, W copper"` with each count wrapped
+/// in its legacy colour tag (`<b:cyan>1</> platinum`), exactly as
+/// `statemoney` colours the number only. Zero denominations are
+/// omitted. The result carries colour tags, so it must reach the
+/// player through `send_to` / `send_rendered` (which strip them for
+/// plain-text clients). Returns None when the total is zero or
+/// negative so callers can render the empty case differently.
 pub(crate) fn format_wealth(total: i64) -> Option<String> {
     if total <= 0 {
         return None;
     }
     let mut remainder = total;
-    let platinum = remainder / 1000;
-    remainder %= 1000;
-    let gold = remainder / 100;
-    remainder %= 100;
-    let silver = remainder / 10;
-    let copper = remainder % 10;
     let mut parts: Vec<String> = Vec::new();
-    if platinum > 0 {
-        parts.push(format!("{platinum} platinum"));
-    }
-    if gold > 0 {
-        parts.push(format!("{gold} gold"));
-    }
-    if silver > 0 {
-        parts.push(format!("{silver} silver"));
-    }
-    if copper > 0 {
-        parts.push(format!("{copper} copper"));
+    for (scale, name, tag) in COIN_DENOMINATIONS {
+        let count = remainder / scale;
+        remainder %= scale;
+        if count > 0 {
+            parts.push(format!("{tag}{count}</> {name}"));
+        }
     }
     Some(parts.join(", "))
+}
+
+/// [`format_wealth`] for call sites that always have a positive
+/// amount in hand ("Deposited ...", "You hand ... to ..."); falls
+/// back to "no coin" for a non-positive one.
+pub(crate) fn format_amount(total: i64) -> String {
+    format_wealth(total).unwrap_or_else(|| "no coin".to_string())
 }
 
 /// `practice <ability>`: bump proficiency by 5, capped at the
