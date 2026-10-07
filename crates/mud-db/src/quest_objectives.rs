@@ -1042,6 +1042,105 @@ pub async fn increment_progress(
     Ok(row.map(|r| (r.current_count, r.completed)))
 }
 
+/// Record a not-yet-complete objective's count outright (COLLECT_ITEM
+/// follows what is held, so it can go down as well as up). A completed
+/// objective is never touched.
+pub async fn set_open_progress(
+    pool: &PgPool,
+    character_quest_id: &str,
+    quest_zone_id: i32,
+    quest_id: i32,
+    phase_id: i32,
+    objective_id: i32,
+    count: i32,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"
+        INSERT INTO "CharacterQuestObjective"
+            (id, character_quest_id, quest_zone_id, quest_id, phase_id,
+             objective_id, current_count, completed)
+        VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, false)
+        ON CONFLICT (character_quest_id, quest_zone_id, quest_id, phase_id, objective_id)
+        DO UPDATE SET current_count = EXCLUDED.current_count
+        WHERE "CharacterQuestObjective".completed = false
+        "#,
+        character_quest_id,
+        quest_zone_id,
+        quest_id,
+        phase_id,
+        objective_id,
+        count,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Atomically mark an objective complete at `required_count`. Returns
+/// `true` for exactly one caller - the one that flipped it - so a
+/// completion that must consume items is only ever acted on once.
+pub async fn claim_objective(
+    pool: &PgPool,
+    character_quest_id: &str,
+    quest_zone_id: i32,
+    quest_id: i32,
+    phase_id: i32,
+    objective_id: i32,
+    required_count: i32,
+) -> sqlx::Result<bool> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO "CharacterQuestObjective"
+            (id, character_quest_id, quest_zone_id, quest_id, phase_id,
+             objective_id, current_count, completed, completed_at)
+        VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, true, NOW())
+        ON CONFLICT (character_quest_id, quest_zone_id, quest_id, phase_id, objective_id)
+        DO UPDATE SET current_count = EXCLUDED.current_count,
+                      completed = true,
+                      completed_at = NOW()
+        WHERE "CharacterQuestObjective".completed = false
+        RETURNING id
+        "#,
+        character_quest_id,
+        quest_zone_id,
+        quest_id,
+        phase_id,
+        objective_id,
+        required_count,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
+
+/// Undo [`claim_objective`] when the items it was going to consume
+/// turned out to be gone.
+pub async fn release_objective(
+    pool: &PgPool,
+    character_quest_id: &str,
+    quest_zone_id: i32,
+    quest_id: i32,
+    phase_id: i32,
+    objective_id: i32,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE "CharacterQuestObjective"
+        SET completed = false, completed_at = NULL, current_count = 0
+        WHERE character_quest_id = $1 AND quest_zone_id = $2 AND quest_id = $3
+          AND phase_id = $4 AND objective_id = $5
+        "#,
+        character_quest_id,
+        quest_zone_id,
+        quest_id,
+        phase_id,
+        objective_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_progress(
     pool: &PgPool,

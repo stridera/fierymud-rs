@@ -79,6 +79,15 @@ pub enum PendingPlayerUpdate {
     /// The character's quest just entered a new phase; credit any
     /// COLLECT objectives from what they already carry.
     QuestPhaseEntered { character_id: String },
+    /// A `COLLECT_ITEM` objective was claimed as complete: take the
+    /// required items from the pack (or give the claim back if they
+    /// are gone) and carry on with the quest.
+    CollectClaimed {
+        character_id: String,
+        obj: crate::quest_progress::ObjectiveRef,
+        /// Prototype `(zone, id)` of the collected item.
+        object: (i32, i32),
+    },
     /// The character was just put on a quest (trigger auto-accept):
     /// forget any variables cached from a previous run and credit
     /// COLLECT objectives from what they already carry.
@@ -110,6 +119,7 @@ impl PendingPlayerUpdate {
             | Self::AbilityKnown { character_id, .. }
             | Self::SpawnItem { character_id, .. }
             | Self::QuestPhaseEntered { character_id }
+            | Self::CollectClaimed { character_id, .. }
             | Self::QuestAccepted { character_id, .. }
             | Self::DialogueReply { character_id, .. } => character_id,
         }
@@ -193,6 +203,9 @@ pub fn drain_player_updates(world: &mut World) {
             }
             PendingPlayerUpdate::QuestPhaseEntered { .. } => {
                 crate::quest_progress::recheck_collect_objectives(world, entity);
+            }
+            PendingPlayerUpdate::CollectClaimed { obj, object, .. } => {
+                crate::quest_progress::finish_collect(world, entity, &obj, object);
             }
             PendingPlayerUpdate::QuestAccepted {
                 character_id,
@@ -8245,10 +8258,6 @@ pub(crate) enum QuestObjectiveBump {
         zone: i32,
         id: i32,
     },
-    CollectItem {
-        zone: i32,
-        id: i32,
-    },
     DeliverItem {
         item_zone: i32,
         item_id: i32,
@@ -8330,24 +8339,15 @@ pub(crate) fn bump_deliver_quest_progress(
     );
 }
 
-/// Advance any active `COLLECT_ITEM` objectives whose target
-/// object matches the just-picked-up item's prototype. Called
-/// from `cmd_get` when an item moves into the player's inventory.
-/// Also fires the ITEM-trigger dispatcher (Wave 4.1).
+/// An item landed in a player's pack via `get`: fire the ITEM quest
+/// trigger. `COLLECT_ITEM` progress is not bumped here - it follows what
+/// the character actually holds (`quest_progress::collect_watch_tick`).
 pub(crate) fn bump_collect_quest_progress(
     world: &mut World,
     collector: Entity,
     object_zone: i32,
     object_id: i32,
 ) {
-    bump_quest_progress(
-        world,
-        collector,
-        QuestObjectiveBump::CollectItem {
-            zone: object_zone,
-            id: object_id,
-        },
-    );
     crate::quest_triggers::dispatch_item_trigger(world, collector, object_zone, object_id);
 }
 
@@ -8451,12 +8451,6 @@ fn bump_quest_progress_with(
                 }
                 QuestObjectiveBump::TalkToNpc { zone, id } => {
                     mud_db::quest_objectives::list_talk_to_npc_progress(
-                        &pool, &cid, zone, id, is_actor,
-                    )
-                    .await
-                }
-                QuestObjectiveBump::CollectItem { zone, id } => {
-                    mud_db::quest_objectives::list_collect_item_progress(
                         &pool, &cid, zone, id, is_actor,
                     )
                     .await

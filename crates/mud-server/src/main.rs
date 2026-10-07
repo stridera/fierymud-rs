@@ -552,6 +552,7 @@ async fn main() {
                 timed!(combat::level_sweep_tick),
                 timed!(quest_triggers::quest_sweep_tick),
                 timed!(quest_triggers::quest_custom_lua_drain),
+                timed!(quest_progress::collect_watch_tick),
                 timed!(events::events_poll_tick),
                 timed!(events::drain_events_inbox),
                 timed!(log_heartbeat),

@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
-use mud_world::{Account, Item, Located, WorldKey};
+use mud_world::{Account, EquippedSlot, Item, Located, Player, WorldKey};
 
 use crate::commands::{Connection, DbPool, PendingPlayerUpdate, PlayerUpdateTx};
 
@@ -28,7 +28,7 @@ pub(crate) struct Notifier {
 }
 
 impl Notifier {
-    fn say(&self, text: &str) {
+    pub(crate) fn say(&self, text: &str) {
         let _ = self.out.try_send(text.as_bytes().to_vec());
     }
 
@@ -46,7 +46,7 @@ impl Notifier {
 /// The identity and display data of one objective row, independent of
 /// which query produced it.
 #[derive(Debug, Clone)]
-pub(crate) struct ObjectiveRef {
+pub struct ObjectiveRef {
     pub character_quest_id: String,
     pub quest_zone_id: i32,
     pub quest_id: i32,
@@ -136,43 +136,6 @@ pub(crate) async fn record_progress(
         }
     };
     notify.say(&progress_line(obj, new_count, completed, party_prefix));
-    if completed {
-        advance_quest(
-            pool,
-            notify,
-            &obj.character_quest_id,
-            obj.quest_zone_id,
-            obj.quest_id,
-        )
-        .await;
-    }
-}
-
-/// Set an objective's count outright (held-items credit) rather than
-/// stepping it, then announce and advance like [`record_progress`].
-async fn record_absolute(
-    pool: &mud_db::sqlx::PgPool,
-    notify: &Notifier,
-    obj: &ObjectiveRef,
-    new_count: i32,
-) {
-    let completed = new_count >= obj.required_count;
-    if let Err(e) = mud_db::quest_objectives::upsert_progress(
-        pool,
-        &obj.character_quest_id,
-        obj.quest_zone_id,
-        obj.quest_id,
-        obj.phase_id,
-        obj.objective_id,
-        new_count,
-        completed,
-    )
-    .await
-    {
-        tracing::warn!(error = %e, "objective upsert failed");
-        return;
-    }
-    notify.say(&progress_line(obj, new_count, completed, ""));
     if completed {
         advance_quest(
             pool,
@@ -337,14 +300,6 @@ pub(crate) fn held_counts(world: &mut World, holder: Entity) -> HashMap<(i32, i3
     counts
 }
 
-/// New progress for a COLLECT objective given what is held right now:
-/// the held quantity capped at the requirement, only when that is an
-/// improvement on what is already recorded.
-pub(crate) fn collect_credit(held: i32, current: i32, required: i32) -> Option<i32> {
-    let credit = held.min(required);
-    (credit > current).then_some(credit)
-}
-
 /// World-side bookkeeping when a character starts (or restarts) a
 /// quest: the database row's variables were reset, so drop the cached
 /// copy, then credit COLLECT objectives from the pack.
@@ -361,19 +316,47 @@ pub(crate) fn on_quest_accepted(
     recheck_collect_objectives(world, player);
 }
 
-/// Credit COLLECT_ITEM objectives in the player's current phase with
-/// the items they already carry. Pickups made before a phase began
-/// never counted towards it (progress is phase-gated), so this runs on
-/// every phase entry: acceptance, advancing from the previous phase,
-/// and `qload`/`qgive`.
+/// What a COLLECT_ITEM objective should do given the quantity held.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CollectStep {
+    /// Held enough: complete it (consuming the items).
+    Complete,
+    /// Not enough yet: record this many (only when it differs from the
+    /// stored count).
+    Progress(i32),
+    /// Nothing to change.
+    Unchanged,
+}
+
+/// COLLECT_ITEM progress is the number of matching items actually
+/// held, capped at the requirement - it follows the pack down as well
+/// as up, so pickups cannot be banked by dropping and re-getting.
+pub(crate) fn collect_step(held: i32, current: i32, required: i32) -> CollectStep {
+    if held >= required {
+        CollectStep::Complete
+    } else if held != current {
+        CollectStep::Progress(held)
+    } else {
+        CollectStep::Unchanged
+    }
+}
+
+/// Re-evaluate the player's COLLECT_ITEM objectives (current phase of
+/// every quest they hold) against what they carry right now. Runs on
+/// every phase entry (acceptance, advancing, `qload`/`qgive`) and
+/// whenever the pack changes (`collect_watch_tick`).
 pub(crate) fn recheck_collect_objectives(world: &mut World, player: Entity) {
+    let held = held_counts(world, player);
+    recheck_with(world, player, held);
+}
+
+fn recheck_with(world: &mut World, player: Entity, held: HashMap<(i32, i32), i32>) {
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
     let Some(notify) = Notifier::for_player(world, player) else {
         return;
     };
-    let held = held_counts(world, player);
     tokio::spawn(async move {
         recheck_collect_task(&pool, &notify, &held).await;
     });
@@ -399,8 +382,208 @@ async fn recheck_collect_task(
             .get(&(row.object_zone_id, row.object_id))
             .copied()
             .unwrap_or(0);
-        if let Some(new_count) = collect_credit(n, row.current_count, row.required_count) {
-            record_absolute(pool, notify, &ObjectiveRef::from(row), new_count).await;
+        let obj = ObjectiveRef::from(row);
+        match collect_step(n, row.current_count, row.required_count) {
+            CollectStep::Unchanged => {}
+            CollectStep::Progress(count) => {
+                let saved = mud_db::quest_objectives::set_open_progress(
+                    pool,
+                    &obj.character_quest_id,
+                    obj.quest_zone_id,
+                    obj.quest_id,
+                    obj.phase_id,
+                    obj.objective_id,
+                    count,
+                )
+                .await;
+                match saved {
+                    // Only announce gains; losing an item is silent.
+                    Ok(()) if count > row.current_count => {
+                        notify.say(&progress_line(&obj, count, false, ""));
+                    }
+                    Ok(()) => {}
+                    Err(e) => tracing::warn!(error = %e, "collect progress write failed"),
+                }
+            }
+            CollectStep::Complete => {
+                claim_collect(pool, notify, &obj, (row.object_zone_id, row.object_id)).await;
+            }
+        }
+    }
+}
+
+/// Claim a satisfied COLLECT objective (exactly one racing caller
+/// wins) and hand it to the world thread, which takes the items.
+async fn claim_collect(
+    pool: &mud_db::sqlx::PgPool,
+    notify: &Notifier,
+    obj: &ObjectiveRef,
+    object: (i32, i32),
+) {
+    let claimed = mud_db::quest_objectives::claim_objective(
+        pool,
+        &obj.character_quest_id,
+        obj.quest_zone_id,
+        obj.quest_id,
+        obj.phase_id,
+        obj.objective_id,
+        obj.required_count,
+    )
+    .await;
+    match claimed {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "collect claim failed");
+            return;
+        }
+    }
+    let sent = match &notify.update_tx {
+        Some(tx) => tx
+            .send(PendingPlayerUpdate::CollectClaimed {
+                character_id: notify.character_id.clone(),
+                obj: obj.clone(),
+                object,
+            })
+            .await
+            .is_ok(),
+        None => false,
+    };
+    if !sent {
+        release_collect(pool, obj).await;
+    }
+}
+
+async fn release_collect(pool: &mud_db::sqlx::PgPool, obj: &ObjectiveRef) {
+    if let Err(e) = mud_db::quest_objectives::release_objective(
+        pool,
+        &obj.character_quest_id,
+        obj.quest_zone_id,
+        obj.quest_id,
+        obj.phase_id,
+        obj.objective_id,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "collect release failed");
+    }
+}
+
+/// Entities `holder` carries directly that are instances of `key`,
+/// pack items before worn ones.
+fn held_entities(world: &mut World, holder: Entity, key: (i32, i32)) -> Vec<Entity> {
+    let mut q =
+        world.query_filtered::<(Entity, &Located, &WorldKey, Has<EquippedSlot>), With<Item>>();
+    let mut found: Vec<(bool, Entity)> = q
+        .iter(world)
+        .filter(|(_, l, wk, _)| l.0 == holder && (wk.zone, wk.id) == key)
+        .map(|(e, _, _, worn)| (worn, e))
+        .collect();
+    found.sort_by_key(|(worn, _)| *worn);
+    found.into_iter().map(|(_, e)| e).collect()
+}
+
+/// World-thread half of a COLLECT completion: verify the player still
+/// holds the required quantity, TAKE those items (collecting is a
+/// turn-in), then finish the objective. If the items are gone by now
+/// (dropped between the scan and this tick) the claim is given back.
+pub(crate) fn finish_collect(
+    world: &mut World,
+    player: Entity,
+    obj: &ObjectiveRef,
+    object: (i32, i32),
+) {
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        return;
+    };
+    let Some(notify) = Notifier::for_player(world, player) else {
+        return;
+    };
+    let need = usize::try_from(obj.required_count.max(1)).unwrap_or(1);
+    let items = held_entities(world, player, object);
+    if items.len() < need {
+        let obj = obj.clone();
+        tokio::spawn(async move { release_collect(&pool, &obj).await });
+        return;
+    }
+    let name = world
+        .get::<mud_world::Named>(items[0])
+        .map(|n| n.name.clone())
+        .unwrap_or_default();
+    for item in items.into_iter().take(need) {
+        crate::commands::info::despawn_item_tree(world, item);
+    }
+    crate::commands::send_to(
+        world,
+        player,
+        format!("You hand over {need} x {name} for the quest.\r\n"),
+    );
+    let obj = obj.clone();
+    tokio::spawn(async move {
+        notify.say(&progress_line(&obj, obj.required_count, true, ""));
+        advance_quest(
+            &pool,
+            &notify,
+            &obj.character_quest_id,
+            obj.quest_zone_id,
+            obj.quest_id,
+        )
+        .await;
+    });
+}
+
+/// The pack as a comparable signature.
+#[derive(Component, Debug, PartialEq, Eq)]
+pub(crate) struct PackSignature(u64);
+
+fn pack_signature(counts: &HashMap<(i32, i32), i32>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut entries: Vec<_> = counts.iter().map(|(k, v)| (*k, *v)).collect();
+    entries.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    entries.hash(&mut h);
+    h.finish()
+}
+
+/// Period of the pack watch, in ticks (0.2 s at 10 Hz).
+const PACK_WATCH_PERIOD_TICKS: u64 = 2;
+
+/// Notice when an online player's pack changes by any route (get, drop,
+/// put, give, buy, loot, junk, quest rewards...) and re-evaluate their
+/// COLLECT_ITEM objectives. One pass over item entities per run; the
+/// database is only consulted for players whose pack actually changed.
+pub(crate) fn collect_watch_tick(world: &mut World) {
+    let tick = world.resource::<crate::TickCount>().0;
+    if !tick.is_multiple_of(PACK_WATCH_PERIOD_TICKS) {
+        return;
+    }
+    let players: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Player>, With<mud_world::Online>)>();
+        q.iter(world).collect()
+    };
+    if players.is_empty() {
+        return;
+    }
+    let mut packs: HashMap<Entity, HashMap<(i32, i32), i32>> =
+        players.iter().map(|&p| (p, HashMap::new())).collect();
+    {
+        let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
+        for (l, wk) in q.iter(world) {
+            if let Some(pack) = packs.get_mut(&l.0) {
+                *pack.entry((wk.zone, wk.id)).or_insert(0) += 1;
+            }
+        }
+    }
+    for (player, held) in packs {
+        let sig = PackSignature(pack_signature(&held));
+        let previous = world.get::<PackSignature>(player).map(|s| s.0);
+        if previous == Some(sig.0) {
+            continue;
+        }
+        let first_sight_empty = previous.is_none() && held.is_empty();
+        crate::commands::try_insert(world, player, sig);
+        if !first_sight_empty {
+            recheck_with(world, player, held);
         }
     }
 }
@@ -410,16 +593,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collect_credit_caps_at_requirement() {
-        assert_eq!(collect_credit(5, 0, 3), Some(3));
-        assert_eq!(collect_credit(2, 0, 3), Some(2));
+    fn collect_step_completes_only_when_enough_is_held() {
+        assert_eq!(collect_step(3, 0, 3), CollectStep::Complete);
+        assert_eq!(collect_step(5, 0, 3), CollectStep::Complete);
+        assert_eq!(collect_step(2, 0, 3), CollectStep::Progress(2));
     }
 
     #[test]
-    fn collect_credit_never_goes_backwards() {
-        assert_eq!(collect_credit(0, 0, 3), None);
-        assert_eq!(collect_credit(1, 2, 3), None);
-        assert_eq!(collect_credit(3, 3, 3), None);
+    fn collect_step_follows_the_pack_down() {
+        // Dropping an item lowers the stored count: pickups are not banked.
+        assert_eq!(collect_step(1, 2, 3), CollectStep::Progress(1));
+        assert_eq!(collect_step(0, 1, 3), CollectStep::Progress(0));
+        assert_eq!(collect_step(2, 2, 3), CollectStep::Unchanged);
+        assert_eq!(collect_step(0, 0, 3), CollectStep::Unchanged);
+    }
+
+    #[test]
+    fn pack_signature_ignores_order_and_tracks_counts() {
+        let a: HashMap<(i32, i32), i32> = [((1, 1), 2), ((1, 2), 1)].into_iter().collect();
+        let b: HashMap<(i32, i32), i32> = [((1, 2), 1), ((1, 1), 2)].into_iter().collect();
+        let c: HashMap<(i32, i32), i32> = [((1, 1), 1), ((1, 2), 1)].into_iter().collect();
+        assert_eq!(pack_signature(&a), pack_signature(&b));
+        assert_ne!(pack_signature(&a), pack_signature(&c));
     }
 
     #[test]

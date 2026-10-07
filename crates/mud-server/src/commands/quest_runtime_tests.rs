@@ -9,7 +9,7 @@ use std::time::Duration;
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_db::sqlx::{self, PgPool};
-use mud_world::{Account, Located, Named, Online, Player, WorldKey};
+use mud_world::{Account, Item, Located, Named, Online, Player, WorldKey};
 
 use super::test_support::{Rx, drain};
 use super::{Connection, DbPool};
@@ -133,6 +133,81 @@ impl Fx {
         (world, player, room, rx)
     }
 
+    /// COLLECT_ITEM objective (phase 1, id 1) on the first `Objects` row.
+    async fn collect_objective(&self, required: i32) -> (i32, i32) {
+        let obj: (i32, i32) =
+            sqlx::query_as("SELECT zone_id, id FROM \"Objects\" ORDER BY zone_id, id LIMIT 1")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO \"QuestObjective\" (quest_zone_id, quest_id, phase_id, id, \
+             objective_type, player_description, required_count, \
+             target_object_zone_id, target_object_id) \
+             VALUES ($1, $2, 1, 1, 'COLLECT_ITEM'::\"QuestObjectiveType\", 'collect', $3, $4, $5)",
+        )
+        .bind(self.zone)
+        .bind(self.quest)
+        .bind(required)
+        .bind(obj.0)
+        .bind(obj.1)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        obj
+    }
+
+    /// A second character (`<id>-alt`) who has also accepted the quest.
+    async fn alt(&self) -> String {
+        let id = format!("{}-alt", self.char_id);
+        sqlx::query("INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())")
+            .bind(&id)
+            .bind(format!("{}A", &self.char_id[self.char_id.len() - 12..]))
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        let outcome = mud_db::quests::accept_for_player(&self.pool, &id, 10, self.zone, self.quest)
+            .await
+            .unwrap();
+        assert_eq!(outcome, mud_db::quests::AcceptOutcome::Accepted);
+        id
+    }
+
+    /// Wire the async-update channel into `world` (what the tick loop
+    /// owns in production).
+    fn with_updates(world: &mut World) {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        world.insert_resource(super::PlayerUpdateTx(tx));
+        world.insert_resource(super::PlayerUpdateInbox(std::sync::Mutex::new(rx)));
+        world.insert_resource(crate::TickCount(0));
+    }
+
+    /// Run the pack watch and drain async updates a few times, giving
+    /// the spawned DB tasks time to land in between.
+    async fn settle(world: &mut World) {
+        for _ in 0..10 {
+            crate::quest_progress::collect_watch_tick(world);
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            super::drain_player_updates(world);
+        }
+    }
+
+    fn give_item(world: &mut World, holder: Entity, key: (i32, i32)) -> Entity {
+        world
+            .spawn((
+                Item,
+                Named {
+                    name: "a quest trinket".into(),
+                },
+                WorldKey {
+                    zone: key.0,
+                    id: key.1,
+                },
+                Located(holder),
+            ))
+            .id()
+    }
+
     /// Pay 50 XP + 7 gold on completion.
     async fn rewards(&self) {
         for (ty, amount) in [("EXPERIENCE", 50), ("GOLD", 7)] {
@@ -200,8 +275,9 @@ impl Fx {
             .execute(&self.pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM \"Characters\" WHERE id = $1")
+        sqlx::query("DELETE FROM \"Characters\" WHERE id = $1 OR id = $2")
             .bind(&self.char_id)
+            .bind(format!("{}-alt", self.char_id))
             .execute(&self.pool)
             .await
             .unwrap();
@@ -401,5 +477,94 @@ async fn triggers_skip_quests_the_character_has_any_record_of() {
     crate::quest_triggers::grant_or_offer(&fx.pool, &fx.char_id, &tx, 10, &q, None).await;
     assert_eq!(fx.status().await, "IN_PROGRESS");
     assert!(drain(&mut rx).contains("New quest"));
+    fx.end().await;
+}
+
+fn item_count(world: &mut World, key: (i32, i32)) -> usize {
+    let mut q = world.query_filtered::<&WorldKey, With<Item>>();
+    q.iter(world).filter(|wk| (wk.zone, wk.id) == key).count()
+}
+
+/// COLLECT progress is what is HELD: dropping and re-getting an item
+/// cannot bank pickups, and completing the objective takes the items.
+#[tokio::test(flavor = "current_thread")]
+async fn collect_follows_the_pack_and_consumes_on_completion() {
+    let Some(fx) = fixture().await else { return };
+    let key = fx.collect_objective(2).await;
+    let (mut world, player, room, mut rx) = fx.world();
+    Fx::with_updates(&mut world);
+    fx.accept().await;
+
+    // get / drop loop with a single item never gets past 1/2.
+    let item = Fx::give_item(&mut world, player, key);
+    for _ in 0..3 {
+        Fx::settle(&mut world).await;
+        world.entity_mut(item).insert(Located(room)); // drop
+        Fx::settle(&mut world).await;
+        world.entity_mut(item).insert(Located(player)); // get
+    }
+    Fx::settle(&mut world).await;
+    assert_eq!(fx.status().await, "IN_PROGRESS");
+    let out = drain(&mut rx);
+    assert!(out.contains("Quest objective: collect (1/2)"), "{out}");
+    assert!(!out.contains("(2/2)"), "{out}");
+
+    // A second item completes it, and both are handed over.
+    Fx::give_item(&mut world, player, key);
+    Fx::settle(&mut world).await;
+    assert_eq!(fx.wait_for_status("COMPLETED").await, "COMPLETED");
+    assert_eq!(item_count(&mut world, key), 0, "items were consumed");
+    let out = drain(&mut rx);
+    assert!(out.contains("Quest objective complete: collect"), "{out}");
+    assert!(out.contains("*** Quest complete! ***"), "{out}");
+    fx.end().await;
+}
+
+/// The same items cannot complete the objective for two characters:
+/// the first completion takes them.
+#[tokio::test(flavor = "current_thread")]
+async fn collect_items_cannot_be_passed_to_an_alt_to_complete_twice() {
+    let Some(fx) = fixture().await else { return };
+    let key = fx.collect_objective(2).await;
+    let (mut world, player, room, _rx) = fx.world();
+    Fx::with_updates(&mut world);
+    fx.accept().await;
+    let alt_id = fx.alt().await;
+    let (tx2, _rx2) = tokio::sync::mpsc::channel(256);
+    let alt = world
+        .spawn((
+            Player,
+            Online,
+            Named { name: "Alt".into() },
+            Account {
+                user_id: "u2".into(),
+                character_id: alt_id.clone(),
+                role: UserRole::Player,
+                account_role: UserRole::Player,
+                perms: Vec::new(),
+            },
+            Connection(tx2),
+            Located(room),
+        ))
+        .id();
+
+    let a = Fx::give_item(&mut world, player, key);
+    let b = Fx::give_item(&mut world, player, key);
+    Fx::settle(&mut world).await;
+    assert_eq!(fx.wait_for_status("COMPLETED").await, "COMPLETED");
+    // Whatever the first character does next, nothing is left to pass on.
+    assert!(world.get_entity(a).is_err() && world.get_entity(b).is_err());
+    Fx::settle(&mut world).await;
+    let alt_status: String = sqlx::query_scalar(
+        "SELECT status::text FROM \"CharacterQuest\" WHERE character_id = $1 AND quest_id = $2",
+    )
+    .bind(&alt_id)
+    .bind(fx.quest)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(alt_status, "IN_PROGRESS");
+    assert_eq!(item_count(&mut world, key), 0);
+    let _ = alt;
     fx.end().await;
 }
