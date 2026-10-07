@@ -252,6 +252,26 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["inspect"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Banking,
+        help: Help {
+            usage: "inspect [<#|item|pet>]",
+            summary: "Pay a shopkeeper to identify a wares item or pet.",
+            long: "Legacy shop service. With no argument, lists the \
+                   keeper's wares with their inspection fee (a tenth of \
+                   the purchase price, minimum one copper). With an item \
+                   number or name, pays the fee and shows that item's full \
+                   stat block without buying it; a pet number or name \
+                   shows the pet's stats. Staff inspect for free.",
+        },
+        run: cmd_inspect,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["list"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -4214,6 +4234,254 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
         out.push_str(&format!("\r\nYou have {coin}.\r\n"));
     }
     send_rendered(world, player, &out);
+}
+
+/// Legacy `shopping_inspect` fee: a tenth of the purchase price, never
+/// less than one copper.
+fn inspect_fee(buy_price: i64) -> i64 {
+    (buy_price / 10).max(1)
+}
+
+/// `inspect [<#|item|pet>]`: legacy shop service. Not the staff `stat`
+/// and not the admin API's `inspect_actor`. With no argument it lists
+/// the keeper's wares with the inspection fee; with an item it charges
+/// the fee and renders the same stat block `identify` shows, without
+/// buying or marking anything. A pet offer shows the pet's stats
+/// (legacy pet-shop `inspect`).
+#[allow(clippy::too_many_lines)]
+pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
+    let arg = args.trim();
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let keeper: Option<(Entity, Shopkeeper)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
+        q.iter(world)
+            .find(|(_, l, _)| l.0 == located.0)
+            .map(|(e, _, s)| (e, *s))
+    };
+    let Some((keeper_entity, keeper_marker)) = keeper else {
+        send_to(world, player, "No one here is selling anything.\r\n");
+        return;
+    };
+    let keeper_name = name_of(world, keeper_entity);
+    let Some(shop) = world
+        .resource::<ShopCatalog>()
+        .by_key
+        .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
+        .cloned()
+    else {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} has nothing to show you.\r\n"),
+        );
+        return;
+    };
+    let object_protos = world.resource::<ObjectPrototypes>().by_key.clone();
+    let mob_protos = world.resource::<MobPrototypes>().by_key.clone();
+
+    if arg.is_empty() {
+        let mut out = String::new();
+        if shop.items.is_empty() && shop.pets.is_empty() {
+            send_rendered(
+                world,
+                player,
+                &format!("{keeper_name} has nothing to inspect right now.\r\n"),
+            );
+            return;
+        }
+        out.push_str(&format!("\r\n{keeper_name} will inspect:\r\n"));
+        out.push_str(&format!(
+            "  {:<3} {:<4} {:<40} {}\r\n",
+            "#", "Lvl", "Item", "Fee"
+        ));
+        for (i, offer) in shop.items.iter().enumerate() {
+            let proto = object_protos.get(&(offer.object_zone_id, offer.object_id));
+            let item_name = proto.map_or_else(
+                || format!("(missing {}/{})", offer.object_zone_id, offer.object_id),
+                |p| p.name.clone(),
+            );
+            let base_cost = proto.map_or(0, |p| p.cost);
+            let level = proto.map_or(0, |p| p.level);
+            let fee = inspect_fee(shop_offer_price(offer, base_cost, shop.buy_profit));
+            out.push_str(&format!(
+                "  {:<3} {:<4} {:<40} {}\r\n",
+                i + 1,
+                level,
+                item_name,
+                format_wealth(fee).unwrap_or_else(|| "free".to_string()),
+            ));
+        }
+        for (i, offer) in shop.pets.iter().enumerate() {
+            let proto = mob_protos.get(&(offer.mob_zone_id, offer.mob_id));
+            let pet_name = proto.map_or_else(
+                || format!("(missing {}/{})", offer.mob_zone_id, offer.mob_id),
+                |p| p.name.clone(),
+            );
+            let level = proto.map_or(0, |p| p.level);
+            out.push_str(&format!(
+                "  {:<3} {:<4} {:<40} {}\r\n",
+                shop.items.len() + i + 1,
+                level,
+                pet_name,
+                format_wealth(pet_inspect_fee(level)).unwrap_or_else(|| "free".to_string()),
+            ));
+        }
+        out.push_str("\r\nUse `inspect <#|name>` to pay the fee and examine one.\r\n");
+        send_rendered(world, player, &out);
+        return;
+    }
+
+    // Unified numbering matches `list` / `buy`: items first, then pets.
+    let lc = arg.to_ascii_lowercase();
+    let (item_idx, pet_idx): (Option<usize>, Option<usize>) = if let Ok(n) = arg.parse::<usize>() {
+        if n >= 1 && n <= shop.items.len() {
+            (Some(n - 1), None)
+        } else {
+            (
+                None,
+                n.checked_sub(shop.items.len() + 1)
+                    .filter(|i| *i < shop.pets.len()),
+            )
+        }
+    } else {
+        let item = shop.items.iter().position(|o| {
+            object_protos
+                .get(&(o.object_zone_id, o.object_id))
+                .is_some_and(|p| {
+                    mud_world::targeting::entity_matches(&lc, &p.name, Some(&p.keywords))
+                })
+        });
+        let pet = if item.is_some() {
+            None
+        } else {
+            shop.pets.iter().position(|o| {
+                mob_protos.get(&(o.mob_zone_id, o.mob_id)).is_some_and(|p| {
+                    mud_world::targeting::entity_matches(&lc, &p.name, Some(&p.keywords))
+                })
+            })
+        };
+        (item, pet)
+    };
+    let staff = is_staff(world, player);
+    let on_hand = world.get::<Wealth>(player).map_or(0, |w| w.0);
+
+    if let Some(idx) = item_idx {
+        let offer = shop.items[idx];
+        let Some(proto) = object_protos
+            .get(&(offer.object_zone_id, offer.object_id))
+            .cloned()
+        else {
+            send_to(world, player, "That item's prototype is missing.\r\n");
+            return;
+        };
+        let fee = inspect_fee(shop_offer_price(&offer, proto.cost, shop.buy_profit));
+        if !staff && on_hand < fee {
+            send_rendered(
+                world,
+                player,
+                &format!(
+                    "{keeper_name} eyes you. \"You need {} to have that inspected.\"\r\n",
+                    format_wealth(fee - on_hand).unwrap_or_else(|| "more coin".to_string())
+                ),
+            );
+            return;
+        }
+        // Render against a throwaway copy of the wares item: it lives
+        // on the keeper (not the player, so no inventory/GMCP churn),
+        // carries `Identified` so the block shows full detail, and is
+        // despawned right after.
+        let mut bundle = world.spawn((
+            Item,
+            Named {
+                name: proto.name.clone(),
+            },
+            Keywords(proto.keywords.clone()),
+            WorldKey {
+                zone: proto.zone_id,
+                id: proto.id,
+            },
+            Located(keeper_entity),
+            mud_world::Identified,
+        ));
+        if let Some(liq) = proto.liquid.clone() {
+            bundle.insert(mud_world::LiquidContainer {
+                liquid: liq.liquid,
+                capacity: liq.capacity,
+                remaining: liq.remaining,
+                poisoned: liq.poisoned,
+            });
+        }
+        if let Some(fuel) = proto.light_fuel {
+            bundle.insert(mud_world::LightFuel {
+                capacity: fuel.capacity,
+                remaining: fuel.remaining,
+            });
+        }
+        let temp = bundle.id();
+        let block = render_identify_block(world, player, temp);
+        world.despawn(temp);
+        let Some(block) = block else {
+            return;
+        };
+        if !staff && let Some(mut w) = world.get_mut::<Wealth>(player) {
+            w.0 = w.0.saturating_sub(fee);
+        }
+        send_rendered(world, player, &block);
+        let player_name = name_of(world, player);
+        broadcast_room_except_rendered(
+            world,
+            located.0,
+            &[player],
+            &format!("{player_name} inspects {}.\r\n", proto.name),
+        );
+        return;
+    }
+
+    if let Some(idx) = pet_idx {
+        let offer = shop.pets[idx];
+        let Some(proto) = mob_protos.get(&(offer.mob_zone_id, offer.mob_id)).cloned() else {
+            send_to(world, player, "That mob's prototype is missing.\r\n");
+            return;
+        };
+        let fee = pet_inspect_fee(proto.level);
+        if !staff && on_hand < fee {
+            send_to(world, player, "You don't have enough money!\r\n");
+            return;
+        }
+        if !staff && let Some(mut w) = world.get_mut::<Wealth>(player) {
+            w.0 = w.0.saturating_sub(fee);
+        }
+        let out = format!(
+            "Name: {}\r\nLevel: {}, Hit Points: {}, Movement Points: {}\r\n\
+             Damage: {}d{}+{}, Accuracy: {}, Evasion: {}\r\n",
+            proto.name,
+            proto.level,
+            proto.rolled_hp(),
+            proto.move_points,
+            proto.damage_dice_num,
+            proto.damage_dice_size,
+            proto.damage_dice_bonus,
+            proto.accuracy,
+            proto.evasion,
+        );
+        send_rendered(world, player, &out);
+        return;
+    }
+
+    send_rendered(
+        world,
+        player,
+        &format!("{keeper_name} doesn't have '{arg}' to inspect.\r\n"),
+    );
+}
+
+/// Legacy `PET_INSPECT_PRICE`: `(lvl^2 + 3*lvl) / 10` copper.
+fn pet_inspect_fee(level: i32) -> i64 {
+    let l = i64::from(level.max(0));
+    (l * l + 3 * l) / 10
 }
 
 /// `buy <#|name>`: purchase an item from the shopkeeper in the room.

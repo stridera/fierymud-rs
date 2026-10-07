@@ -9,7 +9,7 @@ use mud_world::{
     ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, Shopkeeper, Wealth,
 };
 
-use super::info::{cmd_buy, cmd_list, cmd_mount};
+use super::info::{cmd_buy, cmd_inspect, cmd_list, cmd_mount};
 use super::test_support::{Rx, drain, mob_proto, object_proto, player_in};
 
 const SHOP: (i32, i32) = (30, 91);
@@ -281,4 +281,71 @@ fn persisted_mount_is_rideable_after_relog() {
     cmd_mount(&mut world, player, "mare");
     let out = drain(&mut rx);
     assert!(out.contains("You mount"), "{out}");
+}
+
+fn sword_shop() -> ShopDef {
+    shop_def(
+        vec![ShopOffering {
+            object_zone_id: 30,
+            object_id: 7,
+            amount: -1,
+            price: 0,
+        }],
+        Vec::new(),
+    )
+}
+
+#[test]
+fn inspect_without_argument_lists_wares_with_a_tenth_fee() {
+    let (mut world, player, mut rx) = world_with_shop(sword_shop(), 1_000);
+    cmd_inspect(&mut world, player, "");
+    let out = drain(&mut rx);
+    assert!(out.contains("Jorhan will inspect"), "{out}");
+    assert!(out.contains("a steel sword"), "{out}");
+    // Sword costs 100 at profit 1.0 -> fee 10 copper.
+    assert!(out.contains("1 silver"), "{out}");
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 1_000);
+}
+
+#[test]
+fn inspect_item_charges_the_fee_shows_stats_and_does_not_buy() {
+    let (mut world, player, mut rx) = world_with_shop(sword_shop(), 1_000);
+    // Resources the stat block reads unconditionally.
+    world.init_resource::<mud_world::ObjectAbilityCatalog>();
+    world.init_resource::<mud_world::AbilityCatalog>();
+    world.init_resource::<mud_world::ClassCatalog>();
+    world.init_resource::<mud_world::LiquidCatalog>();
+    cmd_inspect(&mut world, player, "sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("Properties"), "{out}");
+    assert!(out.contains("Weapon"), "{out}");
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 990);
+    // Nothing was handed over and the throwaway copy is gone.
+    let held = world
+        .query::<&Located>()
+        .iter(&world)
+        .filter(|l| l.0 == player)
+        .count();
+    assert_eq!(held, 0);
+    let items = world.query::<&mud_world::Item>().iter(&world).count();
+    assert_eq!(items, 0);
+}
+
+#[test]
+fn inspect_refuses_when_the_player_cannot_cover_the_fee() {
+    let (mut world, player, mut rx) = world_with_shop(sword_shop(), 3);
+    cmd_inspect(&mut world, player, "1");
+    let out = drain(&mut rx);
+    assert!(out.contains("to have that inspected"), "{out}");
+    assert!(!out.contains("Properties"), "{out}");
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 3);
+}
+
+#[test]
+fn inspect_pet_shows_stats_with_unified_numbering() {
+    let (mut world, player, mut rx) = world_with_shop(mixed_shop(), 1_000);
+    cmd_inspect(&mut world, player, "kitten");
+    let out = drain(&mut rx);
+    assert!(out.contains("Name: a kitten"), "{out}");
+    assert!(out.contains("Level: 1"), "{out}");
 }
