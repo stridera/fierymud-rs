@@ -13,7 +13,6 @@ mod equip_apply;
 mod events;
 mod idle;
 mod item_decay;
-mod item_ownership;
 mod login;
 mod memorize;
 mod quest_dialogue;
@@ -522,7 +521,6 @@ async fn main() {
                 timed!(combat::combat_tick),
                 timed!(combat::corpse_decay_tick),
                 timed!(item_decay::item_decay_tick),
-                timed!(item_ownership::release_unowned_item_ids),
                 timed!(effects::effects_tick),
                 timed!(regen::regen_tick),
                 timed!(regen::hunger_thirst_tick),

@@ -4,8 +4,9 @@
 //!
 //! Unlike the character-side persistence which diff-writes a whole
 //! inventory on save, the chest moves one row at a time: a `deposit`
-//! call INSERTs a fresh row, a `withdraw` call DELETEs an existing
-//! one. The runtime never carries a long-lived in-memory snapshot of
+//! call INSERTs a fresh row (and deletes the item's inventory row in the
+//! same transaction), a `withdraw_to_inventory` call DELETEs an existing
+//! one (and inserts the inventory row in the same transaction). The runtime never carries a long-lived in-memory snapshot of
 //! the chest — it's loaded on demand by the listing command and
 //! consumed transactionally by the take command. That keeps the
 //! cross-character "char A deposited, char B sees it" semantics easy
@@ -75,9 +76,9 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Acc
 /// row for the item (its `PersistedItemId`), if it has one. It is
 /// deleted in the same transaction as the INSERT so a crash between
 /// the deposit and the character's next save can never leave the item
-/// in both the chest and the inventory. Scoped to
-/// `stored_by_character_id`: a row some other character has since
-/// claimed is left alone.
+/// in both the chest and the inventory. Not scoped to a character: only
+/// one entity can hold a given id, and an item handed over since its last
+/// save may still sit in the previous holder's row.
 #[allow(clippy::too_many_arguments)]
 pub async fn deposit(
     pool: &PgPool,
@@ -90,14 +91,10 @@ pub async fn deposit(
     inventory_row_id: Option<i32>,
 ) -> sqlx::Result<i32> {
     let mut tx = pool.begin().await?;
-    if let (Some(row_id), Some(character_id)) = (inventory_row_id, stored_by_character_id) {
-        sqlx::query!(
-            r#"DELETE FROM "CharacterItems" WHERE id = $1 AND character_id = $2"#,
-            row_id,
-            character_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+    if let Some(row_id) = inventory_row_id {
+        sqlx::query!(r#"DELETE FROM "CharacterItems" WHERE id = $1"#, row_id)
+            .execute(&mut *tx)
+            .await?;
     }
     let row = sqlx::query!(
         r#"
@@ -124,13 +121,24 @@ pub async fn deposit(
     Ok(row.id)
 }
 
-/// Take a row out of the account chest. Returns the row that was
-/// removed (so the caller can spawn a fresh entity with the
-/// preserved `custom_data`) or `None` when the row is already gone
-/// (race / double-withdraw — the runtime should surface "not
-/// found" to the player without erroring out the command).
-pub async fn withdraw(pool: &PgPool, item_id: i32) -> sqlx::Result<Option<AccountItemRow>> {
-    sqlx::query_as!(
+/// Take a row out of the account chest into a character's inventory, in
+/// ONE transaction: the chest row is deleted and the `CharacterItems` row
+/// inserted together, so a crash can neither lose the item nor leave it in
+/// both places. Returns the removed chest row (so the caller can spawn an
+/// entity with the preserved `custom_data`) and the new inventory row's id
+/// (to stamp on that entity as its `PersistedItemId`), or `None` when the
+/// chest row is already gone (race / double-withdraw — the runtime should
+/// surface "not found" to the player without erroring out the command).
+///
+/// `charges`, `liquid_remaining` and `liquid_type` are carried over from
+/// `custom_data`; the other per-instance fields have no inventory column.
+pub async fn withdraw_to_inventory(
+    pool: &PgPool,
+    item_id: i32,
+    character_id: &str,
+) -> sqlx::Result<Option<(AccountItemRow, i32)>> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query_as!(
         AccountItemRow,
         r#"
         DELETE FROM account_items
@@ -148,6 +156,39 @@ pub async fn withdraw(pool: &PgPool, item_id: i32) -> sqlx::Result<Option<Accoun
         "#,
         item_id,
     )
-    .fetch_optional(pool)
-    .await
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let field = |key: &str| row.custom_data.as_ref().and_then(|v| v.get(key));
+    let int = |key: &str| {
+        field(key)
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|n| i32::try_from(n).ok())
+    };
+    let charges = int("charges").unwrap_or(-1);
+    let liquid_remaining = int("liquid_remaining").unwrap_or(0);
+    let liquid_type = field("liquid_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let inserted = sqlx::query!(
+        r#"
+        INSERT INTO "CharacterItems"
+            (character_id, object_zone_id, object_id,
+             charges, liquid_remaining, liquid_type, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        RETURNING id
+        "#,
+        character_id,
+        row.object_zone_id,
+        row.object_id,
+        charges,
+        liquid_remaining,
+        liquid_type,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some((row, inserted.id)))
 }

@@ -43,7 +43,15 @@
 //!   [`SaveCoordinator::retry_failed_snapshot`], which keeps retrying off
 //!   the tick (with its generation, so it can never overwrite a newer
 //!   save) after the player entity is gone.
-//! * **Shutdown.** [`SaveCoordinator::flush`] waits for every spawned write.
+//! * **Relog barrier.** Every spawned background write / quit retry counts
+//!   in its slot's `outstanding`. A character that logs back in while that
+//!   is non-zero must not load from the database yet (it would read state
+//!   older than the pending write, and the write would then land over the
+//!   new session): [`SaveCoordinator::wait_settled`] lets login wait for it
+//!   without holding up the tick.
+//! * **Shutdown.** [`SaveCoordinator::flush`] waits for every spawned write;
+//!   [`SaveCoordinator::unsettled_characters`] names whoever is still
+//!   unsaved if it times out.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -106,6 +114,9 @@ struct Slot {
     /// A background snapshot exists whose completion has not yet been
     /// applied to the ECS.
     in_flight: AtomicBool,
+    /// Spawned background writes plus quit-save retry tasks that have not
+    /// finished (success, superseded, or given up).
+    outstanding: AtomicUsize,
     last_save: Mutex<Instant>,
     /// Set after a failed background write: the character is not retried
     /// before this instant.
@@ -118,6 +129,7 @@ impl Slot {
             order: Arc::new(tokio::sync::Mutex::new(0)),
             next_generation: AtomicU64::new(1),
             in_flight: AtomicBool::new(false),
+            outstanding: AtomicUsize::new(0),
             last_save: Mutex::new(Instant::now()),
             retry_after: Mutex::new(None),
         }
@@ -187,6 +199,16 @@ impl OrderedSave {
         *self.last_committed = (*self.last_committed).max(generation);
         self.slot.touch();
     }
+
+    /// For a direct inventory-row write that is not a snapshot commit
+    /// (account-chest deposit / withdraw): mark every snapshot taken so far
+    /// stale, so a background write already queued behind this turn cannot
+    /// land its out-of-date item list over the row change. Those saves are
+    /// skipped, not lost: the next autosave carries the same state.
+    pub(crate) fn supersede_earlier_snapshots(&mut self) {
+        let generation = self.next_generation();
+        *self.last_committed = (*self.last_committed).max(generation);
+    }
 }
 
 /// Completes a background task's bookkeeping even if the writer panics.
@@ -220,18 +242,21 @@ impl Drop for TaskGuard {
             // Writer panicked or the runtime is shutting down.
             self.finish(Outcome::Failed("save task aborted".to_string()));
         }
+        self.slot.outstanding.fetch_sub(1, Ordering::SeqCst);
         if self.shared.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.shared.idle.notify_waiters();
         }
     }
 }
 
-/// Keeps `pending` accurate for a detached retry task (see
-/// [`SaveCoordinator::retry_failed_snapshot`]) even if it panics.
-struct PendingGuard(Arc<Shared>);
+/// Keeps `pending` (and the slot's `outstanding`) accurate for a detached
+/// retry task (see [`SaveCoordinator::retry_failed_snapshot`]) even if it
+/// panics.
+struct PendingGuard(Arc<Shared>, Arc<Slot>);
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
+        self.1.outstanding.fetch_sub(1, Ordering::SeqCst);
         if self.0.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.0.idle.notify_waiters();
         }
@@ -329,6 +354,7 @@ impl SaveCoordinator {
         let snap = Arc::new(snap);
         let shared = Arc::clone(&self.0);
         shared.pending.fetch_add(1, Ordering::SeqCst);
+        slot.outstanding.fetch_add(1, Ordering::SeqCst);
         let mut guard = TaskGuard {
             shared: Arc::clone(&shared),
             snapshot: Arc::clone(&snap),
@@ -376,7 +402,8 @@ impl SaveCoordinator {
         let slot = self.slot(&snapshot.character_id);
         let shared = Arc::clone(&self.0);
         shared.pending.fetch_add(1, Ordering::SeqCst);
-        let guard = PendingGuard(Arc::clone(&shared));
+        slot.outstanding.fetch_add(1, Ordering::SeqCst);
+        let guard = PendingGuard(Arc::clone(&shared), Arc::clone(&slot));
         let snap = Arc::new(snapshot);
         tokio::spawn(async move {
             let _guard = guard;
@@ -450,6 +477,45 @@ impl SaveCoordinator {
             .take(limit)
             .map(|(_, c)| c.clone())
             .collect()
+    }
+
+    /// True while a background write or quit-save retry for this character
+    /// has not finished: the database does not yet hold its latest state.
+    pub(crate) fn has_unsettled_saves(&self, character_id: &str) -> bool {
+        self.0
+            .slots
+            .lock()
+            .expect("slots lock")
+            .get(character_id)
+            .is_some_and(|s| s.outstanding.load(Ordering::SeqCst) > 0)
+    }
+
+    /// Wait (without holding the tick: call from a spawned task) until this
+    /// character has no unfinished write or retry. `false` on timeout, i.e.
+    /// the database may still be behind the character's last session.
+    pub(crate) async fn wait_settled(&self, character_id: &str, timeout: Duration) -> bool {
+        let poll = async {
+            while self.has_unsettled_saves(character_id) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        tokio::time::timeout(timeout, poll).await.is_ok()
+    }
+
+    /// Ids of characters with a write or retry still unfinished; logged by
+    /// shutdown when its flush times out.
+    pub(crate) fn unsettled_characters(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .0
+            .slots
+            .lock()
+            .expect("slots lock")
+            .iter()
+            .filter(|(_, s)| s.outstanding.load(Ordering::SeqCst) > 0)
+            .map(|(k, _)| k.clone())
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// Number of spawned writes not yet finished.
@@ -699,6 +765,8 @@ mod tests {
     }
 
     static FAST_RETRY: &[Duration] = &[Duration::from_millis(5), Duration::from_millis(5)];
+    static SLOW_RETRY: &[Duration] = &[Duration::from_millis(80), Duration::from_millis(80)];
+    static NEVER_RETRY: &[Duration] = &[Duration::from_secs(30)];
 
     /// The owned snapshot of a failed quit-save is retried off the tick
     /// until it lands, and `flush` (shutdown) waits for it.
@@ -768,6 +836,100 @@ mod tests {
         );
         assert!(c.flush(&mut world, Duration::from_secs(5)).await);
         assert!(!wrote.load(Ordering::SeqCst));
+    }
+
+    /// A relogging character waits for its pending quit-save retry: the
+    /// barrier stays up through the retry's sleeps (when no order lock is
+    /// held) and drops once the write lands.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_settled_blocks_until_the_pending_retry_lands() {
+        let c = SaveCoordinator::new(1);
+        let mut world = World::new();
+        let e = player(&mut world, "char-w");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_w = Arc::clone(&attempts);
+        assert!(!c.has_unsettled_saves("char-w"));
+        c.retry_failed_snapshot(
+            snapshot_player(&mut world, e, 1).unwrap(),
+            move |_| {
+                let n = attempts_w.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n < 2 {
+                        Err("down".to_string())
+                    } else {
+                        Ok(HashMap::new())
+                    }
+                }
+            },
+            SLOW_RETRY,
+        );
+        assert!(c.has_unsettled_saves("char-w"));
+        assert_eq!(c.unsettled_characters(), vec!["char-w".to_string()]);
+        // Too short a wait: still unsettled.
+        assert!(!c.wait_settled("char-w", Duration::from_millis(20)).await);
+        // A full wait returns only once the write has landed.
+        assert!(c.wait_settled("char-w", Duration::from_secs(5)).await);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(!c.has_unsettled_saves("char-w"));
+        assert!(c.unsettled_characters().is_empty());
+    }
+
+    /// A retry that keeps failing keeps the barrier up past the wait, and
+    /// an in-flight background write holds it too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_settled_times_out_while_saves_keep_failing() {
+        let c = SaveCoordinator::new(1);
+        let mut world = World::new();
+        let e = player(&mut world, "char-x");
+        c.retry_failed_snapshot(
+            snapshot_player(&mut world, e, 1).unwrap(),
+            |_| async { Err::<HashMap<usize, i32>, _>("down".to_string()) },
+            NEVER_RETRY,
+        );
+        assert!(!c.wait_settled("char-x", Duration::from_millis(150)).await);
+
+        let e2 = player(&mut world, "char-y");
+        let (gate_tx, gate_rx) = oneshot::channel::<()>();
+        assert!(request(&c, &mut world, e2, "char-y", move |_| async move {
+            let _ = gate_rx.await;
+            Ok(HashMap::new())
+        }));
+        assert!(c.has_unsettled_saves("char-y"));
+        assert_eq!(
+            c.unsettled_characters(),
+            vec!["char-x".to_string(), "char-y".to_string()]
+        );
+        gate_tx.send(()).unwrap();
+        assert!(c.wait_settled("char-y", Duration::from_secs(5)).await);
+    }
+
+    /// A direct row write (chest deposit) supersedes snapshots taken before
+    /// it: a queued background write never reaches the database.
+    #[tokio::test(flavor = "current_thread")]
+    async fn superseded_snapshot_is_skipped() {
+        let c = SaveCoordinator::new(2);
+        let mut world = World::new();
+        let e = player(&mut world, "char-s");
+        let wrote = Arc::new(AtomicBool::new(false));
+        let wrote_w = Arc::clone(&wrote);
+        assert!(request(&c, &mut world, e, "char-s", move |_| async move {
+            wrote_w.store(true, Ordering::SeqCst);
+            Ok(HashMap::new())
+        }));
+        {
+            let mut ordered = c.begin_ordered("char-s").await;
+            ordered.supersede_earlier_snapshots();
+        }
+        assert!(c.flush(&mut world, Duration::from_secs(5)).await);
+        assert!(!wrote.load(Ordering::SeqCst));
+        // Snapshots taken afterwards are unaffected.
+        let wrote_w = Arc::clone(&wrote);
+        assert!(request(&c, &mut world, e, "char-s", move |_| async move {
+            wrote_w.store(true, Ordering::SeqCst);
+            Ok(HashMap::new())
+        }));
+        assert!(c.flush(&mut world, Duration::from_secs(5)).await);
+        assert!(wrote.load(Ordering::SeqCst));
     }
 
     /// Staggering: at most `limit` characters per scan, oldest first, only

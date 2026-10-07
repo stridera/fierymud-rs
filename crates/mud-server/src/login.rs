@@ -417,7 +417,20 @@ enum AuthDoneKind {
     /// The poller saw the device-code row leave PENDING (or reach its
     /// deadline); the main loop re-reads it and resolves the login.
     WebApprovalWake { code_id: String },
+    /// The wait for the character's previous session to finish saving
+    /// ended (`settled == false`: it is still failing). See
+    /// [`ConnRouter::complete_login_inner`].
+    SaveSettled {
+        user: User,
+        char_row: Box<CharacterRow>,
+        settled: bool,
+    },
 }
+
+/// How long a relogging character waits for its previous session's
+/// pending save (quit-save retry / in-flight autosave) to land before the
+/// login is refused. See [`ConnRouter::complete_login_inner`].
+const PREVIOUS_SAVE_WAIT: Duration = Duration::from_secs(10);
 
 /// Inclusive length window for a new character name. Lower bound
 /// keeps single-letter ambiguity out of `who`-style listings;
@@ -786,6 +799,9 @@ pub struct ConnRouter {
     /// A field (not a direct call) so tests can observe which
     /// connections the router asked to close.
     close_conn: fn(ConnId) -> bool,
+    /// Max wait for a relogging character's pending save; a field so
+    /// tests can shorten it.
+    save_wait: Duration,
 }
 
 /// Per-connection capability snapshot. Updated by the telnet
@@ -864,6 +880,7 @@ impl ConnRouter {
             auth_tx,
             auth_rx: Some(auth_rx),
             close_conn: mud_net::close_connection,
+            save_wait: PREVIOUS_SAVE_WAIT,
         }
     }
 
@@ -956,7 +973,11 @@ impl ConnRouter {
             .cloned()
             .unwrap_or_default();
         if !coordinator.flush(world, Duration::from_secs(30)).await {
-            warn!("shutdown: background saves still pending after 30s");
+            error!(
+                character_ids = ?coordinator.unsettled_characters(),
+                "shutdown: saves still pending after 30s; these characters' latest state \
+                 was NOT persisted"
+            );
         }
     }
 
@@ -2656,6 +2677,14 @@ impl ConnRouter {
                 self.finish_creation(conn_id, draft, hashed, pool, world)
                     .await;
             }
+            AuthDoneKind::SaveSettled {
+                user,
+                char_row,
+                settled,
+            } => {
+                self.finish_save_wait(conn_id, user, *char_row, settled, pool, world)
+                    .await;
+            }
             AuthDoneKind::WebApprovalWake { code_id } => {
                 let Some(ctx) = self.login.get_mut(&conn_id) else {
                     return;
@@ -3137,7 +3166,6 @@ impl ConnRouter {
     /// Player entity, and migrate the connection from `login` to
     /// `playing`. Shared by both the email + char-select path and
     /// the direct character-name path.
-    #[allow(clippy::too_many_lines)]
     async fn complete_login(
         &mut self,
         conn_id: ConnId,
@@ -3145,6 +3173,89 @@ impl ConnRouter {
         pool: &PgPool,
         user: User,
         char_row: CharacterRow,
+    ) {
+        self.complete_login_inner(conn_id, world, pool, user, char_row, false)
+            .await;
+    }
+
+    /// Hold a relogging character until its previous session's save has
+    /// landed. A failed quit-save is retried in the background for minutes
+    /// and an autosave may still be in flight; loading from the database
+    /// now would hand the player state older than that write, which would
+    /// then land on top of the new session (rolled-back stats, duplicated
+    /// items). The wait runs in a spawned task so the game loop keeps
+    /// ticking; its result comes back through `auth_tx`.
+    fn start_save_wait(
+        &mut self,
+        conn_id: ConnId,
+        coordinator: SaveCoordinator,
+        user: User,
+        char_row: CharacterRow,
+    ) {
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            return;
+        };
+        // Swallow input until the wait resolves.
+        ctx.stage = Stage::Authenticating;
+        let _ = ctx
+            .outbound
+            .try_send(b"Saving your previous session, please wait...\r\n".to_vec());
+        info!(conn_id, character_id = %char_row.id,
+            "login waiting for the previous session's save to land");
+        let tx = self.auth_tx.clone();
+        let wait = self.save_wait;
+        tokio::spawn(async move {
+            let settled = coordinator.wait_settled(&char_row.id, wait).await;
+            let _ = tx.send(AuthDone {
+                conn_id,
+                kind: AuthDoneKind::SaveSettled {
+                    user,
+                    char_row: Box::new(char_row),
+                    settled,
+                },
+            });
+        });
+    }
+
+    /// The previous-session wait ended: refuse the login if the save is
+    /// still failing, else reload the character row (it was read before the
+    /// wait, so its stats may predate the save) and finish logging in.
+    async fn finish_save_wait(
+        &mut self,
+        conn_id: ConnId,
+        user: User,
+        char_row: CharacterRow,
+        settled: bool,
+        pool: &PgPool,
+        world: &mut World,
+    ) {
+        if !settled {
+            warn!(conn_id, character_id = %char_row.id,
+                "login refused: the previous session's save is still failing");
+            if let Some(ctx) = self.login.remove(&conn_id) {
+                let _ = ctx.outbound.try_send(
+                    b"Your previous session is still being saved; try again in a minute.\r\n"
+                        .to_vec(),
+                );
+            }
+            self.caps.remove(&conn_id);
+            (self.close_conn)(conn_id);
+            return;
+        }
+        let fresh = reload_character_row(pool, char_row).await;
+        self.complete_login_inner(conn_id, world, pool, user, fresh, true)
+            .await;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn complete_login_inner(
+        &mut self,
+        conn_id: ConnId,
+        world: &mut World,
+        pool: &PgPool,
+        user: User,
+        char_row: CharacterRow,
+        save_wait_done: bool,
     ) {
         // Duplicate session: take over the live entity instead of
         // spawning a second copy (and a second inventory).
@@ -3155,6 +3266,15 @@ impl ConnRouter {
                 commands::send_prompt(world, entity);
             }
             info!(conn_id, char_name = %char_row.name, "player reconnected (takeover)");
+            return;
+        }
+        // Relog barrier: nothing below may read the database while the
+        // character's previous session still has a save pending.
+        if !save_wait_done
+            && let Some(coordinator) = world.get_resource::<SaveCoordinator>().cloned()
+            && coordinator.has_unsettled_saves(&char_row.id)
+        {
+            self.start_save_wait(conn_id, coordinator, user, char_row);
             return;
         }
         let item_rows = mud_db::character_items::list_for(pool, &char_row.id)
@@ -4545,6 +4665,21 @@ pub(crate) fn snapshot_player(
         now_inst,
         new_time_played,
     })
+}
+
+/// Re-read a character's row after waiting on its pending save, so the
+/// session starts from what that save wrote. Falls back to the row it was
+/// given if the re-read fails (the per-table loads that follow would then
+/// still be current).
+async fn reload_character_row(pool: &PgPool, stale: CharacterRow) -> CharacterRow {
+    match characters::find_by_name(pool, &stale.name).await {
+        Ok(Some(fresh)) if fresh.id == stale.id => fresh,
+        Ok(_) => stale,
+        Err(e) => {
+            warn!(error = %e, character_id = %stale.id, "character reload after save wait failed");
+            stale
+        }
+    }
 }
 
 /// Run every per-character DB write for `snap` inside ONE transaction.
@@ -6562,12 +6697,6 @@ mod tests {
         .unwrap()
     }
 
-    fn run_ownership_sweep(world: &mut World) {
-        let mut schedule = Schedule::default();
-        schedule.add_systems(crate::item_ownership::release_unowned_item_ids);
-        schedule.run(world);
-    }
-
     async fn first_object(pool: &PgPool) -> Option<(i32, i32)> {
         mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
             .fetch_optional(pool)
@@ -6612,9 +6741,8 @@ mod tests {
                 .id();
             assert!(save_player(&mut world, a, &pool).await.committed);
             assert!(world.get::<mud_world::PersistedItemId>(item).is_some());
-            // give A -> B, then the per-tick ownership pass.
+            // give A -> B.
             world.entity_mut(item).insert(Located(b));
-            run_ownership_sweep(&mut world);
             for who in order.chars() {
                 let e = if who == 'a' { a } else { b };
                 let out = save_player(&mut world, e, &pool).await;
@@ -6660,7 +6788,6 @@ mod tests {
                 .id();
             assert!(save_player(&mut world, a, &pool).await.committed);
             world.entity_mut(bag).insert(Located(b));
-            run_ownership_sweep(&mut world);
             for who in order.chars() {
                 let e = if who == 'a' { a } else { b };
                 assert!(save_player(&mut world, e, &pool).await.committed);
@@ -6682,9 +6809,9 @@ mod tests {
         }
     }
 
-    /// An item dropped on the ground leaves player ownership: the owner's
-    /// next save deletes the row, the id is cleared, and the next person
-    /// to pick it up INSERTs a fresh row.
+    /// An item dropped on the ground keeps its row id (nothing strips it):
+    /// the owner's next save deletes the row (ground items are not
+    /// persisted), and the next person to pick it up INSERTs a fresh one.
     #[tokio::test(flavor = "current_thread")]
     async fn dropped_item_row_is_deleted_and_pickup_inserts_fresh() {
         let Some(pool) = live_pool().await else {
@@ -6709,13 +6836,15 @@ mod tests {
         let old_id = world.get::<mud_world::PersistedItemId>(item).unwrap().0;
 
         world.entity_mut(item).insert(Located(room));
-        run_ownership_sweep(&mut world);
-        assert!(world.get::<mud_world::PersistedItemId>(item).is_none());
+        assert_eq!(
+            world.get::<mud_world::PersistedItemId>(item).unwrap().0,
+            old_id,
+            "ids are never stripped"
+        );
         assert!(save_player(&mut world, a, &pool).await.committed);
         assert!(item_rows(&pool, &[&ca.id, &cb.id]).await.is_empty());
 
         world.entity_mut(item).insert(Located(b));
-        run_ownership_sweep(&mut world);
         assert!(save_player(&mut world, b, &pool).await.committed);
         let rows = item_rows(&pool, &[&ca.id, &cb.id]).await;
         assert_eq!(rows.len(), 1, "{rows:?}");
@@ -6724,11 +6853,12 @@ mod tests {
         drop_item_rows(&pool, &[&ca.id, &cb.id]).await;
     }
 
-    /// Even with the stale id still on the item (no ownership pass yet),
-    /// a pick-up after the owner's delete re-inserts, and a pick-up before
-    /// it re-homes: exactly one row either way.
+    /// The id stays on a dropped item, so a pick-up before the dropper's
+    /// save re-homes the row and a pick-up after it re-inserts: exactly one
+    /// row either way, whoever saves when, including when only the picker
+    /// ever saves (the dropper "crashed") - no duplicate window.
     #[tokio::test(flavor = "current_thread")]
-    async fn stale_id_pickup_still_ends_with_exactly_one_row() {
+    async fn ground_item_pickup_ends_with_exactly_one_row() {
         let Some(pool) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
@@ -6737,7 +6867,8 @@ mod tests {
             eprintln!("skipping: no Objects rows");
             return;
         };
-        for a_saves_first in [true, false] {
+        // (a saves between drop and pick-up, a saves after b, a saves at all)
+        for (a_before, a_after) in [(true, true), (false, true), (false, false), (true, false)] {
             let (_u, ca) = temp_unlinked_char(&pool, "sa").await;
             let (_u, cb) = temp_unlinked_char(&pool, "sb").await;
             let mut world = World::new();
@@ -6750,17 +6881,110 @@ mod tests {
                 .id();
             assert!(save_player(&mut world, a, &pool).await.committed);
             world.entity_mut(item).insert(Located(room));
-            if a_saves_first {
+            if a_before {
                 assert!(save_player(&mut world, a, &pool).await.committed);
             }
             world.entity_mut(item).insert(Located(b));
             assert!(save_player(&mut world, b, &pool).await.committed);
-            assert!(save_player(&mut world, a, &pool).await.committed);
+            // Crash-equivalent: nothing else ran, so the row must already
+            // be exactly B's.
             let rows = item_rows(&pool, &[&ca.id, &cb.id]).await;
-            assert_eq!(rows.len(), 1, "a_saves_first={a_saves_first}: {rows:?}");
+            assert_eq!(rows.len(), 1, "a_before={a_before}: {rows:?}");
             assert_eq!(rows[0].1, cb.id);
+            if a_after {
+                assert!(save_player(&mut world, a, &pool).await.committed);
+                let rows = item_rows(&pool, &[&ca.id, &cb.id]).await;
+                assert_eq!(rows.len(), 1, "a_before={a_before}: {rows:?}");
+                assert_eq!(rows[0].1, cb.id);
+            }
             drop_item_rows(&pool, &[&ca.id, &cb.id]).await;
         }
+    }
+
+    /// Corpse looting: the dead player's items move into a corpse and then
+    /// to the looter. One row, owned by the looter, whichever of the two
+    /// saves first or whether only the looter saves.
+    #[tokio::test(flavor = "current_thread")]
+    async fn corpse_looting_ends_with_one_row_owned_by_the_looter() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        for order in ["ab", "ba", "b"] {
+            let (_u, ca) = temp_unlinked_char(&pool, "ka").await;
+            let (_u, cb) = temp_unlinked_char(&pool, "kb").await;
+            let mut world = World::new();
+            world.insert_resource(SaveCoordinator::default());
+            let room = world.spawn_empty().id();
+            let a = spawn_player_for(&mut world, &ca.id, room);
+            let b = spawn_player_for(&mut world, &cb.id, room);
+            let item = world
+                .spawn((Item, WorldKey { zone: oz, id: oid }, Located(a)))
+                .id();
+            assert!(save_player(&mut world, a, &pool).await.committed);
+            let pid = world.get::<mud_world::PersistedItemId>(item).unwrap().0;
+            // A dies: the item goes into a corpse container in the room.
+            let corpse = world.spawn((Item, Located(room))).id();
+            world.entity_mut(item).insert(Located(corpse));
+            // B loots the corpse.
+            world.entity_mut(item).insert(Located(b));
+            assert_eq!(
+                world.get::<mud_world::PersistedItemId>(item).unwrap().0,
+                pid
+            );
+            for who in order.chars() {
+                let e = if who == 'a' { a } else { b };
+                assert!(save_player(&mut world, e, &pool).await.committed);
+            }
+            let rows = item_rows(&pool, &[&ca.id, &cb.id]).await;
+            assert_eq!(rows.len(), 1, "order {order}: {rows:?}");
+            assert_eq!(rows[0].1, cb.id, "order {order}: {rows:?}");
+            drop_item_rows(&pool, &[&ca.id, &cb.id]).await;
+        }
+    }
+
+    /// Items that are destroyed (sold, junked, decayed, consumed: all just
+    /// despawn) lose their row at the last owner's next save, and items
+    /// left on the ground or in a corpse forever do too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn destroyed_and_abandoned_items_lose_their_rows_at_the_owners_next_save() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_u, ca) = temp_unlinked_char(&pool, "xa").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let a = spawn_player_for(&mut world, &ca.id, room);
+        let spawn_item = |world: &mut World| {
+            world
+                .spawn((Item, WorldKey { zone: oz, id: oid }, Located(a)))
+                .id()
+        };
+        let destroyed = spawn_item(&mut world);
+        let abandoned = spawn_item(&mut world);
+        let kept = spawn_item(&mut world);
+        assert!(save_player(&mut world, a, &pool).await.committed);
+        assert_eq!(item_rows(&pool, &[&ca.id]).await.len(), 3);
+        world.despawn(destroyed);
+        world.entity_mut(abandoned).insert(Located(room));
+        assert!(save_player(&mut world, a, &pool).await.committed);
+        let rows = item_rows(&pool, &[&ca.id]).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].0,
+            world.get::<mud_world::PersistedItemId>(kept).unwrap().0
+        );
+        drop_item_rows(&pool, &[&ca.id]).await;
     }
 
     /// A commit that lands after the item moved (or after a newer commit
@@ -6859,6 +7083,138 @@ mod tests {
         assert!(world.get_entity(p).is_err(), "player despawned");
         let coordinator = world.resource::<SaveCoordinator>().clone();
         assert_eq!(coordinator.pending(), 1, "retry task owns the snapshot");
+    }
+
+    static RELOG_RETRY: &[Duration] = &[Duration::from_millis(150)];
+    static RELOG_NEVER: &[Duration] = &[Duration::from_secs(30)];
+
+    /// Relog while the previous session's quit-save is still being retried:
+    /// login waits (without blocking the loop), then reloads the character
+    /// so it starts from what that save wrote, not the stale pre-save row.
+    #[tokio::test(flavor = "current_thread")]
+    async fn relog_waits_for_the_pending_quit_save_and_loads_its_state() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (user, c) = temp_unlinked_char(&pool, "rl").await;
+        let stale = (*c).clone();
+        assert_eq!(stale.hit_points, 10, "stale row as read at auth time");
+        let mut world = auth_world(3);
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let p = spawn_player_for(&mut world, &c.id, room);
+        world.get_mut::<Health>(p).unwrap().hp = 3;
+        let snap = snapshot_player(&mut world, p, 1).unwrap();
+        world.despawn(p);
+        // The quit-save failed once; its retry lands ~150 ms later.
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_w = std::sync::Arc::clone(&attempts);
+        let wpool = pool.clone();
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        coordinator.retry_failed_snapshot(
+            snap,
+            move |snap| {
+                let n = attempts_w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let wpool = wpool.clone();
+                async move {
+                    if n == 0 {
+                        Err("db blip".to_string())
+                    } else {
+                        write_snapshot(&wpool, &snap)
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
+                }
+            },
+            RELOG_RETRY,
+        );
+
+        let mut router = ConnRouter::new();
+        let mut arx = router.take_auth_rx().unwrap();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        drain(&mut orx);
+        router
+            .complete_login(1, &mut world, &pool, user, (*c).clone())
+            .await;
+        // Returns immediately: the wait runs off the loop.
+        assert!(drain(&mut orx).contains("Saving your previous session, please wait..."));
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::Authenticating
+        ));
+        let done = tokio::time::timeout(Duration::from_secs(10), arx.recv())
+            .await
+            .expect("wait resolves")
+            .unwrap();
+        let AuthDoneKind::SaveSettled { settled, .. } = done.kind else {
+            panic!("expected SaveSettled");
+        };
+        assert!(settled, "the retry landed within the wait");
+        assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+        let fresh = reload_character_row(&pool, stale).await;
+        assert_eq!(fresh.hit_points, 3, "login must see the saved state");
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// If the previous session's save is still failing when the wait runs
+    /// out, login is refused rather than loading stale state.
+    #[tokio::test(flavor = "current_thread")]
+    async fn relog_is_refused_while_the_previous_save_keeps_failing() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (user, c) = temp_unlinked_char(&pool, "rf").await;
+        let mut world = auth_world(3);
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let p = spawn_player_for(&mut world, &c.id, room);
+        let snap = snapshot_player(&mut world, p, 1).unwrap();
+        world.despawn(p);
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        coordinator.retry_failed_snapshot(
+            snap,
+            |_| async { Err::<HashMap<usize, i32>, _>("db down".to_string()) },
+            RELOG_NEVER,
+        );
+
+        let mut router = ConnRouter::new();
+        router.save_wait = Duration::from_millis(120);
+        thread_local! {
+            static CLOSED: std::cell::RefCell<Vec<ConnId>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        router.close_conn = |c| {
+            CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
+        let mut arx = router.take_auth_rx().unwrap();
+        let (tx, mut orx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        drain(&mut orx);
+        router
+            .complete_login(1, &mut world, &pool, user, (*c).clone())
+            .await;
+        assert!(drain(&mut orx).contains("Saving your previous session"));
+        let done = tokio::time::timeout(Duration::from_secs(10), arx.recv())
+            .await
+            .expect("wait resolves")
+            .unwrap();
+        router.on_auth_done(done, &pool, &mut world).await;
+        let text = drain(&mut orx);
+        assert!(
+            text.contains("Your previous session is still being saved; try again in a minute."),
+            "{text}"
+        );
+        assert!(!router.login.contains_key(&1));
+        assert_eq!(CLOSED.with(|v| v.borrow().clone()), vec![1]);
+        assert!(
+            world.query::<&Player>().iter(&world).next().is_none(),
+            "no session was spawned"
+        );
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 
     async fn temp_cleanup(pool: &PgPool, code_ids: &[&str], char_ids: &[&str], user_ids: &[&str]) {
