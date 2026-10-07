@@ -13,6 +13,7 @@ mod equip_apply;
 mod events;
 mod idle;
 mod item_decay;
+mod item_ownership;
 mod login;
 mod memorize;
 mod quest_dialogue;
@@ -521,6 +522,7 @@ async fn main() {
                 timed!(combat::combat_tick),
                 timed!(combat::corpse_decay_tick),
                 timed!(item_decay::item_decay_tick),
+                timed!(item_ownership::release_unowned_item_ids),
                 timed!(effects::effects_tick),
                 timed!(regen::regen_tick),
                 timed!(regen::hunger_thirst_tick),
@@ -682,27 +684,11 @@ async fn main() {
                     // since async DB writes can't run inline; we drain
                     // the markers here and hand each player to the same
                     // background writer the autosave uses (so a script
-                    // calling save() can't stall the tick). A player
-                    // whose previous background save is still in flight
-                    // keeps the marker and is retried next tick. Plays
-                    // well with the autosave above because every save
-                    // is idempotent.
-                    {
-                        let pending_save: Vec<Entity> = {
-                            let mut q = world
-                                .query_filtered::<Entity, With<mud_world::PendingSave>>();
-                            q.iter(&world).collect()
-                        };
-                        for e in pending_save {
-                            // Outcome ignored — the autosave path logs
-                            // failures; `false` means "busy, retry".
-                            if login::spawn_background_save(&mut world, e, &pool)
-                                && let Ok(mut em) = world.get_entity_mut(e)
-                            {
-                                em.remove::<mud_world::PendingSave>();
-                            }
-                        }
-                    }
+                    // calling save() can't stall the tick). The marker
+                    // survives until a write is handed off and is
+                    // re-armed if that write fails (see
+                    // `login::drain_pending_saves`).
+                    login::drain_pending_saves(&mut world, &pool);
                     tick_stats::lap(&mut world, "pending_save");
                     // Drain idle-kick markers before flushing prompts
                     // so the kick notice lands ahead of the prompt

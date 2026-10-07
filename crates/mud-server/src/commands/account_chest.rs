@@ -227,6 +227,9 @@ async fn cmd_chest_deposit(
     };
     let custom_data = serde_json::to_value(&state).ok();
     let item_name = name_of(world, item);
+    // The item's inventory row is removed in the same transaction as the
+    // chest INSERT (see `deposit`), so a crash can't leave it in both.
+    let inventory_row_id = world.get::<mud_world::PersistedItemId>(item).map(|p| p.0);
     let insert_result = mud_db::account_items::deposit(
         pool,
         &account.user_id,
@@ -235,6 +238,7 @@ async fn cmd_chest_deposit(
         1,
         custom_data.as_ref(),
         Some(&account.character_id),
+        inventory_row_id,
     )
     .await;
     if let Err(e) = insert_result {
@@ -458,6 +462,117 @@ mod tests {
         }
         assert_eq!(out.matches("to use the account chest.").count(), 3, "{out}");
         assert!(out.contains("https://muditor.fierymud.org"), "{out}");
+    }
+
+    /// Depositing removes the item's `CharacterItems` row in the same
+    /// transaction as the chest INSERT, so a crash before the next save
+    /// can't leave the item in both places.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn deposit_removes_the_inventory_row() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
+        let Ok(Ok(pool)) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), mud_db::connect(&url)).await
+        else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Ok(Some((oz, oid))) =
+            mud_db::sqlx::query_as::<_, (i32, i32)>("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+        else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let tag = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let user_id = format!("zz-chest-u-{tag}");
+        let char_id = format!("zz-chest-c-{tag}");
+        mud_db::sqlx::query(
+            "INSERT INTO \"Users\" (id, email, display_name, updated_at) \
+             VALUES ($1, $2, $1, NOW())",
+        )
+        .bind(&user_id)
+        .bind(format!("{user_id}@test.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        mud_db::sqlx::query(
+            "INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(&char_id)
+        .bind(format!("Zzch{}", tag % 1_000_000_000_000))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let row_id: i32 = mud_db::sqlx::query_scalar(
+            "INSERT INTO \"CharacterItems\" (character_id, object_zone_id, object_id, updated_at) \
+             VALUES ($1, $2, $3, NOW()) RETURNING id",
+        )
+        .bind(&char_id)
+        .bind(oz)
+        .bind(oid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let mut world = World::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let room = world.spawn_empty().id();
+        let player = world
+            .spawn((
+                Account {
+                    user_id: user_id.clone(),
+                    character_id: char_id.clone(),
+                    role: UserRole::Player,
+                    account_role: UserRole::Player,
+                    perms: Vec::new(),
+                },
+                crate::commands::Connection(tx),
+                Located(room),
+            ))
+            .id();
+        world.spawn((
+            Item,
+            Named {
+                name: "a test blade".to_string(),
+            },
+            Keywords(vec!["blade".to_string()]),
+            WorldKey { zone: oz, id: oid },
+            mud_world::PersistedItemId(row_id),
+            Located(player),
+        ));
+        cmd_chest_deposit(&mut world, player, &pool, "blade").await;
+
+        let inv: i64 = mud_db::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM \"CharacterItems\" WHERE character_id = $1",
+        )
+        .bind(&char_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let chest: i64 =
+            mud_db::sqlx::query_scalar("SELECT COUNT(*) FROM account_items WHERE user_id = $1")
+                .bind(&user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        mud_db::sqlx::query("DELETE FROM \"Users\" WHERE id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        mud_db::sqlx::query("DELETE FROM \"Characters\" WHERE id = $1")
+            .bind(&char_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(chest, 1, "item is in the chest");
+        assert_eq!(inv, 0, "and no longer has an inventory row");
     }
 
     #[test]

@@ -15,7 +15,7 @@ use mud_world::{
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::autosave::SaveCoordinator;
 use crate::commands::{self, Connection};
@@ -944,8 +944,10 @@ impl ConnRouter {
             // SaveOutcome dropped — broadcast autosave can't surface
             // a per-player partial-save message anyway, and the
             // tracing::warn inside save_player covers staff
-            // diagnostics.
-            let _ = save_player(world, entity, pool).await;
+            // diagnostics. A failed write is retried in the background
+            // (and awaited by the flush below, up to its timeout).
+            let outcome = save_player(world, entity, pool).await;
+            retry_failed_save(world, outcome, pool);
         }
         // Background (autosave / `actor:save()`) writes may still be in
         // flight; the process must not exit until they have landed.
@@ -1018,9 +1020,11 @@ impl ConnRouter {
                 );
             }
             // Disconnect path — player is gone before we could
-            // report a partial save. The tracing::warn inside
-            // save_player covers diagnostics.
-            let _ = save_player(world, entity, pool).await;
+            // report a partial save. A failed write is handed to the
+            // background writer for retry before the entity (and its
+            // items) are despawned, so the state isn't lost with it.
+            let outcome = save_player(world, entity, pool).await;
+            retry_failed_save(world, outcome, pool);
             // Despawn the player AND every item they were carrying / wearing
             // (Located(player) catches both inventory and equipped —
             // EquippedSlot is additive), including items nested inside
@@ -4050,6 +4054,10 @@ pub(crate) struct SaveOutcome {
     pub aborted: bool,
     pub committed: bool,
     pub error: Option<String>,
+    /// On a failed write, the owned snapshot that never reached the
+    /// database. Callers about to destroy the player (quit, idle kick,
+    /// shutdown) hand it to [`retry_failed_save`] so the state isn't lost.
+    pub retry: Option<PlayerSaveSnapshot>,
 }
 
 /// Everything one character save writes, captured synchronously from the
@@ -4066,6 +4074,9 @@ pub(crate) struct PlayerSaveSnapshot {
     /// snapshot is taken. A write whose generation is lower than one
     /// already committed is stale and must not run (see `autosave.rs`).
     pub(crate) generation: u64,
+    /// This save consumed a Lua `PendingSave` request; if the write fails
+    /// the coordinator re-arms the marker so the request isn't lost.
+    pub(crate) resume_pending_save: bool,
     user_id: String,
     hp: i32,
     stamina: i32,
@@ -4490,6 +4501,7 @@ pub(crate) fn snapshot_player(
         character_id: account.character_id,
         entity,
         generation,
+        resume_pending_save: false,
         user_id,
         hp,
         stamina,
@@ -4628,6 +4640,24 @@ pub(crate) async fn write_snapshot(
     Ok(assigned)
 }
 
+/// True when `item` is still directly carried by, or nested (via
+/// `Located` / `Contents`) inside something carried by, `holder`.
+fn is_held_by(world: &World, item: Entity, holder: Entity) -> bool {
+    // Real nesting is a handful of bags; the cap only guards against a
+    // malformed `Located` cycle.
+    let mut cur = item;
+    for _ in 0..32 {
+        let Some(loc) = world.get::<Located>(cur) else {
+            return false;
+        };
+        cur = loc.0;
+        if cur == holder {
+            return true;
+        }
+    }
+    false
+}
+
 /// Fold a committed save back into the ECS: stamp newly-INSERTed
 /// `CharacterItems` ids onto their entities and advance the time-played
 /// anchor. Strictly post-commit ("DB first, then in-memory"). Entities
@@ -4638,9 +4668,24 @@ pub(crate) fn apply_commit(
     assigned: HashMap<usize, i32>,
 ) {
     for (idx, new_id) in assigned {
-        if let Some(target) = snap.entity_for_idx.get(idx).copied()
-            && let Ok(mut em) = world.get_entity_mut(target)
-        {
+        let Some(target) = snap.entity_for_idx.get(idx).copied() else {
+            continue;
+        };
+        // The snapshot is a point-in-time view and a background commit can
+        // land several ticks later. Stamping blindly would (a) overwrite an
+        // id a newer commit already gave the item, and (b) tag an item that
+        // has since left this player (given, dropped) with a row this
+        // character's next save is about to delete. In both cases the row
+        // just written is reconciled by the next save instead. The id the
+        // item had when it was snapshotted (`None` for a fresh INSERT, the
+        // old id when its row vanished and was re-inserted) must still be
+        // the one it has now.
+        let id_at_snapshot = snap.items.get(idx).and_then(|s| s.persisted_id);
+        let id_now = world.get::<mud_world::PersistedItemId>(target).map(|p| p.0);
+        if id_now != id_at_snapshot || !is_held_by(world, target, snap.entity) {
+            continue;
+        }
+        if let Ok(mut em) = world.get_entity_mut(target) {
             em.insert(mud_world::PersistedItemId(new_id));
         }
     }
@@ -4695,6 +4740,7 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
         Err(e) => {
             warn!(error = %e, character_id = %snap.character_id, "save tx failed; rolled back");
             outcome.error = Some(e.to_string());
+            outcome.retry = Some(snap);
         }
     }
     outcome
@@ -4713,16 +4759,85 @@ pub(crate) fn spawn_background_save(world: &mut World, entity: Entity, pool: &Pg
         .get_resource::<SaveCoordinator>()
         .cloned()
         .unwrap_or_default();
+    let had_pending_save = world.get::<mud_world::PendingSave>(entity).is_some();
     let pool = pool.clone();
-    coordinator.request_background(
+    let started = coordinator.request_background(
         &character_id,
-        |generation| snapshot_player(world, entity, generation),
+        |generation| {
+            let mut snap = snapshot_player(world, entity, generation)?;
+            snap.resume_pending_save = had_pending_save;
+            Some(snap)
+        },
         move |snap| async move {
             write_snapshot(&pool, &snap)
                 .await
                 .map_err(|e| e.to_string())
         },
-    )
+    );
+    // The request is satisfied by this write; if the write fails the
+    // coordinator puts the marker back (`resume_pending_save`).
+    if started
+        && had_pending_save
+        && let Ok(mut em) = world.get_entity_mut(entity)
+    {
+        em.remove::<mud_world::PendingSave>();
+    }
+    started
+}
+
+/// Drain Lua-requested saves (`PendingSave` markers). A player whose
+/// previous background save is still in flight keeps the marker and is
+/// retried next tick. A marker on an entity that isn't a player (no
+/// `Account`, e.g. a mob a script called `save()` on) can never be
+/// satisfied, so it is removed rather than retried forever.
+pub(crate) fn drain_pending_saves(world: &mut World, pool: &PgPool) {
+    let pending: Vec<Entity> = world
+        .query_filtered::<Entity, With<mud_world::PendingSave>>()
+        .iter(world)
+        .collect();
+    for e in pending {
+        if world.get::<Account>(e).is_none() {
+            warn!(entity = ?e, "PendingSave on a non-player entity; dropping marker");
+            if let Ok(mut em) = world.get_entity_mut(e) {
+                em.remove::<mud_world::PendingSave>();
+            }
+            continue;
+        }
+        // `false` means "busy, retry next tick"; the marker is cleared
+        // inside once the write has actually been handed off.
+        spawn_background_save(world, e, pool);
+    }
+}
+
+/// A foreground save failed and the player is about to be despawned:
+/// log it loudly and hand the owned snapshot to the background writer,
+/// which keeps retrying (generation-ordered) after the entity is gone.
+pub(crate) fn retry_failed_save(world: &World, outcome: SaveOutcome, pool: &PgPool) {
+    let Some(snap) = outcome.retry else {
+        return;
+    };
+    error!(
+        character_id = %snap.character_id,
+        error = outcome.error.as_deref().unwrap_or("unknown"),
+        "final save FAILED; handing the snapshot to the background writer for retry"
+    );
+    let coordinator = world
+        .get_resource::<SaveCoordinator>()
+        .cloned()
+        .unwrap_or_default();
+    let pool = pool.clone();
+    coordinator.retry_failed_snapshot(
+        snap,
+        move |snap| {
+            let pool = pool.clone();
+            async move {
+                write_snapshot(&pool, &snap)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        },
+        crate::autosave::QUIT_RETRY_BACKOFF,
+    );
 }
 
 /// Materialize each saved `CharacterItem` into a live Item entity. Top-
@@ -6405,6 +6520,345 @@ mod tests {
             .await
             .unwrap();
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    fn failing_pool() -> PgPool {
+        // Connects nowhere, and gives up fast so a "failed save" test
+        // doesn't sit in sqlx's default 30s acquire timeout.
+        mud_db::sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap()
+    }
+
+    fn spawn_player_for(world: &mut World, cid: &str, room: Entity) -> Entity {
+        world
+            .spawn((
+                Player,
+                Account {
+                    user_id: String::new(),
+                    character_id: cid.to_string(),
+                    role: mud_db::enums::UserRole::Player,
+                    account_role: mud_db::enums::UserRole::Player,
+                    perms: vec![],
+                },
+                Health { hp: 10, max: 10 },
+                Located(room),
+            ))
+            .id()
+    }
+
+    /// `(id, character_id)` of every `CharacterItems` row owned by any of
+    /// `cids`, ordered by id.
+    async fn item_rows(pool: &PgPool, cids: &[&str]) -> Vec<(i32, String)> {
+        let cids: Vec<String> = cids.iter().map(ToString::to_string).collect();
+        mud_db::sqlx::query_as(
+            "SELECT id, character_id FROM \"CharacterItems\" \
+             WHERE character_id = ANY($1) ORDER BY id",
+        )
+        .bind(cids)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn run_ownership_sweep(world: &mut World) {
+        let mut schedule = Schedule::default();
+        schedule.add_systems(crate::item_ownership::release_unowned_item_ids);
+        schedule.run(world);
+    }
+
+    async fn first_object(pool: &PgPool) -> Option<(i32, i32)> {
+        mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn drop_item_rows(pool: &PgPool, cids: &[&str]) {
+        for c in cids {
+            mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+                .bind(c)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        temp_cleanup(pool, &[], cids, &[]).await;
+    }
+
+    /// P0 regression: an item handed from A to B must end up as exactly
+    /// one row owned by B, whichever character saves first - and when only
+    /// B saves (A "crashed").
+    #[tokio::test(flavor = "current_thread")]
+    async fn given_item_ends_as_one_row_owned_by_receiver_in_every_save_order() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        for order in ["ab", "ba", "b"] {
+            let (_u, ca) = temp_unlinked_char(&pool, "ga").await;
+            let (_u, cb) = temp_unlinked_char(&pool, "gb").await;
+            let mut world = World::new();
+            world.insert_resource(SaveCoordinator::default());
+            let room = world.spawn_empty().id();
+            let a = spawn_player_for(&mut world, &ca.id, room);
+            let b = spawn_player_for(&mut world, &cb.id, room);
+            let item = world
+                .spawn((Item, WorldKey { zone: oz, id: oid }, Located(a)))
+                .id();
+            assert!(save_player(&mut world, a, &pool).await.committed);
+            assert!(world.get::<mud_world::PersistedItemId>(item).is_some());
+            // give A -> B, then the per-tick ownership pass.
+            world.entity_mut(item).insert(Located(b));
+            run_ownership_sweep(&mut world);
+            for who in order.chars() {
+                let e = if who == 'a' { a } else { b };
+                let out = save_player(&mut world, e, &pool).await;
+                assert!(out.committed, "{order}: {:?}", out.error);
+            }
+            let rows = item_rows(&pool, &[&ca.id, &cb.id]).await;
+            assert_eq!(rows.len(), 1, "order {order}: {rows:?}");
+            assert_eq!(rows[0].1, cb.id, "order {order}: {rows:?}");
+            // Receiver's later saves keep it at one row; the id is stamped.
+            assert!(save_player(&mut world, b, &pool).await.committed);
+            assert_eq!(item_rows(&pool, &[&ca.id, &cb.id]).await.len(), 1);
+            assert!(world.get::<mud_world::PersistedItemId>(item).is_some());
+            drop_item_rows(&pool, &[&ca.id, &cb.id]).await;
+        }
+    }
+
+    /// A container handed over with its contents moves as a unit, even
+    /// when the giver's save deletes the old rows first (children are
+    /// re-inserted under the re-inserted parent).
+    #[tokio::test(flavor = "current_thread")]
+    async fn given_container_with_contents_survives_either_save_order() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        for order in ["ab", "ba"] {
+            let (_u, ca) = temp_unlinked_char(&pool, "ca").await;
+            let (_u, cb) = temp_unlinked_char(&pool, "cb").await;
+            let mut world = World::new();
+            world.insert_resource(SaveCoordinator::default());
+            let room = world.spawn_empty().id();
+            let a = spawn_player_for(&mut world, &ca.id, room);
+            let b = spawn_player_for(&mut world, &cb.id, room);
+            let bag = world
+                .spawn((Item, WorldKey { zone: oz, id: oid }, Located(a)))
+                .id();
+            let inner = world
+                .spawn((Item, WorldKey { zone: oz, id: oid }, Located(bag)))
+                .id();
+            assert!(save_player(&mut world, a, &pool).await.committed);
+            world.entity_mut(bag).insert(Located(b));
+            run_ownership_sweep(&mut world);
+            for who in order.chars() {
+                let e = if who == 'a' { a } else { b };
+                assert!(save_player(&mut world, e, &pool).await.committed);
+            }
+            let rows = item_rows(&pool, &[&ca.id, &cb.id]).await;
+            assert_eq!(rows.len(), 2, "order {order}: {rows:?}");
+            assert!(rows.iter().all(|r| r.1 == cb.id), "{rows:?}");
+            let bag_id = world.get::<mud_world::PersistedItemId>(bag).unwrap().0;
+            let inner_id = world.get::<mud_world::PersistedItemId>(inner).unwrap().0;
+            let container: Option<i32> = mud_db::sqlx::query_scalar(
+                "SELECT container_id FROM \"CharacterItems\" WHERE id = $1",
+            )
+            .bind(inner_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(container, Some(bag_id), "order {order}");
+            drop_item_rows(&pool, &[&ca.id, &cb.id]).await;
+        }
+    }
+
+    /// An item dropped on the ground leaves player ownership: the owner's
+    /// next save deletes the row, the id is cleared, and the next person
+    /// to pick it up INSERTs a fresh row.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_item_row_is_deleted_and_pickup_inserts_fresh() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_u, ca) = temp_unlinked_char(&pool, "da").await;
+        let (_u, cb) = temp_unlinked_char(&pool, "db").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let a = spawn_player_for(&mut world, &ca.id, room);
+        let b = spawn_player_for(&mut world, &cb.id, room);
+        let item = world
+            .spawn((Item, WorldKey { zone: oz, id: oid }, Located(a)))
+            .id();
+        assert!(save_player(&mut world, a, &pool).await.committed);
+        let old_id = world.get::<mud_world::PersistedItemId>(item).unwrap().0;
+
+        world.entity_mut(item).insert(Located(room));
+        run_ownership_sweep(&mut world);
+        assert!(world.get::<mud_world::PersistedItemId>(item).is_none());
+        assert!(save_player(&mut world, a, &pool).await.committed);
+        assert!(item_rows(&pool, &[&ca.id, &cb.id]).await.is_empty());
+
+        world.entity_mut(item).insert(Located(b));
+        run_ownership_sweep(&mut world);
+        assert!(save_player(&mut world, b, &pool).await.committed);
+        let rows = item_rows(&pool, &[&ca.id, &cb.id]).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].1, cb.id);
+        assert_ne!(rows[0].0, old_id, "a fresh row, not the dead one");
+        drop_item_rows(&pool, &[&ca.id, &cb.id]).await;
+    }
+
+    /// Even with the stale id still on the item (no ownership pass yet),
+    /// a pick-up after the owner's delete re-inserts, and a pick-up before
+    /// it re-homes: exactly one row either way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_id_pickup_still_ends_with_exactly_one_row() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        for a_saves_first in [true, false] {
+            let (_u, ca) = temp_unlinked_char(&pool, "sa").await;
+            let (_u, cb) = temp_unlinked_char(&pool, "sb").await;
+            let mut world = World::new();
+            world.insert_resource(SaveCoordinator::default());
+            let room = world.spawn_empty().id();
+            let a = spawn_player_for(&mut world, &ca.id, room);
+            let b = spawn_player_for(&mut world, &cb.id, room);
+            let item = world
+                .spawn((Item, WorldKey { zone: oz, id: oid }, Located(a)))
+                .id();
+            assert!(save_player(&mut world, a, &pool).await.committed);
+            world.entity_mut(item).insert(Located(room));
+            if a_saves_first {
+                assert!(save_player(&mut world, a, &pool).await.committed);
+            }
+            world.entity_mut(item).insert(Located(b));
+            assert!(save_player(&mut world, b, &pool).await.committed);
+            assert!(save_player(&mut world, a, &pool).await.committed);
+            let rows = item_rows(&pool, &[&ca.id, &cb.id]).await;
+            assert_eq!(rows.len(), 1, "a_saves_first={a_saves_first}: {rows:?}");
+            assert_eq!(rows[0].1, cb.id);
+            drop_item_rows(&pool, &[&ca.id, &cb.id]).await;
+        }
+    }
+
+    /// A commit that lands after the item moved (or after a newer commit
+    /// stamped it) must not stamp the row id onto the entity.
+    #[test]
+    fn apply_commit_skips_moved_and_already_stamped_items() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let a = spawn_player_for(&mut world, "ac-a", room);
+        let b = spawn_player_for(&mut world, "ac-b", room);
+        let bag = world
+            .spawn((Item, WorldKey { zone: 1, id: 1 }, Located(a)))
+            .id();
+        let in_bag = world
+            .spawn((Item, WorldKey { zone: 1, id: 2 }, Located(bag)))
+            .id();
+        let moved = world
+            .spawn((Item, WorldKey { zone: 1, id: 3 }, Located(a)))
+            .id();
+        let stamped = world
+            .spawn((Item, WorldKey { zone: 1, id: 4 }, Located(a)))
+            .id();
+        let plain = world
+            .spawn((Item, WorldKey { zone: 1, id: 5 }, Located(a)))
+            .id();
+        let snap = snapshot_player(&mut world, a, 1).unwrap();
+        let idx = |e: Entity| snap.entity_for_idx.iter().position(|x| *x == e).unwrap();
+        // After the snapshot: one item goes to B, one gets a newer id.
+        world.entity_mut(moved).insert(Located(b));
+        world
+            .entity_mut(stamped)
+            .insert(mud_world::PersistedItemId(99));
+        let assigned = HashMap::from([
+            (idx(bag), 10),
+            (idx(in_bag), 11),
+            (idx(moved), 12),
+            (idx(stamped), 13),
+            (idx(plain), 14),
+        ]);
+        apply_commit(&mut world, &snap, assigned);
+        let pid = |e: Entity| world.get::<mud_world::PersistedItemId>(e).map(|p| p.0);
+        assert_eq!(pid(bag), Some(10));
+        assert_eq!(pid(in_bag), Some(11), "nested items are still reachable");
+        assert_eq!(pid(moved), None, "moved off the saver: not stamped");
+        assert_eq!(pid(stamped), Some(99), "existing id is not overwritten");
+        assert_eq!(pid(plain), Some(14));
+    }
+
+    /// A `PendingSave` marker on something that is not a player can never
+    /// be satisfied: it is removed, not retried forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_save_on_non_player_is_dropped() {
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let mob = world.spawn(mud_world::PendingSave).id();
+        drain_pending_saves(&mut world, &lazy_pool());
+        assert!(world.get::<mud_world::PendingSave>(mob).is_none());
+    }
+
+    /// A failed background write re-arms the Lua `PendingSave` marker and
+    /// schedules the character for a quick retry instead of a full
+    /// autosave interval later.
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_background_save_rearms_marker_and_retries_soon() {
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let p = spawn_player_for(&mut world, "pend-1", room);
+        world.entity_mut(p).insert(mud_world::PendingSave);
+        let pool = failing_pool();
+        drain_pending_saves(&mut world, &pool);
+        // Consumed once the write is handed off...
+        assert!(world.get::<mud_world::PendingSave>(p).is_none());
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+        // ...and restored because the write failed.
+        assert!(world.get::<mud_world::PendingSave>(p).is_some());
+        assert!(
+            crate::autosave::FAILED_SAVE_RETRY <= Duration::from_secs(10),
+            "failed saves must retry within seconds"
+        );
+    }
+
+    /// A failed quit-save is not lost with the despawned player: the owned
+    /// snapshot is handed to the background writer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_quit_save_is_retried_in_background_before_despawn() {
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let p = spawn_player_for(&mut world, "quit-1", room);
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        router.playing.insert(1, p);
+        router.on_disconnect(&mut world, 1, &pool).await;
+        assert!(world.get_entity(p).is_err(), "player despawned");
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        assert_eq!(coordinator.pending(), 1, "retry task owns the snapshot");
     }
 
     async fn temp_cleanup(pool: &PgPool, code_ids: &[&str], char_ids: &[&str], user_ids: &[&str]) {

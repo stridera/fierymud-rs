@@ -15,7 +15,7 @@
 //! upper-case form on save. Unknown slot strings are treated as inventory
 //! (no equipped slot) — better than dropping the row entirely.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -156,17 +156,21 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
 /// * Rows whose `id` is no longer in the snapshot (item dropped, sold,
 ///   given) → DELETE.
 /// * Snapshot entries with `persisted_id = Some` (loaded items still
-///   carried) → UPDATE only the runtime-owned columns
-///   (`equipped_location`, `container_id`, `charges`, `liquid_remaining`,
-///   `liquid_type`, `updated_at`). Other columns (`condition`,
-///   `instance_flags`, `custom_name`, etc.) are untouched.
+///   carried) → UPDATE the runtime-owned columns (`equipped_location`,
+///   `container_id`, `charges`, `liquid_remaining`, `liquid_type`,
+///   `updated_at`) and re-home the row to this character
+///   (`character_id`), so an item handed over from another character is
+///   claimed rather than deleted by the previous owner's save. Other
+///   columns (`condition`, `instance_flags`, `custom_name`, etc.) are
+///   untouched. If the row no longer exists the item is inserted.
 /// * Snapshot entries with `persisted_id = None` (newly acquired this
 ///   session) → INSERT.
 ///
-/// Returns `idx → assigned_id` for each INSERT so the caller can stamp
-/// `PersistedItemId` back onto the spawned entity. Inserts run in input
-/// order so a new item placed inside a new container can resolve its
-/// `container_id` from this run's prior insert.
+/// Returns `idx → assigned_id` for each INSERT (including re-inserts of
+/// a vanished persisted row) so the caller can stamp `PersistedItemId`
+/// back onto the spawned entity. Entries are processed in input order so
+/// an item placed inside a new container resolves its `container_id`
+/// from this run's prior insert.
 ///
 /// Multi-query helper — caller passes a `&mut PgConnection` and is
 /// responsible for atomicity (wrap in a transaction if the work
@@ -200,60 +204,60 @@ pub async fn save_inventory_diff(
         .await?;
     }
 
-    // 2. UPDATE existing rows. Container resolution at this point can
-    //    use any `parent_persisted_id` directly; if the parent is a new
-    //    insert (still in step 3 below) `parent_persisted_id` is None
-    //    and `container_id` will be set in step 3 — but a loaded item
-    //    can't have a not-yet-inserted parent because the parent would
-    //    have to be loaded too. So we never need to retro-update an
-    //    UPDATE row's container after a later INSERT.
-    for snap in items {
-        let Some(id) = snap.persisted_id else {
-            continue;
-        };
-        sqlx::query!(
-            r#"
-            UPDATE "CharacterItems"
-            SET equipped_location = $1,
-                container_id = $2,
-                charges = $3,
-                liquid_remaining = $4,
-                liquid_type = $5,
-                updated_at = NOW()
-            WHERE id = $6
-            "#,
-            snap.equipped_location.as_deref(),
-            snap.parent_persisted_id,
-            snap.charges.unwrap_or(-1),
-            snap.liquid_remaining.unwrap_or(0),
-            snap.liquid_type.as_deref(),
-            id,
-        )
-        .execute(&mut *conn)
-        .await?;
-    }
-
-    // 3. INSERT new items. For each, resolve container_id by either
-    //    `parent_persisted_id` (parent was a loaded row) or
-    //    `parent_idx` (parent is also a new insert earlier in `items`).
-    //    The latter requires the parent's INSERT to have run first —
-    //    `parent_idx` is constrained to be strictly less than the
-    //    row's own index by the BFS that builds the snapshot.
+    // 2. Upsert every snapshot entry in input order (parents precede
+    //    children). A snapshot entry with a `persisted_id` is UPDATEd
+    //    *and re-homed* (`character_id = $cid`): the item may have been
+    //    handed over from another character whose row we now claim. Once
+    //    the row carries our id, the previous owner's delete step (scoped
+    //    to `character_id = <them>`) no longer matches it, so whichever
+    //    owner saves first the item ends up as exactly one row owned by
+    //    its current holder. If the UPDATE matches nothing (the previous
+    //    owner's save already deleted the row, or it was never ours to
+    //    begin with) the item is INSERTed fresh and the new id returned.
+    //
+    //    `ids[idx]` is the row id each entry ended up with; it resolves a
+    //    child's `container_id` even when its parent was re-inserted under
+    //    a new id in this same pass.
     let mut assigned: HashMap<usize, i32> = HashMap::new();
-    let inserted_idxs: HashSet<usize> = items
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.persisted_id.is_none())
-        .map(|(i, _)| i)
-        .collect();
+    let mut ids: Vec<i32> = Vec::with_capacity(items.len());
+    let mut remapped: HashMap<i32, i32> = HashMap::new();
     for (idx, snap) in items.iter().enumerate() {
-        if !inserted_idxs.contains(&idx) {
-            continue;
+        let container_id: Option<i32> = snap
+            .parent_idx
+            .and_then(|p_idx| ids.get(p_idx).copied())
+            .or_else(|| {
+                snap.parent_persisted_id
+                    .map(|pid| remapped.get(&pid).copied().unwrap_or(pid))
+            });
+        if let Some(id) = snap.persisted_id {
+            let updated = sqlx::query!(
+                r#"
+                UPDATE "CharacterItems"
+                SET character_id = $1,
+                    equipped_location = $2,
+                    container_id = $3,
+                    charges = $4,
+                    liquid_remaining = $5,
+                    liquid_type = $6,
+                    updated_at = NOW()
+                WHERE id = $7
+                RETURNING id
+                "#,
+                character_id,
+                snap.equipped_location.as_deref(),
+                container_id,
+                snap.charges.unwrap_or(-1),
+                snap.liquid_remaining.unwrap_or(0),
+                snap.liquid_type.as_deref(),
+                id,
+            )
+            .fetch_optional(&mut *conn)
+            .await?;
+            if updated.is_some() {
+                ids.push(id);
+                continue;
+            }
         }
-        let container_id: Option<i32> = snap.parent_persisted_id.or_else(|| {
-            snap.parent_idx
-                .and_then(|p_idx| assigned.get(&p_idx).copied())
-        });
         let row = sqlx::query!(
             r#"
             INSERT INTO "CharacterItems"
@@ -274,7 +278,11 @@ pub async fn save_inventory_diff(
         )
         .fetch_one(&mut *conn)
         .await?;
+        if let Some(old) = snap.persisted_id {
+            remapped.insert(old, row.id);
+        }
         assigned.insert(idx, row.id);
+        ids.push(row.id);
     }
 
     Ok(assigned)

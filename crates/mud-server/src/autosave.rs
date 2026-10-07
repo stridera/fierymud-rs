@@ -35,6 +35,14 @@
 //!   background snapshot of a character until the first has been folded
 //!   back into the ECS ([`SaveCoordinator::apply_completions`]); this keeps
 //!   `PersistedItemId` stamping consistent (no duplicate INSERTs).
+//! * **Failure retry.** A failed background write backdates the slot's
+//!   `last_save` (and holds it off for `FAILED_SAVE_RETRY` so a dead
+//!   database isn't hammered every scan) so the character is due again
+//!   within seconds rather than a full autosave interval later. A failed
+//!   quit-save hands its owned snapshot to
+//!   [`SaveCoordinator::retry_failed_snapshot`], which keeps retrying off
+//!   the tick (with its generation, so it can never overwrite a newer
+//!   save) after the player entity is gone.
 //! * **Shutdown.** [`SaveCoordinator::flush`] waits for every spawned write.
 
 use std::collections::HashMap;
@@ -45,7 +53,7 @@ use std::time::{Duration, Instant};
 
 use bevy_ecs::prelude::*;
 use tokio::sync::{Notify, OwnedMutexGuard, Semaphore};
-use tracing::warn;
+use tracing::{error, info, warn};
 
 use crate::login::{PlayerSaveSnapshot, apply_commit};
 
@@ -56,6 +64,23 @@ pub(crate) const AUTOSAVE_PER_SCAN: usize = 2;
 /// Concurrent background DB writers. Leaves most of the pool free for
 /// login / command traffic.
 pub(crate) const BACKGROUND_WRITERS: usize = 2;
+/// After a failed background save the character is retried this soon
+/// (not a whole autosave interval later).
+pub(crate) const FAILED_SAVE_RETRY: Duration = Duration::from_secs(5);
+/// Delays between retries of a failed quit-save. The player is already
+/// gone, so this is the only chance their last state ever reaches the
+/// database; ~2.5 minutes of attempts rides out a restart or failover.
+pub(crate) const QUIT_RETRY_BACKOFF: &[Duration] = &[
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+    Duration::from_secs(30),
+    Duration::from_secs(30),
+    Duration::from_secs(30),
+    Duration::from_secs(30),
+];
 
 /// Result of one background write, folded into the ECS on the next tick.
 #[derive(Debug)]
@@ -82,6 +107,9 @@ struct Slot {
     /// applied to the ECS.
     in_flight: AtomicBool,
     last_save: Mutex<Instant>,
+    /// Set after a failed background write: the character is not retried
+    /// before this instant.
+    retry_after: Mutex<Option<Instant>>,
 }
 
 impl Slot {
@@ -91,11 +119,31 @@ impl Slot {
             next_generation: AtomicU64::new(1),
             in_flight: AtomicBool::new(false),
             last_save: Mutex::new(Instant::now()),
+            retry_after: Mutex::new(None),
         }
     }
 
     fn touch(&self) {
         *self.last_save.lock().expect("last_save lock") = Instant::now();
+        *self.retry_after.lock().expect("retry_after lock") = None;
+    }
+
+    /// A background write failed: backdate `last_save` so the character is
+    /// due on the next scan after `FAILED_SAVE_RETRY`, whatever the
+    /// autosave interval is.
+    fn mark_failed(&self) {
+        let now = Instant::now();
+        *self.last_save.lock().expect("last_save lock") = now
+            .checked_sub(Duration::from_secs(24 * 3600))
+            .unwrap_or(now);
+        *self.retry_after.lock().expect("retry_after lock") = Some(now + FAILED_SAVE_RETRY);
+    }
+
+    fn retry_held_off(&self) -> bool {
+        self.retry_after
+            .lock()
+            .expect("retry_after lock")
+            .is_some_and(|t| Instant::now() < t)
     }
 
     fn since_last_save(&self) -> Duration {
@@ -178,6 +226,18 @@ impl Drop for TaskGuard {
     }
 }
 
+/// Keeps `pending` accurate for a detached retry task (see
+/// [`SaveCoordinator::retry_failed_snapshot`]) even if it panics.
+struct PendingGuard(Arc<Shared>);
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if self.0.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
 impl SaveCoordinator {
     pub(crate) fn new(max_background_writers: usize) -> Self {
         Self(Arc::new(Shared {
@@ -222,7 +282,16 @@ impl SaveCoordinator {
                 Outcome::Stale => {}
                 Outcome::Failed(ref e) => {
                     warn!(error = %e, character_id = %c.snapshot.character_id,
-                        "background save failed; will retry next interval");
+                        "background save failed; retrying shortly");
+                    c.slot.mark_failed();
+                    // A Lua `actor:save()` request was consumed when this
+                    // write started; it is only satisfied once a write
+                    // lands, so put the marker back.
+                    if c.snapshot.resume_pending_save
+                        && let Ok(mut em) = world.get_entity_mut(c.snapshot.entity)
+                    {
+                        em.insert(mud_world::PendingSave);
+                    }
                 }
             }
             c.slot.in_flight.store(false, Ordering::SeqCst);
@@ -289,6 +358,62 @@ impl SaveCoordinator {
         true
     }
 
+    /// Keep retrying a snapshot whose foreground write (quit / idle-kick /
+    /// shutdown) failed, off the tick, after the player entity is gone.
+    /// Each attempt takes the character's turn and is skipped (and the
+    /// retry ends) once a newer generation has committed, so it can never
+    /// overwrite a later save. Gives up with an ERROR after `schedule` is
+    /// exhausted. Must be called inside a tokio runtime.
+    pub(crate) fn retry_failed_snapshot<W, Fut>(
+        &self,
+        snapshot: PlayerSaveSnapshot,
+        writer: W,
+        schedule: &'static [Duration],
+    ) where
+        W: Fn(Arc<PlayerSaveSnapshot>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<HashMap<usize, i32>, String>> + Send + 'static,
+    {
+        let slot = self.slot(&snapshot.character_id);
+        let shared = Arc::clone(&self.0);
+        shared.pending.fetch_add(1, Ordering::SeqCst);
+        let guard = PendingGuard(Arc::clone(&shared));
+        let snap = Arc::new(snapshot);
+        tokio::spawn(async move {
+            let _guard = guard;
+            let mut attempt = 0usize;
+            loop {
+                {
+                    let mut last_committed = Arc::clone(&slot.order).lock_owned().await;
+                    if snap.generation <= *last_committed {
+                        info!(character_id = %snap.character_id,
+                            "save retry superseded by a newer committed save");
+                        return;
+                    }
+                    let _permit = shared.writers.acquire().await;
+                    match writer(Arc::clone(&snap)).await {
+                        Ok(_) => {
+                            *last_committed = snap.generation;
+                            info!(character_id = %snap.character_id, attempt,
+                                "save retry succeeded");
+                            return;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, character_id = %snap.character_id, attempt,
+                                "save retry failed");
+                        }
+                    }
+                }
+                let Some(delay) = schedule.get(attempt).copied() else {
+                    error!(character_id = %snap.character_id,
+                        "save retry exhausted; this character's last state was NOT persisted");
+                    return;
+                };
+                attempt += 1;
+                tokio::time::sleep(delay).await;
+            }
+        });
+    }
+
     /// Characters due for an autosave: not in flight, last saved at least
     /// `interval` ago, oldest first, at most `limit`. Also prunes slots of
     /// characters no longer in `online` that nothing references.
@@ -312,7 +437,7 @@ impl SaveCoordinator {
             let slot = slots
                 .entry(cid.clone())
                 .or_insert_with(|| Arc::new(Slot::new()));
-            if slot.in_flight.load(Ordering::SeqCst) {
+            if slot.in_flight.load(Ordering::SeqCst) || slot.retry_held_off() {
                 continue;
             }
             let age = slot.since_last_save();
@@ -543,6 +668,106 @@ mod tests {
             Ok(HashMap::new())
         }));
         assert!(c.flush(&mut world, Duration::from_secs(5)).await);
+    }
+
+    /// A failed background write makes the character due again within
+    /// seconds (not a full autosave interval), once the short hold-off
+    /// passes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_background_save_is_due_again_within_seconds() {
+        let c = SaveCoordinator::new(1);
+        let mut world = World::new();
+        let e = player(&mut world, "char-f");
+        let online = vec!["char-f".to_string()];
+        let interval = Duration::from_secs(300);
+        assert!(request(&c, &mut world, e, "char-f", |_| async {
+            Err::<HashMap<usize, i32>, _>("db down".to_string())
+        }));
+        assert!(c.flush(&mut world, Duration::from_secs(5)).await);
+        // Held off briefly so a dead database isn't hammered every scan...
+        assert!(c.autosave_due(&online, interval, 2).is_empty());
+        assert!(FAILED_SAVE_RETRY <= Duration::from_secs(10));
+        // ...then due again, though only moments passed vs a 300s interval.
+        *c.slot("char-f").retry_after.lock().unwrap() = Some(Instant::now());
+        assert_eq!(c.autosave_due(&online, interval, 2), online);
+        // A successful write restores the normal cadence.
+        assert!(request(&c, &mut world, e, "char-f", |_| async {
+            Ok(HashMap::new())
+        }));
+        assert!(c.flush(&mut world, Duration::from_secs(5)).await);
+        assert!(c.autosave_due(&online, interval, 2).is_empty());
+    }
+
+    static FAST_RETRY: &[Duration] = &[Duration::from_millis(5), Duration::from_millis(5)];
+
+    /// The owned snapshot of a failed quit-save is retried off the tick
+    /// until it lands, and `flush` (shutdown) waits for it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_quit_snapshot_is_retried_until_it_commits() {
+        let c = SaveCoordinator::new(1);
+        let mut world = World::new();
+        let e = player(&mut world, "char-q");
+        let snap = snapshot_player(&mut world, e, 7).unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_w = Arc::clone(&attempts);
+        c.retry_failed_snapshot(
+            snap,
+            move |_| {
+                let n = attempts_w.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n < 2 {
+                        Err("still down".to_string())
+                    } else {
+                        Ok(HashMap::new())
+                    }
+                }
+            },
+            FAST_RETRY,
+        );
+        assert_eq!(c.pending(), 1);
+        assert!(c.flush(&mut world, Duration::from_secs(5)).await);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        // Committed with its generation: an older snapshot can't undo it.
+        assert_eq!(*c.slot("char-q").order.lock().await, 7);
+    }
+
+    /// A retry gives up (rather than looping forever) once its schedule is
+    /// exhausted, and is dropped as stale if a newer save already landed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn quit_snapshot_retry_gives_up_and_yields_to_newer_saves() {
+        let c = SaveCoordinator::new(1);
+        let mut world = World::new();
+        let e = player(&mut world, "char-r");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_w = Arc::clone(&attempts);
+        c.retry_failed_snapshot(
+            snapshot_player(&mut world, e, 1).unwrap(),
+            move |_| {
+                attempts_w.fetch_add(1, Ordering::SeqCst);
+                async { Err::<HashMap<usize, i32>, _>("down".to_string()) }
+            },
+            FAST_RETRY,
+        );
+        assert!(c.flush(&mut world, Duration::from_secs(5)).await);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "1 try + 2 retries");
+
+        // A newer generation has committed: the old snapshot never writes.
+        {
+            let mut ordered = c.begin_ordered("char-r").await;
+            ordered.record_commit(5);
+        }
+        let wrote = Arc::new(AtomicBool::new(false));
+        let wrote_w = Arc::clone(&wrote);
+        c.retry_failed_snapshot(
+            snapshot_player(&mut world, e, 2).unwrap(),
+            move |_| {
+                wrote_w.store(true, Ordering::SeqCst);
+                async { Ok(HashMap::new()) }
+            },
+            FAST_RETRY,
+        );
+        assert!(c.flush(&mut world, Duration::from_secs(5)).await);
+        assert!(!wrote.load(Ordering::SeqCst));
     }
 
     /// Staggering: at most `limit` characters per scan, oldest first, only

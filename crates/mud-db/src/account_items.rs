@@ -70,6 +70,15 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Acc
 /// chest is empty) — keeps the listing append-only by default
 /// without needing the caller to compute it. `stored_at` defaults to
 /// `NOW()` via the schema.
+///
+/// `inventory_row_id` is the depositing character's `CharacterItems`
+/// row for the item (its `PersistedItemId`), if it has one. It is
+/// deleted in the same transaction as the INSERT so a crash between
+/// the deposit and the character's next save can never leave the item
+/// in both the chest and the inventory. Scoped to
+/// `stored_by_character_id`: a row some other character has since
+/// claimed is left alone.
+#[allow(clippy::too_many_arguments)]
 pub async fn deposit(
     pool: &PgPool,
     user_id: &str,
@@ -78,7 +87,18 @@ pub async fn deposit(
     quantity: i32,
     custom_data: Option<&serde_json::Value>,
     stored_by_character_id: Option<&str>,
+    inventory_row_id: Option<i32>,
 ) -> sqlx::Result<i32> {
+    let mut tx = pool.begin().await?;
+    if let (Some(row_id), Some(character_id)) = (inventory_row_id, stored_by_character_id) {
+        sqlx::query!(
+            r#"DELETE FROM "CharacterItems" WHERE id = $1 AND character_id = $2"#,
+            row_id,
+            character_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
     let row = sqlx::query!(
         r#"
         INSERT INTO account_items
@@ -98,8 +118,9 @@ pub async fn deposit(
         custom_data,
         stored_by_character_id,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(row.id)
 }
 
