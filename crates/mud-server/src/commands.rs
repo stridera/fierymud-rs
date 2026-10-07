@@ -416,6 +416,8 @@ mod rent;
 pub(crate) use rent::{PendingRentConfirm, finalize_rent};
 #[path = "commands/alias_parity.rs"]
 mod alias_parity;
+#[path = "commands/drag.rs"]
+mod drag;
 #[path = "commands/economy.rs"]
 mod economy;
 #[path = "commands/followers.rs"]
