@@ -84,6 +84,10 @@ pub fn respawn_tick(world: &mut World) {
     // dispatcher can fire LOAD on them after the respawn loop
     // exits — firing inside the loop would re-borrow World mid-spawn.
     let mut load_fire_queue: Vec<Entity> = Vec::new();
+    // Every freshly-spawned mob, so worn gear gets the same
+    // `recompute_equipped_for` pass boot-time mobs get (lit worn
+    // lights, equipment bonuses) once the spawn loop is done.
+    let mut spawned_mobs: Vec<Entity> = Vec::new();
     // (room, mob name) pairs for the post-loop announcement pass.
     // Same reason as load_fire_queue — the broadcast helper queries
     // the world, but the spawn block here holds an EntityWorldMut.
@@ -221,6 +225,7 @@ pub fn respawn_tick(world: &mut World) {
             em.insert(Mountable);
         }
         reset_id_alive.insert(entry.reset_id);
+        spawned_mobs.push(em.id());
         *world_counts.entry(proto_key).or_insert(0) += 1;
         announce_queue.push((entry.room_entity, proto.name.clone()));
         if proto.alignment <= aggro_threshold {
@@ -231,6 +236,9 @@ pub fn respawn_tick(world: &mut World) {
 
     if refilled > 0 {
         info!(refilled, "respawn tick");
+    }
+    for mob in spawned_mobs {
+        crate::equip_apply::recompute_equipped_for(world, mob);
     }
 
     // Tell anyone watching that a mob just wandered in. Only fires

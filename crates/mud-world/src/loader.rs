@@ -1262,6 +1262,14 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             if let Some(s) = slot {
                 bundle.insert(EquippedSlot(s));
             }
+            // A worn light needs its fuel state: without it the light
+            // stays dark (no fuel data is never assumed infinite).
+            if let Some(fuel) = proto.light_fuel {
+                bundle.insert(crate::components::LightFuel {
+                    capacity: fuel.capacity,
+                    remaining: fuel.remaining,
+                });
+            }
             if let Some(ref keys) = trigger_keys {
                 bundle.insert(AttachedTriggers(keys.clone()));
             }
@@ -2189,21 +2197,23 @@ fn parse_portal_destination(values: &serde_json::Value) -> Option<i32> {
 /// (capacity 0 means uninitialized — runtime treats it as empty).
 /// Parse a Light's fuel state from its `values` JSONB. Schema
 /// shape: `{"Capacity": 240, "Remaining": 240, "Is_Lit:": false}`.
-/// Numbers can be int or string; missing fields default to -1
-/// (infinite). The `Is_Lit:` flag is loader-time hint only — at
-/// runtime, the Lit marker comes from `cmd_light` toggles.
+/// Numbers can be int or string. Legacy semantics: `Remaining` of -1
+/// is a permanent light, 0 is spent, so a missing / unparseable
+/// `Remaining` is 0 (spent), never infinite — only data that says -1
+/// makes a flame eternal. A missing `Capacity` falls back to
+/// `Remaining` (legacy `init_obj_proto`). The `Is_Lit:` flag is
+/// loader-time hint only — at runtime, the Lit marker comes from
+/// `cmd_light` toggles.
 fn parse_light_fuel(values: &serde_json::Value) -> crate::resources::LightFuelProto {
-    let parse_int = |v: Option<&serde_json::Value>| -> i32 {
+    let parse_int = |v: Option<&serde_json::Value>| -> Option<i32> {
         match v {
-            Some(serde_json::Value::Number(n)) => {
-                i32::try_from(n.as_i64().unwrap_or(-1)).unwrap_or(-1)
-            }
-            Some(serde_json::Value::String(s)) => s.parse().unwrap_or(-1),
-            _ => -1,
+            Some(serde_json::Value::Number(n)) => n.as_i64().and_then(|n| i32::try_from(n).ok()),
+            Some(serde_json::Value::String(s)) => s.trim().parse().ok(),
+            _ => None,
         }
     };
-    let capacity = parse_int(values.get("Capacity"));
-    let remaining = parse_int(values.get("Remaining"));
+    let remaining = parse_int(values.get("Remaining")).unwrap_or(0);
+    let capacity = parse_int(values.get("Capacity")).unwrap_or(remaining);
     crate::resources::LightFuelProto {
         capacity,
         remaining,
@@ -2782,6 +2792,30 @@ mod weight_reduction_tests {
                 < f64::EPSILON
         );
         assert!(parse_weight_reduction(&json!({"Weight Reduction": "x"})).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod light_fuel_tests {
+    use super::parse_light_fuel;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_values_are_kept_and_minus_one_is_permanent() {
+        let f = parse_light_fuel(&json!({"Capacity": 240, "Remaining": "120"}));
+        assert_eq!((f.capacity, f.remaining), (240, 120));
+        let p = parse_light_fuel(&json!({"Capacity": -1, "Remaining": -1}));
+        assert_eq!((p.capacity, p.remaining), (-1, -1));
+    }
+
+    #[test]
+    fn missing_or_garbage_remaining_is_spent_not_infinite() {
+        let f = parse_light_fuel(&json!({}));
+        assert_eq!((f.capacity, f.remaining), (0, 0));
+        let g = parse_light_fuel(&json!({"Remaining": "x"}));
+        assert_eq!(g.remaining, 0);
+        let c = parse_light_fuel(&json!({"Remaining": 30}));
+        assert_eq!((c.capacity, c.remaining), (30, 30));
     }
 }
 

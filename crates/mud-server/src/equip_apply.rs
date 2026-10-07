@@ -77,14 +77,16 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
     // ---- Light sources ----
     // A worn / held light burns without a separate `light` command
     // (the pre-rewrite game's torches worked the moment you held
-    // them). Spent lights (`remaining == 0`) stay dark; `-1` is the
-    // permanent-flame sentinel and does light. Items already `Lit`
-    // are left alone.
+    // them). Legacy semantics: `remaining == 0` is a spent light and
+    // stays dark; `-1` (any negative) is the permanent-flame sentinel
+    // and does light. A light with no fuel data at all is NOT assumed
+    // infinite: only data that says `-1` makes a flame permanent.
+    // Items already `Lit` are left alone.
     if proto.r#type == mud_db::enums::ObjectType::Light
         && world.get::<mud_world::Lit>(item).is_none()
         && world
             .get::<mud_world::LightFuel>(item)
-            .is_none_or(|f| f.remaining != 0)
+            .is_some_and(|f| f.remaining != 0)
     {
         try_insert(world, item, mud_world::Lit);
     }
@@ -285,15 +287,19 @@ pub fn unapply_object_from_wearer(world: &mut World, item: Entity, wearer: Entit
 /// to keep the call idempotent (a re-login that double-walks
 /// shouldn't double-stack stats).
 pub fn recompute_equipped_for(world: &mut World, wearer: Entity) {
-    let equipped: Vec<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &mud_world::Located, &EquippedSlot), With<mud_world::Item>>(
-            );
-        q.iter(world)
-            .filter(|(_, l, _)| l.0 == wearer)
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+    // Walk the wearer's `Contents` index (O(carried), not O(world items))
+    // so this stays cheap when called per respawned mob.
+    let equipped: Vec<Entity> = world
+        .get::<mud_world::Contents>(wearer)
+        .map(|c| {
+            c.iter()
+                .filter(|e| {
+                    world.get::<mud_world::Item>(*e).is_some()
+                        && world.get::<EquippedSlot>(*e).is_some()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     for item in equipped {
         if world.get::<GrantedDeltas>(item).is_some() {
             continue;
@@ -684,6 +690,28 @@ mod tests {
         );
         apply_object_to_wearer(&mut world, item, wearer);
         assert!(world.get::<mud_world::Lit>(item).is_some());
+    }
+
+    #[test]
+    fn light_with_no_fuel_data_is_not_assumed_infinite() {
+        let (mut world, room, wearer, item) = light_world(None, Some(Slot::Hold));
+        apply_object_to_wearer(&mut world, item, wearer);
+        assert!(world.get::<mud_world::Lit>(item).is_none());
+        assert!(!crate::commands::room_has_light(&mut world, room));
+    }
+
+    #[test]
+    fn recompute_lights_equipped_light_found_via_contents() {
+        let (mut world, room, wearer, item) = light_world(
+            Some(mud_world::LightFuel {
+                capacity: -1,
+                remaining: -1,
+            }),
+            Some(Slot::Hold),
+        );
+        recompute_equipped_for(&mut world, wearer);
+        assert!(world.get::<mud_world::Lit>(item).is_some());
+        assert!(crate::commands::room_has_light(&mut world, room));
     }
 
     #[test]
