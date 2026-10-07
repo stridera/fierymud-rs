@@ -130,6 +130,26 @@ fn record_failure(world: &mut World, zone: i32, id: i32, name: &str, event: &str
     }
 }
 
+/// Run `f` with the mob sleep / casting gate selected for `event`.
+/// Legacy `script_driver` exempts only DEATH triggers; every other
+/// mob trigger is aborted while the mob sleeps and paused while it
+/// casts (legacy 54a61ba6). Room / object listeners are unaffected
+/// (the host only gates `Mob` entities).
+fn gated<R>(
+    host: &mut mud_script::LuaHost,
+    event: TriggerEvent,
+    f: impl FnOnce(&mut mud_script::LuaHost) -> R,
+) -> R {
+    host.set_gate(if event == TriggerEvent::Death {
+        mud_script::ScriptGate::Off
+    } else {
+        mud_script::ScriptGate::Mob
+    });
+    let out = f(host);
+    host.set_gate(mud_script::ScriptGate::Off);
+    out
+}
+
 /// Fire every trigger attached to `entity` whose flags include `event`.
 /// Each fire takes a fresh `&mut World` (via `resource_scope` on
 /// `LuaHost`); errors are logged at warn level — a broken trigger
@@ -162,7 +182,7 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
 
     for (zone, id, name, body) in to_fire {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            host.exec_for_actor(world, entity, &body)
+            gated(&mut host, event, |h| h.exec_for_actor(world, entity, &body))
         });
         drain_lua_outbox(world);
         record_fire(world, entity, zone, id, event, result.is_ok());
@@ -209,13 +229,15 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
     let lowered = text.to_ascii_lowercase();
     for (zone, id, name, body) in to_fire {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            host.exec_for_listener_with_extras(
-                world,
-                listener,
-                speaker,
-                &body,
-                &[("speech", &lowered)],
-            )
+            gated(&mut host, TriggerEvent::Speech, |h| {
+                h.exec_for_listener_with_extras(
+                    world,
+                    listener,
+                    speaker,
+                    &body,
+                    &[("speech", &lowered)],
+                )
+            })
         });
         drain_lua_outbox(world);
         record_fire(
@@ -264,7 +286,9 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
         };
         for (zone, id, name, body) in to_fire {
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-                host.exec_for_actor_with_extras(world, listener, &body, &[("speech", &lowered)])
+                gated(&mut host, TriggerEvent::Speech, |h| {
+                    h.exec_for_actor_with_extras(world, listener, &body, &[("speech", &lowered)])
+                })
             });
             drain_lua_outbox(world);
             record_fire(
@@ -357,7 +381,9 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
         };
         for (zone, id, name, body) in to_fire {
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-                host.exec_for_listener_with_extras(world, listener, entering, &body, &[])
+                gated(&mut host, TriggerEvent::Greet, |h| {
+                    h.exec_for_listener_with_extras(world, listener, entering, &body, &[])
+                })
             });
             drain_lua_outbox(world);
             record_fire(
@@ -444,7 +470,9 @@ pub fn fire_event_with_actor(
     }
     for (zone, id, name, body) in to_fire {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            host.exec_for_listener_with_extras(world, listener, acting, &body, &[])
+            gated(&mut host, event, |h| {
+                h.exec_for_listener_with_extras(world, listener, acting, &body, &[])
+            })
         });
         drain_lua_outbox(world);
         record_fire(world, listener, zone, id, event, result.is_ok());
@@ -481,7 +509,9 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
     }
     for (zone, id, name, body) in to_fire {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            host.exec_for_event(world, recipient, giver, Some(item), &body, &[])
+            gated(&mut host, TriggerEvent::Receive, |h| {
+                h.exec_for_event(world, recipient, giver, Some(item), &body, &[])
+            })
         });
         drain_lua_outbox(world);
         record_fire(
@@ -542,14 +572,16 @@ pub fn fire_command_in_room(
         };
         for (zone, id, name, body) in to_fire {
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-                host.exec_for_event_with_value(
-                    world,
-                    listener,
-                    player,
-                    None,
-                    &body,
-                    &[("cmd", cmd), ("args", args)],
-                )
+                gated(&mut host, TriggerEvent::Command, |h| {
+                    h.exec_for_event_with_value(
+                        world,
+                        listener,
+                        player,
+                        None,
+                        &body,
+                        &[("cmd", cmd), ("args", args)],
+                    )
+                })
             });
             drain_lua_outbox(world);
             record_fire(
@@ -855,5 +887,137 @@ mod validate_tests {
         cat.by_key
             .insert((1, 1), def(1, 1, "undefined_function_xyz()"));
         assert!(validate_catalog(&cat, None).failures.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sleep_gate_tests {
+    use super::*;
+    use mud_db::enums::EntityType;
+    use mud_world::{
+        EntityVariableCache, Health, Mob, Named, Posture, PostureKind, TriggerAttach, TriggerDef,
+        WorldKey,
+    };
+
+    const BODY: &str = "self:setvar('ran', 1)";
+
+    struct Fixture {
+        world: World,
+        room: Entity,
+        mob: Entity,
+        player: Entity,
+    }
+
+    fn fixture(event: TriggerEvent) -> Fixture {
+        let mut world = World::new();
+        let mut catalog = TriggerCatalog::default();
+        catalog.by_key.insert(
+            (99, 1),
+            TriggerDef {
+                zone_id: 99,
+                id: 1,
+                name: "t".to_string(),
+                attach_type: TriggerAttach::Mob,
+                commands: BODY.to_string(),
+                flags: vec![event],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        world.insert_resource(catalog);
+        world.insert_resource(mud_script::LuaHost::new());
+        let room = world.spawn_empty().id();
+        let mob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "sleeper".to_string(),
+                },
+                Health { hp: 10, max: 10 },
+                WorldKey { zone: 99, id: 1 },
+                Located(room),
+                Posture(PostureKind::Standing),
+                AttachedTriggers(vec![(99, 1)]),
+            ))
+            .id();
+        let player = world
+            .spawn((
+                Named {
+                    name: "visitor".to_string(),
+                },
+                Located(room),
+            ))
+            .id();
+        Fixture {
+            world,
+            room,
+            mob,
+            player,
+        }
+    }
+
+    fn ran(world: &mut World) -> bool {
+        let seen = world
+            .get_resource::<EntityVariableCache>()
+            .is_some_and(|c| c.get(EntityType::Mob, 99, 1, "ran").is_some());
+        // Reset between phases so each assertion starts clean.
+        world.insert_resource(EntityVariableCache::default());
+        seen
+    }
+
+    fn set_posture(f: &mut Fixture, p: PostureKind) {
+        f.world.entity_mut(f.mob).insert(Posture(p));
+    }
+
+    #[test]
+    fn sleeping_mob_ignores_speech_until_awake() {
+        let mut f = fixture(TriggerEvent::Speech);
+        set_posture(&mut f, PostureKind::Sleeping);
+        fire_speech_in_room(&mut f.world, f.player, f.room, "hello");
+        assert!(!ran(&mut f.world), "asleep: speech trigger suppressed");
+        set_posture(&mut f, PostureKind::Standing);
+        fire_speech_in_room(&mut f.world, f.player, f.room, "hello");
+        assert!(ran(&mut f.world), "awake: speech trigger fires again");
+    }
+
+    #[test]
+    fn sleeping_mob_ignores_greet_until_awake() {
+        let mut f = fixture(TriggerEvent::Greet);
+        set_posture(&mut f, PostureKind::Sleeping);
+        fire_greet_in_room(&mut f.world, f.player, f.room);
+        assert!(!ran(&mut f.world));
+        set_posture(&mut f, PostureKind::Standing);
+        fire_greet_in_room(&mut f.world, f.player, f.room);
+        assert!(ran(&mut f.world));
+    }
+
+    #[test]
+    fn sleeping_mob_ignores_fight_events() {
+        let mut f = fixture(TriggerEvent::Fight);
+        set_posture(&mut f, PostureKind::Sleeping);
+        fire_event(&mut f.world, f.mob, TriggerEvent::Fight);
+        assert!(!ran(&mut f.world));
+    }
+
+    #[test]
+    fn death_trigger_fires_while_asleep() {
+        let mut f = fixture(TriggerEvent::Death);
+        set_posture(&mut f, PostureKind::Sleeping);
+        fire_event(&mut f.world, f.mob, TriggerEvent::Death);
+        assert!(ran(&mut f.world), "death triggers are immune to the gate");
+    }
+
+    #[test]
+    fn gate_is_cleared_after_dispatch() {
+        // A gated dispatch must not leak the gate into later,
+        // ungated exec calls (effects, admin lua).
+        let mut f = fixture(TriggerEvent::Speech);
+        fire_speech_in_room(&mut f.world, f.player, f.room, "hi");
+        set_posture(&mut f, PostureKind::Sleeping);
+        f.world
+            .resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
+                host.exec_for_actor(world, f.mob, BODY).unwrap();
+            });
+        assert!(ran(&mut f.world));
     }
 }

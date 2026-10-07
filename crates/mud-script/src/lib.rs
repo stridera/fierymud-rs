@@ -36,9 +36,63 @@ pub struct YieldedThread {
     acting: Entity,
     object: Option<Entity>,
     extras: Vec<(String, String)>,
+    /// Whether the trigger that spawned this thread is subject to the
+    /// mob sleep / casting gate (see [`ScriptGate`]). Captured at park
+    /// time so `tick_yielded` can apply it on resume.
+    gate: ScriptGate,
     /// Tick value at which this thread becomes due to resume. Computed
     /// at park time as `host.current_tick + wait_secs * TICK_HZ`.
     resume_at_tick: u64,
+}
+
+/// Legacy `script_driver` (`dg_scripts.cpp`) gates every MOB trigger
+/// except DEATH on the mob's state: a mob that is not awake (stance
+/// at or below sleeping, i.e. sleeping or stunned here) aborts the
+/// script, and a casting mob pauses it until the cast finishes.
+/// Death triggers are immune. Gating applies only when the script's
+/// `self` is a `Mob`; room / object triggers are never gated.
+///
+/// Set by the trigger dispatchers via [`LuaHost::set_gate`] around each
+/// exec call; defaults to `Off` so effect scripts, admin `lua`, and
+/// tests run unconditionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScriptGate {
+    /// No gating (default).
+    #[default]
+    Off,
+    /// Gate on the listener mob's sleep / casting state.
+    Mob,
+}
+
+/// Pause between re-checks while a mob's script is held for a cast.
+/// Legacy `pause_while_casting` re-queues the trigger every 10 pulses
+/// (one second at 10 Hz).
+const CAST_PAUSE_TICKS: u64 = TICK_HZ;
+
+/// Why a mob's script is currently blocked, per legacy `AWAKE` /
+/// `CASTING`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MobBlock {
+    /// Not awake: abort the script.
+    Asleep,
+    /// Casting: hold the script until the cast ends.
+    Casting,
+}
+
+/// Legacy `!AWAKE(mob)` (sleeping or stunned) then `CASTING(mob)`.
+/// `None` for non-mobs or a free mob.
+fn mob_block(world: &World, entity: Entity) -> Option<MobBlock> {
+    world.get::<Mob>(entity)?;
+    let sleeping = world
+        .get::<Posture>(entity)
+        .is_some_and(|p| p.0 == PostureKind::Sleeping);
+    if sleeping || world.get::<mud_world::Stunned>(entity).is_some() {
+        return Some(MobBlock::Asleep);
+    }
+    if world.get::<mud_world::Casting>(entity).is_some() {
+        return Some(MobBlock::Casting);
+    }
+    None
 }
 
 /// Bevy resource wrapping the Lua interpreter and the parked-coroutine
@@ -52,6 +106,8 @@ pub struct LuaHost {
     /// deciding which parked threads are due in `tick_yielded`.
     current_tick: u64,
     yielded: Vec<YieldedThread>,
+    /// Gate applied to the next exec calls; see [`ScriptGate`].
+    gate: ScriptGate,
     /// Shared metatables used to build each trigger's private
     /// environment; see [`EnvKit`].
     env_kit: EnvKit,
@@ -559,6 +615,7 @@ impl LuaHost {
             lua,
             current_tick: 0,
             yielded: Vec::new(),
+            gate: ScriptGate::Off,
             env_kit,
         }
     }
@@ -584,6 +641,13 @@ impl LuaHost {
         self.current_tick = tick;
     }
 
+    /// Select the sleep / casting gate for subsequent exec calls.
+    /// Trigger dispatchers set `Mob` for non-death mob triggers and
+    /// restore `Off` afterwards.
+    pub fn set_gate(&mut self, gate: ScriptGate) {
+        self.gate = gate;
+    }
+
     /// Number of threads currently parked waiting for `wait(N)` to
     /// elapse. Surfaced for diagnostics (the `show` admin command).
     #[must_use]
@@ -604,8 +668,22 @@ impl LuaHost {
             .into_iter()
             .partition(|y| y.resume_at_tick <= due_tick);
         self.yielded = parked;
-        let resumed = due.len();
-        for yielded in due {
+        let mut resumed = 0;
+        for mut yielded in due {
+            if yielded.gate == ScriptGate::Mob {
+                match mob_block(world, yielded.listener) {
+                    // Legacy aborts the script when the mob is not awake.
+                    Some(MobBlock::Asleep) => continue,
+                    // Legacy pauses the script while the mob is casting.
+                    Some(MobBlock::Casting) => {
+                        yielded.resume_at_tick = due_tick.saturating_add(CAST_PAUSE_TICKS);
+                        self.yielded.push(yielded);
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+            resumed += 1;
             // Errors during resume are swallowed — the body's already
             // partway through, and mud-server's outbox-drain happens
             // around `tick_yielded`, so any pre-error output reaches
@@ -686,6 +764,7 @@ impl LuaHost {
                     acting: yielded.acting,
                     object: yielded.object,
                     extras: yielded.extras,
+                    gate: yielded.gate,
                     resume_at_tick,
                 });
                 Ok(())
@@ -780,6 +859,17 @@ impl LuaHost {
     ) -> Result<(String, Option<bool>), String> {
         let span = tracing::info_span!("lua_exec");
         let _g = span.enter();
+
+        let gate = self.gate;
+        let block = if gate == ScriptGate::Mob {
+            mob_block(world, listener)
+        } else {
+            None
+        };
+        // Sleeping mob: the trigger never starts (legacy aborts it).
+        if block == Some(MobBlock::Asleep) {
+            return Ok((String::new(), None));
+        }
 
         // Stash a raw pointer to the world for callbacks. Cleared in the
         // cleanup arm below regardless of code outcome.
@@ -1250,6 +1340,11 @@ impl LuaHost {
                 .set_environment(globals.clone())
                 .into_function()?;
             let thread = self.lua.create_thread(func)?;
+            // Casting mob: park the not-yet-started thread; it begins
+            // once the cast ends (legacy `pause_while_casting`).
+            if block == Some(MobBlock::Casting) {
+                return Ok((None, Some((thread, 1, globals.clone()))));
+            }
             let values: MultiValue = thread.resume(())?;
             if matches!(thread.status(), ThreadStatus::Resumable) {
                 let wait_secs = values
@@ -1313,6 +1408,7 @@ impl LuaHost {
                             .iter()
                             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                             .collect(),
+                        gate,
                         resume_at_tick,
                     });
                 }
@@ -5604,5 +5700,161 @@ mod tests {
         assert_eq!(sets.len(), 2);
         assert_eq!(clears.len(), 1);
         assert_eq!(clears[0], "c");
+    }
+
+    // ----- mob sleep / casting gate (legacy 54a61ba6) -----
+
+    fn var_set(world: &World, key: &str) -> bool {
+        world
+            .get_resource::<EntityVariableCache>()
+            .is_some_and(|c| c.get(EntityType::Mob, 99, 1, key).is_some())
+    }
+
+    fn casting() -> mud_world::Casting {
+        mud_world::Casting {
+            ability_id: 1,
+            ability_name: "fireball".to_string(),
+            args: String::new(),
+            kind_label: "spell".to_string(),
+            verb: "cast".to_string(),
+            ticks_remaining: 10,
+            ticks_total: 10,
+            target: mud_world::CastTarget::Area,
+            recognized_by: Vec::new(),
+            slot_reservation: None,
+        }
+    }
+
+    fn gated_host() -> LuaHost {
+        let mut host = LuaHost::new();
+        host.set_gate(ScriptGate::Mob);
+        host
+    }
+
+    #[test]
+    fn gate_sleeping_mob_does_not_start_trigger_until_awake() {
+        let (mut world, mob) = make_world_with_mob();
+        world.entity_mut(mob).insert(Posture(PostureKind::Sleeping));
+        let mut host = gated_host();
+        host.exec_for_actor(&mut world, mob, "self:setvar('ran', 1)")
+            .unwrap();
+        assert!(!var_set(&world, "ran"), "sleeping mob must not run");
+        assert_eq!(host.yielded_count(), 0, "aborted, not deferred");
+        world.entity_mut(mob).insert(Posture(PostureKind::Standing));
+        host.exec_for_actor(&mut world, mob, "self:setvar('ran', 1)")
+            .unwrap();
+        assert!(var_set(&world, "ran"), "awake mob runs again");
+    }
+
+    #[test]
+    fn gate_stunned_mob_counts_as_not_awake() {
+        let (mut world, mob) = make_world_with_mob();
+        world.entity_mut(mob).insert(mud_world::Stunned);
+        let mut host = gated_host();
+        host.exec_for_actor(&mut world, mob, "self:setvar('ran', 1)")
+            .unwrap();
+        assert!(!var_set(&world, "ran"));
+    }
+
+    #[test]
+    fn gate_off_runs_on_sleeping_mob_death_exemption() {
+        let (mut world, mob) = make_world_with_mob();
+        world.entity_mut(mob).insert(Posture(PostureKind::Sleeping));
+        let mut host = LuaHost::new();
+        host.set_gate(ScriptGate::Off);
+        host.exec_for_actor(&mut world, mob, "self:setvar('ran', 1)")
+            .unwrap();
+        assert!(var_set(&world, "ran"));
+    }
+
+    #[test]
+    fn gate_does_not_apply_to_non_mobs() {
+        let (mut world, actor) = make_world_with_mob();
+        world.entity_mut(actor).remove::<Mob>();
+        world
+            .entity_mut(actor)
+            .insert(Posture(PostureKind::Sleeping));
+        let mut host = gated_host();
+        let out = host
+            .exec_for_actor(&mut world, actor, "print('ran')")
+            .unwrap();
+        assert_eq!(out, "ran\r\n");
+    }
+
+    #[test]
+    fn gate_wait_script_aborts_if_mob_asleep_at_resume() {
+        let (mut world, mob) = make_world_with_mob();
+        let mut host = gated_host();
+        host.set_current_tick(0);
+        host.exec_for_actor(
+            &mut world,
+            mob,
+            "self:setvar('a', 1) wait(1) self:setvar('b', 1)",
+        )
+        .unwrap();
+        assert!(var_set(&world, "a"));
+        assert_eq!(host.yielded_count(), 1);
+        world.entity_mut(mob).insert(Posture(PostureKind::Sleeping));
+        host.set_current_tick(10);
+        assert_eq!(host.tick_yielded(&mut world), 0);
+        assert_eq!(host.yielded_count(), 0, "aborted per legacy break");
+        world.entity_mut(mob).insert(Posture(PostureKind::Standing));
+        host.set_current_tick(100);
+        host.tick_yielded(&mut world);
+        assert!(!var_set(&world, "b"), "aborted script never resumes");
+    }
+
+    #[test]
+    fn gate_wait_script_on_death_trigger_survives_sleep() {
+        let (mut world, mob) = make_world_with_mob();
+        let mut host = LuaHost::new();
+        host.set_gate(ScriptGate::Off);
+        host.set_current_tick(0);
+        host.exec_for_actor(&mut world, mob, "wait(1) self:setvar('b', 1)")
+            .unwrap();
+        world.entity_mut(mob).insert(Posture(PostureKind::Sleeping));
+        host.set_current_tick(10);
+        assert_eq!(host.tick_yielded(&mut world), 1);
+        assert!(var_set(&world, "b"), "death-style script resumes asleep");
+    }
+
+    #[test]
+    fn gate_wait_script_defers_while_casting_then_resumes() {
+        let (mut world, mob) = make_world_with_mob();
+        let mut host = gated_host();
+        host.set_current_tick(0);
+        host.exec_for_actor(&mut world, mob, "wait(1) self:setvar('b', 1)")
+            .unwrap();
+        world.entity_mut(mob).insert(casting());
+        host.set_current_tick(10);
+        assert_eq!(host.tick_yielded(&mut world), 0);
+        assert_eq!(host.yielded_count(), 1, "held while casting");
+        assert!(!var_set(&world, "b"));
+        // Still casting one second later: still held.
+        host.set_current_tick(20);
+        assert_eq!(host.tick_yielded(&mut world), 0);
+        assert_eq!(host.yielded_count(), 1);
+        world.entity_mut(mob).remove::<mud_world::Casting>();
+        host.set_current_tick(30);
+        assert_eq!(host.tick_yielded(&mut world), 1);
+        assert!(var_set(&world, "b"), "resumes once the cast ends");
+    }
+
+    #[test]
+    fn gate_new_trigger_deferred_while_casting_until_cast_ends() {
+        let (mut world, mob) = make_world_with_mob();
+        world.entity_mut(mob).insert(casting());
+        let mut host = gated_host();
+        host.set_current_tick(0);
+        host.exec_for_actor(&mut world, mob, "self:setvar('ran', 1)")
+            .unwrap();
+        assert!(!var_set(&world, "ran"), "not started mid-cast");
+        assert_eq!(host.yielded_count(), 1);
+        host.set_current_tick(10);
+        assert_eq!(host.tick_yielded(&mut world), 0, "still casting");
+        world.entity_mut(mob).remove::<mud_world::Casting>();
+        host.set_current_tick(20);
+        assert_eq!(host.tick_yielded(&mut world), 1);
+        assert!(var_set(&world, "ran"));
     }
 }
