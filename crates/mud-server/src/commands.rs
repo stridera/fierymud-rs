@@ -8171,6 +8171,39 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
     }
 }
 
+/// The room `note_room_entry` last ran for, so [`room_entry_tick`] only
+/// reacts to arrivals nobody has reported yet.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LastNotedRoom(Entity);
+
+/// Catch arrivals that do not go through the walking code - teleport,
+/// goto, transfer, summon, recall, portals, anything that moves a
+/// player by setting `Located` - and give them the same quest-side
+/// treatment as a step ([`note_room_entry`]). A player's first sighting
+/// (login, spawn) only records where they are: appearing in the world
+/// is not an entry.
+pub(crate) fn room_entry_tick(world: &mut World) {
+    let seen: Vec<(Entity, Entity, Option<Entity>)> = {
+        let mut q = world.query_filtered::<
+            (Entity, &Located, Option<&LastNotedRoom>),
+            (With<Player>, With<mud_world::Online>),
+        >();
+        q.iter(world)
+            .map(|(e, l, last)| (e, l.0, last.map(|r| r.0)))
+            .collect()
+    };
+    for (player, room, last) in seen {
+        if last == Some(room) {
+            continue;
+        }
+        if last.is_some() {
+            note_room_entry(world, player, room);
+        } else {
+            try_insert(world, player, LastNotedRoom(room));
+        }
+    }
+}
+
 /// Quest side of walking into `room`, run on EVERY entry (the
 /// exploration set in [`mark_room_visited`] only remembers the first):
 ///
@@ -8183,6 +8216,7 @@ pub(crate) fn note_room_entry(world: &mut World, player: Entity, room: Entity) {
     if world.get::<Player>(player).is_none() {
         return;
     }
+    try_insert(world, player, LastNotedRoom(room));
     let Some(key) = world.get::<WorldKey>(room).copied() else {
         return;
     };

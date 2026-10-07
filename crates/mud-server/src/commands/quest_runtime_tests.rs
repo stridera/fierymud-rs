@@ -865,3 +865,44 @@ async fn visit_room_bump_only_runs_for_targeted_rooms() {
     assert_eq!(fx.wait_for_status("COMPLETED").await, "COMPLETED");
     fx.end().await;
 }
+
+/// Arrivals that are not steps - here a staff `goto` - count as
+/// entering the room for VISIT_ROOM objectives; appearing in the world
+/// does not.
+#[tokio::test(flavor = "current_thread")]
+async fn teleport_arrival_counts_for_visit_room() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    let (mut world, player, target_room, _rx) = fx.world_as(UserRole::Builder);
+    let start = world
+        .spawn(WorldKey {
+            zone: fx.room.0,
+            id: 9_999_999,
+        })
+        .id();
+    // The player begins in `start`; the objective's room is `target_room`.
+    world.entity_mut(player).insert(Located(start));
+    let mut index = mud_world::WorldKeyIndex::default();
+    index.rooms.insert(fx.room, target_room);
+    world.insert_resource(index);
+    fx.accept().await;
+
+    // First sighting only records the room, even if it were the target.
+    super::room_entry_tick(&mut world);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(fx.status().await, "IN_PROGRESS");
+
+    super::dispatch(
+        &mut world,
+        player,
+        &format!("goto {} {}", fx.room.0, fx.room.1),
+    );
+    assert_eq!(
+        world.get::<Located>(player).map(|l| l.0),
+        Some(target_room),
+        "goto moved the player"
+    );
+    super::room_entry_tick(&mut world);
+    assert_eq!(fx.wait_for_status("COMPLETED").await, "COMPLETED");
+    fx.end().await;
+}
