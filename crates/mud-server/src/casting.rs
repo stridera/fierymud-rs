@@ -23,8 +23,15 @@
 //! - Damage taken during cast → Concentration check (damage as % of
 //!   max HP, > 30% breaks).
 //! - `abort`, `disengage`, `flee` → explicit interrupt.
-//! - Being moved by something else (follow, summon) → cancel.
+//! - Being moved by something else (a follower dragged along by its
+//!   leader) → cancel. A summon does not cancel a cast.
 //! - A bash knocks the caster flat (see `commands/combat.rs`).
+//!
+//! Slots: starting a spell *reserves* a slot of its circle (unavailable,
+//! not recovering); landing the spell commits the reservation into the
+//! normal recovery cooldown, and an abort, interruption, or a refusal at
+//! completion releases exactly that reservation (legacy charges only on
+//! `CAST_RESULT_CHARGE`). The id lives on the `Casting` component.
 //!
 //! Quick Chant: when the spell starts, a caster who knows the skill
 //! rolls the legacy formula; success halves the wind-up and trims it
@@ -39,10 +46,13 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AbilityCatalog, AbilityDef, Account, CastTarget, Casting, CoreStats, Fighting, Health,
-    KnownAbilities, Located, Player, Posture, PostureKind, Profile, SpellSlotData, SpellSlots,
+    KnownAbilities, Located, Player, Posture, PostureKind, Profile, SlotHold, SpellSlotData,
 };
 
-use crate::commands::{Prevent, can_see_player, effect_prevents, name_of, name_or, send_to};
+use crate::commands::{
+    Prevent, can_see_player, effect_prevents, name_of, name_or, player_can_see_in_dark,
+    room_has_light, room_is_dark, send_to, settle_slot,
+};
 
 /// One combat round in ticks. Combat round = 4s (per
 /// `GameConfig.combat.round_seconds`), `TICK_HZ` = 10, so 40 ticks.
@@ -67,10 +77,15 @@ const KNOW_SPELL_KEY: &str = "know_spell";
 
 /// Commands (canonical registry names) a player may still use while a
 /// cast winds up: the deliberate exits plus the passive info and
-/// channel commands legacy flagged `CMD_CAST`. Staff commands are
-/// always allowed (legacy `CMD_ANY`).
+/// channel commands legacy flagged `CMD_CAST` (directly, or through
+/// `CMD_ANY`; `interpreter.cpp`). `quit`, `save` and `toggle` are
+/// `CMD_ANY ^ CMD_CAST` there, i.e. explicitly refused mid-cast.
+/// Staff commands are always allowed (legacy `CMD_ANY`).
 const CASTING_ALLOWED: &[&str] = &[
     "abort",
+    "cls",
+    "world",
+    "quest",
     "disengage",
     "flee",
     "look",
@@ -129,17 +144,35 @@ pub(crate) fn allowed_while_casting(command: &str) -> bool {
     CASTING_ALLOWED.contains(&command)
 }
 
-/// Legacy quick-chant roll: `random(1..=110) < skill + int + wis`
-/// (stat bonuses never subtract).
+/// Legacy `stat_bonus[x].magic` (`constants.cpp`, `load_stat_bonus`):
+/// the "bonus to spells" a 0..=100 stat earns. Zero up to 44, then
+/// linear from 2 at 45 to 7 at 100 (`(x - 23) / 11`, which matches the
+/// legacy float expression truncated, at every x). A fixed legacy
+/// curve (runtime invariant), not builder-tunable content.
 #[must_use]
-pub(crate) fn quick_chant_hit(skill: i32, int_bonus: i32, wis_bonus: i32, roll: i32) -> bool {
-    roll < skill + int_bonus.max(0) + wis_bonus.max(0)
+pub(crate) fn stat_bonus_magic(stat: i32) -> i32 {
+    if stat < 45 {
+        0
+    } else {
+        (stat.min(100) - 23) / 11
+    }
 }
 
-/// Wind-up length in stars after a successful quick chant: halved,
-/// then trimmed by how far below the caster's top circle the spell
-/// sits (every 3 circles for damage / healing / violent spells, with
-/// a floor; every 2 for the rest). Never below one star.
+/// Legacy quick-chant roll: `random(1..=110) < skill + magic bonus of
+/// INT + magic bonus of WIS` (`spell_parser.cpp`, `do_cast`).
+#[must_use]
+pub(crate) fn quick_chant_hit(skill: i32, int_bonus: i32, wis_bonus: i32, roll: i32) -> bool {
+    roll < skill + int_bonus + wis_bonus
+}
+
+/// Wind-up length in stars (seconds; legacy `SINFO.cast_time` units,
+/// `cast_time_rounds * 4`) after a successful quick chant: halved, then
+/// trimmed by how far below the caster's top circle the spell sits.
+/// Damage / healing / violent spells lose one star per 3 circles, with
+/// a floor of one star (and, for long casts, of `half - 2`); only when
+/// the halved time is still above 1. Everything else loses one star per
+/// 2 circles with no minimum: the time can reach 0 and the spell lands
+/// at once (legacy `do_cast`).
 #[must_use]
 pub(crate) fn quick_chant_stars(
     base_stars: i32,
@@ -156,11 +189,12 @@ pub(crate) fn quick_chant_stars(
             if base_stars >= 10 && stars < base_stars / 2 - 2 {
                 stars = base_stars / 2 - 2;
             }
+            stars = stars.max(1);
         }
     } else {
         stars -= gap / 2;
     }
-    stars.max(1)
+    stars.max(0)
 }
 
 /// Wind-up length in ticks for `caster` starting `def`, and whether
@@ -193,8 +227,8 @@ pub(crate) fn wind_up_ticks(
     let core = world.get::<CoreStats>(caster).copied().unwrap_or_default();
     if !quick_chant_hit(
         skill,
-        CoreStats::bonus(core.intelligence),
-        CoreStats::bonus(core.wisdom),
+        stat_bonus_magic(core.intelligence),
+        stat_bonus_magic(core.wisdom),
         roll,
     ) {
         return (base, false);
@@ -366,8 +400,23 @@ fn spoken_name(def: &AbilityDef) -> String {
     def.plain_name.to_ascii_lowercase().replace('_', " ")
 }
 
-fn caster_label(world: &World, observer: Entity, caster: Entity) -> String {
-    if can_see_player(world, observer, caster) {
+/// Whether `observer` can make out `subject` in the shared room: not
+/// invisible to them, and the room isn't too dark to see anyone
+/// (`dark` is the room's darkness, computed once; `HOLY_LIGHT` pierces it).
+fn can_make_out(world: &World, observer: Entity, subject: Entity, dark: bool) -> bool {
+    (!dark || player_can_see_in_dark(world, observer)) && can_see_player(world, observer, subject)
+}
+
+/// True when the caster's room is dark with no light source in it.
+fn room_dark_for_all(world: &mut World, caster: Entity) -> bool {
+    let Some(room) = world.get::<Located>(caster).map(|l| l.0) else {
+        return false;
+    };
+    room_is_dark(world, room) && !room_has_light(world, room)
+}
+
+fn caster_label(world: &World, observer: Entity, caster: Entity, dark: bool) -> String {
+    if can_make_out(world, observer, caster, dark) {
         name_of(world, caster)
     } else {
         "Someone".to_string()
@@ -398,6 +447,7 @@ pub(crate) fn announce_cast_start(
         _ => None,
     };
     let mut recognized = Vec::new();
+    let dark = room_dark_for_all(world, caster);
     for observer in observers(world, caster) {
         let staff = is_staff(world, observer);
         let skill = know_spell_id
@@ -422,13 +472,15 @@ pub(crate) fn announce_cast_start(
             Some(t) if knows || rand::random_range(0..=101) < int => {
                 if t == observer {
                     " at <b><red>You</></>!!!".to_string()
-                } else {
+                } else if can_make_out(world, observer, t, dark) {
                     format!(" at <b>{}</>", name_or(world, t, "someone"))
+                } else {
+                    " at <b>someone</>".to_string()
                 }
             }
             _ => String::new(),
         };
-        let who = caster_label(world, observer, caster);
+        let who = caster_label(world, observer, caster, dark);
         send_to(
             world,
             observer,
@@ -455,8 +507,9 @@ fn announce_cast_complete(world: &mut World, caster: Entity, snap: &Casting) {
         .find(|d| d.id == snap.ability_id)
         .map_or_else(|| snap.ability_name.clone(), spoken_name);
     let garbled = syllabize(&plain);
+    let dark = room_dark_for_all(world, caster);
     for observer in observers(world, caster) {
-        let who = caster_label(world, observer, caster);
+        let who = caster_label(world, observer, caster, dark);
         send_to(
             world,
             observer,
@@ -473,7 +526,7 @@ fn announce_cast_complete(world: &mut World, caster: Entity, snap: &Casting) {
                 format!("stares at you and utters the words, '{spell}'.")
             }
             CastTarget::InRoom(t) | CastTarget::Fighting(t) => {
-                if can_see_player(world, observer, t) {
+                if can_make_out(world, observer, t, dark) {
                     format!(
                         "stares at {} and utters the words, '{spell}'.",
                         name_or(world, t, "someone"),
@@ -494,27 +547,24 @@ fn announce_cast_complete(world: &mut World, caster: Entity, snap: &Casting) {
     }
 }
 
-/// Remove the wind-up and hand the spent slot back (legacy only
-/// charges a spell that completes). `None` when nothing was casting.
+/// Remove the wind-up and release its slot reservation (legacy only
+/// charges a spell that completes): exactly the reserved slot, never
+/// another spell's. `None` when nothing was casting.
 fn end_cast(world: &mut World, caster: Entity) -> Option<Casting> {
     let snap = world.get::<Casting>(caster).cloned()?;
     if let Ok(mut em) = world.get_entity_mut(caster) {
         em.remove::<Casting>();
     }
-    if let Some(circle) = snap.slot_circle
-        && let Some(mut slots) = world.get_mut::<SpellSlots>(caster)
-        && let Some(pos) = slots.in_flight.iter().rposition(|c| c.circle == circle)
-    {
-        slots.in_flight.remove(pos);
-    }
+    settle_slot(world, caster, snap.slot_reservation, false);
     Some(snap)
 }
 
 /// Tell the room the caster's chant just broke off.
 fn announce_stop(world: &mut World, caster: Entity) {
     let name = name_of(world, caster);
+    let dark = room_dark_for_all(world, caster);
     for observer in observers(world, caster) {
-        let who = if can_see_player(world, observer, caster) {
+        let who = if can_make_out(world, observer, caster, dark) {
             name.clone()
         } else {
             "Someone".to_string()
@@ -591,10 +641,14 @@ pub(crate) fn casting_tick(world: &mut World) {
             }
             continue;
         }
-        // The wind-up is over: the slot stays spent. Take the
-        // component off *without* refunding, then land the spell.
+        // The wind-up is over. Take the component off and park the slot
+        // reservation as a `SlotHold`: the resolution commits it into the
+        // recovery cooldown if the spell lands, or releases it itself.
         if let Ok(mut em) = world.get_entity_mut(caster) {
             em.remove::<Casting>();
+            if let Some(id) = snap.slot_reservation {
+                em.insert(SlotHold(id));
+            }
         }
         announce_cast_complete(world, caster, &snap);
         crate::commands::resolve_queued_cast(
@@ -605,6 +659,15 @@ pub(crate) fn casting_tick(world: &mut World) {
             &snap.verb,
             snap.target,
         );
+        // Refused at completion before the resolution reached the
+        // slot (silenced, posture, cooldown, ...): nothing was cast,
+        // so the slot goes back untouched.
+        if let Some(hold) = world.get::<SlotHold>(caster).map(|h| h.0) {
+            if let Ok(mut em) = world.get_entity_mut(caster) {
+                em.remove::<SlotHold>();
+            }
+            settle_slot(world, caster, Some(hold), false);
+        }
     }
 }
 
@@ -651,7 +714,7 @@ mod tests {
     use crate::commands::test_support::{Rx, ability_def, drain, player_in};
     use crate::commands::{dispatch, invoke_ability};
     use mud_db::abilities::AbilityKind;
-    use mud_world::{EffectCatalog, EffectDef, Named};
+    use mud_world::{EffectCatalog, EffectDef, Mob, Named, SpellSlots};
 
     const MEND: i32 = 1;
     const QUICK_CHANT: i32 = 2;
@@ -822,33 +885,404 @@ mod tests {
     }
 
     #[test]
-    fn dead_target_aborts_and_the_slot_is_handed_back() {
-        let (mut world, room, _) = world_with_spell(1);
-        let (caster, mut rx) = caster_in(&mut world, room);
+    fn dead_target_aborts_and_the_reservation_is_released() {
+        let (mut world, room, _) = slot_world(1);
+        let (caster, mut rx) = slot_caster(&mut world, room, 1);
         let (bob, _b) = bob_in(&mut world, room);
         start_mend(&mut world, caster);
-        {
-            let mut c = world.get_mut::<Casting>(caster).unwrap();
-            c.slot_circle = Some(1);
-        }
-        world.entity_mut(caster).insert(SpellSlots {
-            in_flight: vec![mud_world::SpellCooldown {
-                circle: 1,
-                secs_remaining: 9,
-                total_secs: 9,
-            }],
-        });
+        assert_eq!(slots(&world, caster).reserved.len(), 1);
         world.entity_mut(bob).insert(Health { hp: 0, max: 50 });
         drain(&mut rx);
         run_ticks(&mut world, 1);
         assert!(drain(&mut rx).contains("You stop chanting abruptly!"));
+        assert!(slots(&world, caster).reserved.is_empty());
+        assert!(slots(&world, caster).in_flight.is_empty());
+    }
+
+    const CLASS: i32 = 7;
+    const OTHER: i32 = 3;
+
+    /// Mend (circle 1) for class 7 at level 10, two circle-1 slots.
+    fn slot_world(rounds: i32) -> (World, Entity, Entity) {
+        let (mut world, room, elsewhere) = world_with_spell(rounds);
+        let mut data = SpellSlotData::default();
+        data.ability_circle.insert((CLASS, MEND), 1);
+        data.ability_circle.insert((CLASS, OTHER), 1);
+        data.progression.insert((10, 1), 2);
+        world.insert_resource(data);
+        (world, room, elsewhere)
+    }
+
+    fn slot_caster(world: &mut World, room: Entity, _slots: i32) -> (Entity, Rx) {
+        let (caster, rx) = caster_in(world, room);
+        world.entity_mut(caster).insert(Profile {
+            level: 10,
+            class_id: Some(CLASS),
+            race: "HUMAN".to_string(),
+            experience: 0,
+            gender: "neutral".to_string(),
+        });
+        (caster, rx)
+    }
+
+    fn slots(world: &World, e: Entity) -> &SpellSlots {
+        world.get::<SpellSlots>(e).expect("slots")
+    }
+
+    #[test]
+    fn starting_a_cast_reserves_a_slot_without_recovering() {
+        let (mut world, room, _) = slot_world(1);
+        let (caster, _rx) = slot_caster(&mut world, room, 1);
+        let (_bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        let s = slots(&world, caster);
+        assert_eq!(s.reserved.len(), 1);
+        assert!(s.in_flight.is_empty(), "no recovery before completion");
+        assert_eq!(s.used_in_circle(1), 1);
+        let id = world.get::<Casting>(caster).unwrap().slot_reservation;
+        assert_eq!(id, Some(s.reserved[0].id));
+        run_ticks(&mut world, 20);
+        assert!(slots(&world, caster).in_flight.is_empty());
+    }
+
+    #[test]
+    fn completion_converts_the_reservation_into_recovery() {
+        let (mut world, room, _) = slot_world(1);
+        let (caster, _rx) = slot_caster(&mut world, room, 1);
+        let (bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        run_ticks(&mut world, 40);
+        assert!(hp(&world, bob) > 5, "the spell landed");
+        let s = slots(&world, caster);
+        assert!(s.reserved.is_empty());
+        assert_eq!(s.in_flight.len(), 1);
+        assert_eq!(s.in_flight[0].circle, 1);
+        assert_eq!(
+            s.in_flight[0].secs_remaining,
+            mud_world::CIRCLE_RECOVER_TIME[1]
+        );
+        assert!(world.get::<SlotHold>(caster).is_none());
+    }
+
+    #[test]
+    fn abort_releases_exactly_the_reserved_slot() {
+        let (mut world, room, _) = slot_world(2);
+        let (caster, _rx) = slot_caster(&mut world, room, 1);
+        let (_bob, _b) = bob_in(&mut world, room);
+        // An earlier spell's slot is mid-recovery in the same circle.
+        let mut earlier = SpellSlots::default();
+        earlier.in_flight.push(mud_world::SpellCooldown {
+            circle: 1,
+            secs_remaining: 9,
+            total_secs: 30,
+        });
+        world.entity_mut(caster).insert(earlier);
+        start_mend(&mut world, caster);
+        assert_eq!(slots(&world, caster).used_in_circle(1), 2, "both spent");
+        assert!(abort_casting(&mut world, caster));
+        let s = slots(&world, caster);
+        assert!(s.reserved.is_empty());
+        assert_eq!(
+            s.in_flight.len(),
+            1,
+            "the other spell's cooldown is untouched"
+        );
+        assert_eq!(s.in_flight[0].secs_remaining, 9);
+        assert_eq!(s.used_in_circle(1), 1);
+    }
+
+    #[test]
+    fn release_only_touches_its_own_reservation() {
+        let mut s = SpellSlots::default();
+        let a = s.reserve(1, 30);
+        let b = s.reserve(1, 30);
+        assert_ne!(a, b);
+        assert!(s.release(a));
+        assert!(!s.release(a), "already settled");
+        assert_eq!(s.reserved.len(), 1);
+        assert_eq!(s.reserved[0].id, b);
+        assert!(!s.commit(a));
+        assert!(s.commit(b));
+        assert!(s.reserved.is_empty());
+        assert_eq!(s.in_flight.len(), 1);
+    }
+
+    #[test]
+    fn refused_before_the_cast_starts_spends_nothing() {
+        let (mut world, room, _) = slot_world(1);
+        let (caster, mut rx) = slot_caster(&mut world, room, 1);
+        let (bob, _b) = bob_in(&mut world, room);
+        world
+            .resource_mut::<AbilityCatalog>()
+            .by_name
+            .get_mut("mend")
+            .unwrap()
+            .combat_ok = false;
+        world.entity_mut(caster).insert(Fighting(bob));
+        start_mend(&mut world, caster);
+        assert!(drain(&mut rx).contains("while fighting"));
+        assert!(world.get::<Casting>(caster).is_none());
         assert!(
             world
                 .get::<SpellSlots>(caster)
-                .unwrap()
-                .in_flight
-                .is_empty()
+                .is_none_or(|s| { s.reserved.is_empty() && s.in_flight.is_empty() })
         );
+
+        // A cooldown refusal is just as free.
+        world.entity_mut(caster).remove::<Fighting>();
+        let mut cd = mud_world::Cooldowns::default();
+        cd.ready_at.insert(
+            MEND,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        world.entity_mut(caster).insert(cd);
+        start_mend(&mut world, caster);
+        assert!(drain(&mut rx).contains("yet"));
+        assert!(
+            world
+                .get::<SpellSlots>(caster)
+                .is_none_or(|s| { s.reserved.is_empty() && s.in_flight.is_empty() })
+        );
+    }
+
+    #[test]
+    fn spent_circle_refuses_to_start() {
+        let (mut world, room, _) = slot_world(1);
+        let (caster, mut rx) = slot_caster(&mut world, room, 1);
+        let (_bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        world.entity_mut(caster).remove::<Casting>();
+        // Second reservation (the first stays held) fills the circle.
+        world.get_mut::<SpellSlots>(caster).unwrap().reserve(1, 30);
+        drain(&mut rx);
+        start_mend(&mut world, caster);
+        assert!(drain(&mut rx).contains("slots are spent (2/2)"));
+        assert!(world.get::<Casting>(caster).is_none());
+        assert_eq!(slots(&world, caster).reserved.len(), 2, "no third");
+    }
+
+    #[test]
+    fn refusal_at_completion_releases_the_reservation() {
+        let (mut world, room, _) = slot_world(1);
+        let (caster, mut rx) = slot_caster(&mut world, room, 1);
+        let (bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        // The spell goes on cooldown mid-wind-up: the completion gate
+        // refuses it, so nothing was cast and nothing is charged.
+        let mut cd = mud_world::Cooldowns::default();
+        cd.ready_at.insert(
+            MEND,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        world.entity_mut(caster).insert(cd);
+        drain(&mut rx);
+        run_ticks(&mut world, 40);
+        assert!(drain(&mut rx).contains("yet"));
+        assert_eq!(hp(&world, bob), 5, "nothing landed");
+        let s = slots(&world, caster);
+        assert!(s.reserved.is_empty());
+        assert!(s.in_flight.is_empty(), "no recovery started");
+        assert!(world.get::<SlotHold>(caster).is_none());
+    }
+
+    fn room_wide_world(rounds: i32) -> (World, Entity) {
+        let (mut world, room, _) = slot_world(rounds);
+        {
+            let mut cat = world.resource_mut::<AbilityCatalog>();
+            let mend = cat.by_name.get_mut("mend").unwrap();
+            mend.violent = true;
+            mend.target_scope = "ROOM_ENEMIES".to_string();
+        }
+        (world, room)
+    }
+
+    #[test]
+    fn room_wide_hostile_cast_is_refused_in_a_peaceful_room_before_the_chant() {
+        let (mut world, room) = room_wide_world(2);
+        let (caster, mut crx) = slot_caster(&mut world, room, 1);
+        let (_watcher, mut wrx) = player_in(&mut world, room);
+        world.entity_mut(room).insert(mud_world::PeacefulRoom);
+        invoke_ability(&mut world, caster, "'mend'", AbilityKind::Spell, "cast");
+        assert!(drain(&mut crx).contains("peaceful aura"));
+        assert!(world.get::<Casting>(caster).is_none());
+        assert!(world.get::<SpellSlots>(caster).is_none());
+        assert!(drain(&mut wrx).is_empty(), "no chant was announced");
+    }
+
+    #[test]
+    fn room_wide_cast_with_nobody_to_hit_is_refused_before_the_chant() {
+        let (mut world, room) = room_wide_world(2);
+        let (caster, mut crx) = slot_caster(&mut world, room, 1);
+        let (_watcher, mut wrx) = player_in(&mut world, room);
+        invoke_ability(&mut world, caster, "'mend'", AbilityKind::Spell, "cast");
+        assert!(drain(&mut crx).contains("Nothing here to cast"));
+        assert!(world.get::<Casting>(caster).is_none());
+        assert!(world.get::<SpellSlots>(caster).is_none());
+        assert!(drain(&mut wrx).is_empty(), "no chant was announced");
+    }
+
+    #[test]
+    fn room_wide_cast_with_targets_chants_and_reserves() {
+        let (mut world, room) = room_wide_world(2);
+        let (caster, _crx) = slot_caster(&mut world, room, 1);
+        let mob = world
+            .spawn((Mob, Located(room), Named { name: "rat".into() }))
+            .id();
+        let _ = mob;
+        invoke_ability(&mut world, caster, "'mend'", AbilityKind::Spell, "cast");
+        assert!(world.get::<Casting>(caster).is_some());
+        assert_eq!(slots(&world, caster).reserved.len(), 1);
+    }
+
+    #[test]
+    fn quick_chant_bonus_follows_the_legacy_stat_table() {
+        for x in [0, 1, 30, 44] {
+            assert_eq!(stat_bonus_magic(x), 0, "{x}");
+        }
+        assert_eq!(stat_bonus_magic(45), 2);
+        assert_eq!(stat_bonus_magic(50), 2);
+        assert_eq!(stat_bonus_magic(55), 2);
+        assert_eq!(stat_bonus_magic(56), 3);
+        assert_eq!(stat_bonus_magic(67), 4);
+        assert_eq!(stat_bonus_magic(89), 6);
+        assert_eq!(stat_bonus_magic(99), 6);
+        assert_eq!(stat_bonus_magic(100), 7);
+        assert_eq!(stat_bonus_magic(250), 7, "clamped like the 0..=100 table");
+    }
+
+    #[test]
+    fn quick_chant_uses_the_legacy_bonus_not_the_core_stat_bonus() {
+        let (mut world, room, _) = world_with_spell(4);
+        let (caster, _rx) = caster_in(&mut world, room);
+        world.entity_mut(caster).insert((
+            KnownAbilities {
+                entries: vec![(MEND, 500, true), (QUICK_CHANT, 400, true)],
+            },
+            CoreStats {
+                intelligence: 100,
+                wisdom: 100,
+                ..CoreStats::default()
+            },
+        ));
+        let def = world.resource::<AbilityCatalog>().by_name["mend"].clone();
+        // skill 40 + 7 + 7 = 54: a roll of 53 hits, 54 does not.
+        assert!(wind_up_ticks(&world, caster, &def, 53).1);
+        assert!(!wind_up_ticks(&world, caster, &def, 54).1);
+        // Below 45 the stats add nothing.
+        world.entity_mut(caster).insert(CoreStats {
+            intelligence: 44,
+            wisdom: 44,
+            ..CoreStats::default()
+        });
+        assert!(wind_up_ticks(&world, caster, &def, 39).1);
+        assert!(!wind_up_ticks(&world, caster, &def, 40).1);
+    }
+
+    #[test]
+    fn non_offensive_quick_chant_can_land_immediately() {
+        // 1 round = 4 stars, halved 2, minus (9 - 1) / 2 = 4 -> clamps to 0.
+        assert_eq!(quick_chant_stars(4, 9, 1, false), 0);
+        // Offensive casts keep a one-star minimum once above it...
+        assert_eq!(quick_chant_stars(4, 9, 1, true), 1);
+        // ...and a halved time of 0 or 1 is left alone.
+        assert_eq!(quick_chant_stars(1, 9, 1, true), 0);
+        assert_eq!(quick_chant_stars(3, 9, 1, true), 1);
+    }
+
+    #[test]
+    fn zero_star_quick_chant_resolves_on_the_first_tick() {
+        let (mut world, room, _) = slot_world(1);
+        let (caster, _rx) = slot_caster(&mut world, room, 1);
+        let (bob, _b) = bob_in(&mut world, room);
+        // Top circle 9 for a level-10 caster so the gap is wide.
+        world
+            .resource_mut::<SpellSlotData>()
+            .progression
+            .insert((10, 9), 1);
+        world.entity_mut(caster).insert(KnownAbilities {
+            entries: vec![(MEND, 500, true), (QUICK_CHANT, 1000, true)],
+        });
+        let mut landed = 0;
+        for _ in 0..30 {
+            world.entity_mut(bob).insert(Health { hp: 5, max: 50 });
+            world.entity_mut(caster).remove::<SpellSlots>();
+            start_mend(&mut world, caster);
+            if world.get::<Casting>(caster).unwrap().ticks_total == 0 {
+                run_ticks(&mut world, 1);
+                assert!(hp(&world, bob) > 5, "landed at once");
+                landed += 1;
+            } else {
+                world.entity_mut(caster).remove::<Casting>();
+            }
+        }
+        assert!(landed > 10, "quick chant fired: {landed}");
+    }
+
+    fn dark_room_with(world: &mut World, room: Entity) {
+        world
+            .entity_mut(room)
+            .insert(mud_world::RoomMagicalDarkness);
+    }
+
+    fn staff_watcher(world: &mut World, room: Entity) -> Rx {
+        // Staff always recognise the spell and its target.
+        let (watcher, rx) = player_in(world, room);
+        world.entity_mut(watcher).insert((
+            Named {
+                name: "Watcher".to_string(),
+            },
+            Account {
+                user_id: "w".into(),
+                character_id: "w".into(),
+                role: mud_db::enums::UserRole::Builder,
+                account_role: mud_db::enums::UserRole::Builder,
+                perms: vec![],
+            },
+        ));
+        rx
+    }
+
+    #[test]
+    fn lit_room_start_line_names_caster_and_target() {
+        let (mut world, room, _) = world_with_spell(2);
+        let (caster, _rx) = caster_in(&mut world, room);
+        let (_bob, _b) = bob_in(&mut world, room);
+        let mut wrx = staff_watcher(&mut world, room);
+        start_mend(&mut world, caster);
+        let out = drain(&mut wrx);
+        assert!(out.contains("Tester starts casting"), "{out:?}");
+        assert!(out.contains("Bob"), "{out:?}");
+    }
+
+    #[test]
+    fn dark_room_hides_caster_and_target_names() {
+        let (mut world, room, _) = world_with_spell(1);
+        dark_room_with(&mut world, room);
+        let (caster, _rx) = caster_in(&mut world, room);
+        let (_bob, _b) = bob_in(&mut world, room);
+        let mut wrx = staff_watcher(&mut world, room);
+        start_mend(&mut world, caster);
+        let out = drain(&mut wrx);
+        assert!(out.contains("Someone starts casting"), "{out:?}");
+        assert!(out.contains("someone"), "{out:?}");
+        assert!(!out.contains("Tester") && !out.contains("Bob"), "{out:?}");
+        run_ticks(&mut world, 40);
+        let out = drain(&mut wrx);
+        assert!(out.contains("Someone completes their spell"), "{out:?}");
+        assert!(out.contains("stares off at nothing"), "{out:?}");
+    }
+
+    #[test]
+    fn start_line_hides_an_invisible_target_like_the_completion_line() {
+        let (mut world, room, _) = world_with_spell(1);
+        let (caster, _rx) = caster_in(&mut world, room);
+        let (bob, _b) = bob_in(&mut world, room);
+        world.entity_mut(bob).insert(mud_world::Invisible);
+        let mut wrx = staff_watcher(&mut world, room);
+        start_mend(&mut world, caster);
+        let out = drain(&mut wrx);
+        assert!(out.contains("someone"), "{out:?}");
+        assert!(!out.contains("Bob"), "{out:?}");
     }
 
     #[test]
@@ -893,8 +1327,13 @@ mod tests {
         for name in ["abort", "flee", "disengage", "look", "gossip", "tell"] {
             assert!(allowed_while_casting(name), "{name}");
         }
+        // Legacy CMD_CAST (directly or via CMD_ANY).
+        for name in ["cls", "world", "quest", "score", "inventory"] {
+            assert!(allowed_while_casting(name), "{name}");
+        }
+        // `quit` / `save` / `toggle` are `CMD_ANY ^ CMD_CAST`: refused.
         for name in [
-            "north", "kill", "cast", "chant", "get", "sit", "say", "quit",
+            "north", "kill", "cast", "chant", "get", "sit", "say", "quit", "save", "toggle",
         ] {
             assert!(!allowed_while_casting(name), "{name}");
         }
@@ -983,8 +1422,8 @@ mod tests {
     #[test]
     fn quick_chant_trims_low_circle_spells_further() {
         // Utility spell, circle 1 for a caster whose top circle is 9:
-        // 8 stars halved = 4, minus (9 - 1) / 2 = 0 -> floored at 1.
-        assert_eq!(quick_chant_stars(8, 9, 1, false), 1);
+        // 8 stars halved = 4, minus (9 - 1) / 2 = 4 -> 0, no minimum.
+        assert_eq!(quick_chant_stars(8, 9, 1, false), 0);
         // Offensive spells lose one star per three circles instead.
         assert_eq!(quick_chant_stars(8, 9, 1, true), 2);
         // Same circle as the caster's top: only the halving.
@@ -997,8 +1436,6 @@ mod tests {
     fn quick_chant_roll_uses_skill_and_stats() {
         assert!(quick_chant_hit(50, 3, 2, 54));
         assert!(!quick_chant_hit(50, 3, 2, 55));
-        // Negative stat bonuses never hurt.
-        assert!(!quick_chant_hit(50, -4, -4, 50));
     }
 
     #[test]

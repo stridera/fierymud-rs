@@ -12482,7 +12482,8 @@ pub(crate) enum AoeScope {
 /// (`aoe_repeat = false`) so the description-box header / cooldown
 /// gate fire once; subsequent calls pass `aoe_repeat = true` to
 /// suppress the repeats. Empty target lists short-circuit with a
-/// caller-friendly refusal.
+/// caller-friendly refusal. Returns whether any target was dispatched
+/// to (the cast landed), so a slot reservation can be committed.
 ///
 /// Replaces hand-rolled per-ability AOE loops (currently `cmd_roar`)
 /// with a single generic dispatcher. Once `Ability.target_scope`
@@ -12497,16 +12498,16 @@ pub(crate) fn invoke_ability_aoe(
     ability_name: &str,
     scope: AoeScope,
     refusal_when_empty: &str,
-) {
+) -> bool {
     let Some(located) = world.get::<Located>(caster).copied() else {
         send_to(world, caster, "You are nowhere.\r\n");
-        return;
+        return false;
     };
     let room = located.0;
     let targets: Vec<(Entity, String)> = aoe_targets_in_room(world, caster, room, scope);
     if targets.is_empty() {
         send_to(world, caster, refusal_when_empty);
-        return;
+        return false;
     }
     // Per-target dispatch always passes `aoe_repeat = true` so the
     // recursive `invoke_ability_with` call doesn't re-trigger the
@@ -12528,6 +12529,112 @@ pub(crate) fn invoke_ability_aoe(
             true,
             Some(*target),
         );
+    }
+    true
+}
+
+/// What a room-wide cast says when nobody is there to hit / reach.
+fn aoe_refusal(scope: AoeScope, verb: &str, def: &mud_world::AbilityDef) -> String {
+    if matches!(scope, AoeScope::RoomEnemies | AoeScope::RoomAll) {
+        format!("Nothing here to {verb} {}.\r\n", def.name)
+    } else {
+        format!("Nobody here for {} to reach.\r\n", def.name)
+    }
+}
+
+/// Upfront checks for a room-wide cast, run before the chant starts
+/// (legacy refuses before `start_chant`, not after the wind-up): a
+/// peaceful room forbids hostile magic, and somebody has to be there to
+/// be affected. False (with the refusal already sent) means don't cast.
+fn aoe_preflight(
+    world: &mut World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+    verb: &str,
+    scope: AoeScope,
+) -> bool {
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return false;
+    };
+    if ability_is_hostile(world, def) && world.get::<mud_world::PeacefulRoom>(room).is_some() {
+        send_to(
+            world,
+            player,
+            "A peaceful aura forbids hostile magic here.\r\n",
+        );
+        return false;
+    }
+    if aoe_targets_in_room(world, player, room, scope).is_empty() {
+        send_to(world, player, aoe_refusal(scope, verb, def));
+        return false;
+    }
+    true
+}
+
+/// Take a slot for a spell that is about to start, when the caster's
+/// class gives it a circle: refuse (message sent, `Err`) if every slot
+/// of that circle is spent or reserved, otherwise hold one and return
+/// its reservation id. `Ok(None)` for spells outside the slot model
+/// (off-class, classless casters). Recovery time is the circle's base
+/// plus the spell's `memorization_time` tax, applied on commit.
+fn reserve_spell_slot(
+    world: &mut World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+) -> Result<Option<u64>, ()> {
+    let Some(class_id) = world.get::<Profile>(player).and_then(|p| p.class_id) else {
+        return Ok(None);
+    };
+    let data = world.resource::<mud_world::SpellSlotData>();
+    let Some(circle) = data.ability_circle.get(&(class_id, def.id)).copied() else {
+        return Ok(None);
+    };
+    let level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    let max = data.progression.get(&(level, circle)).copied().unwrap_or(0);
+    let used = world
+        .get::<mud_world::SpellSlots>(player)
+        .map_or(0, |s| s.used_in_circle(circle));
+    if used >= max {
+        send_to(
+            world,
+            player,
+            format!(
+                "Your circle {circle} slots are spent ({used}/{max}). \
+                 Wait for one to recover.\r\n"
+            ),
+        );
+        return Err(());
+    }
+    let recover = mud_world::CIRCLE_RECOVER_TIME
+        .get(usize::try_from(circle).unwrap_or(0))
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(def.memorization_time);
+    if world.get::<mud_world::SpellSlots>(player).is_none() {
+        world
+            .entity_mut(player)
+            .insert(mud_world::SpellSlots::default());
+    }
+    let id = world
+        .get_mut::<mud_world::SpellSlots>(player)
+        .map(|mut s| s.reserve(circle, recover));
+    Ok(id)
+}
+
+/// Settle a cast's slot reservation: `charge` commits it into the
+/// recovery cooldown (the spell landed), otherwise it is released
+/// untouched. Only ever acts on `hold`'s own slot.
+pub(crate) fn settle_slot(world: &mut World, player: Entity, hold: Option<u64>, charge: bool) {
+    let Some(id) = hold else {
+        return;
+    };
+    if let Some(mut slots) = world.get_mut::<mud_world::SpellSlots>(player) {
+        if charge {
+            slots.commit(id);
+        } else {
+            slots.release(id);
+        }
     }
 }
 
@@ -12728,6 +12835,25 @@ pub fn lua_attack_all(world: &mut World, attacker: Entity) {
     }
 }
 
+/// Whether `def` is hostile magic for the peaceful-room gate: any
+/// `ENEMY_*` / `AREA_FOES` / `AREA_HOSTILE` targeting. Abilities without an
+/// `AbilityTargeting` row (most of them) fall back to `violent`.
+fn ability_is_hostile(world: &World, def: &mud_world::AbilityDef) -> bool {
+    let valid_targets: Vec<String> = world
+        .resource::<AbilityCatalog>()
+        .targeting
+        .get(&def.id)
+        .map(|r| r.valid_targets.iter().map(|s| s.to_uppercase()).collect())
+        .unwrap_or_default();
+    if valid_targets.is_empty() {
+        def.violent
+    } else {
+        valid_targets
+            .iter()
+            .any(|t| t.starts_with("ENEMY") || t == "AREA_FOES" || t == "AREA_HOSTILE")
+    }
+}
+
 /// Resolve the single target of a cast and run the target-dependent
 /// gates (peaceful room, `AbilityTargeting`, `AbilityRestrictions`).
 /// Sends the refusal to the caster and returns `None` when the cast
@@ -12783,13 +12909,7 @@ fn resolve_and_gate_target(
     // spell (Burning Hands, Web, Fireball) reads as non-hostile and
     // the no-target gate below silently routes the cast onto the
     // caster — instant suicide. See G2.1 / G2.2 in remaining-work.md.
-    let is_hostile_ability = if valid_targets.is_empty() {
-        def.violent
-    } else {
-        valid_targets
-            .iter()
-            .any(|t| t.starts_with("ENEMY") || t == "AREA_FOES" || t == "AREA_HOSTILE")
-    };
+    let is_hostile_ability = ability_is_hostile(world, def);
     if is_hostile_ability
         && let Some(located) = world.get::<Located>(player)
         && world.get::<mud_world::PeacefulRoom>(located.0).is_some()
@@ -13198,81 +13318,12 @@ pub(crate) fn invoke_ability_with(
             return;
         };
         cast_target = lock;
+    } else if queue_wind_up
+        && let Some(scope) = aoe_scope_for(&def)
+        && !aoe_preflight(world, player, &def, verb, scope)
+    {
+        return;
     }
-    let mut slot_circle: Option<i32> = None;
-
-    // Slot gate: legacy slot-pool model. When the ability is a Spell
-    // AND the caster's class has it in `ClassAbilities` (i.e. it
-    // lands in a circle for this class), refuse the cast unless the
-    // class has a free slot of that circle at this level. Off-class
-    // spells, non-Spell kinds (Skill / Chant / Song), and classless
-    // casters skip the gate. On gate pass we push a `SpellCooldown`
-    // for the circle — fizzles still pay the slot ("burn the prep"),
-    // matching legacy `charge_mem` semantics.
-    //
-    // Slot cooldown = per-circle base + per-spell `memorization_time`
-    // tax. The circle table covers the bulk; `memorization_time` lets
-    // a builder make Meteorswarm cost a premium beyond its circle-10
-    // baseline without churning the global table.
-    // Slot gate is skipped when the cast is item-driven (scroll/wand/
-    // staff/potion). The *item* is the magic source — the player isn't
-    // burning a memorized slot — so the gate is irrelevant.
-    // Also skipped on the resolution path of a queued cast — the slot
-    // was already consumed at queue-start time and pushed into
-    // `SpellSlots.in_flight`, so re-checking now would refuse the
-    // resolution of a cast the player legitimately paid for.
-    if matches!(def.kind, mud_db::abilities::AbilityKind::Spell) && !from_item && !skip_queue {
-        let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
-        if let Some(class_id) = class_id {
-            let circle = world
-                .resource::<mud_world::SpellSlotData>()
-                .ability_circle
-                .get(&(class_id, def.id))
-                .copied();
-            if let Some(circle) = circle {
-                let level = world.get::<Profile>(player).map_or(0, |p| p.level);
-                let max = world
-                    .resource::<mud_world::SpellSlotData>()
-                    .progression
-                    .get(&(level, circle))
-                    .copied()
-                    .unwrap_or(0);
-                let used = world
-                    .get::<mud_world::SpellSlots>(player)
-                    .map_or(0, |s| s.used_in_circle(circle));
-                if used >= max {
-                    send_to(
-                        world,
-                        player,
-                        format!(
-                            "Your circle {circle} slots are spent ({used}/{max}). \
-                             Wait for one to recover.\r\n"
-                        ),
-                    );
-                    return;
-                }
-                let recover = mud_world::CIRCLE_RECOVER_TIME
-                    .get(usize::try_from(circle).unwrap_or(0))
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(def.memorization_time);
-                let cd = mud_world::SpellCooldown {
-                    circle,
-                    secs_remaining: recover,
-                    total_secs: recover,
-                };
-                slot_circle = Some(circle);
-                if let Some(mut s) = world.get_mut::<mud_world::SpellSlots>(player) {
-                    s.in_flight.push(cd);
-                } else {
-                    world.entity_mut(player).insert(mud_world::SpellSlots {
-                        in_flight: vec![cd],
-                    });
-                }
-            }
-        }
-    }
-
     // Combat-state gates (Ability.in_combat_only / combat_ok).
     // `in_combat_only` refuses casts when the caster has no Fighting;
     // `combat_ok=false` refuses while engaged. Both flags are
@@ -13403,15 +13454,42 @@ pub(crate) fn invoke_ability_with(
         }
     }
 
-    // Cast queue install. All the pay-up-front gates (anti-magic /
-    // dead-magic / known / slot / combat / posture / cooldown) have
-    // passed, so the slot is already in flight. From here we either
-    // queue the wind-up and bail (player-typed spell with
-    // `cast_time_rounds > 0`), or fall through to the resolution
-    // body. The resolution path (`skip_queue = true`) bypasses both
-    // this branch and the earlier slot-consumption block, since
-    // `casting_tick` is calling us *because* the slot was already
-    // paid. SKILL kind and item / AOE-sub casts always skip too.
+    // Slot reservation. Every refusal gate (anti-magic / dead-magic /
+    // known / combat / posture / cooldown / summon / room-wide target
+    // preflight) has passed, so only now does the cast take a slot --
+    // legacy charges only on completion (`complete_spell` ->
+    // `charge_mem`, `CAST_RESULT_CHARGE`). The slot is *held* (not
+    // recovering) until the spell lands; `settle_slot` then commits it
+    // into the normal cooldown, or releases it if the cast is refused
+    // or aborted. When the Spell's class has it in `ClassAbilities`
+    // the caster needs a free slot of that circle at this level;
+    // off-class spells, non-Spell kinds (Skill / Chant / Song) and
+    // classless casters skip the slot model. Item-driven casts (scroll /
+    // wand / staff / potion) never touch it: the *item* is the magic
+    // source. The resolution of a queued cast (`skip_queue`) takes over
+    // the reservation `casting_tick` parked in `SlotHold`.
+    let mut slot_hold: Option<u64> = None;
+    if matches!(def.kind, mud_db::abilities::AbilityKind::Spell) && !from_item {
+        if !skip_queue {
+            let Ok(hold) = reserve_spell_slot(world, player, &def) else {
+                return;
+            };
+            slot_hold = hold;
+        } else if !aoe_repeat {
+            slot_hold = world
+                .entity_mut(player)
+                .take::<mud_world::SlotHold>()
+                .map(|h| h.0);
+        }
+    }
+
+    // Cast queue install. All the refusal gates have passed and the
+    // slot is held. From here we either queue the wind-up and bail
+    // (player-typed spell with `cast_time_rounds > 0`), or fall
+    // through to the resolution body. The resolution path
+    // (`skip_queue = true`) bypasses this branch: `casting_tick` is
+    // calling us *because* the wind-up finished. SKILL kind and item /
+    // AOE-sub casts always skip too.
     if queue_wind_up {
         let roll = rand::random_range(1..=110);
         let (total_ticks, quick) = crate::casting::wind_up_ticks(world, player, &def, roll);
@@ -13427,7 +13505,7 @@ pub(crate) fn invoke_ability_with(
             ticks_total: total_ticks,
             target: cast_target,
             recognized_by,
-            slot_circle,
+            slot_reservation: slot_hold,
         });
         let secs = (total_ticks / 10).max(1);
         let quick_note = if quick {
@@ -13458,12 +13536,10 @@ pub(crate) fn invoke_ability_with(
     // this function once per target with aoe_repeat = true.
     let inferred_scope = aoe_scope_for(&def);
     if !aoe_repeat && let Some(scope) = inferred_scope {
-        let refusal = if matches!(scope, AoeScope::RoomEnemies | AoeScope::RoomAll) {
-            format!("Nothing here to {verb} {}.\r\n", def.name)
-        } else {
-            format!("Nobody here for {} to reach.\r\n", def.name)
-        };
-        invoke_ability_aoe(world, player, kind, verb, &def.plain_name, scope, &refusal);
+        let refusal = aoe_refusal(scope, verb, &def);
+        let dispatched =
+            invoke_ability_aoe(world, player, kind, verb, &def.plain_name, scope, &refusal);
+        settle_slot(world, player, slot_hold, dispatched);
         return;
     }
 
@@ -13476,6 +13552,7 @@ pub(crate) fn invoke_ability_with(
     let Some((target_entity, _)) =
         resolve_and_gate_target(world, player, &def, verb, target_word, forced_target)
     else {
+        settle_slot(world, player, slot_hold, false);
         return;
     };
     // (The legacy "requires:" informational block was removed once
@@ -13725,6 +13802,9 @@ pub(crate) fn invoke_ability_with(
                 &format!("You resist {}'s {}.\r\n", actor_name_pre, def.name,),
             );
         }
+        // The spell was cast and the target shrugged it off: legacy
+        // still charges the slot.
+        settle_slot(world, player, slot_hold, true);
         return;
     }
     let halve_duration = matches!(save_action, SaveOutcome::HalfDuration);
@@ -16772,6 +16852,7 @@ pub(crate) fn invoke_ability_with(
     // teammates per the shared bump_quest_progress dispatch.
     bump_use_skill_quest_progress(world, player, def.id);
     let _ = spawn_count;
+    settle_slot(world, player, slot_hold, true);
 }
 
 /// Validate that `target` matches at least one entry in

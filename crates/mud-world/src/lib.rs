@@ -27,11 +27,11 @@ pub use components::{
     RegenBonus, Resistances, RestState, RevealedExits, RiddenBy, Room, RoomBlockedExit,
     RoomBlockedExits, RoomBurningEffect, RoomExtras, RoomLayout, RoomMagicalDarkness,
     RoomMagicalLight, RoomSector, Sanctuary, SavingThrows, ScriptVars, Shopkeeper, Sized,
-    SkillPoints, Slot, SnoopedBy, Snooping, SoundproofRoom, SpellCooldown, SpellResistanceDelta,
-    SpellSlots, Stamina, Stealth, Stunned, SwitchedFrom, SwitchedInto, SyslogMinLevel, TellLog,
-    Thirst, TimePlayed, Title, Trophy, TrophyEntry, TrophyKind, UiStyle, WallTraversal,
-    WatchingSyslog, Wealth, WearableIn, WimpyThreshold, WizInvis, WorldKey, Zone, ZoneClimate,
-    ZoneVisits,
+    SkillPoints, Slot, SlotHold, SlotReservation, SnoopedBy, Snooping, SoundproofRoom,
+    SpellCooldown, SpellResistanceDelta, SpellSlots, Stamina, Stealth, Stunned, SwitchedFrom,
+    SwitchedInto, SyslogMinLevel, TellLog, Thirst, TimePlayed, Title, Trophy, TrophyEntry,
+    TrophyKind, UiStyle, WallTraversal, WatchingSyslog, Wealth, WearableIn, WimpyThreshold,
+    WizInvis, WorldKey, Zone, ZoneClimate, ZoneVisits,
 };
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_effect_catalog,

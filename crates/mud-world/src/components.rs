@@ -760,10 +760,11 @@ pub struct Casting {
     /// Players who recognised the spell from its chant (legacy
     /// `see_spell`). They see its true name when the cast completes.
     pub recognized_by: Vec<Entity>,
-    /// Circle of the spell slot this cast spent when it started.
-    /// Handed back if the wind-up is aborted: like legacy, only a
-    /// completed spell burns its slot.
-    pub slot_circle: Option<i32>,
+    /// Reservation (see [`SpellSlots::reserve`]) holding this cast's
+    /// slot. Released if the wind-up is aborted or refuses at
+    /// completion; committed into the slot's cooldown when the spell
+    /// lands. Like legacy, only a completed spell burns its slot.
+    pub slot_reservation: Option<u64>,
 }
 
 /// What a wind-up is locked onto, and where the target has to still be
@@ -1911,24 +1912,94 @@ pub struct SpellCooldown {
     pub total_secs: i32,
 }
 
+/// A slot held for a cast that has started but not completed. Not
+/// recovering: legacy only charges a spell slot when the spell
+/// completes (`complete_spell` -> `charge_mem`, on `CAST_RESULT_CHARGE`),
+/// so a wind-up holds a slot back without starting its cooldown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotReservation {
+    /// Unique per `SpellSlots`; stored on the `Casting` (or `SlotHold`)
+    /// that owns it so a release can only ever hit its own slot.
+    pub id: u64,
+    pub circle: i32,
+    /// Recovery time the slot gets once the reservation is committed.
+    pub recover_secs: i32,
+}
+
 /// Spell-slot pool for caster classes. Legacy slot model: at level
 /// `L` you have `SpellSlotData.progression[(L, C)]` slots in circle
-/// `C`. A slot is "free" if no `SpellCooldown` for that circle is
-/// in `in_flight`; casting consumes a free slot by pushing a
-/// cooldown. Fizzles still pay the slot ("burn the prep"). Persisted
-/// to `Characters.spell_cooldowns` so cooldowns survive disconnect.
+/// `C`. A slot is "free" if no `SpellCooldown` for that circle is in
+/// `in_flight` and no [`SlotReservation`] holds it. Starting a cast
+/// reserves a slot; completing the spell with a charge result commits
+/// the reservation into a cooldown (recovery starts then); an aborted
+/// or refused cast releases it untouched. Persisted to
+/// `Characters.spell_cooldowns` so cooldowns survive disconnect;
+/// reservations are transient (a wind-up never survives a logout).
 #[derive(Component, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SpellSlots {
     pub in_flight: Vec<SpellCooldown>,
+    #[serde(skip)]
+    pub reserved: Vec<SlotReservation>,
+    #[serde(skip)]
+    next_reservation: u64,
 }
 
 impl SpellSlots {
-    /// Number of slots in `circle` currently in cooldown.
+    /// Number of slots in `circle` unavailable right now: recovering
+    /// plus reserved by a cast in progress.
     #[must_use]
     pub fn used_in_circle(&self, circle: i32) -> i32 {
-        i32::try_from(self.in_flight.iter().filter(|c| c.circle == circle).count()).unwrap_or(0)
+        let cooling = self.in_flight.iter().filter(|c| c.circle == circle).count();
+        let held = self.reserved.iter().filter(|r| r.circle == circle).count();
+        i32::try_from(cooling + held).unwrap_or(i32::MAX)
+    }
+
+    /// Hold one slot of `circle` for a cast in progress. The slot is
+    /// unavailable but does not recover until [`commit`](Self::commit).
+    pub fn reserve(&mut self, circle: i32, recover_secs: i32) -> u64 {
+        self.next_reservation += 1;
+        let id = self.next_reservation;
+        self.reserved.push(SlotReservation {
+            id,
+            circle,
+            recover_secs,
+        });
+        id
+    }
+
+    /// Give back exactly the slot reserved as `id`. False if it was
+    /// already settled.
+    pub fn release(&mut self, id: u64) -> bool {
+        let Some(pos) = self.reserved.iter().position(|r| r.id == id) else {
+            return false;
+        };
+        self.reserved.remove(pos);
+        true
+    }
+
+    /// Turn reservation `id` into a normal cooldown: recovery starts
+    /// now. False if it was already settled.
+    pub fn commit(&mut self, id: u64) -> bool {
+        let Some(pos) = self.reserved.iter().position(|r| r.id == id) else {
+            return false;
+        };
+        let r = self.reserved.remove(pos);
+        self.in_flight.push(SpellCooldown {
+            circle: r.circle,
+            secs_remaining: r.recover_secs,
+            total_secs: r.recover_secs,
+        });
+        true
     }
 }
+
+/// Slot reservation of a queued cast that is resolving right now.
+/// `casting_tick` parks the id here while the spell lands; the
+/// resolution path settles it (commit / release) and removes the
+/// component, and the tick releases whatever is left over if the
+/// resolution refused before settling.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SlotHold(pub u64);
 
 /// What abilities (spells / chants / songs / skills) a character has
 /// learned, plus their proficiency. Loaded from `CharacterAbilities`
