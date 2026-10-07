@@ -961,6 +961,63 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         );
     }
 }
+/// Legacy `switch_ok`: moving to a new opponent mid-fight needs the
+/// `Switch` skill. No skill refuses outright; a failed roll (`roll`
+/// is 1..=101 against the skill percent) drops the current fight
+/// without starting a new one; success drops it so the caller can
+/// engage the new target. Returns true when the caller may proceed.
+fn try_switch_opponent(world: &mut World, player: Entity, old: Entity, roll: i32) -> bool {
+    let skill = world
+        .get_resource::<mud_world::AbilityCatalog>()
+        .and_then(|c| c.by_name.get("switch"))
+        .and_then(|def| {
+            world
+                .get::<mud_world::KnownAbilities>(player)?
+                .entries
+                .iter()
+                .find(|(id, _, known)| *id == def.id && *known)
+                .map(|(_, prof, _)| (prof / 10).clamp(0, 100))
+        })
+        .unwrap_or(0);
+    if skill <= 0 {
+        let old_name = name_of(world, old);
+        send_to(
+            world,
+            player,
+            format!("You are already busy fighting with {old_name}.\r\n"),
+        );
+        return false;
+    }
+    let player_name = name_of(world, player);
+    let room = world.get::<Located>(player).map(|l| l.0);
+    try_remove::<Fighting>(world, player);
+    if roll > skill {
+        send_to(
+            world,
+            player,
+            "You try to switch opponents and become confused.\r\n",
+        );
+        if let Some(room) = room {
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[player],
+                &format!("{player_name} tries to switch opponents, but becomes confused!\r\n"),
+            );
+        }
+        return false;
+    }
+    send_to(world, player, "You switch opponents!\r\n");
+    if let Some(room) = room {
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{player_name} switches opponents!\r\n"),
+        );
+    }
+    true
+}
 pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     if !require_alert_posture(world, player, "attack") {
         return;
@@ -1042,6 +1099,27 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     }
 
     if !super::attack_ok::attack_ok(world, player, target, true) {
+        return;
+    }
+
+    // Already-fighting gate (legacy `do_hit`): re-issuing the command
+    // on the current opponent is a no-op, and picking a different one
+    // is a `switch` skill check. Without this, every `kill` re-ran the
+    // engage path below -- a free first swing, a fresh ATTACK trigger
+    // and a stamina drain each time -- and swapped targets with no
+    // skill at all.
+    let current = world
+        .get::<Fighting>(player)
+        .map(|f| f.0)
+        .filter(|&c| world.get::<Located>(c).is_some_and(|l| l.0 == located.0));
+    if current == Some(target) {
+        send_to(world, player, "You're doing the best you can!\r\n");
+        return;
+    }
+    if let Some(old) = current
+        && world.get::<Mob>(player).is_none()
+        && !try_switch_opponent(world, player, old, rand::random_range(1..=101))
+    {
         return;
     }
     let actual_name = name_of(world, target);
@@ -3049,4 +3127,140 @@ pub(crate) fn cmd_disengage(world: &mut World, player: Entity, args: &str) {
     }
     try_remove::<Fighting>(world, player);
     send_to(world, player, "You stop fighting.\r\n");
+}
+
+#[cfg(test)]
+mod attack_while_fighting_tests {
+    use super::*;
+    use crate::commands::test_support::{ability_def, drain, player_in};
+    use mud_db::abilities::AbilityKind;
+    use mud_world::{AbilityCatalog, KnownAbilities, PlayerFlags};
+
+    const SWITCH: i32 = 7;
+
+    /// Player "Tester" fighting mob "ogre" with a second mob "rat"
+    /// in the room. Both mobs fight back.
+    fn setup() -> (
+        World,
+        Entity,
+        Entity,
+        Entity,
+        crate::commands::test_support::Rx,
+    ) {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (p, rx) = player_in(&mut world, room);
+        world
+            .entity_mut(p)
+            .insert((CombatStats::default(), Health { hp: 100, max: 100 }));
+        let mk = |world: &mut World, name: &str| {
+            world
+                .spawn((
+                    Mob,
+                    Named { name: name.into() },
+                    Located(room),
+                    CombatStats::default(),
+                    Health { hp: 100, max: 100 },
+                ))
+                .id()
+        };
+        let ogre = mk(&mut world, "ogre");
+        let rat = mk(&mut world, "rat");
+        world.entity_mut(p).insert(Fighting(ogre));
+        world.entity_mut(ogre).insert(Fighting(p));
+        (world, p, ogre, rat, rx)
+    }
+
+    fn hp(world: &World, e: Entity) -> i32 {
+        world.get::<Health>(e).unwrap().hp
+    }
+
+    fn with_switch(world: &mut World, p: Entity, proficiency: i32) {
+        let mut catalog = AbilityCatalog::default();
+        catalog.by_name.insert(
+            "switch".to_string(),
+            ability_def(SWITCH, "Switch", AbilityKind::Skill),
+        );
+        world.insert_resource(catalog);
+        world.entity_mut(p).insert(KnownAbilities {
+            entries: vec![(SWITCH, proficiency, true)],
+        });
+    }
+
+    #[test]
+    fn kill_same_target_is_a_no_op() {
+        let (mut world, p, ogre, _rat, mut rx) = setup();
+        for _ in 0..3 {
+            cmd_attack(&mut world, p, "ogre");
+        }
+        let out = drain(&mut rx);
+        assert_eq!(
+            out.matches("You're doing the best you can!").count(),
+            3,
+            "{out}"
+        );
+        assert!(!out.contains("You attack"), "{out}");
+        assert_eq!(hp(&world, ogre), 100, "no free swing");
+        assert_eq!(hp(&world, p), 100);
+        assert_eq!(world.get::<Fighting>(p).map(|f| f.0), Some(ogre));
+        assert_eq!(world.get::<Fighting>(ogre).map(|f| f.0), Some(p));
+    }
+
+    #[test]
+    fn kill_other_without_switch_is_refused() {
+        let (mut world, p, ogre, rat, mut rx) = setup();
+        cmd_attack(&mut world, p, "rat");
+        let out = drain(&mut rx);
+        assert!(out.contains("You are already busy fighting with"), "{out}");
+        assert_eq!(world.get::<Fighting>(p).map(|f| f.0), Some(ogre));
+        assert!(world.get::<Fighting>(rat).is_none());
+        assert_eq!(hp(&world, rat), 100);
+    }
+
+    #[test]
+    fn failed_switch_roll_drops_the_fight_without_engaging() {
+        let (mut world, p, ogre, _rat, mut rx) = setup();
+        with_switch(&mut world, p, 500); // 50%
+        assert!(!try_switch_opponent(&mut world, p, ogre, 51));
+        assert!(drain(&mut rx).contains("become confused"));
+        assert!(world.get::<Fighting>(p).is_none());
+    }
+
+    #[test]
+    fn successful_switch_roll_clears_the_old_target() {
+        let (mut world, p, ogre, _rat, mut rx) = setup();
+        with_switch(&mut world, p, 500);
+        assert!(try_switch_opponent(&mut world, p, ogre, 50));
+        assert!(drain(&mut rx).contains("You switch opponents!"));
+        assert!(world.get::<Fighting>(p).is_none());
+    }
+
+    #[test]
+    fn kill_other_still_obeys_the_pk_rule() {
+        let (mut world, p, ogre, _rat, mut rx) = setup();
+        let room = world.get::<Located>(p).unwrap().0;
+        let (victim, _vrx) = player_in(&mut world, room);
+        world.entity_mut(victim).insert((
+            Named {
+                name: "Victim".into(),
+            },
+            CombatStats::default(),
+            PlayerFlags(vec![]),
+        ));
+        world.entity_mut(p).insert(PlayerFlags(vec![]));
+        cmd_attack(&mut world, p, "victim");
+        let out = drain(&mut rx);
+        assert!(out.contains("You must turn on PK first"), "{out}");
+        assert!(!out.contains("busy fighting"), "{out}");
+        assert_eq!(world.get::<Fighting>(p).map(|f| f.0), Some(ogre));
+    }
+
+    #[test]
+    fn mob_attackers_switch_freely() {
+        let (mut world, _p, ogre, rat, _rx) = setup();
+        // The ogre fights the player; it has no Switch skill row, and
+        // the skill gate is player-only.
+        cmd_attack(&mut world, ogre, "rat");
+        assert_eq!(world.get::<Fighting>(ogre).map(|f| f.0), Some(rat));
+    }
 }
