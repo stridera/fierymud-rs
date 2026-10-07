@@ -265,10 +265,30 @@ fn plain_telnet_notice_bytes(world: &World) -> Vec<u8> {
     // The prompt that follows is written straight after this block, so
     // a row without a trailing line break glued "Password:" onto the
     // notice (#49). Prompts are the only login text left unterminated.
-    if !text.ends_with('\n') {
-        text.push_str("\r\n");
+    // `render_color_tags` closes an unclosed tag with a trailing SGR
+    // reset, so test for the line break just before that reset and put
+    // the CRLF there (otherwise "...\r\n<red>" got a second one).
+    let body_len = text.trim_end_matches("\x1b[0m").len();
+    if !text[..body_len].ends_with('\n') {
+        text.insert_str(body_len, "\r\n");
     }
     text.into_bytes()
+}
+
+/// Shape check for the first login prompt, run before any lookup or
+/// echo. Email-shaped input (contains `@`, the website device-code
+/// path) must be free of control bytes and whitespace; anything else
+/// must look like a legacy character name (`_parse_name` in
+/// `fierymud_legacy/src/db.cpp`: ASCII letters only, at least two of
+/// them). The upper bound is the creation cap rather than legacy's 16
+/// so characters already created with 17-20 letters can still log in.
+/// Case is not enforced (lookup is case-insensitive).
+fn is_valid_login_identifier(s: &str) -> bool {
+    const MAX_EMAIL_LEN: usize = 254;
+    if s.contains('@') {
+        return s.len() <= MAX_EMAIL_LEN && !s.chars().any(|c| c.is_control() || c.is_whitespace());
+    }
+    (2..=MAX_CHARACTER_NAME_LEN).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphabetic())
 }
 
 /// Verify a plaintext password against a stored hash, transparently
@@ -1501,6 +1521,19 @@ impl ConnRouter {
                 // Either path lands in AwaitingPassword; the character path
                 // also stashes a preselected character so we can skip the
                 // CharSelect menu.
+                if !is_valid_login_identifier(trimmed) {
+                    // Never echo the rejected input: control bytes in it
+                    // (ESC sequences) would act on the player's terminal.
+                    let _ = ctx
+                        .outbound
+                        .try_send(b"Invalid name, please try another.\r\n".to_vec());
+                    let _ = ctx.outbound.try_send(login_message_bytes(
+                        world,
+                        "EMAIL_PROMPT",
+                        IDENT_PROMPT_FALLBACK,
+                    ));
+                    return;
+                }
                 let is_email = trimmed.contains('@');
                 let sentinel_user = || User {
                     id: String::new(),
@@ -6790,6 +6823,55 @@ mod tests {
     fn tls_detection_uses_conn_id_bit() {
         assert!(!conn_is_tls(7));
         assert!(conn_is_tls((1u64 << 40) | 7));
+    }
+
+    #[test]
+    fn plain_telnet_notice_open_colour_tag_after_crlf_gets_no_extra_line_break() {
+        let mut world = World::new();
+        world.insert_resource(messages(&[(
+            "PLAIN_TELNET_NOTICE",
+            "default",
+            "<red>Not encrypted.\r\n",
+        )]));
+        let notice = String::from_utf8(plain_telnet_notice_bytes(&world)).unwrap();
+        assert!(notice.contains("Not encrypted.\r\n"), "{notice:?}");
+        assert_eq!(notice.matches('\n').count(), 1, "{notice:?}");
+        assert!(notice.ends_with("\x1b[0m"), "{notice:?}");
+
+        // Unterminated text with an open tag still gets exactly one.
+        world.insert_resource(messages(&[(
+            "PLAIN_TELNET_NOTICE",
+            "default",
+            "<red>Not encrypted.",
+        )]));
+        let notice = String::from_utf8(plain_telnet_notice_bytes(&world)).unwrap();
+        assert_eq!(notice.matches('\n').count(), 1, "{notice:?}");
+    }
+
+    #[test]
+    fn login_identifier_rejects_control_bytes_and_bad_shapes() {
+        assert!(!is_valid_login_identifier("\x1b[2J"));
+        assert!(!is_valid_login_identifier("Bob\x07"));
+        assert!(!is_valid_login_identifier("\x7fBob"));
+        assert!(!is_valid_login_identifier("a"));
+        assert!(!is_valid_login_identifier(""));
+        assert!(!is_valid_login_identifier("Bob2"));
+        assert!(!is_valid_login_identifier("o'neil"));
+        assert!(!is_valid_login_identifier("two words"));
+        let too_long = "a".repeat(MAX_CHARACTER_NAME_LEN + 1);
+        assert!(!is_valid_login_identifier(&too_long));
+    }
+
+    #[test]
+    fn login_identifier_accepts_names_and_emails() {
+        assert!(is_valid_login_identifier("Strider"));
+        assert!(is_valid_login_identifier("ab"));
+        assert!(is_valid_login_identifier(
+            &"a".repeat(MAX_CHARACTER_NAME_LEN)
+        ));
+        assert!(is_valid_login_identifier("user@example.com"));
+        assert!(!is_valid_login_identifier("us er@example.com"));
+        assert!(!is_valid_login_identifier("user@exa\x1bmple.com"));
     }
 
     #[test]
