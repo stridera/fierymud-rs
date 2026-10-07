@@ -405,3 +405,71 @@ async fn variables_are_listed_for_hydration() {
     assert!(mine(mud_db::quests::list_with_variables(&fx.pool).await.unwrap()).is_empty());
     fx.end().await;
 }
+
+/// DELIVER_ITEM matches on item AND recipient; USE_SKILL on the
+/// ability. Both read the columns the quest API already stores.
+#[tokio::test]
+async fn deliver_item_and_use_skill_objectives_match_their_targets() {
+    let Some(fx) = fixture().await else { return };
+    let obj: (i32, i32) =
+        sqlx::query_as("SELECT zone_id, id FROM \"Objects\" ORDER BY zone_id, id LIMIT 1")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    let ability: i32 = sqlx::query_scalar("SELECT id FROM \"Ability\" ORDER BY id LIMIT 1")
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    fx.phase(1, 0).await;
+    sqlx::query(
+        "INSERT INTO \"QuestObjective\" (quest_zone_id, quest_id, phase_id, id, \
+         objective_type, player_description, required_count, \
+         target_object_zone_id, target_object_id, deliver_to_mob_zone_id, deliver_to_mob_id) \
+         VALUES ($1, $2, 1, 1, 'DELIVER_ITEM'::\"QuestObjectiveType\", 'deliver', 1, \
+         $3, $4, $5, $6)",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .bind(obj.0)
+    .bind(obj.1)
+    .bind(fx.mobs[0].0)
+    .bind(fx.mobs[0].1)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO \"QuestObjective\" (quest_zone_id, quest_id, phase_id, id, \
+         objective_type, player_description, required_count, target_ability_id) \
+         VALUES ($1, $2, 1, 2, 'USE_SKILL'::\"QuestObjectiveType\", 'use', 1, $3)",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .bind(ability)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(fx.accept().await, AcceptOutcome::Accepted);
+
+    let deliver = |mob: usize| {
+        let pool = fx.pool.clone();
+        let cid = fx.char_id.clone();
+        let (mz, mid) = fx.mobs[mob];
+        async move {
+            mud_db::quest_objectives::list_deliver_item_progress(
+                &pool, &cid, obj.0, obj.1, mz, mid, true,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(deliver(0).await.len(), 1, "right item to the right mob");
+    assert!(deliver(1).await.is_empty(), "wrong recipient");
+
+    let used =
+        mud_db::quest_objectives::list_use_skill_progress(&fx.pool, &fx.char_id, ability, true)
+            .await
+            .unwrap();
+    assert_eq!(used.len(), 1);
+    assert_eq!(used[0].objective_id, 2);
+    fx.end().await;
+}
