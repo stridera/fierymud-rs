@@ -3331,7 +3331,14 @@ impl ConnRouter {
             );
             return;
         }
-        let fresh = reload_character_row(pool, char_row).await;
+        let fresh = match reload_character_row(pool, &char_row, self.load_fault).await {
+            Ok(fresh) => fresh,
+            Err(failure) => {
+                failure.log(conn_id, &char_row.id);
+                self.refuse_login(conn_id, LOAD_FAILED_MESSAGE);
+                return;
+            }
+        };
         self.complete_login_inner(conn_id, world, pool, user, fresh, true)
             .await;
     }
@@ -3382,9 +3389,7 @@ impl ConnRouter {
         let loaded = match load_persisted(pool, &char_row, &user, self.load_fault).await {
             Ok(l) => l,
             Err(failure) => {
-                error!(conn_id, character_id = %char_row.id, table = failure.table,
-                    error = %failure.source,
-                    "login refused: per-character table failed to load");
+                failure.log(conn_id, &char_row.id);
                 self.refuse_login(conn_id, LOAD_FAILED_MESSAGE);
                 return;
             }
@@ -3519,9 +3524,8 @@ impl ConnRouter {
                     poof_out: char_row.poof_out.clone(),
                 });
             }
-            // ScriptVars — JSON object → BTreeMap. Tolerate a
-            // garbage/legacy shape silently (drop the data) rather
-            // than rejecting login.
+            // ScriptVars — JSON object → BTreeMap. Shape was already
+            // validated by `check_json` in `load_persisted`.
             if let Some(json) = script_vars_json
                 && let Ok(map) =
                     serde_json::from_value::<std::collections::BTreeMap<String, String>>(json)
@@ -3529,9 +3533,7 @@ impl ConnRouter {
             {
                 e.insert(mud_world::ScriptVars(map));
             }
-            // Trophy — JSON list → Trophy. Same tolerant pattern;
-            // the kill counter just resets to empty on bad data
-            // instead of bouncing the player off the server.
+            // Trophy — JSON list → Trophy (validated in `load_persisted`).
             if let Some(json) = trophy_json
                 && let Ok(entries) = serde_json::from_value::<
                     std::collections::VecDeque<mud_world::TrophyEntry>,
@@ -3541,17 +3543,15 @@ impl ConnRouter {
                 e.insert(mud_world::Trophy { entries });
             }
             // SpellSlots — JSON object {in_flight: [...]} → component.
-            // Tolerant: missing/garbage data starts the player with a
-            // fresh empty pool rather than bouncing login.
+            // Validated in `load_persisted`; NULL/empty means no slots.
             if let Some(json) = spell_cooldowns_json
                 && let Ok(slots) = serde_json::from_value::<mud_world::SpellSlots>(json)
                 && !slots.in_flight.is_empty()
             {
                 e.insert(slots);
             }
-            // IgnoreList — JSON array of lowercased names. Tolerant:
-            // garbage data starts with an empty list rather than
-            // bouncing login.
+            // IgnoreList — JSON array of lowercased names (validated in
+            // `load_persisted`).
             if let Some(json) = ignore_list_json
                 && let Ok(list) = serde_json::from_value::<Vec<String>>(json)
                 && !list.is_empty()
@@ -4668,10 +4668,67 @@ pub(crate) fn snapshot_player(
 const LOAD_FAILED_MESSAGE: &str =
     "The game is having trouble loading your character; please try again in a minute.";
 
-/// A per-character table failed to load; carries which one for the log.
-struct LoadFailure {
-    table: &'static str,
-    source: mud_db::sqlx::Error,
+/// Saved per-character state could not be loaded; carries which table or
+/// column for the log. Either way the login is refused, because the next
+/// save would write the empty stand-in over the real data.
+#[derive(Debug)]
+enum LoadFailure {
+    /// A table read failed.
+    Db {
+        table: &'static str,
+        source: mud_db::sqlx::Error,
+    },
+    /// A non-empty JSON column did not parse into its runtime shape.
+    Parse {
+        column: &'static str,
+        source: serde_json::Error,
+    },
+}
+
+impl LoadFailure {
+    /// Log at ERROR naming the character and table/column. Never the raw
+    /// column value: it is player data.
+    fn log(&self, conn_id: ConnId, character_id: &str) {
+        match self {
+            Self::Db { table, source } => error!(conn_id, character_id, table, error = %source,
+                "login refused: per-character table failed to load"),
+            Self::Parse { column, source } => error!(conn_id, character_id, column,
+                error = %source,
+                "login refused: saved state column failed to parse"),
+        }
+    }
+}
+
+impl std::fmt::Display for LoadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Db { table, source } => write!(f, "{table}: {source}"),
+            Self::Parse { column, source } => write!(f, "{column}: {source}"),
+        }
+    }
+}
+
+/// Refuse a saved JSON column that has content but does not parse as `T`.
+/// NULL and empty values (`null`, `""`, `{}`, `[]`) carry nothing to lose
+/// and are allowed.
+fn check_json<T: serde::de::DeserializeOwned>(
+    column: &'static str,
+    value: Option<&serde_json::Value>,
+) -> Result<(), LoadFailure> {
+    let Some(value) = value else { return Ok(()) };
+    let empty = match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => s.is_empty(),
+        serde_json::Value::Array(a) => a.is_empty(),
+        serde_json::Value::Object(o) => o.is_empty(),
+        _ => false,
+    };
+    if empty {
+        return Ok(());
+    }
+    serde_json::from_value::<T>(value.clone())
+        .map(drop)
+        .map_err(|source| LoadFailure::Parse { column, source })
 }
 
 /// Everything read from per-character tables at login.
@@ -4716,7 +4773,7 @@ async fn guarded<T>(
     } else {
         load.await
     };
-    result.map_err(|source| LoadFailure { table, source })
+    result.map_err(|source| LoadFailure::Db { table, source })
 }
 
 /// Housing summary: `None` for the typical player who owns no house.
@@ -4851,6 +4908,22 @@ async fn load_persisted(
     )
     .await?;
     let pets_json = guarded(fault, "pets", mud_db::characters::load_pets(pool, id)).await?;
+    // The component hydration below tolerates nothing: a column that has
+    // content but does not parse would be dropped, and the next save
+    // would then write NULL over it.
+    check_json::<std::collections::BTreeMap<String, String>>(
+        "script_vars",
+        script_vars_json.as_ref(),
+    )?;
+    check_json::<std::collections::VecDeque<mud_world::TrophyEntry>>(
+        "trophy_data",
+        trophy_json.as_ref(),
+    )?;
+    check_json::<mud_world::SpellSlots>("spell_cooldowns", spell_cooldowns_json.as_ref())?;
+    check_json::<Vec<String>>("ignore_list", ignore_list_json.as_ref())?;
+    check_json::<std::collections::HashMap<String, i64>>("cooldowns", cooldowns_json.as_ref())?;
+    check_json::<PersistedEffects>("effect_instances", effect_instances_json.as_ref())?;
+    check_json::<PersistedPets>("pets", pets_json.as_ref())?;
     let house_summary = load_house(pool, id, fault).await?;
     let mut ability_rows = guarded(
         fault,
@@ -4911,18 +4984,21 @@ async fn load_persisted(
 }
 
 /// Re-read a character's row after waiting on its pending save, so the
-/// session starts from what that save wrote. Falls back to the row it was
-/// given if the re-read fails (the per-table loads that follow would then
-/// still be current).
-async fn reload_character_row(pool: &PgPool, stale: CharacterRow) -> CharacterRow {
-    match characters::find_by_name(pool, &stale.name).await {
-        Ok(Some(fresh)) if fresh.id == stale.id => fresh,
-        Ok(_) => stale,
-        Err(e) => {
-            warn!(error = %e, character_id = %stale.id, "character reload after save wait failed");
-            stale
+/// session starts from what that save wrote. A failed or empty re-read is
+/// an error: continuing with the pre-wait row would let the next
+/// `save_state` write those older stats over the save that just landed.
+async fn reload_character_row(
+    pool: &PgPool,
+    stale: &CharacterRow,
+    fault: Option<&str>,
+) -> Result<CharacterRow, LoadFailure> {
+    guarded(fault, "character_reload", async {
+        match characters::find_by_name(pool, &stale.name).await? {
+            Some(fresh) if fresh.id == stale.id => Ok(fresh),
+            _ => Err(mud_db::sqlx::Error::RowNotFound),
         }
-    }
+    })
+    .await
 }
 
 /// Run every per-character DB write for `snap` inside ONE transaction.
@@ -7567,7 +7643,7 @@ mod tests {
         };
         assert!(settled, "the retry landed within the wait");
         assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) >= 2);
-        let fresh = reload_character_row(&pool, stale).await;
+        let fresh = reload_character_row(&pool, &stale, None).await.unwrap();
         assert_eq!(fresh.hit_points, 3, "login must see the saved state");
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
@@ -8462,13 +8538,117 @@ mod tests {
         // Control: without a fault the loader returns both tables.
         let ok = load_persisted(&pool, &c, &user, None)
             .await
-            .unwrap_or_else(|f| panic!("control load failed at {}: {}", f.table, f.source));
+            .unwrap_or_else(|f| panic!("control load failed at {f}"));
         assert_eq!(ok.item_rows.len(), 1);
         assert!(
             ok.ability_rows
                 .iter()
                 .any(|r| r.ability_id == ability_id && r.proficiency == 77)
         );
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// A non-empty saved-state column that does not parse refuses the
+    /// login and leaves the stored bytes untouched; NULL and empty values
+    /// still log in (checked via the loader).
+    #[tokio::test(flavor = "current_thread")]
+    async fn unparseable_saved_state_refuses_login_and_keeps_bytes() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (user, c) = temp_unlinked_char(&pool, "pj").await;
+        let columns = [
+            "script_vars",
+            "trophy_data",
+            "spell_cooldowns",
+            "ignore_list",
+            "cooldowns",
+            "effect_instances",
+            "pets",
+        ];
+        for column in columns {
+            mud_db::sqlx::query(
+                "UPDATE \"Characters\" SET script_vars = NULL, trophy_data = NULL, \
+                 spell_cooldowns = NULL, ignore_list = NULL, cooldowns = NULL, \
+                 effect_instances = NULL, pets = NULL WHERE id = $1",
+            )
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            mud_db::sqlx::query(&format!(
+                "UPDATE \"Characters\" SET {column} = to_jsonb('corrupt'::text) WHERE id = $1"
+            ))
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let read = || async {
+                mud_db::sqlx::query_scalar::<_, Option<String>>(&format!(
+                    "SELECT {column}::text FROM \"Characters\" WHERE id = $1"
+                ))
+                .bind(&c.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            };
+            let before = read().await;
+            assert_eq!(before.as_deref(), Some("\"corrupt\""));
+
+            let mut world = auth_world(3);
+            let (mut router, mut orx) = load_guard_router(&world);
+            router
+                .complete_login(1, &mut world, &pool, user.clone(), (*c).clone())
+                .await;
+            assert_load_refused(&router, &mut world, &mut orx, column);
+            assert_eq!(read().await, before, "{column}: bytes unchanged");
+            match load_persisted(&pool, &c, &user, None).await {
+                Err(LoadFailure::Parse { column: got, .. }) => assert_eq!(got, column),
+                Err(other) => panic!("{column}: wrong failure {other}"),
+                Ok(_) => panic!("{column}: corrupt value accepted"),
+            }
+        }
+
+        // Empty values are allowed.
+        mud_db::sqlx::query(
+            "UPDATE \"Characters\" SET script_vars = '{}', trophy_data = '[]', \
+             spell_cooldowns = '{}', ignore_list = '[]', cooldowns = '{}', \
+             effect_instances = '{}', pets = NULL WHERE id = $1",
+        )
+        .bind(&c.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        load_persisted(&pool, &c, &user, None)
+            .await
+            .unwrap_or_else(|f| panic!("empty columns refused: {f}"));
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// A failed character re-read after the save-wait refuses the login
+    /// instead of continuing on the pre-wait row.
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_reload_after_save_wait_refuses_login() {
+        let Some(pool) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (user, c) = temp_unlinked_char(&pool, "rl").await;
+        let mut world = auth_world(3);
+        let (mut router, mut orx) = load_guard_router(&world);
+        router.load_fault = Some("character_reload");
+        router
+            .finish_save_wait(1, user.clone(), (*c).clone(), true, &pool, &mut world)
+            .await;
+        assert_load_refused(&router, &mut world, &mut orx, "character_reload");
+
+        // A row that vanished during the wait is refused the same way.
+        let mut gone = (*c).clone();
+        gone.name = "ZzNoSuchCharacterZz".to_string();
+        assert!(reload_character_row(&pool, &gone, None).await.is_err());
+        // Control: the real row reloads.
+        assert!(reload_character_row(&pool, &c, None).await.is_ok());
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 }
