@@ -1106,20 +1106,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         // for un-tagged content (horse/warhorse/donkey/etc.) so the
         // imported world still surfaces mounts even before content
         // authors have tagged every horse with MobTrait::Mount.
-        let mount_via_trait = proto
-            .traits
-            .iter()
-            .any(|t| matches!(t, mud_db::enums::MobTrait::Mount));
-        let mount_via_keyword = proto.keywords.iter().any(|k| {
-            let lc = k.to_ascii_lowercase();
-            lc.contains("horse")
-                || lc.contains("steed")
-                || lc.contains("mount")
-                || lc.contains("donkey")
-                || lc.contains("mare")
-                || lc.contains("nightmare")
-        });
-        if mount_via_trait || mount_via_keyword {
+        if proto.is_mountable() {
             em.insert(Mountable);
         }
         let e = em.id();

@@ -4276,6 +4276,12 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         })
     };
     let Some(idx) = offer_idx else {
+        // Pet and mount shops sell mobs, not items: legacy players just
+        // `buy` them, so fall through to the keeper's pet offerings.
+        if !shop.pets.is_empty() {
+            cmd_hire(world, player, arg);
+            return;
+        }
         send_rendered(
             world,
             player,
@@ -4524,7 +4530,11 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
     {
         em.insert(mud_world::ExamineText(proto.examine_description.clone()));
     }
-    let _ = pet_entity;
+    if proto.is_mountable()
+        && let Ok(mut em) = world.get_entity_mut(pet_entity)
+    {
+        em.insert(mud_world::Mountable);
+    }
     let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
     send_rendered(
         world,

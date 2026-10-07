@@ -454,6 +454,9 @@ mod save;
 mod search_tests;
 #[path = "commands/setrecall.rs"]
 mod setrecall;
+#[cfg(test)]
+#[path = "commands/shop_tests.rs"]
+mod shop_tests;
 #[path = "commands/skills_extra.rs"]
 mod skills_extra;
 #[path = "commands/spells.rs"]

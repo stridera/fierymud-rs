@@ -213,20 +213,7 @@ pub fn respawn_tick(world: &mut World) {
         if !proto.examine_description.trim().is_empty() {
             em.insert(mud_world::ExamineText(proto.examine_description.clone()));
         }
-        let mount_via_trait = proto
-            .traits
-            .iter()
-            .any(|t| matches!(t, mud_db::enums::MobTrait::Mount));
-        let mount_via_keyword = proto.keywords.iter().any(|k| {
-            let lc = k.to_ascii_lowercase();
-            lc.contains("horse")
-                || lc.contains("steed")
-                || lc.contains("mount")
-                || lc.contains("donkey")
-                || lc.contains("mare")
-                || lc.contains("nightmare")
-        });
-        if mount_via_trait || mount_via_keyword {
+        if proto.is_mountable() {
             em.insert(Mountable);
         }
         reset_id_alive.insert(entry.reset_id);
