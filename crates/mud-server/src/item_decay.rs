@@ -98,8 +98,44 @@ pub fn item_decay_tick(world: &mut World) {
                 // Inside a container or unrooted — silent destroy.
             }
         }
+        release_contents(world, entity, holder_entity, &holder_kind);
         if let Ok(em) = world.get_entity_mut(entity) {
             em.despawn();
+        }
+    }
+}
+
+/// A decaying container must not orphan what it holds. Legacy
+/// `extract_corpse` moves each item to the container's own container,
+/// or to the room (the carrier's room when the container is carried).
+/// A container with no resolvable place (unrooted) takes its contents
+/// with it. Items nested deeper stay with their own parent.
+fn release_contents(world: &mut World, container: Entity, holder: Entity, kind: &HolderKind) {
+    let contents: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+        q.iter(world)
+            .filter(|(_, l)| l.0 == container)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    if contents.is_empty() {
+        return;
+    }
+    let dest = match kind {
+        HolderKind::Room | HolderKind::Container => Some(holder),
+        HolderKind::Player => world.get::<Located>(holder).map(|l| l.0),
+        HolderKind::Unknown => None,
+    };
+    for item in contents {
+        match dest {
+            Some(d) => {
+                world.entity_mut(item).insert(Located(d));
+            }
+            None => {
+                if let Ok(em) = world.get_entity_mut(item) {
+                    em.despawn();
+                }
+            }
         }
     }
 }
@@ -125,4 +161,71 @@ fn location_kind(world: &World, item: Entity) -> (Entity, HolderKind) {
         return (loc, HolderKind::Room);
     }
     (loc, HolderKind::Container)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mud_world::{Keywords, WorldKey};
+
+    fn item(world: &mut World, name: &str, at: Entity) -> Entity {
+        world
+            .spawn((
+                Item,
+                Named { name: name.into() },
+                Keywords(vec![name.into()]),
+                WorldKey { zone: 1, id: 1 },
+                Located(at),
+            ))
+            .id()
+    }
+
+    fn decaying(world: &mut World, name: &str, at: Entity) -> Entity {
+        let e = item(world, name, at);
+        world.entity_mut(e).insert(ItemTimer {
+            remaining_secs: 1,
+            decompose_window_secs: 0,
+        });
+        e
+    }
+
+    #[test]
+    fn decaying_container_on_the_floor_spills_into_the_room() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let bag = decaying(&mut world, "bag", room);
+        let gem = item(&mut world, "gem", bag);
+        let inner = item(&mut world, "pouch", bag);
+        let coin = item(&mut world, "coin", inner);
+        item_decay_tick(&mut world);
+        assert!(world.get_entity(bag).is_err());
+        assert_eq!(world.get::<Located>(gem).unwrap().0, room);
+        assert_eq!(world.get::<Located>(inner).unwrap().0, room);
+        // Deeper nesting stays with its own parent.
+        assert_eq!(world.get::<Located>(coin).unwrap().0, inner);
+    }
+
+    #[test]
+    fn decaying_container_inside_another_hands_contents_to_it() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let chest = item(&mut world, "chest", room);
+        let bag = decaying(&mut world, "bag", chest);
+        let gem = item(&mut world, "gem", bag);
+        item_decay_tick(&mut world);
+        assert!(world.get_entity(bag).is_err());
+        assert_eq!(world.get::<Located>(gem).unwrap().0, chest);
+    }
+
+    #[test]
+    fn decaying_carried_container_drops_contents_in_the_carriers_room() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let bag = decaying(&mut world, "bag", player);
+        let gem = item(&mut world, "gem", bag);
+        item_decay_tick(&mut world);
+        assert!(world.get_entity(bag).is_err());
+        assert_eq!(world.get::<Located>(gem).unwrap().0, room);
+    }
 }
