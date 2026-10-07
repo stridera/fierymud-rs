@@ -1477,6 +1477,21 @@ const ABBREV_DENYLIST: &[&str] = &[
     "reloadallzones",
 ];
 
+/// Commands whose abbreviations must be at least this many characters
+/// long. A shorter prefix does not match the command at all (it is not
+/// refused like a [`ABBREV_DENYLIST`] entry, it is simply unknown). `k`
+/// is too easy to hit when `l` (look) was meant, so every `k` command
+/// needs two letters (`ki`/`kic`/`kick`, `kil`/`kill`, `kn`/`kneel`).
+const MIN_ABBREV: &[(&str, usize)] = &[("kick", 2), ("kill", 2), ("kneel", 2)];
+
+/// Shortest prefix of `name` that may resolve to it (1 when unlisted).
+fn min_abbrev(name: &str) -> usize {
+    MIN_ABBREV
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or(1, |&(_, len)| len)
+}
+
 /// False for destructive commands that must be typed in full.
 fn abbrev_allowed(cmd: &Command) -> bool {
     !abbrev_blocked(cmd.names[0])
@@ -1524,7 +1539,10 @@ pub(crate) fn resolve_by_prefix(
         for &name in cmd.names {
             // Multi-word names (`clan storage list`) only match whole,
             // through `longest_prefix_match`.
-            if name.contains(char::is_whitespace) || !name.starts_with(needle) {
+            if name.contains(char::is_whitespace)
+                || !name.starts_with(needle)
+                || needle.len() < min_abbrev(name)
+            {
                 continue;
             }
             let key = prefix_rank(name);
@@ -2876,7 +2894,6 @@ mod tests {
         for name in [
             "attack",
             "kill",
-            "k",
             "hit",
             "murder",
             "consider",

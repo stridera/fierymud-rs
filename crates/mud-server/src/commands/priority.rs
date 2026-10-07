@@ -517,8 +517,8 @@ mod tests {
             .filter(|l| !l.contains(' ') && canonical_of(l).is_some())
             .collect();
         // New directions and `out`/`in` have no legacy entry to defer to;
-        // `k` stays "kill" (legacy table order would make it `kick`) because
-        // it is the one-letter attack every player types.
+        // `k` matches nothing on purpose (`MIN_ABBREV`): it is too easy to
+        // hit when `l` (look) was meant.
         let exempt = ["ne", "nw", "se", "sw", "o", "in", "k"];
         let mut bad = Vec::new();
         for l in &implemented {
@@ -549,9 +549,17 @@ mod tests {
     }
 
     #[test]
-    fn k_is_the_one_letter_attack() {
-        assert_eq!(resolve("k"), canonical_of("kill"));
+    fn bare_k_is_unknown_but_longer_k_abbreviations_work() {
+        // Neither staff nor mortals get a command (or the "type it out"
+        // refusal for kick) from a lone `k`.
+        assert_eq!(resolve("k"), None);
+        assert_eq!(resolve_as("k", UserRole::Implementor, ALL_PERMS), None);
         assert_eq!(resolve("ki"), Some("kick"));
+        assert_eq!(resolve("kic"), Some("kick"));
+        assert_eq!(resolve("kick"), Some("kick"));
+        assert_eq!(resolve("kil"), canonical_of("kill"));
+        assert_eq!(resolve("kill"), canonical_of("kill"));
+        assert_eq!(resolve("kn"), Some("kneel"));
     }
 
     #[test]

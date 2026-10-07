@@ -101,7 +101,7 @@ Counts are approximate because many legacy entries are pure aliases (`go` → `d
 | help | info.rs | |
 | hide | info.rs | |
 | hire | info.rs | |
-| hit / kill / k / attack / murder | combat.rs | merged |
+| hit / kill / attack / murder | combat.rs | merged |
 | hitall / tantrum | combat.rs | merged |
 | hold / grab / wield / wear / remove / rem | info.rs | equip |
 | house / visit | info.rs / housing.rs | |

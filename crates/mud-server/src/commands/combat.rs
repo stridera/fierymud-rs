@@ -22,7 +22,7 @@ use crate::commands::{
 
 inventory::submit! {
     Command {
-    names: &["attack", "kill", "k", "hit", "murder"],
+    names: &["attack", "kill", "hit", "murder"],
     min_role: UserRole::Player,
     required_perm: None,
     category: Category::Combat,
