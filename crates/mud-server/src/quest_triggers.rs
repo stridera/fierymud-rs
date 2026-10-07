@@ -156,19 +156,22 @@ where
 /// their availability requirement (the same check `qaccept` runs;
 /// fails closed on a script error), then offer or auto-accept the
 /// survivors in the background.
+///
+/// Returns how many quests were handed on to be offered (the rest were
+/// hidden, already offered this session, or failed the requirement).
 pub(crate) fn offer_candidates(
     world: &mut World,
     player: Entity,
     quests: Vec<mud_db::quests::QuestRow>,
-) {
+) -> usize {
     let Some(cid) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
-        return;
+        return 0;
     };
     let Some(out) = world.get::<Connection>(player).map(|c| c.0.clone()) else {
-        return;
+        return 0;
     };
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
-        return;
+        return 0;
     };
     let level = world.get::<Profile>(player).map_or(1, |p| p.level);
     let update_tx = world
@@ -204,8 +207,9 @@ pub(crate) fn offer_candidates(
         allowed.push(q);
     }
     if allowed.is_empty() {
-        return;
+        return 0;
     }
+    let handed_on = allowed.len();
     {
         let mut offered = world
             .get::<OfferedQuests>(player)
@@ -219,6 +223,7 @@ pub(crate) fn offer_candidates(
             grant_or_offer(&pool, &cid, &out, level, q, update_tx.as_ref()).await;
         }
     });
+    handed_on
 }
 
 /// Dispatch LEVEL-trigger quests for `player` at the moment their
@@ -253,14 +258,15 @@ pub(crate) fn dispatch_room_trigger(
     player: Entity,
     room_zone: i32,
     room_id: i32,
-) {
+) -> usize {
     let Some(index) = world.get_resource::<RoomQuestIndex>() else {
-        return;
+        return 0;
     };
     let quests = index.trigger_quests((room_zone, room_id));
-    if !quests.is_empty() {
-        offer_candidates(world, player, quests);
+    if quests.is_empty() {
+        return 0;
     }
+    offer_candidates(world, player, quests)
 }
 
 /// Dispatch SKILL-trigger quests when `player` first successfully

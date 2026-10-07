@@ -12,6 +12,15 @@ use mud_db::quests::{AcceptOutcome, accept_for_player};
 use sqlx::PgPool;
 
 /// Keeps ids unique between tests running in parallel.
+/// Small pools: every test opens its own, and the suite is routinely
+/// run many copies at once against one shared database server.
+fn test_pool_settings() -> mud_db::PoolSettings {
+    mud_db::PoolSettings {
+        max_connections: 1,
+        acquire_timeout: std::time::Duration::from_secs(60),
+    }
+}
+
 static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 struct Fx {
@@ -25,12 +34,31 @@ struct Fx {
 async fn fixture() -> Option<Fx> {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
-    let Ok(Ok(pool)) =
-        tokio::time::timeout(std::time::Duration::from_secs(3), mud_db::connect(&url)).await
+    let Ok(Ok(pool)) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        mud_db::connect_with(&url, test_pool_settings()),
+    )
+    .await
     else {
         eprintln!("skipping: dev database unavailable");
         return None;
     };
+    // Sweep fixtures a failed run left behind once they are clearly stale
+    // (fresh ones may belong to suites running in parallel).
+    sqlx::query(
+        "DELETE FROM \"Quest\" WHERE name = 'zz runtime test' \
+         AND created_at < NOW() - interval '10 minutes'",
+    )
+    .execute(&pool)
+    .await
+    .ok()?;
+    sqlx::query(
+        "DELETE FROM \"Characters\" WHERE id LIKE 'zz-qrt-c-%' \
+         AND updated_at < NOW() - interval '10 minutes'",
+    )
+    .execute(&pool)
+    .await
+    .ok()?;
     let mobs: Vec<(i32, i32)> =
         sqlx::query_as("SELECT zone_id, id FROM \"Mobs\" ORDER BY zone_id, id LIMIT 2")
             .fetch_all(&pool)
@@ -44,29 +72,45 @@ async fn fixture() -> Option<Fx> {
         eprintln!("skipping: need two Mobs rows");
         return None;
     }
-    let tag = std::time::SystemTime::now()
+    // Unique per process and per call (copies of the suite may run at
+    // once against the same database).
+    let pid = std::process::id();
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
-        + u128::from(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let char_id = format!("zz-qrt-c-{tag}");
+        .as_nanos();
+    let char_id = format!("zz-qrt-c-{pid}-{seq}-{nanos}");
     sqlx::query("INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())")
         .bind(&char_id)
-        .bind(format!("Zzq{}", tag % 1_000_000_000_000))
+        .bind(format!("Zzq{pid}x{seq}x{}", nanos % 1_000_000))
         .execute(&pool)
         .await
         .unwrap();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let quest = 9_000_000 + (tag % 900_000) as i32;
-    sqlx::query(
-        "INSERT INTO \"Quest\" (zone_id, id, name, plain_name, repeatable, updated_at) \
-         VALUES ($1, $2, 'zz runtime test', 'zz runtime test', true, NOW())",
-    )
-    .bind(zone)
-    .bind(quest)
-    .execute(&pool)
-    .await
-    .unwrap();
+    // Claim a quest id (draw until the insert wins) rather than compute one.
+    let mut quest = 0;
+    for attempt in 0..200_u128 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let candidate = 9_000_000
+            + ((nanos / 7 + u128::from(pid) * 31 + u128::from(seq) * 977 + attempt * 7919)
+                % 900_000) as i32;
+        let inserted = sqlx::query(
+            "INSERT INTO \"Quest\" (zone_id, id, name, plain_name, repeatable, updated_at) \
+             VALUES ($1, $2, 'zz runtime test', 'zz runtime test', true, NOW()) \
+             ON CONFLICT (zone_id, id) DO NOTHING",
+        )
+        .bind(zone)
+        .bind(candidate)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .rows_affected();
+        if inserted == 1 {
+            quest = candidate;
+            break;
+        }
+    }
+    assert_ne!(quest, 0, "could not claim a quest id");
     Some(Fx {
         pool,
         char_id,

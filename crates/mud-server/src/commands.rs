@@ -79,6 +79,15 @@ pub enum PendingPlayerUpdate {
     /// The character's quest just entered a new phase; credit any
     /// COLLECT objectives from what they already carry.
     QuestPhaseEntered { character_id: String },
+    /// The prototypes the character's active `COLLECT_ITEM` objectives
+    /// watch (drives the pack watch; empty = nothing to watch).
+    CollectTargets {
+        character_id: String,
+        targets: std::collections::HashSet<(i32, i32)>,
+    },
+    /// Persist the character now (background save under the ordered
+    /// save lock): used after quest items are consumed.
+    SavePlayer { character_id: String },
     /// Quests a trigger (level, item, room, skill, event, auto) found
     /// for the character: gate them on their availability requirement
     /// and offer or auto-accept the survivors.
@@ -127,6 +136,8 @@ impl PendingPlayerUpdate {
             | Self::SpawnItem { character_id, .. }
             | Self::QuestPhaseEntered { character_id }
             | Self::CollectClaimed { character_id, .. }
+            | Self::CollectTargets { character_id, .. }
+            | Self::SavePlayer { character_id }
             | Self::TriggerCandidates { character_id, .. }
             | Self::QuestAccepted { character_id, .. }
             | Self::DialogueReply { character_id, .. } => character_id,
@@ -178,6 +189,11 @@ pub fn drain_player_updates(world: &mut World) {
                 .map(|(e, _)| e)
         };
         let Some(entity) = entity else {
+            // The player is gone (disconnected before this drained). A
+            // COLLECT claim made for them must not be left dangling.
+            if let PendingPlayerUpdate::CollectClaimed { obj, .. } = &msg {
+                crate::quest_progress::release_claim(world, obj);
+            }
             continue;
         };
         match msg {
@@ -211,6 +227,12 @@ pub fn drain_player_updates(world: &mut World) {
             }
             PendingPlayerUpdate::QuestPhaseEntered { .. } => {
                 crate::quest_progress::recheck_collect_objectives(world, entity);
+            }
+            PendingPlayerUpdate::CollectTargets { targets, .. } => {
+                crate::quest_progress::set_collect_targets(world, entity, targets);
+            }
+            PendingPlayerUpdate::SavePlayer { .. } => {
+                crate::quest_progress::save_player_soon(world, entity);
             }
             PendingPlayerUpdate::TriggerCandidates { quests, .. } => {
                 crate::quest_triggers::offer_candidates(world, entity, quests);

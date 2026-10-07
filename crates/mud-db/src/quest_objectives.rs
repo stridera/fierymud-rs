@@ -1042,9 +1042,14 @@ pub async fn increment_progress(
     Ok(row.map(|r| (r.current_count, r.completed)))
 }
 
+/// How long a COLLECT_ITEM claim may stay unconsumed before another
+/// recheck is allowed to take it over (the claimant disconnected, or
+/// the process died between claiming and consuming).
+pub const COLLECT_CLAIM_TIMEOUT_SECS: i32 = 30;
+
 /// Record a not-yet-complete objective's count outright (COLLECT_ITEM
 /// follows what is held, so it can go down as well as up). A completed
-/// objective is never touched.
+/// objective is never touched. Any pending claim is cleared.
 pub async fn set_open_progress(
     pool: &PgPool,
     character_quest_id: &str,
@@ -1061,7 +1066,7 @@ pub async fn set_open_progress(
              objective_id, current_count, completed)
         VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, false)
         ON CONFLICT (character_quest_id, quest_zone_id, quest_id, phase_id, objective_id)
-        DO UPDATE SET current_count = EXCLUDED.current_count
+        DO UPDATE SET current_count = EXCLUDED.current_count, completed_at = NULL
         WHERE "CharacterQuestObjective".completed = false
         "#,
         character_quest_id,
@@ -1076,9 +1081,13 @@ pub async fn set_open_progress(
     Ok(())
 }
 
-/// Atomically mark an objective complete at `required_count`. Returns
-/// `true` for exactly one caller - the one that flipped it - so a
-/// completion that must consume items is only ever acted on once.
+/// Atomically CLAIM a satisfied COLLECT objective: it is marked pending
+/// (`current_count = required_count`, `completed_at` = claim time, still
+/// not `completed`). Returns `true` for exactly one caller, so the items
+/// are only ever taken once. A claim is a lease: if it is not turned
+/// into a completion (`upsert_progress(.., true)`) or released within
+/// [`COLLECT_CLAIM_TIMEOUT_SECS`], the next caller may claim it again,
+/// so a claimant that vanished cannot wedge the quest.
 pub async fn claim_objective(
     pool: &PgPool,
     character_quest_id: &str,
@@ -1093,12 +1102,14 @@ pub async fn claim_objective(
         INSERT INTO "CharacterQuestObjective"
             (id, character_quest_id, quest_zone_id, quest_id, phase_id,
              objective_id, current_count, completed, completed_at)
-        VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, true, NOW())
+        VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, $6, false, NOW())
         ON CONFLICT (character_quest_id, quest_zone_id, quest_id, phase_id, objective_id)
         DO UPDATE SET current_count = EXCLUDED.current_count,
-                      completed = true,
                       completed_at = NOW()
         WHERE "CharacterQuestObjective".completed = false
+          AND ("CharacterQuestObjective".completed_at IS NULL
+               OR "CharacterQuestObjective".completed_at
+                  < NOW() - make_interval(secs => $7::int))
         RETURNING id
         "#,
         character_quest_id,
@@ -1107,14 +1118,15 @@ pub async fn claim_objective(
         phase_id,
         objective_id,
         required_count,
+        COLLECT_CLAIM_TIMEOUT_SECS,
     )
     .fetch_optional(pool)
     .await?;
     Ok(row.is_some())
 }
 
-/// Undo [`claim_objective`] when the items it was going to consume
-/// turned out to be gone.
+/// Give a claim back (the items turned out to be gone, or the claimant
+/// could not finish). Completed objectives are left alone.
 pub async fn release_objective(
     pool: &PgPool,
     character_quest_id: &str,
@@ -1126,9 +1138,9 @@ pub async fn release_objective(
     sqlx::query!(
         r#"
         UPDATE "CharacterQuestObjective"
-        SET completed = false, completed_at = NULL, current_count = 0
+        SET completed_at = NULL, current_count = 0
         WHERE character_quest_id = $1 AND quest_zone_id = $2 AND quest_id = $3
-          AND phase_id = $4 AND objective_id = $5
+          AND phase_id = $4 AND objective_id = $5 AND completed = false
         "#,
         character_quest_id,
         quest_zone_id,

@@ -14,11 +14,21 @@ use mud_world::{Account, Item, Located, Named, Online, Player, WorldKey};
 use super::test_support::{Rx, drain};
 use super::{Connection, DbPool};
 
+/// Small pools: every test opens its own, and the suite is routinely
+/// run many copies at once against one shared database server.
+fn test_pool_settings() -> mud_db::PoolSettings {
+    mud_db::PoolSettings {
+        max_connections: 1,
+        acquire_timeout: std::time::Duration::from_secs(60),
+    }
+}
+
 static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 struct Fx {
     pool: PgPool,
     char_id: String,
+    name: String,
     zone: i32,
     quest: i32,
     room: (i32, i32),
@@ -27,39 +37,78 @@ struct Fx {
 async fn fixture() -> Option<Fx> {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
-    let Ok(Ok(pool)) = tokio::time::timeout(Duration::from_secs(3), mud_db::connect(&url)).await
+    let Ok(Ok(pool)) = tokio::time::timeout(
+        Duration::from_secs(3),
+        mud_db::connect_with(&url, test_pool_settings()),
+    )
+    .await
     else {
         eprintln!("skipping: dev database unavailable");
         return None;
     };
+    // Fixtures a crashed or failed run left behind (a panic skips `end`)
+    // are swept once they are clearly stale, so they cannot leak into
+    // later runs; fresh ones may belong to tests running in parallel.
+    sqlx::query(
+        "DELETE FROM \"Quest\" WHERE name = 'zz rt test' \
+         AND created_at < NOW() - interval '10 minutes'",
+    )
+    .execute(&pool)
+    .await
+    .ok()?;
+    sqlx::query(
+        "DELETE FROM \"Characters\" WHERE id LIKE 'zz-qrs-c-%' \
+         AND updated_at < NOW() - interval '10 minutes'",
+    )
+    .execute(&pool)
+    .await
+    .ok()?;
     let room: (i32, i32) =
         sqlx::query_as("SELECT zone_id, id FROM \"Room\" ORDER BY zone_id, id LIMIT 1")
             .fetch_optional(&pool)
             .await
             .ok()??;
-    let tag = std::time::SystemTime::now()
+    // Unique per process AND per call, so copies of the suite running
+    // against the same database never collide on character ids/names.
+    let pid = std::process::id();
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
-        + u128::from(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let char_id = format!("zz-qrs-c-{tag}");
+        .as_nanos();
+    let char_id = format!("zz-qrs-c-{pid}-{seq}-{nanos}");
+    let name = format!("Zzs{pid}x{seq}x{}", nanos % 1_000_000);
     sqlx::query("INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())")
         .bind(&char_id)
-        .bind(format!("Zzs{}", tag % 1_000_000_000_000))
+        .bind(&name)
         .execute(&pool)
         .await
         .unwrap();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let quest = 9_100_000 + (tag % 800_000) as i32;
-    sqlx::query(
-        "INSERT INTO \"Quest\" (zone_id, id, name, plain_name, repeatable, updated_at) \
-         VALUES ($1, $2, 'zz rt test', 'zz rt test', true, NOW())",
-    )
-    .bind(room.0)
-    .bind(quest)
-    .execute(&pool)
-    .await
-    .unwrap();
+    // Quest ids are claimed, not computed: draw until the insert wins, so
+    // two fixtures can never share one.
+    let mut quest = 0;
+    for attempt in 0..200_u128 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let candidate = 9_100_000
+            + ((nanos / 7 + u128::from(pid) * 31 + u128::from(seq) * 977 + attempt * 7919)
+                % 800_000) as i32;
+        let inserted = sqlx::query(
+            "INSERT INTO \"Quest\" (zone_id, id, name, plain_name, repeatable, updated_at) \
+             VALUES ($1, $2, 'zz rt test', 'zz rt test', true, NOW()) \
+             ON CONFLICT (zone_id, id) DO NOTHING",
+        )
+        .bind(room.0)
+        .bind(candidate)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .rows_affected();
+        if inserted == 1 {
+            quest = candidate;
+            break;
+        }
+    }
+    assert_ne!(quest, 0, "could not claim a quest id");
     sqlx::query(
         "INSERT INTO \"QuestPhase\" (quest_zone_id, quest_id, id, name, \"order\") \
          VALUES ($1, $2, 1, 'phase', 0)",
@@ -72,10 +121,42 @@ async fn fixture() -> Option<Fx> {
     Some(Fx {
         pool,
         char_id,
+        name,
         zone: room.0,
         quest,
         room,
     })
+}
+
+/// Everything the player is sent up to and including the first message
+/// containing `needle` (waiting, bounded, for it to arrive).
+async fn recv_through(rx: &mut Rx, needle: &str) -> String {
+    let mut text = String::new();
+    while !text.contains(needle) {
+        let Ok(Some(bytes)) = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await else {
+            panic!("timed out waiting for {needle:?}; got {text:?}");
+        };
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    text
+}
+
+/// Drive the pack watch and the async-update drain until the player has
+/// been sent a message containing `needle` (bounded), returning
+/// everything received on the way. For flows that need the world
+/// thread to cooperate; no fixed waits.
+async fn pump_through(world: &mut World, rx: &mut Rx, needle: &str) -> String {
+    let mut text = String::new();
+    for _ in 0..200 {
+        Fx::settle_once(world).await;
+        while let Ok(bytes) = rx.try_recv() {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        if text.contains(needle) {
+            return text;
+        }
+    }
+    panic!("timed out waiting for {needle:?}; got {text:?}");
 }
 
 impl Fx {
@@ -162,7 +243,7 @@ impl Fx {
         let id = format!("{}-alt", self.char_id);
         sqlx::query("INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())")
             .bind(&id)
-            .bind(format!("{}A", &self.char_id[self.char_id.len() - 12..]))
+            .bind(format!("{}A", self.name))
             .execute(&self.pool)
             .await
             .unwrap();
@@ -190,6 +271,12 @@ impl Fx {
             tokio::time::sleep(Duration::from_millis(60)).await;
             super::drain_player_updates(world);
         }
+    }
+
+    async fn settle_once(world: &mut World) {
+        crate::quest_progress::collect_watch_tick(world);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        super::drain_player_updates(world);
     }
 
     fn give_item(world: &mut World, holder: Entity, key: (i32, i32)) -> Entity {
@@ -255,6 +342,20 @@ impl Fx {
         .unwrap_or_else(|| "NONE".to_string())
     }
 
+    /// Pump the world (pack watch + async-update drain) until the quest
+    /// reaches `want`, bounded.
+    async fn pump_to_status(&self, world: &mut World, want: &str) -> String {
+        let mut now = self.status().await;
+        for _ in 0..200 {
+            if now == want {
+                break;
+            }
+            Fx::settle_once(world).await;
+            now = self.status().await;
+        }
+        now
+    }
+
     /// Poll until the quest reaches `want` (async bump tasks run in the
     /// background), or give up after a few seconds.
     async fn wait_for_status(&self, want: &str) -> String {
@@ -307,13 +408,10 @@ async fn visit_room_counts_entries_after_an_earlier_visit() {
     for _ in 0..2 {
         super::mark_room_visited(&mut world, player, room);
         super::note_room_entry(&mut world, player, room);
-        // Let the spawned DB task for this entry land before the next.
-        tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    assert_eq!(fx.wait_for_status("COMPLETED").await, "COMPLETED");
-    let out = drain(&mut rx);
+    let out = recv_through(&mut rx, "*** Quest complete! ***").await;
     assert!(out.contains("Quest objective: visit (1/2)"), "{out}");
-    assert!(out.contains("*** Quest complete! ***"), "{out}");
+    assert_eq!(fx.status().await, "COMPLETED");
     fx.end().await;
 }
 
@@ -504,20 +602,17 @@ async fn collect_follows_the_pack_and_consumes_on_completion() {
         Fx::settle(&mut world).await;
         world.entity_mut(item).insert(Located(player)); // get
     }
-    Fx::settle(&mut world).await;
+    let out = pump_through(&mut world, &mut rx, "(1/2)").await;
     assert_eq!(fx.status().await, "IN_PROGRESS");
-    let out = drain(&mut rx);
     assert!(out.contains("Quest objective: collect (1/2)"), "{out}");
     assert!(!out.contains("(2/2)"), "{out}");
 
     // A second item completes it, and both are handed over.
     Fx::give_item(&mut world, player, key);
-    Fx::settle(&mut world).await;
-    assert_eq!(fx.wait_for_status("COMPLETED").await, "COMPLETED");
+    let out = pump_through(&mut world, &mut rx, "*** Quest complete! ***").await;
+    assert_eq!(fx.status().await, "COMPLETED");
     assert_eq!(item_count(&mut world, key), 0, "items were consumed");
-    let out = drain(&mut rx);
     assert!(out.contains("Quest objective complete: collect"), "{out}");
-    assert!(out.contains("*** Quest complete! ***"), "{out}");
     fx.end().await;
 }
 
@@ -551,8 +646,10 @@ async fn collect_items_cannot_be_passed_to_an_alt_to_complete_twice() {
 
     let a = Fx::give_item(&mut world, player, key);
     let b = Fx::give_item(&mut world, player, key);
-    Fx::settle(&mut world).await;
-    assert_eq!(fx.wait_for_status("COMPLETED").await, "COMPLETED");
+    assert_eq!(
+        fx.pump_to_status(&mut world, "COMPLETED").await,
+        "COMPLETED"
+    );
     // Whatever the first character does next, nothing is left to pass on.
     assert!(world.get_entity(a).is_err() && world.get_entity(b).is_err());
     Fx::settle(&mut world).await;
@@ -644,7 +741,7 @@ async fn quest_staff_commands_are_audited() {
     let (mut world, coder, room, _rx) = fx.world_as(UserRole::Coder);
     world.get_mut::<Account>(coder).unwrap().user_id = user.clone();
     let alt_id = format!("{}-alt", fx.char_id);
-    let alt_name = format!("Zza{}", &fx.char_id[fx.char_id.len() - 12..]);
+    let alt_name = format!("{}B", fx.name);
     sqlx::query("INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())")
         .bind(&alt_id)
         .bind(&alt_name)
@@ -785,6 +882,12 @@ async fn trigger_auto_accept_honours_the_availability_requirement() {
 
 /// Entering a trigger room offers the quest once per login session,
 /// from the in-memory index (no query per step).
+///
+/// Isolated from whatever else is in the shared dev database: the index
+/// holds only this test's quest (a full-table `refresh` would also pick
+/// up unrelated ROOM-triggered quests), and the once-per-session rule is
+/// checked through the dispatcher's return value rather than by waiting
+/// for output to (not) arrive.
 #[tokio::test(flavor = "current_thread")]
 async fn room_trigger_offers_each_quest_once_per_session() {
     let Some(fx) = fixture().await else { return };
@@ -799,27 +902,45 @@ async fn room_trigger_offers_each_quest_once_per_session() {
     .execute(&fx.pool)
     .await
     .unwrap();
-    let index = crate::quest_triggers::RoomQuestIndex::default();
-    index.refresh(&fx.pool).await.unwrap();
+    let ours = mud_db::quests::get_quest(&fx.pool, fx.zone, fx.quest)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // `refresh` really loads ROOM-triggered quests from the database.
+    let loaded = crate::quest_triggers::RoomQuestIndex::default();
+    loaded.refresh(&fx.pool).await.unwrap();
     assert!(
-        index
+        loaded
             .trigger_quests(fx.room)
             .iter()
-            .any(|q| q.id == fx.quest),
+            .any(|q| q.id == fx.quest && q.zone_id == fx.zone),
         "refresh loads the ROOM-triggered quest"
     );
-    let (mut world, player, room, mut rx) = fx.world();
-    world.insert_resource(index);
 
-    for _ in 0..4 {
-        super::note_room_entry(&mut world, player, room);
-        tokio::time::sleep(Duration::from_millis(150)).await;
+    // The behaviour under test runs on an index holding only that quest.
+    let (mut world, player, _room, mut rx) = fx.world();
+    world.insert_resource(crate::quest_triggers::RoomQuestIndex::with(vec![ours], []));
+    let enter = |w: &mut World, who| {
+        crate::quest_triggers::dispatch_room_trigger(w, who, fx.room.0, fx.room.1)
+    };
+    assert_eq!(enter(&mut world, player), 1, "first entry offers it");
+    for _ in 0..3 {
+        assert_eq!(enter(&mut world, player), 0, "later entries do not");
     }
-    let out = drain(&mut rx);
-    assert_eq!(out.matches("Quest available").count(), 1, "{out}");
+    let offer = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("offer text arrives")
+        .expect("channel open");
+    let offer = String::from_utf8_lossy(&offer).into_owned();
+    assert!(
+        offer.contains("Quest available")
+            && offer.contains(&format!("({}, {})", fx.zone, fx.quest)),
+        "{offer}"
+    );
 
     // A fresh session (new entity) is offered it again.
-    let (tx2, mut rx2) = tokio::sync::mpsc::channel(64);
+    let (tx2, _rx2) = tokio::sync::mpsc::channel(64);
     let again = world
         .spawn((
             Player,
@@ -834,12 +955,9 @@ async fn room_trigger_offers_each_quest_once_per_session() {
                 perms: Vec::new(),
             },
             Connection(tx2),
-            Located(room),
         ))
         .id();
-    super::note_room_entry(&mut world, again, room);
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(drain(&mut rx2).matches("Quest available").count(), 1);
+    assert_eq!(enter(&mut world, again), 1);
     fx.end().await;
 }
 
@@ -904,5 +1022,187 @@ async fn teleport_arrival_counts_for_visit_room() {
     );
     super::room_entry_tick(&mut world);
     assert_eq!(fx.wait_for_status("COMPLETED").await, "COMPLETED");
+    fx.end().await;
+}
+
+/// A claim whose player vanished before the world thread drained it is
+/// given back at once; one that is lost any other way expires and can
+/// be taken again, so the quest is never wedged.
+#[tokio::test(flavor = "current_thread")]
+async fn orphaned_collect_claims_are_released_and_expire() {
+    let Some(fx) = fixture().await else { return };
+    let key = fx.collect_objective(2).await;
+    let (mut world, _player, _room, _rx) = fx.world();
+    Fx::with_updates(&mut world);
+    fx.accept().await;
+    let cq = mud_db::quests::find_character_quest(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let claim = || async {
+        mud_db::quest_objectives::claim_objective(&fx.pool, &cq, fx.zone, fx.quest, 1, 1, 2)
+            .await
+            .unwrap()
+    };
+    let row = || async {
+        sqlx::query_as::<_, (i32, bool, bool)>(
+            "SELECT current_count, completed, completed_at IS NOT NULL \
+             FROM \"CharacterQuestObjective\" WHERE character_quest_id = $1",
+        )
+        .bind(&cq)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap()
+    };
+
+    // The claim is made, then the player disconnects before it drains.
+    assert!(claim().await);
+    assert!(!claim().await, "a live claim cannot be taken twice");
+    let tx = world.resource::<super::PlayerUpdateTx>().0.clone();
+    tx.send(super::PendingPlayerUpdate::CollectClaimed {
+        character_id: "nobody-online-with-this-id".into(),
+        obj: crate::quest_progress::ObjectiveRef {
+            character_quest_id: cq.clone(),
+            quest_zone_id: fx.zone,
+            quest_id: fx.quest,
+            phase_id: 1,
+            objective_id: 1,
+            required_count: 2,
+            show_progress: true,
+            player_description: "collect".into(),
+        },
+        object: key,
+    })
+    .await
+    .unwrap();
+    super::drain_player_updates(&mut world);
+    let mut released = false;
+    for _ in 0..40 {
+        if row().await == (0, false, false) {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(released, "unresolved player: claim released");
+    assert_eq!(fx.status().await, "IN_PROGRESS");
+
+    // A claim nobody ever consumes expires and is reclaimable.
+    assert!(claim().await);
+    assert!(!claim().await);
+    sqlx::query(
+        "UPDATE \"CharacterQuestObjective\" SET completed_at = NOW() - interval '31 seconds' \
+         WHERE character_quest_id = $1",
+    )
+    .bind(&cq)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    assert!(claim().await, "stale claim is taken over");
+    fx.end().await;
+}
+
+/// Consuming a worn item takes it off properly: its stat bonuses go
+/// with it, and the player is saved afterwards.
+#[tokio::test(flavor = "current_thread")]
+async fn consuming_a_worn_item_unequips_it_and_saves() {
+    let Some(fx) = fixture().await else { return };
+    let key = fx.collect_objective(1).await;
+    let (mut world, player, _room, _rx) = fx.world();
+    Fx::with_updates(&mut world);
+    let fire = mud_db::enums::ElementType::Fire;
+    world
+        .entity_mut(player)
+        .insert(mud_world::Resistances([(fire, 10)].into_iter().collect()));
+    world
+        .entity_mut(player)
+        .insert(mud_world::Health { hp: 7, max: 10 });
+    fx.accept().await;
+    let item = Fx::give_item(&mut world, player, key);
+    world.entity_mut(item).insert((
+        mud_world::EquippedSlot(mud_world::Slot::Head),
+        crate::equip_apply::GrantedDeltas {
+            deltas: vec![],
+            effects: vec![],
+            resistances: vec![(fire, 10)],
+        },
+    ));
+
+    assert_eq!(
+        fx.pump_to_status(&mut world, "COMPLETED").await,
+        "COMPLETED"
+    );
+    assert!(world.get_entity(item).is_err(), "worn item was consumed");
+    assert!(
+        world
+            .get::<mud_world::Resistances>(player)
+            .is_some_and(|r| r.0.is_empty()),
+        "its resistance bonus was reversed"
+    );
+    // The removal is persisted promptly: the save lands in the database
+    // (hit points 7 are only in the ECS) - or at least is queued for
+    // the next tick when a write was already in flight.
+    let mut saved = false;
+    for _ in 0..40 {
+        Fx::settle_once(&mut world).await;
+        let hp: i32 = sqlx::query_scalar("SELECT hit_points FROM \"Characters\" WHERE id = $1")
+            .bind(&fx.char_id)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        if hp == 7 || world.get::<mud_world::PendingSave>(player).is_some() {
+            saved = true;
+            break;
+        }
+    }
+    assert!(saved, "player save requested after the turn-in");
+    fx.end().await;
+}
+
+/// Only players with active COLLECT objectives are watched.
+#[tokio::test(flavor = "current_thread")]
+async fn pack_watch_only_covers_players_with_collect_objectives() {
+    let Some(fx) = fixture().await else { return };
+    let key = fx.collect_objective(3).await;
+    let (mut world, player, room, _rx) = fx.world();
+    Fx::with_updates(&mut world);
+    // A second player with no quest at all.
+    let (tx2, _rx2) = tokio::sync::mpsc::channel(64);
+    let idle = world
+        .spawn((
+            Player,
+            Online,
+            Named {
+                name: "Idle".into(),
+            },
+            Account {
+                user_id: "u2".into(),
+                character_id: format!("{}-alt", fx.char_id),
+                role: UserRole::Player,
+                account_role: UserRole::Player,
+                perms: Vec::new(),
+            },
+            Connection(tx2),
+            Located(room),
+        ))
+        .id();
+    fx.accept().await;
+    let watched = |w: &World, e| {
+        w.get::<crate::quest_progress::CollectWatch>(e)
+            .map(|c| c.targets.clone())
+    };
+    for _ in 0..200 {
+        Fx::settle_once(&mut world).await;
+        if watched(&world, player).is_some_and(|t| !t.is_empty()) && watched(&world, idle).is_some()
+        {
+            break;
+        }
+    }
+    assert_eq!(watched(&world, player), Some([key].into_iter().collect()));
+    assert_eq!(
+        watched(&world, idle),
+        Some(std::collections::HashSet::new())
+    );
     fx.end().await;
 }

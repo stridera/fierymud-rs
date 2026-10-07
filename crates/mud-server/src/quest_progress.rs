@@ -11,10 +11,10 @@
 
 #![allow(clippy::doc_markdown)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
-use mud_world::{Account, EquippedSlot, Item, Located, Player, WorldKey};
+use mud_world::{Account, Contents, EquippedSlot, Item, Located, Player, WorldKey};
 
 use crate::commands::{Connection, DbPool, PendingPlayerUpdate, PlayerUpdateTx};
 
@@ -288,13 +288,39 @@ pub(crate) async fn grant_completion_rewards(
 }
 
 /// How many of each prototype `holder` carries directly (inventory and
-/// worn gear; items inside containers do not count).
-pub(crate) fn held_counts(world: &mut World, holder: Entity) -> HashMap<(i32, i32), i32> {
+/// worn gear; items inside containers do not count), read from the
+/// holder's `Contents` reverse index - O(items carried), not O(world).
+pub(crate) fn held_counts(world: &World, holder: Entity) -> HashMap<(i32, i32), i32> {
+    held_matching(world, holder, |_| true)
+}
+
+/// [`held_counts`] restricted to the prototypes in `targets`.
+fn held_target_counts(
+    world: &World,
+    holder: Entity,
+    targets: &HashSet<(i32, i32)>,
+) -> HashMap<(i32, i32), i32> {
+    held_matching(world, holder, |key| targets.contains(&key))
+}
+
+fn held_matching(
+    world: &World,
+    holder: Entity,
+    wanted: impl Fn((i32, i32)) -> bool,
+) -> HashMap<(i32, i32), i32> {
     let mut counts: HashMap<(i32, i32), i32> = HashMap::new();
-    let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
-    for (l, wk) in q.iter(world) {
-        if l.0 == holder {
-            *counts.entry((wk.zone, wk.id)).or_insert(0) += 1;
+    let Some(contents) = world.get::<Contents>(holder) else {
+        return counts;
+    };
+    for item in contents.iter() {
+        if world.get::<Item>(item).is_none() {
+            continue;
+        }
+        if let Some(wk) = world.get::<WorldKey>(item) {
+            let key = (wk.zone, wk.id);
+            if wanted(key) {
+                *counts.entry(key).or_insert(0) += 1;
+            }
         }
     }
     counts
@@ -377,6 +403,21 @@ async fn recheck_collect_task(
                 return;
             }
         };
+    // Tell the world thread which prototypes this character's active
+    // COLLECT objectives watch, so the pack watch only scans (and only
+    // re-queries) for characters that have any.
+    if let Some(tx) = &notify.update_tx {
+        let targets = rows
+            .iter()
+            .map(|r| (r.object_zone_id, r.object_id))
+            .collect();
+        let _ = tx
+            .send(PendingPlayerUpdate::CollectTargets {
+                character_id: notify.character_id.clone(),
+                targets,
+            })
+            .await;
+    }
     for row in &rows {
         let n = held
             .get(&(row.object_zone_id, row.object_id))
@@ -483,10 +524,24 @@ fn held_entities(world: &mut World, holder: Entity, key: (i32, i32)) -> Vec<Enti
     found.into_iter().map(|(_, e)| e).collect()
 }
 
+/// Give a claim back from the world thread (nothing to consume it
+/// with). Without a database pool there is nothing to give back to.
+pub(crate) fn release_claim(world: &World, obj: &ObjectiveRef) {
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        return;
+    };
+    let obj = obj.clone();
+    tokio::spawn(async move { release_collect(&pool, &obj).await });
+}
+
 /// World-thread half of a COLLECT completion: verify the player still
 /// holds the required quantity, TAKE those items (collecting is a
-/// turn-in), then finish the objective. If the items are gone by now
-/// (dropped between the scan and this tick) the claim is given back.
+/// turn-in), then finish the objective and save the player so the item
+/// removal and the completed objective become durable together.
+///
+/// Every path that does not reach the consume step gives the claim
+/// back; a claim that is somehow lost anyway expires on its own (see
+/// `claim_objective`).
 pub(crate) fn finish_collect(
     world: &mut World,
     player: Entity,
@@ -497,21 +552,33 @@ pub(crate) fn finish_collect(
         return;
     };
     let Some(notify) = Notifier::for_player(world, player) else {
+        // Link-dead: nobody to tell, and nothing to consume against.
+        release_claim(world, obj);
         return;
     };
     let need = usize::try_from(obj.required_count.max(1)).unwrap_or(1);
     let items = held_entities(world, player, object);
     if items.len() < need {
-        let obj = obj.clone();
-        tokio::spawn(async move { release_collect(&pool, &obj).await });
+        release_claim(world, obj);
         return;
     }
     let name = world
         .get::<mud_world::Named>(items[0])
         .map(|n| n.name.clone())
         .unwrap_or_default();
+    let mut unequipped = false;
     for item in items.into_iter().take(need) {
+        if world.get::<EquippedSlot>(item).is_some() {
+            // Worn: take it off properly first so its stat bonuses and
+            // granted effects go with it.
+            crate::equip_apply::unapply_object_from_wearer(world, item, player);
+            crate::commands::try_remove::<EquippedSlot>(world, item);
+            unequipped = true;
+        }
         crate::commands::info::despawn_item_tree(world, item);
+    }
+    if unequipped {
+        crate::commands::refresh_player_items_gmcp(world, player);
     }
     crate::commands::send_to(
         world,
@@ -520,6 +587,23 @@ pub(crate) fn finish_collect(
     );
     let obj = obj.clone();
     tokio::spawn(async move {
+        // Items are gone: record the completion first so a crash can
+        // never leave the player without both.
+        if let Err(e) = mud_db::quest_objectives::upsert_progress(
+            &pool,
+            &obj.character_quest_id,
+            obj.quest_zone_id,
+            obj.quest_id,
+            obj.phase_id,
+            obj.objective_id,
+            obj.required_count,
+            true,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "collect completion write failed");
+            return;
+        }
         notify.say(&progress_line(&obj, obj.required_count, true, ""));
         advance_quest(
             &pool,
@@ -529,12 +613,30 @@ pub(crate) fn finish_collect(
             obj.quest_id,
         )
         .await;
+        // Persist the pack (the removed items) now rather than at the
+        // next autosave.
+        if let Some(tx) = &notify.update_tx {
+            let _ = tx
+                .send(PendingPlayerUpdate::SavePlayer {
+                    character_id: notify.character_id.clone(),
+                })
+                .await;
+        }
     });
 }
 
-/// The pack as a comparable signature.
-#[derive(Component, Debug, PartialEq, Eq)]
-pub(crate) struct PackSignature(u64);
+/// World-thread half of [`PendingPlayerUpdate::SavePlayer`]: snapshot
+/// now and write in the background under the character's save lock. If
+/// a save is already in flight the `PendingSave` marker retries it on
+/// the next tick.
+pub(crate) fn save_player_soon(world: &mut World, player: Entity) {
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        return;
+    };
+    if !crate::login::spawn_background_save(world, player, &pool) {
+        crate::commands::try_insert(world, player, mud_world::PendingSave);
+    }
+}
 
 fn pack_signature(counts: &HashMap<(i32, i32), i32>) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -545,13 +647,50 @@ fn pack_signature(counts: &HashMap<(i32, i32), i32>) -> u64 {
     h.finish()
 }
 
+/// Per-player state of the pack watch.
+#[derive(Component, Debug, Default)]
+pub(crate) struct CollectWatch {
+    /// Prototypes the player's active COLLECT objectives want. Empty
+    /// means the watch costs nothing for this player.
+    pub(crate) targets: HashSet<(i32, i32)>,
+    /// Signature of the watched part of the pack at the last check.
+    signature: u64,
+    /// Tick of the last recheck, so a quiet pack is still re-verified
+    /// periodically (which also heals an expired claim).
+    last_check: u64,
+}
+
+/// World-thread half of [`PendingPlayerUpdate::CollectTargets`].
+pub(crate) fn set_collect_targets(world: &mut World, player: Entity, targets: HashSet<(i32, i32)>) {
+    let tick = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
+    let signature = pack_signature(&held_target_counts(world, player, &targets));
+    crate::commands::try_insert(
+        world,
+        player,
+        CollectWatch {
+            targets,
+            signature,
+            last_check: tick,
+        },
+    );
+}
+
 /// Period of the pack watch, in ticks (0.2 s at 10 Hz).
 const PACK_WATCH_PERIOD_TICKS: u64 = 2;
+/// A watched pack is re-verified at least this often even if unchanged.
+const PACK_RECHECK_TICKS: u64 = 600;
 
-/// Notice when an online player's pack changes by any route (get, drop,
-/// put, give, buy, loot, junk, quest rewards...) and re-evaluate their
-/// COLLECT_ITEM objectives. One pass over item entities per run; the
-/// database is only consulted for players whose pack actually changed.
+/// Notice when a player's pack changes by any route (get, drop, put,
+/// give, buy, loot, junk, quest rewards...) and re-evaluate their
+/// COLLECT_ITEM objectives.
+///
+/// Cost note (runs inside the timed tick): a player is scanned only if
+/// they have active COLLECT objectives ([`CollectWatch::targets`]), and
+/// the scan walks just their own `Contents` - O(items carried), no pass
+/// over world items. Everyone else costs one component lookup. A newly
+/// seen player gets one database check (login discovery); the database
+/// is otherwise consulted only when a watched pack changes, or every
+/// [`PACK_RECHECK_TICKS`] for a watched player.
 pub(crate) fn collect_watch_tick(world: &mut World) {
     let tick = world.resource::<crate::TickCount>().0;
     if !tick.is_multiple_of(PACK_WATCH_PERIOD_TICKS) {
@@ -561,30 +700,27 @@ pub(crate) fn collect_watch_tick(world: &mut World) {
         let mut q = world.query_filtered::<Entity, (With<Player>, With<mud_world::Online>)>();
         q.iter(world).collect()
     };
-    if players.is_empty() {
-        return;
-    }
-    let mut packs: HashMap<Entity, HashMap<(i32, i32), i32>> =
-        players.iter().map(|&p| (p, HashMap::new())).collect();
-    {
-        let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
-        for (l, wk) in q.iter(world) {
-            if let Some(pack) = packs.get_mut(&l.0) {
-                *pack.entry((wk.zone, wk.id)).or_insert(0) += 1;
-            }
-        }
-    }
-    for (player, held) in packs {
-        let sig = PackSignature(pack_signature(&held));
-        let previous = world.get::<PackSignature>(player).map(|s| s.0);
-        if previous == Some(sig.0) {
+    for player in players {
+        let Some(watch) = world.get::<CollectWatch>(player) else {
+            // First sight (login): find out what they are collecting.
+            crate::commands::try_insert(world, player, CollectWatch::default());
+            recheck_collect_objectives(world, player);
+            continue;
+        };
+        if watch.targets.is_empty() {
             continue;
         }
-        let first_sight_empty = previous.is_none() && held.is_empty();
-        crate::commands::try_insert(world, player, sig);
-        if !first_sight_empty {
-            recheck_with(world, player, held);
+        let held = held_target_counts(world, player, &watch.targets);
+        let signature = pack_signature(&held);
+        let overdue = tick.saturating_sub(watch.last_check) >= PACK_RECHECK_TICKS;
+        if signature == watch.signature && !overdue {
+            continue;
         }
+        if let Some(mut w) = world.get_mut::<CollectWatch>(player) {
+            w.signature = signature;
+            w.last_check = tick;
+        }
+        recheck_with(world, player, held);
     }
 }
 
@@ -629,7 +765,7 @@ mod tests {
         world.spawn((Item, key(8), Located(me)));
         world.spawn((Item, key(7), Located(other)));
         world.spawn((Item, key(7), Located(bag)));
-        let counts = held_counts(&mut world, me);
+        let counts = held_counts(&world, me);
         assert_eq!(counts.get(&(30, 7)), Some(&2));
         assert_eq!(counts.get(&(30, 8)), Some(&1));
         assert_eq!(counts.len(), 2);
