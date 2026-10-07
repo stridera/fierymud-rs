@@ -1010,10 +1010,17 @@ impl LineSplitter {
     /// completed before an overflow are still delivered.
     fn push(&mut self, data: &[u8], lines: &mut Vec<String>) -> Result<(), LineTooLong> {
         for &b in data {
-            if std::mem::take(&mut self.after_cr) && (b == b'\n' || b == 0) {
+            if std::mem::take(&mut self.after_cr) && b == b'\n' {
                 continue;
             }
             match b {
+                // NUL is never part of a command. Telnet sends one after
+                // a bare CR (`CR NUL`), and some clients emit stray ones
+                // (keepalives, line padding); left in the line it ends up
+                // in the name lookup, which Postgres rejects ("invalid
+                // byte sequence ... 0x00"), failing the first login
+                // attempt with "Server error." (#48).
+                0 => {}
                 // Character-at-a-time clients (and `telnet` once the
                 // server stops echoing) send the erase key as BS or
                 // DEL instead of editing locally. Drop the whole last
@@ -2152,6 +2159,52 @@ mod limit_tests {
         assert_eq!(split(&[b"hello\r", b"\nworld\n"]), ["hello", "world"]);
         // Telnet CR NUL.
         assert_eq!(split(&[b"hello\r\0next\r"]), ["hello", "next"]);
+    }
+
+    #[test]
+    fn splitter_drops_nul_anywhere_in_a_line() {
+        // #48: a stray NUL (leading, embedded, trailing, or its own
+        // read) must never reach the name lookup.
+        assert_eq!(split(&[b"\0Mukashi\r\n"]), ["Mukashi"]);
+        assert_eq!(split(&[b"Muk\0ashi\r\n"]), ["Mukashi"]);
+        assert_eq!(split(&[b"Mukashi\0\r\n"]), ["Mukashi"]);
+        assert_eq!(split(&[b"\0", b"Mukashi\r", b"\0"]), ["Mukashi"]);
+        // A NUL-only line is just a blank line, not garbage.
+        assert_eq!(split(&[b"\0\r\n"]), [""]);
+    }
+
+    #[test]
+    fn leading_iac_negotiation_and_nul_still_parse_a_clean_name() {
+        // Negotiation replies and a NUL arriving in the same read as the
+        // first name line (#48): IAC frames are consumed by the telnet
+        // parser, the NUL by the splitter.
+        let mut parser = TelnetParser::new();
+        let mut sp = LineSplitter::new();
+        let mut lines = Vec::new();
+        let wire = [
+            &[telnet::IAC, 251, 31][..],
+            &[telnet::IAC, 250, 24, 0, b'x', b't', telnet::IAC, 240][..],
+            b"\0Mukashi\r\n",
+        ]
+        .concat();
+        let (data, _events) = parser.feed(&wire);
+        assert!(sp.push(&data, &mut lines).is_ok());
+        assert_eq!(lines, ["Mukashi"]);
+    }
+
+    #[tokio::test]
+    async fn nul_prefixed_name_reaches_the_world_clean() {
+        let (addr, _gate, mut rx) = start(fast_limits()).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await.kind,
+            InboundKind::Connected { .. }
+        ));
+        client.write_all(b"\0Mukashi\r\n").await.unwrap();
+        match next_event(&mut rx).await.kind {
+            InboundKind::Line(l) => assert_eq!(l, "Mukashi"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
