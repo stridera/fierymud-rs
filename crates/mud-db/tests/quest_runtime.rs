@@ -368,3 +368,40 @@ async fn reaccept_after_abandon_resets_partial_progress() {
     assert_eq!(rows[0].current_count, 0, "partial progress was wiped");
     fx.end().await;
 }
+
+/// Quest variables written before a restart are listed for boot
+/// hydration, and re-accepting wipes them.
+#[tokio::test]
+async fn variables_are_listed_for_hydration() {
+    let Some(fx) = fixture().await else { return };
+    fx.phase(1, 0).await;
+    fx.kill(1, 1, 0).await;
+    assert_eq!(fx.accept().await, AcceptOutcome::Accepted);
+    let cq = fx.cq_id().await;
+    let mine = |rows: Vec<mud_db::quests::QuestVariablesRow>| {
+        rows.into_iter()
+            .filter(|r| r.character_id == fx.char_id)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        mine(mud_db::quests::list_with_variables(&fx.pool).await.unwrap()).is_empty(),
+        "an empty bag is not listed"
+    );
+
+    mud_db::quests::set_quest_variable(&fx.pool, &cq, "stage", &serde_json::json!("two"))
+        .await
+        .unwrap();
+    let rows = mine(mud_db::quests::list_with_variables(&fx.pool).await.unwrap());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].quest_zone_id, rows[0].quest_id),
+        (fx.zone, fx.quest)
+    );
+    assert_eq!(rows[0].variables, serde_json::json!({"stage": "two"}));
+
+    // Abandon + accept again: the database bag is reset.
+    mud_db::quests::abandon(&fx.pool, &cq).await.unwrap();
+    assert_eq!(fx.accept().await, AcceptOutcome::Accepted);
+    assert!(mine(mud_db::quests::list_with_variables(&fx.pool).await.unwrap()).is_empty());
+    fx.end().await;
+}

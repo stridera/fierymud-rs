@@ -79,6 +79,14 @@ pub enum PendingPlayerUpdate {
     /// The character's quest just entered a new phase; credit any
     /// COLLECT objectives from what they already carry.
     QuestPhaseEntered { character_id: String },
+    /// The character was just put on a quest (trigger auto-accept):
+    /// forget any variables cached from a previous run and credit
+    /// COLLECT objectives from what they already carry.
+    QuestAccepted {
+        character_id: String,
+        quest_zone: i32,
+        quest_id: i32,
+    },
     /// A quest dialogue opened: the mob speaks to the player and, for
     /// a tree, the conversation is tracked from `open.enter`.
     DialogueReply {
@@ -102,6 +110,7 @@ impl PendingPlayerUpdate {
             | Self::AbilityKnown { character_id, .. }
             | Self::SpawnItem { character_id, .. }
             | Self::QuestPhaseEntered { character_id }
+            | Self::QuestAccepted { character_id, .. }
             | Self::DialogueReply { character_id, .. } => character_id,
         }
     }
@@ -128,6 +137,7 @@ pub const PLAYER_UPDATE_QUEUE_CAP: usize = 1024;
 /// Tick system that drains the player-update inbox and applies
 /// each message to the matching online player. Idempotent —
 /// missing characters (offline players) silently drop.
+#[allow(clippy::too_many_lines)]
 pub fn drain_player_updates(world: &mut World) {
     let drained: Vec<PendingPlayerUpdate> = {
         let inbox = world.resource::<PlayerUpdateInbox>();
@@ -183,6 +193,19 @@ pub fn drain_player_updates(world: &mut World) {
             }
             PendingPlayerUpdate::QuestPhaseEntered { .. } => {
                 crate::quest_progress::recheck_collect_objectives(world, entity);
+            }
+            PendingPlayerUpdate::QuestAccepted {
+                character_id,
+                quest_zone,
+                quest_id,
+            } => {
+                crate::quest_progress::on_quest_accepted(
+                    world,
+                    entity,
+                    &character_id,
+                    quest_zone,
+                    quest_id,
+                );
             }
             PendingPlayerUpdate::DialogueReply {
                 mob_name,

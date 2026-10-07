@@ -949,6 +949,27 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     );
     world.insert_resource(entity_var_cache);
 
+    // Pass 4.7d: hydrate the QuestVariableCache from
+    // `CharacterQuest.variables`, so `quest:getvar` still sees what
+    // `quest:setvar` stored before a restart.
+    let quest_var_rows = mud_db::quests::list_with_variables(pool).await?;
+    let mut quest_var_cache = crate::resources::QuestVariableCache::default();
+    let mut quest_var_keys = 0;
+    for row in &quest_var_rows {
+        quest_var_keys += quest_var_cache.hydrate_bag(
+            &row.character_id,
+            row.quest_zone_id,
+            row.quest_id,
+            &row.variables,
+        );
+    }
+    info!(
+        quests = quest_var_cache.quest_count(),
+        keys = quest_var_keys,
+        "quest variables loaded"
+    );
+    world.insert_resource(quest_var_cache);
+
     // Pass 5: spawn live entities from MobResets / ObjectResets. Each
     // reset row spawns *exactly one* entity, only when the world's
     // count of that proto is below the row's `max_instances` (the

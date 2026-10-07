@@ -275,12 +275,13 @@ async fn grant_or_offer(
                     q.plain_name, q.zone_id, q.id
                 );
                 let _ = out.try_send(line.into_bytes());
-                // Items already carried count towards a first-phase
-                // COLLECT objective.
+                // Reset cached variables and credit carried items.
                 if let Some(tx) = update_tx {
                     let _ = tx
-                        .send(crate::commands::PendingPlayerUpdate::QuestPhaseEntered {
+                        .send(crate::commands::PendingPlayerUpdate::QuestAccepted {
                             character_id: cid.to_string(),
+                            quest_zone: q.zone_id,
+                            quest_id: q.id,
                         })
                         .await;
                 }

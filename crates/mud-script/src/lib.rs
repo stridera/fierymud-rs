@@ -5733,6 +5733,36 @@ mod tests {
     }
 
     #[test]
+    fn quest_getvar_sees_hydrated_values_after_restart() {
+        // A fresh world (the server just booted) whose cache was
+        // hydrated from `CharacterQuest.variables`: `getvar` reads the
+        // stored value, and a script that never set anything this run
+        // still sees it.
+        let (mut world, player) = make_world_with_player_and_account();
+        let mut cache = mud_world::QuestVariableCache::default();
+        cache.hydrate_bag(
+            "char-1",
+            30,
+            1,
+            &serde_json::json!({"read_tablet": true, "stage": "two"}),
+        );
+        world.insert_resource(cache);
+        let mut host = LuaHost::new();
+        let out = host
+            .exec_for_actor(
+                &mut world,
+                player,
+                r#"
+                local q = actor:active_quest(30, 1)
+                print(tostring(q:getvar("read_tablet")), tostring(q:getvar("stage")),
+                      tostring(q:getvar("missing")))
+                "#,
+            )
+            .expect("ok");
+        assert_eq!(out, "true\ttwo\tnil\r\n");
+    }
+
+    #[test]
     fn quest_active_quest_returns_nil_for_mob_without_account() {
         // Non-player entities don't carry an Account (no character_id);
         // `actor:active_quest(...)` returns nil so the trigger body

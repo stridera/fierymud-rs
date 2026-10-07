@@ -283,12 +283,13 @@ async fn main() {
     // mutate. Catalog starts empty; the first poll fills it.
     events::init_resources(&mut world);
     // Per-quest variable cache (`quest:setvar` / `quest:getvar`
-    // Lua bindings). Empty by default; `quest_var_flush_tick`
-    // drains dirty rows to the DB every 10s. Hydration is
-    // implicit — the first `quest:getvar` against a freshly-
-    // accepted quest sees no cache entry and returns nil, which
-    // is the same result as a DB row with `variables = '{}'`.
-    world.insert_resource(mud_world::QuestVariableCache::default());
+    // Lua bindings), hydrated from `CharacterQuest.variables` by the
+    // world loader; `quest_var_flush_tick` drains dirty rows back to
+    // the DB every 10s. Only fall back to an empty cache when the
+    // loader did not install one.
+    if !world.contains_resource::<mud_world::QuestVariableCache>() {
+        world.insert_resource(mud_world::QuestVariableCache::default());
+    }
     if let Err(e) = quest_dialogue::load_catalog(&mut world, &pool).await {
         tracing::warn!(error = %e, "dialogue catalog load failed");
     }

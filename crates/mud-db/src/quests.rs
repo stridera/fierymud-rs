@@ -787,6 +787,35 @@ pub async fn get_quest_variables(
     Ok(row.map(|r| r.variables))
 }
 
+/// One `CharacterQuest` row that carries script variables.
+#[derive(Debug, Clone)]
+pub struct QuestVariablesRow {
+    pub character_id: String,
+    pub quest_zone_id: i32,
+    pub quest_id: i32,
+    pub variables: serde_json::Value,
+}
+
+/// Every `CharacterQuest` whose `variables` bag is non-empty, for
+/// hydrating the in-memory `QuestVariableCache` at boot so `getvar`
+/// survives a restart.
+pub async fn list_with_variables(pool: &PgPool) -> sqlx::Result<Vec<QuestVariablesRow>> {
+    sqlx::query_as!(
+        QuestVariablesRow,
+        r#"
+        SELECT
+            character_id AS "character_id!: String",
+            quest_zone_id AS "quest_zone_id!: i32",
+            quest_id AS "quest_id!: i32",
+            variables AS "variables!: serde_json::Value"
+        FROM "CharacterQuest"
+        WHERE variables <> '{}'::jsonb
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Set one named key inside the per-character quest variables JSON
 /// object (Wave 4.10). Other keys preserved. `Null` deletes the key.
 pub async fn set_quest_variable(

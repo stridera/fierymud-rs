@@ -293,6 +293,22 @@ pub(crate) fn collect_credit(held: i32, current: i32, required: i32) -> Option<i
     (credit > current).then_some(credit)
 }
 
+/// World-side bookkeeping when a character starts (or restarts) a
+/// quest: the database row's variables were reset, so drop the cached
+/// copy, then credit COLLECT objectives from the pack.
+pub(crate) fn on_quest_accepted(
+    world: &mut World,
+    player: Entity,
+    character_id: &str,
+    quest_zone: i32,
+    quest_id: i32,
+) {
+    if let Some(mut cache) = world.get_resource_mut::<mud_world::QuestVariableCache>() {
+        cache.reset_quest(character_id, quest_zone, quest_id);
+    }
+    recheck_collect_objectives(world, player);
+}
+
 /// Credit COLLECT_ITEM objectives in the player's current phase with
 /// the items they already carry. Pickups made before a phase began
 /// never counted towards it (progress is phase-gated), so this runs on

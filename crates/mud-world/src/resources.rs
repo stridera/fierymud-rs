@@ -2650,6 +2650,9 @@ impl EntityVariableCache {
 /// they're harmless. Tombstone semantics: `None` value means "delete
 /// on flush" — same shape as the entity cache so the flush logic
 /// is dual-purpose.
+/// Per-quest variable key the `qreward` command owns; scripts must not use it.
+pub const CLAIMED_REWARDS_VAR: &str = "claimed_rewards";
+
 #[derive(Resource, Default, Debug)]
 pub struct QuestVariableCache {
     inner: HashMap<(String, i32, i32), HashMap<String, Option<serde_json::Value>>>,
@@ -2724,6 +2727,49 @@ impl QuestVariableCache {
             .entry((character_id, quest_zone, quest_id))
             .or_default()
             .insert(key, Some(value));
+    }
+
+    /// Hydrate a whole `CharacterQuest.variables` JSON object (boot
+    /// load). Non-object values are ignored, nothing is marked dirty,
+    /// and the reserved [`CLAIMED_REWARDS_VAR`] key is skipped: the
+    /// `qreward` command writes it straight to the database, and a
+    /// stale copy in the cache would be flushed back over a newer
+    /// claim list. Returns the number of keys loaded.
+    pub fn hydrate_bag(
+        &mut self,
+        character_id: &str,
+        quest_zone: i32,
+        quest_id: i32,
+        variables: &serde_json::Value,
+    ) -> usize {
+        let Some(obj) = variables.as_object() else {
+            return 0;
+        };
+        let mut loaded = 0;
+        for (key, value) in obj {
+            if key == CLAIMED_REWARDS_VAR || value.is_null() {
+                continue;
+            }
+            self.hydrate(
+                character_id.to_string(),
+                quest_zone,
+                quest_id,
+                key.clone(),
+                value.clone(),
+            );
+            loaded += 1;
+        }
+        loaded
+    }
+
+    /// Forget everything cached for one quest (and any pending flush).
+    /// Called when the quest is accepted again: the database row's
+    /// `variables` is reset to `{}`, so the cache must not keep, or
+    /// later flush, the previous run's values.
+    pub fn reset_quest(&mut self, character_id: &str, quest_zone: i32, quest_id: i32) {
+        let key = (character_id.to_string(), quest_zone, quest_id);
+        self.inner.remove(&key);
+        self.dirty.remove(&key);
     }
 
     /// Drain dirty quests for the flush tick. Returns
@@ -3126,6 +3172,43 @@ mod tests {
             c.drain_dirty().is_empty(),
             "second drain after no writes is empty"
         );
+    }
+
+    #[test]
+    fn quest_var_cache_hydrate_bag_loads_json_without_dirtying() {
+        let mut c = QuestVariableCache::default();
+        let n = c.hydrate_bag(
+            "char-1",
+            30,
+            1,
+            &serde_json::json!({"stage": "two", "kills": 3, "claimed_rewards": [1], "gone": null}),
+        );
+        assert_eq!(n, 2, "claimed_rewards and null keys are skipped");
+        assert_eq!(
+            c.get("char-1", 30, 1, "stage"),
+            Some(&serde_json::json!("two"))
+        );
+        assert_eq!(c.get("char-1", 30, 1, "kills"), Some(&serde_json::json!(3)));
+        assert!(c.get("char-1", 30, 1, "claimed_rewards").is_none());
+        assert!(c.drain_dirty().is_empty(), "hydration must not dirty");
+        assert_eq!(
+            c.hydrate_bag("char-1", 30, 2, &serde_json::json!([1, 2])),
+            0
+        );
+    }
+
+    #[test]
+    fn quest_var_cache_reset_quest_drops_values_and_pending_flush() {
+        let mut c = QuestVariableCache::default();
+        c.hydrate_bag("char-1", 30, 1, &serde_json::json!({"stage": "old"}));
+        c.set("char-1".into(), 30, 1, "fresh".into(), serde_json::json!(1));
+        c.set("char-1".into(), 30, 2, "other".into(), serde_json::json!(2));
+        c.reset_quest("char-1", 30, 1);
+        assert!(c.get("char-1", 30, 1, "stage").is_none());
+        assert!(c.get("char-1", 30, 1, "fresh").is_none());
+        let drained = c.drain_dirty();
+        assert_eq!(drained.len(), 1, "only the other quest still flushes");
+        assert_eq!(drained[0].2, 2);
     }
 
     // ---- HelpCatalog ----

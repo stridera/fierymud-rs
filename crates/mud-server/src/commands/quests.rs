@@ -419,9 +419,9 @@ pub(crate) async fn cmd_qaccept(
     };
     send_to(world, player, line);
     if accepted {
-        // Items already in the pack count towards a first-phase
-        // COLLECT objective.
-        crate::quest_progress::recheck_collect_objectives(world, player);
+        // The row's variables were reset; items already in the pack
+        // count towards a first-phase COLLECT objective.
+        crate::quest_progress::on_quest_accepted(world, player, &character_id, zone, id);
     }
 }
 
