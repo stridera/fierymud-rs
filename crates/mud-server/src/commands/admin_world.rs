@@ -2471,6 +2471,24 @@ pub(crate) fn cmd_force(world: &mut World, player: Entity, args: &str) {
     let admin_name = name_of(world, player);
     let target_name = name_of(world, target);
 
+    // Rank rule (mirrors `authorize_level_change`): you can only force
+    // someone strictly below your own character level. Self is exempt.
+    // Without this, DevMode (every account holds `force`) would let a
+    // level-5 player make a god act.
+    if target != player {
+        let actor_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+        let target_level = world.get::<Profile>(target).map_or(0, |p| p.level);
+        if target_level >= actor_level {
+            record_admin_action(world, player, "force_denied", args);
+            send_to(
+                world,
+                player,
+                format!("{target_name} outranks or equals you; you can't force them.\r\n"),
+            );
+            return;
+        }
+    }
+
     send_rendered(
         world,
         player,

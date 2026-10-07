@@ -602,7 +602,12 @@ pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     // canonical yes/no tokens leaves the confirm intact and falls
     // through (player can keep typing other commands; the prompt is
     // sticky until they answer). Y/N consumes the component.
-    if let Some(pending) = world.get::<PendingRentConfirm>(player).cloned() {
+    //
+    // Only a typed (Direct) line may answer: a script `actor:command("yes")`
+    // or a forced `yes` must not spend a player's gold. Non-direct lines
+    // skip the prompt and run as ordinary commands.
+    let typed = COMMAND_ORIGIN.with(std::cell::Cell::get) == CommandOrigin::Direct;
+    if typed && let Some(pending) = world.get::<PendingRentConfirm>(player).cloned() {
         match tokens[0] {
             "y" | "yes" => {
                 if let Ok(mut em) = world.get_entity_mut(player) {

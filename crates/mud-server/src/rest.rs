@@ -74,6 +74,14 @@ pub fn award_experience(world: &mut World, entity: Entity, base_xp: i32) -> i32 
     if base_xp <= 0 {
         return 0;
     }
+    // Staff-level characters gain nothing (`Profile::grant_experience`), so
+    // they must not burn their rest source or Repose pool either.
+    if world
+        .get::<Profile>(entity)
+        .is_some_and(|p| mud_db::enums::is_staff_level(p.level))
+    {
+        return 0;
+    }
     // Wake consumer runs FIRST so the Refreshed Effect lands before
     // the multiplied gain, in case any wake attachment grants a
     // spell-power buff (etc.) that the kill-XP narration would want

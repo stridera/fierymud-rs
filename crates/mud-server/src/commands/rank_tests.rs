@@ -412,3 +412,96 @@ fn lua_award_exp_does_not_move_a_god() {
     assert_eq!(level_of(&world, god), 104);
     assert_eq!(world.get::<Profile>(mortal).unwrap().experience, 25);
 }
+
+fn posture_of(world: &World, e: Entity) -> mud_world::PostureKind {
+    world.get::<mud_world::Posture>(e).unwrap().0
+}
+
+fn force_audited(world: &World, verb: &str) -> bool {
+    world
+        .resource::<crate::commands::AdminAuditLog>()
+        .entries
+        .iter()
+        .any(|e| e.verb == verb)
+}
+
+#[test]
+fn force_respects_level() {
+    let mut world = World::new();
+    world.insert_resource(DevMode(true));
+    let l104 = spawn(&mut world, "Coder", 104, UserRole::Player);
+    let l105 = spawn(&mut world, "Boss", 105, UserRole::Player);
+    let peer = spawn(&mut world, "Peer", 104, UserRole::Player);
+    let low = spawn(&mut world, "Low", 5, UserRole::Player);
+    for e in [l104, l105, peer, low] {
+        world
+            .entity_mut(e)
+            .insert(mud_world::Posture(mud_world::PostureKind::Standing));
+    }
+    // Higher, equal rank: refused and audited.
+    dispatch(&mut world, l104, "force Boss sit");
+    assert_eq!(posture_of(&world, l105), mud_world::PostureKind::Standing);
+    assert!(force_audited(&world, "force_denied"));
+    dispatch(&mut world, l104, "force Peer sit");
+    assert_eq!(posture_of(&world, peer), mud_world::PostureKind::Standing);
+    // A level-5 DevMode player can't make a god act.
+    dispatch(&mut world, low, "force Coder sit");
+    assert_eq!(posture_of(&world, l104), mud_world::PostureKind::Standing);
+    // Strictly higher forcing lower works.
+    dispatch(&mut world, l105, "force Coder sit");
+    assert_eq!(posture_of(&world, l104), mud_world::PostureKind::Sitting);
+    // Self-force is allowed.
+    dispatch(&mut world, low, "force Low sit");
+    assert_eq!(posture_of(&world, low), mud_world::PostureKind::Sitting);
+}
+
+#[test]
+fn non_typed_yes_does_not_confirm_rent() {
+    use crate::commands::{CommandOrigin, PendingRentConfirm, with_command_origin};
+    let mut world = World::new();
+    world.insert_resource(DevMode(true));
+    world.init_resource::<crate::commands::SocialRegistry>();
+    let p = spawn(&mut world, "Renter", 20, UserRole::Player);
+    let boss = spawn(&mut world, "Boss", 105, UserRole::Player);
+    world.entity_mut(p).insert((
+        mud_world::Wealth(1_000_000),
+        PendingRentConfirm {
+            tier_name: "Suite".into(),
+            tier: 2,
+            fee_gp: 5,
+        },
+    ));
+    let paid = |w: &World| w.get::<mud_world::Wealth>(p).unwrap().0 < 1_000_000;
+    run_lua_command(&mut world, p, "yes");
+    assert!(!paid(&world), "script yes must not pay rent");
+    assert!(world.get::<PendingRentConfirm>(p).is_some());
+    dispatch(&mut world, boss, "force Renter yes");
+    assert!(!paid(&world), "forced yes must not pay rent");
+    with_command_origin(CommandOrigin::Script, || dispatch(&mut world, p, "no"));
+    assert!(
+        world.get::<PendingRentConfirm>(p).is_some(),
+        "non-typed no must not cancel either"
+    );
+    dispatch(&mut world, p, "yes");
+    assert!(paid(&world), "typed yes confirms");
+    assert!(world.get::<PendingRentConfirm>(p).is_none());
+}
+
+#[test]
+fn staff_xp_does_not_burn_repose_or_rest_source() {
+    use mud_world::RestState;
+    let mut world = World::new();
+    world.insert_resource(level_table(110));
+    let god = spawn(&mut world, "God", 104, UserRole::Player);
+    let rest = RestState {
+        repose: 5000,
+        source: mud_db::enums::RestSource::Inn,
+        tier: 2,
+    };
+    world.entity_mut(god).insert(rest);
+    assert_eq!(crate::rest::award_experience(&mut world, god, 1000), 0);
+    let after = world.get::<RestState>(god).unwrap();
+    assert_eq!(after.repose, 5000);
+    assert_eq!(after.source, mud_db::enums::RestSource::Inn);
+    assert_eq!(after.tier, 2);
+}
