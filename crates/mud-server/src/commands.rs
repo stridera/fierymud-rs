@@ -422,6 +422,12 @@ mod drag;
 mod economy;
 #[path = "commands/followers.rs"]
 mod followers;
+#[path = "commands/gmcp.rs"]
+mod gmcp;
+pub(crate) use gmcp::clear_gmcp_sent;
+#[cfg(test)]
+#[path = "commands/gmcp_tests.rs"]
+mod gmcp_tests;
 #[path = "commands/magic_focus.rs"]
 mod magic_focus;
 pub(crate) use magic_focus::Concentrating;
@@ -1873,12 +1879,9 @@ pub(crate) fn send_comm_channel_text(
     };
     let plain_speaker = render_color_tags(talker, ColorMode::Strip);
     let plain_text = render_color_tags(text, ColorMode::Strip);
-    let payload = format!(
-        r#"{{"channel":"{}","talker":"{}","text":"{}"}}"#,
-        channel,
-        plain_speaker.replace('\\', "\\\\").replace('"', "\\\""),
-        plain_text.replace('\\', "\\\\").replace('"', "\\\""),
-    );
+    let payload =
+        serde_json::json!({"channel": channel, "talker": plain_speaker, "text": plain_text})
+            .to_string();
     let _ = conn
         .0
         .try_send(mud_net::gmcp_packet("Comm.Channel.Text", &payload));
@@ -7845,31 +7848,28 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // the IAC bytes as garbage which most terminal emulators strip
     // (they're outside the ASCII range).
     send_char_vitals(world, target);
-    // Char.Name — IRE-style identity frame. Sent every prompt for
-    // simplicity; the payload is small and idempotent on the
-    // client side. Mudlet binds `gmcp.Char.Name.name` for profile
-    // automation (per-character config files keyed by name).
+    // Char.Name / Char.StatusVars / Char.Status are change-gated: sent
+    // on the first prompt, after the client renegotiates, and whenever
+    // the content changes. StatusVars is a static schema descriptor, so
+    // in practice it goes out once per negotiation.
     if let Some(name_str) = name {
-        let plain = render_color_tags(name_str, ColorMode::Strip)
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let payload = format!("{{\"name\":\"{plain}\",\"full_name\":\"{plain}\"}}");
-        let _ = conn.try_send(mud_net::gmcp_packet("Char.Name", &payload));
+        let plain = render_color_tags(name_str, ColorMode::Strip);
+        let payload = serde_json::json!({"name": plain, "full_name": plain}).to_string();
+        gmcp::send_if_changed(world, target, "Char.Name", &payload, false);
     }
-    // Char.StatusVars — schema descriptor: maps each Char.Status
-    // field to a human label so generic clients can build a
-    // status panel without per-MUD code. Once-per-login would be
-    // ideal but emitting per prompt is cheap (~120 bytes) and
-    // sidesteps the "did the client miss the first push?" race.
     {
-        let payload = "{\"name\":\"Name\",\"full_name\":\"Full Name\",\"level\":\"Level\",\"class\":\"Class\",\"race\":\"Race\",\"xp\":\"Experience\",\"wealth\":\"Wealth\"}";
-        let _ = conn.try_send(mud_net::gmcp_packet("Char.StatusVars", payload));
+        let payload = serde_json::json!({
+            "name": "Name",
+            "full_name": "Full Name",
+            "level": "Level",
+            "class": "Class",
+            "race": "Race",
+            "xp": "Experience",
+            "wealth": "Wealth",
+        })
+        .to_string();
+        gmcp::send_if_changed(world, target, "Char.StatusVars", &payload, false);
     }
-    // Char.Status: longer-lived character metadata (level / xp /
-    // class / race / wealth). Same prompt cadence — many of these
-    // change only on level-up but the per-prompt push is cheap
-    // and lets the client refresh on any state change without
-    // computing what changed.
     if let Some(prof) = world.get::<Profile>(target) {
         let class_label = prof
             .class_id
@@ -7881,17 +7881,18 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             })
             .unwrap_or("");
         let wealth = world.get::<Wealth>(target).map_or(0, |w| w.0);
-        let payload = format!(
-            "{{\"name\":\"{}\",\"level\":{},\"xp\":{},\"class\":\"{}\",\"race\":\"{}\",\"wealth\":{}}}",
-            name.unwrap_or("").replace('"', "\\\""),
-            prof.level,
-            prof.experience,
-            class_label.replace('"', "\\\""),
-            prof.race.replace('"', "\\\""),
-            wealth,
-        );
-        let _ = conn.try_send(mud_net::gmcp_packet("Char.Status", &payload));
+        let payload = serde_json::json!({
+            "name": name.unwrap_or(""),
+            "level": prof.level,
+            "xp": prof.experience,
+            "class": class_label,
+            "race": prof.race,
+            "wealth": wealth,
+        })
+        .to_string();
+        gmcp::send_if_changed(world, target, "Char.Status", &payload, false);
     }
+    let mut discord_payload: Option<String> = None;
     // External.Discord.Status — Discord rich-presence frame.
     // Drives the "Playing fierymud-rs — Lvl X Class" overlay
     // through Mudlet's Discord SDK integration. Server icon /
@@ -7916,73 +7917,34 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
                 })
                 .unwrap_or("Adventurer");
             let plain_name = name
-                .map(|s| {
-                    render_color_tags(s, ColorMode::Strip)
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"")
-                })
+                .map(|s| render_color_tags(s, ColorMode::Strip))
                 .unwrap_or_default();
             let start_time = compute_login_unix_ts(world, target);
-            let game = cfg.get_string("gmcp", "discord_game_name", "fierymud-rs");
-            let state = cfg.get_string("gmcp", "discord_state", "");
-            let small_image = cfg.get_string("gmcp", "discord_small_image", "");
-            let small_image_text = cfg.get_string("gmcp", "discord_small_image_text", "");
-            let details = format!(
-                "Character: {plain_name}  Class: {class}  Level: {lvl}",
-                plain_name = plain_name,
-                class = class_label.replace('"', "\\\""),
-                lvl = prof.level,
-            );
-            let payload = format!(
-                "{{\"state\":\"{state}\",\"details\":\"{details}\",\"game\":\"{game}\",\"small_image\":[\"{small_image}\"],\"small_image_text\":\"{small_image_text}\",\"start_time\":{start_time}}}",
-                state = state.replace('"', "\\\""),
-                game = game.replace('"', "\\\""),
-                small_image = small_image.replace('"', "\\\""),
-                small_image_text = small_image_text.replace('"', "\\\""),
-            );
-            let _ = conn.try_send(mud_net::gmcp_packet("External.Discord.Status", &payload));
+            let payload = serde_json::json!({
+                "state": cfg.get_string("gmcp", "discord_state", ""),
+                "details": format!(
+                    "Character: {plain_name}  Class: {class_label}  Level: {}",
+                    prof.level
+                ),
+                "game": cfg.get_string("gmcp", "discord_game_name", "fierymud-rs"),
+                "small_image": [cfg.get_string("gmcp", "discord_small_image", "")],
+                "small_image_text": cfg.get_string("gmcp", "discord_small_image_text", ""),
+                "start_time": start_time,
+            })
+            .to_string();
+            discord_payload = Some(payload);
         }
     }
-    // Char.Aggro: every mob (anywhere) that has the player on its
+    if let Some(payload) = discord_payload {
+        gmcp::send_if_changed(world, target, "External.Discord.Status", &payload, false);
+    }
+    // Char.Aggro: mobs (anywhere) that have the player on their
     // HateList or in MobMemory. Lets HUD clients render a "things
     // hunting you" panel without polling. Two arrays so the client
     // can split active threats from "remembers you" stragglers.
-    {
-        let mut hating: Vec<String> = Vec::new();
-        let mut remembering: Vec<String> = Vec::new();
-        let mut q = world.query_filtered::<(
-            &Named,
-            Option<&crate::combat::HateList>,
-            Option<&crate::combat::MobMemory>,
-        ), With<Mob>>();
-        for (n, hate, mem) in q.iter(world) {
-            let in_hate = hate.is_some_and(|h| h.0.contains(&target));
-            let in_mem = mem.is_some_and(|m| m.0.contains(&target));
-            if in_hate {
-                hating.push(format!(
-                    "\"{}\"",
-                    render_color_tags(&n.name, ColorMode::Strip)
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"")
-                ));
-            } else if in_mem {
-                remembering.push(format!(
-                    "\"{}\"",
-                    render_color_tags(&n.name, ColorMode::Strip)
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"")
-                ));
-            }
-        }
-        if !hating.is_empty() || !remembering.is_empty() {
-            let payload = format!(
-                "{{\"hating\":[{}],\"remembering\":[{}]}}",
-                hating.join(","),
-                remembering.join(",")
-            );
-            let _ = conn.try_send(mud_net::gmcp_packet("Char.Aggro", &payload));
-        }
-    }
+    // Change-gated; an empty pair is sent once to clear a stale panel.
+    let aggro = gmcp::build_char_aggro(world, target);
+    gmcp::send_if_changed(world, target, "Char.Aggro", &aggro, false);
 
     // Group — IRE-shaped party panel. Solo players get an empty
     // `{}` frame so a previously-visible panel clears; grouped
@@ -8001,162 +7963,19 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
 
     // Char.Effects: array of `{name, ability, duration, source,
     // strength}` for every active effect on the player. Drives
-    // client-side buff/debuff panels.
-    //
-    // Both `name` (the effect's own label, e.g. "ward") AND
-    // `ability` (the spell that caused it, e.g. "armor") are
-    // emitted. The two are distinct in the data model — a single
-    // `armor` cast applies a `ward` effect — but Mudlet's icon
-    // sets and player intuition are keyed off the spell. Clients
-    // pick: name for descriptive display, ability for the icon
-    // and the player-facing label most users expect ("you have
-    // armor up", not "you have ward up"). `ability` is empty
-    // when the effect has no originating ability (admin grants,
-    // environmental auras).
-    //
-    // Cadence matches the prompt — per-prompt refresh is cheap
-    // and tracks ticks transparently. `duration` is seconds
-    // remaining (-1 = permanent); `source` is the high-level
-    // origin tag (spell / item / room / admin / other).
-    {
-        use mud_world::{AppliedTo as Applied, EffectInstance, EffectSource};
-        let mut entries: Vec<String> = Vec::new();
-        // Snapshot ability id → plain name once outside the loop.
-        // The catalog's `by_name` is HashMap<&str, AbilityDef>,
-        // so reverse-lookup by id requires a scan; collecting it
-        // up front avoids re-scanning per effect.
-        let ability_names: std::collections::HashMap<i32, String> = world
-            .get_resource::<AbilityCatalog>()
-            .map(|c| {
-                c.by_name
-                    .values()
-                    .map(|d| (d.id, d.plain_name.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut q = world.query::<(&EffectInstance, &Applied)>();
-        for (inst, applied) in q.iter(world) {
-            if applied.0 != target {
-                continue;
-            }
-            let safe_name = inst.name.replace('\\', "\\\\").replace('"', "\\\"");
-            let safe_ability = inst
-                .ability_id
-                .and_then(|id| ability_names.get(&id))
-                .map(|s| {
-                    render_color_tags(s, ColorMode::Strip)
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"")
-                })
-                .unwrap_or_default();
-            let source_label = match &inst.source {
-                EffectSource::Spell => "spell",
-                EffectSource::Item => "item",
-                EffectSource::Room => "room",
-                EffectSource::Admin => "admin",
-                EffectSource::Other(_) => "other",
-            };
-            entries.push(format!(
-                "{{\"name\":\"{}\",\"ability\":\"{}\",\"duration\":{},\"source\":\"{}\",\"strength\":{}}}",
-                safe_name, safe_ability, inst.remaining_secs, source_label, inst.strength
-            ));
-        }
-        // Always emit, even when empty — clients use the empty
-        // array to clear stale icons.
-        let payload = format!("[{}]", entries.join(","));
-        let _ = conn.try_send(mud_net::gmcp_packet("Char.Effects", &payload));
-    }
+    // client-side buff/debuff panels. `name` is the effect's own label
+    // (e.g. "ward"), `ability` the spell that caused it (e.g. "armor",
+    // empty for admin grants / auras); `duration` is seconds remaining
+    // (-1 = permanent). An empty array is sent when the last effect
+    // fades so clients clear stale icons. Change-gated.
+    let effects = gmcp::build_char_effects(world, target);
+    gmcp::send_if_changed(world, target, "Char.Effects", &effects, false);
 
-    // Room.Info — IRE-shaped mapper feed. Mudlet's stock mapper
-    // script keys off this exact field set; emitting the legacy
-    // {zone, id, exits:[...]} shape silently dropped the room
-    // from any Mudlet auto-mapping. Shape:
-    //   { num: int           // composite key, zone*100000+id
-    //   , name: string       // room title (color-stripped)
-    //   , area: string       // zone display name
-    //   , environment: string  // sector type label
-    //   , exits: { dir: int }  // direction → destination composite num
-    //   , doors: { dir: state }  // direction → "closed" / "locked"
-    //   }
-    // The composite num encoding is reversible (id = num %
-    // 100000, zone = num / 100000) and unique within a 5-digit
-    // local-id space — comfortably above any zone we have today.
-    if let Some(located) = world.get::<Located>(target) {
-        let room = located.0;
-        let room_name = world
-            .get::<Named>(room)
-            .map_or_else(String::new, |n| n.name.clone());
-        let plain_name = render_color_tags(&room_name, ColorMode::Strip)
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let (zone_id, room_id) = world
-            .get::<WorldKey>(room)
-            .map_or((-1, -1), |k| (k.zone, k.id));
-        let num = room_composite_num(zone_id, room_id);
-        // Zone display name: walk to the zone entity via WorldKeyIndex.
-        // God zones are not on any mortal map: no area name for them.
-        let area_name = world
-            .get_resource::<WorldKeyIndex>()
-            .and_then(|idx| idx.zones.get(&zone_id).copied())
-            .filter(|_| crate::room_access::room_visible_to(world, target, room))
-            .and_then(|zone_e| world.get::<Named>(zone_e).map(|n| n.name.clone()))
-            .unwrap_or_default();
-        let area_plain = render_color_tags(&area_name, ColorMode::Strip)
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let environment = world
-            .get::<RoomSector>(room)
-            .map_or("Unknown", |s| sector_label(s.0));
-        // Exits dict: direction → destination composite num. Doors
-        // dict: direction → "closed" / "locked" for non-Open
-        // states. Hidden exits omitted until found (the same way
-        // `look` hides them from unsearched rooms).
-        let mut exit_entries: Vec<String> = Vec::new();
-        let mut door_entries: Vec<String> = Vec::new();
-        if let Some(exits) = world.get::<Exits>(room) {
-            for (dir, data) in &exits.0 {
-                // Undiscovered hidden exits and exits into a god zone
-                // are not mapped; hidden exits the player has found
-                // via `search` are.
-                if exit_is_hidden_to(world, target, room, *dir, data) {
-                    continue;
-                }
-                let dir_name = direction_name(*dir);
-                let dest_num = data
-                    .to
-                    .and_then(|e| world.get::<WorldKey>(e))
-                    .map_or(0, |k| room_composite_num(k.zone, k.id));
-                exit_entries.push(format!("\"{dir_name}\":{dest_num}"));
-                let door_state = match data.state {
-                    mud_db::enums::ExitState::Open => None,
-                    mud_db::enums::ExitState::Closed => Some("closed"),
-                    mud_db::enums::ExitState::Locked => Some("locked"),
-                };
-                if let Some(state) = door_state {
-                    door_entries.push(format!("\"{dir_name}\":\"{state}\""));
-                }
-            }
-        }
-        // Server-side layout coords. Builders set Room.layoutX /
-        // layoutY / layoutZ in Muditor; the loader attaches them
-        // as a `RoomLayout` component. When present, emit them
-        // as `coords` so client-side mappers can place rooms
-        // exactly where the builder laid them out instead of
-        // doing compass-walk auto-placement. Absence of the
-        // field signals "auto-place me" — the Mudlet rewrite
-        // gates on `coords` when picking a strategy.
-        let coords_field = world
-            .get::<mud_world::RoomLayout>(room)
-            .map(|l| format!(",\"coords\":\"{},{},{}\"", l.x, l.y, l.z))
-            .unwrap_or_default();
-        let payload = format!(
-            "{{\"num\":{num},\"name\":\"{plain_name}\",\"area\":\"{area_plain}\",\"environment\":\"{environment}\",\"exits\":{{{}}},\"doors\":{{{}}}{}}}",
-            exit_entries.join(","),
-            door_entries.join(","),
-            coords_field,
-        );
-        let _ = conn.try_send(mud_net::gmcp_packet("Room.Info", &payload));
-    }
+    // Room.Info — IRE-shaped mapper feed (see `gmcp::build_room_info`).
+    // `look` (and therefore every movement) pushes it ahead of the room
+    // text; here it only goes out when the content changed, e.g. after
+    // `search` reveals a hidden exit.
+    gmcp::send_room_info(world, target, false);
 }
 
 /// Encode a `(zone, id)` composite room key as a single integer
@@ -10935,8 +10754,11 @@ pub(crate) fn room_is_dark(world: &World, room: Entity) -> bool {
     if matches!(sector, Sector::City | Sector::Road) {
         return false;
     }
-    let hour = world.resource::<mud_world::MudClock>().hour;
-    matches!(hour, 0..=4 | 22..=23)
+    // No clock (headless test worlds) means no night.
+    let Some(clock) = world.get_resource::<mud_world::MudClock>() else {
+        return false;
+    };
+    matches!(clock.hour, 0..=4 | 22..=23)
 }
 
 /// True when `entity` perceives through normal darkness, magical

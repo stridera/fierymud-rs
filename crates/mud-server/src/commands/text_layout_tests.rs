@@ -46,7 +46,26 @@ fn strip(s: &str) -> String {
 
 fn look_output(world: &mut World, player: Entity, rx: &mut super::test_support::Rx) -> String {
     cmd_look(world, player, "");
-    strip(&drain(rx))
+    // Drop GMCP subnegotiation frames (`IAC SB 201 ... IAC SE`): they
+    // ride the same stream but are not text the player reads.
+    let mut bytes = Vec::new();
+    while let Ok(b) = rx.try_recv() {
+        bytes.extend(b);
+    }
+    let mut text = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(&[255, 250, 201]) {
+            while i + 1 < bytes.len() && bytes[i..i + 2] != [255, 240] {
+                i += 1;
+            }
+            i += 2;
+        } else {
+            text.push(bytes[i]);
+            i += 1;
+        }
+    }
+    strip(&String::from_utf8_lossy(&text))
 }
 
 #[test]

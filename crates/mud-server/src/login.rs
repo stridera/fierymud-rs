@@ -1519,6 +1519,12 @@ impl ConnRouter {
             // for capability-gated rendering.
             "Core.Hello" => {
                 tracing::info!(conn_id, payload, "GMCP Core.Hello");
+                // A (re)negotiating client has lost whatever we sent
+                // before; forget it so the next prompt re-sends every
+                // change-gated package.
+                if let Some(&entity) = self.playing.get(&conn_id) {
+                    commands::clear_gmcp_sent(world, entity);
+                }
             }
             // Core.Supports.Set — client tells us which packages
             // it understands. Today we don't filter our outgoing
@@ -1526,6 +1532,12 @@ impl ConnRouter {
             // bindings a connecting client expects.
             "Core.Supports.Set" => {
                 tracing::info!(conn_id, payload, "GMCP Core.Supports.Set");
+                // A (re)negotiating client has lost whatever we sent
+                // before; forget it so the next prompt re-sends every
+                // change-gated package.
+                if let Some(&entity) = self.playing.get(&conn_id) {
+                    commands::clear_gmcp_sent(world, entity);
+                }
             }
             // External.Discord.Hello — client signals Discord
             // integration is ready. Re-emit ONLY External.Discord.Info

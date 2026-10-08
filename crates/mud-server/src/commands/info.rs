@@ -5936,14 +5936,16 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
 
+    // GMCP Room.Info goes out BEFORE the room text (every move calls
+    // `look` with no argument) so mappers see the room data first. In
+    // a room the viewer can't see it is `{}`, never the room's data.
+    crate::commands::gmcp::send_room_info(world, player, true);
+
     // Dark-room gate: caves, underdark, underwater, and outdoor
     // rooms at night print only "It is pitch black..." plus exits
     // (AUTO_EXIT) — unless someone in the room carries a Lit item,
     // or the player has HOLY_LIGHT (admin/staff toggle).
-    if room_is_dark(world, room)
-        && !room_has_light(world, room)
-        && !crate::commands::player_can_see_in_dark(world, player)
-    {
+    if !crate::commands::gmcp::viewer_sees_room(world, player, room) {
         let mut out = String::from("\r\nIt is pitch black; you can see nothing.\r\n");
         // HUM items still carry through the dark — sound doesn't
         // need light. Single line regardless of count; the room
