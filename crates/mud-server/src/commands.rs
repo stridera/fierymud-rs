@@ -8149,6 +8149,12 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // text; here it only goes out when the content changed, e.g. after
     // `search` reveals a hidden exit.
     gmcp::send_room_info(world, target, false);
+    // This prompt answers any output queued for `target` so far; without
+    // this, a caller that sends a prompt itself (login, takeover) would
+    // get a second one from the next `flush_prompts` (issue #88).
+    PROMPT_RECIPIENTS.with(|r| {
+        r.borrow_mut().remove(&target);
+    });
 }
 
 /// Encode a `(zone, id)` composite room key as a single integer

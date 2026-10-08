@@ -7572,6 +7572,9 @@ mod tests {
         let hall = out.find("The Grand Hall").expect(&out);
         let info = out.find("Room.Info").expect(&out);
         assert!(reconnecting < info && info < hall, "{out}");
+        // One prompt for the takeover, not a second from the next flush.
+        commands::flush_prompts(&mut world);
+        assert_eq!(drain(&mut rx2), "", "no repeated prompt after login");
     }
 
     /// World resources `look` needs, plus a named, described room.

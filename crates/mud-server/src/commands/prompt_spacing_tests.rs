@@ -194,3 +194,32 @@ fn look_in_an_empty_room_adds_no_trailing_blank_line() {
         "{out:?}"
     );
 }
+
+/// Issue #88: login sends its own prompt after the enter-game output; the
+/// next `flush_prompts` must not send a second one for that same output.
+#[test]
+fn an_explicit_prompt_is_not_repeated_by_the_next_flush() {
+    let (mut world, _room, player, mut rx) = world_with_player();
+    world
+        .entity_mut(player)
+        .insert(mud_world::Prompt("PROMPT> ".to_string()));
+    send_to(&world, player, "Welcome, Tester.\r\n");
+    send_prompt(&mut world, player);
+    flush_prompts(&mut world);
+    flush_prompts(&mut world);
+    let out = plain(&drain(&mut rx));
+    assert_eq!(out.matches("PROMPT>").count(), 1, "{out:?}");
+}
+
+#[test]
+fn output_after_an_explicit_prompt_still_earns_a_new_prompt() {
+    let (mut world, _room, player, mut rx) = world_with_player();
+    world
+        .entity_mut(player)
+        .insert(mud_world::Prompt("PROMPT> ".to_string()));
+    send_prompt(&mut world, player);
+    send_to(&world, player, "A gnat bites you.\r\n");
+    flush_prompts(&mut world);
+    let out = plain(&drain(&mut rx));
+    assert_eq!(out.matches("PROMPT>").count(), 2, "{out:?}");
+}
