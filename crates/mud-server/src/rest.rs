@@ -432,4 +432,51 @@ mod tests {
         assert!(matches!(rest.source, RestSource::None));
         assert_eq!(effect_count(&mut world, 2), 0);
     }
+
+    fn pool_world(repose: i32) -> (World, Entity) {
+        let mut world = World::new();
+        let player = world
+            .spawn(RestState {
+                repose,
+                source: RestSource::None,
+                tier: 0,
+            })
+            .id();
+        (world, player)
+    }
+
+    fn pool(world: &World, e: Entity) -> i32 {
+        world.get::<RestState>(e).unwrap().repose
+    }
+
+    #[test]
+    fn repose_doubles_xp_and_spends_only_the_bonus() {
+        let (mut world, e) = pool_world(1_000);
+        assert_eq!(apply_repose_on_xp(&mut world, e, 100), 100);
+        assert_eq!(pool(&world, e), 900);
+    }
+
+    #[test]
+    fn repose_partial_pool_gives_partial_bonus_then_stops_at_zero() {
+        let (mut world, e) = pool_world(150);
+        assert_eq!(apply_repose_on_xp(&mut world, e, 100), 100);
+        assert_eq!(pool(&world, e), 50);
+        // Only 50 left: bonus is capped at the pool, which empties exactly.
+        assert_eq!(apply_repose_on_xp(&mut world, e, 100), 50);
+        assert_eq!(pool(&world, e), 0);
+        // Empty pool: no bonus, never negative.
+        assert_eq!(apply_repose_on_xp(&mut world, e, 100), 0);
+        assert_eq!(pool(&world, e), 0);
+    }
+
+    #[test]
+    fn repose_award_experience_total_is_base_plus_drawn() {
+        let (mut world, e) = setup(RestSource::None, 0);
+        world.get_mut::<RestState>(e).unwrap().repose = 30;
+        assert_eq!(award_experience(&mut world, e, 100), 130);
+        assert_eq!(pool(&world, e), 0);
+        assert_eq!(world.get::<Profile>(e).unwrap().experience, 130);
+        assert_eq!(award_experience(&mut world, e, 100), 100);
+        assert_eq!(pool(&world, e), 0);
+    }
 }

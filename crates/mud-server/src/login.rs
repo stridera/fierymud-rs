@@ -520,17 +520,23 @@ const MAX_CHARACTER_NAME_LEN: usize = 20;
 /// (0, 0) is "The Void" — fitting.
 const FALLBACK_START: (i32, i32) = (0, 0);
 
-/// Rest / repose: offline Repose fill rate per tier. Indexed by
-/// `restTier` (0..=3); tier 0 is `NONE` / `QUIT` and contributes
-/// nothing. Values are XP-per-real-hour while logged off. Matches
-/// the design doc §"Tier table" (TUNABLE: 2.5 / 5.0 / 10.0).
-const REPOSE_FILL_PER_HOUR: [f64; 4] = [0.0, 2.5, 5.0, 10.0];
-
-/// Rest / repose: per-tier cap on the Repose pool, as a fraction of
-/// the XP needed to advance from the player's current level to the
-/// next. Indexed by `restTier`. **TUNABLE** — design doc §"Tier table":
-/// 10% basic, 25% suite, 50% penthouse. Tier 0 caps at zero.
-const REPOSE_CAP_FRAC: [f64; 4] = [0.0, 0.10, 0.25, 0.50];
+/// Rest / repose: offline Repose fill rate and pool cap per tier,
+/// both in basis points (1/100 of a percent) of the XP needed to
+/// advance from the character's current level to the next, so the
+/// pool scales with progression. Indexed by `restTier` (0..=3); tier 0
+/// is `NONE` / `QUIT` and contributes nothing. **TUNABLE**, see
+/// `docs/design/rest-and-repose.md` §"Tier table":
+///
+/// | tier | fill / hour | cap  | time to cap |
+/// |------|-------------|------|-------------|
+/// | 0    | 0           | 0    | n/a         |
+/// | 1    | 2.5%        | 10%  | 4 h         |
+/// | 2    | 5.0%        | 25%  | 5 h         |
+/// | 3    | 10.0%       | 50%  | 5 h         |
+const REPOSE_FILL_BP_PER_HOUR: [i64; 4] = [0, 250, 500, 1000];
+/// See [`REPOSE_FILL_BP_PER_HOUR`].
+const REPOSE_CAP_BP: [i64; 4] = [0, 1000, 2500, 5000];
+const BASIS_POINTS: i128 = 10_000;
 
 /// Maximum disconnect window across which non-staff effects persist,
 /// in seconds. Reconnect within this window restores active buffs /
@@ -4082,7 +4088,8 @@ pub(crate) fn spawn_player(
     // verbatim — they're consumed only on first XP gain (R4), never
     // on login per ADR 0001 §1.
     let elapsed_secs = last_login_unix.map_or(0, |prev| now_unix.saturating_sub(prev).max(0));
-    let new_repose = accrue_repose(c.repose, c.rest_tier, c.level, elapsed_secs);
+    let next_level_xp = repose_next_level_xp(world, c.class_id, c.level);
+    let new_repose = accrue_repose(c.repose, c.rest_tier, next_level_xp, elapsed_secs);
 
     let index = world.resource::<WorldKeyIndex>();
     // Recall point: only set when the row has both coordinates AND the room
@@ -5864,40 +5871,53 @@ fn pick_starting_room(c: &CharacterRow, race_start: Option<(i32, i32)>) -> (i32,
     FALLBACK_START
 }
 
-/// Rest / repose: accrue Repose for the elapsed offline window.
-/// Returns the new pool value (clamped to per-tier cap). Pure-fn for
-/// unit testability — no DB or component writes.
-///
-/// `elapsed_secs` is wall-clock seconds offline; `level` and `tier`
-/// drive the rate / cap table. `existing_repose` is the sticky pool
-/// that survives logouts.
+/// Rest / repose: XP needed to advance from `level` to the next level
+/// (class-scaled, from the live `LevelTable`; the same bracket
+/// `level_progress` shows). `None` when there is no next level to
+/// accrue against: staff levels, the mortal cap (99), or a level the
+/// table has no rows for.
 #[must_use]
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-fn accrue_repose(existing_repose: i32, tier: i32, level: i32, elapsed_secs: i64) -> i32 {
-    if !(1..=3).contains(&tier) || elapsed_secs <= 0 {
-        return existing_repose;
+fn repose_next_level_xp(world: &World, class_id: Option<i32>, level: i32) -> Option<i64> {
+    if !(1..mud_db::enums::MAX_MORTAL_LEVEL).contains(&level) {
+        return None;
     }
-    let tier_idx = usize::try_from(tier).unwrap_or(0);
-    let Some(rate) = REPOSE_FILL_PER_HOUR.get(tier_idx).copied() else {
+    let floor = i64::from(mud_world::exp_to_reach(world, class_id, level).unwrap_or(0));
+    let ceiling = i64::from(mud_world::exp_to_reach(world, class_id, level + 1)?);
+    Some((ceiling - floor).max(1))
+}
+
+/// Rest / repose: accrue Repose for the elapsed offline window.
+/// Returns the new pool value. Pure-fn for unit testability: no DB or
+/// component writes.
+///
+/// `next_level_xp` is the XP bracket to the next level (see
+/// [`repose_next_level_xp`]; `None` accrues nothing). Gain is
+/// `hours * fill% * next_level_xp`, added to `existing_repose` and
+/// capped at `cap% * next_level_xp`, all rounded down to whole XP. An
+/// existing pool already above the cap (earned at a higher tier, or
+/// before a level-up changed the bracket) is never reduced.
+#[must_use]
+fn accrue_repose(
+    existing_repose: i32,
+    tier: i32,
+    next_level_xp: Option<i64>,
+    elapsed_secs: i64,
+) -> i32 {
+    let (Some(next_level_xp), true) = (next_level_xp, elapsed_secs > 0) else {
         return existing_repose;
     };
-    let Some(cap_frac) = REPOSE_CAP_FRAC.get(tier_idx).copied() else {
+    let Some((rate_bp, cap_bp)) = usize::try_from(tier)
+        .ok()
+        .and_then(|i| Some((REPOSE_FILL_BP_PER_HOUR.get(i)?, REPOSE_CAP_BP.get(i)?)))
+    else {
         return existing_repose;
     };
-    let hours = elapsed_secs as f64 / 3600.0;
-    let gained = (hours * rate).max(0.0) as i64;
-    // xpForNextLevel: bracket between current and next level. Mirror
-    // the runtime's `experience_for_level` curve so the cap tracks
-    // actual progression.
-    let bracket = commands::experience_for_level(level + 1)
-        .saturating_sub(commands::experience_for_level(level))
-        .max(1);
-    let cap = ((bracket as f64) * cap_frac).max(0.0) as i64;
-    let total = i64::from(existing_repose).saturating_add(gained).min(cap);
+    let xp = i128::from(next_level_xp.max(0));
+    // Exact integer math: no float rounding at the cap boundary.
+    let gained = i128::from(elapsed_secs) * i128::from(*rate_bp) * xp / (3600 * BASIS_POINTS);
+    let cap = i128::from(*cap_bp) * xp / BASIS_POINTS;
+    let existing = i128::from(existing_repose);
+    let total = existing.saturating_add(gained).min(cap).max(existing);
     i32::try_from(total).unwrap_or(i32::MAX)
 }
 
@@ -6048,46 +6068,142 @@ mod tests {
         }
     }
 
+    /// L10 -> L11 bracket used by the accrual tests.
+    const L10_NEXT_XP: i64 = 69_000;
+    const HOUR: i64 = 3600;
+
+    fn accrue_l10(existing: i32, tier: i32, hours_secs: i64) -> i32 {
+        accrue_repose(existing, tier, Some(L10_NEXT_XP), hours_secs)
+    }
+
     #[test]
-    fn accrue_repose_zero_for_tier_zero() {
-        assert_eq!(accrue_repose(100, 0, 5, 36_000), 100);
+    fn accrue_repose_tier1_four_hours_is_exactly_the_cap() {
+        // 4 h * 2.5% = 10% of 69,000.
+        assert_eq!(accrue_l10(0, 1, 4 * HOUR), 6_900);
+    }
+
+    #[test]
+    fn accrue_repose_tier1_one_hour_is_a_quarter_of_the_cap() {
+        assert_eq!(accrue_l10(0, 1, HOUR), 1_725);
+    }
+
+    #[test]
+    fn accrue_repose_tier1_beyond_cap_stays_at_cap() {
+        assert_eq!(accrue_l10(0, 1, 365 * 24 * HOUR), 6_900);
+    }
+
+    #[test]
+    fn accrue_repose_higher_tiers_use_their_own_rate_and_cap() {
+        assert_eq!(accrue_l10(0, 2, HOUR), 3_450);
+        assert_eq!(accrue_l10(0, 2, 5 * HOUR), 17_250);
+        assert_eq!(accrue_l10(0, 3, HOUR), 6_900);
+        assert_eq!(accrue_l10(0, 3, 5 * HOUR), 34_500);
+        assert_eq!(accrue_l10(0, 3, 100 * HOUR), 34_500);
+    }
+
+    #[test]
+    fn accrue_repose_zero_hours_gains_nothing() {
+        assert_eq!(accrue_l10(0, 1, 0), 0);
+        assert_eq!(accrue_l10(123, 3, 0), 123);
     }
 
     #[test]
     fn accrue_repose_zero_for_negative_elapsed() {
-        assert_eq!(accrue_repose(100, 2, 5, -1), 100);
+        assert_eq!(accrue_l10(100, 2, -1), 100);
     }
 
     #[test]
-    fn accrue_repose_t1_basic_caps_at_10_percent() {
-        // L5: bracket = ceil(6) - ceil(5) per the curve. Just check
-        // the function clamps to <= cap and never exceeds.
-        let result = accrue_repose(0, 1, 5, 365 * 24 * 3600); // a year offline
-        // T1 cap = 10% of bracket; for L5 bracket ≈ 33k, so cap ≈ 3.3k.
-        assert!(result > 0);
-        let bracket = commands::experience_for_level(6) - commands::experience_for_level(5);
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-        let expected_cap = (bracket as f64 * 0.10) as i32;
-        assert!(result <= expected_cap, "{result} > {expected_cap}");
+    fn accrue_repose_zero_for_tier_zero() {
+        assert_eq!(accrue_l10(0, 0, 10 * HOUR), 0);
+        assert_eq!(accrue_l10(100, 0, 10 * HOUR), 100);
     }
 
     #[test]
-    fn accrue_repose_t3_penthouse_caps_higher_than_t1() {
-        let t1 = accrue_repose(0, 1, 10, 365 * 24 * 3600);
-        let t3 = accrue_repose(0, 3, 10, 365 * 24 * 3600);
-        assert!(t3 > t1, "tier 3 cap should exceed tier 1");
+    fn accrue_repose_unknown_tier_gains_nothing() {
+        assert_eq!(accrue_l10(5, 4, 10 * HOUR), 5);
+        assert_eq!(accrue_l10(5, -1, 10 * HOUR), 5);
     }
 
     #[test]
-    fn accrue_repose_preserves_existing_pool_above_cap() {
-        // If repose already exceeds the per-tier cap (rare — would
-        // need cross-tier history), the helper still clamps to cap
-        // because the spec wants a deterministic per-tier ceiling.
-        let r = accrue_repose(999_999_999, 1, 5, 3_600);
-        let bracket = commands::experience_for_level(6) - commands::experience_for_level(5);
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-        let cap = (bracket as f64 * 0.10) as i32;
-        assert_eq!(r, cap);
+    fn accrue_repose_rounds_down_to_whole_xp() {
+        // 1 s at tier 1: 69,000 * 2.5% / 3600 = 0.479 XP.
+        assert_eq!(accrue_l10(0, 1, 1), 0);
+        // 100 s: 47.9 XP.
+        assert_eq!(accrue_l10(0, 1, 100), 47);
+    }
+
+    #[test]
+    fn accrue_repose_adds_to_existing_pool_up_to_cap() {
+        assert_eq!(accrue_l10(1_000, 1, HOUR), 2_725);
+        assert_eq!(accrue_l10(6_000, 1, HOUR), 6_900);
+    }
+
+    #[test]
+    fn accrue_repose_never_reduces_pool_above_cap() {
+        assert_eq!(accrue_l10(999_999, 1, HOUR), 999_999);
+        assert_eq!(accrue_l10(7_000, 1, 4 * HOUR), 7_000);
+    }
+
+    #[test]
+    fn accrue_repose_without_next_level_gains_nothing() {
+        assert_eq!(accrue_repose(0, 3, None, 100 * HOUR), 0);
+        assert_eq!(accrue_repose(50, 3, None, 100 * HOUR), 50);
+    }
+
+    fn level_world() -> World {
+        let mut world = World::new();
+        let rows = [
+            (10, 600_000),
+            (11, 669_000),
+            (99, 9_000_000),
+            (100, 9_500_000),
+        ]
+        .into_iter()
+        .map(|(level, exp_required)| mud_world::LevelRow {
+            level,
+            name: None,
+            exp_required,
+            hp_gain: 1,
+            stamina_gain: 1,
+            is_immortal: level >= 100,
+            permissions: Vec::new(),
+        })
+        .collect();
+        world.insert_resource(mud_world::LevelTable { rows });
+        world
+    }
+
+    #[test]
+    fn repose_next_level_xp_is_the_level_bracket() {
+        let world = level_world();
+        assert_eq!(repose_next_level_xp(&world, None, 10), Some(69_000));
+    }
+
+    #[test]
+    fn repose_next_level_xp_none_at_mortal_cap_and_for_gods() {
+        let world = level_world();
+        assert_eq!(repose_next_level_xp(&world, None, 99), None);
+        assert_eq!(repose_next_level_xp(&world, None, 104), None);
+        assert_eq!(repose_next_level_xp(&world, None, 0), None);
+        // No table row for level 13 / 14 at all.
+        assert_eq!(repose_next_level_xp(&world, None, 12), None);
+    }
+
+    #[test]
+    fn l99_and_l104_accrue_nothing_end_to_end() {
+        let world = level_world();
+        for level in [99, 104] {
+            let next = repose_next_level_xp(&world, None, level);
+            assert_eq!(accrue_repose(0, 3, next, 100 * HOUR), 0, "level {level}");
+        }
+    }
+
+    #[test]
+    fn l10_tier1_four_hours_end_to_end() {
+        let world = level_world();
+        let next = repose_next_level_xp(&world, None, 10);
+        assert_eq!(accrue_repose(0, 1, next, 4 * HOUR), 6_900);
+        assert_eq!(accrue_repose(0, 1, next, HOUR), 1_725);
     }
 
     // --- creation-flow validators ---

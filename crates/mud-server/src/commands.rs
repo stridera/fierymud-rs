@@ -5822,20 +5822,6 @@ mod tests {
     // --- score-sheet helpers ---
 
     #[test]
-    fn experience_for_level_floor_at_one() {
-        assert_eq!(super::experience_for_level(0), 0);
-        assert_eq!(super::experience_for_level(1), 0);
-    }
-
-    #[test]
-    fn experience_for_level_is_monotonic() {
-        let curve: Vec<i64> = (1..=20).map(super::experience_for_level).collect();
-        for window in curve.windows(2) {
-            assert!(window[0] <= window[1], "curve must be monotonic: {curve:?}");
-        }
-    }
-
-    #[test]
     fn progress_bar_is_fixed_width() {
         // Always 22 chars: '[' + 20 cells + ']'.
         for pct in [0, 1, 50, 99, 100] {
@@ -10181,21 +10167,6 @@ fn group_status_line(g: &GroupStatus) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Cumulative XP required to *reach* `level` on the old
-/// `level^2.5 * 1000` curve. Only the offline Repose accrual cap in
-/// `login.rs` still uses it; every XP readout and level-up reads the
-/// `LevelDefinition` table through [`level_progress`] / `exp_to_reach`.
-/// TODO: move the Repose cap onto the level table and delete this.
-#[must_use]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub(crate) fn experience_for_level(level: i32) -> i64 {
-    if level <= 1 {
-        return 0;
-    }
-    let raw = f64::from(level).powf(2.5) * 1000.0;
-    raw as i64
 }
 
 /// XP-to-next-level summary for `profile`, from the live level table and
