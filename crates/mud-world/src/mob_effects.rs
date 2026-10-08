@@ -85,6 +85,16 @@ const FLAG_MARKERS: &[FlagMarker] = &[
         tag_backed: None,
     },
     FlagMarker {
+        flags: &["waterwalk"],
+        insert: |e| {
+            e.insert(crate::components::WaterWalk);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::WaterWalk>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
         flags: &["bless"],
         insert: |e| {
             e.insert(crate::components::Bless);
@@ -229,7 +239,7 @@ fn marker_for(flag: &str) -> Option<&'static FlagMarker> {
 /// Install the marker component a `status` effect's `flag` stands for.
 /// Returns true when `flag` maps to a plain marker. Flags that need
 /// extra data (resistance, empowered, globe) are handled by the cast
-/// path itself; flags with no marker component (waterwalk, `detect_hidden`,
+/// path itself; flags with no marker component (`detect_hidden`,
 /// language, debuffs, ...) return false.
 pub fn install_flag_marker(world: &mut World, target: Entity, flag: &str) -> bool {
     let Some(marker) = marker_for(flag) else {
@@ -556,6 +566,7 @@ mod tests {
             ("detect_align", |w, e| w.get::<DetectAlign>(e).is_some()),
             ("blur", |w, e| w.get::<Blur>(e).is_some()),
             ("familiarity", |w, e| w.get::<Familiar>(e).is_some()),
+            ("waterwalk", |w, e| w.get::<WaterWalk>(e).is_some()),
         ];
         for (flag, has) in mapped {
             let target = world.spawn_empty().id();
@@ -564,7 +575,6 @@ mod tests {
             assert!(has(&world, target), "{flag} marker installed");
         }
         for flag in [
-            "waterwalk",
             "detect_hidden",
             "detect_magic",
             "fireshield",
@@ -586,9 +596,10 @@ mod tests {
             assert!(is_name_behaviour_flag(flag) && is_instance_only_flag(flag));
             assert!(!install_flag_marker_known(flag));
         }
-        for flag in ["waterwalk", "language_fluency"] {
-            assert!(!is_instance_only_flag(flag), "{flag} has no behaviour");
-        }
+        assert!(
+            !is_instance_only_flag("language_fluency"),
+            "language_fluency has no behaviour"
+        );
     }
 
     #[test]

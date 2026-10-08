@@ -38,8 +38,9 @@ pub use components::{
     Slot, SlotHold, SlotReservation, SnoopedBy, Snooping, SoundproofRoom, SpellCooldown,
     SpellResistanceDelta, SpellSlots, Stamina, Stealth, Stunned, SwitchedFrom, SwitchedInto,
     SyslogMinLevel, TellLog, Thirst, TimePlayed, Title, Trophy, TrophyEntry, TrophyKind, UiStyle,
-    WallTraversal, WatchingSyslog, Wealth, WearableIn, WimpyThreshold, WizInvis, WorldKey, Zone,
-    ZoneClimate, ZoneVisits, is_lit, room_in_god_zone, wear_keyword_slot, zone_is_god,
+    WallTraversal, WatchingSyslog, WaterWalk, Wealth, WearableIn, WimpyThreshold, WizInvis,
+    WorldKey, Zone, ZoneClimate, ZoneVisits, is_lit, room_in_god_zone, wear_keyword_slot,
+    zone_is_god,
 };
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_effect_catalog,

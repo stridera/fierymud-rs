@@ -132,6 +132,13 @@ pub fn wander_tick(world: &mut World) {
                         if aquatic && !room_is_aquatic(world, to) {
                             return None;
                         }
+                        // "Water, no swim": a mob without a boat, wings,
+                        // waterwalk or the AQUATIC trait never wanders into
+                        // or out of deep water (legacy mob_movement goes
+                        // through the same do_simple_move gate).
+                        if crate::room_access::deep_water_blocks(world, mob, room, to) {
+                            return None;
+                        }
                         // NoMobsRoom: wandering mobs refuse to enter
                         // rooms flagged `allows_mobs = false`. Staff-
                         // placed mobs (via `load <zone> <id>`) bypass
@@ -654,5 +661,34 @@ mod tests {
 
         world.entity_mut(leader).insert(Located(to));
         assert_eq!(wander_many(&mut world, follower), Some(to));
+    }
+
+    /// Legacy mobs walk through the same deep-water gate as players: a plain
+    /// mob never wanders into a `Sector::Water` room, but an AQUATIC one, a
+    /// flier and a waterwalker do.
+    #[test]
+    fn deep_water_blocks_wandering_unless_the_mob_can_cross() {
+        let mut world = World::new();
+        let from = make_room(&mut world);
+        let lake = make_room(&mut world);
+        world.entity_mut(lake).insert(RoomSector(Sector::Water));
+        link(&mut world, from, Direction::North, lake);
+
+        let plain = make_mob(&mut world, from);
+        assert_eq!(wander_many(&mut world, plain), Some(from), "plain mob");
+
+        let fish = make_mob(&mut world, from);
+        world
+            .entity_mut(fish)
+            .insert(MobTraits(vec![MobTrait::Aquatic]));
+        assert_eq!(wander_many(&mut world, fish), Some(lake), "aquatic");
+
+        let bird = make_mob(&mut world, from);
+        world.entity_mut(bird).insert(mud_world::Flying);
+        assert_eq!(wander_many(&mut world, bird), Some(lake), "flying");
+
+        let walker = make_mob(&mut world, from);
+        world.entity_mut(walker).insert(mud_world::WaterWalk);
+        assert_eq!(wander_many(&mut world, walker), Some(lake), "waterwalk");
     }
 }

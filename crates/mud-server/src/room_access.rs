@@ -16,10 +16,12 @@
 //!   peaceful exclusions, in either zone-limited or whole-world range.
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::UserRole;
+use mud_db::enums::{MobTrait, MovementMode, ObjectType, Sector, UserRole};
 use mud_world::{
-    Account, Contents, DeathTrap, EntryRestriction, Located, Mob, NoTeleportRoom, PeacefulRoom,
-    Player, Profile, RoomCapacity, WorldKey, WorldKeyIndex, room_in_god_zone, zone_is_god,
+    Account, Contents, DeathTrap, EntryRestriction, EquippedSlot, Flying, Item, Located, Mob,
+    MobTraits, Mounted, MovementModeTag, NoTeleportRoom, ObjectPrototypes, PeacefulRoom, Player,
+    Profile, RoomCapacity, RoomSector, WaterWalk, WorldKey, WorldKeyIndex, room_in_god_zone,
+    zone_is_god,
 };
 
 /// Legacy refusal (act.movement.cpp `do_simple_move`, GODROOM branch).
@@ -165,6 +167,72 @@ fn evaluate_restriction(world: &mut World, mover: Entity, dest: Entity, expr: &s
     }
 }
 
+/// Legacy refusal (act.movement.cpp `do_simple_move`, `SECT_WATER` branch).
+pub(crate) const NEED_BOAT: &str = "You need a boat or wings to go there.\r\n";
+
+/// Legacy `can_travel_on_water` (movement.cpp) for one body: an immortal, a
+/// `waterwalk` holder, an AQUATIC mob, or someone with a boat. A boat counts
+/// when worn, or carried in the inventory and not wearable at all (legacy
+/// `find_eq_pos < 0`); a wearable boat (a canoe worn on the off hand) has to
+/// actually be worn. Boats inside containers do not count.
+fn body_can_travel_on_water(world: &World, who: Entity) -> bool {
+    if is_immortal(world, who)
+        || world.get::<WaterWalk>(who).is_some()
+        || world
+            .get::<MobTraits>(who)
+            .is_some_and(|t| t.has(MobTrait::Aquatic))
+    {
+        return true;
+    }
+    let Some(contents) = world.get::<Contents>(who) else {
+        return false;
+    };
+    let protos = world.get_resource::<ObjectPrototypes>();
+    contents.iter().any(|item| {
+        if world.get::<Item>(item).is_none() {
+            return false;
+        }
+        let Some(proto) = world
+            .get::<WorldKey>(item)
+            .and_then(|k| protos?.by_key.get(&(k.zone, k.id)))
+        else {
+            return false;
+        };
+        proto.r#type == ObjectType::Boat
+            && (world.get::<EquippedSlot>(item).is_some()
+                || mud_world::wear_flags_slots(&proto.wear_flags).is_empty())
+    })
+}
+
+/// Legacy `flying`: airborne (the `Flying` marker, or a proto that flies) or
+/// an immortal.
+fn body_is_flying(world: &World, who: Entity) -> bool {
+    is_immortal(world, who)
+        || world.get::<Flying>(who).is_some()
+        || world
+            .get::<MovementModeTag>(who)
+            .is_some_and(|m| m.0 == MovementMode::Flying)
+}
+
+/// Legacy "water, no swim" gate (`do_simple_move`): stepping into OR out of
+/// a `Sector::Water` room needs a boat, flight or waterwalk. Shallows and
+/// underwater rooms are not gated. A rider and the mount under it share
+/// their gear, so either one satisfying the rule lets the pair through.
+pub(crate) fn deep_water_blocks(world: &World, mover: Entity, from: Entity, to: Entity) -> bool {
+    let deep = |room: Entity| {
+        world
+            .get::<RoomSector>(room)
+            .is_some_and(|s| s.0 == Sector::Water)
+    };
+    if !deep(from) && !deep(to) {
+        return false;
+    }
+    let mount = world.get::<Mounted>(mover).map(|m| m.0);
+    let bodies = std::iter::once(mover).chain(mount);
+    !bodies.clone().any(|b| body_can_travel_on_water(world, b))
+        && !bodies.clone().any(|b| body_is_flying(world, b))
+}
+
 /// May `mover` enter `dest`? Rooms without a restriction admit everyone;
 /// staff bypass; otherwise the room's Lua restriction decides.
 pub(crate) fn entry_allowed(world: &mut World, mover: Entity, dest: Entity) -> bool {
@@ -213,7 +281,7 @@ pub(crate) fn refuse_entry(world: &mut World, mover: Entity, dest: Entity) -> bo
 }
 
 /// Drop every candidate `(direction, room)` that any of `movers` may not
-/// enter. Used by flee/retreat, which pick a random exit and must never
+/// enter (including deep water without a boat, wings or waterwalk). Used by flee/retreat, which pick a random exit and must never
 /// pick one into a room that refuses the fleer.
 pub(crate) fn retain_admitted<T>(
     world: &mut World,
@@ -221,9 +289,13 @@ pub(crate) fn retain_admitted<T>(
     candidates: &mut Vec<(T, Entity)>,
 ) {
     candidates.retain(|(_, room)| {
-        movers
-            .iter()
-            .all(|m| room_visible_to(world, *m, *room) && entry_allowed(world, *m, *room))
+        movers.iter().all(|m| {
+            room_visible_to(world, *m, *room)
+                && entry_allowed(world, *m, *room)
+                && world
+                    .get::<Located>(*m)
+                    .is_none_or(|l| !deep_water_blocks(world, *m, l.0, *room))
+        })
     });
 }
 

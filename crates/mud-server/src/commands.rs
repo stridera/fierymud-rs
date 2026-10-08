@@ -564,6 +564,9 @@ mod vlist;
 #[path = "commands/vlist_tests.rs"]
 mod vlist_tests;
 #[cfg(test)]
+#[path = "commands/water_tests.rs"]
+mod water_tests;
+#[cfg(test)]
 #[path = "commands/wear_tests.rs"]
 mod wear_tests;
 #[cfg(test)]
@@ -21730,6 +21733,12 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     if crate::room_access::refuse_entry(world, player, target) {
         return;
     }
+    // "Water, no swim" gate (legacy SECT_WATER): a boat, flight or
+    // waterwalk is needed to step into or out of a deep-water room.
+    if crate::room_access::deep_water_blocks(world, player, from_room, target) {
+        send_to(world, player, crate::room_access::NEED_BOAT);
+        return;
+    }
 
     // Stamina pre-flight: cost depends on the target room's sector.
     // Followers along for the ride aren't checked — they go where the leader
@@ -21845,6 +21854,12 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                     f,
                     format!("{} is {verb}.\r\n", exit_noun_phrase(&exit)),
                 );
+                continue;
+            }
+            // Legacy runs every follower through the deep-water check too:
+            // one without a boat, wings or waterwalk stays behind.
+            if crate::room_access::deep_water_blocks(world, f, from_room, target) {
+                send_to(world, f, crate::room_access::NEED_BOAT);
                 continue;
             }
             // A follower the room refuses stays behind (legacy checks each

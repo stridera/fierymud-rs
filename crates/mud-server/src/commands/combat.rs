@@ -2898,6 +2898,10 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
     if crate::room_access::refuse_entry(world, player, target) {
         return;
     }
+    if crate::room_access::deep_water_blocks(world, player, from_room, target) {
+        send_to(world, player, crate::room_access::NEED_BOAT);
+        return;
+    }
 
     let dir_name = direction_name(dir);
     let mover_name = name_of(world, player);

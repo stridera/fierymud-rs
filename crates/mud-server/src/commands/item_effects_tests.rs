@@ -971,19 +971,18 @@ fn instance_only_flags_become_one_worn_instance_and_no_marker() {
 
 #[test]
 fn flags_with_no_runtime_behaviour_stay_unmapped() {
-    for flag in ["waterwalk", "language_fluency"] {
-        let (mut world, p, mut rx) = setup();
-        ring(&mut world, p, 330, "idle", vec![status(&[flag])]);
-        wear(&mut world, p, &mut rx, "idle");
-        assert!(effects_on(&mut world, p).is_empty(), "{flag}");
-        assert!(world.get::<Bless>(p).is_none(), "{flag}");
-    }
+    let flag = "language_fluency";
+    let (mut world, p, mut rx) = setup();
+    ring(&mut world, p, 330, "idle", vec![status(&[flag])]);
+    wear(&mut world, p, &mut rx, "idle");
+    assert!(effects_on(&mut world, p).is_empty(), "{flag}");
+    assert!(world.get::<Bless>(p).is_none(), "{flag}");
 }
 
 #[test]
 fn perception_and_combat_flags_install_their_marker_while_worn() {
     type Has = fn(&World, Entity) -> bool;
-    let cases: [(&str, Has); 5] = [
+    let cases: [(&str, Has); 6] = [
         ("infravision", |w, e| {
             w.get::<mud_world::Infravision>(e).is_some()
         }),
@@ -996,6 +995,9 @@ fn perception_and_combat_flags_install_their_marker_while_worn() {
         ("blur", |w, e| w.get::<mud_world::Blur>(e).is_some()),
         ("familiarity", |w, e| {
             w.get::<mud_world::Familiar>(e).is_some()
+        }),
+        ("waterwalk", |w, e| {
+            w.get::<mud_world::WaterWalk>(e).is_some()
         }),
     ];
     for (flag, has) in cases {

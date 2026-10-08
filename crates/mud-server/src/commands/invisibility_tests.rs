@@ -474,6 +474,7 @@ fn flags_array_installs_every_mapped_marker_and_ignores_unknown_flags() {
     mud_world::mob_effects::apply_mob_default_effects(&mut fx.world, wolf, (30, 1));
     assert!(fx.world.get::<DetectInvis>(wolf).is_some());
     assert!(fx.world.get::<mud_world::Sanctuary>(wolf).is_some());
+    assert!(fx.world.get::<mud_world::WaterWalk>(wolf).is_some());
     // Flags without a marker spawn nothing: no source-less poison tick,
     // no permanent sleep fighting the mob's posture.
     let names: Vec<String> = {
@@ -485,11 +486,11 @@ fn flags_array_installs_every_mapped_marker_and_ignores_unknown_flags() {
             .map(|(e, _)| e.name.clone())
             .collect()
     };
-    assert_eq!(names.len(), 2, "{names:?}");
+    assert_eq!(names.len(), 3, "{names:?}");
     assert!(
         names
             .iter()
-            .all(|n| n == "detect_invisible" || n == "sanctuary")
+            .all(|n| n == "detect_invisible" || n == "sanctuary" || n == "waterwalk")
     );
 }
 

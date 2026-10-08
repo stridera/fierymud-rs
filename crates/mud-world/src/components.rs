@@ -1647,6 +1647,12 @@ pub const PREF_CHARSET_KEY: &str = "pref.charset";
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Flying;
 
+/// Marker: the `waterwalk` effect flag (spell, worn item, race or mob
+/// default). Lets the holder cross "water, no swim" rooms without a boat
+/// or wings (legacy `can_travel_on_water`, `EFF_WATERWALK`).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WaterWalk;
+
 /// Marker: an actor stands in an air room with nothing holding it up and is
 /// falling through the down exits (legacy `EVENT_GRAVITY`). Inserted by
 /// [`crate::movement::begin_fall_if_unsupported`] on entering an air room and
