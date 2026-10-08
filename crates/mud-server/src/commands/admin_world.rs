@@ -2824,8 +2824,7 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
             &[player],
             &format!("{line}\r\n"),
         );
-        crate::combat::stop_fighting_both_ways(world, player);
-        world.entity_mut(player).insert(Located(target));
+        mud_world::movement::move_to_room(world, player, target);
     }
     // Bring the mount along on goto / recall — otherwise the mount
     // is orphaned in the old room with a stale RiddenBy link.

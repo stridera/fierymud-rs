@@ -373,38 +373,17 @@ pub(crate) fn remember_attacker(world: &mut World, mob: Entity, attacker: Entity
     }
 }
 
-/// Legacy `char_from_room`: leaving a room ends the mover's own fight and
-/// every fight against them (`stop_fighting` + `stop_attackers`). Without
-/// this the stale `Fighting` links survive until the next combat tick, so a
-/// target that walked back in before the tick would resume the fight.
-/// `ReengageLag` is deliberately left alone.
-pub(crate) fn stop_fighting_both_ways(world: &mut World, who: Entity) {
-    try_remove::<Fighting>(world, who);
-    let attackers: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Fighting)>();
-        q.iter(world)
-            .filter(|(_, f)| f.0 == who)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for a in attackers {
-        try_remove::<Fighting>(world, a);
-    }
-}
+pub(crate) use mud_world::movement::stop_fighting_both_ways;
 
 /// Move a located entity to `dest`, ending its fights first when the room
-/// actually changes (see [`stop_fighting_both_ways`]). The one place
-/// characters change rooms: `cmd_move`, flee/retreat, `mob_flee`, wander,
-/// teleport/goto/transfer/recall/summon, drag. An entity with no `Located`
-/// is left untouched.
+/// actually changes (see [`stop_fighting_both_ways`]; `ReengageLag` is left
+/// alone). The server-side entry point for characters changing rooms:
+/// `cmd_move`, flee/retreat, `mob_flee`, wander, teleport/goto/transfer/
+/// recall/summon, drag. An entity with no `Located` is left untouched.
 pub(crate) fn relocate(world: &mut World, who: Entity, dest: Entity) {
-    let Some(here) = world.get::<Located>(who).map(|l| l.0) else {
-        return;
-    };
-    if here != dest {
-        stop_fighting_both_ways(world, who);
+    if world.get::<Located>(who).is_some() {
+        mud_world::movement::move_to_room(world, who, dest);
     }
-    world.entity_mut(who).insert(Located(dest));
 }
 
 /// A rider that moves takes its mount along (the mount's own movement is
@@ -2104,8 +2083,10 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // Achievement hooks: first_kill and (eventually)
         // milestone-kill counters. Fire on the player who's
         // currently Fighting the victim — same target as the
-        // kill-coin / loot-claim attribution.
-        if let Some(killer) = killer {
+        // kill-coin / loot-claim attribution. An illusory mob gives no
+        // kill credit at all in legacy (`disburse_kill_exp` returns early),
+        // so none of these hooks fire for it.
+        if let Some(killer) = killer.filter(|_| !illusory) {
             crate::commands::grant_achievement(world, killer, "first_kill");
             crate::commands::bump_kill_count(world, killer);
             apply_protected_kill_penalty(world, killer, victim);
@@ -2143,10 +2124,10 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                     crate::commands::cap_sentence_start(victim_name),
                 ),
             );
+            // Despawn each carried / worn item with whatever it contains,
+            // or bag contents would be stranded as orphan entities.
             for it in owned_items {
-                if let Ok(e) = world.get_entity_mut(it) {
-                    e.despawn();
-                }
+                crate::commands::info::despawn_item_tree(world, it);
             }
             disengage_attackers_of(world, victim);
             finish_mob_death(world, victim);
@@ -4038,6 +4019,25 @@ mod tests {
     }
 
     #[test]
+    fn move_to_room_clears_fights_only_when_the_room_changes() {
+        let mut world = World::new();
+        let (room_a, room_b, mob) = hurt_mob_under_attack(&mut world, vec![], 60);
+        let attacker = world.get::<Fighting>(mob).unwrap().0;
+        // No `Located` yet: still placed, still clears nothing relevant.
+        let stray = world.spawn_empty().id();
+        mud_world::movement::move_to_room(&mut world, stray, room_b);
+        assert_eq!(world.get::<Located>(stray).map(|l| l.0), Some(room_b));
+        // Same room: the fight survives.
+        mud_world::movement::move_to_room(&mut world, mob, room_a);
+        assert_eq!(world.get::<Fighting>(mob).map(|f| f.0), Some(attacker));
+        // Different room: both directions end, including attackers of the mover.
+        world.entity_mut(attacker).insert(Fighting(mob));
+        mud_world::movement::move_to_room(&mut world, mob, room_b);
+        assert!(world.get::<Fighting>(mob).is_none());
+        assert!(world.get::<Fighting>(attacker).is_none());
+    }
+
+    #[test]
     fn relocating_to_the_same_room_keeps_the_fight() {
         let mut world = World::new();
         let (room_a, _b, mob) = hurt_mob_under_attack(&mut world, vec![], 60);
@@ -5277,13 +5277,32 @@ mod tests {
                 ]));
             }
             let killer = credit_player(&mut world, room, "Killer", 0);
-            world.entity_mut(killer).insert(Fighting(goblin));
+            world
+                .entity_mut(killer)
+                .insert((Fighting(goblin), mud_world::KillStats::default()));
+            let bag = world.spawn((Item, Located(goblin))).id();
+            let gem = world.spawn((Item, Located(bag))).id();
             run_combat_tick(&mut world);
             assert!(world.get_entity(goblin).is_err());
             assert_eq!(
                 xp_of(&world, killer) > 0,
                 expect_xp,
                 "illusory {illusory}: xp"
+            );
+            // An illusory kill gives no kill credit (count, achievements,
+            // protected-kill penalty and quest objectives share one guard).
+            let kills = world.get::<mud_world::KillStats>(killer).unwrap().total;
+            assert_eq!(kills, i32::from(!illusory), "illusory {illusory}: kills");
+            // Carried bag and its contents vanish together; none is orphaned.
+            assert_eq!(
+                world.get_entity(bag).is_ok(),
+                !illusory,
+                "illusory {illusory}: bag"
+            );
+            assert_eq!(
+                world.get_entity(gem).is_ok(),
+                !illusory,
+                "illusory {illusory}: gem"
             );
             let corpses = world
                 .query_filtered::<&Located, With<Corpse>>()

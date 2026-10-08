@@ -2382,7 +2382,7 @@ pub fn relocate(world: &mut World, entity: Entity, target: Entity) {
         return;
     }
     let looted = source_corpse.zip(carrying_player(world, target));
-    world.entity_mut(entity).insert(Located(target));
+    mud_world::movement::move_to_room(world, entity, target);
     if let Some((corpse, player)) = looted {
         if !world.contains_resource::<LuaOutbox>() {
             world.insert_resource(LuaOutbox::default());
@@ -3244,9 +3244,7 @@ impl UserData for LuaActor {
                 else {
                     return;
                 };
-                if world.get::<Located>(this.entity).is_some() {
-                    world.entity_mut(this.entity).insert(Located(target));
-                }
+                mud_world::movement::move_to_room(world, this.entity, target);
             })
         });
 
@@ -4436,9 +4434,7 @@ impl UserData for LuaRoom {
                             .collect()
                     };
                     for e in occupants {
-                        if let Ok(mut em) = world.get_entity_mut(e) {
-                            em.insert(Located(target_entity));
-                        }
+                        mud_world::movement::move_to_room(world, e, target_entity);
                     }
                 })
             },
@@ -6146,5 +6142,83 @@ mod tests {
         relocate(&mut world, gem, player);
         assert_eq!(world.get::<Located>(gem).unwrap().0, player);
         assert_eq!(loot_notes(&world), vec![(player, corpse)]);
+    }
+
+    /// Two linked rooms, a mob in the first fighting an attacker (both
+    /// directions), and a room index so scripts can `get_room`.
+    fn fight_world() -> (World, Entity, Entity, Entity, Entity) {
+        let mut world = World::new();
+        let room_b = world.spawn_empty().id();
+        let room_a = world.spawn(mud_world::Exits::default()).id();
+        world.get_mut::<mud_world::Exits>(room_a).unwrap().0.insert(
+            mud_db::enums::Direction::North,
+            mud_world::ExitData {
+                to: Some(room_b),
+                state: mud_db::enums::ExitState::Open,
+                key: None,
+                description: None,
+                keywords: Vec::new(),
+                is_hidden: false,
+                is_pickproof: false,
+                is_bashable: false,
+                hit_points: None,
+            },
+        );
+        let mut index = WorldKeyIndex::default();
+        index.rooms.insert((99, 1), room_a);
+        index.rooms.insert((99, 2), room_b);
+        world.insert_resource(index);
+        let attacker = world.spawn(Located(room_a)).id();
+        let mob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "TestMob".to_string(),
+                },
+                Health { hp: 10, max: 10 },
+                WorldKey { zone: 99, id: 1 },
+                Located(room_a),
+                mud_world::Fighting(attacker),
+            ))
+            .id();
+        world.entity_mut(attacker).insert(mud_world::Fighting(mob));
+        (world, room_a, room_b, mob, attacker)
+    }
+
+    fn assert_fight_ended(world: &World, mob: Entity, attacker: Entity) {
+        assert!(world.get::<mud_world::Fighting>(mob).is_none());
+        assert!(world.get::<mud_world::Fighting>(attacker).is_none());
+    }
+
+    #[test]
+    fn script_teleport_ends_the_fight_both_ways() {
+        let (mut world, _a, room_b, mob, attacker) = fight_world();
+        relocate(&mut world, mob, room_b);
+        assert_eq!(world.get::<Located>(mob).unwrap().0, room_b);
+        assert_fight_ended(&world, mob, attacker);
+    }
+
+    #[test]
+    fn script_move_ends_the_fight_both_ways() {
+        let (mut world, _a, room_b, mob, attacker) = fight_world();
+        let mut host = LuaHost::new();
+        host.exec_for_actor(&mut world, mob, "self:move('north')")
+            .unwrap();
+        assert_eq!(world.get::<Located>(mob).unwrap().0, room_b);
+        assert_fight_ended(&world, mob, attacker);
+    }
+
+    #[test]
+    fn script_teleport_all_ends_fights_both_ways() {
+        let (mut world, _a, room_b, mob, attacker) = fight_world();
+        let mut host = LuaHost::new();
+        host.exec_for_actor(
+            &mut world,
+            mob,
+            "get_room(99, 1):teleport_all(get_room(99, 2))",
+        )
+        .unwrap();
+        assert_eq!(world.get::<Located>(mob).unwrap().0, room_b);
+        assert_fight_ended(&world, mob, attacker);
     }
 }

@@ -20814,10 +20814,14 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         let leader = movers[idx];
         idx += 1;
         let new_followers: Vec<Entity> = {
-            let mut q = world.query::<(Entity, &Located, &Follower)>();
+            // Legacy `do_simple_move` only drags along followers that are not
+            // fighting; a follower in a fight stays behind.
+            let mut q = world.query::<(Entity, &Located, &Follower, Has<Fighting>)>();
             q.iter(world)
-                .filter(|(e, l, f)| f.0 == leader && l.0 == from_room && !movers.contains(e))
-                .map(|(e, _, _)| e)
+                .filter(|(e, l, f, fighting)| {
+                    f.0 == leader && l.0 == from_room && !fighting && !movers.contains(e)
+                })
+                .map(|(e, _, _, _)| e)
                 .collect()
         };
         for f in new_followers {

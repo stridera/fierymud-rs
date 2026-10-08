@@ -5,10 +5,10 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Fighting, Follower, Located, Mob, RiddenBy};
+use mud_world::{Follower, Located, Mob, RiddenBy};
 
 use crate::commands::{
-    Category, Command, Help, broadcast_room_except_players_rendered, name_of, send_to, try_remove,
+    Category, Command, Help, broadcast_room_except_players_rendered, name_of, send_to,
 };
 
 inventory::submit! {
@@ -67,12 +67,9 @@ fn cmd_call(world: &mut World, player: Entity, _args: &str) {
                 &format!("{follower_name} heeds the call of {caller}.\r\n"),
             );
         }
-        try_remove::<Fighting>(world, follower);
-        if world.get::<Located>(follower).is_some() {
-            world.entity_mut(follower).insert(Located(here));
-        } else if let Ok(mut em) = world.get_entity_mut(follower) {
-            em.insert(Located(here));
-        }
+        // Calling a pet away ends its fights both ways (and everyone
+        // fighting it), like any other room change.
+        mud_world::movement::move_to_room(world, follower, here);
         send_to(
             world,
             follower,
@@ -97,7 +94,7 @@ fn cmd_call(world: &mut World, player: Entity, _args: &str) {
 mod tests {
     use super::*;
     use crate::commands::test_support::{drain, player_in};
-    use mud_world::Named;
+    use mud_world::{Fighting, Named};
 
     fn pet(world: &mut World, room: Entity, owner: Entity, name: &str) -> Entity {
         world
@@ -130,6 +127,7 @@ mod tests {
             ))
             .id();
         world.entity_mut(far).insert(Fighting(stranger));
+        world.entity_mut(stranger).insert(Fighting(far));
 
         cmd_call(&mut world, player, "");
         let out = drain(&mut rx);
@@ -137,6 +135,8 @@ mod tests {
         assert_eq!(world.get::<Located>(far).unwrap().0, here);
         assert_eq!(world.get::<Located>(near).unwrap().0, here);
         assert!(world.get::<Fighting>(far).is_none());
+        // Whoever was fighting the pet stops too.
+        assert!(world.get::<Fighting>(stranger).is_none());
         // Unrelated mob stays put.
         assert_eq!(world.get::<Located>(stranger).unwrap().0, away);
 

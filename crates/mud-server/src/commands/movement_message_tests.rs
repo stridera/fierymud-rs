@@ -143,3 +143,29 @@ fn noun_phrase_skips_blank_entries_and_falls_back_to_the_way() {
     let plain = exit(None, ExitState::Closed, &[]);
     assert_eq!(exit_noun_phrase(&plain), "The way");
 }
+
+/// Legacy `do_simple_move` only drags along followers that are not
+/// fighting; a fighting follower stays behind (and keeps its fight).
+#[test]
+fn a_fighting_follower_stays_behind_when_the_leader_moves() {
+    let (mut world, leader, _mrx, _brx, _crx) = setup(Direction::North, ExitState::Open, &[]);
+    let from = world.get::<mud_world::Located>(leader).unwrap().0;
+    let (idle, _irx) = player_in(&mut world, from);
+    let (fighter, _frx) = player_in(&mut world, from);
+    let foe = world.spawn(mud_world::Located(from)).id();
+    for f in [idle, fighter] {
+        world
+            .entity_mut(f)
+            .insert((account(), mud_world::Follower(leader)));
+    }
+    world.entity_mut(fighter).insert(mud_world::Fighting(foe));
+    cmd_move(&mut world, leader, Direction::North);
+    let to = world.get::<mud_world::Located>(leader).unwrap().0;
+    assert_ne!(to, from);
+    assert_eq!(world.get::<mud_world::Located>(idle).unwrap().0, to);
+    assert_eq!(world.get::<mud_world::Located>(fighter).unwrap().0, from);
+    assert_eq!(
+        world.get::<mud_world::Fighting>(fighter).map(|f| f.0),
+        Some(foe)
+    );
+}

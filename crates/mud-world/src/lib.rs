@@ -2,6 +2,7 @@ pub mod components;
 pub mod loader;
 pub mod mob_effects;
 pub mod mob_spawn;
+pub mod movement;
 pub mod reset_gear;
 pub mod resources;
 pub mod targeting;

@@ -208,3 +208,30 @@ fn goto_brings_the_mount_along() {
     dispatch(&mut w, god, "goto 2");
     assert_eq!(where_is(&w, horse), to);
 }
+
+#[test]
+fn goto_ends_fights_only_when_the_room_changes() {
+    let mut w = world();
+    let (here, there) = (room(&mut w, 1), room(&mut w, 2));
+    let (god, _g) = person(&mut w, "Strider", 104, here);
+    let foe = w
+        .spawn((
+            Mob,
+            Named {
+                name: "a wolf".into(),
+            },
+            Located(here),
+        ))
+        .id();
+    w.entity_mut(god).insert(mud_world::Fighting(foe));
+    w.entity_mut(foe).insert(mud_world::Fighting(god));
+    // Same room: nothing moves, the fight stands.
+    dispatch(&mut w, god, "goto 1");
+    assert!(w.get::<mud_world::Fighting>(god).is_some());
+    assert!(w.get::<mud_world::Fighting>(foe).is_some());
+    // Different room: both directions end.
+    dispatch(&mut w, god, "goto 2");
+    assert_eq!(where_is(&w, god), there);
+    assert!(w.get::<mud_world::Fighting>(god).is_none());
+    assert!(w.get::<mud_world::Fighting>(foe).is_none());
+}

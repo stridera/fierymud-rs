@@ -2030,11 +2030,7 @@ fn teleport(world: &mut World, name: &str, zone_id: i32, room_id: i32) -> AdminR
             format!("room ({zone_id}, {room_id}) not loaded"),
         ));
     };
-    if world.get::<Located>(entity).is_some() {
-        world.entity_mut(entity).insert(Located(room_entity));
-    } else if let Ok(mut e) = world.get_entity_mut(entity) {
-        e.insert(Located(room_entity));
-    }
+    mud_world::movement::move_to_room(world, entity, room_entity);
     Ok(json!({
         "success": true,
         "name": name_of(world, entity),
@@ -2446,5 +2442,36 @@ mod actor_lookup_tests {
         assert!(msg.contains("Samui") && msg.contains("Samantha"), "{msg}");
         // The write path refuses too.
         assert!(set_player_field(&mut w, "sam", "hp", 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod teleport_fight_tests {
+    use super::*;
+    use mud_world::{Fighting, Located, Named};
+
+    #[test]
+    fn admin_teleport_ends_the_fight_both_ways() {
+        let mut w = World::new();
+        w.insert_resource(WorldKeyIndex::default());
+        let from = w.spawn_empty().id();
+        let to = w.spawn_empty().id();
+        w.resource_mut::<WorldKeyIndex>().rooms.insert((30, 2), to);
+        let foe = w.spawn(Located(from)).id();
+        let target = w
+            .spawn((
+                Mob,
+                Named {
+                    name: "Wolf".to_string(),
+                },
+                Located(from),
+                Fighting(foe),
+            ))
+            .id();
+        w.entity_mut(foe).insert(Fighting(target));
+        teleport(&mut w, "wolf", 30, 2).unwrap();
+        assert_eq!(w.get::<Located>(target).map(|l| l.0), Some(to));
+        assert!(w.get::<Fighting>(target).is_none());
+        assert!(w.get::<Fighting>(foe).is_none());
     }
 }
