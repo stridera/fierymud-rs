@@ -3584,6 +3584,27 @@ impl ConnRouter {
             all_chars,
         } = loaded;
 
+        // Stamp last_login exactly once per successful login — split
+        // from save_state, which used to overwrite it on every
+        // autosave (so the column meant "last save," not "last
+        // login"). PreviousLogin was already captured from char_row
+        // before this call, so the displayed "Last login" line keeps
+        // showing the prior session's start. The same UPDATE clears
+        // `last_logout`; if it fails the stale value would grant repose
+        // for time played after a crash, so the login is refused (before
+        // anything is spawned) rather than continuing.
+        if let Err(failure) = guarded(
+            self.load_fault,
+            "last_login",
+            mud_db::characters::update_last_login(pool, &char_row.id),
+        )
+        .await
+        {
+            failure.log(conn_id, &char_row.id);
+            self.refuse_login(conn_id, LOGIN_STAMP_FAILED_MESSAGE);
+            return;
+        }
+
         let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
         let entity = spawn_player(world, &user, &char_row, outbound);
         let item_count = spawn_inventory(world, entity, &item_rows);
@@ -3594,15 +3615,6 @@ impl ConnRouter {
         // spawn_player above is the *unmodified* DB row; this pass
         // stacks the gear-derived deltas on top.
         crate::equip_apply::recompute_equipped_for(world, entity);
-        // Stamp last_login exactly once at successful spawn — split
-        // from save_state, which used to overwrite it on every
-        // autosave (so the column meant "last save," not "last
-        // login"). PreviousLogin was already captured from char_row
-        // before this call, so the displayed "Last login" line keeps
-        // showing the prior session's start.
-        if let Err(e) = mud_db::characters::update_last_login(pool, &char_row.id).await {
-            warn!(conn_id, error = %e, "last_login update failed");
-        }
         let known_abilities = KnownAbilities::from_rows(&ability_rows);
         let ability_count = known_abilities.entries.len();
         let aliases = mud_world::Aliases::from_rows(&alias_rows);
@@ -4906,6 +4918,10 @@ pub(crate) fn snapshot_player(
 /// Shown when a per-character table could not be read at login.
 const LOAD_FAILED_MESSAGE: &str =
     "The game is having trouble loading your character; please try again in a minute.";
+
+/// Shown when the login-time `last_login` / `last_logout` stamp could not be
+/// written.
+const LOGIN_STAMP_FAILED_MESSAGE: &str = "Please try again in a moment.";
 
 /// Saved per-character state could not be loaded; carries which table or
 /// column for the log. Either way the login is refused, because the next
@@ -9907,6 +9923,45 @@ mod tests {
         assert!(reload_character_row(&pool, &gone, None).await.is_err());
         // Control: the real row reloads.
         assert!(reload_character_row(&pool, &c, None).await.is_ok());
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// A failed `last_login` / `last_logout` stamp refuses the login before
+    /// anything spawns, and the stale `last_logout` is left as it was.
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_last_login_stamp_refuses_login() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (user, c) = temp_unlinked_char(&pool, "ll").await;
+        mud_db::sqlx::query("UPDATE \"Characters\" SET last_logout = NOW() WHERE id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut world = auth_world(3);
+        let (mut router, mut orx) = load_guard_router(&world);
+        router.load_fault = Some("last_login");
+        router
+            .complete_login(1, &mut world, &pool, user.clone(), (*c).clone())
+            .await;
+        let text = drain(&mut orx);
+        assert!(text.contains("Please try again in a moment."), "{text}");
+        assert!(!router.login.contains_key(&1), "ctx removed");
+        assert_eq!(LOAD_CLOSED.with(|v| v.borrow().clone()), vec![1]);
+        assert!(
+            world.query::<&Player>().iter(&world).next().is_none(),
+            "no session was spawned"
+        );
+        let still_set: bool = mud_db::sqlx::query_scalar(
+            "SELECT last_logout IS NOT NULL FROM \"Characters\" WHERE id = $1",
+        )
+        .bind(&c.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(still_set, "last_logout untouched by the refused login");
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 }
