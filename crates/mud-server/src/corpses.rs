@@ -50,6 +50,10 @@ struct CorpseSnapshot {
     /// skeleton without crashing).
     #[serde(default = "default_origin_level")]
     origin_level: i32,
+    /// Coin (copper) lying in the corpse's `CoinPile`: a dead player's
+    /// purse, or a mob's leftover loot. Defaults to 0 for older snapshots.
+    #[serde(default)]
+    coins: i64,
 }
 
 fn default_origin_level() -> i32 {
@@ -113,6 +117,9 @@ pub fn save_snapshot(world: &mut World) {
                 })
                 .collect()
         };
+        let coins = world
+            .get::<mud_world::CoinPile>(corpse)
+            .map_or(0, |p| p.0.max(0));
         snapshots.push(CorpseSnapshot {
             name,
             keywords,
@@ -122,6 +129,7 @@ pub fn save_snapshot(world: &mut World) {
             contents,
             is_player,
             origin_level,
+            coins,
         });
     }
     if snapshots.is_empty() {
@@ -203,6 +211,9 @@ pub fn load_snapshot(world: &mut World) {
                 em.insert(mud_world::PlayerCorpse);
             }
             em.insert(mud_world::CorpseOriginLevel(snap.origin_level.max(1)));
+            if snap.coins > 0 {
+                em.insert(mud_world::CoinPile(snap.coins));
+            }
         }
         for c in snap.contents {
             if !spawn_item_into(world, c.proto_zone, c.proto_id, corpse) {
@@ -318,6 +329,7 @@ mod tests {
                 ],
                 is_player: true,
                 origin_level: 47,
+                coins: 1234,
             }],
         };
         let bytes = serde_json::to_vec_pretty(&original).expect("serialize");
@@ -328,8 +340,19 @@ mod tests {
         assert_eq!(c.keywords, vec!["corpse".to_string(), "strider".into()]);
         assert_eq!((c.room_zone, c.room_id), (30, 45));
         assert_eq!(c.decay_secs, 480);
+        assert_eq!(c.coins, 1234);
         assert_eq!(c.contents.len(), 2);
         assert_eq!((c.contents[0].proto_zone, c.contents[0].proto_id), (12, 7));
+    }
+
+    #[test]
+    fn snapshot_without_coins_field_defaults_to_zero() {
+        let parsed: SnapshotFile = serde_json::from_str(
+            r#"{"corpses":[{"name":"x","keywords":[],"room_zone":1,"room_id":2,
+                "decay_secs":5,"contents":[]}]}"#,
+        )
+        .expect("parse");
+        assert_eq!(parsed.corpses[0].coins, 0);
     }
 
     #[test]

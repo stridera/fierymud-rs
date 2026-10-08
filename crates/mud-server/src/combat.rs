@@ -1705,6 +1705,23 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
             try_remove::<mud_world::EquippedSlot>(world, it);
         }
 
+        // Carried coin goes into the corpse with the items (legacy
+        // `make_corpse` drops a money object inside the corpse). The
+        // whole carried purse moves in one pile; bank and account
+        // chest wealth are separate components and stay put. The
+        // corpse's `CoinPile` is what `look in` shows, what `get all`
+        // pulls back onto `Wealth`, and what falls to the room when
+        // the corpse decays.
+        let coins_lost = world.get::<Wealth>(victim).map_or(0, |w| w.0).max(0);
+        if coins_lost > 0 {
+            if let Some(mut w) = world.get_mut::<Wealth>(victim) {
+                w.0 = 0;
+            }
+            if let Ok(mut em) = world.get_entity_mut(corpse) {
+                em.insert(mud_world::CoinPile(coins_lost));
+            }
+        }
+
         // XP loss on death: shave 10% of the player's experience
         // total, floored at 0. Mirrors legacy CircleMUD's
         // round-down-to-bracket-floor behavior loosely; we don't
@@ -1786,6 +1803,13 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // a player can come back, get their bearings, and recover
         // gear without a 10-minute panic timer.
         let death_room_name = name_of(world, room);
+        if let Some(purse) = crate::commands::format_wealth(coins_lost) {
+            send_to(
+                world,
+                victim,
+                format!("Your purse of {purse} goes into the corpse with your gear.\r\n"),
+            );
+        }
         send_to(
             world,
             victim,
@@ -1806,6 +1830,10 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 crate::commands::cap_sentence_start(victim_name),
             ),
         );
+        // Persist the emptied purse and pack now rather than waiting for
+        // the next autosave, so a crash can't restore the coins on top
+        // of the corpse's copy.
+        crate::quest_progress::save_player_soon(world, victim);
         info!(?victim, name = %victim_name, ?corpse, "player corpsed");
     } else {
         // Mob death: notify, spawn a corpse, drop loot + leftover
@@ -3118,6 +3146,120 @@ mod tests {
             .iter(&world)
             .count();
         assert_eq!(still_equipped, 0, "EquippedSlot stripped on death");
+    }
+
+    fn spawn_dying_player(world: &mut World, room: Entity, name: &str, coins: i64) -> Entity {
+        world
+            .spawn((
+                Player,
+                Named {
+                    name: name.to_string(),
+                },
+                Located(room),
+                Health { hp: 0, max: 100 },
+                Posture(PostureKind::Standing),
+                Wealth(coins),
+                mud_world::BankWealth(9_999),
+            ))
+            .id()
+    }
+
+    fn player_corpse_in(world: &mut World, room: Entity) -> Entity {
+        world
+            .query_filtered::<(Entity, &Located), With<mud_world::PlayerCorpse>>()
+            .iter(world)
+            .find(|(_, l)| l.0 == room)
+            .map(|(e, _)| e)
+            .expect("player corpse in room")
+    }
+
+    #[test]
+    fn player_death_moves_carried_coins_into_the_corpse() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        let player = spawn_dying_player(&mut world, room, "Tester", 12_345);
+
+        super::handle_death(&mut world, player, "Tester", room);
+
+        assert_eq!(world.get::<Wealth>(player).unwrap().0, 0, "purse emptied");
+        assert_eq!(
+            world.get::<mud_world::BankWealth>(player).unwrap().0,
+            9_999,
+            "bank untouched"
+        );
+        let corpse = player_corpse_in(&mut world, room);
+        assert_eq!(world.get::<mud_world::CoinPile>(corpse).unwrap().0, 12_345);
+    }
+
+    #[test]
+    fn player_death_with_no_coins_leaves_no_coin_pile() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        let player = spawn_dying_player(&mut world, room, "Tester", 0);
+
+        super::handle_death(&mut world, player, "Tester", room);
+
+        let corpse = player_corpse_in(&mut world, room);
+        assert!(world.get::<mud_world::CoinPile>(corpse).is_none());
+    }
+
+    #[test]
+    fn owner_get_all_from_corpse_recovers_the_coins_and_others_cannot() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        world.insert_resource(ObjectPrototypes::default());
+        let owner = spawn_dying_player(&mut world, room, "Tester", 777);
+        let thief = spawn_dying_player(&mut world, room, "Robber", 0);
+        super::handle_death(&mut world, owner, "Tester", room);
+        let corpse = player_corpse_in(&mut world, room);
+
+        crate::commands::info::cmd_get(&mut world, thief, "all corpse");
+        assert_eq!(
+            world.get::<mud_world::CoinPile>(corpse).unwrap().0,
+            777,
+            "non-owner is refused by the consent gate"
+        );
+        assert_eq!(world.get::<Wealth>(thief).unwrap().0, 0);
+
+        crate::commands::info::cmd_get(&mut world, owner, "all corpse");
+        assert!(world.get::<mud_world::CoinPile>(corpse).is_none());
+        assert_eq!(world.get::<Wealth>(owner).unwrap().0, 777);
+    }
+
+    #[test]
+    fn mob_death_does_not_touch_player_wealth_paths() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        let mob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a rat".to_string(),
+                },
+                Located(room),
+                Health { hp: 0, max: 5 },
+                Posture(PostureKind::Standing),
+                Wealth(500),
+            ))
+            .id();
+
+        super::handle_death(&mut world, mob, "a rat", room);
+
+        let corpse = world
+            .query_filtered::<(Entity, &Located), With<Corpse>>()
+            .iter(&world)
+            .find(|(_, l)| l.0 == room)
+            .map(|(e, _)| e)
+            .expect("mob corpse");
+        assert!(
+            world.get::<mud_world::CoinPile>(corpse).is_none(),
+            "mob carried Wealth is not a corpse source; only proto wealth is"
+        );
+        assert!(world.get::<mud_world::PlayerCorpse>(corpse).is_none());
     }
 
     #[test]
