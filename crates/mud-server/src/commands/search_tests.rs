@@ -19,6 +19,7 @@ fn world_with_rooms() -> (World, Entity, Entity) {
     world.insert_resource(mud_world::EffectCatalog::default());
     world.insert_resource(mud_world::RaceCatalog::default());
     world.insert_resource(mud_world::RuntimeConfig::default());
+    world.insert_resource(crate::TickCount(0));
     let zone = world
         .spawn((
             Zone,
@@ -184,6 +185,10 @@ fn search_by_keyword_reveals_closed_hidden_door_then_open_works() {
     assert_eq!(world.get::<Located>(p).unwrap().0, ice);
 }
 
+fn advance(world: &mut World, ticks: u64) {
+    world.resource_mut::<crate::TickCount>().0 += ticks;
+}
+
 fn searcher_with_int(world: &mut World, room: Entity, int: i32) -> (Entity, Rx) {
     let (p, rx) = player(world, room);
     world.entity_mut(p).insert(CoreStats {
@@ -219,6 +224,7 @@ fn search_roll_is_int_against_random_0_to_200() {
     assert!(!revealed(&world, p, tunnel, Direction::East));
     assert_eq!(seen, vec![200]);
 
+    advance(&mut world, 20);
     super::info::search_with_roll(&mut world, p, "", &mut |_| 49);
     assert!(drain(&mut rx).contains("You have found a hidden monolith"));
     assert!(revealed(&world, p, tunnel, Direction::East));
@@ -237,6 +243,7 @@ fn search_keyword_match_always_reveals_without_rolling() {
     // A wrong keyword falls back to the (failing) roll.
     super::info::search_with_roll(&mut world, p, "portal", &mut |_| 200);
     assert!(!revealed(&world, p, tunnel, Direction::East));
+    advance(&mut world, 20);
     // A keyword prefix reveals even with INT 0 and a hopeless roll.
     super::info::search_with_roll(&mut world, p, "mono", &mut |_| panic!("no roll on a match"));
     assert!(drain(&mut rx).contains("You have found a hidden monolith to the east."));
@@ -270,4 +277,50 @@ fn search_rolls_per_hidden_exit_and_reveals_only_the_first_found() {
     super::info::search_with_roll(&mut world, q, "", &mut |_| 0);
     assert!(revealed(&world, q, tunnel, Direction::North));
     assert!(!revealed(&world, q, tunnel, Direction::East));
+}
+
+#[test]
+fn search_lags_the_searcher_for_half_a_combat_round() {
+    let (mut world, tunnel, ice) = world_with_rooms();
+    world
+        .get_mut::<Exits>(tunnel)
+        .unwrap()
+        .0
+        .insert(Direction::East, hidden_door(ice, ExitState::Open));
+    let (p, mut rx) = searcher_with_int(&mut world, tunnel, 50);
+
+    // A failed search still costs the lag (legacy WAIT_STATE).
+    super::info::search_with_roll(&mut world, p, "", &mut |_| 200);
+    drain(&mut rx);
+    advance(&mut world, 19);
+    super::info::search_with_roll(&mut world, p, "", &mut |_| 0);
+    assert!(drain(&mut rx).contains("still recovering"));
+    assert!(!revealed(&world, p, tunnel, Direction::East));
+    advance(&mut world, 1);
+    super::info::search_with_roll(&mut world, p, "", &mut |_| 0);
+    assert!(drain(&mut rx).contains("You have found a hidden monolith"));
+}
+
+#[test]
+fn staff_always_find_hidden_exits_and_are_not_lagged() {
+    let (mut world, tunnel, ice) = world_with_rooms();
+    {
+        let mut exits = world.get_mut::<Exits>(tunnel).unwrap();
+        exits
+            .0
+            .insert(Direction::East, hidden_door(ice, ExitState::Open));
+        exits
+            .0
+            .insert(Direction::West, hidden_door(ice, ExitState::Open));
+    }
+    let (p, mut rx) = searcher_with_int(&mut world, tunnel, 0);
+    world.get_mut::<Account>(p).unwrap().role = effective_rank(100, UserRole::Immortal);
+
+    // INT 0 and a hopeless roll: a player would find nothing.
+    super::info::search_with_roll(&mut world, p, "", &mut |_| panic!("staff never roll"));
+    assert!(drain(&mut rx).contains("You have found a hidden monolith to the east."));
+    assert!(revealed(&world, p, tunnel, Direction::East));
+    // No lag: the next search (same tick) finds the west exit.
+    super::info::search_with_roll(&mut world, p, "", &mut |_| 200);
+    assert!(revealed(&world, p, tunnel, Direction::West));
 }

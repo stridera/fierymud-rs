@@ -5644,7 +5644,8 @@ inventory::submit! {
                    haven't found is checked in turn: naming its \
                    keyword (`search monolith`) always finds it, \
                    otherwise your Intelligence is rolled against \
-                   0-200. The first exit found is revealed. Reveals are \
+                   0-200. The first exit found is revealed (staff always find one). A \
+                   search leaves you busy for half a combat round. Reveals are \
                    per-character and session-scoped — a fresh \
                    login starts back at zero known hidden exits, \
                    matching the legacy contract until a persistent \
@@ -5690,6 +5691,23 @@ fn exit_keyword_matches(keywords: &[String], arg: &str) -> bool {
         })
 }
 
+/// Legacy `WAIT_STATE(ch, PULSE_VIOLENCE / 2)` after a search: half a
+/// combat round. Ticks are 10 Hz, a round is 40 (`REENGAGE_LAG_TICKS`).
+const SEARCH_LAG_TICKS: u64 = 20;
+
+/// Tick before which the searcher may not search again.
+#[derive(Component, Debug, Clone, Copy)]
+struct SearchLag {
+    until: u64,
+}
+
+/// Staff (legacy `GET_LEVEL >= LVL_IMMORT`) always find hidden exits.
+fn is_immortal(world: &World, e: Entity) -> bool {
+    world
+        .get::<Account>(e)
+        .is_some_and(|a| a.role.at_least(UserRole::Immortal))
+}
+
 /// `cmd_search` with the `random(0, 200)` roll injected: `roll(200)`
 /// is called once per hidden exit that did not match the keyword.
 pub(crate) fn search_with_roll(
@@ -5702,11 +5720,32 @@ pub(crate) fn search_with_roll(
         send_to(world, player, "You're too busy fighting to search!\r\n");
         return;
     }
+    let now = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
+    let staff = is_immortal(world, player);
+    if !staff
+        && world
+            .get::<SearchLag>(player)
+            .is_some_and(|l| l.until > now)
+    {
+        send_to(
+            world,
+            player,
+            "You are still recovering from your last search.\r\n",
+        );
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere to search.\r\n");
         return;
     };
     let room = located.0;
+    try_insert(
+        world,
+        player,
+        SearchLag {
+            until: now + SEARCH_LAG_TICKS,
+        },
+    );
     let player_name = name_of(world, player);
     send_to(world, player, "You search the area carefully...\r\n");
     broadcast_room_except_players_rendered(
@@ -5747,7 +5786,7 @@ pub(crate) fn search_with_roll(
     let intelligence = world.get::<CoreStats>(player).map_or(0, |s| s.intelligence);
     let found = candidates
         .into_iter()
-        .find(|(_, keyword_hit)| *keyword_hit || intelligence > roll(200))
+        .find(|(_, keyword_hit)| *keyword_hit || staff || intelligence > roll(200))
         .map(|(d, _)| d);
     let Some(found) = found else {
         send_to(world, player, "You find nothing of interest.\r\n");
