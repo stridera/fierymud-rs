@@ -277,7 +277,7 @@ pub(super) fn banish(
             &format!("{cap_victim} disappears in a flash of light!\r\n"),
         );
         let gear_destroyed = destroys_gear(caster, params, rolls.gear);
-        extract_mob(world, victim, room, gear_destroyed);
+        extract_mob(world, victim, Some(room), gear_destroyed);
         Outcome::MobBanished { gear_destroyed }
     }
 }
@@ -290,8 +290,15 @@ fn nothing_happens(world: &mut World, caster: Entity, room: Entity, outcome: Out
 
 /// Legacy `extract_objects` (when `destroy_gear`) + `extract_char`: whatever
 /// the mob wore or carried is destroyed, or else dropped on the floor of its
-/// room; then the mob itself leaves the world.
-fn extract_mob(world: &mut World, mob: Entity, room: Entity, destroy_gear: bool) {
+/// room; then the mob itself leaves the world. A mob with no room has nothing
+/// to drop onto, so its gear is destroyed. Also the exit for a conjured mob
+/// whose summon ends (`effects::despawn_summoned_mob`).
+pub(crate) fn extract_mob(
+    world: &mut World,
+    mob: Entity,
+    room: Option<Entity>,
+    destroy_gear: bool,
+) {
     let items: Vec<Entity> = world
         .get::<Contents>(mob)
         .map(|c| {
@@ -301,12 +308,13 @@ fn extract_mob(world: &mut World, mob: Entity, room: Entity, destroy_gear: bool)
         })
         .unwrap_or_default();
     for item in items {
-        if destroy_gear {
-            super::info::despawn_item_tree(world, item);
-        } else {
-            crate::equip_apply::release_gear(world, item);
-            try_remove::<EquippedSlot>(world, item);
-            world.entity_mut(item).insert(Located(room));
+        match room {
+            Some(room) if !destroy_gear => {
+                crate::equip_apply::release_gear(world, item);
+                try_remove::<EquippedSlot>(world, item);
+                world.entity_mut(item).insert(Located(room));
+            }
+            _ => super::info::despawn_item_tree(world, item),
         }
     }
     // Pets that followed the mob stop following it (legacy `die_follower`).

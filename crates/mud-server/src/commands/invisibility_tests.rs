@@ -559,3 +559,67 @@ async fn live_db_default_effects_install_detect_invis() {
         );
     }
 }
+
+// -- death ----------------------------------------------------------------
+
+/// Spawn the `invisible` spell effect backing `Fx::ghost`'s marker.
+fn back_invisibility(world: &mut World, target: Entity) {
+    world.spawn((
+        mud_world::EffectInstance {
+            kind: 1,
+            name: "invisible".into(),
+            strength: 1,
+            remaining_secs: 300,
+            source: mud_world::EffectSource::Spell,
+            ability_id: None,
+        },
+        mud_world::AppliedTo(target),
+        mud_world::InvisibleSource,
+    ));
+}
+
+#[test]
+fn an_invisible_player_dying_next_to_an_aggro_mob_is_not_re_engaged() {
+    // Death strips the `invisible` effect; fading used to re-run the
+    // room's aggro check against the half-dead victim, locking the mob
+    // onto the ghost.
+    let mut fx = Fx::new();
+    let wolf = fx.mob("a wolf", -1000);
+    let other = fx.mob("a rat", -1000);
+    back_invisibility(&mut fx.world, fx.ghost);
+    fx.world.insert_resource(crate::TickCount(0));
+    // The wolf was fighting someone else; the ghost was fighting the rat.
+    fx.world.entity_mut(other).insert(Fighting(fx.ghost));
+    fx.world.entity_mut(fx.ghost).insert(Fighting(other));
+    fx.world.get_mut::<Health>(fx.ghost).unwrap().hp = 1;
+
+    crate::combat::handle_death(&mut fx.world, fx.ghost, "Ghost", fx.room);
+
+    assert!(fx.world.get::<Invisible>(fx.ghost).is_none(), "stripped");
+    assert!(fx.world.get::<mud_world::Ghost>(fx.ghost).is_some());
+    let mut q = fx.world.query::<(Entity, &Fighting)>();
+    let engaged: Vec<_> = q.iter(&fx.world).collect();
+    assert!(
+        engaged.iter().all(|(_, f)| f.0 != fx.ghost)
+            && fx.world.get::<Fighting>(fx.ghost).is_none(),
+        "nobody fights the ghost: wolf={:?}",
+        fx.world.get::<Fighting>(wolf).map(|f| f.0)
+    );
+}
+
+#[test]
+fn aggro_never_engages_a_ghost_or_a_dead_actor() {
+    let mut fx = Fx::new();
+    let wolf = fx.mob("a wolf", -1000);
+    fx.world.entity_mut(fx.ghost).remove::<Invisible>();
+    fx.world.entity_mut(fx.ghost).insert(mud_world::Ghost);
+    super::recheck_aggro_in_room(&mut fx.world, fx.ghost);
+    assert!(fx.world.get::<Fighting>(wolf).is_none(), "ghost");
+    fx.world.entity_mut(fx.ghost).remove::<mud_world::Ghost>();
+    fx.world.get_mut::<Health>(fx.ghost).unwrap().hp = 0;
+    super::recheck_aggro_in_room(&mut fx.world, fx.ghost);
+    assert!(fx.world.get::<Fighting>(wolf).is_none(), "hp 0");
+    assert!(!super::mob_will_start_fight(&fx.world, wolf, fx.ghost));
+    fx.world.get_mut::<Health>(fx.ghost).unwrap().hp = 10;
+    assert!(super::mob_will_start_fight(&fx.world, wolf, fx.ghost));
+}

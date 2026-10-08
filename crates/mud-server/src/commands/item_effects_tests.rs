@@ -1516,3 +1516,47 @@ fn removing_two_summon_instances_on_one_mob_does_not_panic() {
     let _ = super::despawn_effects_on(&mut world, mob, vec![a, b]);
     assert!(world.get_entity(mob).is_err());
 }
+
+#[test]
+fn a_fading_summon_drops_its_gear_and_frees_its_fighters() {
+    let (mut world, p, _rx) = setup();
+    let room = world.get::<Located>(p).unwrap().0;
+    let (mob, _eff) = summoned_mob(&mut world, room, "summoned-wolf");
+    let carried = world
+        .spawn((
+            Item,
+            Named {
+                name: "a bone".into(),
+            },
+            Keywords(vec!["bone".into()]),
+            Located(mob),
+        ))
+        .id();
+    let worn = world
+        .spawn((
+            Item,
+            Named {
+                name: "a collar".into(),
+            },
+            Keywords(vec!["collar".into()]),
+            Located(mob),
+            EquippedSlot(mud_world::Slot::LeftFinger),
+        ))
+        .id();
+    world.entity_mut(p).insert(mud_world::Fighting(mob));
+    world.entity_mut(mob).insert(mud_world::Fighting(p));
+    assert_eq!(
+        super::remove_effect_named(&mut world, mob, "summoned-wolf"),
+        1
+    );
+    assert!(world.get_entity(mob).is_err(), "conjured mob gone");
+    for item in [carried, worn] {
+        assert_eq!(
+            world.get::<Located>(item).map(|l| l.0),
+            Some(room),
+            "item dropped to the room, not left on a dead entity"
+        );
+        assert!(world.get::<EquippedSlot>(item).is_none());
+    }
+    assert!(world.get::<mud_world::Fighting>(p).is_none(), "disengaged");
+}

@@ -380,6 +380,7 @@ pub(crate) use attack_ok::{attack_ok, is_servant};
 mod balance;
 #[path = "commands/banish.rs"]
 mod banish;
+pub(crate) use banish::extract_mob;
 #[path = "commands/boards.rs"]
 mod boards;
 pub(crate) use boards::compose_board_step;
@@ -499,6 +500,9 @@ mod race_effects_tests;
 #[cfg(test)]
 #[path = "commands/rank_tests.rs"]
 mod rank_tests;
+#[cfg(test)]
+#[path = "commands/recast_tests.rs"]
+mod recast_tests;
 #[path = "commands/release.rs"]
 pub(crate) mod release;
 #[path = "commands/room_chat.rs"]
@@ -11178,6 +11182,12 @@ pub(crate) fn recheck_aggro_in_room(world: &mut World, player: Entity) {
     if world.get::<Player>(player).is_none() || world.get::<Fighting>(player).is_some() {
         return;
     }
+    // Nobody picks a fight with a ghost or a corpse-to-be: death-time
+    // effect teardown (invisibility fading) and fall deaths reach here
+    // while the victim is already dead.
+    if target_is_dead_or_ghost(world, player) {
+        return;
+    }
     if world
         .get::<Account>(player)
         .is_some_and(|a| a.role.rank() > UserRole::Player.rank())
@@ -20410,8 +20420,9 @@ pub(crate) fn pretty_effect_label(raw: &str) -> String {
 
 /// Despawn any existing `EffectInstance` children on `target` whose
 /// name matches `name` (case-insensitive) and whose `ability_id`
-/// matches. Reverses each match's `ModifyDelta` first so a re-cast
-/// buff doesn't leave behind double-stacked stat modifiers. Used by
+/// matches. Each match goes through the shared effect teardown (stat and
+/// resistance deltas reversed) so a re-cast buff doesn't leave behind
+/// double-stacked modifiers. Used by
 /// the cast pipeline's effect-spawn arms so re-casting Detect Magic,
 /// Bless, Enhance Ability, etc. refreshes the existing buff rather
 /// than piling up duplicate list entries (or stacked stat deltas).
@@ -20434,16 +20445,10 @@ pub(crate) fn refresh_existing_effect(
             .collect()
     };
     for matched in matches {
-        // Reverse any stat-delta companion before despawning. The
-        // expiry tick normally handles undo via the same component;
-        // we shortcut here because the despawn skips that path.
-        let delta = world.get::<mud_world::ModifyDelta>(matched).cloned();
-        if let Some(d) = delta {
-            apply_modify_delta(world, target, &d.target, -d.amount);
-        }
-        if let Ok(em) = world.get_entity_mut(matched) {
-            em.despawn();
-        }
+        // The shared teardown reverses every numeric companion (stat
+        // `ModifyDelta`, `SpellResistanceDelta`, regen bonus) the way expiry
+        // does, without the wear-off hook or marker teardown.
+        crate::effects::replace_effect_instance(world, target, matched);
     }
 }
 
@@ -21693,6 +21698,11 @@ pub(crate) fn wimpy_mob_is_scared(world: &World, mob: Entity) -> bool {
             .is_some_and(|h| h.hp < (h.max >> 2))
 }
 
+/// True for a `Ghost` or an actor at 0 HP or less: never a valid aggro target.
+fn target_is_dead_or_ghost(world: &World, target: Entity) -> bool {
+    world.get::<Ghost>(target).is_some() || world.get::<Health>(target).is_some_and(|h| h.hp <= 0)
+}
+
 /// Legacy gate on a mob *starting* a fight with `target` (aggro on
 /// entry, respawn aggro; pets and charmed mobs never start one). Grudge re-engage only uses
 /// [`wimpy_mob_is_scared`]: legacy `mob_memory_check` has no awake test. A wimpy mob below its panic
@@ -21703,6 +21713,9 @@ pub(crate) fn wimpy_mob_is_scared(world: &World, mob: Entity) -> bool {
 /// unaffected.
 pub(crate) fn mob_will_start_fight(world: &World, mob: Entity, target: Entity) -> bool {
     use mud_db::enums::MobBehavior;
+    if target_is_dead_or_ghost(world, target) {
+        return false;
+    }
     // A pet or charmed mob never opens hostilities (not even against
     // its own master): it fights when its master does.
     if attack_ok::is_servant(world, mob) || crate::fear::is_feared(world, mob) {

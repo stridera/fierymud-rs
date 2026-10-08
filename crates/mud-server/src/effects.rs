@@ -326,17 +326,17 @@ pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, 
         }
     }
 }
-
-/// Undo everything one `EffectInstance` did to `target` and despawn it:
-/// the `ModifyDelta` stat change, a Refreshed regen bonus, the elemental
-/// `SpellResistanceDelta` bump, the stun marker, then the flag / globe
-/// markers and the evil / good protection marker. The single reversal
-/// behind expiry ([`effects_tick`]) and every early removal (dispel,
-/// cleanse, `cancel`, staff strip) so none of them can leave a bonus
-/// behind. The alignment tag is read before the despawn, and the marker
-/// drops only when no other tagged instance and no worn `protect_*` item
-/// still backs it.
-fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entity) {
+/// Undo the numeric side of one `EffectInstance` (stat `ModifyDelta`,
+/// refreshed regen bonus, `SpellResistanceDelta`) and despawn it, leaving
+/// every flag marker alone. Returns the instance name and alignment-protect
+/// tag read before the despawn. The first half of
+/// [`teardown_effect_instance`]; a recast calls it directly through
+/// [`replace_effect_instance`], where the replacement keeps the markers up.
+fn reverse_effect_companions(
+    world: &mut World,
+    target: Entity,
+    eff_entity: Entity,
+) -> (Option<String>, Option<mud_world::AlignmentProtectionTag>) {
     let name = world
         .get::<EffectInstance>(eff_entity)
         .map(|i| i.name.clone());
@@ -372,6 +372,30 @@ fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entit
     if let Ok(e) = world.get_entity_mut(eff_entity) {
         e.despawn();
     }
+    (name, align_tag)
+}
+
+/// Drop one `EffectInstance` that a recast of the same spell is about to
+/// replace: reverses every numeric companion (`ModifyDelta`,
+/// `SpellResistanceDelta`, refreshed regen bonus) exactly like expiry, so
+/// recasting `PROT_FIRE` / `STONE_SKIN` cannot stack. Markers (fly, invisible,
+/// stun, protect_*) stay up because the replacement re-backs them, and no
+/// wear-off hook or text fires: legacy refresh shows neither.
+pub(crate) fn replace_effect_instance(world: &mut World, target: Entity, eff_entity: Entity) {
+    reverse_effect_companions(world, target, eff_entity);
+}
+
+/// Undo everything one `EffectInstance` did to `target` and despawn it:
+/// the `ModifyDelta` stat change, a Refreshed regen bonus, the elemental
+/// `SpellResistanceDelta` bump, the stun marker, then the flag / globe
+/// markers and the evil / good protection marker. The single reversal
+/// behind expiry ([`effects_tick`]) and every early removal (dispel,
+/// cleanse, `cancel`, staff strip) so none of them can leave a bonus
+/// behind. The alignment tag is read before the despawn, and the marker
+/// drops only when no other tagged instance and no worn `protect_*` item
+/// still backs it.
+fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entity) {
+    let (name, align_tag) = reverse_effect_companions(world, target, eff_entity);
     let Some(name) = name else {
         return;
     };
@@ -397,8 +421,8 @@ fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entit
 /// pointing at the spawned mob via `AppliedTo(mob)`. When the instance goes
 /// (expiry, dispel, cleanse, `cancel`, staff strip) the conjured mob
 /// vanishes with it, the legacy "follower fades" behaviour: drop a final
-/// flavor line into the mob's room so observers see it, then despawn the
-/// mob. Players are never despawned, and a mob a sibling instance already
+/// flavor line into the mob's room so observers see it, then extract the
+/// mob like legacy `extract_char` (gear to the floor, fighters disengaged). Players are never despawned, and a mob a sibling instance already
 /// took is a no-op.
 fn despawn_summoned_mob(world: &mut World, target: Entity) {
     if world.get::<mud_world::Player>(target).is_some() {
@@ -421,9 +445,10 @@ fn despawn_summoned_mob(world: &mut World, target: Entity) {
             send_to(world, p, msg.clone());
         }
     }
-    if let Ok(em) = world.get_entity_mut(target) {
-        em.despawn();
-    }
+    // Legacy `extract_char`: carried and worn items drop to the room, the
+    // mob's followers and rider let go, and anyone fighting it disengages.
+    let room = world.get::<mud_world::Located>(target).map(|l| l.0);
+    crate::commands::extract_mob(world, target, room, false);
 }
 
 /// Remove one `EffectInstance` before its time (dispel, cleanse, `cancel`,

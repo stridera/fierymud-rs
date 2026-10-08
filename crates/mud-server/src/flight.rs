@@ -39,6 +39,10 @@ const FLIGHT_LOAD_FRACTION: f64 = 0.95;
 const SAFEFALL_ABILITY_ID: i32 = 302;
 /// Ticks between steps of a fall (legacy: 2 pulses, 4 under feather fall).
 const FALL_STEP_TICKS: u64 = 2;
+/// A fall that has dropped this many rooms ends where it is. The start-room
+/// check only catches a loop back to the start; a cycle that skips it
+/// (A -> B -> C -> B) would otherwise fall forever.
+const MAX_FALL_ROOMS: u32 = 50;
 const FEATHER_FALL_STEP_TICKS: u64 = 4;
 /// Order legacy walks exits in (`falling_yell`).
 const DIRECTIONS: [Direction; 10] = [
@@ -452,7 +456,10 @@ fn fall_step(world: &mut World, e: Entity, tick: u64) {
     }
 
     fall.distance += 1;
-    if is_air(world, to_room) && room_below(world, to_room).is_some() {
+    if fall.distance < MAX_FALL_ROOMS
+        && is_air(world, to_room)
+        && room_below(world, to_room).is_some()
+    {
         fall.due_tick = tick
             + if feather {
                 FEATHER_FALL_STEP_TICKS
@@ -463,7 +470,7 @@ fn fall_step(world: &mut World, e: Entity, tick: u64) {
         return;
     }
 
-    // Nothing below: this is the bottom.
+    // Nothing below (or the distance cap): this is the bottom.
     try_remove::<Falling>(world, e);
     land(world, e, to_room, fall.distance, feather);
 }

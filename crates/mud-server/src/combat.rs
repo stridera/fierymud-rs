@@ -1965,13 +1965,6 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
             try_remove::<mud_world::EquippedSlot>(world, it);
         }
 
-        // Legacy `perform_die` (fight.cpp:839) strips every effect before
-        // the corpse is made. Gear is already released above, so worn-item
-        // grants are gone with their items (or kept for soulbound ones);
-        // what is left here is spells, debuffs and admin effects. Race
-        // innates stay. Done before the save below so nothing stale persists.
-        crate::effects::strip_non_innate_effects(world, victim);
-
         // Carried coin goes into the corpse with the items (legacy
         // `make_corpse` drops a money object inside the corpse). The
         // whole carried purse moves in one pile; bank and account
@@ -2048,6 +2041,16 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         if let Some(mut hp) = world.get_mut::<Health>(victim) {
             hp.hp = 0;
         }
+
+        // Legacy `perform_die` (fight.cpp:839) strips every effect before
+        // the corpse is made. Gear is already released above, so worn-item
+        // grants are gone with their items (or kept for soulbound ones);
+        // what is left here is spells, debuffs and admin effects. Race
+        // innates stay. Done before the save below so nothing stale persists.
+        // Runs AFTER the grudge data is cleared and the Ghost is in place:
+        // removing `invisible` re-runs the room's aggro check, which must
+        // find nothing to engage.
+        crate::effects::strip_non_innate_effects(world, victim);
 
         // Death recovery hint: name the room the corpse landed in so
         // the player knows where to return for their gear. Player

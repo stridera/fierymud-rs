@@ -388,6 +388,30 @@ fn a_fall_with_no_way_down_goes_nowhere() {
 }
 
 #[test]
+fn a_fall_through_a_room_cycle_ends_after_fifty_rooms() {
+    // sky1 -> b -> c -> b -> ...: never returns to the start room.
+    let mut f = fx();
+    let b = room(&mut f.world, "Loop B", Sector::Air);
+    let c = room(&mut f.world, "Loop C", Sector::Air);
+    f.world.get_mut::<Exits>(f.sky1).unwrap().0.clear();
+    connect(&mut f.world, f.sky1, Direction::Down, b);
+    connect(&mut f.world, b, Direction::Down, c);
+    connect(&mut f.world, c, Direction::Down, b);
+    f.world.entity_mut(f.p).insert(Falling {
+        start_room: f.sky1,
+        distance: 0,
+        due_tick: 0,
+    });
+    run_falls(&mut f.world);
+    assert!(!is_falling(&mut f.world, f.p));
+    // 50 drops: sky1 -> b, then alternating c, b, ... ends on c (even count).
+    assert_eq!(f.world.get::<Located>(f.p).unwrap().0, c);
+    // A 50-room drop is lethal (50 * 3 / 50 of max HP): the cap ended it by
+    // landing, and the landing killed.
+    assert!(f.world.get::<mud_world::Ghost>(f.p).is_some());
+}
+
+#[test]
 fn fall_damage_follows_the_legacy_formula() {
     // distance * (size + 1) / 50 of max HP.
     assert_eq!(fall_damage(5, 2, 100, false, false), 30);
