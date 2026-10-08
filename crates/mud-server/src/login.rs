@@ -3869,74 +3869,13 @@ impl ConnRouter {
             commands::mark_room_visited(world, entity, room);
             commands::apply_room_environment_at_login(world, entity, room);
         }
-        // Display MOTD before the spawn-prompt. Pulled from the
-        // schema's `SystemText` table (key `"motd"`) via the
-        // [`mud_world::SystemTexts`] resource; falls back to the
-        // compile-time constant when the row is missing. Skipped
-        // entirely when the row exists but is empty so a builder
-        // can disable the auto-display by clearing the content
-        // without dropping the row. `imotd` (staff-only) is also
-        // shown when the viewer's level qualifies — the
-        // `min_level` gate makes that automatic.
-        let viewer_level = world.get::<Profile>(entity).map_or(0, |p| p.level);
-        let motd = world
-            .get_resource::<mud_world::SystemTexts>()
-            .and_then(|t| t.content("motd", viewer_level))
-            .unwrap_or(crate::commands::MOTD_TEXT);
-        if !motd.trim().is_empty() {
-            commands::send_to(world, entity, motd.to_string());
-        }
-        // Staff-only `imotd`: shown after `motd` so it sits closer
-        // to the prompt where eyes land. No fallback constant —
-        // an absent row simply means "no immortal motd today,"
-        // which is the right behavior for a fresh DB.
-        if let Some(imotd) = world
-            .get_resource::<mud_world::SystemTexts>()
-            .and_then(|t| t.content("imotd", viewer_level))
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_string)
-        {
-            commands::send_to(world, entity, imotd);
-        }
-        // Name-approval notice: when the marker is present (i.e. the
-        // `Characters.name_approved` column is `false`), surface a
-        // one-line heads-up after the MOTD so the player understands
-        // why social channels refuse. The marker itself is what gates
-        // the social commands; this just explains the gate.
-        if world
-            .get::<mud_world::NameApprovalPending>(entity)
-            .is_some()
-        {
-            commands::send_to(
-                world,
-                entity,
-                "\r\n<b:yellow>Your character name is awaiting staff approval.</> \
-                 You can move, look, and fight; chat channels (tell / say / \
-                 gossip / group) are silenced until a staff member runs \
-                 `approve_name` or `reject_name`. Run `name_status` for the \
-                 current state.\r\n",
-            );
-        }
-        // Broadcast Room.AddPlayer to anyone already in the room so
-        // their "who's here" panel updates. The arriving player's
-        // own snapshot lands at first prompt via send_prompt's
-        // companion frames (or via cmd_look once they look around).
-        // Pair with a text arrival line so plain-telnet clients
-        // without GMCP support also see the join — mirrors the
-        // leave broadcast on disconnect.
-        if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
-            commands::broadcast_room_player_diff(world, room, entity, "AddPlayer");
-            let player_name = commands::name_of(world, entity);
-            commands::broadcast_room_visual(
-                world,
-                room,
-                entity,
-                &[entity],
-                &commands::cap_sentence_start(&format!(
-                    "{player_name} fades into being, returning from dreams.\r\n"
-                )),
-            );
-        }
+        // Wire the connection's output capabilities before anything is
+        // shown, so the MOTD and the auto-look render with the client's
+        // colour / charset settings.
+        self.playing.insert(conn_id, entity);
+        self.sync_client_width(conn_id, entity, world);
+        self.attach_output(conn_id, entity, world);
+        show_enter_game(world, entity, &char_row.name, char_row.last_login.is_none());
         // One-shot per login: ship the chat-channel directory so
         // the client can build chat tabs from server data instead
         // of hardcoding the channel list. Role-aware — wiznet
@@ -3953,9 +3892,6 @@ impl ConnRouter {
         // skips characters already on the quest, so this is safe
         // to re-fire every login.
         crate::quest_triggers::dispatch_auto_trigger(world, entity);
-        self.playing.insert(conn_id, entity);
-        self.sync_client_width(conn_id, entity, world);
-        self.attach_output(conn_id, entity, world);
         commands::send_prompt(world, entity);
         info!(
             conn_id,
@@ -3966,6 +3902,90 @@ impl ConnRouter {
             alias_count,
             "player spawned"
         );
+    }
+}
+
+/// What a character sees on entering the game, in legacy `CON_MENU` '1'
+/// order: MOTD (and staff `imotd`), welcome line, "$n has entered the game."
+/// to the room, then the auto-look through the real `look` command so GMCP
+/// Room.Info precedes the room text.
+fn show_enter_game(world: &mut World, entity: Entity, name: &str, first_login: bool) {
+    // Display MOTD before the spawn-prompt. Pulled from the
+    // schema's `SystemText` table (key `"motd"`) via the
+    // [`mud_world::SystemTexts`] resource; falls back to the
+    // compile-time constant when the row is missing. Skipped
+    // entirely when the row exists but is empty so a builder
+    // can disable the auto-display by clearing the content
+    // without dropping the row. `imotd` (staff-only) is also
+    // shown when the viewer's level qualifies — the
+    // `min_level` gate makes that automatic.
+    let viewer_level = world.get::<Profile>(entity).map_or(0, |p| p.level);
+    let motd = world
+        .get_resource::<mud_world::SystemTexts>()
+        .and_then(|t| t.content("motd", viewer_level))
+        .unwrap_or(crate::commands::MOTD_TEXT);
+    if !motd.trim().is_empty() {
+        commands::send_to(world, entity, motd.to_string());
+    }
+    // Staff-only `imotd`: shown after `motd` so it sits closer
+    // to the prompt where eyes land. No fallback constant —
+    // an absent row simply means "no immortal motd today,"
+    // which is the right behavior for a fresh DB.
+    if let Some(imotd) = world
+        .get_resource::<mud_world::SystemTexts>()
+        .and_then(|t| t.content("imotd", viewer_level))
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+    {
+        commands::send_to(world, entity, imotd);
+    }
+    // Name-approval notice: when the marker is present (i.e. the
+    // `Characters.name_approved` column is `false`), surface a
+    // one-line heads-up after the MOTD so the player understands
+    // why social channels refuse. The marker itself is what gates
+    // the social commands; this just explains the gate.
+    if world
+        .get::<mud_world::NameApprovalPending>(entity)
+        .is_some()
+    {
+        commands::send_to(
+            world,
+            entity,
+            "\r\n<b:yellow>Your character name is awaiting staff approval.</> \
+             You can move, look, and fight; chat channels (tell / say / \
+             gossip / group) are silenced until a staff member runs \
+             `approve_name` or `reject_name`. Run `name_status` for the \
+             current state.\r\n",
+        );
+    }
+    // Enter-game sequence, legacy `CON_MENU` '1' order: welcome line,
+    // "$n has entered the game." to the room, then the auto-look
+    // (`look_at_room`). The look goes through the real `look` command so
+    // GMCP Room.Info precedes the room text.
+    if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
+        commands::send_to(world, entity, format!("\r\nWelcome, {name}.\r\n\r\n"));
+        // First-login guidance: a brand-new character has no prior
+        // `last_login` stamp. Suppressed for returning characters so
+        // veterans aren't nagged.
+        if first_login {
+            commands::send_to(
+                world,
+                entity,
+                "Try:  look  ·  exits  ·  score  ·  inventory  ·  help newbie\r\n\r\n",
+            );
+        }
+        // Room.AddPlayer updates the "who's here" panel of anyone
+        // already in the room; the text line covers plain telnet.
+        commands::broadcast_room_player_diff(world, room, entity, "AddPlayer");
+        let player_name = commands::name_of(world, entity);
+        commands::broadcast_room_visual(
+            world,
+            room,
+            entity,
+            &[entity],
+            &commands::cap_sentence_start(&format!("{player_name} has entered the game.\r\n")),
+        );
+        commands::dispatch(world, entity, "look");
     }
 }
 
@@ -4157,32 +4177,10 @@ pub(crate) fn spawn_player(
         charisma: c.charisma,
     };
 
-    // Welcome line — only when we have a room to land in.
-    if let Some(room_entity) = room_entity {
-        let room_name = commands::name_or(world, room_entity, "<unknown>");
-        let _ = outbound.try_send(
-            format!(
-                "\r\nWelcome, {name}.\r\nYou appear in: {room_name}\r\n\r\n",
-                name = c.name,
-            )
-            .into_bytes(),
-        );
-        // First-login guidance: a brand-new character has no prior
-        // `last_login` stamp. Drop a one-line "Try: ..." pointing at
-        // the most useful first commands so a fresh player isn't
-        // staring at a blank prompt. Suppressed for returning
-        // characters (last_login set) to avoid nagging veterans.
-        if c.last_login.is_none() {
-            // Plain text — the welcome is sent directly through the
-            // outbound channel without going through `send_raw`'s
-            // XML-Lite renderer, so color tags would show literally.
-            let _ = outbound.try_send(
-                "Try:  look  ·  exits  ·  score  ·  inventory  ·  help newbie\r\n\r\n"
-                    .as_bytes()
-                    .to_vec(),
-            );
-        }
-    } else {
+    // No room to land in: say so now. The welcome line, arrival message
+    // and auto-look for the normal case are sent by `complete_login_inner`
+    // after the MOTD (legacy order), once the entity exists.
+    if room_entity.is_none() {
         let _ = outbound.try_send(
             format!(
                 "No starting room available (tried ({zone},{room}) and fallback {FALLBACK_START:?}).\r\n",
@@ -7213,7 +7211,7 @@ mod tests {
         world.insert_resource(SaveCoordinator::default());
         let pool = failing_pool();
         let mut router = ConnRouter::new();
-        let room = world.spawn(mud_world::Room).id();
+        let room = enter_game_room(&mut world);
         let (fighter, foe, _rx) = fighter_in(&mut router, &mut world, room, 1);
         router.on_disconnect(&mut world, 1, &pool).await;
         assert!(world.get::<commands::Linkdead>(fighter).is_some());
@@ -7245,6 +7243,123 @@ mod tests {
         assert_eq!(world.resource::<SaveCoordinator>().pending(), 0);
         let out = drain(&mut rx2);
         assert!(out.contains("Reconnecting."), "{out}");
+        // Legacy `perform_dupe_check`: reconnecting is followed by a look.
+        let reconnecting = out.find("Reconnecting.").unwrap();
+        let hall = out.find("The Grand Hall").expect(&out);
+        let info = out.find("Room.Info").expect(&out);
+        assert!(reconnecting < info && info < hall, "{out}");
+    }
+
+    /// World resources `look` needs, plus a named, described room.
+    fn enter_game_room(world: &mut World) -> Entity {
+        world.insert_resource(mud_script::LuaHost::default());
+        world.insert_resource(WorldKeyIndex::default());
+        world.insert_resource(mud_world::WeatherCatalog::default());
+        world.insert_resource(mud_world::AbilityCatalog::default());
+        world.insert_resource(mud_world::EffectCatalog::default());
+        world.insert_resource(mud_world::RaceCatalog::default());
+        world.insert_resource(mud_world::RuntimeConfig::default());
+        world.init_resource::<mud_world::MudClock>();
+        world.insert_resource(commands::PromptState::default());
+        world
+            .spawn((
+                mud_world::Room,
+                Named {
+                    name: "The Grand Hall".into(),
+                },
+                mud_world::Description("Banners hang from the rafters.".into()),
+                mud_world::Exits::default(),
+            ))
+            .id()
+    }
+
+    fn enter_game_player(
+        world: &mut World,
+        room: Entity,
+        name: &str,
+    ) -> (Entity, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+        let e = world
+            .spawn((
+                Player,
+                mud_world::Online,
+                Named { name: name.into() },
+                Located(room),
+                Connection(tx),
+                Health { hp: 10, max: 10 },
+                Account {
+                    user_id: format!("u-{name}"),
+                    character_id: format!("c-{name}"),
+                    role: mud_db::enums::UserRole::Player,
+                    account_role: mud_db::enums::UserRole::Player,
+                    perms: vec![],
+                },
+                Profile {
+                    level: 20,
+                    class_id: None,
+                    race: "Human".into(),
+                    experience: 0,
+                    gender: "neutral".into(),
+                },
+            ))
+            .id();
+        (e, rx)
+    }
+
+    #[test]
+    fn entering_the_game_shows_welcome_then_room_look() {
+        let mut world = World::new();
+        let room = enter_game_room(&mut world);
+        let (me, mut rx) = enter_game_player(&mut world, room, "Tester");
+
+        show_enter_game(&mut world, me, "Tester", false);
+
+        let out = drain(&mut rx);
+        let welcome = out.find("Welcome, Tester.").expect(&out);
+        let info = out.find("Room.Info").expect(&out);
+        // The room text is the last mention (Room.Info JSON names it too).
+        let title = out.rfind("The Grand Hall").expect(&out);
+        let desc = out.rfind("Banners hang").expect(&out);
+        // Welcome before the look; GMCP Room.Info ahead of the room text.
+        assert!(welcome < info && info < title && title < desc, "{out}");
+        assert!(!out.contains("You appear in"), "{out}");
+        assert!(!out.contains("Try:"), "returning character: {out}");
+    }
+
+    #[test]
+    fn first_login_hint_comes_before_the_look() {
+        let mut world = World::new();
+        let room = enter_game_room(&mut world);
+        let (me, mut rx) = enter_game_player(&mut world, room, "Tester");
+
+        show_enter_game(&mut world, me, "Tester", true);
+
+        let out = drain(&mut rx);
+        let hint = out.find("Try:").expect(&out);
+        let title = out.find("The Grand Hall").expect(&out);
+        assert!(
+            out.find("Welcome, Tester.").unwrap() < hint && hint < title,
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn room_sees_the_arrival_message_once_and_after_the_welcome() {
+        let mut world = World::new();
+        let room = enter_game_room(&mut world);
+        let (me, mut my_rx) = enter_game_player(&mut world, room, "Tester");
+        let (_watcher, mut watcher_rx) = enter_game_player(&mut world, room, "Watcher");
+
+        show_enter_game(&mut world, me, "Tester", false);
+
+        let seen = drain(&mut watcher_rx);
+        assert_eq!(
+            seen.matches("Tester has entered the game.").count(),
+            1,
+            "{seen}"
+        );
+        let mine = drain(&mut my_rx);
+        assert!(!mine.contains("has entered the game"), "{mine}");
     }
 
     #[tokio::test(flavor = "current_thread")]
