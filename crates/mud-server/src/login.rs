@@ -3536,7 +3536,7 @@ impl ConnRouter {
         // spawning a second copy (and a second inventory).
         if self.try_takeover(world, conn_id, &char_row.id) {
             if let Some(&entity) = self.playing.get(&conn_id) {
-                commands::dispatch(world, entity, "look");
+                commands::info::cmd_look(world, entity, "");
                 commands::refresh_player_items_gmcp(world, entity);
                 commands::send_prompt(world, entity);
             }
@@ -3974,7 +3974,7 @@ fn show_enter_game(world: &mut World, entity: Entity, name: &str, first_login: b
             &[entity],
             &commands::cap_sentence_start(&format!("{player_name} has entered the game.\r\n")),
         );
-        commands::dispatch(world, entity, "look");
+        commands::info::cmd_look(world, entity, "");
     }
 }
 
@@ -7330,6 +7330,49 @@ mod tests {
             out.find("Welcome, Tester.").unwrap() < hint && hint < title,
             "{out}"
         );
+    }
+
+    #[test]
+    fn login_look_ignores_room_command_triggers_and_aliases() {
+        use mud_world::{TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent};
+        let mut world = World::new();
+        let room = enter_game_room(&mut world);
+        // A mob in the room whose COMMAND trigger swallows every command.
+        let mut catalog = TriggerCatalog::default();
+        catalog.by_key.insert(
+            (99, 1),
+            TriggerDef {
+                zone_id: 99,
+                id: 1,
+                name: "swallow".to_string(),
+                attach_type: TriggerAttach::Mob,
+                commands: "return false".to_string(),
+                flags: vec![TriggerEvent::Command],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        world.insert_resource(catalog);
+        world.insert_resource(mud_script::LuaHost::new());
+        world.spawn((
+            mud_world::Mob,
+            Located(room),
+            mud_world::AttachedTriggers(vec![(99, 1)]),
+        ));
+        let (me, mut rx) = enter_game_player(&mut world, room, "Tester");
+        world.entity_mut(me).insert(mud_world::Aliases {
+            entries: vec![("look".into(), "say aliased".into())],
+        });
+
+        // Control: a typed `look` is eaten by the trigger.
+        commands::dispatch(&mut world, me, "look");
+        let typed = drain(&mut rx);
+        assert!(!typed.contains("Banners hang"), "control: {typed}");
+
+        show_enter_game(&mut world, me, "Tester", false);
+        let out = drain(&mut rx);
+        assert!(out.contains("Banners hang"), "look was swallowed: {out}");
+        assert!(!out.contains("aliased"), "alias expanded at login: {out}");
     }
 
     #[test]
