@@ -10703,6 +10703,46 @@ mod tests {
         assert_load_refused(&router, &mut world, &mut orx, "unreachable db");
     }
 
+    /// `abilities_loaded` on a virtual session is just the character's
+    /// `CharacterAbilities` row count. A seeded mortal (`TestWarrior`, class
+    /// Warrior) must load some; the classless god `Strider` owns none by
+    /// design (staff skip the `KnownAbilities` gate), so 0 there is not a
+    /// bug. Read-only; skips when the dev DB or those characters are absent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn seeded_mortal_loads_abilities_classless_god_has_none() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let count = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                let id: Option<String> =
+                    mud_db::sqlx::query_scalar("SELECT id FROM \"Characters\" WHERE name = $1")
+                        .bind(name)
+                        .fetch_optional(&pool)
+                        .await
+                        .unwrap();
+                match id {
+                    Some(id) => Some(
+                        mud_db::character_abilities::list_for(&pool, &id)
+                            .await
+                            .unwrap()
+                            .len(),
+                    ),
+                    None => None,
+                }
+            }
+        };
+        match count("TestWarrior").await {
+            Some(n) => assert!(n > 0, "TestWarrior should load abilities, got {n}"),
+            None => eprintln!("skipping: TestWarrior not seeded"),
+        }
+        if let Some(n) = count("Strider").await {
+            assert_eq!(n, 0, "classless god Strider has no CharacterAbilities rows");
+        }
+    }
+
     /// For every per-character table, an injected load failure refuses the
     /// login and leaves the character's `CharacterAbilities` and
     /// `CharacterItems` rows untouched (nothing exists to save over them).

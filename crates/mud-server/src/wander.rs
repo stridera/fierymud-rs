@@ -17,11 +17,13 @@
 //! a populated zone doesn't see mobs constantly migrating; tight
 //! enough that a long sit watches the world breathe.
 
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ExitState, MobBehavior, MobTrait, Sector};
 use mud_world::{
     AttachedTriggers, Corpse, ExitData, Exits, Fighting, Follower, Item, Located, Mob,
-    MobBehaviors, MobTraits, Named, RiddenBy, RoomSector, WorldKey,
+    MobBehaviors, MobTraits, Named, Player, RiddenBy, RoomSector, WorldKey,
 };
 
 use crate::TickCount;
@@ -195,6 +197,13 @@ pub fn wander_tick(world: &mut World) {
 /// or worn (`EquippedSlot` set) are skipped. Cadence is 10s so
 /// even a Scavenger-heavy zone doesn't strip the floor in one
 /// frame; a player dropping a stack still gets to grab some back.
+///
+/// Cost is O(scavengers + items): one pass over the items builds a
+/// per-room queue of floor loot, restricted to rooms a scavenger actually
+/// stands in. (The earlier per-mob scan was O(scavengers x items) and
+/// built a fresh query for every mob, ~150-220 ms at 5.5k mobs / 4.1k
+/// items.) Mobs sharing a room take successive items from that room's
+/// queue, in the same order a per-mob "first item in the room" scan would.
 pub fn scavenger_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(SCAVENGER_PERIOD_TICKS) {
@@ -208,25 +217,45 @@ pub fn scavenger_tick(world: &mut World) {
             .map(|(e, l, _)| (e, l.0))
             .collect()
     };
+    if scavengers.is_empty() {
+        return;
+    }
+    let scavenger_rooms: HashSet<Entity> = scavengers.iter().map(|&(_, room)| room).collect();
+    // Free-floor items per scavenger room. Items Located on other actors
+    // or inside containers never match a room key. Corpses are skipped: a
+    // player who dies in a Scavenger-patrolled room and respawns expects
+    // to find their own body still on the floor, not vanished into a mob's
+    // inventory and despawned with the mob's next tick.
+    let mut floor: HashMap<Entity, VecDeque<Entity>> = HashMap::new();
+    {
+        let mut q = world
+            .query_filtered::<(Entity, &Located), (With<Item>, With<Named>, Without<Corpse>)>();
+        for (item, loc) in q.iter(world) {
+            if scavenger_rooms.contains(&loc.0) {
+                floor.entry(loc.0).or_default().push_back(item);
+            }
+        }
+    }
+    if floor.is_empty() {
+        return;
+    }
+    // The pickup message only reaches players, so skip it in rooms that
+    // have none (the common case).
+    let player_rooms: HashSet<Entity> = {
+        let mut q = world.query_filtered::<&Located, With<Player>>();
+        q.iter(world).map(|l| l.0).collect()
+    };
     for (mob, room) in scavengers {
-        // Pick the first free-floor item in the room — items
-        // Located on other actors or inside containers stay put.
-        // Corpses are skipped: a player who dies in a Scavenger-
-        // patrolled room and respawns expects to find their own
-        // body still on the floor, not vanished into a mob's
-        // inventory and despawned with the mob's next tick.
-        let target_item: Option<(Entity, String)> = {
-            let mut q =
-                world.query_filtered::<(Entity, &Located, &Named), (With<Item>, Without<Corpse>)>();
-            q.iter(world)
-                .find(|(_, l, _)| l.0 == room)
-                .map(|(e, _, n)| (e, n.name.clone()))
-        };
-        let Some((item, item_name)) = target_item else {
+        let Some(item) = floor.get_mut(&room).and_then(VecDeque::pop_front) else {
             continue;
         };
-        if world.get::<Located>(item).is_some() {
-            world.entity_mut(item).insert(Located(mob));
+        let item_name = world
+            .get::<Named>(item)
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        world.entity_mut(item).insert(Located(mob));
+        if !player_rooms.contains(&room) {
+            continue;
         }
         let mob_name = world
             .get::<Named>(mob)
@@ -404,6 +433,179 @@ mod tests {
             }
         }
         assert!(moved, "AQUATIC mob should wander between water sectors");
+    }
+
+    #[derive(Component)]
+    struct M0;
+    #[derive(Component)]
+    struct M1;
+    #[derive(Component)]
+    struct M2;
+    #[derive(Component)]
+    struct M3;
+    #[derive(Component)]
+    struct M4;
+    #[derive(Component)]
+    struct M5;
+    #[derive(Component)]
+    struct M6;
+    #[derive(Component)]
+    struct M7;
+
+    /// Attach a bit-pattern of marker components so the world spans up to
+    /// 256 archetypes per entity kind, as a live world with many
+    /// component combinations does.
+    fn scatter_archetype(world: &mut World, e: Entity, bits: usize) {
+        let mut ent = world.entity_mut(e);
+        if bits & 1 != 0 {
+            ent.insert(M0);
+        }
+        if bits & 2 != 0 {
+            ent.insert(M1);
+        }
+        if bits & 4 != 0 {
+            ent.insert(M2);
+        }
+        if bits & 8 != 0 {
+            ent.insert(M3);
+        }
+        if bits & 16 != 0 {
+            ent.insert(M4);
+        }
+        if bits & 32 != 0 {
+            ent.insert(M5);
+        }
+        if bits & 64 != 0 {
+            ent.insert(M6);
+        }
+        if bits & 128 != 0 {
+            ent.insert(M7);
+        }
+    }
+
+    /// Prod-scale scavenger scenario: 5000 mobs (1200 scavengers), 4000
+    /// items over 1500 rooms. Floor loot is concentrated in rooms
+    /// 1000..1500, so most scavengers stand in a room with nothing to take
+    /// (the worst case for a scan-per-mob). Some items are corpses or
+    /// carried by mobs, and a few marker components spread the entities
+    /// over several archetypes like a live world. Returns
+    /// `(world, rooms, scavengers, corpses, carried)`.
+    fn scavenger_world() -> (World, Vec<Entity>, Vec<Entity>, Vec<Entity>, Vec<Entity>) {
+        const ROOMS: usize = 1500;
+        const MOBS: usize = 5000;
+        const SCAVENGERS: usize = 1200;
+        const ITEMS: usize = 4000;
+        let mut world = World::new();
+        world.insert_resource(TickCount(SCAVENGER_PERIOD_TICKS));
+        let rooms: Vec<Entity> = (0..ROOMS).map(|_| make_room(&mut world)).collect();
+        let mut mobs = Vec::with_capacity(MOBS);
+        let mut scavengers = Vec::new();
+        for i in 0..MOBS {
+            let mob = make_mob(&mut world, rooms[i % ROOMS]);
+            if i < SCAVENGERS {
+                world
+                    .entity_mut(mob)
+                    .insert(MobBehaviors(vec![MobBehavior::Scavenger]));
+                scavengers.push(mob);
+            }
+            scatter_archetype(&mut world, mob, i);
+            mobs.push(mob);
+        }
+        let (mut corpses, mut carried) = (Vec::new(), Vec::new());
+        for i in 0..ITEMS {
+            let named = Named {
+                name: format!("item {i}"),
+            };
+            let floor = rooms[1000 + i % 500];
+            let item = match i % 10 {
+                // Carried by a (non-scavenger) mob: never floor loot.
+                0 => {
+                    let holder = mobs[SCAVENGERS + i % (MOBS - SCAVENGERS)];
+                    let e = world.spawn((Item, named, Located(holder))).id();
+                    carried.push(e);
+                    e
+                }
+                1 => {
+                    let e = world.spawn((Item, Corpse, named, Located(floor))).id();
+                    corpses.push(e);
+                    e
+                }
+                _ => world.spawn((Item, named, Located(floor))).id(),
+            };
+            scatter_archetype(&mut world, item, i);
+        }
+        (world, rooms, scavengers, corpses, carried)
+    }
+
+    /// Each scavenger standing on floor loot lifts exactly one item,
+    /// corpses and carried items are never touched, and scavengers in
+    /// bare rooms stay empty-handed.
+    #[test]
+    fn scavenger_tick_picks_one_floor_item_each() {
+        let (mut world, rooms, scavengers, corpses, carried) = scavenger_world();
+        let floor_before: usize = {
+            let mut q = world.query_filtered::<&Located, (With<Item>, Without<Corpse>)>();
+            q.iter(&world).filter(|l| rooms.contains(&l.0)).count()
+        };
+        // Scavengers standing in a room that holds a non-corpse floor item.
+        let loot_rooms: std::collections::HashSet<Entity> = {
+            let mut q = world.query_filtered::<&Located, (With<Item>, Without<Corpse>)>();
+            q.iter(&world)
+                .map(|l| l.0)
+                .filter(|r| rooms.contains(r))
+                .collect()
+        };
+        let expected: Vec<Entity> = scavengers
+            .iter()
+            .copied()
+            .filter(|&m| loot_rooms.contains(&world.get::<Located>(m).unwrap().0))
+            .collect();
+        assert_eq!(expected.len(), 160);
+        scavenger_tick(&mut world);
+        let mut holding = std::collections::HashMap::<Entity, usize>::new();
+        let mut q = world.query_filtered::<&Located, With<Item>>();
+        for l in q.iter(&world) {
+            if scavengers.contains(&l.0) {
+                *holding.entry(l.0).or_default() += 1;
+            }
+        }
+        assert!(holding.values().all(|&n| n == 1), "one item per mob");
+        assert_eq!(holding.len(), expected.len());
+        assert!(expected.iter().all(|m| holding.contains_key(m)));
+        for c in corpses {
+            assert!(
+                rooms.contains(&world.get::<Located>(c).unwrap().0),
+                "corpse taken"
+            );
+        }
+        for c in carried {
+            assert!(!rooms.contains(&world.get::<Located>(c).unwrap().0));
+        }
+        let floor_after = {
+            let mut q = world.query_filtered::<&Located, (With<Item>, Without<Corpse>)>();
+            q.iter(&world).filter(|l| rooms.contains(&l.0)).count()
+        };
+        assert_eq!(floor_before - floor_after, expected.len());
+    }
+
+    /// Timing guard at prod scale. Prod saw 138-223 ms per pass with the
+    /// old per-mob item scan; the indexed pass must stay far below the
+    /// 100 ms slow-tick threshold. Hard limit only enforced in release.
+    #[test]
+    fn scavenger_tick_prod_scale_is_fast() {
+        let (mut world, ..) = scavenger_world();
+        let start = std::time::Instant::now();
+        scavenger_tick(&mut world);
+        let first = start.elapsed();
+        // Steady state: nothing left for most scavengers to do.
+        let start = std::time::Instant::now();
+        scavenger_tick(&mut world);
+        let second = start.elapsed();
+        eprintln!("scavenger_tick 5000 mobs / 4000 items: first={first:?} second={second:?}");
+        if !cfg!(debug_assertions) {
+            assert!(first.as_millis() < 5, "first pass took {first:?}");
+            assert!(second.as_millis() < 5, "second pass took {second:?}");
+        }
     }
 
     /// Run the wander tick enough times that an unblocked mob would
