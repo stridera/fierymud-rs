@@ -12,11 +12,11 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectFlag, ObjectType};
 use mud_world::{
-    CoinPile, Corpse, Decomposing, Description, Item, ItemTimer, Keywords, Located, Named,
-    ObjectFlags, ObjectProto, ObjectPrototypes, WorldKey,
+    CoinPile, Corpse, Decomposing, Description, Item, ItemTimer, Keywords, Located, LooseCoins,
+    Named, ObjectFlags, ObjectProto, ObjectPrototypes, WorldKey,
 };
 
-use crate::commands::{broadcast_room_except_rendered, send_to};
+use crate::commands::{broadcast_room_except_rendered, cap_sentence_start, send_to};
 
 /// Legacy MUD-hour to wall seconds. Matches the constant used by
 /// effect duration resolution; centralized here to keep the timer
@@ -131,7 +131,9 @@ pub fn item_decay_tick(world: &mut World) {
                 send_to(
                     world,
                     holder_entity,
-                    format!("<dim>{item_name} crumbles to dust in your hands.</>\r\n"),
+                    cap_sentence_start(&format!(
+                        "<dim>{item_name} crumbles to dust in your hands.</>\r\n"
+                    )),
                 );
             }
             HolderKind::Room => {
@@ -139,7 +141,9 @@ pub fn item_decay_tick(world: &mut World) {
                     world,
                     holder_entity,
                     &[],
-                    &format!("<dim>{item_name} crumbles to dust.</>\r\n"),
+                    &cap_sentence_start(&format!(
+                        "<dim>{item_name} crumbles to dust and blows away.</>\r\n"
+                    )),
                 );
             }
             HolderKind::Container | HolderKind::Unknown => {
@@ -171,7 +175,14 @@ pub(crate) fn release_contents(
             .map(|(e, _)| e)
             .collect()
     };
-    let coins = world.get::<CoinPile>(container).map_or(0, |p| p.0).max(0);
+    // A loose pile of coins *is* the money: when it rots the coins go with
+    // it (legacy `decay_object` extracts the money object). Releasing its
+    // amount would respawn a fresh pile that rots again, forever.
+    let coins = if world.get::<LooseCoins>(container).is_some() {
+        0
+    } else {
+        world.get::<CoinPile>(container).map_or(0, |p| p.0).max(0)
+    };
     if contents.is_empty() && coins == 0 {
         return;
     }
@@ -281,6 +292,7 @@ pub(crate) fn spawn_loose_coin_pile(world: &mut World, room: Entity, coins: i64)
         .spawn((
             Item,
             CoinPile(coins),
+            LooseCoins,
             Named {
                 name: "a pile of coins".to_string(),
             },
@@ -346,6 +358,36 @@ mod tests {
             decompose_window_secs: 0,
         });
         e
+    }
+
+    #[test]
+    fn rotting_loose_coin_pile_is_gone_for_good() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let pile = spawn_loose_coin_pile(&mut world, room, 10);
+        world.get_mut::<ItemTimer>(pile).unwrap().remaining_secs = 1;
+        item_decay_tick(&mut world);
+        assert!(world.get_entity(pile).is_err());
+        // The coins were destroyed, not re-dropped as a fresh pile that
+        // would rot again and again (issue #64).
+        let mut q = world.query_filtered::<&Located, With<CoinPile>>();
+        assert_eq!(q.iter(&world).filter(|l| l.0 == room).count(), 0);
+    }
+
+    #[test]
+    fn rotting_floor_item_message_starts_with_a_capital() {
+        use crate::commands::test_support::{drain, player_in};
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (_player, mut rx) = player_in(&mut world, room);
+        let pile = spawn_loose_coin_pile(&mut world, room, 10);
+        world.get_mut::<ItemTimer>(pile).unwrap().remaining_secs = 1;
+        item_decay_tick(&mut world);
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("A pile of coins crumbles to dust and blows away."),
+            "{out}"
+        );
     }
 
     #[test]

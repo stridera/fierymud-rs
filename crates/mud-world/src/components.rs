@@ -1038,6 +1038,13 @@ pub struct Decomposing;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CoinPile(pub i64);
 
+/// Marker on a standalone `CoinPile` item: the pile *is* the money (legacy
+/// `ITEM_MONEY`), not a container holding it. When it rots the coins rot
+/// with it; they must not be handed to the room the way a rotting corpse's
+/// or chest's pile is.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct LooseCoins;
+
 /// Marker: this entity is hidden / sneaking. Resolves the `hidden`
 /// symbol in formula expressions to 1 (vs 0 when absent). Used by
 /// rogue-style abilities (BACKSTAB's `bonusIfHidden`, future
