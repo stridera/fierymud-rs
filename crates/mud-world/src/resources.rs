@@ -2197,10 +2197,19 @@ impl CoreAbilities {
     /// space interchangeable) for each role, in the order of the fields.
     pub const NAMES: [&'static str; 5] = ["Dodge", "Parry", "Safefall", "Pick Lock", "Switch"];
 
-    /// Resolve every role against `catalog`, warning on each missing name.
+    /// Resolve every role against `catalog`, warning on each missing name
+    /// and once per role whose name matches more than one ability.
     #[must_use]
     pub fn resolve(catalog: &AbilityCatalog) -> Self {
-        let found = Self::resolve_quiet(catalog);
+        let (found, ambiguous) = Self::resolve_inner(catalog);
+        for (name, ids) in ambiguous {
+            tracing::warn!(
+                ability = name,
+                candidates = ?ids,
+                chosen = ids[0],
+                "core ability name matches several abilities; using the lowest id"
+            );
+        }
         for name in found.missing() {
             tracing::warn!(
                 ability = name,
@@ -2211,23 +2220,52 @@ impl CoreAbilities {
     }
 
     /// [`Self::resolve`] without the logging.
+    ///
+    /// Deterministic regardless of `HashMap` iteration order: an exact
+    /// `plain_name` match (case-insensitive, no `_`/space folding) beats a
+    /// folded one (`PICK_LOCK` for `Pick Lock`), and any remaining tie goes
+    /// to the lowest id.
     #[must_use]
     pub fn resolve_quiet(catalog: &AbilityCatalog) -> Self {
-        let find = |canonical: &str| {
+        Self::resolve_inner(catalog).0
+    }
+
+    /// Resolve all roles; also return, per role whose candidates were still
+    /// ambiguous after preferring exact names, the candidate ids ascending
+    /// (the first is the one chosen).
+    fn resolve_inner(catalog: &AbilityCatalog) -> (Self, Vec<(&'static str, Vec<i32>)>) {
+        let mut ambiguous = Vec::new();
+        let mut find = |canonical: &'static str| -> Option<i32> {
             let want = canonical.to_ascii_lowercase();
-            catalog
+            let mut folded: Vec<&AbilityDef> = catalog
                 .by_name
                 .values()
-                .find(|d| d.plain_name.to_ascii_lowercase().replace('_', " ") == want)
-                .map(|d| d.id)
+                .filter(|d| d.plain_name.to_ascii_lowercase().replace('_', " ") == want)
+                .collect();
+            let exact: Vec<&AbilityDef> = folded
+                .iter()
+                .copied()
+                .filter(|d| d.plain_name.eq_ignore_ascii_case(canonical))
+                .collect();
+            if !exact.is_empty() {
+                folded = exact;
+            }
+            let mut ids: Vec<i32> = folded.iter().map(|d| d.id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() > 1 {
+                ambiguous.push((canonical, ids.clone()));
+            }
+            ids.first().copied()
         };
-        Self {
+        let found = Self {
             dodge: find(Self::NAMES[0]),
             parry: find(Self::NAMES[1]),
             safefall: find(Self::NAMES[2]),
             pick_lock: find(Self::NAMES[3]),
             switch: find(Self::NAMES[4]),
-        }
+        };
+        (found, ambiguous)
     }
 
     /// Canonical names of the roles that did not resolve.

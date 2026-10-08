@@ -19,6 +19,14 @@ pub struct AbilityEffectRow {
     /// JSONB blob of per-mapping overrides (damage formula, area flag,
     /// component breakdown, etc.). Kept opaque until the casting
     /// pipeline interprets it.
+    ///
+    /// Notable `damage` keys: `amount` (formula), `multipliers` (per-target
+    /// `{expr, min, max}` list), `bonusIfHidden`, and `casterClassMultiplier`:
+    /// a map of lowercase `Class.plain_name` to a non-negative factor, e.g.
+    /// `{"priest": 1.25, "paladin": 1.25}`, applied to the rolled damage when
+    /// the caster's class (or a parent class) is listed. It is honoured ONLY
+    /// by `damage` effects; on any other effect type it is ignored and the
+    /// runtime logs a warning once per ability.
     pub override_params: Option<serde_json::Value>,
     /// Within-ability ordering (matters when an ability emits multiple
     /// effects in sequence).

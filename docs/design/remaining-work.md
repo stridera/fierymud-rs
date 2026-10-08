@@ -410,6 +410,14 @@ fold in the dynamic-exponent legacy scaling.
     affinity bonuses (Priest +25% Destroy Undead, Cryomancer
     +25% Ice Storm, etc.) remain content-follow-up — engine
     work is done so they're pure JSON authoring + DB updates.
+  - **Class-keyed bonus: `casterClassMultiplier`.** ✅ A damage
+    effect's `override_params` may carry
+    `"casterClassMultiplier": {"priest": 1.25, "paladin": 1.25}`
+    (lowercase `Class.plain_name` keys, non-negative factors; the
+    caster's parent classes count). Applied after `multipliers`,
+    before spell_power. Only the `damage` arm reads it; on any other
+    effect type the runtime warns once per ability. Used by HOLY_WORD
+    (priest/paladin) and UNHOLY_WORD (diabolist/anti-paladin).
   - **Wave 2: lifeform multipliers (2026-05-18).** ✅ Added
     `victim_is_undead`, `victim_is_demonic`, `victim_is_celestial`,
     and `victim_is_elemental` symbols to `FormulaCtx` (0/1 from

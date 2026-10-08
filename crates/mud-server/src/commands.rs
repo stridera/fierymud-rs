@@ -4218,6 +4218,129 @@ mod tests {
         assert_eq!(mud_world::effective_race(&world, nobody), "");
     }
 
+    /// Build a world with one carried ring (proto key 7:7, size band as
+    /// given) and a player of `size`; returns `(world, player, item)`.
+    fn size_band_fixture(
+        size: mud_db::enums::Size,
+        min: Option<&str>,
+        max: Option<&str>,
+    ) -> (World, Entity, Entity) {
+        use super::test_support::{object_proto, player_in};
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (player, _rx) = player_in(&mut world, room);
+        world.entity_mut(player).insert(mud_world::Sized(size));
+        let mut proto = object_proto(7, 7, mud_db::enums::ObjectType::Armor);
+        proto.wear_flags = vec![mud_db::enums::WearFlag::Finger];
+        proto.min_size = min.map(str::to_string);
+        proto.max_size = max.map(str::to_string);
+        let mut protos = mud_world::ObjectPrototypes::default();
+        protos.by_key.insert((7, 7), proto);
+        world.insert_resource(protos);
+        let item = world
+            .spawn((
+                mud_world::Item,
+                Named {
+                    name: "a ring".into(),
+                },
+                mud_world::Located(player),
+                mud_world::WorldKey { zone: 7, id: 7 },
+            ))
+            .id();
+        (world, player, item)
+    }
+
+    #[test]
+    fn wear_refuses_giant_wearer_when_item_max_size_is_large() {
+        use mud_db::enums::Size;
+        // Giant (rank 5) is above LARGE (rank 3): the band must block it.
+        // The old local `size_rank` ranked unknown labels as MEDIUM, so a
+        // Giant+ wearer was never blocked.
+        for size in [Size::Giant, Size::Titanic, Size::Mountainous] {
+            let (mut world, player, item) = size_band_fixture(size, None, Some("LARGE"));
+            assert!(
+                !super::wear_item(&mut world, player, item, super::WearWhere::Default, true),
+                "{size:?} wearer must be refused a max_size LARGE item"
+            );
+            assert!(
+                world.get::<mud_world::EquippedSlot>(item).is_none(),
+                "{size:?}: item must stay unequipped"
+            );
+        }
+    }
+
+    #[test]
+    fn size_band_refusal_uses_canonical_ranks() {
+        use super::size_band_refusal as refuse;
+        use mud_db::enums::Size;
+        assert!(refuse(Size::Giant, None, Some("LARGE"), "a ring").is_some());
+        assert!(refuse(Size::Large, None, Some("LARGE"), "a ring").is_none());
+        assert!(refuse(Size::Mountainous, None, Some("Titanic"), "a ring").is_some());
+        assert!(refuse(Size::Small, Some("GIANT"), None, "a ring").is_some());
+        assert!(refuse(Size::Titanic, Some("GIANT"), None, "a ring").is_none());
+        // An unparseable label is ignored rather than guessed at.
+        assert!(refuse(Size::Giant, None, Some("BOGUS"), "a ring").is_none());
+        assert!(refuse(Size::Giant, None, None, "a ring").is_none());
+    }
+
+    #[test]
+    fn core_abilities_resolve_prefers_exact_name_then_lowest_id() {
+        use super::test_support::ability_def;
+        use mud_db::abilities::AbilityKind::Skill;
+        // Several insertion orders so HashMap iteration order can't pass by luck.
+        for order in 0..6_usize {
+            let mut rows = vec![
+                // Folded-only match (underscore) with the lowest id.
+                (5, "PICK_LOCK"),
+                // Two exact matches (different case, distinct map keys).
+                (30, "Pick Lock"),
+                (20, "pick lock"),
+                // Dodge: only folded candidates; lowest id wins.
+                (9, "DODGE"),
+                (4, "Dodge"),
+                // Unambiguous.
+                (60, "Parry"),
+            ];
+            rows.rotate_left(order);
+            let mut catalog = mud_world::AbilityCatalog::default();
+            for (id, name) in rows {
+                let mut def = ability_def(id, name, Skill);
+                def.plain_name = name.to_string();
+                catalog.by_name.insert(format!("{name}#{id}"), def);
+            }
+            let core = mud_world::CoreAbilities::resolve_quiet(&catalog);
+            // Exact (case-insensitive, unfolded) beats the lower-id PICK_LOCK;
+            // of the two exact rows the lowest id wins.
+            assert_eq!(core.pick_lock, Some(20), "order {order}");
+            // DODGE / Dodge are both exact; lowest id wins.
+            assert_eq!(core.dodge, Some(4), "order {order}");
+            assert_eq!(core.parry, Some(60), "order {order}");
+            assert_eq!(core.safefall, None, "order {order}");
+        }
+    }
+
+    #[test]
+    fn caster_class_multiplier_on_non_damage_effect_warns_once_per_ability() {
+        use super::warn_unused_caster_class_multiplier as warn;
+        let bad = serde_json::json!({"casterClassMultiplier": {"priest": 1.25}});
+        let plain = serde_json::json!({"amount": 5});
+        // Ids unique to this test: the dedupe set is process-wide.
+        assert!(warn(990_001, "TEST_HEAL", "heal", Some(&bad), None));
+        assert!(
+            !warn(990_001, "TEST_HEAL", "heal", Some(&bad), None),
+            "once"
+        );
+        assert!(
+            !warn(990_001, "TEST_HEAL", "status", Some(&bad), None),
+            "once per ability, not per effect"
+        );
+        assert!(warn(990_002, "TEST_STATUS", "status", None, Some(&bad)));
+        // Damage arm honours it; absent key never warns.
+        assert!(!warn(990_003, "TEST_DAMAGE", "damage", Some(&bad), None));
+        assert!(!warn(990_004, "TEST_HEAL2", "heal", Some(&plain), None));
+        assert!(!warn(990_005, "TEST_HEAL3", "heal", None, None));
+    }
+
     #[test]
     fn aoe_refusal_from_attack_ok_is_sent_once_not_per_target() {
         use super::test_support::{drain, player_in};
@@ -12636,6 +12759,39 @@ pub(crate) fn wear_into(
     );
 }
 
+/// B6 size band: the refusal message when `wearer` falls outside
+/// `min_size <= wearer <= max_size`. Compares via the canonical
+/// `Size::rank()` (TINY=0 .. MOUNTAINOUS=9). A band label that is not a
+/// `Size` is a data error: warn and ignore that bound rather than guess a
+/// rank for it.
+fn size_band_refusal(
+    wearer: mud_db::enums::Size,
+    min_size: Option<&str>,
+    max_size: Option<&str>,
+    item_name: &str,
+) -> Option<String> {
+    let band = |label: Option<&str>| {
+        label.and_then(|l| {
+            let parsed = mud_db::enums::Size::from_label(l);
+            if parsed.is_none() {
+                tracing::warn!(label = l, item = %item_name, "unknown size band label on object; bound ignored");
+            }
+            parsed
+        })
+    };
+    if let Some(min) = band(min_size)
+        && wearer.rank() < min.rank()
+    {
+        return Some(format!("{item_name} is far too big for your body.\r\n"));
+    }
+    if let Some(max) = band(max_size)
+        && wearer.rank() > max.rank()
+    {
+        return Some(format!("{item_name} is far too small for your body.\r\n"));
+    }
+    None
+}
+
 /// Wear one specific carried item (legacy `perform_wear`). Returns
 /// whether it ended up equipped. With `quiet` (legacy `collective`, used
 /// by `wear all`) refusals are not reported.
@@ -12767,24 +12923,6 @@ pub(crate) fn wear_item(
         );
         return false;
     }
-    // Schema's `Size` enum ordered TINY → GIGANTIC. Local helper
-    // so the B6 size band can compare via ordinal rather than
-    // string equality. Unknown / mob-latent labels rank as
-    // MEDIUM so nothing freaks out about a missing row.
-    #[allow(clippy::match_same_arms)] // explicit MEDIUM arm documents the default
-    let size_rank = |label: &str| -> i32 {
-        match label.to_ascii_uppercase().as_str() {
-            "FINE" | "DIMINUTIVE" => 0,
-            "TINY" => 1,
-            "SMALL" => 2,
-            "MEDIUM" => 3,
-            "LARGE" => 4,
-            "HUGE" => 5,
-            "GIGANTIC" | "GARGANTUAN" => 6,
-            "COLOSSAL" => 7,
-            _ => 3,
-        }
-    };
     // B6: inclusive race allow-list. Empty = no opinion;
     // non-empty = wearer must be one of these.
     if !allowed_races.is_empty()
@@ -12803,27 +12941,12 @@ pub(crate) fn wear_item(
     // Compare via the ordinal helper so the band is monotonic
     // (TINY < SMALL < MEDIUM < LARGE < HUGE < GIGANTIC).
     let wearer_size = world.get::<mud_world::Sized>(player).map(|s| s.0);
-    if let Some(wsize) = wearer_size {
-        let wsize_str = format!("{wsize:?}").to_ascii_uppercase();
-        let wsize_rank = size_rank(&wsize_str);
-        if let Some(min) = min_size.as_deref()
-            && wsize_rank < size_rank(min)
-        {
-            say(
-                world,
-                &format!("{item_name} is far too big for your body.\r\n"),
-            );
-            return false;
-        }
-        if let Some(max) = max_size.as_deref()
-            && wsize_rank > size_rank(max)
-        {
-            say(
-                world,
-                &format!("{item_name} is far too small for your body.\r\n"),
-            );
-            return false;
-        }
+    if let Some(wsize) = wearer_size
+        && let Some(refusal) =
+            size_band_refusal(wsize, min_size.as_deref(), max_size.as_deref(), &item_name)
+    {
+        say(world, &refusal);
+        return false;
     }
 
     // Resolve to the actual destination slot. Paired anatomy (rings,
@@ -15023,6 +15146,13 @@ pub(crate) fn invoke_ability_with(
         Some(render_header())
     };
     for spec in &effect_specs {
+        warn_unused_caster_class_multiplier(
+            def.id,
+            &def.plain_name,
+            &spec.effect_type,
+            spec.override_params.as_ref(),
+            Some(&spec.default_params),
+        );
         // Pretty player-facing label for the effect in `applied_msgs`
         // diagnostic lines ("Detect Magic" rather than the raw flag
         // "detect_magic"). Matching/dispel paths still want the raw
@@ -19504,6 +19634,42 @@ pub(crate) fn caster_class_multiplier_from_blob(
             .and_then(|(_, v)| v.as_f64())
             .filter(|f| f.is_finite() && *f >= 0.0)
     })
+}
+
+/// `casterClassMultiplier` is only honoured by the `damage` effect arm. When
+/// the key shows up on any other effect type the data is silently inert, so
+/// log a warning once per ability (process-wide) pointing at the mistake.
+/// Returns whether this call logged, for tests.
+pub(crate) fn warn_unused_caster_class_multiplier(
+    ability_id: i32,
+    ability_name: &str,
+    effect_type: &str,
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> bool {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
+        std::sync::OnceLock::new();
+    if effect_type == "damage" {
+        return false;
+    }
+    let has_key =
+        |p: Option<&serde_json::Value>| p.and_then(|v| v.get("casterClassMultiplier")).is_some();
+    if !has_key(override_params) && !has_key(default_params) {
+        return false;
+    }
+    let first = WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .is_ok_and(|mut set| set.insert(ability_id));
+    if first {
+        tracing::warn!(
+            ability = ability_name,
+            ability_id,
+            effect_type,
+            "casterClassMultiplier is only honoured on `damage` effects; ignored here"
+        );
+    }
+    first
 }
 
 /// Scale `amount` by the caster's class entry in `casterClassMultiplier`

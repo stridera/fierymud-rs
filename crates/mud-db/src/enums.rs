@@ -1123,6 +1123,25 @@ impl Size {
         }
     }
 
+    /// Case-insensitive parse from the canonical `SCREAMING_SNAKE_CASE`
+    /// name (the form `ObjectProto::min_size` / `max_size` carry).
+    #[must_use]
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "TINY" => Some(Self::Tiny),
+            "SMALL" => Some(Self::Small),
+            "MEDIUM" => Some(Self::Medium),
+            "LARGE" => Some(Self::Large),
+            "HUGE" => Some(Self::Huge),
+            "GIANT" => Some(Self::Giant),
+            "GARGANTUAN" => Some(Self::Gargantuan),
+            "COLOSSAL" => Some(Self::Colossal),
+            "TITANIC" => Some(Self::Titanic),
+            "MOUNTAINOUS" => Some(Self::Mountainous),
+            _ => None,
+        }
+    }
+
     /// Inverse of [`Self::rank`], clamped to the valid band
     /// (TINY..=MOUNTAINOUS) so a stacked size shift never walks off the
     /// ends of the ladder.
