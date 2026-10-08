@@ -366,6 +366,8 @@ mod admin_inspect;
 mod admin_management;
 #[path = "commands/admin_reload.rs"]
 mod admin_reload;
+#[path = "commands/object_stat.rs"]
+mod object_stat;
 pub(crate) use admin_reload::shutdown_poll;
 #[path = "commands/admin_world.rs"]
 mod admin_world;

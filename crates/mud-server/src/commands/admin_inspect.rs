@@ -90,7 +90,9 @@ inventory::submit! {
             usage: "ostat <zone> <id> | <id> | <name>",
             summary: "Dump an object PROTOTYPE.",
             long: "Builder+. Mirrors 'mstat' for objects: type, weight, \
-                   wear flags, restrictions, special-values per type. \
+                   wear flags, locks (!DROP / CURSED!!), armor, stat \
+                   bonuses, effect flags, special-values per type. \
+                   'stat <object>' prints the same block for a live item. \
                    Same target forms — composite key, id in current \
                    zone, or substring against proto name.",
         },
@@ -178,7 +180,8 @@ inventory::submit! {
             long: "Builder+. Reads every component on the named live \
                    entity (player, mob, or item by name in your room) \
                    and prints a structured dump. \
-                   \r\nNote the difference from mstat / ostat: stat \
+                   Items print the same block as 'ostat' plus their \
+                   instance state. \r\nNote the difference from mstat: stat \
                    shows what the entity actually has right now \
                    (e.g. current HP, active effects, stored vars); \
                    mstat / ostat show the catalog template the \
@@ -1544,52 +1547,9 @@ pub(crate) fn cmd_ostat(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    let live = world
-        .query_filtered::<&WorldKey, With<Item>>()
-        .iter(world)
-        .filter(|wk| wk.zone == zone && wk.id == id)
-        .count();
-    let trig_count = world
-        .resource::<mud_world::TriggerCatalog>()
-        .object_attachments
-        .get(&(zone, id))
-        .map_or(0, Vec::len);
-
-    let mut out = String::from("\r\n");
-    out.push_str(&format!("(zone, id):    ({zone}, {id})\r\n"));
-    out.push_str(&format!("name:          {}\r\n", p.name));
-    out.push_str(&format!("keywords:      {}\r\n", p.keywords.join(", ")));
-    if let Some(desc) = &p.examine_description {
-        out.push_str(&format!("examine:       {desc}\r\n"));
-    }
-    out.push_str(&format!("type:          {}\r\n", p.r#type.label()));
-    let wear_labels: Vec<&'static str> = p.wear_flags.iter().map(|f| f.label()).collect();
-    let wear_str = if wear_labels.is_empty() {
-        "<none>".to_string()
-    } else {
-        wear_labels.join(", ")
-    };
-    out.push_str(&format!("wear_flags:    {wear_str}\r\n"));
-    if let Some(b) = p.board_id {
-        out.push_str(&format!("board_id:      {b}\r\n"));
-    }
-    if let Some(liq) = &p.liquid {
-        out.push_str(&format!(
-            "liquid:        {} ({}/{}, poisoned={})\r\n",
-            liq.liquid, liq.remaining, liq.capacity, liq.poisoned
-        ));
-    }
-    out.push_str(&format!("triggers:      {trig_count}\r\n"));
-    if p.extras.is_empty() {
-        out.push_str("extras:        <none>\r\n");
-    } else {
-        out.push_str(&format!("extras:        {} entries\r\n", p.extras.len()));
-        for (kws, _) in &p.extras {
-            out.push_str(&format!("               keywords: {}\r\n", kws.join(", ")));
-        }
-    }
-    out.push_str(&format!("live count:    {live}\r\n"));
-    send_to(world, player, out);
+    // Same renderer `stat <object>` uses, so the two never drift.
+    let out = super::object_stat::render_object_stat(world, Some(&p), None);
+    crate::commands::send_rendered(world, player, &out);
 }
 pub(crate) fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
     use mud_db::enums::Climate;
@@ -2735,6 +2695,21 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             found
         };
 
+    // Live items share the `ostat` renderer (stat bonuses, locks, the
+    // CURSED marker) and append their instance state.
+    if world.get::<Item>(target).is_some() {
+        let proto = world.get::<WorldKey>(target).copied().and_then(|wk| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(wk.zone, wk.id))
+                .cloned()
+        });
+        let out = super::object_stat::render_object_stat(world, proto.as_ref(), Some(target));
+        crate::commands::send_rendered(world, player, &out);
+        return;
+    }
+
     let mut out = String::from("\r\n");
     out.push_str(&format!("entity:        {target:?}\r\n"));
     out.push_str(&format!("name:          {}\r\n", name_of(world, target)));
@@ -2752,65 +2727,6 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         out.push_str("kind:          Player\r\n");
     } else if world.get::<Mob>(target).is_some() {
         out.push_str("kind:          Mob\r\n");
-    } else if world.get::<Item>(target).is_some() {
-        out.push_str("kind:          Item\r\n");
-        // Lit + fuel state for Light-typed items. Lit alone is a
-        // marker; LightFuel carries the burn timer.
-        if mud_world::is_lit(world, target) {
-            out.push_str("lit:           yes\r\n");
-        }
-        if let Some(fuel) = world.get::<mud_world::LightFuel>(target).copied() {
-            if fuel.remaining < 0 {
-                out.push_str("fuel:          infinite\r\n");
-            } else {
-                out.push_str(&format!(
-                    "fuel:          {} / {} game-hours\r\n",
-                    fuel.remaining, fuel.capacity,
-                ));
-            }
-        }
-        // Resolve through the prototype catalog for weight / level /
-        // type. Synthetic seed items lack a WorldKey and so fall
-        // through silently.
-        if let Some(wk) = world.get::<WorldKey>(target).copied() {
-            if let Some(proto) = world
-                .resource::<ObjectPrototypes>()
-                .by_key
-                .get(&(wk.zone, wk.id))
-                .cloned()
-            {
-                out.push_str(&format!(
-                    "proto:         weight {:.1}, level {}, type {}\r\n",
-                    proto.weight,
-                    proto.level,
-                    proto.r#type.label(),
-                ));
-            }
-            // Bound abilities (scrolls / wands / staves).
-            if let Some(abilities) = world
-                .resource::<mud_world::ObjectAbilityCatalog>()
-                .by_key
-                .get(&(wk.zone, wk.id))
-                .cloned()
-            {
-                let catalog = world.resource::<AbilityCatalog>();
-                for b in &abilities {
-                    let name = catalog
-                        .by_name
-                        .values()
-                        .find(|d| d.id == b.ability_id)
-                        .map_or_else(
-                            || format!("(id {})", b.ability_id),
-                            |d| d.plain_name.clone(),
-                        );
-                    let ch = b.charges.map_or_else(|| "∞".to_string(), |c| c.to_string());
-                    out.push_str(&format!(
-                        "ability:       {name} (level {}, charges {ch})\r\n",
-                        b.level,
-                    ));
-                }
-            }
-        }
     } else {
         out.push_str("kind:          (other)\r\n");
     }
