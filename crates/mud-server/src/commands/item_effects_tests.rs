@@ -21,6 +21,7 @@ use crate::equip_apply::{
 
 const MODIFY: i32 = 3;
 const STATUS: i32 = 4;
+const GLOBE: i32 = 17;
 
 fn effect_def(id: i32, name: &str, kind: &str, params: serde_json::Value) -> EffectDef {
     EffectDef {
@@ -60,6 +61,16 @@ fn setup() -> (World, Entity, Rx) {
             "status",
             "status",
             serde_json::json!({"flag": "bless"}),
+        ),
+    );
+    // The real `globe` row: a minor globe unless the item says more.
+    catalog.by_id.insert(
+        GLOBE,
+        effect_def(
+            GLOBE,
+            "globe",
+            "globe",
+            serde_json::json!({"maxCircle": 3, "duration": "level"}),
         ),
     );
     world.insert_resource(catalog);
@@ -593,4 +604,259 @@ fn zreset_still_deletes_a_floor_reset_item() {
     let out = drain(&mut rx);
     assert!(world.get_entity(floor).is_err(), "{out}");
     assert!(out.contains("1 item(s)"), "{out}");
+}
+
+// ---- Worn flags: overlap, save and globe ----
+
+fn globe(strength: i32, modifier_data: serde_json::Value) -> ObjectGrantedEffect {
+    ObjectGrantedEffect {
+        effect_id: GLOBE,
+        strength,
+        modifier_data,
+        wear_location: None,
+    }
+}
+
+fn spell_instance(world: &mut World, p: Entity, name: &str, strength: i32) -> Entity {
+    world
+        .spawn((
+            EffectInstance {
+                kind: STATUS,
+                name: name.into(),
+                strength,
+                remaining_secs: 60,
+                source: EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(p),
+        ))
+        .id()
+}
+
+fn wear(world: &mut World, p: Entity, rx: &mut Rx, kw: &str) {
+    dispatch(world, p, &format!("wear {kw}"));
+    let _ = drain(rx);
+}
+
+fn remove(world: &mut World, p: Entity, rx: &mut Rx, kw: &str) {
+    dispatch(world, p, &format!("remove {kw}"));
+    let _ = drain(rx);
+}
+
+fn circle(world: &World, p: Entity) -> Option<i32> {
+    world.get::<mud_world::MaxAbsorbCircle>(p).map(|m| m.0)
+}
+
+#[test]
+fn flying_ring_installs_the_marker_on_wear_and_clears_it_on_remove() {
+    let (mut world, p, mut rx) = setup();
+    ring(
+        &mut world,
+        p,
+        20,
+        "wing",
+        vec![status(&["fly", "sanctuary"])],
+    );
+    wear(&mut world, p, &mut rx, "wing");
+    assert!(world.get::<Flying>(p).is_some());
+    assert!(world.get::<mud_world::Sanctuary>(p).is_some());
+    assert_eq!(effects_on(&mut world, p).len(), 2);
+    remove(&mut world, p, &mut rx, "wing");
+    assert!(world.get::<Flying>(p).is_none());
+    assert!(world.get::<mud_world::Sanctuary>(p).is_none());
+    assert!(effects_on(&mut world, p).is_empty());
+}
+
+#[test]
+fn two_worn_items_granting_one_flag_keep_it_until_both_are_off() {
+    let (mut world, p, mut rx) = setup();
+    ring(&mut world, p, 21, "feather", vec![status(&["fly"])]);
+    let second = ring(&mut world, p, 22, "pinion", vec![status(&["fly"])]);
+    world
+        .entity_mut(second)
+        .insert(WearableIn(mud_world::Slot::RightFinger));
+    wear(&mut world, p, &mut rx, "feather");
+    wear(&mut world, p, &mut rx, "pinion");
+    assert!(world.get::<Flying>(p).is_some());
+    remove(&mut world, p, &mut rx, "feather");
+    assert!(world.get::<Flying>(p).is_some(), "the other ring backs fly");
+    remove(&mut world, p, &mut rx, "pinion");
+    assert!(world.get::<Flying>(p).is_none());
+}
+
+#[test]
+fn a_spell_expiring_under_a_worn_flag_leaves_the_marker_and_the_reverse_holds() {
+    let (mut world, p, mut rx) = setup();
+    let spell = spell_instance(&mut world, p, "fly", 1);
+    ring(&mut world, p, 23, "lift", vec![status(&["fly"])]);
+    wear(&mut world, p, &mut rx, "lift");
+    // The spell fades first: the ring still holds the flag.
+    world.despawn(spell);
+    crate::effects::teardown_markers_after_removal(&mut world, p, "fly");
+    assert!(world.get::<Flying>(p).is_some(), "worn item backs fly");
+    // A spell cast over the ring, then the ring comes off.
+    spell_instance(&mut world, p, "fly", 1);
+    remove(&mut world, p, &mut rx, "lift");
+    assert!(world.get::<Flying>(p).is_some(), "spell backs fly");
+}
+
+#[test]
+fn despawning_a_worn_flag_item_clears_the_flag_unless_a_spell_backs_it() {
+    let (mut world, p, mut rx) = setup();
+    let r = ring(&mut world, p, 24, "ghost", vec![status(&["sanctuary"])]);
+    wear(&mut world, p, &mut rx, "ghost");
+    assert!(world.get::<mud_world::Sanctuary>(p).is_some());
+    despawn_item(&mut world, r);
+    assert!(world.get::<mud_world::Sanctuary>(p).is_none());
+    assert!(effects_on(&mut world, p).is_empty());
+
+    spell_instance(&mut world, p, "sanctuary", 1);
+    world.entity_mut(p).insert(mud_world::Sanctuary);
+    let r2 = ring(&mut world, p, 25, "halo", vec![status(&["sanctuary"])]);
+    wear(&mut world, p, &mut rx, "halo");
+    despawn_item(&mut world, r2);
+    assert!(world.get::<mud_world::Sanctuary>(p).is_some());
+}
+
+#[test]
+fn a_save_keeps_the_spell_flag_and_drops_the_gear_flag() {
+    let (mut world, p, mut rx) = setup();
+    spell_instance(&mut world, p, "bless", 1);
+    ring(
+        &mut world,
+        p,
+        26,
+        "pure",
+        vec![status(&["fly", "sanctuary"])],
+    );
+    wear(&mut world, p, &mut rx, "pure");
+    ring(
+        &mut world,
+        p,
+        27,
+        "warding",
+        vec![globe(6, serde_json::json!({}))],
+    );
+    wear(&mut world, p, &mut rx, "warding");
+    let snap = crate::login::snapshot_player(&mut world, p, 1).expect("snapshot");
+    let json = snap.effect_instances_json.expect("the spell is saved");
+    let names: Vec<&str> = json["effects"]
+        .as_array()
+        .expect("effects array")
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["bless"], "no worn-item flag is persisted");
+
+    // Fresh login: the save restores, the worn items re-apply: once each.
+    let (mut world2, p2, _rx2) = setup();
+    crate::login::restore_persisted_effects(&mut world2, p2, serde_json::from_value(json).unwrap());
+    for (id, kw, grant) in [
+        (26, "pure", status(&["fly", "sanctuary"])),
+        (27, "warding", globe(6, serde_json::json!({}))),
+    ] {
+        let item = ring(&mut world2, p2, id, kw, vec![grant]);
+        world2.entity_mut(item).insert(EquippedSlot(if id == 26 {
+            mud_world::Slot::LeftFinger
+        } else {
+            mud_world::Slot::RightFinger
+        }));
+    }
+    recompute_equipped_for(&mut world2, p2);
+    recompute_equipped_for(&mut world2, p2);
+    assert!(world2.get::<Flying>(p2).is_some());
+    assert_eq!(circle(&world2, p2), Some(6));
+    assert_eq!(
+        effects_on(&mut world2, p2).len(),
+        4,
+        "bless + fly + sanct + globe"
+    );
+}
+
+#[test]
+fn a_worn_globe_sets_the_circle_and_removal_recomputes_the_max() {
+    let (mut world, p, mut rx) = setup();
+    let minor = ring(
+        &mut world,
+        p,
+        30,
+        "dim",
+        vec![globe(3, serde_json::json!({}))],
+    );
+    let major = ring(
+        &mut world,
+        p,
+        31,
+        "bright",
+        vec![globe(6, serde_json::json!({}))],
+    );
+    world
+        .entity_mut(major)
+        .insert(WearableIn(mud_world::Slot::RightFinger));
+    wear(&mut world, p, &mut rx, "dim");
+    assert_eq!(circle(&world, p), Some(3));
+    wear(&mut world, p, &mut rx, "bright");
+    assert_eq!(circle(&world, p), Some(6));
+    remove(&mut world, p, &mut rx, "bright");
+    assert_eq!(circle(&world, p), Some(3), "falls back to the minor globe");
+    despawn_item(&mut world, minor);
+    assert_eq!(circle(&world, p), None);
+    assert!(effects_on(&mut world, p).is_empty());
+}
+
+#[test]
+fn a_worn_globe_and_a_cast_globe_take_the_higher_circle_and_each_outlives_the_other() {
+    let (mut world, p, mut rx) = setup();
+    // A cast MINOR_GLOBE: instance named "globe", circle in strength.
+    let spell = spell_instance(&mut world, p, "globe", 3);
+    world.entity_mut(p).insert(mud_world::MaxAbsorbCircle(3));
+    let r = ring(
+        &mut world,
+        p,
+        32,
+        "aegis",
+        vec![globe(6, serde_json::json!({}))],
+    );
+    wear(&mut world, p, &mut rx, "aegis");
+    assert_eq!(circle(&world, p), Some(6));
+    // The spell fades: the worn major globe keeps 6.
+    world.despawn(spell);
+    crate::effects::teardown_markers_after_removal(&mut world, p, "globe");
+    assert_eq!(circle(&world, p), Some(6));
+    // A spell again, then the item is taken without `remove` (death).
+    spell_instance(&mut world, p, "globe", 3);
+    release_gear(&mut world, r);
+    assert_eq!(
+        circle(&world, p),
+        Some(3),
+        "the spell still absorbs circle 3"
+    );
+}
+
+#[test]
+fn a_globe_row_reads_its_circle_from_modifier_data_then_strength_then_the_effect_default() {
+    let (mut world, p, mut rx) = setup();
+    ring(
+        &mut world,
+        p,
+        33,
+        "etched",
+        vec![globe(1, serde_json::json!({"maxCircle": 5}))],
+    );
+    wear(&mut world, p, &mut rx, "etched");
+    assert_eq!(circle(&world, p), Some(5));
+    remove(&mut world, p, &mut rx, "etched");
+    ring(
+        &mut world,
+        p,
+        34,
+        "plain",
+        vec![globe(1, serde_json::json!({}))],
+    );
+    wear(&mut world, p, &mut rx, "plain");
+    assert_eq!(
+        circle(&world, p),
+        Some(3),
+        "effect default_params.maxCircle"
+    );
 }

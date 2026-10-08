@@ -4549,7 +4549,7 @@ pub(crate) struct PlayerSaveSnapshot {
     spell_cooldowns_json: Option<serde_json::Value>,
     cooldowns_json: Option<serde_json::Value>,
     ignore_list_json: Option<serde_json::Value>,
-    effect_instances_json: Option<serde_json::Value>,
+    pub(crate) effect_instances_json: Option<serde_json::Value>,
     pets_json: Option<serde_json::Value>,
     ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow>,
     alias_rows: Vec<mud_db::character_aliases::CharacterAliasRow>,

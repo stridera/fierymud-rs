@@ -7,7 +7,9 @@
 //! become one permanent `EffectInstance` per flag, sourced
 //! `worn_item` and tagged with `GrantedByItem`, with the flag's marker
 //! component installed through `install_flag_marker` (the path race and
-//! mob-default effects use). Unequip despawns only this item's
+//! mob-default effects use). A `globe` row spawns a permanent "globe"
+//! instance (circle in `strength`) and raises `MaxAbsorbCircle` to the
+//! highest circle of any source. Unequip despawns only this item's
 //! instances and tears the markers down like an expiry would. `ObjectResistance` rows roll into the wearer's
 //! `Resistances` map. Symmetric `unapply_*` reverses every change.
 //!
@@ -201,6 +203,38 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
             }
             continue;
         }
+        // `globe` effect: a permanent "globe" instance carrying the
+        // highest circle absorbed in `strength`, the shape the
+        // MINOR/MAJOR_GLOBE spells spawn. The marker is the max over every
+        // source, so wearing a minor globe under a cast major one changes
+        // nothing; removal recomputes it from what remains.
+        if def.effect_type == "globe" {
+            let circle = globe_circle(&grant, &def.default_params);
+            let existing = world
+                .get::<mud_world::MaxAbsorbCircle>(wearer)
+                .map_or(0, |m| m.0);
+            try_insert(
+                world,
+                wearer,
+                mud_world::MaxAbsorbCircle(existing.max(circle)),
+            );
+            let entity = world
+                .spawn((
+                    EffectInstance {
+                        kind: def.id,
+                        name: def.name.clone(),
+                        strength: circle,
+                        remaining_secs: -1,
+                        source: EffectSource::Other(WORN_ITEM_EFFECT_SOURCE.to_string()),
+                        ability_id: None,
+                    },
+                    AppliedTo(wearer),
+                    GrantedByItem(item),
+                ))
+                .id();
+            spawned_effect_entities.push(entity);
+            continue;
+        }
         // `status` effect: one permanent instance per flag, with the
         // flag's marker installed through the same path race and
         // mob-default effects use. Other effect types have no
@@ -262,6 +296,23 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
     {
         try_insert(world, item, bookkeeping);
     }
+}
+
+/// Highest circle a worn `globe` row absorbs: `modifier_data.maxCircle`,
+/// else the row's `strength` (importer data: 3 minor, 6 major; the column
+/// defaults to 1, which is not a circle), else the effect's
+/// `default_params.maxCircle`, else 3.
+fn globe_circle(grant: &ObjectGrantedEffect, default_params: &serde_json::Value) -> i32 {
+    let from = |v: &serde_json::Value| {
+        v.get("maxCircle")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|n| i32::try_from(n).ok())
+    };
+    from(&grant.modifier_data)
+        .or_else(|| (grant.strength > 1).then_some(grant.strength))
+        .or_else(|| from(default_params))
+        .unwrap_or(3)
+        .max(1)
 }
 
 /// Reverse `apply_object_to_wearer`. Reads the `GrantedDeltas`
@@ -374,6 +425,11 @@ pub fn describe_item_grants(world: &World, proto: &mud_world::ObjectProto) -> It
             {
                 out.applies.push(format!("{a:+} to {}{at}", apply_label(t)));
             }
+        } else if def.effect_type == "globe" {
+            out.provides.push(format!(
+                "spell globe, absorbs up to circle {}{at}",
+                globe_circle(g, &def.default_params)
+            ));
         } else if def.effect_type == "status" {
             for flag in row_flags(&g.modifier_data, &def.default_params) {
                 if mud_world::mob_effects::install_flag_marker_known(&flag)

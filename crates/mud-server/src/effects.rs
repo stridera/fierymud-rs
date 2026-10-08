@@ -340,6 +340,31 @@ pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, 
             try_remove::<mud_world::Empowered>(world, target);
         }
     }
+    // Globe teardown: MINOR/MAJOR_GLOBE spells and worn globe items both
+    // carry an EffectInstance named "globe" with the circle in
+    // `strength`. The marker is recomputed from whatever remains
+    // (max-wins) rather than removed outright, so stacking MAJOR over
+    // MINOR, or a spell over a worn globe, never drops coverage when
+    // only one source goes.
+    if name.eq_ignore_ascii_case("globe") {
+        let highest = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .filter(|(eff, applied)| {
+                    applied.0 == target && eff.name.eq_ignore_ascii_case("globe")
+                })
+                .map(|(eff, _)| eff.strength)
+                .max()
+        };
+        match highest {
+            Some(s) if s > 0 => {
+                try_insert(world, target, mud_world::MaxAbsorbCircle(s));
+            }
+            _ => {
+                try_remove::<mud_world::MaxAbsorbCircle>(world, target);
+            }
+        }
+    }
     // DetectInvis teardown — flag-based effect with name
     // "detect_invisible" (the data carries it as a status
     // effect with that name).
@@ -676,31 +701,6 @@ pub fn effects_tick(world: &mut World) {
                     );
                     for p in players {
                         crate::commands::send_to(world, p, msg.clone());
-                    }
-                }
-            }
-            // J1 globe teardown — MINOR/MAJOR_GLOBE both spawn an
-            // EffectInstance named "globe" with the maxCircle stored
-            // in `strength`. When the last one fades, recompute the
-            // marker from any remaining instances rather than
-            // removing outright — stacking MAJOR over MINOR shouldn't
-            // drop coverage to nothing when only one expires.
-            if name.eq_ignore_ascii_case("globe") {
-                let highest = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world)
-                        .filter(|(eff, applied)| {
-                            applied.0 == target && eff.name.eq_ignore_ascii_case("globe")
-                        })
-                        .map(|(eff, _)| eff.strength)
-                        .max()
-                };
-                match highest {
-                    Some(s) if s > 0 => {
-                        try_insert(world, target, mud_world::MaxAbsorbCircle(s));
-                    }
-                    _ => {
-                        try_remove::<mud_world::MaxAbsorbCircle>(world, target);
                     }
                 }
             }
