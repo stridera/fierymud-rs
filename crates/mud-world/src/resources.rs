@@ -963,7 +963,7 @@ pub struct ObjectProto {
     pub r#type: mud_db::enums::ObjectType,
     pub name: String,
     pub keywords: Vec<String>,
-    /// Short line shown in a room's "On the ground:" listing.
+    /// Long description, the line a room listing prints for this object on the ground.
     pub room_description: String,
     /// Long description shown by `examine`. None means "fall back to name".
     pub examine_description: Option<String>,

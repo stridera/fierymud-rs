@@ -134,7 +134,7 @@ fn look_separates_description_from_the_ground_listing() {
     cmd_look(&mut world, player, "");
     let out = plain(&drain(&mut rx));
     assert!(
-        out.contains("Stone walls rise on every side.\r\n\r\nOn the ground: a rusty key\r\n"),
+        out.contains("Stone walls rise on every side.\r\n\r\na rusty key\r\n"),
         "{out:?}"
     );
 }

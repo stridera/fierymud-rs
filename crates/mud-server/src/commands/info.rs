@@ -3803,11 +3803,11 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                     .position(|x| x == s)
                     .unwrap_or(usize::MAX)
             });
-            let entries: Vec<String> = sorted
-                .iter()
-                .map(|(s, n)| format!("{} <dim>({})</>", n, s.label()))
-                .collect();
-            out.push_str(&format!("<cyan>Equipped:</> {}.\r\n", entries.join(", "),));
+            // One piece of gear per line (legacy `print_char_equipment_to_char`).
+            out.push_str(&format!("{name_rendered} is using:\r\n"));
+            for (s, n) in &sorted {
+                out.push_str(&format!("  <cyan>{:>14}</>: {n}\r\n", s.label()));
+            }
         }
     }
     // If the target is an Item-typed container (corpse, bag, chest, ...),
@@ -6201,12 +6201,12 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         // Newest arrival first (legacy `obj_to_room` pushes the list head).
         let mut item_rows: Vec<_> = q.iter(world).filter(|(_, l, _, _)| l.0 == room).collect();
         crate::commands::sort_newest_first(world, room, &mut item_rows, |r| r.0);
-        for (_e, _l, n, flags) in item_rows {
+        for (e, _l, n, flags) in item_rows {
             if !can_see_invis && flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Invisible))
             {
                 continue;
             }
-            names.push(n.name.clone());
+            names.push(item_room_line(world, e, &n.name));
         }
         stack_entries(names, has_flag(world, player, PlayerFlag::ExpandObjs))
             .into_iter()
@@ -6340,10 +6340,10 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         let header = render_color_tags("<cyan>Also here:</>", mode);
         out.push_str(&format!("{header} {}\r\n", rendered.join(", ")));
     }
-    if !items.is_empty() {
-        let rendered: Vec<String> = items.iter().map(|i| render_color_tags(i, mode)).collect();
-        let header = render_color_tags("<cyan>On the ground:</>", mode);
-        out.push_str(&format!("{header} {}\r\n", rendered.join(", ")));
+    // One object per line, like the mob lines above (legacy
+    // `list_obj_to_char`, SHOW_LONG_DESC): no header, no commas.
+    for line in &items {
+        out.push_str(&format!("{}\r\n", render_color_tags(line, mode)));
     }
     // Atmospheric cue: anything HUMs? Surfaces a single ambient
     // line, after the items list so the player connects "I see
@@ -12418,6 +12418,30 @@ pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
     let entities: Vec<Entity> = worn_items.iter().map(|(e, _, _, _)| *e).collect();
     send_char_items_list(world, player, "wear", &entities);
+}
+
+/// The line a room listing prints for a ground item: the prototype's
+/// room (long) description, as legacy `list_obj_to_char` does with
+/// SHOW_LONG_DESC. Falls back to the short name for items with no
+/// prototype (corpses, synthetic items), an empty long description,
+/// or a per-instance rename.
+fn item_room_line(world: &World, item: Entity, short_name: &str) -> String {
+    if world
+        .get::<mud_world::ItemCustomization>(item)
+        .is_some_and(|c| c.name.is_some())
+    {
+        return short_name.to_string();
+    }
+    world
+        .get::<WorldKey>(item)
+        .and_then(|k| {
+            world
+                .get_resource::<mud_world::ObjectPrototypes>()
+                .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+        })
+        .map(|p| p.room_description.trim())
+        .filter(|d| !d.is_empty())
+        .map_or_else(|| short_name.to_string(), str::to_string)
 }
 
 /// `cooldowns` / `cd`: list active ability cooldowns for the player.

@@ -489,6 +489,9 @@ mod rank_tests;
 pub(crate) mod release;
 #[path = "commands/room_chat.rs"]
 mod room_chat;
+#[cfg(test)]
+#[path = "commands/room_objects_tests.rs"]
+mod room_objects_tests;
 #[path = "commands/save.rs"]
 mod save;
 #[cfg(test)]
