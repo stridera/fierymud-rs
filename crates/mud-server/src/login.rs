@@ -5462,6 +5462,8 @@ pub(crate) fn apply_commit(
             if let Ok(mut em) = world.get_entity_mut(d.corpse) {
                 em.insert(mud_world::PlayerCorpseId(corpse_id));
             }
+            // Items that decayed inside the corpse before this commit.
+            crate::corpses::flush_unsettled_removals(world, d.corpse, corpse_id);
             if let Ok(mut em) = world.get_entity_mut(snap.entity) {
                 em.remove::<crate::corpses::PendingDeath>();
             }

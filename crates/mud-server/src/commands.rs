@@ -1902,18 +1902,27 @@ pub(crate) fn send_comm_channel_text(
 /// dispatcher after each `exec_for_actor` returns.
 pub(crate) fn drain_lua_outbox(world: &mut World) {
     use mud_world::LuaOutbox;
-    let (messages, direct, commands) = if world.contains_resource::<LuaOutbox>() {
+    let (messages, direct, commands, corpse_loot) = if world.contains_resource::<LuaOutbox>() {
         let mut out = world.resource_mut::<LuaOutbox>();
         (
             std::mem::take(&mut out.messages),
             std::mem::take(&mut out.direct),
             std::mem::take(&mut out.commands),
+            std::mem::take(&mut out.corpse_loot),
         )
     } else {
-        (Vec::new(), Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
     };
-    if messages.is_empty() && direct.is_empty() && commands.is_empty() {
+    if messages.is_empty() && direct.is_empty() && commands.is_empty() && corpse_loot.is_empty() {
         return;
+    }
+    // Items a script moved out of a player corpse into a player's hands:
+    // same bookkeeping as a `get` (see `get_from_container`).
+    for (player, corpse) in corpse_loot {
+        if world.get_entity(player).is_ok() && world.get_entity(corpse).is_ok() {
+            crate::corpses::note_loot(world, player, corpse);
+            crate::quest_progress::save_player_soon(world, player);
+        }
     }
     // Room broadcasts: snapshot recipients per room so the inner loop
     // doesn't re-borrow World mid-send.

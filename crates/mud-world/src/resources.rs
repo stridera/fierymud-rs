@@ -1905,6 +1905,10 @@ pub struct LuaOutbox {
     /// current Lua call returns to avoid re-entering the dispatcher
     /// while a trigger body is still executing.
     pub commands: Vec<(Entity, String)>,
+    /// `(player, corpse)` — a script moved an item out of a player corpse
+    /// into `player`'s possession. mud-server records it in the corpse
+    /// loot ledger (the same as a `get`) after the Lua call returns.
+    pub corpse_loot: Vec<(Entity, Entity)>,
 }
 
 /// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.

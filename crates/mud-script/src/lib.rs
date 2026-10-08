@@ -2322,6 +2322,61 @@ fn destroy_item(lua: &Lua, actor: Entity, needle: &str) -> mlua::Result<()> {
     })
 }
 
+/// The player corpse `item` sits in (directly or inside nested bags), if any.
+fn enclosing_player_corpse(world: &World, item: Entity) -> Option<Entity> {
+    let mut cur = item;
+    // Real nesting is a handful of bags; the cap guards a `Located` cycle.
+    for _ in 0..32 {
+        cur = world.get::<Located>(cur)?.0;
+        if world.get::<mud_world::PlayerCorpse>(cur).is_some() {
+            return Some(cur);
+        }
+    }
+    None
+}
+
+/// The player carrying `holder` (the player itself, or a bag chain ending
+/// in one), if any. A player corpse ends the search: what lies in it is
+/// not in the carrier's possession.
+fn carrying_player(world: &World, holder: Entity) -> Option<Entity> {
+    let mut cur = holder;
+    for _ in 0..32 {
+        if world.get::<Player>(cur).is_some() {
+            return Some(cur);
+        }
+        if world.get::<mud_world::PlayerCorpse>(cur).is_some() {
+            return None;
+        }
+        cur = world.get::<Located>(cur)?.0;
+    }
+    None
+}
+
+/// Re-home `entity` under `target` (`actor:teleport`). An item leaving a
+/// player corpse for a player's possession is a loot like `get`: the
+/// move is reported through [`LuaOutbox::corpse_loot`] so the corpse
+/// can't be deleted before the player's save re-homes the item's rows.
+pub fn relocate(world: &mut World, entity: Entity, target: Entity) {
+    if world.get::<Located>(entity).is_none() {
+        return;
+    }
+    let looted = if world.get::<Item>(entity).is_some() {
+        enclosing_player_corpse(world, entity).zip(carrying_player(world, target))
+    } else {
+        None
+    };
+    world.entity_mut(entity).insert(Located(target));
+    if let Some((corpse, player)) = looted {
+        if !world.contains_resource::<LuaOutbox>() {
+            world.insert_resource(LuaOutbox::default());
+        }
+        world
+            .resource_mut::<LuaOutbox>()
+            .corpse_loot
+            .push((player, corpse));
+    }
+}
+
 /// Look up a room by `(zone, id)` via `WorldKeyIndex.rooms` and
 /// return a `LuaRoom` userdata, or nil if not found.
 fn get_room(lua: &Lua, zone: i32, id: i32) -> mlua::Result<Value> {
@@ -3314,9 +3369,7 @@ impl UserData for LuaActor {
             |lua, this, target: AnyUserData| -> mlua::Result<()> {
                 let room_entity = target.borrow::<LuaRoom>()?.entity;
                 world_mut_from_lua(lua, |world| {
-                    if world.get::<Located>(this.entity).is_some() {
-                        world.entity_mut(this.entity).insert(Located(room_entity));
-                    }
+                    relocate(world, this.entity, room_entity);
                 })
             },
         );
@@ -5990,5 +6043,62 @@ mod tests {
         host.set_current_tick(20);
         assert_eq!(host.tick_yielded(&mut world), 1);
         assert!(var_set(&world, "ran"));
+    }
+
+    fn corpse_world() -> (World, Entity, Entity, Entity, Entity, Entity) {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let player = world.spawn((Player, Located(room))).id();
+        let corpse = world
+            .spawn((
+                Item,
+                mud_world::PlayerCorpse,
+                mud_world::PlayerCorpseId(7),
+                Located(room),
+            ))
+            .id();
+        let bag = world.spawn((Item, Located(corpse))).id();
+        let gem = world.spawn((Item, Located(bag))).id();
+        (world, room, player, corpse, bag, gem)
+    }
+
+    fn loot_notes(world: &World) -> Vec<(Entity, Entity)> {
+        world
+            .get_resource::<LuaOutbox>()
+            .map(|o| o.corpse_loot.clone())
+            .unwrap_or_default()
+    }
+
+    /// A script moving an item (nested or not) out of a player corpse
+    /// into a player's possession is a loot: it is reported so mud-server
+    /// can mark the corpse as having an unsaved take.
+    #[test]
+    fn script_move_out_of_a_player_corpse_into_a_player_is_reported() {
+        let (mut world, _room, player, corpse, bag, gem) = corpse_world();
+        relocate(&mut world, gem, player);
+        assert_eq!(world.get::<Located>(gem).unwrap().0, player);
+        assert_eq!(loot_notes(&world), vec![(player, corpse)]);
+
+        // Into a bag the player carries counts too.
+        let pack = world.spawn((Item, Located(player))).id();
+        relocate(&mut world, bag, pack);
+        assert_eq!(loot_notes(&world), vec![(player, corpse), (player, corpse)]);
+    }
+
+    #[test]
+    fn script_moves_that_are_not_loot_are_not_reported() {
+        let (mut world, room, player, corpse, bag, gem) = corpse_world();
+        // Out of the corpse onto the floor, or between its own bags.
+        relocate(&mut world, gem, room);
+        relocate(&mut world, bag, corpse);
+        // Into a player from somewhere that is not a player corpse.
+        let loose = world.spawn((Item, Located(room))).id();
+        relocate(&mut world, loose, player);
+        // Into a bag lying inside a corpse a player carries.
+        let carried = world
+            .spawn((Item, mud_world::PlayerCorpse, Located(player)))
+            .id();
+        relocate(&mut world, bag, carried);
+        assert!(loot_notes(&world).is_empty());
     }
 }

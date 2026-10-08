@@ -167,6 +167,7 @@ pub fn corpse_decay_tick(world: &mut World) {
     if !tick.is_multiple_of(10) {
         return;
     }
+    crate::corpses::sweep_loot_ledger(world);
     // Corpses whose database rows are gone release their contents now.
     for corpse in crate::corpses::take_decayed(world) {
         if world.get_entity(corpse).is_err() {
