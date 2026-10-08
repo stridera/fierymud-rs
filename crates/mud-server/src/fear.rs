@@ -196,10 +196,12 @@ pub(crate) fn can_flee_now(world: &mut World, actor: Entity) -> bool {
     true
 }
 
-/// Make `victim` panic: stop its fight and cast, then run through the same
-/// flee primitive the wimpy path (`mob_flee`) and the `flee` command
+/// Make `victim` panic: cancel its cast, then run through the same flee
+/// primitive the wimpy path (`mob_flee`) and the `flee` command
 /// (`flee_through_exit`) use, so movement rules and messages stay
-/// consistent. Guarded by [`can_flee_now`] (legacy `do_flee`).
+/// consistent. Guarded by [`can_flee_now`] (legacy `do_flee`). The fight
+/// only ends if the victim actually leaves the room (`relocate` clears it
+/// both ways); a cornered victim keeps fighting, as in legacy.
 pub(crate) fn panic_flee(world: &mut World, victim: Entity, source: Option<Entity>) -> Panic {
     let Some(room) = world.get::<Located>(victim).map(|l| l.0) else {
         return Panic::Unable;
@@ -210,7 +212,6 @@ pub(crate) fn panic_flee(world: &mut World, victim: Entity, source: Option<Entit
     let is_player = world.get::<Player>(victim).is_some();
 
     crate::casting::cancel_own_cast(world, victim);
-    try_remove::<Fighting>(world, victim);
     if let Some(source) = source
         && !is_player
     {

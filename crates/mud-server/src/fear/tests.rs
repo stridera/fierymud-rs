@@ -284,8 +284,8 @@ fn cornered_mob_cannot_flee_and_stays() {
     assert_eq!(panic_flee(&mut f.world, mob, None), Panic::Cornered);
     assert_eq!(f.at(mob), Some(f.here));
     assert!(
-        f.world.get::<Fighting>(mob).is_none(),
-        "legacy stop_fighting happens even when the flee fails"
+        f.world.get::<Fighting>(mob).is_some(),
+        "a failed flee keeps the fight going"
     );
 }
 

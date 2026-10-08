@@ -4109,6 +4109,43 @@ mod tests {
         assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(room_a));
     }
 
+    /// A player (optionally linkdead) cornered in an exitless room by an
+    /// attacker, both fighting each other. Returns `(player, attacker)`.
+    fn cornered_player(world: &mut World, linkdead: bool) -> (Entity, Entity) {
+        world.insert_resource(mud_world::EffectCatalog::default());
+        let (room_a, _b, mob) = hurt_mob_under_attack(world, vec![], 60);
+        world.entity_mut(room_a).insert(Exits::default());
+        world.entity_mut(mob).insert(Health {
+            hp: 100_000,
+            max: 100_000,
+        });
+        let player = credit_player(world, room_a, "Cornered", 0);
+        world.entity_mut(player).insert(Fighting(mob));
+        world.entity_mut(mob).insert(Fighting(player));
+        if linkdead {
+            world
+                .entity_mut(player)
+                .insert(crate::commands::Linkdead { since_tick: 0 });
+        }
+        (player, mob)
+    }
+
+    #[test]
+    fn cornered_feared_player_keeps_fighting_and_still_swings() {
+        for linkdead in [false, true] {
+            let mut world = World::new();
+            let (player, mob) = cornered_player(&mut world, linkdead);
+            assert_eq!(
+                crate::fear::panic_flee(&mut world, player, Some(mob)),
+                crate::fear::Panic::Cornered
+            );
+            assert_eq!(world.get::<Fighting>(player).map(|f| f.0), Some(mob));
+            run_combat_tick(&mut world);
+            let hp = world.get::<Health>(mob).unwrap().hp;
+            assert!(hp < 100_000, "linkdead {linkdead}: swing landed, hp {hp}");
+        }
+    }
+
     #[test]
     fn wimpy_mob_flees_when_hp_drops_below_a_quarter() {
         let mut world = World::new();
