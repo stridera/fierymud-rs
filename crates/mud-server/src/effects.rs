@@ -259,6 +259,103 @@ const EFFECT_PERIOD_TICKS: u64 = 10;
 /// stay within combat budgets.
 const BLEED_DPS: i32 = 2;
 
+/// Drop the marker component a just-removed `status` effect named `name`
+/// backed, once no other `EffectInstance` of that name remains on
+/// `target`. Shared by expiry ([`effects_tick`]) and by dispel / cleanse
+/// removals so a dispelled `fly` / `bless` / ... cannot leave its marker
+/// without backing.
+pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, name: &str) {
+    // Stealth marker mirrors the stun pattern: it outlives only
+    // as long as at least one `hidden` / `sneak` EffectInstance
+    // is on the target. Manually-toggled `hide` / `visible`
+    // commands install/remove Stealth directly without a
+    // backing effect, so a target with manual stealth + no
+    // status effects is unaffected by this branch.
+    if name.eq_ignore_ascii_case("hidden") || name.eq_ignore_ascii_case("sneak") {
+        let still_hidden = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world).any(|(eff, applied)| {
+                applied.0 == target
+                    && (eff.name.eq_ignore_ascii_case("hidden")
+                        || eff.name.eq_ignore_ascii_case("sneak"))
+            })
+        };
+        if !still_hidden {
+            try_remove::<Stealth>(world, target);
+        }
+    }
+    // Flying marker mirrors the Stealth pattern — alive only
+    // while at least one backing effect (FLY, WINGS_OF_*) is
+    // on the target, race innates included (they are permanent
+    // instances).
+    if name.eq_ignore_ascii_case("fly") {
+        let still_flying = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .any(|(eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case("fly"))
+        };
+        if !still_flying {
+            try_remove::<mud_world::Flying>(world, target);
+        }
+    }
+    if name.eq_ignore_ascii_case("bless") {
+        let still_blessed = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .any(|(eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case("bless"))
+        };
+        if !still_blessed {
+            try_remove::<mud_world::Bless>(world, target);
+        }
+    }
+    if name.eq_ignore_ascii_case("sanctuary") {
+        let still_sanctified = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world).any(|(eff, applied)| {
+                applied.0 == target && eff.name.eq_ignore_ascii_case("sanctuary")
+            })
+        };
+        if !still_sanctified {
+            try_remove::<mud_world::Sanctuary>(world, target);
+        }
+    }
+    if name.eq_ignore_ascii_case("haste") {
+        let still_hasted = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .any(|(eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case("haste"))
+        };
+        if !still_hasted {
+            try_remove::<mud_world::Haste>(world, target);
+        }
+    }
+    if name.eq_ignore_ascii_case("empowered") {
+        let still_empowered = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world).any(|(eff, applied)| {
+                applied.0 == target && eff.name.eq_ignore_ascii_case("empowered")
+            })
+        };
+        if !still_empowered {
+            try_remove::<mud_world::Empowered>(world, target);
+        }
+    }
+    // DetectInvis teardown — flag-based effect with name
+    // "detect_invisible" (the data carries it as a status
+    // effect with that name).
+    if name.eq_ignore_ascii_case("detect_invisible") {
+        let still_seeing = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world).any(|(eff, applied)| {
+                applied.0 == target && eff.name.eq_ignore_ascii_case("detect_invisible")
+            })
+        };
+        if !still_seeing {
+            try_remove::<mud_world::DetectInvis>(world, target);
+        }
+    }
+}
+
 /// Decrement remaining duration on every active effect; despawn ones whose
 /// duration hit zero (with a "fades" message to the target if it has a
 /// connection); also despawn any effect whose target entity has gone away.
@@ -453,84 +550,7 @@ pub fn effects_tick(world: &mut World) {
             {
                 e.despawn();
             }
-            // Stealth marker mirrors the stun pattern: it outlives only
-            // as long as at least one `hidden` / `sneak` EffectInstance
-            // is on the target. Manually-toggled `hide` / `visible`
-            // commands install/remove Stealth directly without a
-            // backing effect, so a target with manual stealth + no
-            // status effects is unaffected by this branch.
-            if name.eq_ignore_ascii_case("hidden") || name.eq_ignore_ascii_case("sneak") {
-                let still_hidden = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target
-                            && (eff.name.eq_ignore_ascii_case("hidden")
-                                || eff.name.eq_ignore_ascii_case("sneak"))
-                    })
-                };
-                if !still_hidden {
-                    try_remove::<Stealth>(world, target);
-                }
-            }
-            // Flying marker mirrors the Stealth pattern — alive only
-            // while at least one backing effect (FLY, WINGS_OF_*) is
-            // on the target. Race-set Flying is proto-attached and
-            // not subject to this teardown.
-            if name.eq_ignore_ascii_case("fly") {
-                let still_flying = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("fly")
-                    })
-                };
-                if !still_flying {
-                    try_remove::<mud_world::Flying>(world, target);
-                }
-            }
-            if name.eq_ignore_ascii_case("bless") {
-                let still_blessed = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("bless")
-                    })
-                };
-                if !still_blessed {
-                    try_remove::<mud_world::Bless>(world, target);
-                }
-            }
-            if name.eq_ignore_ascii_case("sanctuary") {
-                let still_sanctified = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("sanctuary")
-                    })
-                };
-                if !still_sanctified {
-                    try_remove::<mud_world::Sanctuary>(world, target);
-                }
-            }
-            if name.eq_ignore_ascii_case("haste") {
-                let still_hasted = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("haste")
-                    })
-                };
-                if !still_hasted {
-                    try_remove::<mud_world::Haste>(world, target);
-                }
-            }
-            if name.eq_ignore_ascii_case("empowered") {
-                let still_empowered = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("empowered")
-                    })
-                };
-                if !still_empowered {
-                    try_remove::<mud_world::Empowered>(world, target);
-                }
-            }
+            teardown_markers_after_removal(world, target, &name);
             // J2 alignment-protect teardown — PROT_FROM_EVIL /
             // PROT_FROM_GOOD spawn instances with name="resistance"
             // (shared with element-resistance flavors) but tag the
@@ -758,20 +778,6 @@ pub fn effects_tick(world: &mut World) {
                     for p in players {
                         crate::commands::send_to(world, p, msg.clone());
                     }
-                }
-            }
-            // DetectInvis teardown — flag-based effect with name
-            // "detect_invisible" (the data carries it as a status
-            // effect with that name).
-            if name.eq_ignore_ascii_case("detect_invisible") {
-                let still_seeing = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("detect_invisible")
-                    })
-                };
-                if !still_seeing {
-                    try_remove::<mud_world::DetectInvis>(world, target);
                 }
             }
             // Invisible marker: the expiring effect itself doesn't

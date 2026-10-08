@@ -11,6 +11,9 @@ use mud_world::{
 
 use super::info::cmd_effects;
 use super::test_support::{Rx, drain, mob_proto, player_in};
+use super::{
+    DispelScope, remove_effect_named, remove_effects_by_tag, remove_effects_for_condition,
+};
 use crate::login::{PersistedEffects, restore_persisted_effects};
 
 /// The real `status` Effect row: its `default_params.flag` is `bless`,
@@ -28,7 +31,7 @@ fn world_with_races(rows: &[(&str, &[&str])]) -> World {
                 name: "status".into(),
                 description: None,
                 effect_type: "status".into(),
-                tags: vec![],
+                tags: vec!["status".into(), "buff".into(), "debuff".into()],
                 presence_override: None,
                 default_params: serde_json::json!({"flag": "bless", "duration": "level * 2"}),
                 prevents_speaking: false,
@@ -184,4 +187,78 @@ fn spawned_mob_gets_its_race_effects_once() {
     let inst = instances(&mut world, mob);
     assert_eq!(inst.len(), 1, "{inst:?}");
     assert_eq!(inst[0].2, EffectSource::Other("mob_default".into()));
+}
+
+/// A spell-granted `fly` (Spell source, `status` kind) on `target`.
+fn add_spell_fly(world: &mut World, target: Entity) {
+    world.entity_mut(target).insert(Flying);
+    world.spawn((
+        EffectInstance {
+            kind: 4,
+            name: "fly".into(),
+            strength: 1,
+            remaining_secs: 300,
+            source: EffectSource::Spell,
+            ability_id: None,
+        },
+        AppliedTo(target),
+    ));
+}
+
+#[test]
+fn enrapture_style_debuff_dispel_keeps_dwarf_infravision() {
+    let mut world = world_with_races(&[("DWARF", &["infravision", "ultravision"])]);
+    let (dwarf, _rx) = player_of(&mut world, "DWARF");
+    crate::login::apply_player_race_effects(&mut world, dwarf);
+    let removed = remove_effects_by_tag(&mut world, dwarf, "debuff", DispelScope::All);
+    assert_eq!(removed, 0);
+    let names: Vec<String> = instances(&mut world, dwarf)
+        .into_iter()
+        .map(|(n, ..)| n)
+        .collect();
+    assert_eq!(names, vec!["infravision", "ultravision"]);
+}
+
+#[test]
+fn douse_style_first_buff_dispel_keeps_race_fly() {
+    let mut world = world_with_races(&[("DRAGON_FIRE", &["fly"])]);
+    let room = world.spawn(Room).id();
+    let mut proto = mob_proto(30, 1, MobProfession::Trainer);
+    proto.race = "dragon_fire".into();
+    let dragon = mud_world::spawn_mob_from_proto(&mut world, &proto, room, None);
+    let removed = remove_effects_by_tag(&mut world, dragon, "buff", DispelScope::First);
+    assert_eq!(removed, 0);
+    assert!(world.get::<Flying>(dragon).is_some());
+    assert_eq!(instances(&mut world, dragon).len(), 1);
+    // Named / condition cleansing leaves race innates alone too.
+    assert_eq!(remove_effect_named(&mut world, dragon, "fly"), 0);
+    assert_eq!(remove_effects_for_condition(&mut world, dragon, "fly"), 0);
+    assert_eq!(instances(&mut world, dragon).len(), 1);
+}
+
+#[test]
+fn dispelled_spell_fly_clears_the_flying_marker() {
+    let mut world = world_with_races(&[]);
+    let (player, _rx) = player_of(&mut world, "HUMAN");
+    add_spell_fly(&mut world, player);
+    let removed = remove_effects_by_tag(&mut world, player, "buff", DispelScope::All);
+    assert_eq!(removed, 1);
+    assert!(
+        world.get::<Flying>(player).is_none(),
+        "marker left unbacked"
+    );
+}
+
+#[test]
+fn dispelled_spell_fly_keeps_marker_backed_by_race_fly() {
+    let mut world = world_with_races(&[("FAERIE_SEELIE", &["fly"])]);
+    let (player, _rx) = player_of(&mut world, "FAERIE_SEELIE");
+    crate::login::apply_player_race_effects(&mut world, player);
+    add_spell_fly(&mut world, player);
+    let removed = remove_effects_by_tag(&mut world, player, "buff", DispelScope::All);
+    assert_eq!(removed, 1, "only the spell fly goes");
+    assert!(world.get::<Flying>(player).is_some());
+    let inst = instances(&mut world, player);
+    assert_eq!(inst.len(), 1);
+    assert!(mud_world::mob_effects::is_race_effect(&inst[0].2));
 }

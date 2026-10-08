@@ -18554,7 +18554,9 @@ pub(crate) fn resolve_dispel_scope(
 
 /// Remove `EffectInstance`s on `target` whose source `EffectDef`
 /// carries `tag` in its `tags` list. Returns the number despawned.
-/// With `scope = First`, stops after one removal.
+/// With `scope = First`, stops after one removal. Race innates
+/// (`RaceEffects`) are permanent and never removed; removals unwind
+/// markers the same way expiry does.
 pub(crate) fn remove_effects_by_tag(
     world: &mut World,
     target: Entity,
@@ -18600,6 +18602,7 @@ pub(crate) fn remove_effects_by_tag(
         q.iter(world)
             .filter(|(_, eff, applied)| {
                 applied.0 == target
+                    && !mud_world::mob_effects::is_race_effect(&eff.source)
                     && (tag_match.contains(&eff.kind)
                         || eff
                             .ability_id
@@ -18611,13 +18614,7 @@ pub(crate) fn remove_effects_by_tag(
     if matches!(scope, DispelScope::First) {
         to_remove.truncate(1);
     }
-    let count = to_remove.len();
-    for e in to_remove {
-        if let Ok(em) = world.get_entity_mut(e) {
-            em.despawn();
-        }
-    }
-    count
+    despawn_effects_on(world, target, to_remove)
 }
 
 /// Read `aggro` from a redirect effect's params. True selects the
@@ -19074,15 +19071,22 @@ fn flag_prevents(flag: &str, kind: Prevent) -> bool {
 
 /// Despawn the given effect entities on `target`, first giving back any
 /// stat change a `ModifyDelta` companion recorded (the expiry tick does
-/// the same), so a cleansed debuff does not leave its penalty behind.
+/// the same), so a cleansed debuff does not leave its penalty behind, and
+/// unwind the status markers they backed.
 fn despawn_effects_on(world: &mut World, target: Entity, effects: Vec<Entity>) -> usize {
     let count = effects.len();
     for e in effects {
         if let Some(d) = world.get::<mud_world::ModifyDelta>(e).cloned() {
             apply_modify_delta(world, target, &d.target, -d.amount);
         }
+        let name = world.get::<EffectInstance>(e).map(|i| i.name.clone());
         if let Ok(em) = world.get_entity_mut(e) {
             em.despawn();
+        }
+        // Same marker unwind as expiry, so a dispelled `fly` / `bless` /
+        // ... does not leave its marker without a backing instance.
+        if let Some(name) = name {
+            crate::effects::teardown_markers_after_removal(world, target, &name);
         }
     }
     count
@@ -19095,7 +19099,11 @@ pub(crate) fn remove_effect_named(world: &mut World, target: Entity, name: &str)
     let to_remove: Vec<Entity> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
-            .filter(|(_, eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case(name))
+            .filter(|(_, eff, applied)| {
+                applied.0 == target
+                    && !mud_world::mob_effects::is_race_effect(&eff.source)
+                    && eff.name.eq_ignore_ascii_case(name)
+            })
             .map(|(e, _, _)| e)
             .collect()
     };
@@ -19135,6 +19143,7 @@ pub(crate) fn remove_effects_for_condition(
         q.iter(world)
             .filter(|(_, eff, applied)| {
                 applied.0 == target
+                    && !mud_world::mob_effects::is_race_effect(&eff.source)
                     && (eff.name.eq_ignore_ascii_case(condition)
                         || eff.ability_id.is_some_and(|id| ability_ids.contains(&id)))
             })
