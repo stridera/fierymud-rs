@@ -4539,11 +4539,16 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
         if !staff && let Some(mut w) = world.get_mut::<Wealth>(player) {
             w.0 = w.0.saturating_sub(fee);
         }
+        // A mob's level is misleading (issue #83): only staff see it.
+        let level_label = if staff {
+            format!("Level: {}, ", proto.level)
+        } else {
+            String::new()
+        };
         let out = format!(
-            "Name: {}\r\nLevel: {}, Hit Points: {}, Movement Points: {}\r\n\
+            "Name: {}\r\n{level_label}Hit Points: {}, Movement Points: {}\r\n\
              Damage: {}d{}+{}, Accuracy: {}, Evasion: {}\r\n{}",
             proto.name,
-            proto.level,
             proto.rolled_hp(),
             proto.move_points,
             proto.damage_dice_num,

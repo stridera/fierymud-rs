@@ -408,7 +408,24 @@ fn inspect_pet_shows_stats_with_unified_numbering() {
     cmd_inspect(&mut world, player, "kitten");
     let out = drain(&mut rx);
     assert!(out.contains("Name: a kitten"), "{out}");
-    assert!(out.contains("Level: 1"), "{out}");
+    assert!(out.contains("Hit Points:"), "{out}");
+    // A mob's level is misleading (issue #83): mortals do not see it.
+    assert!(!out.contains("Level"), "{out}");
+}
+
+#[test]
+fn inspect_pet_shows_level_to_staff() {
+    let (mut world, player, mut rx) = world_with_shop(mixed_shop(), 1_000);
+    world.entity_mut(player).insert(mud_world::Account {
+        user_id: "u".to_string(),
+        character_id: "c".to_string(),
+        role: mud_db::enums::UserRole::Builder,
+        account_role: mud_db::enums::UserRole::Builder,
+        perms: Vec::new(),
+    });
+    cmd_inspect(&mut world, player, "kitten");
+    let out = drain(&mut rx);
+    assert!(out.contains("Level: 1, Hit Points:"), "{out}");
 }
 
 #[test]
