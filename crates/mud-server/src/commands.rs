@@ -438,6 +438,9 @@ pub(crate) use gmcp::clear_gmcp_sent;
 #[cfg(test)]
 #[path = "commands/gmcp_tests.rs"]
 pub(crate) mod gmcp_tests;
+#[cfg(test)]
+#[path = "commands/gmcp_visibility_tests.rs"]
+mod gmcp_visibility_tests;
 #[path = "commands/magic_focus.rs"]
 mod magic_focus;
 #[path = "commands/senses.rs"]
@@ -2845,7 +2848,7 @@ mod tests {
             .id();
 
         let payload = format!(r#"{{"id":"{}"}}"#, mob.to_bits());
-        handle_room_mob_get(&world, viewer, &payload);
+        handle_room_mob_get(&mut world, viewer, &payload);
 
         // Drain the channel; the inn block rides on the Room.Mob.Info
         // frame. Raw bytes are telnet-framed but the package name +
@@ -2977,7 +2980,7 @@ mod tests {
             .id();
 
         let payload = format!(r#"{{"id":"{}"}}"#, mob.to_bits());
-        handle_room_mob_get(&world, viewer, &payload);
+        handle_room_mob_get(&mut world, viewer, &payload);
 
         let mut seen = String::new();
         while let Ok(bytes) = rx.try_recv() {
@@ -7333,28 +7336,7 @@ pub(crate) fn send_char_items_diff(
 /// mutable borrow to construct its state cache. The actual
 /// iteration is read-only.
 pub(crate) fn send_room_players_snapshot(world: &mut World, viewer: Entity) {
-    let Some(room) = world.get::<Located>(viewer).map(|l| l.0) else {
-        return;
-    };
-    let mut entries: Vec<String> = Vec::new();
-    {
-        let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Player>>();
-        for (e, loc, named) in q.iter(world) {
-            if loc.0 == room && e != viewer && can_see_player(world, viewer, e) {
-                let plain = render_color_tags(&named.name, ColorMode::Strip)
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"");
-                entries.push(format!(r#"{{"name":"{plain}","full_name":"{plain}"}}"#));
-            }
-        }
-    }
-    let Some(conn) = world.get::<Connection>(viewer) else {
-        return;
-    };
-    let payload = format!("[{}]", entries.join(","));
-    let _ = conn
-        .0
-        .try_send(mud_net::gmcp_packet("Room.Players", &payload));
+    gmcp::send_room_players(world, viewer, true);
 }
 
 /// Push a single `Room.AddPlayer` / `Room.RemovePlayer` diff to
@@ -7368,23 +7350,27 @@ pub(crate) fn broadcast_room_player_diff(
     subject: Entity,
     verb: &str, // "AddPlayer" or "RemovePlayer"
 ) {
-    let raw_name = world.get::<Named>(subject).map_or("", |n| n.name.as_str());
-    let plain = render_color_tags(raw_name, ColorMode::Strip)
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let payload = format!(r#"{{"name":"{plain}","full_name":"{plain}"}}"#);
-    let frame = mud_net::gmcp_packet(&format!("Room.{verb}"), &payload);
-
-    let recipients: Vec<Entity> = {
+    let observers: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
-            .filter(|(e, loc)| loc.0 == room && *e != subject && can_see_player(world, *e, subject))
+            .filter(|(e, loc)| loc.0 == room && *e != subject)
             .map(|(e, _)| e)
             .collect()
     };
-    for e in recipients {
+    for e in observers {
+        // Same visibility as the `Room.Players` snapshot: nothing for
+        // an observer who can't perceive the subject, a generic shape
+        // in the dark.
+        let room_seen = gmcp::viewer_sees_room(world, e, room);
+        let how = gmcp::perceives(world, e, subject, room_seen);
+        let Some(name) = gmcp::perceived_name(world, subject, how) else {
+            continue;
+        };
+        let payload = serde_json::json!({ "name": name, "full_name": name }).to_string();
         if let Some(conn) = world.get::<Connection>(e) {
-            let _ = conn.0.try_send(frame.clone());
+            let _ = conn
+                .0
+                .try_send(mud_net::gmcp_packet(&format!("Room.{verb}"), &payload));
         }
     }
 }
@@ -7606,9 +7592,11 @@ fn build_char_combat(world: &World, viewer: Entity) -> String {
     if world.get_entity(mob).is_err() {
         return "{}".to_string();
     }
+    // An opponent the viewer can't see (invisible attacker) is
+    // "someone", like the combat messages.
     let mob_plain = world
         .get::<Named>(mob)
-        .map(|n| plain_for_gmcp(&n.name))
+        .map(|n| plain_for_gmcp(&seen_name(world, viewer, mob, &n.name)))
         .unwrap_or_default();
     let (mob_hp, mob_max) = world.get::<Health>(mob).map_or((0, 0), |h| (h.hp, h.max));
     let mob_pct = if mob_max > 0 {
@@ -7626,7 +7614,7 @@ fn build_char_combat(world: &World, viewer: Entity) -> String {
         .unwrap_or(viewer);
     let tank_plain = world
         .get::<Named>(tank)
-        .map(|n| plain_for_gmcp(&n.name))
+        .map(|n| plain_for_gmcp(&seen_name(world, viewer, tank, &n.name)))
         .unwrap_or_default();
     let (tank_hp, tank_max) = world.get::<Health>(tank).map_or((0, 0), |h| (h.hp, h.max));
 
@@ -7706,9 +7694,11 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
         return;
     };
     // Snapshot mob entities in the room, dropping any the viewer
-    // can't see (WizInvis level above viewer's). The visibility
-    // filter happens here rather than per-mob below so professions
-    // and hostility on hidden mobs never leak into the frame.
+    // doesn't perceive (invisible, WizInvis above their level, or lost
+    // in a dark room) via the same predicate `look` uses. The filter
+    // happens here rather than per-mob below so professions and
+    // hostility on hidden mobs never leak into the frame.
+    let room_seen = gmcp::viewer_sees_room(world, viewer, room);
     let candidates: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
         q.iter(world)
@@ -7716,13 +7706,24 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
             .map(|(e, _)| e)
             .collect()
     };
-    let candidates: Vec<Entity> = candidates
+    let candidates: Vec<(Entity, gmcp::Perceived)> = candidates
         .into_iter()
-        .filter(|&mob| can_see_player(world, viewer, mob))
+        .map(|mob| (mob, gmcp::perceives(world, viewer, mob, room_seen)))
+        .filter(|(_, how)| *how != gmcp::Perceived::Unseen)
         .collect();
     let mut entries: Vec<String> = Vec::with_capacity(candidates.len());
     let mut services: Vec<&'static str> = Vec::new();
-    for mob in candidates {
+    for (mob, how) in candidates {
+        if how == gmcp::Perceived::Shape {
+            // Infravision in the dark: a generic shape, no hostility,
+            // health, targets or services.
+            let label = gmcp::perceived_name(world, mob, how).unwrap_or_default();
+            entries.push(format!(
+                r#"{{"id":"{}","name":"{label}","hostile":false,"hp_percent":0,"targeting":null,"professions":[]}}"#,
+                mob.to_bits(),
+            ));
+            continue;
+        }
         let mob_plain = world
             .get::<Named>(mob)
             .map(|n| plain_for_gmcp(&n.name))
@@ -7737,10 +7738,14 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
         let targeting_json = world
             .get::<Fighting>(mob)
             .map(|f| f.0)
-            .and_then(|t| world.get::<Named>(t))
+            .and_then(|t| {
+                world
+                    .get::<Named>(t)
+                    .map(|n| seen_name(world, viewer, t, &n.name))
+            })
             .map_or_else(
                 || "null".to_string(),
-                |n| format!("\"{}\"", plain_for_gmcp(&n.name)),
+                |n| format!("\"{}\"", plain_for_gmcp(&n)),
             );
         let status_field = if world.get::<Stunned>(mob).is_some() {
             r#","status":"stunned""#
@@ -7834,7 +7839,7 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
 /// player Connection — request fishing should fail silent, not leak
 /// the difference between "no such mob" and "wrong room".
 #[allow(clippy::too_many_lines)]
-pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) {
+pub(crate) fn handle_room_mob_get(world: &mut World, viewer: Entity, payload: &str) {
     // Accept either `{"id":"123"}` (string form, matching what
     // Room.Mobs emits) or `{"id":123}` (numeric) — the client
     // shouldn't fail-route if it forgets the quotes.
@@ -7872,6 +7877,11 @@ pub(crate) fn handle_room_mob_get(world: &World, viewer: Entity, payload: &str) 
     // brute-forcing entity ids can't tell "invisible" from "no
     // such mob".
     if !can_see_player(world, viewer, target) {
+        return;
+    }
+    // A dark room hides its occupants' details too: no more than the
+    // generic `Room.Mobs` shape, which has nothing to click through to.
+    if !gmcp::viewer_sees_room(world, viewer, viewer_room.unwrap_or(target)) {
         return;
     }
     let Some(conn) = world.get::<Connection>(viewer) else {
@@ -8337,6 +8347,9 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // the derived `Room.Services` frame in the same pass.
     send_char_combat(world, target);
     send_room_mobs(world, target, false);
+    // Who's here: change-gated, so a light going out or invisibility
+    // fading refreshes it on the next prompt.
+    gmcp::send_room_players(world, target, false);
     send_char_skills(world, target);
 
     // Char.Effects: array of `{name, ability, duration, source,

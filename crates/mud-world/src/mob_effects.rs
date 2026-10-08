@@ -229,7 +229,7 @@ fn marker_for(flag: &str) -> Option<&'static FlagMarker> {
 /// Install the marker component a `status` effect's `flag` stands for.
 /// Returns true when `flag` maps to a plain marker. Flags that need
 /// extra data (resistance, empowered, globe) are handled by the cast
-/// path itself; flags with no marker component (waterwalk, detect_hidden,
+/// path itself; flags with no marker component (waterwalk, `detect_hidden`,
 /// language, debuffs, ...) return false.
 pub fn install_flag_marker(world: &mut World, target: Entity, flag: &str) -> bool {
     let Some(marker) = marker_for(flag) else {

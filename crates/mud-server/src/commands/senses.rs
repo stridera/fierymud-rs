@@ -77,12 +77,23 @@ fn life_sensed_line(count: usize) -> &'static str {
     }
 }
 
-/// Legacy `print_char_infra_to_char`.
-fn red_shape_line(world: &World, target: Entity) -> String {
+/// What infravision makes of `target` in the dark: "red shape of a
+/// medium living being". Shared by the text `look` and the GMCP room
+/// panels so the two never disagree on how much a shape gives away.
+#[must_use]
+pub(crate) fn red_shape_label(world: &World, target: Entity) -> String {
     let size = world.get::<Sized>(target).map_or(Size::Medium, |s| s.0);
     format!(
-        "<red>The red shape of a {} living being is here.</>\r\n",
+        "red shape of a {} living being",
         format!("{size:?}").to_lowercase()
+    )
+}
+
+/// Legacy `print_char_infra_to_char`.
+fn red_shape_line(world: &World, target: Entity) -> String {
+    format!(
+        "<red>The {} is here.</>\r\n",
+        red_shape_label(world, target)
     )
 }
 

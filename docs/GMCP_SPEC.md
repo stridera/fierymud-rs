@@ -336,9 +336,17 @@ Array<{
 are the routing keys for service-related UI affordances (a shop
 icon, a bank button, etc.).
 
-**Visibility:** Mobs whose `WizInvis` level is above the viewer's
-level are filtered out server-side and never appear in the array.
-The frame is what the viewer *can see*, not the full room census.
+**Visibility:** The frame is what the viewer *can see*, using the same
+rules as the text `look`: mobs that are magically invisible (unless the
+viewer has detect_invisible, `HOLY_LIGHT` or is a god) or whose
+`WizInvis` level is above the viewer's level are filtered out
+server-side. In a dark room the array is empty, except that a viewer
+with infravision gets one generic entry per character
+(`name: "the red shape of a medium living being"`, `hostile:false`,
+`hp_percent:0`, no professions); `Room.Mob.Get` on it is a no-op.
+`Room.Players`, `Room.AddPlayer`/`RemovePlayer`, `Room.Info` and
+`Char.Aggro`/`Char.Combat` names follow the same predicate (an unseen
+opponent is `"someone"`).
 
 **Cadence:** On change only (plus after renegotiation), and always
 alongside `Room.Info` on `look` (so every move). Empty array clears the
@@ -379,8 +387,9 @@ an id from `Room.Mobs[i].id`; server replies with `Room.Mob.Info`.
 client brute-forcing entity ids can't distinguish failure modes):
 - mob entity must still exist (handles despawn-mid-frame)
 - mob must be in the requesting player's room (no cross-map snoop)
-- mob must be visible to the viewer (`WizInvis` above viewer's
-  level → no info leak, even with a valid id from a prior frame)
+- mob must be visible to the viewer (invisible, `WizInvis` above
+  viewer's level, or the room is dark to them → no info leak, even
+  with a valid id from a prior frame)
 
 **Outbound** (client → server):
 ```ts

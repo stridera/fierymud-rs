@@ -6071,6 +6071,9 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         // even when AUTO_EXIT is on. (A future search/feel-the-wall
         // skill would surface them; nothing today does.)
         send_to(world, player, out);
+        // The who's-here panel still has to be replaced: empty (or
+        // shapes only) in the dark, never the previous room's list.
+        send_room_players_snapshot(world, player);
         return;
     }
 
@@ -6145,7 +6148,9 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         // Newest arrival first (legacy `char_to_room` pushes the list head).
         let mut mob_rows: Vec<_> = q
             .iter(world)
-            .filter(|(_, l, _, _, _)| l.0 == room)
+            .filter(|(e, l, _, _, _)| {
+                l.0 == room && crate::commands::can_see_player(world, player, *e)
+            })
             .collect();
         crate::commands::sort_newest_first(world, room, &mut mob_rows, |r| r.0);
         for (mob, _, n, desc, stats) in mob_rows {

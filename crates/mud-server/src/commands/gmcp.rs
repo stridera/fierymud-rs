@@ -80,6 +80,97 @@ pub(crate) fn viewer_sees_room(world: &mut World, viewer: Entity, room: Entity) 
         && !super::player_can_see_in_dark(world, viewer))
 }
 
+/// How much of another character `viewer` makes out in `room`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Perceived {
+    /// Seen properly: real name and details.
+    Clear,
+    /// Only a warm shape in the dark (infravision): a generic entry.
+    Shape,
+    /// Not perceived at all: left out of every panel.
+    Unseen,
+}
+
+/// What `viewer` perceives of `target` standing in a room, given
+/// whether the viewer can make out that room (`room_seen`, from
+/// [`viewer_sees_room`]). Exactly the `look` rules: [`can_see_player`]
+/// (magic invisibility, `WizInvis`; gods and `HOLY_LIGHT` pierce) first,
+/// then darkness, where only infravision still gives a red shape.
+/// Every GMCP panel that names a character goes through this.
+///
+/// [`can_see_player`]: super::can_see_player
+pub(crate) fn perceives(
+    world: &World,
+    viewer: Entity,
+    target: Entity,
+    room_seen: bool,
+) -> Perceived {
+    if !super::can_see_player(world, viewer, target) {
+        Perceived::Unseen
+    } else if room_seen {
+        Perceived::Clear
+    } else if super::senses::has_infravision(world, viewer) {
+        Perceived::Shape
+    } else {
+        Perceived::Unseen
+    }
+}
+
+/// The name a panel shows for `target` given how it is perceived, or
+/// `None` when it must be omitted. Shapes get the generic infravision
+/// label, never the real name.
+pub(crate) fn perceived_name(world: &World, target: Entity, how: Perceived) -> Option<String> {
+    match how {
+        Perceived::Clear => Some(
+            world
+                .get::<Named>(target)
+                .map(|n| strip(&n.name))
+                .unwrap_or_default(),
+        ),
+        Perceived::Shape => Some(format!(
+            "the {}",
+            super::senses::red_shape_label(world, target)
+        )),
+        Perceived::Unseen => None,
+    }
+}
+
+/// Build the `Room.Players` payload: every other player in `viewer`'s
+/// room, as far as `viewer` perceives them (see [`perceives`]).
+pub(crate) fn build_room_players(world: &mut World, viewer: Entity) -> String {
+    let Some(room) = world.get::<Located>(viewer).map(|l| l.0) else {
+        return "[]".to_string();
+    };
+    let room_seen = viewer_sees_room(world, viewer, room);
+    let here: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<mud_world::Player>>();
+        q.iter(world)
+            .filter(|(e, loc)| loc.0 == room && *e != viewer)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let entries: Vec<Value> = here
+        .into_iter()
+        .filter_map(|e| {
+            let how = perceives(world, viewer, e, room_seen);
+            perceived_name(world, e, how).map(|n| json!({ "name": n, "full_name": n }))
+        })
+        .collect();
+    Value::Array(entries).to_string()
+}
+
+/// Send `Room.Players` for `viewer`'s room. `force` always sends; the
+/// prompt path passes `false` so it only goes out when what the viewer
+/// perceives changed (someone arrives, a light goes out, invisibility
+/// fades).
+pub(crate) fn send_room_players(world: &mut World, viewer: Entity, force: bool) {
+    if world.get::<Connection>(viewer).is_none() {
+        return;
+    }
+    let payload = build_room_players(world, viewer);
+    send_if_changed(world, viewer, "Room.Players", &payload, force);
+}
+
 /// Build the `Room.Info` payload for `viewer`'s current room, or `{}`
 /// when they cannot see it (dark room) or are nowhere.
 pub(crate) fn build_room_info(world: &mut World, viewer: Entity) -> String {
@@ -256,10 +347,14 @@ pub(crate) fn build_char_aggro(world: &mut World, target: Entity) -> String {
     let mut hating: Vec<String> = Vec::new();
     let mut remembering: Vec<String> = Vec::new();
     let mut q = world.query_filtered::<
-        (&Named, Option<&HateList>, Option<&MobMemory>),
+        (Entity, &Named, Option<&HateList>, Option<&MobMemory>),
         (With<mud_world::Mob>, Or<(With<HateList>, With<MobMemory>)>),
     >();
-    for (n, hate, mem) in q.iter(world) {
+    for (e, n, hate, mem) in q.iter(world) {
+        // An invisible (or wizinvis) mob stays nameless to the viewer.
+        if !super::can_see_player(world, target, e) {
+            continue;
+        }
         if hate.is_some_and(|h| h.0.contains(&target)) {
             hating.push(strip(&n.name));
         } else if mem.is_some_and(|m| m.0.contains(&target)) {
