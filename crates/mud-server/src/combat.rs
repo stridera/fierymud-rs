@@ -793,24 +793,33 @@ pub fn combat_tick(world: &mut World) {
     // through to the per-entity NaturalDamage / dmg_roll branch.
     let weapon_dice: std::collections::HashMap<Entity, (i32, i32, i32)> =
         if world.get_resource::<ObjectPrototypes>().is_some() {
-            let protos: Vec<(Entity, (i32, i32))> = {
-                let mut q = world.query::<(&Located, &EquippedSlot, &WorldKey)>();
+            let protos: Vec<(Entity, (i32, i32), i32)> = {
+                let mut q = world.query::<(
+                    &Located,
+                    &EquippedSlot,
+                    &WorldKey,
+                    Option<&mud_world::components::WeaponDiceSizeAdjust>,
+                )>();
                 q.iter(world)
-                    .filter(|(_, eq, _)| eq.0 == Slot::Wield)
-                    .map(|(loc, _, key)| (loc.0, (key.zone, key.id)))
+                    .filter(|(_, eq, _, _)| eq.0 == Slot::Wield)
+                    .map(|(loc, _, key, adj)| (loc.0, (key.zone, key.id), adj.map_or(0, |a| a.0)))
                     .collect()
             };
             let proto_catalog = world.resource::<ObjectPrototypes>();
             protos
                 .into_iter()
-                .filter_map(|(wielder, key)| {
+                .filter_map(|(wielder, key, adjust)| {
                     let p = proto_catalog.by_key.get(&key)?;
                     if p.weapon_dice_num <= 0 || p.weapon_dice_size <= 0 {
                         return None;
                     }
                     Some((
                         wielder,
-                        (p.weapon_dice_num, p.weapon_dice_size, p.weapon_dice_bonus),
+                        (
+                            p.weapon_dice_num,
+                            (p.weapon_dice_size + adjust).max(1),
+                            p.weapon_dice_bonus,
+                        ),
                     ))
                 })
                 .collect()
@@ -983,6 +992,7 @@ struct Swing {
 /// Skips the FIGHT trigger fire (`combat_tick` will fire it on the
 /// next regular cadence; firing twice on engage would be a behavior
 /// change).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Entity) {
     // Defenders that combat_tick refuses to swing on — same gates so
     // engage doesn't bypass them.
@@ -1012,23 +1022,32 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
     let is_mob = world.get::<mud_world::Mob>(attacker).is_some();
     // Lift the wielded-weapon's world key out so the prototype
     // lookup doesn't hold a borrow while we touch resources.
-    let wielded_key: Option<(i32, i32)> = {
-        let mut q = world.query::<(&Located, &EquippedSlot, &WorldKey)>();
-        q.iter(world).find_map(|(loc, eq, key)| {
+    let wielded_key: Option<((i32, i32), i32)> = {
+        let mut q = world.query::<(
+            &Located,
+            &EquippedSlot,
+            &WorldKey,
+            Option<&mud_world::components::WeaponDiceSizeAdjust>,
+        )>();
+        q.iter(world).find_map(|(loc, eq, key, adj)| {
             if loc.0 == attacker && eq.0 == Slot::Wield {
-                Some((key.zone, key.id))
+                Some(((key.zone, key.id), adj.map_or(0, |a| a.0)))
             } else {
                 None
             }
         })
     };
-    let weapon_dice: Option<(i32, i32, i32)> = wielded_key.and_then(|key| {
+    let weapon_dice: Option<(i32, i32, i32)> = wielded_key.and_then(|(key, adjust)| {
         let protos = world.get_resource::<ObjectPrototypes>()?;
         let p = protos.by_key.get(&key)?;
         if p.weapon_dice_num <= 0 || p.weapon_dice_size <= 0 {
             return None;
         }
-        Some((p.weapon_dice_num, p.weapon_dice_size, p.weapon_dice_bonus))
+        Some((
+            p.weapon_dice_num,
+            (p.weapon_dice_size + adjust).max(1),
+            p.weapon_dice_bonus,
+        ))
     });
     let natural: Option<(i32, i32, i32)> = world
         .get::<NaturalDamage>(attacker)

@@ -346,6 +346,12 @@ impl ObjectRestrictions {
     }
 }
 
+/// Per-instance change to a weapon's dice size (legacy: `Curse` on a
+/// weapon does `VAL_WEAPON_DICE_SIZE--`, `Remove Curse` does `++`). The
+/// prototype stays untouched; combat reads `proto size + adjust`.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WeaponDiceSizeAdjust(pub i32);
+
 /// Marker: a Light-type item is currently lit. Only the `light` command
 /// sets it (wearing or holding a light does not), `extinguish` and fuel
 /// burn-out clear it. A lit light on or beside an actor lights the room.

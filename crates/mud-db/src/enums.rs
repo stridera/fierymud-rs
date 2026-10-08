@@ -1049,6 +1049,21 @@ impl sqlx::postgres::PgHasArrayType for ObjectRestriction {
 }
 
 impl ObjectRestriction {
+    /// Parse the DB / JSON spelling (`NO_DROP`) used in ability effect
+    /// params; the Rust variant spelling (`NoDrop`) is accepted too.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_uppercase().replace('_', "").as_str() {
+            "NODROP" => Some(Self::NoDrop),
+            "NOTAKE" => Some(Self::NoTake),
+            "NOSELL" => Some(Self::NoSell),
+            "NOBURN" => Some(Self::NoBurn),
+            "NOLOCATE" => Some(Self::NoLocate),
+            "NOINVISIBLE" => Some(Self::NoInvisible),
+            _ => None,
+        }
+    }
+
     /// Builder-facing label for `identify` / `examine` restriction
     /// readouts. Hyphenated form so "No-drop" reads as a single
     /// token in a comma-separated list.

@@ -366,6 +366,8 @@ mod admin_inspect;
 mod admin_management;
 #[path = "commands/admin_reload.rs"]
 mod admin_reload;
+#[path = "commands/object_spells.rs"]
+mod object_spells;
 #[path = "commands/object_stat.rs"]
 mod object_stat;
 pub(crate) use admin_reload::shutdown_poll;
@@ -13787,6 +13789,9 @@ fn resolve_and_gate_target(
     // nonsensical.
     let allows_inventory_target = valid_targets.iter().any(|t| t == "OBJECT_INV")
         || (valid_targets.is_empty() && !def.violent);
+    // OBJECT_WORLD: an object lying in the caster's room (legacy
+    // TAR_OBJ_ROOM). Only abilities that list it can reach floor items.
+    let allows_room_object_target = valid_targets.iter().any(|t| t == "OBJECT_WORLD");
     let prefers_rider_default = valid_targets.iter().any(|t| t == "RIDER");
     // Hostile abilities (any ENEMY_* / AREA_FOES targeting) refuse
     // in PeacefulRoom — same contract cmd_attack and engage_combat
@@ -13863,7 +13868,15 @@ fn resolve_and_gate_target(
         } else {
             None
         };
-        let in_room = inv_match.or_else(|| find_actor_in_room(world, word, located.0, player));
+        let in_room = inv_match
+            .or_else(|| find_actor_in_room(world, word, located.0, player))
+            .or_else(|| {
+                if allows_room_object_target {
+                    find_in_room(world, word, located.0)
+                } else {
+                    None
+                }
+            });
         // SUMMON-class spells need to reach players in *other* rooms
         // (that's literally the point). When the in-room lookup
         // misses, fall back to a global online-player search before
@@ -14457,6 +14470,15 @@ pub(crate) fn invoke_ability_with(
         settle_slot(world, player, slot_hold, false);
         return;
     };
+    // Spells on objects (Curse, Remove Curse; legacy `mag_alter_obj`)
+    // carry `alter_object` effects and skip the actor-only machinery
+    // (saves, damage, effect instances) below.
+    if world.get::<Item>(target_entity).is_some()
+        && object_spells::cast_on_object(world, player, &def, target_entity)
+    {
+        settle_slot(world, player, slot_hold, true);
+        return;
+    }
     // Legacy `aggro_lose_spells`: casting hostile magic at someone
     // else breaks the caster's invisibility.
     if target_entity != player && ability_is_hostile(world, &def) {
@@ -14727,6 +14749,9 @@ pub(crate) fn invoke_ability_with(
     let mut custom_messaging = false;
     let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
     let mut spawn_count: usize = 0;
+    // Effects the `cleanse` arm removed so far; Remove Curse only lifts a
+    // carried object's curse when the person had none (legacy).
+    let mut cleansed_total: usize = 0;
     // Set by the teleport arm so the auto-look fires AFTER the cast
     // confirmation message rather than before it — otherwise the
     // arrival-room description splits "You read aloud from {scroll}"
@@ -15439,11 +15464,24 @@ pub(crate) fn invoke_ability_with(
                     }
                     total
                 };
+                cleansed_total += removed;
                 applied_msgs.push(if removed == 0 {
                     format!("{pretty} (nothing to cleanse)")
                 } else {
                     format!("{pretty} (cleansed {removed} effect(s))")
                 });
+            }
+            "alter_object" => {
+                // Object-targeted casts return before this loop; here the
+                // target is a person. Only the "remove" form applies:
+                // lift the curse from the first carried object, unless
+                // the person had a curse effect that was just cleansed.
+                if object_spells::removes(spec)
+                    && cleansed_total == 0
+                    && object_spells::lift_first_carried(world, player, target_entity, spec)
+                {
+                    applied_msgs.push(format!("{pretty} (lifted from a carried object)"));
+                }
             }
             "stun" => {
                 // Mark the target as Stunned (skips combat swings)
@@ -18007,6 +18045,10 @@ pub(crate) fn check_target_type(
     let target_is_self = caster == target;
     let target_is_item_in_inv = world.get::<Item>(target).is_some()
         && world.get::<Located>(target).is_some_and(|l| l.0 == caster);
+    let caster_room = world.get::<Located>(caster).map(|l| l.0);
+    let target_is_item_in_room = world.get::<Item>(target).is_some()
+        && caster_room.is_some()
+        && world.get::<Located>(target).map(|l| l.0) == caster_room;
     // RIDER target is the caster's current mount.
     let target_is_caster_mount = world
         .get::<mud_world::Mounted>(caster)
@@ -18028,6 +18070,12 @@ pub(crate) fn check_target_type(
             "OBJECT_INV" => {
                 any_recognized = true;
                 if target_is_item_in_inv {
+                    return None;
+                }
+            }
+            "OBJECT_WORLD" => {
+                any_recognized = true;
+                if target_is_item_in_room {
                     return None;
                 }
             }
@@ -20070,6 +20118,7 @@ pub(crate) const KNOWN_EFFECT_TYPE_ARMS: &[&str] = &[
     "knockdown",
     "globe",
     "summon",
+    "alter_object",
     // `status` lands in the catchall but is *intentionally* handled
     // there by the flag-dispatch table (Bless / Sanctuary / Stealth
     // / etc.) — counts as covered.

@@ -6,6 +6,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectFlag, ObjectRestriction};
+use mud_world::components::WeaponDiceSizeAdjust;
 use mud_world::{
     AbilityCatalog, AppliedTo, ClassCatalog, EffectInstance, EquippedSlot, Item, Keywords, Located,
     ObjectFlags, ObjectProto, ObjectRestrictions, WorldKey,
@@ -128,11 +129,22 @@ pub(crate) fn render_object_stat(
             .as_deref()
             .map(|t| format!(" ({t})"))
             .unwrap_or_default();
+        // A curse spell shrinks the die on this instance only.
+        let adjust = item
+            .and_then(|e| world.get::<WeaponDiceSizeAdjust>(e))
+            .map_or(0, |a| a.0);
+        let size = (p.weapon_dice_size + adjust).max(1);
+        let mut live = p.clone();
+        live.weapon_dice_size = size;
+        let note = if adjust == 0 {
+            String::new()
+        } else {
+            format!(" [die {}, was d{}]", signed(adjust), p.weapon_dice_size)
+        };
         out.push_str(&format!(
-            "damage:        {}d{}{bonus}{dtype}, avg {}\r\n",
+            "damage:        {}d{size}{bonus}{dtype}, avg {}{note}\r\n",
             p.weapon_dice_num,
-            p.weapon_dice_size,
-            p.avg_damage(),
+            live.avg_damage(),
         ));
     }
     if p.armor_pct != 0 {
