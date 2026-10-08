@@ -52,8 +52,12 @@ inventory::submit! {
                    \x20 goto <id>             — room <id> in your current zone\r\n\
                    \x20 goto <zone> <id>      — composite (zone, id)\r\n\
                    \x20 goto <name>           — teleport to a player or mob's room\r\n\
+                   \x20 goto home            — your recall (home) room\r\n\
                    \r\n\
-                   Bypasses exits, doors, and movement gates.",
+                   Bypasses exits, doors, and no-teleport rooms. Rooms \
+                   restricted to the god ranks stay closed to lower staff. \
+                   Your `poofout` / `poofin` lines are shown to the rooms \
+                   you leave and arrive in.",
         },
         run: cmd_goto,
     }
@@ -301,8 +305,9 @@ inventory::submit! {
         help: Help {
             usage: "poofin [<message>]",
             summary: "Set your custom arrival message on goto / teleport.",
-            long: "Builder+. Replaces the generic \"$n appears in \
-                   a swirl of light.\" with your own line. Bare \
+            long: "Builder+. Replaces the generic \"$n appears with an \
+                   ear-splitting bang.\" with your own line (`$n` stands \
+                   for your name). Bare \
                    `poofin` shows the current value; `poofin clear` \
                    removes it.",
         },
@@ -320,7 +325,7 @@ inventory::submit! {
             usage: "poofout [<message>]",
             summary: "Set your custom departure message on goto / teleport.",
             long: "Builder+. Mirrors `poofin`. Replaces the generic \
-                   \"$n vanishes.\" departure line.",
+                   \"$n disappears in a puff of smoke.\" departure line.",
         },
         run: cmd_poofout,
     }
@@ -2688,9 +2693,18 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
             send_to(
                 world,
                 player,
-                "Usage: goto <id> | goto <zone> <id> | goto <name>\r\n",
+                "Usage: goto <id> | goto <zone> <id> | goto <name> | goto home\r\n",
             );
             return;
+        }
+        [arg] if arg.eq_ignore_ascii_case("home") => {
+            // Legacy do_goto: "home" is the staff member's own home room
+            // (here the bound recall point, else the race start room).
+            let Some(home) = crate::commands::recall::recall_room(world, player) else {
+                send_to(world, player, "Your home room is invalid.\r\n");
+                return;
+            };
+            Some(home)
         }
         [a, b] if a.parse::<i32>().is_ok() && b.parse::<i32>().is_ok() => {
             // `goto <zone> <id>` — composite key.
@@ -2783,13 +2797,8 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Couldn't resolve a destination.\r\n");
         return;
     };
-    // NoTeleportRoom gate on the destination — same contract as
-    // `cmd_teleport`. The gate honors staff: builders must clear
-    // the flag before they can `goto` into a no-teleport room.
-    if world.get::<mud_world::NoTeleportRoom>(target).is_some() {
-        send_to(world, player, "That room refuses inbound teleports.\r\n");
-        return;
-    }
+    // Legacy do_goto has no no-teleport gate: it is a staff command and
+    // `ROOM_NOTELEPORT` only constrains the teleport spells.
     // Legacy do_goto: below the god ranks a restricted (GODROOM) room is
     // off limits. Immortal+ bypass inside `entry_allowed`.
     if !crate::room_access::entry_allowed(world, player, target) {
@@ -2801,7 +2810,27 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);
-    if world.get::<Located>(player).is_some() {
+    let origin = world.get::<Located>(player).map(|l| l.0);
+    let (poof_in, poof_out) = world
+        .get::<mud_world::Poofs>(player)
+        .map(|p| (p.poof_in.clone(), p.poof_out.clone()))
+        .unwrap_or_default();
+    let name = name_of(world, player);
+    let poof_line = |custom: Option<String>, default: &str| {
+        custom
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| default.to_string())
+            .replace("$n", &name)
+    };
+    if let Some(origin) = origin {
+        let line = poof_line(poof_out, "$n disappears in a puff of smoke.");
+        crate::commands::broadcast_room_visible(
+            world,
+            origin,
+            player,
+            &[player],
+            &format!("{line}\r\n"),
+        );
         world.entity_mut(player).insert(Located(target));
     }
     // Bring the mount along on goto / recall — otherwise the mount
@@ -2810,6 +2839,16 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
         && world.get::<Located>(mount).is_some()
     {
         world.entity_mut(mount).insert(Located(target));
+    }
+    if origin.is_some() {
+        let line = poof_line(poof_in, "$n appears with an ear-splitting bang.");
+        crate::commands::broadcast_room_visible(
+            world,
+            target,
+            player,
+            &[player],
+            &format!("{line}\r\n"),
+        );
     }
     cmd_look(world, player, "");
 }

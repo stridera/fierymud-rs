@@ -442,6 +442,9 @@ mod expand_tests;
 #[path = "commands/god_zone_tests.rs"]
 mod god_zone_tests;
 #[cfg(test)]
+#[path = "commands/goto_tests.rs"]
+mod goto_tests;
+#[cfg(test)]
 #[path = "commands/invisibility_tests.rs"]
 mod invisibility_tests;
 #[cfg(test)]
