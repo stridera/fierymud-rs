@@ -271,6 +271,52 @@ fn inventory_order_survives_a_save_load_round_trip() {
 }
 
 #[test]
+fn two_saved_ears_rows_load_into_left_and_right_ear() {
+    use mud_db::character_items::CharacterItemRow;
+    let (mut world, _room, p, _rx) = setup();
+    world.insert_resource(mud_world::TriggerCatalog::default());
+    world.insert_resource(mud_world::ObjectAbilityCatalog::default());
+    let mut protos = ObjectPrototypes::default();
+    for id in [1, 2, 3] {
+        protos
+            .by_key
+            .insert((1, id), object_proto(1, id, ObjectType::Other));
+    }
+    *world.resource_mut::<ObjectPrototypes>() = protos;
+    let row = |id: i32, obj: i32, loc: &str| CharacterItemRow {
+        id,
+        character_id: "c".into(),
+        object_zone_id: 1,
+        object_id: obj,
+        container_id: None,
+        equipped_location: Some(loc.into()),
+        charges: -1,
+        liquid_remaining: 0,
+        liquid_type: None,
+        lit: false,
+    };
+    let rows = vec![row(1, 1, "EARS"), row(2, 2, "EARS"), row(3, 3, "EARS")];
+    assert_eq!(crate::login::spawn_inventory(&mut world, p, &rows), 3);
+    let mut q = world.query_filtered::<(&WorldKey, &Located, Option<&mud_world::EquippedSlot>), With<mud_world::Item>>();
+    let mut got: Vec<(i32, Option<mud_world::Slot>)> = q
+        .iter(&world)
+        .filter(|(_, l, _)| l.0 == p)
+        .map(|(k, _, s)| (k.id, s.map(|s| s.0)))
+        .collect();
+    got.sort_by_key(|(id, _)| *id);
+    // Third row: both ears taken, keeps the label's slot (still on the
+    // character, not dropped).
+    assert_eq!(
+        got,
+        vec![
+            (1, Some(mud_world::Slot::LeftEar)),
+            (2, Some(mud_world::Slot::RightEar)),
+            (3, Some(mud_world::Slot::LeftEar)),
+        ]
+    );
+}
+
+#[test]
 fn indexed_actor_target_matches_look_mobs_before_players() {
     let (mut world, room, p, mut rx) = setup();
     let other = world

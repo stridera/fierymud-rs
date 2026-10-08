@@ -5727,6 +5727,10 @@ pub(crate) fn spawn_inventory(
     // wait for their parent to land.
     let mut spawned: HashMap<i32, Entity> = HashMap::new();
     let mut pending: Vec<&CharacterItemRow> = rows.iter().collect();
+    // Slots already filled during this load. Old saves can hold two rows
+    // with the same paired label (two `EARS`, two `WRIST`); the second one
+    // goes to the other side of the pair.
+    let mut worn: std::collections::HashSet<Slot> = std::collections::HashSet::new();
 
     loop {
         let mut made_progress = false;
@@ -5832,9 +5836,16 @@ pub(crate) fn spawn_inventory(
                 e.insert(mud_world::PersistedItemId(row.id));
             }
             if let Some(slot_str) = row.equipped_location.as_deref()
-                && let Some(slot) = Slot::from_label(slot_str)
+                && let Some(label_slot) = Slot::from_label_warn(slot_str)
+                // Both sides of a pair taken: keep the label's own slot
+                // (item stays worn, never dropped). A single-slot
+                // position already taken leaves the item carried.
+                && let Some(slot) = label_slot.first_free(|s| worn.contains(&s)).or(
+                    (label_slot.group().len() > 1).then_some(label_slot),
+                )
                 && let Ok(mut e) = world.get_entity_mut(item_entity)
             {
+                worn.insert(slot);
                 e.insert(EquippedSlot(slot));
             }
             // Charges: prefer the persisted per-instance value when

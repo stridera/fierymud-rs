@@ -524,41 +524,81 @@ impl Slot {
         }
     }
 
-    /// Parse the free-text `equipped_location` from `CharacterItems`. Case
-    /// insensitive. Mirrors `db_label` round-trip plus a few legacy
-    /// aliases (`NECK_1`/`NECK_2` collapse to `NECK`, `FINGER_R`/`FINGER_L`
-    /// map to `LeftFinger`/`RightFinger`). Returns None for any label
-    /// we still don't model.
+    /// Parse the free-text `equipped_location` from `CharacterItems` or
+    /// `wear_location` from `MobResetEquipment`. Case insensitive. Mirrors
+    /// `db_label` round-trip plus the aliases found in the data:
+    ///
+    /// - bare `EARS` / `EAR` / `WRIST` / `NECK_1`: pre-pairing labels that
+    ///   resolve to the first slot of their pair;
+    /// - reset labels `LEAR` / `REAR`, `WRIST_L` / `WRIST_R`,
+    ///   `FINGER_L` / `FINGER_R` (left / right as written);
+    /// - slots this port does not model separately, collapsed the same way
+    ///   the importer does: `WIELD2` / `TWO_HAND_WIELD` to `Wield`,
+    ///   `HOLD2` / `SHIELD` to `Hold`, `OBELT` to `Waist`.
+    ///
+    /// Returns None for any label we still don't model.
     #[must_use]
     pub fn from_label(s: &str) -> Option<Self> {
         match s.to_ascii_uppercase().as_str() {
             "HEAD" => Some(Self::Head),
             "EYES" => Some(Self::Eyes),
             "FACE" => Some(Self::Face),
-            // Bare EARS / EAR / WRIST are the pre-pairing labels (one bin
-            // for both sides): they resolve to the first slot of the pair.
-            "EARS" | "EAR" | "EAR_LEFT" => Some(Self::LeftEar),
-            "EAR_RIGHT" => Some(Self::RightEar),
+            "EARS" | "EAR" | "EAR_LEFT" | "LEAR" => Some(Self::LeftEar),
+            "EAR_RIGHT" | "REAR" => Some(Self::RightEar),
             "NECK" | "NECK_1" => Some(Self::Neck),
             "NECK_2" => Some(Self::SecondNeck),
             "ABOUT" => Some(Self::About),
             "BODY" => Some(Self::Body),
             "ARMS" => Some(Self::Arms),
-            "WRIST" | "WRIST_RIGHT" => Some(Self::RightWrist),
-            "WRIST_LEFT" => Some(Self::LeftWrist),
+            "WRIST" | "WRIST_RIGHT" | "WRIST_R" => Some(Self::RightWrist),
+            "WRIST_LEFT" | "WRIST_L" => Some(Self::LeftWrist),
             "HANDS" => Some(Self::Hands),
-            "FINGER_LEFT" | "FINGER_R" => Some(Self::LeftFinger),
-            "FINGER_RIGHT" | "FINGER_L" => Some(Self::RightFinger),
-            "WAIST" | "BELT" => Some(Self::Waist),
+            "FINGER_LEFT" | "FINGER_L" => Some(Self::LeftFinger),
+            "FINGER_RIGHT" | "FINGER_R" => Some(Self::RightFinger),
+            "WAIST" | "BELT" | "OBELT" => Some(Self::Waist),
             "LEGS" => Some(Self::Legs),
             "FEET" => Some(Self::Feet),
-            "WIELD" => Some(Self::Wield),
-            "HOLD" => Some(Self::Hold),
+            "WIELD" | "WIELD2" | "TWO_HAND_WIELD" => Some(Self::Wield),
+            "HOLD" | "HOLD2" | "SHIELD" => Some(Self::Hold),
             "LIGHT" => Some(Self::Light),
             "HOVER" => Some(Self::Hover),
             "BADGE" => Some(Self::Badge),
             _ => None,
         }
+    }
+
+    /// [`from_label`](Self::from_label) for loaders: an unrecognised,
+    /// non-empty label logs one warning per distinct label (not per row)
+    /// so unmodelled data does not fail silently.
+    #[must_use]
+    pub fn from_label_warn(s: &str) -> Option<Self> {
+        static WARNED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+            std::sync::Mutex::new(None);
+        let slot = Self::from_label(s);
+        if slot.is_none() && !s.trim().is_empty() {
+            let first_time = WARNED
+                .lock()
+                .map(|mut g| {
+                    g.get_or_insert_with(std::collections::HashSet::new)
+                        .insert(s.to_ascii_uppercase())
+                })
+                .unwrap_or(false);
+            if first_time {
+                tracing::warn!(label = s, "unknown equipment slot label; item not worn");
+            }
+        }
+        slot
+    }
+
+    /// `self` if `taken` does not report it occupied, otherwise the first
+    /// free slot of its [`group`](Self::group); None when every slot of
+    /// the position is taken.
+    #[must_use]
+    pub fn first_free(self, taken: impl Fn(Self) -> bool) -> Option<Self> {
+        if !taken(self) {
+            return Some(self);
+        }
+        self.group().iter().copied().find(|s| !taken(*s))
     }
 
     /// The slots that make up this slot's wear position, in the order
@@ -2841,6 +2881,89 @@ mod tests {
         assert_eq!(Slot::from_label("HOVER"), Some(Slot::Hover));
         assert_eq!(Slot::from_label(""), None);
         assert_eq!(Slot::from_label("garbage"), None);
+    }
+
+    #[test]
+    fn slot_from_label_reset_aliases() {
+        assert_eq!(Slot::from_label("WRIST_L"), Some(Slot::LeftWrist));
+        assert_eq!(Slot::from_label("WRIST_R"), Some(Slot::RightWrist));
+        assert_eq!(Slot::from_label("LEAR"), Some(Slot::LeftEar));
+        assert_eq!(Slot::from_label("REAR"), Some(Slot::RightEar));
+        assert_eq!(Slot::from_label("lear"), Some(Slot::LeftEar));
+    }
+
+    #[test]
+    fn slot_from_label_finger_sides_not_swapped() {
+        assert_eq!(Slot::from_label("FINGER_L"), Some(Slot::LeftFinger));
+        assert_eq!(Slot::from_label("FINGER_R"), Some(Slot::RightFinger));
+        assert_eq!(Slot::from_label("FINGER_LEFT"), Some(Slot::LeftFinger));
+        assert_eq!(Slot::from_label("FINGER_RIGHT"), Some(Slot::RightFinger));
+    }
+
+    #[test]
+    fn slot_from_label_covers_every_dev_db_label() {
+        // Distinct MobResetEquipment.wear_location / CharacterItems.equipped_location.
+        for label in [
+            "ABOUT",
+            "ARMS",
+            "BADGE",
+            "BODY",
+            "EARS",
+            "EYES",
+            "FACE",
+            "FEET",
+            "FINGER_L",
+            "FINGER_LEFT",
+            "FINGER_R",
+            "FINGER_RIGHT",
+            "HANDS",
+            "HEAD",
+            "HOLD",
+            "HOLD2",
+            "HOVER",
+            "LEAR",
+            "LEGS",
+            "LIGHT",
+            "NECK_1",
+            "NECK_2",
+            "OBELT",
+            "REAR",
+            "SHIELD",
+            "TWO_HAND_WIELD",
+            "WAIST",
+            "WIELD",
+            "WIELD2",
+            "WRIST_L",
+            "WRIST_LEFT",
+            "WRIST_R",
+            "WRIST_RIGHT",
+        ] {
+            assert!(Slot::from_label(label).is_some(), "unhandled {label}");
+        }
+        assert_eq!(Slot::from_label("OBELT"), Some(Slot::Waist));
+        assert_eq!(Slot::from_label("SHIELD"), Some(Slot::Hold));
+        assert_eq!(Slot::from_label("HOLD2"), Some(Slot::Hold));
+        assert_eq!(Slot::from_label("WIELD2"), Some(Slot::Wield));
+        assert_eq!(Slot::from_label("TWO_HAND_WIELD"), Some(Slot::Wield));
+    }
+
+    #[test]
+    fn slot_first_free_spills_to_pair_partner() {
+        use std::collections::HashSet;
+        let none: HashSet<Slot> = HashSet::new();
+        assert_eq!(
+            Slot::LeftEar.first_free(|s| none.contains(&s)),
+            Some(Slot::LeftEar)
+        );
+        let one: HashSet<Slot> = [Slot::LeftEar].into();
+        assert_eq!(
+            Slot::LeftEar.first_free(|s| one.contains(&s)),
+            Some(Slot::RightEar)
+        );
+        let both: HashSet<Slot> = [Slot::LeftEar, Slot::RightEar].into();
+        assert_eq!(Slot::LeftEar.first_free(|s| both.contains(&s)), None);
+        let head: HashSet<Slot> = [Slot::Head].into();
+        assert_eq!(Slot::Head.first_free(|s| head.contains(&s)), None);
     }
 
     #[test]

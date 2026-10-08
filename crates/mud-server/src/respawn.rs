@@ -484,6 +484,28 @@ mod tests {
     }
 
     #[test]
+    fn mob_reset_wrist_l_and_paired_labels_equip_both_sides() {
+        let (mut world, room) = base_world();
+        let rows = vec![
+            eq_row(1, 1, SWORD, Some("WRIST_L"), 0.99),
+            eq_row(2, 1, HELM, Some("WRIST_L"), 0.99),
+            eq_row(3, 1, BREAD, Some("WRIST_L"), 0.99),
+        ];
+        add_mob_reset(&mut world, room, 1, &rows);
+        let mob = boot_mob(&mut world, room, 1);
+        // First WRIST_L takes the left wrist, the second spills to the
+        // right wrist, the third finds both taken and stays carried.
+        assert_eq!(
+            gear_of(&mut world, mob),
+            vec![
+                (SWORD, Some("LeftWrist".to_string())),
+                (HELM, Some("RightWrist".to_string())),
+                (BREAD, None),
+            ]
+        );
+    }
+
+    #[test]
     fn respawned_gear_is_world_owned_not_character_items() {
         // Mob gear is parented to the mob, never to a player, so the
         // player-save snapshot (which walks a player's Located chain)

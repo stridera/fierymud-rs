@@ -15,7 +15,7 @@
 //! times its carrier respawns. The row-ownership invariant for mobs
 //! and room objects is untouched: one reset row still owns one mob.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
 use mud_db::{mob_reset_equipment::MobResetEquipment, object_reset_contents::ObjectResetContent};
@@ -101,7 +101,7 @@ pub fn build_gear_entries(
         by_reset.entry(eq.reset_id).or_default().push(MobGearEntry {
             object_zone_id: eq.object_zone_id,
             object_id: eq.object_id,
-            slot: eq.wear_location.as_deref().and_then(Slot::from_label),
+            slot: eq.wear_location.as_deref().and_then(Slot::from_label_warn),
             cap: gear_cap(eq.probability),
         });
     }
@@ -216,6 +216,11 @@ pub fn outfit_mob(
     else {
         return stats;
     };
+    // Slots already filled on this mob by earlier entries: a second item
+    // for a paired position (two `EARS`/`WRIST` rows) takes the other
+    // side; with nothing free it stays in inventory instead of doubling
+    // up in an occupied slot.
+    let mut worn: HashSet<Slot> = HashSet::new();
     for entry in entries {
         let key = (entry.object_zone_id, entry.object_id);
         let proto = world
@@ -229,7 +234,11 @@ pub fn outfit_mob(
             stats.skipped += 1;
             continue;
         }
-        spawn_item(world, &proto, mob, entry.slot);
+        let slot = entry.slot.and_then(|s| s.first_free(|c| worn.contains(&c)));
+        if let Some(slot) = slot {
+            worn.insert(slot);
+        }
+        spawn_item(world, &proto, mob, slot);
         *counts.entry(key).or_insert(0) += 1;
         stats.spawned += 1;
     }

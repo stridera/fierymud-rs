@@ -15,7 +15,8 @@ pub struct MobResetEquipment {
     pub object_zone_id: i32,
     pub object_id: i32,
     /// Free-text slot name; the runtime maps to `mud_world::Slot` via
-    /// `Slot::from_label`. Unknown slots are skipped on load.
+    /// `Slot::from_label_warn`. Unknown slots log one warning per label and the
+    /// item is carried instead of worn.
     pub wear_location: Option<String>,
     pub max_instances: i32,
     pub probability: f64,
