@@ -4717,6 +4717,14 @@ pub(crate) fn snapshot_player(
                 liquid_remaining: lc.as_ref().map(|l| l.remaining),
                 liquid_type: lc.as_ref().map(|l| l.liquid.clone()),
                 lit: world.get::<mud_world::Lit>(*e).is_some(),
+                custom: world.get::<mud_world::ItemCustomization>(*e).map(|c| {
+                    mud_db::character_items::ItemCustomSnap {
+                        name: c.name.clone(),
+                        examine: c.examine.clone(),
+                        keywords: c.keywords.clone(),
+                        overwrite: c.dirty,
+                    }
+                }),
                 in_corpse: *in_corpse,
             });
             ents.push(*e);
@@ -5891,6 +5899,21 @@ pub(crate) fn spawn_inventory(
                 && let Ok(mut e) = world.get_entity_mut(item_entity)
             {
                 e.insert(mud_world::Lit);
+            }
+            if row.custom_name.is_some()
+                || row.custom_examine_description.is_some()
+                || row.custom_keywords.is_some()
+            {
+                crate::item_custom::install(
+                    world,
+                    item_entity,
+                    mud_world::ItemCustomization {
+                        name: row.custom_name.clone(),
+                        examine: row.custom_examine_description.clone(),
+                        keywords: row.custom_keywords.clone(),
+                        dirty: false,
+                    },
+                );
             }
             spawned.insert(row.id, item_entity);
             made_progress = true;
@@ -8491,6 +8514,218 @@ mod tests {
             .unwrap();
         let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![second_id, first_id], "oldest arrival first");
+
+        mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// Issues #67/#68: a custom name, examine text and keyword override
+    /// written through the normal save reload on the next login, set the
+    /// mirroring instance flags, and clearing them clears the columns.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn item_customization_survives_save_and_reload() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let object: Option<(i32, i32)> =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some((oz, oid)) = object else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "cust").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let mut protos = mud_world::ObjectPrototypes::default();
+        let mut proto = crate::commands::test_support::object_proto(
+            oz,
+            oid,
+            mud_db::enums::ObjectType::Container,
+        );
+        proto.name = "a cloth sack".into();
+        proto.keywords = vec!["sack".into()];
+        protos.by_key.insert((oz, oid), proto);
+        let by_key = protos.by_key.clone();
+        world.insert_resource(protos);
+        world.insert_resource(mud_world::TriggerCatalog::default());
+        world.insert_resource(mud_world::ObjectAbilityCatalog::default());
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &c.id, room);
+        let bag = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a cloth sack".into(),
+                },
+                WorldKey { zone: oz, id: oid },
+                Located(player),
+            ))
+            .id();
+        crate::item_custom::edit(&mut world, bag, |cu| {
+            cu.name = Some("Daedela's cloth sack".into());
+            cu.examine = Some("Stitched with care.".into());
+            cu.keywords = Some(vec!["sack".into(), "gems".into()]);
+        });
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+
+        let row_flags = |pool: PgPool, id: i32| async move {
+            mud_db::sqlx::query_as::<
+                _,
+                (
+                    Option<String>,
+                    Option<String>,
+                    Vec<String>,
+                    serde_json::Value,
+                ),
+            >(
+                "SELECT custom_name, custom_examine_description, \
+                        COALESCE(instance_flags::text[], '{}'), custom_values \
+                 FROM \"CharacterItems\" WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let pid = world.get::<mud_world::PersistedItemId>(bag).unwrap().0;
+        let (name, examine, flags, values) = row_flags(pool.clone(), pid).await;
+        assert_eq!(name.as_deref(), Some("Daedela's cloth sack"));
+        assert_eq!(examine.as_deref(), Some("Stitched with care."));
+        assert!(flags.contains(&"CUSTOM_NAMED".to_string()), "{flags:?}");
+        assert!(flags.contains(&"CUSTOM_DESCRIBED".to_string()), "{flags:?}");
+        assert_eq!(values["keywords"], serde_json::json!(["sack", "gems"]));
+
+        // Reload into a fresh world through the real loader.
+        let rows = mud_db::character_items::list_for(&pool, &c.id)
+            .await
+            .unwrap();
+        let mut world2 = World::new();
+        world2.insert_resource(mud_world::ObjectPrototypes { by_key });
+        world2.insert_resource(mud_world::TriggerCatalog::default());
+        world2.insert_resource(mud_world::ObjectAbilityCatalog::default());
+        let room2 = world2.spawn_empty().id();
+        let player2 = spawn_player_for(&mut world2, &c.id, room2);
+        assert_eq!(spawn_inventory(&mut world2, player2, &rows), 1);
+        let loaded = world2
+            .query_filtered::<Entity, With<Item>>()
+            .iter(&world2)
+            .next()
+            .unwrap();
+        assert_eq!(
+            world2.get::<Named>(loaded).unwrap().name,
+            "Daedela's cloth sack"
+        );
+        assert_eq!(
+            world2.get::<mud_world::Description>(loaded).unwrap().0,
+            "Stitched with care."
+        );
+        let kw = world2.get::<mud_world::Keywords>(loaded).unwrap().0.clone();
+        assert!(kw.contains(&"gems".to_string()) && kw.contains(&"daedela's".to_string()));
+
+        // Clearing the overrides clears the columns and flags.
+        crate::item_custom::edit(&mut world, bag, |cu| {
+            cu.name = None;
+            cu.examine = None;
+            cu.keywords = None;
+        });
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let (name, examine, flags, values) = row_flags(pool.clone(), pid).await;
+        assert!(name.is_none() && examine.is_none(), "{name:?} {examine:?}");
+        assert!(flags.is_empty(), "{flags:?}");
+        assert!(values.get("keywords").is_none(), "{values}");
+
+        mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// A holder's save must not overwrite customization an admin wrote
+    /// straight into the database: only a customization the runtime changed
+    /// this session (`dirty`) is written over an existing row.
+    #[tokio::test]
+    async fn clean_customization_does_not_clobber_database_edits() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let object: Option<(i32, i32)> =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some((oz, oid)) = object else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "clean").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &c.id, room);
+        let plain = world
+            .spawn((Item, WorldKey { zone: oz, id: oid }, Located(player)))
+            .id();
+        let loaded = world
+            .spawn((
+                Item,
+                WorldKey { zone: oz, id: oid },
+                Located(player),
+                mud_world::ItemCustomization {
+                    name: Some("Old".into()),
+                    ..Default::default()
+                },
+            ))
+            .id();
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let plain_id = world.get::<mud_world::PersistedItemId>(plain).unwrap().0;
+        let loaded_id = world.get::<mud_world::PersistedItemId>(loaded).unwrap().0;
+        // A fresh INSERT writes the customization even when not dirty.
+        let name_of_row = |pool: PgPool, id: i32| async move {
+            mud_db::sqlx::query_scalar::<_, Option<String>>(
+                "SELECT custom_name FROM \"CharacterItems\" WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            name_of_row(pool.clone(), loaded_id).await.as_deref(),
+            Some("Old")
+        );
+
+        mud_db::sqlx::query(
+            "UPDATE \"CharacterItems\" SET custom_name = 'Admin set' WHERE id = ANY($1)",
+        )
+        .bind(vec![plain_id, loaded_id])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        assert_eq!(
+            name_of_row(pool.clone(), plain_id).await.as_deref(),
+            Some("Admin set")
+        );
+        assert_eq!(
+            name_of_row(pool.clone(), loaded_id).await.as_deref(),
+            Some("Admin set")
+        );
 
         mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
             .bind(&c.id)

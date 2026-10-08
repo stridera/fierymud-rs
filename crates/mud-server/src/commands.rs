@@ -449,6 +449,11 @@ mod goto_tests;
 #[cfg(test)]
 #[path = "commands/invisibility_tests.rs"]
 mod invisibility_tests;
+#[path = "commands/item_edit.rs"]
+mod item_edit;
+#[cfg(test)]
+#[path = "commands/item_edit_tests.rs"]
+mod item_edit_tests;
 #[cfg(test)]
 #[path = "commands/look_mob_tests.rs"]
 mod look_mob_tests;

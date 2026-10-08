@@ -5,8 +5,13 @@
 //! charges, condition). The runtime owns a subset that mutates during play —
 //! `charges`, `liquid_remaining`, `liquid_type`, and the lit flag of light
 //! sources (the `lit` key of `custom_values`) — and round-trips those.
-//! Other columns (`condition`, `custom_name`, `custom_examine_description`,
-//! the rest of `custom_values`, `instance_flags`, `liquid_effects`, `liquid_identified`)
+//! Per-instance text customization (`custom_name`, `custom_examine_description`,
+//! the `keywords` key of `custom_values`, and the `CUSTOM_NAMED` /
+//! `CUSTOM_DESCRIBED` instance flags that mirror them) is loaded always but
+//! written back only when the snapshot says the runtime changed it
+//! (`ItemCustomSnap::overwrite`), or on INSERT.
+//! Other columns (`condition`, the rest of `custom_values`, the rest of
+//! `instance_flags`, `liquid_effects`, `liquid_identified`)
 //! aren't yet read or written by any runtime command, so the save path
 //! UPDATEs only the runtime-owned columns and leaves the rest untouched.
 //! That preserves admin/editor edits to those fields across player saves.
@@ -51,6 +56,25 @@ pub struct CharacterItemRow {
     /// Whether the item is a lit light source, read from the
     /// `custom_values` JSONB key `lit` (no dedicated column).
     pub lit: bool,
+    /// Player- or staff-given short description (`custom_name`).
+    pub custom_name: Option<String>,
+    /// Per-instance examine text (`custom_examine_description`).
+    pub custom_examine_description: Option<String>,
+    /// Keyword override (the `keywords` array in `custom_values`).
+    pub custom_keywords: Option<Vec<String>>,
+}
+
+/// Save-side per-instance text customization (see [`CharacterItemSnap::custom`]).
+#[derive(Debug, Clone, Default)]
+pub struct ItemCustomSnap {
+    pub name: Option<String>,
+    pub examine: Option<String>,
+    pub keywords: Option<Vec<String>>,
+    /// The runtime changed these this session: write them over an existing
+    /// row (a `None` clears the column). When `false` an UPDATE leaves the
+    /// row's customization alone, preserving edits made directly in the
+    /// database. A fresh INSERT always writes them.
+    pub overwrite: bool,
 }
 
 /// Save-side per-item snapshot. Mirrors what the runtime knows about
@@ -83,6 +107,9 @@ pub struct CharacterItemSnap {
     /// row's `custom_values` JSONB (other keys are left alone), so no
     /// schema change is needed.
     pub lit: bool,
+    /// Text customization; `None` when the item has no customization
+    /// component (UPDATE leaves the row's columns alone).
+    pub custom: Option<ItemCustomSnap>,
     /// The item sits in the dying owner's corpse (written by the death
     /// transaction): its row keeps `character_id = owner` and gets the
     /// corpse's id. Every other snapshot entry clears `corpse_id`, which
@@ -161,7 +188,12 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
             charges,
             liquid_remaining,
             liquid_type,
-            COALESCE(custom_values -> 'lit' = 'true'::jsonb, FALSE) AS "lit!"
+            COALESCE(custom_values -> 'lit' = 'true'::jsonb, FALSE) AS "lit!",
+            custom_name,
+            custom_examine_description,
+            CASE WHEN jsonb_typeof(custom_values -> 'keywords') = 'array'
+                 THEN ARRAY(SELECT jsonb_array_elements_text(custom_values -> 'keywords'))
+            END AS "custom_keywords?"
         FROM "CharacterItems"
         WHERE character_id = $1 AND corpse_id IS NULL
         ORDER BY updated_at, id
@@ -188,7 +220,12 @@ pub async fn list_for_corpse(pool: &PgPool, corpse_id: i32) -> sqlx::Result<Vec<
             charges,
             liquid_remaining,
             liquid_type,
-            COALESCE(custom_values -> 'lit' = 'true'::jsonb, FALSE) AS "lit!"
+            COALESCE(custom_values -> 'lit' = 'true'::jsonb, FALSE) AS "lit!",
+            custom_name,
+            custom_examine_description,
+            CASE WHEN jsonb_typeof(custom_values -> 'keywords') = 'array'
+                 THEN ARRAY(SELECT jsonb_array_elements_text(custom_values -> 'keywords'))
+            END AS "custom_keywords?"
         FROM "CharacterItems"
         WHERE corpse_id = $1
         ORDER BY updated_at, id
@@ -250,9 +287,12 @@ pub async fn delete_corpse_item_rows(
 ///   (`character_id`), so an item handed over from another character is
 ///   claimed rather than deleted by the previous owner's save. The row's
 ///   `corpse_id` is set to `corpse_id` for entries flagged `in_corpse` and
-///   cleared otherwise (an item looted out of a corpse). Other
-///   columns (`condition`, `instance_flags`, `custom_name`, etc.) are
-///   untouched. If the row no longer exists the item is inserted.
+///   cleared otherwise (an item looted out of a corpse). Text
+///   customization (`custom_name`, `custom_examine_description`, the
+///   `keywords` key of `custom_values` and the mirroring
+///   `CUSTOM_NAMED` / `CUSTOM_DESCRIBED` instance flags) is rewritten only
+///   when `custom.overwrite`. Other columns (`condition`, other
+///   `instance_flags`, etc.) are untouched. If the row no longer exists the item is inserted.
 /// * Snapshot entries with `persisted_id = None` (newly acquired this
 ///   session) → INSERT.
 ///
@@ -326,6 +366,11 @@ pub async fn save_inventory_diff(
                 snap.parent_persisted_id
                     .map(|pid| remapped.get(&pid).copied().unwrap_or(pid))
             });
+        let custom = snap.custom.as_ref();
+        let overwrite = custom.is_some_and(|c| c.overwrite);
+        let custom_name = custom.and_then(|c| c.name.as_deref());
+        let custom_examine = custom.and_then(|c| c.examine.as_deref());
+        let patch = custom_values_patch(snap.lit, custom.and_then(|c| c.keywords.as_deref()));
         if let Some(id) = snap.persisted_id {
             let updated = sqlx::query!(
                 r#"
@@ -336,13 +381,24 @@ pub async fn save_inventory_diff(
                     charges = $4,
                     liquid_remaining = $5,
                     liquid_type = $6,
-                    custom_values = CASE WHEN $8::boolean
+                    custom_values = (CASE WHEN $11::boolean
                         THEN (CASE WHEN jsonb_typeof(custom_values) = 'object'
-                                   THEN custom_values ELSE '{}'::jsonb END)
-                             || '{"lit": true}'::jsonb
+                                   THEN custom_values ELSE '{}'::jsonb END) - 'lit' - 'keywords'
                         ELSE (CASE WHEN jsonb_typeof(custom_values) = 'object'
                                    THEN custom_values ELSE '{}'::jsonb END) - 'lit'
-                        END,
+                        END) || $8::jsonb,
+                    custom_name = CASE WHEN $11::boolean THEN $12::text ELSE custom_name END,
+                    custom_examine_description =
+                        CASE WHEN $11::boolean THEN $13::text ELSE custom_examine_description END,
+                    instance_flags = CASE WHEN $11::boolean THEN
+                        array_remove(array_remove(COALESCE(instance_flags, ARRAY[]::"ItemInstanceFlag"[]),
+                                                  'CUSTOM_NAMED'::"ItemInstanceFlag"),
+                                     'CUSTOM_DESCRIBED'::"ItemInstanceFlag")
+                        || CASE WHEN $12::text IS NULL THEN ARRAY[]::"ItemInstanceFlag"[]
+                                ELSE ARRAY['CUSTOM_NAMED'::"ItemInstanceFlag"] END
+                        || CASE WHEN $13::text IS NULL THEN ARRAY[]::"ItemInstanceFlag"[]
+                                ELSE ARRAY['CUSTOM_DESCRIBED'::"ItemInstanceFlag"] END
+                        ELSE instance_flags END,
                     updated_at = NOW() + $9::int * INTERVAL '1 millisecond',
                     corpse_id = $10
                 WHERE id = $7
@@ -355,9 +411,12 @@ pub async fn save_inventory_diff(
                 snap.liquid_remaining.unwrap_or(0),
                 snap.liquid_type.as_deref(),
                 id,
-                snap.lit,
+                patch,
                 arrival_offset_ms,
                 row_corpse_id,
+                overwrite,
+                custom_name,
+                custom_examine,
             )
             .fetch_optional(&mut *conn)
             .await?;
@@ -372,11 +431,14 @@ pub async fn save_inventory_diff(
                 (character_id, object_zone_id, object_id,
                  equipped_location, container_id,
                  charges, liquid_remaining, liquid_type, custom_values, updated_at,
-                 corpse_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                    CASE WHEN $9::boolean THEN '{"lit": true}'::jsonb ELSE '{}'::jsonb END,
+                 corpse_id, custom_name, custom_examine_description, instance_flags)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb,
                     NOW() + $10::int * INTERVAL '1 millisecond',
-                    $11)
+                    $11, $12::text, $13::text,
+                    (CASE WHEN $12::text IS NULL THEN ARRAY[]::"ItemInstanceFlag"[]
+                          ELSE ARRAY['CUSTOM_NAMED'::"ItemInstanceFlag"] END)
+                    || (CASE WHEN $13::text IS NULL THEN ARRAY[]::"ItemInstanceFlag"[]
+                             ELSE ARRAY['CUSTOM_DESCRIBED'::"ItemInstanceFlag"] END))
             RETURNING id
             "#,
             character_id,
@@ -387,9 +449,11 @@ pub async fn save_inventory_diff(
             snap.charges.unwrap_or(-1),
             snap.liquid_remaining.unwrap_or(0),
             snap.liquid_type.as_deref(),
-            snap.lit,
+            patch,
             arrival_offset_ms,
             row_corpse_id,
+            custom_name,
+            custom_examine,
         )
         .fetch_one(&mut *conn)
         .await?;
@@ -401,4 +465,18 @@ pub async fn save_inventory_diff(
     }
 
     Ok(assigned)
+}
+
+/// The `custom_values` keys the runtime owns, as one JSON object: `lit`
+/// (only when set) and `keywords` (only when overridden). The UPDATE strips
+/// the owned keys from the row and merges this over the rest.
+fn custom_values_patch(lit: bool, keywords: Option<&[String]>) -> serde_json::Value {
+    let mut patch = serde_json::Map::new();
+    if lit {
+        patch.insert("lit".into(), serde_json::Value::Bool(true));
+    }
+    if let Some(kw) = keywords {
+        patch.insert("keywords".into(), serde_json::json!(kw));
+    }
+    serde_json::Value::Object(patch)
 }

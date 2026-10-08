@@ -1272,6 +1272,23 @@ pub struct Charges(pub i32);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PersistedItemId(pub i32);
 
+/// Per-instance text overrides on an Item, mirroring the `CharacterItems`
+/// columns `custom_name`, `custom_examine_description` and the `keywords`
+/// key of `custom_values`. The effective `Named` / `Description` /
+/// `Keywords` components are derived from the proto plus these overrides
+/// (`item_custom::apply` in the server crate); `None` falls back to the proto.
+///
+/// `dirty` is set when the override changed this session. Only dirty
+/// customizations overwrite the row on save, so values an admin wrote
+/// straight into the database are not clobbered by a holder's save.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemCustomization {
+    pub name: Option<String>,
+    pub examine: Option<String>,
+    pub keywords: Option<Vec<String>>,
+    pub dirty: bool,
+}
+
 /// Per-character wimpy threshold: when the WIMPY flag is set and
 /// the character's HP falls below this percentage of max, the
 /// combat tick auto-flees them. Default 25 (matches legacy

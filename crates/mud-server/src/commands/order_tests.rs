@@ -254,6 +254,9 @@ fn inventory_order_survives_a_save_load_round_trip() {
             liquid_remaining: 0,
             liquid_type: None,
             lit: false,
+            custom_name: None,
+            custom_examine_description: None,
+            custom_keywords: None,
         })
         .collect();
 
@@ -294,6 +297,9 @@ fn two_saved_ears_rows_load_into_left_and_right_ear() {
         liquid_remaining: 0,
         liquid_type: None,
         lit: false,
+        custom_name: None,
+        custom_examine_description: None,
+        custom_keywords: None,
     };
     let rows = vec![row(1, 1, "EARS"), row(2, 2, "EARS"), row(3, 3, "EARS")];
     assert_eq!(crate::login::spawn_inventory(&mut world, p, &rows), 3);

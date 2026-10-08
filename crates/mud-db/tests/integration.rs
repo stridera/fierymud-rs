@@ -176,6 +176,7 @@ async fn round_trips_character_items() {
             liquid_remaining: None,
             liquid_type: None,
             lit: true,
+            custom: None,
             in_corpse: false,
         },
         CharacterItemSnap {
@@ -189,6 +190,7 @@ async fn round_trips_character_items() {
             liquid_remaining: None,
             liquid_type: None,
             lit: false,
+            custom: None,
             in_corpse: false,
         },
     ];
@@ -236,6 +238,7 @@ async fn round_trips_character_items() {
             liquid_remaining: r.liquid_type.as_ref().map(|_| r.liquid_remaining),
             liquid_type: r.liquid_type.clone(),
             lit: r.lit,
+            custom: None,
             in_corpse: false,
         })
         .collect();
@@ -671,6 +674,7 @@ async fn lit_flag_preserves_other_custom_values_keys() {
         liquid_remaining: None,
         liquid_type: None,
         lit,
+        custom: None,
         in_corpse: false,
     };
     // Start from an empty inventory, then insert one unlit item.
@@ -751,6 +755,7 @@ async fn lit_flag_preserves_other_custom_values_keys() {
             liquid_remaining: r.liquid_type.as_ref().map(|_| r.liquid_remaining),
             liquid_type: r.liquid_type.clone(),
             lit: r.lit,
+            custom: None,
             in_corpse: false,
         })
         .collect();
@@ -812,6 +817,7 @@ fn corpse_snap(
         liquid_remaining: None,
         liquid_type: None,
         lit: false,
+        custom: None,
         in_corpse,
     }
 }
