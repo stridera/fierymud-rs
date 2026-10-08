@@ -10,8 +10,11 @@
 //! + "decomposing" states with separate flavor lines.
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::ObjectFlag;
-use mud_world::{CoinPile, Description, Item, ItemTimer, Keywords, Located, Named, ObjectProto};
+use mud_db::enums::{ObjectFlag, ObjectType};
+use mud_world::{
+    CoinPile, Corpse, Description, Item, ItemTimer, Keywords, Located, Named, ObjectFlags,
+    ObjectProto, ObjectPrototypes, WorldKey,
+};
 
 use crate::commands::{broadcast_room_except_rendered, send_to};
 
@@ -135,10 +138,17 @@ pub(crate) fn release_contents(
     if coins > 0 {
         release_coins(world, dest, kind, coins);
     }
+    // Legacy `extract_corpse` starts decomposing only what a rotting
+    // *corpse* spills onto the floor; contents handed to an enclosing
+    // container or a carrier's room are left alone.
+    let decompose = matches!(kind, HolderKind::Room) && world.get::<Corpse>(container).is_some();
     for item in contents {
         match dest {
             Some(d) => {
                 world.entity_mut(item).insert(Located(d));
+                if decompose {
+                    start_decomposing(world, item);
+                }
             }
             None => {
                 if let Ok(em) = world.get_entity_mut(item) {
@@ -146,6 +156,48 @@ pub(crate) fn release_contents(
                 }
             }
         }
+    }
+}
+
+/// Legacy `start_decomposing` (limits.cpp): an object below level 100
+/// and not PERMANENT rots in `level + 11` ticks (+192 for a key); a
+/// tick is one MUD hour, so the clock is that many `SECS_PER_MUD_HOUR`.
+/// Contents recurse, except that a corpse's contents never decompose.
+/// An item that already carries an `ItemTimer` keeps it: the Rust timer
+/// is a single clock, and legacy only ever raises a decomp timer.
+pub(crate) fn start_decomposing(world: &mut World, item: Entity) {
+    let key = world.get::<WorldKey>(item).map(|k| (k.zone, k.id));
+    let proto = key.and_then(|k| {
+        world
+            .get_resource::<ObjectPrototypes>()
+            .and_then(|p| p.by_key.get(&k))
+            .map(|p| (p.level, p.r#type == ObjectType::Key))
+    });
+    let (level, is_key) = proto.unwrap_or((0, false));
+    let permanent = world
+        .get::<ObjectFlags>(item)
+        .is_some_and(|f| f.has(ObjectFlag::Permanent));
+    if level < 100 && !permanent && world.get::<ItemTimer>(item).is_none() {
+        let ticks = level
+            .saturating_add(11)
+            .saturating_add(if is_key { 192 } else { 0 });
+        world.entity_mut(item).insert(ItemTimer {
+            remaining_secs: ticks.saturating_mul(SECS_PER_MUD_HOUR),
+            decompose_window_secs: 0,
+        });
+    }
+    if world.get::<Corpse>(item).is_some() {
+        return;
+    }
+    let inner: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+        q.iter(world)
+            .filter(|(_, l)| l.0 == item)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for e in inner {
+        start_decomposing(world, e);
     }
 }
 
@@ -225,7 +277,7 @@ pub(crate) fn location_kind(world: &World, item: Entity) -> (Entity, HolderKind)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mud_world::{Keywords, WorldKey};
+    use mud_world::Keywords;
 
     fn item(world: &mut World, name: &str, at: Entity) -> Entity {
         world
@@ -286,5 +338,115 @@ mod tests {
         item_decay_tick(&mut world);
         assert!(world.get_entity(bag).is_err());
         assert_eq!(world.get::<Located>(gem).unwrap().0, room);
+    }
+
+    fn corpse(world: &mut World, at: Entity) -> Entity {
+        let c = item(world, "corpse", at);
+        world.entity_mut(c).insert(Corpse);
+        c
+    }
+
+    fn proto_world(entries: &[(i32, i32, ObjectType, i32)]) -> World {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        for &(zone, id, kind, level) in entries {
+            let mut p = crate::commands::test_support::object_proto(zone, id, kind);
+            p.level = level;
+            protos.by_key.insert((zone, id), p);
+        }
+        world.insert_resource(protos);
+        world
+    }
+
+    fn keyed(world: &mut World, name: &str, at: Entity, id: i32) -> Entity {
+        let e = item(world, name, at);
+        world.entity_mut(e).insert(WorldKey { zone: 1, id });
+        e
+    }
+
+    #[test]
+    fn rotting_floor_corpse_starts_level_based_timers_on_contents() {
+        // level 5 -> 16 ticks; key level 5 -> 16 + 192 ticks;
+        // level 100 and PERMANENT never rot.
+        let mut world = proto_world(&[
+            (1, 10, ObjectType::Other, 5),
+            (1, 11, ObjectType::Key, 5),
+            (1, 12, ObjectType::Other, 100),
+            (1, 13, ObjectType::Other, 5),
+        ]);
+        let room = world.spawn(mud_world::Room).id();
+        let c = corpse(&mut world, room);
+        world.entity_mut(c).insert(ItemTimer {
+            remaining_secs: 1,
+            decompose_window_secs: 0,
+        });
+        let sword = keyed(&mut world, "sword", c, 10);
+        let key = keyed(&mut world, "key", c, 11);
+        let god = keyed(&mut world, "relic", c, 12);
+        let perm = keyed(&mut world, "perm", c, 13);
+        world
+            .entity_mut(perm)
+            .insert(ObjectFlags(vec![ObjectFlag::Permanent]));
+        item_decay_tick(&mut world);
+        assert!(world.get_entity(c).is_err());
+        let secs = |w: &World, e| w.get::<ItemTimer>(e).map(|t| t.remaining_secs);
+        assert_eq!(secs(&world, sword), Some(16 * SECS_PER_MUD_HOUR));
+        assert_eq!(secs(&world, key), Some(208 * SECS_PER_MUD_HOUR));
+        assert_eq!(secs(&world, god), None);
+        assert_eq!(secs(&world, perm), None);
+    }
+
+    #[test]
+    fn corpse_release_recurses_into_bags_but_not_nested_corpses() {
+        let mut world = proto_world(&[]);
+        let room = world.spawn(mud_world::Room).id();
+        let c = corpse(&mut world, room);
+        world.entity_mut(c).insert(ItemTimer {
+            remaining_secs: 1,
+            decompose_window_secs: 0,
+        });
+        let bag = item(&mut world, "bag", c);
+        let gem = item(&mut world, "gem", bag);
+        let inner_corpse = corpse(&mut world, c);
+        let loot = item(&mut world, "loot", inner_corpse);
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(bag).is_some());
+        assert!(world.get::<ItemTimer>(gem).is_some());
+        assert!(world.get::<ItemTimer>(inner_corpse).is_some());
+        assert!(world.get::<ItemTimer>(loot).is_none());
+    }
+
+    #[test]
+    fn rotting_corpse_in_a_container_or_hands_adds_no_timers() {
+        let mut world = proto_world(&[]);
+        let room = world.spawn(mud_world::Room).id();
+        let chest = item(&mut world, "chest", room);
+        let c1 = corpse(&mut world, chest);
+        let in_chest = item(&mut world, "gem", c1);
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let c2 = corpse(&mut world, player);
+        let carried = item(&mut world, "ring", c2);
+        for c in [c1, c2] {
+            world.entity_mut(c).insert(ItemTimer {
+                remaining_secs: 1,
+                decompose_window_secs: 0,
+            });
+        }
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(in_chest).is_none());
+        assert!(world.get::<ItemTimer>(carried).is_none());
+    }
+
+    #[test]
+    fn existing_timer_is_kept_by_start_decomposing() {
+        let mut world = proto_world(&[]);
+        let room = world.spawn(mud_world::Room).id();
+        let e = item(&mut world, "torch", room);
+        world.entity_mut(e).insert(ItemTimer {
+            remaining_secs: 7,
+            decompose_window_secs: 0,
+        });
+        start_decomposing(&mut world, e);
+        assert_eq!(world.get::<ItemTimer>(e).unwrap().remaining_secs, 7);
     }
 }
