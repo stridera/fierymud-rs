@@ -547,3 +547,50 @@ fn identify_of_a_plain_item_has_no_worn_effects_section() {
     assert!(!out.contains("Worn Effects"), "{out}");
     assert!(!out.contains("Apply:"), "{out}");
 }
+
+fn reset_ring(world: &mut World, holder: Entity, id: i32, keyword: &str) -> Entity {
+    let r = ring(world, holder, id, keyword, vec![modify("str_bonus", 2)]);
+    world.get_mut::<WorldKey>(r).unwrap().zone = 30;
+    world.entity_mut(r).insert(mud_world::FromObjectReset(0));
+    r
+}
+
+#[test]
+fn zreset_keeps_a_reset_ring_a_player_wears_or_carries() {
+    let (mut world, p, mut rx) = setup();
+    let worn = reset_ring(&mut world, p, 20, "worn");
+    let bag = world.spawn((Item, Located(p))).id();
+    let bagged = reset_ring(&mut world, bag, 21, "bagged");
+    // Proto zone must match the key the item carries.
+    let proto = world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .get(&(1, 20))
+        .cloned()
+        .unwrap();
+    world
+        .resource_mut::<ObjectPrototypes>()
+        .by_key
+        .insert((30, 20), proto);
+    world.get_mut::<WorldKey>(worn).unwrap().id = 20;
+    dispatch(&mut world, p, "wear worn");
+    let _ = drain(&mut rx);
+    assert_eq!(strength(&world, p), 15);
+    super::admin_world::cmd_zreset(&mut world, p, "30");
+    let out = drain(&mut rx);
+    assert!(world.get_entity(worn).is_ok(), "{out}");
+    assert!(world.get_entity(bagged).is_ok(), "{out}");
+    assert_eq!(strength(&world, p), 15, "still worn, still applied");
+    assert!(out.contains("0 item(s)"), "{out}");
+}
+
+#[test]
+fn zreset_still_deletes_a_floor_reset_item() {
+    let (mut world, p, mut rx) = setup();
+    let room = world.get::<Located>(p).unwrap().0;
+    let floor = reset_ring(&mut world, room, 22, "floor");
+    super::admin_world::cmd_zreset(&mut world, p, "30");
+    let out = drain(&mut rx);
+    assert!(world.get_entity(floor).is_err(), "{out}");
+    assert!(out.contains("1 item(s)"), "{out}");
+}

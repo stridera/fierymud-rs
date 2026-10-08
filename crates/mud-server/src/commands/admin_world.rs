@@ -1935,6 +1935,23 @@ pub(crate) fn cmd_cls(world: &mut World, player: Entity, _args: &str) {
     send_raw(world, player, "\x1b[2J\x1b[H");
 }
 
+/// True when `item`'s outermost holder (through nested containers) is a
+/// player.
+fn held_by_player(world: &World, item: Entity) -> bool {
+    let mut cur = item;
+    // Real nesting is a handful of bags; the cap guards a `Located` cycle.
+    for _ in 0..32 {
+        let Some(holder) = world.get::<Located>(cur).map(|l| l.0) else {
+            return false;
+        };
+        if world.get::<Player>(holder).is_some() {
+            return true;
+        }
+        cur = holder;
+    }
+    false
+}
+
 pub(crate) fn cmd_zreset(world: &mut World, player: Entity, args: &str) {
     use mud_world::{FromMobReset, FromObjectReset};
     record_admin_action(world, player, "zreset", args);
@@ -1966,11 +1983,19 @@ pub(crate) fn cmd_zreset(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _, _)| e)
             .collect()
     };
+    // Legacy reset_zone never takes an object out of a player's hands (or
+    // off their body): a reset item a player picked up or wears is theirs
+    // now, whatever bag it sits in.
     let item_targets: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &WorldKey, &FromObjectReset), With<Item>>();
-        q.iter(world)
+        let candidates: Vec<Entity> = q
+            .iter(world)
             .filter(|(_, k, _)| k.zone == zone)
             .map(|(e, _, _)| e)
+            .collect();
+        candidates
+            .into_iter()
+            .filter(|e| !held_by_player(world, *e))
             .collect()
     };
     let mob_count = mob_targets.len();
@@ -1984,9 +2009,8 @@ pub(crate) fn cmd_zreset(world: &mut World, player: Entity, args: &str) {
         }
     }
     for e in item_targets {
-        if let Ok(em) = world.get_entity_mut(e) {
-            em.despawn();
-        }
+        // Reverses the bonuses of an item some mob wears before it goes.
+        crate::equip_apply::despawn_item(world, e);
     }
     let admin_name = name_of(world, player);
     send_rendered(
