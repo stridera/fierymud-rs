@@ -1496,6 +1496,7 @@ pub async fn load_ability_catalog(pool: &PgPool) -> sqlx::Result<AbilityCatalog>
                 sphere: row.sphere,
                 damage_type: row.damage_type,
                 memorization_time: row.memorization_time,
+                passive: row.tags.iter().any(|t| t.eq_ignore_ascii_case("passive")),
             },
         );
     }

@@ -508,10 +508,14 @@ widget. One entry per known ability.
     name: string,
     cooldown: number,   // seconds remaining; 0 = available
     available: boolean, // mirror of cooldown == 0; precomputed for cheap filtering
+    passive: boolean,   // true = works automatically (dual wield, weapon skills); no button
     mp_cost?: number,   // reserved — not emitted today (cost is circle-derived)
   }>
 }
 ```
+
+`passive` comes from the ability row's `passive` tag (`Ability.tags`).
+Clients should not draw an activation chip for `passive: true` skills.
 
 **Cadence:** Every prompt.
 

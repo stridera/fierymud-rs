@@ -2211,6 +2211,11 @@ pub struct AbilityDef {
     /// recovery; expensive spells (Harm, Meteorswarm) can charge a
     /// premium. Read by the slot-push site in `commands::invoke_ability`.
     pub memorization_time: i32,
+    /// True when the ability row carries the `passive` tag: it works
+    /// automatically (dual wield, weapon proficiencies, ...) and has no
+    /// command to invoke. Surfaced as `passive` in `Char.Skills` so
+    /// clients do not draw an activation button for it.
+    pub passive: bool,
 }
 
 /// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The

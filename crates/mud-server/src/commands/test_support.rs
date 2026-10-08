@@ -119,6 +119,7 @@ pub(crate) fn ability_def(id: i32, name: &str, kind: AbilityKind) -> AbilityDef 
         sphere: None,
         damage_type: None,
         memorization_time: 0,
+        passive: false,
     }
 }
 

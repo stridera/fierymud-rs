@@ -104,6 +104,10 @@ pub struct AbilityRow {
     /// would suggest. 0 for the vast majority — the base table
     /// already does most of the work.
     pub memorization_time: i32,
+    /// Builder-editable `Ability.tags`. The `passive` tag marks a
+    /// proficiency that fires automatically (dual wield, weapon
+    /// skills, sphere masteries) and has no command to click.
+    pub tags: Vec<String>,
 }
 
 pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
@@ -127,7 +131,8 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
             is_magical,
             LOWER(sphere::text) AS "sphere?: String",
             LOWER(damage_type::text) AS "damage_type?: String",
-            memorization_time
+            memorization_time,
+            tags AS "tags!: Vec<String>"
         FROM "Ability"
         ORDER BY id
         "#

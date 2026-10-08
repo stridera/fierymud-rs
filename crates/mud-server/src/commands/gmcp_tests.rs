@@ -486,3 +486,55 @@ fn aggro_lists_hating_mobs_and_ignores_unrelated_ones() {
     super::send_prompt(&mut fx.world, p);
     assert!(of(&frames(&drain_bytes(&mut rx)), "Char.Aggro").is_empty());
 }
+
+const DUAL_WIELD: i32 = 20;
+const KICK: i32 = 21;
+
+/// A player with vitals and two known skills: a passive one (tagged in
+/// the ability data) and an active one.
+fn world_with_skills() -> (Fx, Entity, Rx) {
+    let mut fx = fixture();
+    let mut catalog = mud_world::AbilityCatalog::default();
+    let mut dual = ability_def(DUAL_WIELD, "Dual Wield", AbilityKind::Skill);
+    dual.passive = true;
+    catalog.by_name.insert("dual wield".to_string(), dual);
+    catalog.by_name.insert(
+        "kick".to_string(),
+        ability_def(KICK, "Kick", AbilityKind::Skill),
+    );
+    fx.world.insert_resource(catalog);
+    let a = fx.a;
+    let (p, rx) = player(&mut fx.world, a, "Kicker");
+    fx.world.entity_mut(p).insert((
+        Health { hp: 50, max: 50 },
+        mud_world::Stamina {
+            current: 30,
+            max: 30,
+        },
+        KnownAbilities {
+            entries: vec![(DUAL_WIELD, 500, true), (KICK, 500, true)],
+        },
+    ));
+    (fx, p, rx)
+}
+
+#[test]
+fn char_skills_marks_dual_wield_passive_and_kick_active() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let skills = of(&fr, "Char.Skills");
+    assert_eq!(skills.len(), 1, "{fr:?}");
+    let v: Value = serde_json::from_str(&skills[0]).unwrap();
+    let by_name = |n: &str| {
+        v["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == n)
+            .unwrap_or_else(|| panic!("{n} missing: {v}"))
+            .clone()
+    };
+    assert_eq!(by_name("DUAL WIELD")["passive"], true);
+    assert_eq!(by_name("KICK")["passive"], false);
+}

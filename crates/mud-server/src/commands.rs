@@ -3637,6 +3637,7 @@ mod tests {
             sphere: Some("fire".to_string()),
             damage_type: Some("fire".to_string()),
             memorization_time: 0,
+            passive: false,
         };
         let _ = AbilityCatalog::default();
         // The property under test is a one-line conditional; the
@@ -3822,6 +3823,7 @@ mod tests {
                 sphere: Some("fire".to_string()),
                 damage_type: Some("fire".to_string()),
                 memorization_time: 0,
+                passive: false,
             },
         );
         world.insert_resource(catalog);
@@ -7057,7 +7059,7 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
 /// skill-bar widget: one entry per known ability with the cooldown
 /// timer and an `available` boolean (true when off cooldown). Shape:
 ///
-///   { skills: [ {name, cooldown, available} ] }
+///   { skills: [ {name, cooldown, available, passive} ] }
 ///
 /// Casting costs are paid in stamina, not mana — this game has no
 /// mana pool. The shape stays MUD-client-standard (no `mp_cost`
@@ -7101,8 +7103,9 @@ pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
             .and_then(|cd| cd.ready_at.get(&ability_id))
             .map_or(0, |when| when.saturating_duration_since(now).as_secs());
         let available = cooldown_secs == 0;
+        let passive = def.passive;
         entries.push(format!(
-            r#"{{"name":"{plain}","cooldown":{cooldown_secs},"available":{available}}}"#,
+            r#"{{"name":"{plain}","cooldown":{cooldown_secs},"available":{available},"passive":{passive}}}"#,
         ));
     }
     let payload = format!(r#"{{"skills":[{}]}}"#, entries.join(","));

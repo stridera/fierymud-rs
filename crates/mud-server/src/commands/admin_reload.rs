@@ -1446,6 +1446,7 @@ mod tests {
             sphere: None,
             damage_type: None,
             memorization_time: 0,
+            passive: false,
         }
     }
 
