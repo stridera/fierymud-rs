@@ -21,10 +21,10 @@ inventory::submit! {
             usage: "ctell <message>",
             summary: "Chat on your clan's private channel.",
             long: "Broadcasts to every online clan member sharing \
-                   your `clan_id`. Refused for players not in a clan. \
+                   your 'clan_id'. Refused for players not in a clan. \
                    Each line is rendered with the clan abbreviation \
                    prefix so cross-clan staff can tell the channels \
-                   apart in `wiznet` cross-traffic.",
+                   apart in 'wiznet' cross-traffic.",
         },
         run: cmd_ctell,
     }
@@ -42,9 +42,9 @@ inventory::submit! {
             long: "Prints clan name + abbreviation + MOTD plus the \
                    roster (sorted leader→officer→member, then by \
                    level desc, then name). Online members are \
-                   marked with a `*`. Refused for players not in a \
-                   clan. Subcommands: `clan motd <text>` (LEADER / \
-                   OFFICER), `clan kick <player>` (LEADER).",
+                   marked with a '*'. Refused for players not in a \
+                   clan. Subcommands: 'clan motd <text>' (LEADER / \
+                   OFFICER), 'clan kick <player>' (LEADER).",
         },
         run: cmd_clan,
     }

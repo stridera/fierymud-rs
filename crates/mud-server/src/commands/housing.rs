@@ -20,7 +20,7 @@ inventory::submit! {
             usage: "visit <player>",
             summary: "Step into another player's house — guest list required.",
             long: "Refuses unless the named owner has added you as a \
-                   guest via `house guest add <you>`. Synthesizes \
+                   guest via 'house guest add <you>'. Synthesizes \
                    the house's ECS rooms on first call (cached in \
                    HousingIndex), then warps you to the foyer. \
                    Async: the multi-table guest-list + room fetch \
@@ -268,8 +268,8 @@ async fn cmd_house_expand(world: &mut World, player: Entity, pool: &mud_db::sqlx
         w.0 -= cost;
     }
     let new_name = format!("Empty Room #{}", summary.rooms.len());
-    let new_desc = "An unfurnished new room. Use `house describe <#> <text>` \
-                    or `house rename <#> <name>` to make it your own."
+    let new_desc = "An unfurnished new room. Use 'house describe <#> <text>' \
+                    or 'house rename <#> <name>' to make it your own."
         .to_string();
     let result = mud_db::housing::add_room(
         pool,

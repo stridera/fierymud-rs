@@ -42,11 +42,11 @@ inventory::submit! {
         help: Help {
             usage: "discord link <discord-id>  |  discord unlink",
             summary: "Bind a Discord account to this user.",
-            long: "Two-step verification: `discord link <id>` mints a \
-                   one-time code; you then echo `/verify <code>` into \
+            long: "Two-step verification: 'discord link <id>' mints a \
+                   one-time code; you then echo '/verify <code>' into \
                    the configured gossip channel within 10 minutes. \
-                   `discord unlink` clears the binding immediately. \
-                   `account` shows the current state.",
+                   'discord unlink' clears the binding immediately. \
+                   'account' shows the current state.",
         },
         run: cmd_mail_stub,
     }
@@ -111,7 +111,7 @@ async fn cmd_discord_link(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            "Discord id must be alphanumeric (with `_` or `.`) and \
+            "Discord id must be alphanumeric (with '_' or '.') and \
              ≤ 64 chars.\r\n",
         );
         return;
@@ -158,7 +158,7 @@ async fn cmd_discord_link(world: &mut World, player: Entity, args: &str) {
             "Verification code: <b:yellow>{code}</>\r\n\
              Within {mins} minutes, send <b>/verify {code}</> to the \
              gossip channel from Discord account <b>{discord_id}</>.\r\n\
-             Use `account` to check whether the link has gone through.\r\n",
+             Use 'account' to check whether the link has gone through.\r\n",
         ),
     );
 }

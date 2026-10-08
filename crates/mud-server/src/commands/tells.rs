@@ -21,11 +21,11 @@ inventory::submit! {
             usage: "tell <player> <message>",
             summary: "Send a private message to one online player.",
             long: "Reaches one player by name. Refused if the target \
-                   is offline, has set their `notell` flag, or is \
+                   is offline, has set their 'notell' flag, or is \
                    ignoring you. Stamped on the receiver as their \
-                   most-recent teller for `reply` and appended to \
-                   their bounded `lasttells` log + the persistent \
-                   `tell_message` table.",
+                   most-recent teller for 'reply' and appended to \
+                   their bounded 'lasttells' log + the persistent \
+                   'tell_message' table.",
         },
         run: cmd_tell,
     }
@@ -40,7 +40,7 @@ inventory::submit! {
         help: Help {
             usage: "reply <message>",
             summary: "Send a tell to whoever last tell'd you.",
-            long: "Forwards through `tell` so the LastTeller stamp \
+            long: "Forwards through 'tell' so the LastTeller stamp \
                    lands on them too — start a back-and-forth without \
                    typing the name.",
         },
@@ -57,8 +57,8 @@ inventory::submit! {
         help: Help {
             usage: "ignore [<name> | -<name> | clear]",
             summary: "Block tells / channel msgs from a player.",
-            long: "No arg: list current entries. `<name>`: add. \
-                   `-<name>`: remove. `clear`: drop the whole list. \
+            long: "No arg: list current entries. '<name>': add. \
+                   '-<name>': remove. 'clear': drop the whole list. \
                    Per-session today; persistence is a follow-up.",
         },
         run: cmd_ignore,
@@ -74,7 +74,7 @@ inventory::submit! {
         help: Help {
             usage: "unignore <name>",
             summary: "Remove a name from your ignore list.",
-            long: "Equivalent to `ignore -<name>`. No-op if the name \
+            long: "Equivalent to 'ignore -<name>'. No-op if the name \
                    isn't currently being ignored.",
         },
         run: cmd_unignore,
@@ -90,8 +90,8 @@ inventory::submit! {
         help: Help {
             usage: "lasttells",
             summary: "Show your bounded recent-tells history.",
-            long: "Reads `TellLog`, hydrated at login from the \
-                   `tell_message` table. Each row shows the sender \
+            long: "Reads 'TellLog', hydrated at login from the \
+                   'tell_message' table. Each row shows the sender \
                    and how long ago the tell arrived.",
         },
         run: cmd_lasttells,

@@ -37,10 +37,10 @@ inventory::submit! {
         help: Help {
             usage: "concentrate",
             summary: "Concentrate deeply to speed up spell memorization.",
-            long: "Like `meditate`, but also grants a temporary Focus \
+            long: "Like 'meditate', but also grants a temporary Focus \
                    bonus (Intelligence / 4, at least 1) while it lasts. \
                    You sit down if standing. Cannot be used while \
-                   fighting. Re-running `concentrate` (or standing, \
+                   fighting. Re-running 'concentrate' (or standing, \
                    or being drawn into combat) breaks your \
                    concentration.",
         },

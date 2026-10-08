@@ -26,8 +26,8 @@ inventory::submit! {
             usage: "gossip <message>",
             summary: "Talk on the global gossip channel.",
             long: "Visible to every online player who hasn't toggled \
-                   their `deaf` flag and isn't ignoring you. The \
-                   slash alias (`/`) lets seasoned players stack \
+                   their 'deaf' flag and isn't ignoring you. The \
+                   slash alias ('/') lets seasoned players stack \
                    gossips without arrowing back to type the verb.",
         },
         run: cmd_gossip,
@@ -43,7 +43,7 @@ inventory::submit! {
         help: Help {
             usage: "music <message>",
             summary: "Sing on the global music channel.",
-            long: "RP-flavored counterpart to `gossip`. Same Deaf / \
+            long: "RP-flavored counterpart to 'gossip'. Same Deaf / \
                    ignore filtering. Convention: in-character song \
                    lyrics or melodic flavor.",
         },
@@ -60,8 +60,8 @@ inventory::submit! {
         help: Help {
             usage: "shout <message>",
             summary: "Shout to every online player.",
-            long: "Higher-volume cousin of `say` (which is room-only). \
-                   Same Deaf / ignore filtering as `gossip`.",
+            long: "Higher-volume cousin of 'say' (which is room-only). \
+                   Same Deaf / ignore filtering as 'gossip'.",
         },
         run: cmd_shout,
     }
@@ -79,7 +79,7 @@ inventory::submit! {
             long: "Visible to every online player not Deaf and not \
                    ignoring you. Conventionally used to coordinate \
                    quest progress with other questers. Same shape as \
-                   `gossip` — separate channel mostly for ear cleanliness.",
+                   'gossip' — separate channel mostly for ear cleanliness.",
         },
         run: cmd_qsay,
     }

@@ -61,7 +61,7 @@ inventory::submit! {
         help: Help {
             usage: "reloadallzones",
             summary: "Reload every zone's world data from the DB.",
-            long: "Coder+. Same as `reloadzone` applied to every zone: \
+            long: "Coder+. Same as 'reloadzone' applied to every zone: \
                    rooms, prototypes and resets are re-read from the \
                    database; live instances are untouched.",
         },
@@ -110,7 +110,7 @@ inventory::submit! {
             long: "Builder+. The C++ server wrote zone files to disk. \
                    Here the database is the source of truth and the \
                    editor writes it, so there is nothing to save; use \
-                   `reloadzone` to pull editor changes into the world.",
+                   'reloadzone' to pull editor changes into the world.",
         },
         run: cmd_savezone,
     }
@@ -127,7 +127,7 @@ inventory::submit! {
             summary: "Not applicable: world data is database-backed.",
             long: "Coder+. The C++ server watched zone files for changes. \
                    World data now lives in the database, so there are no \
-                   files to watch; use `reloadzone` instead.",
+                   files to watch; use 'reloadzone' instead.",
         },
         run: cmd_filewatch,
     }
@@ -161,7 +161,7 @@ inventory::submit! {
             summary: "Compile-check every loaded Lua trigger.",
             long: "Builder+. Syntax-checks each trigger body in the \
                    catalog without running it and lists the failures. \
-                   `validate_scripts zone <id>` limits the pass to one \
+                   'validate_scripts zone <id>' limits the pass to one \
                    zone. Also available as GET \
                    /api/admin/triggers/validate.",
         },
@@ -182,7 +182,7 @@ inventory::submit! {
                    \x20 dtrig list <target>       - triggers attached to a mob/object\r\n\
                    \x20 dtrig info <zone:id>      - details, fire stats and recent errors\r\n\
                    \x20 dtrig fire <target> <id>  - run a trigger body with <target> as self\r\n\
-                   Trigger ids are `zone:id` or a bare id in your current zone.",
+                   Trigger ids are 'zone:id' or a bare id in your current zone.",
         },
         run: cmd_dtrig,
     }
@@ -214,9 +214,9 @@ inventory::submit! {
         help: Help {
             usage: "asearch <name> | --effect <type> | --no-effects",
             summary: "Search abilities by name, effect type, or find broken ones.",
-            long: "Builder+. `asearch fire` matches ability names; \
-                   `--effect heal` finds abilities applying an effect of \
-                   that type; `--no-effects` finds abilities that would \
+            long: "Builder+. 'asearch fire' matches ability names; \
+                   '--effect heal' finds abilities applying an effect of \
+                   that type; '--no-effects' finds abilities that would \
                    cast but do nothing.",
         },
         run: cmd_asearch,
@@ -234,9 +234,9 @@ inventory::submit! {
             summary: "Analyse aggression in this room, or toggle aggro logging.",
             long: "Immortal+. With no argument, lists every mob in the \
                    room with its alignment and aggression formula and \
-                   reports whether it would attack you. `aggrodebug on` \
+                   reports whether it would attack you. 'aggrodebug on' \
                    makes the server log every aggression check (target \
-                   `aggression`, level info) until `aggrodebug off`.",
+                   'aggression', level info) until 'aggrodebug off'.",
         },
         run: cmd_aggrodebug,
     }
@@ -251,9 +251,9 @@ inventory::submit! {
         help: Help {
             usage: "shutdown <now|cancel|seconds> [reason]",
             summary: "Gracefully shut the server down (saves all players).",
-            long: "Coder+. `shutdown now` stops immediately; \
-                   `shutdown 60 maintenance` announces and counts down \
-                   60 seconds; `shutdown cancel` aborts a pending \
+            long: "Coder+. 'shutdown now' stops immediately; \
+                   'shutdown 60 maintenance' announces and counts down \
+                   60 seconds; 'shutdown cancel' aborts a pending \
                    countdown. Every online player is saved before the \
                    process exits; the process manager restarts it.",
         },
@@ -526,7 +526,7 @@ fn tlist_text(catalog: &TriggerCatalog, zone: i32) -> String {
     keys.sort();
     let mut out = format!("--- Triggers in Zone {zone} ---\r\n");
     if keys.is_empty() {
-        out.push_str("No triggers loaded for this zone. Use `treload` to re-read the catalog.\r\n");
+        out.push_str("No triggers loaded for this zone. Use 'treload' to re-read the catalog.\r\n");
         return out;
     }
     for key in &keys {
@@ -717,7 +717,7 @@ fn cmd_dtrig(world: &mut World, player: Entity, args: &str) {
                 send_to(
                     world,
                     player,
-                    "Usage: dtrig info <zone:id>  (zone:id, `zone id`, or id in this zone)\r\n",
+                    "Usage: dtrig info <zone:id>  (zone:id, 'zone id', or id in this zone)\r\n",
                 );
                 return;
             };
@@ -1522,7 +1522,7 @@ mod tests {
             let out = drain(&mut rx);
             assert!(
                 out.contains("You can't do that."),
-                "`{cmd}` was not refused for a mortal: {out:?}"
+                "'{cmd}' was not refused for a mortal: {out:?}"
             );
         }
         assert!(!world.contains_resource::<ShutdownState>());
@@ -1536,11 +1536,11 @@ mod tests {
         let (p, mut rx) = spawn(&mut world, "Mortal", UserRole::Player);
         for cmd in ["reloadzone 1", "reloadallzones", "areload"] {
             let handled = try_dispatch_async(&mut world, p, &pool, cmd).await;
-            assert!(handled, "`{cmd}` fell through for a mortal");
+            assert!(handled, "'{cmd}' fell through for a mortal");
             let out = drain(&mut rx);
             assert!(
                 out.contains("You can't do that."),
-                "`{cmd}` was not refused: {out:?}"
+                "'{cmd}' was not refused: {out:?}"
             );
         }
     }

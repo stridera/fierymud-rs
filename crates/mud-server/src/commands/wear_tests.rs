@@ -260,3 +260,17 @@ fn bare_wear_uses_legacy_flag_priority() {
         Some(Slot::Body)
     );
 }
+
+/// Issue #73: command suggestions in player-facing text use apostrophes,
+/// never markdown backticks.
+#[test]
+fn command_suggestions_use_apostrophes_not_backticks() {
+    let (mut world, p, mut rx) = setup();
+    let mut seen = String::new();
+    for cmd in ["toggle", "toggle zzz", "prompt list", "recall", "setrecall"] {
+        dispatch(&mut world, p, cmd);
+        seen.push_str(&drain(&mut rx));
+    }
+    assert!(seen.contains("Type 'toggle' for the list."), "{seen}");
+    assert!(!seen.contains('`'), "{seen}");
+}

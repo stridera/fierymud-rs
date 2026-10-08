@@ -2295,7 +2295,7 @@ fn award_kill_coin(
             killer,
             format!(
                 "{msg} lies among the remains of {victim_name}. \
-                 (`get all from corpse` to claim, or set `autogold` to auto-collect.)\r\n"
+                 ('get all from corpse' to claim, or set 'autogold' to auto-collect.)\r\n"
             ),
         );
         return;
@@ -3580,7 +3580,7 @@ mod tests {
             assert_eq!(
                 world.get::<Located>(corpse).unwrap().0,
                 room,
-                "`get {cmd}` must leave the corpse on the floor"
+                "'get {cmd}' must leave the corpse on the floor"
             );
         }
 

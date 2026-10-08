@@ -39,9 +39,9 @@ inventory::submit! {
         help: Help {
             usage: "emote <action>",
             summary: "Perform a third-person action visible to the room.",
-            long: "Your name is prepended. `emote smiles broadly.` \
+            long: "Your name is prepended. 'emote smiles broadly.' \
                    shows everyone (including you): \
-                   `Strider smiles broadly.`",
+                   'Strider smiles broadly.'",
         },
         run: cmd_emote,
     }
@@ -58,7 +58,7 @@ inventory::submit! {
             summary: "Ask a mob about a topic — fires SPEECH triggers.",
             long: "Targets a single mob in the room and fires its \
                    SPEECH-flagged Lua bodies with the topic in the \
-                   `speech` Lua global. Bystanders see that you \
+                   'speech' Lua global. Bystanders see that you \
                    asked something but not what.",
         },
         run: cmd_ask,
@@ -111,7 +111,7 @@ inventory::submit! {
             long: "Sends a one-line vitals snapshot to every member \
                    of your current group regardless of room. Used \
                    to coordinate healing / retreat without reading \
-                   raw `who` numbers.",
+                   raw 'who' numbers.",
         },
         run: cmd_greport,
     }

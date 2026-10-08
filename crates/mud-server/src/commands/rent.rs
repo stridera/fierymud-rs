@@ -46,18 +46,18 @@ inventory::submit! {
         help: Help {
             usage: "rent [<tier-name>]",
             summary: "Rent a room: save and leave at a receptionist, or book an inn rest.",
-            long: "With a receptionist present, plain `rent` stores \
+            long: "With a receptionist present, plain 'rent' stores \
                    your belongings and leaves the game exactly like \
-                   `quit`, keeping any rest you have already booked. \
-                   `offer` lists the available inn tiers and their \
-                   prices (so does `rent` in an inn with no \
-                   receptionist). `rent <name>` books that tier and \
+                   'quit', keeping any rest you have already booked. \
+                   'offer' lists the available inn tiers and their \
+                   prices (so does 'rent' in an inn with no \
+                   receptionist). 'rent <name>' books that tier and \
                    charges the fee in \
                    gold and queues an INN RestSource at the chosen \
                    tier; you'll see Refreshed regen and any Wake \
                    Effect attachments on your next XP gain after \
                    logging back in. Tiers 2 and 3 prompt for \
-                   confirmation; reply `y` to confirm or `n` to \
+                   confirmation; reply 'y' to confirm or 'n' to \
                    abort. Fee is flat — pay once, return whenever.",
         },
         run: cmd_rent,
@@ -75,9 +75,9 @@ inventory::submit! {
             summary: "Ask a receptionist what it costs to store your belongings.",
             long: "Speak to a receptionist (or stand in an inn) to hear \
                    the terms. Your character and belongings are saved \
-                   automatically and cost nothing to keep: `quit` \
-                   anywhere (or `rent` at a receptionist) to save and leave. Inns additionally sell \
-                   prepaid rest tiers; `offer` lists them, `rent <name>` \
+                   automatically and cost nothing to keep: 'quit' \
+                   anywhere (or 'rent' at a receptionist) to save and leave. Inns additionally sell \
+                   prepaid rest tiers; 'offer' lists them, 'rent <name>' \
                    books one.",
         },
         run: cmd_offer,
@@ -389,7 +389,7 @@ fn render_tier_menu(world: &mut World, player: Entity, inn: &InnRoom) {
             t.name, t.tier, t.fee_gp
         ));
     }
-    out.push_str("`offer` lists prices; `rent <name>` books a room (tiers 2 and 3 ask to confirm). With a receptionist present, plain `rent` stores your belongings and leaves the game.\r\n");
+    out.push_str("'offer' lists prices; 'rent <name>' books a room (tiers 2 and 3 ask to confirm). With a receptionist present, plain 'rent' stores your belongings and leaves the game.\r\n");
     send_to(world, player, out);
 }
 

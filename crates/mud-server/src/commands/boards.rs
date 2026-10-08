@@ -65,8 +65,8 @@ inventory::submit! {
         help: Help {
             usage: "boards",
             summary: "List every public message board.",
-            long: "Each board has an alias (`mortal`, `god`, `quest`, \
-                   etc.) and a title. Use `board <alias>` to list \
+            long: "Each board has an alias ('mortal', 'god', 'quest', \
+                   etc.) and a title. Use 'board <alias>' to list \
                    messages on one.",
         },
         run: cmd_mail_stub,
@@ -101,8 +101,8 @@ inventory::submit! {
             summary: "Compose a new message on a board.",
             long: "Opens a multi-line composition session: first \
                    non-blank line is the subject, subsequent lines \
-                   accumulate as body. `.send` ships, `.abort` \
-                   cancels, `.preview` shows the draft. Locked \
+                   accumulate as body. '.send' ships, '.abort' \
+                   cancels, '.preview' shows the draft. Locked \
                    boards refuse the open.",
         },
         run: cmd_mail_stub,
@@ -121,7 +121,7 @@ inventory::submit! {
             long: "Hard-deletes the row at the given slot. Players \
                    can only delete posts they made (case-insensitive \
                    poster-name match); Builder-and-above can delete \
-                   anyone's. Edit history (`BoardMessageEdit`) cascades.",
+                   anyone's. Edit history ('BoardMessageEdit') cascades.",
         },
         run: cmd_mail_stub,
     }
@@ -138,7 +138,7 @@ inventory::submit! {
             summary: "Re-open a board post for editing.",
             long: "Pre-loads the existing subject and body into a \
                    composition session. Add lines to append, or \
-                   `.clear` to wipe before writing the new body. \
+                   '.clear' to wipe before writing the new body. \
                    Players can only edit their own posts; Builder+ \
                    bypasses the gate.",
         },
@@ -269,13 +269,13 @@ pub(crate) async fn compose_board_step(
         ComposeStep::Nudge => send_to(
             world,
             player,
-            "Type a subject line, then the body. `.send` to ship; `.abort` to cancel.\r\n",
+            "Type a subject line, then the body. '.send' to ship; '.abort' to cancel.\r\n",
         ),
         ComposeStep::SubjectSet => send_to(
             world,
             player,
             "Subject set. Type the body, one line at a time. \
-             `.send` to ship, `.abort` to cancel, `.preview` to review.\r\n",
+             '.send' to ship, '.abort' to cancel, '.preview' to review.\r\n",
         ),
         ComposeStep::BodyAdded => {}
     }
@@ -408,7 +408,7 @@ pub(crate) async fn cmd_post(
                 world,
                 player,
                 "Stand near the board you want to post on, or use \
-                 `post <alias>` (Builder+) to post remotely.\r\n",
+                 'post <alias>' (Builder+) to post remotely.\r\n",
             );
             return;
         }
@@ -465,7 +465,7 @@ pub(crate) async fn cmd_post(
         format!(
             "Posting to {} ({}).\r\n\
              First line is the subject. Then type the body, one line at a time.\r\n\
-             `.send` ships it; `.abort` cancels; `.preview` shows the draft.\r\n",
+             '.send' ships it; '.abort' cancels; '.preview' shows the draft.\r\n",
             board.title, board.alias,
         ),
     );
@@ -578,8 +578,8 @@ pub(crate) async fn cmd_editpost(
         format!(
             "Editing message #{slot} on {} ({}).\r\n\
              Subject and existing body are preserved. Add lines to append \
-             (or `.abort` to bail without saving). Use `.preview` to see \
-             the current state, `.send` to commit (records an audit row).\r\n",
+             (or '.abort' to bail without saving). Use '.preview' to see \
+             the current state, '.send' to commit (records an audit row).\r\n",
             board.title, board.alias,
         ),
     );
@@ -705,7 +705,7 @@ pub(crate) async fn cmd_look_board(
             msg.subject,
         ));
     }
-    out.push_str("\r\nUse `read <#>` to read a message, or `post` to add one.\r\n");
+    out.push_str("\r\nUse 'read <#>' to read a message, or 'post' to add one.\r\n");
     send_to(world, player, out);
 }
 
@@ -728,7 +728,7 @@ pub(crate) async fn cmd_boards(world: &mut World, player: Entity, pool: &mud_db:
         let lock = if b.locked { "[locked]" } else { "        " };
         out.push_str(&format!("  {:<10} {} {}\r\n", b.alias, lock, b.title));
     }
-    out.push_str("\r\nUse `board <alias>` to list messages, `board <alias> <#>` to read one.\r\n");
+    out.push_str("\r\nUse 'board <alias>' to list messages, 'board <alias> <#>' to read one.\r\n");
     send_to(world, player, out);
 }
 
@@ -789,7 +789,7 @@ pub(crate) async fn cmd_board(
                 world,
                 player,
                 "There is no board here. Stand near a board to read it, \
-                 or use `boards` to see what's available.\r\n",
+                 or use 'boards' to see what's available.\r\n",
             );
             return;
         }
@@ -900,7 +900,7 @@ pub(crate) async fn cmd_board(
         ));
     }
     out.push_str(&format!(
-        "\r\nUse `board {alias} <#>` to read a message.\r\n"
+        "\r\nUse 'board {alias} <#>' to read a message.\r\n"
     ));
     send_to(world, player, out);
 }

@@ -19,7 +19,7 @@ inventory::submit! {
             usage: "release",
             summary: "End the ghost cycle: restore HP, return to recall.",
             long: "When you die, your spirit is left where you fell while \
-                   your corpse drops at the death scene. `release` returns \
+                   your corpse drops at the death scene. 'release' returns \
                    you to your recall point at full HP. Refused when you \
                    aren't currently dead.",
         },

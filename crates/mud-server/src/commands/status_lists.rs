@@ -38,7 +38,7 @@ inventory::submit! {
             summary: "List every available social verb.",
             long: "Sorted alphabetically, columnar layout. Use any \
                    listed verb on its own (or with a target) to fire \
-                   the matching social — `nod`, `shrug`, `smile alice`, \
+                   the matching social — 'nod', 'shrug', 'smile alice', \
                    etc.",
         },
         run: cmd_socials,

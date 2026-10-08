@@ -118,7 +118,7 @@ inventory::submit! {
         long: "Class-gated to Thief or Assassin. Refused while \
                fighting, against yourself, against a Shopkeeper, \
                and against staff. On failure the target notices \
-               and re-aggros on you. Pass `coins` / `gold` to \
+               and re-aggros on you. Pass 'coins' / 'gold' to \
                grab a chunk of their coin instead of an item.",
     },
     run: cmd_steal,
@@ -187,7 +187,7 @@ inventory::submit! {
     help: Help {
         usage: "berserk",
         summary: "Self-buff: rage state for 60s.",
-        long: "Costs 8 stamina, spawns a `berserk` EffectInstance \
+        long: "Costs 8 stamina, spawns a 'berserk' EffectInstance \
                on yourself for 60s. Refused if already berserk. \
                Combat damage scaling is a follow-up — for now \
                this is the visible buff state.",
@@ -239,7 +239,7 @@ inventory::submit! {
     help: Help {
         usage: "roundhouse",
         summary: "Powerful kick — 1.5x damage on your current target.",
-        long: "Costs 7 stamina. Heavier kick than the basic `kick` \
+        long: "Costs 7 stamina. Heavier kick than the basic 'kick' \
                skill (which adds +4); pure damage multiplier. \
                Requires you to be fighting someone.",
     },
@@ -295,7 +295,7 @@ inventory::submit! {
         usage: "rend [<target>]",
         summary: "Tearing attack — damage plus bleed effect.",
         long: "Costs 7 stamina, deals weapon damage, applies a \
-               `bleed` EffectInstance for 30s. Default target is \
+               'bleed' EffectInstance for 30s. Default target is \
                the current Fighting target. Refused if the target \
                is already bleeding.",
     },
@@ -313,7 +313,7 @@ inventory::submit! {
         usage: "gouge [<target>]",
         summary: "Eye gouge — damage plus a temporary blind effect.",
         long: "Costs 7 stamina, deals weapon damage, applies a \
-               `blind` EffectInstance for 30s. Default target is \
+               'blind' EffectInstance for 30s. Default target is \
                your current Fighting target. Refused if the target \
                is already blinded.",
     },
@@ -440,10 +440,10 @@ inventory::submit! {
     help: Help {
         usage: "guard <player|off>",
         summary: "Stand bodyguard — intercept incoming swings on a target.",
-        long: "Sets a `Guarding` link from you onto the named \
+        long: "Sets a 'Guarding' link from you onto the named \
                player; while you're in the same room, attackers \
-               targeting them swing at you instead. `guard off` \
-               clears the link. `guard` with no arg reports \
+               targeting them swing at you instead. 'guard off' \
+               clears the link. 'guard' with no arg reports \
                the current target.",
     },
     run: cmd_guard,
@@ -461,7 +461,7 @@ inventory::submit! {
         summary: "Engage your ally's current target.",
         long: "Looks up <player> in your current room, finds whom \
                they're fighting, and engages that target — same \
-               stamina cost and rules as `attack`. Refused if \
+               stamina cost and rules as 'attack'. Refused if \
                they're not fighting, if their target is gone, or \
                if you're already fighting someone else.",
     },
@@ -479,7 +479,7 @@ inventory::submit! {
         usage: "layhands [<target>]",
         summary: "Holy heal — bigger than bandage, works in combat.",
         long: "Heals 30 HP at a cost of 12 stamina. Works while \
-               fighting (unlike `bandage`). Refused on full-HP \
+               fighting (unlike 'bandage'). Refused on full-HP \
                targets. Default target is yourself.",
     },
     run: cmd_layhands,
@@ -495,7 +495,7 @@ inventory::submit! {
     help: Help {
         usage: "retreat <direction>",
         summary: "Flee combat in a specific direction.",
-        long: "Like `flee` but you choose where to go. Refused if \
+        long: "Like 'flee' but you choose where to go. Refused if \
                the direction has no exit, the door's closed, or \
                the target room is dangling.",
     },
@@ -513,9 +513,9 @@ inventory::submit! {
         usage: "tame <target>",
         summary: "Befriend an animal mob into following you.",
         long: "Drains 4 stamina and dispatches the TAME skill at \
-               the named target. The schema's `charmed` status \
+               the named target. The schema's 'charmed' status \
                effect spawns on the mob; the runtime also installs \
-               `Follower(you)` so existing pet-handling treats it \
+               'Follower(you)' so existing pet-handling treats it \
                as your follower. Mob charm persists until dismiss \
                or the mob dies — animal-control checks against \
                the will save aren't modeled yet, so v1 always \
@@ -536,8 +536,8 @@ inventory::submit! {
         summary: "Throw a rider — dismount + knockdown.",
         long: "Drains 5 stamina and dispatches the BUCK skill at \
                the named target. The schema's data path runs \
-               `dismount` (forced=true) → clears Mounted/RiddenBy, \
-               then `knockdown` (duration=1) → drops the target's \
+               'dismount' (forced=true) → clears Mounted/RiddenBy, \
+               then 'knockdown' (duration=1) → drops the target's \
                posture. v1 dispatches as a player skill so \
                characters with BUCK trained (Sorcerer/Druid/etc.) \
                can fire it; mob-AI usage waits for an autonomous \
@@ -580,7 +580,7 @@ inventory::submit! {
                the named target. Effect is a level-scaling \
                physical-damage application; combat starts via the \
                normal damage→engage path. Same arg-resolution as \
-               `backstab`.",
+               'backstab'.",
     },
     run: cmd_lure,
     }
@@ -615,9 +615,9 @@ inventory::submit! {
         usage: "sneak",
         summary: "Move silently — stealth that survives footsteps.",
         long: "Drains 3 stamina and dispatches the SNEAK skill \
-               via the data path. Spawns a `sneak` status effect \
+               via the data path. Spawns a 'sneak' status effect \
                and installs the Stealth marker (same gate as \
-               `hide`). Movement-stealth-break logic isn't wired \
+               'hide'). Movement-stealth-break logic isn't wired \
                yet, so sneak is functionally identical to hide \
                until that lands.",
     },
@@ -635,9 +635,9 @@ inventory::submit! {
         usage: "conceal",
         summary: "Magical concealment — improved hiding.",
         long: "Drains 4 stamina and dispatches the CONCEAL skill \
-               via the data path. Spawns a `hidden` status effect \
+               via the data path. Spawns a 'hidden' status effect \
                and installs the Stealth marker. Difference vs. \
-               `hide` is in the schema (different proficiency \
+               'hide' is in the schema (different proficiency \
                curve, longer duration), not in the runtime path.",
     },
     run: cmd_conceal,
@@ -655,9 +655,9 @@ inventory::submit! {
         summary: "Quick self/ally heal — wisdom-scaling.",
         long: "Drains 4 stamina and dispatches the FIRST_AID \
                skill via the data path. Heal amount comes from \
-               the schema formula `skill / 4` scaled by wisdom. \
+               the schema formula 'skill / 4' scaled by wisdom. \
                Defaults to self when no target given. The shim \
-               gates `Fighting` since first aid isn't an in-combat \
+               gates 'Fighting' since first aid isn't an in-combat \
                action.",
     },
     run: cmd_firstaid,
@@ -674,7 +674,7 @@ inventory::submit! {
         usage: "bandage [<target>]",
         summary: "Apply first aid for a small heal (out of combat).",
         long: "Heals 10 HP at a cost of 4 stamina. With no arg or \
-               `me`/`self`, bandages yourself. Otherwise tries to \
+               'me'/'self', bandages yourself. Otherwise tries to \
                find the target in your room. Refused while fighting \
                and refused on full-HP targets.",
     },
@@ -1785,7 +1785,7 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
         send_to(
             world,
             player,
-            "You're not grouped with anyone here — try `flee` solo.\r\n",
+            "You're not grouped with anyone here — try 'flee' solo.\r\n",
         );
         return;
     }

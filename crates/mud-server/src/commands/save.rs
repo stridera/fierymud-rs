@@ -23,7 +23,7 @@ inventory::submit! {
                    flags / prompt / hunger / thirst / drunk / known \
                    abilities / spell-slot cooldowns / ability cooldowns \
                    back to the schema. The same path runs automatically \
-                   on disconnect and on graceful shutdown — `save` lets \
+                   on disconnect and on graceful shutdown — 'save' lets \
                    you force it right now without logging out, useful \
                    before a risky encounter or when the network feels \
                    unstable.",
@@ -68,7 +68,7 @@ async fn cmd_save(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool
             world,
             player,
             "Save failed — your last successful checkpoint is intact, \
-             but this attempt rolled back. Try `save` again, or ask \
+             but this attempt rolled back. Try 'save' again, or ask \
              staff to investigate the syslog.\r\n",
         );
     }

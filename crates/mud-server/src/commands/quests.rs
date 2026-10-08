@@ -78,7 +78,7 @@ inventory::submit! {
             usage: "abandon <#>",
             summary: "Drop an in-progress quest.",
             long: "Argument is the slot number from the in-progress \
-                   section of `quests`. Marks the row ABANDONED \
+                   section of 'quests'. Marks the row ABANDONED \
                    rather than deleting it, preserving the audit \
                    trail and the (char, zone, id) unique key.",
         },
@@ -95,7 +95,7 @@ inventory::submit! {
         help: Help {
             usage: "innate",
             summary: "List your race's innate abilities.",
-            long: "Reads the `RaceAbilities` rows for your character's \
+            long: "Reads the 'RaceAbilities' rows for your character's \
                    race and prints each ability's name, category \
                    (PRIMARY / SECONDARY / ...), starting bonus, and \
                    proficiency cap.",
@@ -113,7 +113,7 @@ inventory::submit! {
         help: Help {
             usage: "questinfo <zone> <id>",
             summary: "Show details for a single quest definition.",
-            long: "Reads the `Quest` row for `(zone, id)` and prints \
+            long: "Reads the 'Quest' row for '(zone, id)' and prints \
                    name, level range, flags (repeatable / shareable / \
                    hidden / auto-accept), short description, and full \
                    description.",
@@ -167,7 +167,7 @@ inventory::submit! {
         help: Help {
             usage: "qgive <player> <zone> <quest-id>",
             summary: "Admin: assign a quest to another online player.",
-            long: "Same as `qload` but targets a named online player \
+            long: "Same as 'qload' but targets a named online player \
                    instead of the caller. Target must be currently \
                    online (offline-character assignment is left for a \
                    future iteration).",
@@ -185,12 +185,12 @@ inventory::submit! {
         help: Help {
             usage: "qcomplete <#>",
             summary: "Admin: force-complete an in-progress quest (coder+ pays rewards).",
-            long: "Slot number from the `quests` in-progress section. \
+            long: "Slot number from the 'quests' in-progress section. \
                    Flips IN_PROGRESS -> COMPLETED, stamps completed_at \
                    and bumps completion_count. Coder rank and above \
                    also get the quest's unconditional rewards exactly \
                    as a real completion pays them (conditional and \
-                   choice rewards stay behind `qreward`); lower ranks \
+                   choice rewards stay behind 'qreward'); lower ranks \
                    complete it without rewards. Objectives and phases \
                    are not run. Audited.",
         },
@@ -209,13 +209,13 @@ inventory::submit! {
             summary: "Admin: wipe a player's record of a quest.",
             long: "Deletes the character's whole record of the quest: \
                    status, objective progress and quest variables, so \
-                   it can be given or accepted from scratch (`qload`, \
-                   `qgive` and `qaccept` refuse while any record \
+                   it can be given or accepted from scratch ('qload', \
+                   'qgive' and 'qaccept' refuse while any record \
                    exists). Builders may reset their own character \
                    only; coder rank and above may reset anyone, \
                    including offline characters. Rewards already paid \
-                   are not taken back. `zone:id` is accepted in place \
-                   of `<zone> <quest-id>`. Audited.",
+                   are not taken back. 'zone:id' is accepted in place \
+                   of '<zone> <quest-id>'. Audited.",
         },
         run: cmd_mail_stub,
     }
@@ -766,7 +766,7 @@ pub(crate) async fn cmd_qgive(
                 world,
                 target,
                 format!(
-                    "An immortal grants you a quest: ({zone}, {id}). Type `quests` to view.\r\n"
+                    "An immortal grants you a quest: ({zone}, {id}). Type 'quests' to view.\r\n"
                 ),
             );
             crate::quest_progress::recheck_collect_objectives(world, target);
@@ -796,7 +796,7 @@ pub(crate) async fn cmd_qcomplete(
         send_to(
             world,
             player,
-            "Complete which quest? Pick a number from `quests`.\r\n",
+            "Complete which quest? Pick a number from 'quests'.\r\n",
         );
         return;
     };
@@ -1008,7 +1008,7 @@ pub(crate) async fn cmd_abandon(
         send_to(
             world,
             player,
-            "Abandon which quest? Pick a number from `quests`.\r\n",
+            "Abandon which quest? Pick a number from 'quests'.\r\n",
         );
         return;
     };
@@ -1476,8 +1476,8 @@ async fn qreward_claim(
     let mut msg = format!("You claim your reward: {}.\r\n", describe_reward(&reward));
     msg.push_str(&match remaining {
         0 => "All your conditional / choice rewards are now claimed.\r\n".to_string(),
-        1 => "1 reward still pending — type `qreward` to view.\r\n".to_string(),
-        n => format!("{n} rewards still pending — type `qreward` to view.\r\n"),
+        1 => "1 reward still pending — type 'qreward' to view.\r\n".to_string(),
+        n => format!("{n} rewards still pending — type 'qreward' to view.\r\n"),
     });
     send_to(world, player, msg);
 }

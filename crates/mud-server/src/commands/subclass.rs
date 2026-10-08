@@ -27,7 +27,7 @@ inventory::submit! {
             long: "With no argument, lists the subclasses available to \
                    your class. With a name (or unique prefix), \
                    specializes into that subclass. Requires level 20 \
-                   (the `character.subclass_min_level` config) and is \
+                   (the 'character.subclass_min_level' config) and is \
                    permanent once chosen.",
         },
         run: cmd_subclass,

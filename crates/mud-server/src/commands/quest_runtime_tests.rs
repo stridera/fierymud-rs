@@ -847,7 +847,7 @@ async fn trigger_auto_accept_honours_the_availability_requirement() {
         .unwrap();
         super::drain_player_updates(&mut world);
         tokio::time::sleep(Duration::from_millis(250)).await;
-        assert!(record().await.is_none(), "`{denied}` must deny the grant");
+        assert!(record().await.is_none(), "'{denied}' must deny the grant");
     }
     assert!(drain(&mut rx).is_empty(), "no offer text either");
 

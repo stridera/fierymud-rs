@@ -45,8 +45,8 @@ inventory::submit! {
                    for the named character. Removes the \
                    NameApprovalPending marker on the live entity if \
                    they're online and DMs them. No-op against an \
-                   already-approved character. Pair with `reject_name \
-                   <char> <new>` if the name needs to change.",
+                   already-approved character. Pair with 'reject_name \
+                   <char> <new>' if the name needs to change.",
         },
         run: cmd_mail_stub,
     }
@@ -113,8 +113,8 @@ fn cmd_name_status(world: &mut World, player: Entity, _args: &str) {
             player,
             "Your character name is <b:yellow>awaiting staff approval</>. \
              Social channels (tell / say / gossip / group / clan) are \
-             silenced until staff runs `approve_name` (keep the name) \
-             or `reject_name` (rename you). You can still move, look, \
+             silenced until staff runs 'approve_name' (keep the name) \
+             or 'reject_name' (rename you). You can still move, look, \
              and fight in the meantime.\r\n",
         );
     } else {
@@ -292,7 +292,7 @@ async fn cmd_reject_name_async(
             player,
             format!(
                 "Renamed to '{new_name}' but failed to clear the gate: {e}. \
-                 Recover with `approve_name {new_name}`.\r\n",
+                 Recover with 'approve_name {new_name}'.\r\n",
             ),
         );
         return;

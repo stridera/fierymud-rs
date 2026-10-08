@@ -26,7 +26,7 @@ inventory::submit! {
             usage: "drag <target> <direction>",
             summary: "Drag a corpse, object or consenting body with you.",
             long: "Takes the target (an object or corpse in the room, or a \
-                   sitting/resting player who has used `consent`) along when \
+                   sitting/resting player who has used 'consent') along when \
                    you walk in the given direction. You must be standing. \
                    Anything you could pick up (or any corpse) can be dragged, \
                    up to three times what you can carry, and heavy loads cost \

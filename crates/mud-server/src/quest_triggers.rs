@@ -331,7 +331,7 @@ pub(crate) async fn grant_or_offer(
         match mud_db::quests::accept_for_player(pool, cid, level, q.zone_id, q.id).await {
             Ok(mud_db::quests::AcceptOutcome::Accepted) => {
                 let line = format!(
-                    "*** New quest: {} ({}, {}) — type `quests` to view. ***\r\n",
+                    "*** New quest: {} ({}, {}) — type 'quests' to view. ***\r\n",
                     q.plain_name, q.zone_id, q.id
                 );
                 let _ = out.try_send(line.into_bytes());
@@ -357,7 +357,7 @@ pub(crate) async fn grant_or_offer(
         }
     } else {
         let line = format!(
-            "*** Quest available: {} ({}, {}) — type `qaccept {} {}` to take it. ***\r\n",
+            "*** Quest available: {} ({}, {}) — type 'qaccept {} {}' to take it. ***\r\n",
             q.plain_name, q.zone_id, q.id, q.zone_id, q.id
         );
         let _ = out.try_send(line.into_bytes());

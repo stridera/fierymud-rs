@@ -52,7 +52,7 @@ inventory::submit! {
             usage: "stow",
             summary: "Quickly sheathe your wielded weapon.",
             long: "Moves the weapon in your wield slot into your \
-                   inventory without the fuss of `remove`.",
+                   inventory without the fuss of 'remove'.",
         },
         run: cmd_stow,
     }

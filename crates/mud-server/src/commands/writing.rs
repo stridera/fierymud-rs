@@ -26,7 +26,7 @@ inventory::submit! {
             summary: "Write a message on a note or paper.",
             long: "Writes the message onto a note-type object you carry \
                    or that lies in the room, replacing whatever was \
-                   there. Anyone can then `read` it.",
+                   there. Anyone can then 'read' it.",
         },
         run: cmd_write,
     }

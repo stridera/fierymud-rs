@@ -27,7 +27,7 @@ inventory::submit! {
             long: "Builder+. Saves the room you're standing in as \
                    your recall destination. Persists across logins. \
                    Mortals reset their recall via a touchstone item \
-                   (see `touch <object>`).",
+                   (see 'touch <object>').",
         },
         run: cmd_setrecall,
     }
@@ -43,8 +43,8 @@ inventory::submit! {
             usage: "touch <object>",
             summary: "Touch an object — touchstones bind your recall.",
             long: "Looks up the named keyword in your inventory or \
-                   the room. If the object's prototype `ObjectType` \
-                   is `Touchstone`, your recall point binds to the \
+                   the room. If the object's prototype 'ObjectType' \
+                   is 'Touchstone', your recall point binds to the \
                    room you're standing in. Other object types just \
                    refuse — touch is currently a recall-only verb.",
         },

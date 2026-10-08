@@ -62,7 +62,7 @@ mod tests {
             assert_eq!(
                 canonical(alias),
                 Some(*want),
-                "alias `{alias}` should resolve to `{want}`"
+                "alias '{alias}' should resolve to '{want}'"
             );
         }
     }
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn new_commands_are_registered() {
         for name in NEW_COMMANDS {
-            assert_eq!(canonical(name), Some(*name), "`{name}` not registered");
+            assert_eq!(canonical(name), Some(*name), "'{name}' not registered");
         }
     }
 
@@ -93,7 +93,7 @@ mod tests {
         ] {
             let claimed = inventory::iter::<AsyncCommand>()
                 .any(|cmd| (cmd.dispatch)(&mut world, player, &pool, head, "").is_some());
-            assert!(claimed, "no async dispatch claims `{head}`");
+            assert!(claimed, "no async dispatch claims '{head}'");
         }
     }
 }

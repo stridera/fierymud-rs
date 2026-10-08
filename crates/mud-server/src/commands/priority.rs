@@ -500,7 +500,7 @@ mod tests {
             assert_eq!(
                 got.and_then(canonical_of).or(got),
                 canonical_of(want).or(Some(want)),
-                "`{typed}` should resolve like legacy `{want}`"
+                "'{typed}' should resolve like legacy '{want}'"
             );
         }
     }

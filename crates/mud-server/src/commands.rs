@@ -1022,7 +1022,7 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
             world,
             player,
             "You are frozen by an Implementor and cannot act. \
-             Type `quit` to disconnect, or wait to be thawed.\r\n",
+             Type 'quit' to disconnect, or wait to be thawed.\r\n",
         );
         return;
     }
@@ -1036,7 +1036,7 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
             world,
             player,
             "Your spirit can't act on the world while disembodied. \
-             Type `release` to return to your recall point, or wait \
+             Type 'release' to return to your recall point, or wait \
              for someone to resurrect you.\r\n",
         );
         return;
@@ -1150,7 +1150,7 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
         send_to(
             world,
             player,
-            "Debug commands are disabled by `security.enable_debug_commands=false`. \
+            "Debug commands are disabled by 'security.enable_debug_commands=false'. \
              An admin must flip the GameConfig row to re-enable them.\r\n",
         );
         return;
@@ -2937,11 +2937,11 @@ mod tests {
             "enter",
             "setrecall",
         ] {
-            assert!(names.contains(&name), "movement command `{name}` missing");
+            assert!(names.contains(&name), "movement command '{name}' missing");
         }
         // channels.rs (broadcast comm channels)
         for name in ["gossip", "/", "music", "shout", "wiznet", ";"] {
-            assert!(names.contains(&name), "channel `{name}` missing");
+            assert!(names.contains(&name), "channel '{name}' missing");
         }
         // tells.rs (private comms + ignore list + history)
         for name in [
@@ -2953,21 +2953,21 @@ mod tests {
             "lasttells",
             "lt",
         ] {
-            assert!(names.contains(&name), "tells command `{name}` missing");
+            assert!(names.contains(&name), "tells command '{name}' missing");
         }
         // feedback.rs (bug / idea / typo / petition)
         for name in ["bug", "idea", "typo", "petition"] {
-            assert!(names.contains(&name), "feedback `{name}` missing");
+            assert!(names.contains(&name), "feedback '{name}' missing");
         }
         // room_chat.rs
         for name in [
             "say", "'", "emote", ":", "ask", "whisper", "insult", "gsay", "gtell", "gecho", "gt",
         ] {
-            assert!(names.contains(&name), "room-chat `{name}` missing");
+            assert!(names.contains(&name), "room-chat '{name}' missing");
         }
         // clan_chat.rs
         for name in ["ctell", "ct", "clan"] {
-            assert!(names.contains(&name), "clan-chat `{name}` missing");
+            assert!(names.contains(&name), "clan-chat '{name}' missing");
         }
         // name_approval.rs — replaces the deleted login_approval.rs
         // commands. `approve_login` / `deny_login` / `lreqs` are
@@ -2981,7 +2981,7 @@ mod tests {
             "name_status",
             "namestatus",
         ] {
-            assert!(names.contains(&name), "name-approval `{name}` missing");
+            assert!(names.contains(&name), "name-approval '{name}' missing");
         }
         // The retired LoginRequests commands must NOT appear in the
         // registry — guard against a stale `inventory::submit!` that
@@ -2989,19 +2989,19 @@ mod tests {
         for name in ["approve_login", "deny_login", "lreqs"] {
             assert!(
                 !names.contains(&name),
-                "retired login-approval `{name}` resurfaced in the registry"
+                "retired login-approval '{name}' resurfaced in the registry"
             );
         }
         // status_lists.rs (report + socials)
         for name in ["report", "socials"] {
-            assert!(names.contains(&name), "status-lists `{name}` missing");
+            assert!(names.contains(&name), "status-lists '{name}' missing");
         }
         // mail.rs + boards.rs (async-dispatched stubs)
         for name in [
             "mail", "mailbox", "readmail", "delmail", "boards", "board", "post", "delpost",
             "editpost",
         ] {
-            assert!(names.contains(&name), "mail/board `{name}` missing");
+            assert!(names.contains(&name), "mail/board '{name}' missing");
         }
         // quests.rs (Info + Admin verbs)
         for name in [
@@ -3016,7 +3016,7 @@ mod tests {
             "qgive",
             "qcomplete",
         ] {
-            assert!(names.contains(&name), "quest verb `{name}` missing");
+            assert!(names.contains(&name), "quest verb '{name}' missing");
         }
         // admin_management.rs
         for name in [
@@ -3028,7 +3028,7 @@ mod tests {
             "hgrant",
             "hrevoke",
         ] {
-            assert!(names.contains(&name), "admin-mgmt `{name}` missing");
+            assert!(names.contains(&name), "admin-mgmt '{name}' missing");
         }
         // admin_world.rs
         for name in [
@@ -3048,7 +3048,7 @@ mod tests {
             "loado",
             "dumpworld",
         ] {
-            assert!(names.contains(&name), "admin-world `{name}` missing");
+            assert!(names.contains(&name), "admin-world '{name}' missing");
         }
         // admin_inspect.rs
         for name in [
@@ -3071,7 +3071,7 @@ mod tests {
             "trigs",
             "firetrig",
         ] {
-            assert!(names.contains(&name), "admin-inspect `{name}` missing");
+            assert!(names.contains(&name), "admin-inspect '{name}' missing");
         }
         // combat.rs
         for name in [
@@ -3122,7 +3122,7 @@ mod tests {
             "bodyslam",
             "maul",
         ] {
-            assert!(names.contains(&name), "combat `{name}` missing");
+            assert!(names.contains(&name), "combat '{name}' missing");
         }
         // spells.rs — `skill` / `use` removed 2026-05-17 (they
         // were a backdoor for invoking passive defensives and
@@ -3132,7 +3132,7 @@ mod tests {
             "pick", "study", "memorize", "mem", "pray", "forget", "cast", "c", "chant", "perform",
             "abort", "cancel",
         ] {
-            assert!(names.contains(&name), "spell/skill `{name}` missing");
+            assert!(names.contains(&name), "spell/skill '{name}' missing");
         }
     }
 
@@ -9380,7 +9380,7 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
             world,
             player,
             format!(
-                "You haven't learned {} yet — `study` it first.\r\n",
+                "You haven't learned {} yet — 'study' it first.\r\n",
                 def.name
             ),
         );
@@ -9934,7 +9934,7 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
     }
     if !d.active_effects.is_empty() {
         out.push_str(&format!(
-            "  Effects: {}    (`effects` for durations)\r\n",
+            "  Effects: {}    ('effects' for durations)\r\n",
             d.active_effects.join(", "),
         ));
     }
@@ -9947,14 +9947,14 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         let suffix = if lines == 1 { "" } else { "s" };
         out.push_str(&format!(
             "  Mail draft: to {to}, {lines} line{suffix} so far    \
-             (`mail .send` / `.preview` / `.abort`)\r\n",
+             ('mail .send' / '.preview' / '.abort')\r\n",
         ));
     }
     if let Some((board, lines)) = d.board_draft {
         let suffix = if lines == 1 { "" } else { "s" };
         out.push_str(&format!(
             "  Board draft: on {board}, {lines} line{suffix} so far    \
-             (`post .send` / `.preview` / `.abort`)\r\n",
+             ('post .send' / '.preview' / '.abort')\r\n",
         ));
     }
     if let Some(line) = group_status_line(&d.group_status) {
@@ -10005,13 +10005,13 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
         let pts = d.practice_points;
         let suffix = if pts == 1 { "" } else { "s" };
         out.push_str(&format!(
-            "  Practice: {pts} point{suffix} available    (`practice` to spend)\r\n",
+            "  Practice: {pts} point{suffix} available    ('practice' to spend)\r\n",
         ));
     }
     let (unlocked, total) = d.achievements;
     if total > 0 {
         out.push_str(&format!(
-            "  Achievements: {unlocked} / {total} unlocked    (`achievements` for the list)\r\n",
+            "  Achievements: {unlocked} / {total} unlocked    ('achievements' for the list)\r\n",
         ));
     }
     out
@@ -11552,9 +11552,9 @@ guildhalls for clerics and druids and warriors. Beyond the town \
 lie the wild places, where the patient hunter finds purpose and \
 the careless one finds a quiet grave.\r\n\
 \r\n\
-<dim>Type `commands` to see what your hands can do, `help <name>` \
-for details on any command, and `news` for the most recent \
-changes. If something looks broken, `bug <message>` reaches the \
+<dim>Type 'commands' to see what your hands can do, 'help <name>' \
+for details on any command, and 'news' for the most recent \
+changes. If something looks broken, 'bug <message>' reaches the \
 keepers.</>\r\n\
 \r\n\
 <yellow>The fires are fed. The doors are open. Walk in.</>\r\n\
@@ -11568,19 +11568,19 @@ recent runtime changes:</>\r\n\
 - <yellow>Combat readout</> picked up color hierarchy: HP / damage \
 graded by severity, target names highlighted, miss lines dimmed.\r\n\
 - <yellow>Score</> trimmed to current-stats only — equipment \
-moved to `equipment`, session-meta moved to `clientinfo`.\r\n\
+moved to 'equipment', session-meta moved to 'clientinfo'.\r\n\
 - <yellow>Help index</> reshaped into Info / Movement / Comm / \
 Combat / Magic / Inventory / Group / Mount / Banking / Quest / \
 Mail / Settings categories instead of one giant Info bucket.\r\n\
 - <yellow>Spells / chants / skills / songs</> default to abilities \
-you actually know; `spells all` dumps the full catalog.\r\n\
+you actually know; 'spells all' dumps the full catalog.\r\n\
 - <yellow>Combat-loot</> fixed: a corpse always spawns on mob \
 death; non-AutoGold killers find their coin attached as a \
-CoinPile and reclaim it via `get all from corpse`.\r\n\
+CoinPile and reclaim it via 'get all from corpse'.\r\n\
 - <yellow>Cast parsing</> now supports quoted multi-word names \
-(`cast 'magic missile' goblin`).\r\n\
+('cast 'magic missile' goblin').\r\n\
 \r\n\
-<dim>Run `commands` for everything you can use today.</>\r\n\
+<dim>Run 'commands' for everything you can use today.</>\r\n\
 ";
 pub(crate) const CREDITS_TEXT: &str = "\
 \r\n<b:cyan>=== Credits ===</>\r\n\
@@ -11607,11 +11607,11 @@ pub(crate) const POLICIES_TEXT: &str = "\
 <yellow>1.</> <b:white>No harassment</>, slurs, or threats — to \
 anyone, in any channel. Staff intervene quickly.\r\n\
 <yellow>2.</> <b:white>No cheating</>: report bug exploits with \
-`bug <message>`. Don't use them.\r\n\
+'bug <message>'. Don't use them.\r\n\
 <yellow>3.</> <b:white>No multi-charing for unfair advantage</>. \
 Multi-charing is fine for socializing.\r\n\
-<yellow>4.</> Admins enforce rules; appeals via `tell <admin> \
-<message>` or the address in `motd`.\r\n\
+<yellow>4.</> Admins enforce rules; appeals via 'tell <admin> \
+<message>' or the address in 'motd'.\r\n\
 \r\n\
 <dim>This is a hobby server. Be kind.</>\r\n\
 ";
@@ -13976,7 +13976,7 @@ pub(crate) fn invoke_ability_with(
         send_to(
             world,
             player,
-            "You're already casting something — finish or `cancel` first.\r\n",
+            "You're already casting something — finish or 'cancel' first.\r\n",
         );
         return;
     }
@@ -16516,7 +16516,7 @@ pub(crate) fn invoke_ability_with(
                             world,
                             player,
                             format!(
-                                "{} needs a direction (e.g. `cast '{}' north`).\r\n",
+                                "{} needs a direction (e.g. 'cast '{}' north').\r\n",
                                 def.name,
                                 def.plain_name.to_ascii_lowercase().replace('_', " ")
                             ),
@@ -18915,7 +18915,7 @@ pub(crate) fn name_approval_gate(world: &World, player: Entity) -> bool {
             world,
             player,
             "You can't use that until your name is approved by staff. \
-             Run `name_status` for details.\r\n",
+             Run 'name_status' for details.\r\n",
         );
         true
     } else {
@@ -20819,7 +20819,7 @@ pub(crate) fn group_dismiss_one(world: &mut World, dismisser: Entity, target_nam
             dismisser,
             format!(
                 "Nobody named '{target_name}' is following you. \
-                 Use `group` to see who is.\r\n"
+                 Use 'group' to see who is.\r\n"
             ),
         );
         return;

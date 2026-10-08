@@ -22,9 +22,9 @@ inventory::submit! {
             usage: "devmode [on|off]",
             summary: "Toggle server-wide dev mode (open playtest).",
             long: "Implementor-only. With no argument, prints current \
-                   state. With `on` or `off`, flips the server-wide \
-                   ``DevMode`` resource AND persists the new state to \
-                   the ``GameConfig`` row ``server.dev_mode`` so it \
+                   state. With 'on' or 'off', flips the server-wide \
+                   ''DevMode'' resource AND persists the new state to \
+                   the ''GameConfig'' row ''server.dev_mode'' so it \
                    survives restarts. When ON, every connected player \
                    is treated as Implementor for permission checks AND \
                    dice rolls are visible regardless of the per-player \
@@ -47,7 +47,7 @@ inventory::submit! {
             long: "Implementor-only. Looks up the player by name, \
                    resolves the owning Users row, inserts a \
                    BanRecords row. The login flow refuses any of \
-                   that account's characters until `unban` lifts.",
+                   that account's characters until 'unban' lifts.",
         },
         run: cmd_ban,
     }
@@ -63,13 +63,13 @@ inventory::submit! {
             usage: "cclan create <name> <abbrev>\n       cclan assign <player> <abbrev> [rank]\n       cclan kick <player>\n       cclan motd <abbrev> <text>\n       cclan disband <abbrev>",
             summary: "Manage clans (create / assign / kick / MOTD).",
             long: "Implementor-only.\n\
-                   - `create` opens a new clan; name + abbrev must \
+                   - 'create' opens a new clan; name + abbrev must \
                      both be unique.\n\
-                   - `assign` puts a character into a clan, defaulting \
+                   - 'assign' puts a character into a clan, defaulting \
                      to MEMBER. Rank can be LEADER / OFFICER / MEMBER \
                      / APPLICANT.\n\
-                   - `kick` removes their clan_member row entirely.\n\
-                   - `motd` sets a clan's message-of-the-day; empty \
+                   - 'kick' removes their clan_member row entirely.\n\
+                   - 'motd' sets a clan's message-of-the-day; empty \
                      text clears it.",
         },
         run: cmd_cclan,
@@ -88,7 +88,7 @@ inventory::submit! {
             long: "Builder+. Without args after the name, prints the \
                    current staff notes. With text, appends a new line \
                    prefixed with the timestamp and your character name. \
-                   `clear` is Implementor-only and wipes the entire log.",
+                   'clear' is Implementor-only and wipes the entire log.",
         },
         run: cmd_pnote,
     }
@@ -120,11 +120,11 @@ inventory::submit! {
         help: Help {
             usage: "hgrant <player>",
             summary: "Assign a fresh house to a player.",
-            long: "Builder+. Creates a `PlayerHouse` row for the named \
+            long: "Builder+. Creates a 'PlayerHouse' row for the named \
                    character with the entrance set to the room you're \
                    currently standing in. Seeds one foyer room \
-                   (`local_index = 0`). Fails if the character already \
-                   owns a house — use `hrevoke` first.",
+                   ('local_index = 0'). Fails if the character already \
+                   owns a house — use 'hrevoke' first.",
         },
         run: cmd_hgrant,
     }
@@ -142,7 +142,7 @@ inventory::submit! {
             long: "Implementor-only. Deletes the named character's \
                    PlayerHouse row; FK cascades remove all rooms, \
                    exits, placed items, and guest entries. The owner's \
-                   in-memory `HouseSummary` component remains until \
+                   in-memory 'HouseSummary' component remains until \
                    they reconnect — bounce them if they're online.",
         },
         run: cmd_hrevoke,
@@ -161,7 +161,7 @@ inventory::submit! {
             long: "Builder+. Looks up the target's PlayerHouse, \
                    synthesizes the ECS Room entities for it (if not \
                    yet cached in HousingIndex), then warps you to the \
-                   foyer (`local_index = 0`). Works for offline \
+                   foyer ('local_index = 0'). Works for offline \
                    owners — reads the snapshot straight from the DB. \
                    Routed through the async dispatcher; the sync stub \
                    only fires on dispatcher misconfig.",
@@ -180,11 +180,11 @@ inventory::submit! {
             usage: "treload",
             summary: "Reload the trigger catalog from the database.",
             long: "Builder+. Re-queries the Triggers + attachment \
-                   tables, atomically swaps the live `TriggerCatalog` \
-                   resource, and re-stamps every Room's `AttachedTriggers`. \
+                   tables, atomically swaps the live 'TriggerCatalog' \
+                   resource, and re-stamps every Room's 'AttachedTriggers'. \
                    Mob and object instances keep their current bindings — \
                    next respawn picks up catalog edits naturally. \
-                   Mirrors the `/api/admin/triggers/reload` endpoint so \
+                   Mirrors the '/api/admin/triggers/reload' endpoint so \
                    builders can iterate without round-tripping through MCP. \
                    Routed through the async dispatcher; the sync stub \
                    only fires on dispatcher misconfig.",
@@ -580,7 +580,7 @@ pub(crate) fn cmd_pnote(world: &mut World, player: Entity, args: &str) {
         }
         if body.eq_ignore_ascii_case("clear") {
             if actor_role.rank() < UserRole::Implementor.rank() {
-                let _ = out.try_send(b"`pnote ... clear` is Implementor-only.\r\n".to_vec());
+                let _ = out.try_send(b"'pnote ... clear' is Implementor-only.\r\n".to_vec());
                 return;
             }
             match mud_db::characters::save_staff_notes(&pool, &target.id, "").await {
@@ -1051,8 +1051,8 @@ inventory::submit! {
         help: Help {
             usage: "pscan <substring>",
             summary: "Scan every persisted character's inventory for an item.",
-            long: "Builder+. Joins `CharacterItems` × `Characters` × \
-                   `Objects` against an item-name substring and \
+            long: "Builder+. Joins 'CharacterItems' × 'Characters' × \
+                   'Objects' against an item-name substring and \
                    prints one row per (player, item) hit. Async DB \
                    query — covers offline characters, not just \
                    online ones. Capped at 200 hits server-side.",
@@ -1074,7 +1074,7 @@ inventory::submit! {
                    row + every CharacterItems row (resolved through \
                    the in-memory ObjectPrototypes for names) and \
                    prints what they're wearing / carrying. Replaces \
-                   the legacy `linkload` use case.",
+                   the legacy 'linkload' use case.",
         },
         run: cmd_viewchar,
     }

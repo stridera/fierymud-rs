@@ -23,7 +23,7 @@ inventory::submit! {
         help: Help {
             usage: "unban <player>",
             summary: "Lift the active ban on a player's account.",
-            long: "Implementor-only. Inverse of `ban`. Doesn't \
+            long: "Implementor-only. Inverse of 'ban'. Doesn't \
                    delete the row — flips active=false and stamps \
                    unbanned_at / unbanned_by for the audit trail.",
         },

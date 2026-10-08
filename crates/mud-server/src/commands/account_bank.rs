@@ -34,11 +34,11 @@ inventory::submit! {
         help: Help {
             usage: "account_balance",
             summary: "Show the account-shared bank balance.",
-            long: "Read-only display of `Users.account_wealth`. \
+            long: "Read-only display of 'Users.account_wealth'. \
                    Every character on this account sees the same \
-                   pool; pair with `account_deposit` / \
-                   `account_withdraw` to transfer between the \
-                   per-character bank (`balance`) and the shared pool.",
+                   pool; pair with 'account_deposit' / \
+                   'account_withdraw' to transfer between the \
+                   per-character bank ('balance') and the shared pool.",
         },
         run: cmd_account_balance,
     }
@@ -53,7 +53,7 @@ inventory::submit! {
         help: Help {
             usage: "account_deposit <amount>",
             summary: "Move copper from per-character bank to the shared pool.",
-            long: "Source is your `bank` balance, not on-hand. \
+            long: "Source is your 'bank' balance, not on-hand. \
                    Refuses if your per-character bank can't cover \
                    the amount. After success every online character \
                    on this account sees the new shared pool size.",
@@ -71,7 +71,7 @@ inventory::submit! {
         help: Help {
             usage: "account_withdraw <amount>",
             summary: "Move copper from the shared pool to your per-character bank.",
-            long: "Inverse of `account_deposit`. Refuses if the \
+            long: "Inverse of 'account_deposit'. Refuses if the \
                    shared pool can't cover the amount. Cross-character \
                    sync runs after the transfer — all sibling \
                    characters online refresh their view of the pool.",

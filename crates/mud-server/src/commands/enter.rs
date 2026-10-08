@@ -20,9 +20,9 @@ inventory::submit! {
         help: Help {
             usage: "leave",
             summary: "Exit your current vehicle / mount.",
-            long: "Inverse of `enter` for vehicles. Today the only \
-                   in-vehicle state we model is mounted, so `leave` \
-                   is a synonym for `dismount`. When boats / \
+            long: "Inverse of 'enter' for vehicles. Today the only \
+                   in-vehicle state we model is mounted, so 'leave' \
+                   is a synonym for 'dismount'. When boats / \
                    carriages land it'll cover those too.",
         },
         run: cmd_leave,
@@ -38,7 +38,7 @@ inventory::submit! {
         help: Help {
             usage: "enter <portal>",
             summary: "Step into a portal in the room.",
-            long: "Reads the portal's `Destination` and teleports you to \
+            long: "Reads the portal's 'Destination' and teleports you to \
                    the matching room. Refused while fighting. Portals \
                    with a missing or unresolved destination shimmer \
                    harmlessly.",

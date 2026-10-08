@@ -106,8 +106,8 @@ fn qui_gets_the_safety_reply_and_shorter_forms_are_not_quit() {
     for typed in ["q", "qu"] {
         dispatch(&mut world, p, typed);
         let out = drain(&mut rx);
-        assert!(out.contains("Quaff what?"), "`{typed}`: {out}");
-        assert!(world.get::<Quitting>(p).is_none(), "`{typed}` quit");
+        assert!(out.contains("Quaff what?"), "'{typed}': {out}");
+        assert!(world.get::<Quitting>(p).is_none(), "'{typed}' quit");
     }
 }
 
@@ -624,8 +624,8 @@ fn look_and_examine_take_an_index() {
     for verb in ["look", "look at", "examine", "look at the"] {
         dispatch(&mut world, p, &format!("{verb} 2.sword"));
         let out = drain(&mut rx);
-        assert!(out.contains("bent"), "`{verb} 2.sword`: {out}");
-        assert!(!out.contains("rusty"), "`{verb} 2.sword`: {out}");
+        assert!(out.contains("bent"), "'{verb} 2.sword': {out}");
+        assert!(!out.contains("rusty"), "'{verb} 2.sword': {out}");
     }
 }
 
@@ -698,7 +698,7 @@ fn staff_verbs_need_the_full_word() {
     for typed in ["zr", "ad", "du", "rer", "sla", "dev", "rena", "areloa"] {
         dispatch(&mut world, p, typed);
         let out = drain(&mut rx);
-        assert!(out.contains("Type the whole command"), "`{typed}`: {out}");
+        assert!(out.contains("Type the whole command"), "'{typed}': {out}");
     }
 }
 

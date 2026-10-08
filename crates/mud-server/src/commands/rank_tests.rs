@@ -73,7 +73,7 @@ fn unlinked_l105_passes_implementor_gated_commands() {
     for name in ["set", "advance", "skillset", "goto", "transfer", "teleport"] {
         assert!(
             command_permitted(&world, god, cmd(name)),
-            "L105 unlinked should be permitted `{name}`"
+            "L105 unlinked should be permitted '{name}'"
         );
     }
     // And it actually executes: `set` mutates.

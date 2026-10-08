@@ -24,11 +24,11 @@ inventory::submit! {
         help: Help {
             usage: "pick <direction>",
             summary: "Pick a locked door open with rogue tools.",
-            long: "Skill check against your `PICK_LOCK` proficiency. \
+            long: "Skill check against your 'PICK_LOCK' proficiency. \
                    Refuses on unlocked exits, exits without a keyhole, \
                    and players who haven't trained pick lock. Costs \
                    5 stamina whether you succeed or fail. On success \
-                   the door flips Locked → Closed (same as `unlock`); \
+                   the door flips Locked → Closed (same as 'unlock'); \
                    on failure you get a fumble line.",
         },
         run: cmd_pick,
@@ -44,11 +44,11 @@ inventory::submit! {
         help: Help {
             usage: "study <spell>",
             summary: "Permanently learn a spell from your class list.",
-            long: "Adds the spell to your `KnownAbilities` at the \
-                   minimum proficiency tier (`known=true`, \
+            long: "Adds the spell to your 'KnownAbilities' at the \
+                   minimum proficiency tier ('known=true', \
                    proficiency=1). Refuses unknown abilities, \
                    already-known spells, or off-class spells. \
-                   Persists across reconnect via `CharacterAbilities`.",
+                   Persists across reconnect via 'CharacterAbilities'.",
         },
         run: cmd_study,
     }
@@ -66,10 +66,10 @@ inventory::submit! {
             long: "FieryMUD uses a slot-pool model, not a Vance-style \
                    prepared-spell list. There's nothing to memorize ahead \
                    of time: at each level you have a fixed number of slots \
-                   per circle (see `slots` for your current capacity), and \
-                   any spell you've trained (`study <spell>`) can be cast \
+                   per circle (see 'slots' for your current capacity), and \
+                   any spell you've trained ('study <spell>') can be cast \
                    while a slot of its circle is free. This command \
-                   redirects to `slots`.",
+                   redirects to 'slots'.",
         },
         run: cmd_memorize,
     }
@@ -83,12 +83,12 @@ inventory::submit! {
         category: Category::Magic,
         help: Help {
             usage: "forget",
-            summary: "(legacy alias) Slots aren't pre-prepared — see `slots`.",
+            summary: "(legacy alias) Slots aren't pre-prepared — see 'slots'.",
             long: "There's no prepared-spell list to forget from. Spell \
                    slots are a circle-pool you draw from when casting; a \
                    slot you've spent regenerates on its own under \
                    resting / sleeping / meditating postures. Redirects to \
-                   `slots`.",
+                   'slots'.",
         },
         run: cmd_forget,
     }
@@ -110,7 +110,7 @@ inventory::submit! {
                    restriction checks, damage/heal/buff resolution — \
                    lands when CharacterAbilities and the effect \
                    pipeline are wired. Only matches abilityType = \
-                   SPELL; for chants and songs use `chant` / `perform`.",
+                   SPELL; for chants and songs use 'chant' / 'perform'.",
         },
         run: cmd_cast,
     }
@@ -125,7 +125,7 @@ inventory::submit! {
         help: Help {
             usage: "chant <chant> [target]",
             summary: "Invoke a chant from the catalog (cleric-side spells).",
-            long: "Same shape as `cast` but filters to abilityType = \
+            long: "Same shape as 'cast' but filters to abilityType = \
                    CHANT. Stub: prints metadata and gates on \
                    KnownAbilities, no effect application yet.",
         },
@@ -142,7 +142,7 @@ inventory::submit! {
         help: Help {
             usage: "perform <song> [target]",
             summary: "Perform a song from the catalog (bard).",
-            long: "Same shape as `cast` but filters to abilityType = \
+            long: "Same shape as 'cast' but filters to abilityType = \
                    SONG. Stub: prints metadata and gates on \
                    KnownAbilities, no effect application yet.",
         },
@@ -178,7 +178,7 @@ inventory::submit! {
                    has no queue, so abort has nothing to do — kept \
                    as a registered command name for muscle memory \
                    and to provide a clear message instead of \
-                   'Unknown command'. Use `cancel` to drop a \
+                   'Unknown command'. Use 'cancel' to drop a \
                    non-permanent buff already on you.",
         },
         run: cmd_abort,
@@ -196,7 +196,7 @@ inventory::submit! {
             summary: "Drop a non-permanent buff from yourself.",
             long: "With no arg, lists effects you can cancel \
                    (anything not flagged permanent). With an effect \
-                   name, finds the matching `EffectInstance` on you \
+                   name, finds the matching 'EffectInstance' on you \
                    and despawns it. Permanent effects (e.g. innate \
                    resistances) refuse to cancel.",
         },
@@ -331,7 +331,7 @@ pub(crate) fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
     send_to(
         world,
         player,
-        "You're not even casting a spell right now. (Use `cancel <effect>` to drop an active buff.)\r\n",
+        "You're not even casting a spell right now. (Use 'cancel <effect>' to drop an active buff.)\r\n",
     );
 }
 #[allow(clippy::too_many_lines)]
@@ -393,7 +393,7 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
                 out.push_str(&format!("  {shown} ({hours})\r\n"));
             }
         }
-        out.push_str("\r\nUse `cancel <name>` to drop one.\r\n");
+        out.push_str("\r\nUse 'cancel <name>' to drop one.\r\n");
         send_to(world, player, out);
         return;
     }

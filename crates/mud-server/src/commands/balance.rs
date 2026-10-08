@@ -20,9 +20,9 @@ inventory::submit! {
         help: Help {
             usage: "balance",
             summary: "Show your bank-stored coin.",
-            long: "Read-only display of the `bank_wealth` column from \
-                   your character row. Pair with `deposit` / \
-                   `withdraw` to move coin to / from the bank.",
+            long: "Read-only display of the 'bank_wealth' column from \
+                   your character row. Pair with 'deposit' / \
+                   'withdraw' to move coin to / from the bank.",
         },
         run: cmd_balance,
     }

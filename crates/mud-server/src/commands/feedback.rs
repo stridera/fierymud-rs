@@ -21,7 +21,7 @@ inventory::submit! {
         help: Help {
             usage: "bug <message>",
             summary: "Report a bug to the staff.",
-            long: "Logs a feedback row to the `Reports` table. Body \
+            long: "Logs a feedback row to the 'Reports' table. Body \
                    captures your name + character_id + room + the \
                    text. Empty messages refuse so we don't fill the \
                    table with noise.",
@@ -39,8 +39,8 @@ inventory::submit! {
         help: Help {
             usage: "idea <message>",
             summary: "Suggest a feature / change to the staff.",
-            long: "Same as `bug` but tagged Idea. Same `Reports` \
-                   row shape; `report list <kind>` filters.",
+            long: "Same as 'bug' but tagged Idea. Same 'Reports' \
+                   row shape; 'report list <kind>' filters.",
         },
         run: cmd_idea,
     }
@@ -55,7 +55,7 @@ inventory::submit! {
         help: Help {
             usage: "typo <message>",
             summary: "Report a typo / wording issue.",
-            long: "Same as `bug` but tagged Typo. Useful for builders \
+            long: "Same as 'bug' but tagged Typo. Useful for builders \
                    when reviewing room descriptions.",
         },
         run: cmd_typo,
@@ -74,7 +74,7 @@ inventory::submit! {
             long: "From a mortal: broadcasts the petition to every \
                    online Immortal+. From an immortal: if the first \
                    arg matches an online player name, reply to that \
-                   player privately (the legacy `ptell` form folded \
+                   player privately (the legacy 'ptell' form folded \
                    in). Mortals never see anyone else's petitions.",
         },
         run: cmd_petition,

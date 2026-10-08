@@ -301,7 +301,7 @@ fn level_and_experience_commands_print_ascii_only() {
     for line in ["level", "experience"] {
         dispatch(&mut world, player, line);
         let out = strip_ansi(&drain(&mut rx));
-        assert!(out.is_ascii(), "`{line}` printed non-ASCII: {out:?}");
+        assert!(out.is_ascii(), "'{line}' printed non-ASCII: {out:?}");
         assert!(out.contains("Level 5"), "{out}");
     }
     dispatch(&mut world, player, "level");

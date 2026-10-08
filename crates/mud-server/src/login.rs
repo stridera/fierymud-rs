@@ -987,7 +987,7 @@ fn locked_hint(user: &User, now: chrono::NaiveDateTime) -> Option<String> {
     let until = user.locked_until.filter(|t| *t > now)?;
     Some(format!(
         "This account is locked until {} UTC after too many failed passwords. \
-         You can still log in by typing `code` and approving it on the \
+         You can still log in by typing 'code' and approving it on the \
          website, or clear the lock there.\r\n",
         until.format("%Y-%m-%d %H:%M")
     ))
@@ -1919,7 +1919,7 @@ impl ConnRouter {
                 if yes {
                     let _ = ctx.outbound.try_send(
                         format!(
-                            "Great — let's set up `{identifier}`. Pick a password \
+                            "Great — let's set up '{identifier}'. Pick a password \
                              at least {MIN_NEW_PASSWORD_LEN} characters long.\r\n"
                         )
                         .into_bytes(),
@@ -2019,7 +2019,7 @@ impl ConnRouter {
                 if is_email {
                     let _ = ctx.outbound.try_send(
                         format!(
-                            "Password set for `{identifier}`. Now choose your \
+                            "Password set for '{identifier}'. Now choose your \
                              character's name ({MIN_CHARACTER_NAME_LEN}–{MAX_CHARACTER_NAME_LEN} \
                              letters).\r\n"
                         )
@@ -2070,7 +2070,7 @@ impl ConnRouter {
                     Ok(Some(_)) => {
                         let _ = ctx.outbound.try_send(
                             format!(
-                                "Sorry, the name `{name}` is already taken. \
+                                "Sorry, the name '{name}' is already taken. \
                                  Pick another.\r\n"
                             )
                             .into_bytes(),
@@ -2124,7 +2124,7 @@ impl ConnRouter {
             } => {
                 let Some(race) = match_playable_race(trimmed) else {
                     let _ = ctx.outbound.try_send(
-                        format!("`{trimmed}` isn't one of the available races.\r\n").into_bytes(),
+                        format!("'{trimmed}' isn't one of the available races.\r\n").into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingRace {
                         email,
@@ -2153,7 +2153,7 @@ impl ConnRouter {
             } => {
                 let Some((class_id, class_plain_name)) = match_base_class(world, trimmed) else {
                     let _ = ctx.outbound.try_send(
-                        format!("`{trimmed}` isn't one of the available classes.\r\n").into_bytes(),
+                        format!("'{trimmed}' isn't one of the available classes.\r\n").into_bytes(),
                     );
                     ctx.stage = Stage::AwaitingClass {
                         email,
@@ -2186,7 +2186,7 @@ impl ConnRouter {
                 let Some(gender) = match_playable_gender(trimmed) else {
                     let _ = ctx.outbound.try_send(
                         format!(
-                            "`{trimmed}` isn't a recognized gender — pick one of the listed values.\r\n"
+                            "'{trimmed}' isn't a recognized gender — pick one of the listed values.\r\n"
                         )
                         .into_bytes(),
                     );
@@ -4011,7 +4011,7 @@ fn show_enter_game(
             "\r\n<b:yellow>Your character name is awaiting staff approval.</> \
              You can move, look, and fight; chat channels (tell / say / \
              gossip / group) are silenced until a staff member runs \
-             `approve_name` or `reject_name`. Run `name_status` for the \
+             'approve_name' or 'reject_name'. Run 'name_status' for the \
              current state.\r\n",
         );
     }
@@ -6055,7 +6055,7 @@ fn send_confirm_create_prompt(outbound: &Outbound, identifier: &str, is_email: b
     let kind_label = if is_email { "account" } else { "character" };
     send_prompt(
         outbound,
-        format!("I don't see a {kind_label} for `{identifier}`. Create a new one? (yes/no): ")
+        format!("I don't see a {kind_label} for '{identifier}'. Create a new one? (yes/no): ")
             .into_bytes(),
     );
 }
@@ -9634,7 +9634,7 @@ mod tests {
                 out.contains("UTC after too many failed passwords."),
                 "{out}"
             );
-            assert!(out.contains("typing `code`"), "{out}");
+            assert!(out.contains("typing 'code'"), "{out}");
             assert!(out.contains("Password: "), "re-prompts: {out}");
             let ctx = router.login.get(&1).expect("connection must stay open");
             assert_eq!(ctx.failed_attempts, 0);

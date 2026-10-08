@@ -45,14 +45,14 @@ inventory::submit! {
         help: Help {
             usage: "mstat <zone> <id> | <id> | <name>",
             summary: "Dump a mob PROTOTYPE (template, not a live mob).",
-            long: "Builder+. Reads `MobPrototypes` and prints the \
+            long: "Builder+. Reads 'MobPrototypes' and prints the \
                    proto fields + linked behaviors / professions / \
                    abilities / triggers. Three target forms:\r\n\
                    \x20 mstat <zone> <id>   composite key\r\n\
                    \x20 mstat <id>          id in your current zone\r\n\
                    \x20 mstat <name>        substring against proto name\r\n\
                    \r\n\
-                   For a LIVE mob's per-instance state, use `stat <name>` — \
+                   For a LIVE mob's per-instance state, use 'stat <name>' — \
                    stat reads every component on a live entity, mstat \
                    reads the static catalog row that produced it.",
         },
@@ -69,11 +69,11 @@ inventory::submit! {
         help: Help {
             usage: "mob-ai <zone> <id> | <id> | <name>",
             summary: "Plain-English brief of a mob's behavior.",
-            long: "Builder+. Reads the mob proto and `TriggerCatalog` \
+            long: "Builder+. Reads the mob proto and 'TriggerCatalog' \
                    attachments, then summarises in plain English: \
                    alignment-driven aggression, behaviors (sentinel, \
                    wimpy, etc.), and whether the mob is scripted. For \
-                   the raw fields use `mstat`; this is the form you \
+                   the raw fields use 'mstat'; this is the form you \
                    want when explaining a mob to a designer.",
         },
         run: cmd_mob_ai,
@@ -89,7 +89,7 @@ inventory::submit! {
         help: Help {
             usage: "ostat <zone> <id> | <id> | <name>",
             summary: "Dump an object PROTOTYPE.",
-            long: "Builder+. Mirrors `mstat` for objects: type, weight, \
+            long: "Builder+. Mirrors 'mstat' for objects: type, weight, \
                    wear flags, restrictions, special-values per type. \
                    Same target forms — composite key, id in current \
                    zone, or substring against proto name.",
@@ -107,7 +107,7 @@ inventory::submit! {
         help: Help {
             usage: "sstat <zone> <id> | <id>",
             summary: "Dump a shop's metadata.",
-            long: "Builder+. Reads `ShopCatalog` for keeper, accept \
+            long: "Builder+. Reads 'ShopCatalog' for keeper, accept \
                    rules, items offered, pet roster. <id> alone \
                    defaults to your current zone.",
         },
@@ -124,7 +124,7 @@ inventory::submit! {
         help: Help {
             usage: "tstat <zone> <id> | <id>",
             summary: "Dump a trigger's metadata.",
-            long: "Builder+. Reads `TriggerCatalog` and prints flags, \
+            long: "Builder+. Reads 'TriggerCatalog' and prints flags, \
                    body, fire stats. <id> alone defaults to current \
                    zone.",
         },
@@ -198,7 +198,7 @@ inventory::submit! {
             usage: "setweather <zone> <kind>",
             summary: "Override a zone's weather.",
             long: "Builder+. Forces a precip kind in the zone's \
-                   `WeatherCatalog` entry until the next natural \
+                   'WeatherCatalog' entry until the next natural \
                    weather tick rolls a new value.",
         },
         run: cmd_setweather,
@@ -214,8 +214,8 @@ inventory::submit! {
         help: Help {
             usage: "set <player> <field> <value>  |  set fields",
             summary: "Mutate a player field directly.",
-            long: "Implementor-only. Run `set fields` to list every \
-                   writable field with its aliases. `stat <player>` \
+            long: "Implementor-only. Run 'set fields' to list every \
+                   writable field with its aliases. 'stat <player>' \
                    dumps the full read-only component state — pair \
                    the two when poking at a character.",
         },
@@ -232,8 +232,8 @@ inventory::submit! {
         help: Help {
             usage: "show <category>",
             summary: "Dump runtime catalogs / counts.",
-            long: "Builder+. Categories include `audit`, `effects`, \
-                   `weather`, `triggers`, `tickrate`. See in-source \
+            long: "Builder+. Categories include 'audit', 'effects', \
+                   'weather', 'triggers', 'tickrate'. See in-source \
                    for the full list.",
         },
         run: cmd_show,
@@ -249,8 +249,8 @@ inventory::submit! {
         help: Help {
             usage: "scripterrors [<n>]",
             summary: "Show recent trigger fire failures.",
-            long: "Builder+. Prints the in-memory `ScriptErrorLog` \
-                   ring (most-recent first). Default `n=20`.",
+            long: "Builder+. Prints the in-memory 'ScriptErrorLog' \
+                   ring (most-recent first). Default 'n=20'.",
         },
         run: cmd_scripterrors,
     }
@@ -269,11 +269,11 @@ inventory::submit! {
                    \x20 syslog                 — last 30 entries from \
                        the in-memory ring (newest at the bottom).\r\n\
                    \x20 syslog <n> [<filter>]  — last n entries (1-500), \
-                       optionally filtered by level (`WARN`, `ERROR`) or \
+                       optionally filtered by level ('WARN', 'ERROR') or \
                        a substring matched against target / message.\r\n\
                    \x20 syslog watch           — subscribe to live WARN+ \
                        events; each new line lands on your prompt as it \
-                       fires. Same as `syslog watch warn`.\r\n\
+                       fires. Same as 'syslog watch warn'.\r\n\
                    \x20 syslog watch error     — subscribe but raise the \
                        floor to ERROR-only.\r\n\
                    \x20 syslog watch off       — unsubscribe. \
@@ -292,7 +292,7 @@ inventory::submit! {
         help: Help {
             usage: "lua <code>",
             summary: "Run a snippet of Lua code.",
-            long: "Runs `code` with `actor` bound to your character. \
+            long: "Runs 'code' with 'actor' bound to your character. \
                    Same Lua API surface as triggers.",
         },
         run: cmd_lua,
@@ -315,7 +315,7 @@ inventory::submit! {
                    \x20 triggers <name>         — list attachments on \
                        a specific mob/item by name.\r\n\
                    \x20 triggers <zone> <id>    — look up a trigger \
-                       by catalog id (alias of `tstat`).\r\n\
+                       by catalog id (alias of 'tstat').\r\n\
                    \x20 triggers full [<name>]  — include the trigger \
                        body inline alongside each attachment.",
         },
@@ -333,8 +333,8 @@ inventory::submit! {
             usage: "trighistory [<target>] [<n>]",
             summary: "Show recent trigger fires for an entity.",
             long: "Builder+. Filters the in-memory trigger fire log \
-                   to fires whose listener was <target> (`here` / \
-                   `me` / `self` / a name in the current room). With \
+                   to fires whose listener was <target> ('here' / \
+                   'me' / 'self' / a name in the current room). With \
                    no <target>, shows the last <n> fires across all \
                    entities. <n> defaults to 20, capped at 200.",
         },
@@ -351,12 +351,12 @@ inventory::submit! {
         help: Help {
             usage: "trigattach <target> <zone> <id>",
             summary: "Bolt a trigger onto a live entity without reloading.",
-            long: "Builder+. Mutates `AttachedTriggers` on the target \
+            long: "Builder+. Mutates 'AttachedTriggers' on the target \
                    so a trigger fires for it on the next relevant \
                    event. Doesn't touch the DB — survives only this \
                    session. Use for builder iteration; persist via \
                    muditor when the trigger is ready. <target> is \
-                   `here` (room), `me` / `self`, or a name in the \
+                   'here' (room), 'me' / 'self', or a name in the \
                    current room.",
         },
         run: cmd_trigattach,
@@ -372,9 +372,9 @@ inventory::submit! {
         help: Help {
             usage: "trigdetach <target> <zone> <id>",
             summary: "Remove a runtime trigger attachment.",
-            long: "Builder+. Inverse of `trigattach`. Removes the \
+            long: "Builder+. Inverse of 'trigattach'. Removes the \
                    matching (zone, id) entry from the target's \
-                   `AttachedTriggers`. Silent no-op if no match.",
+                   'AttachedTriggers'. Silent no-op if no match.",
         },
         run: cmd_trigdetach,
     }
@@ -389,7 +389,7 @@ inventory::submit! {
         help: Help {
             usage: "trace <N>",
             summary: "Drill into a captured scripterror entry.",
-            long: "Builder+. Looks up entry #N from `scripterrors` \
+            long: "Builder+. Looks up entry #N from 'scripterrors' \
                    (1 = most recent) and prints the full trigger \
                    body alongside the captured error message — so \
                    the builder doesn't have to chase \
@@ -411,12 +411,12 @@ inventory::submit! {
         help: Help {
             usage: "varset <target> <key> <value...>",
             summary: "Set a script variable on an entity (Lua-side state).",
-            long: "Builder+. <target> is `here` (current room), `me` \
+            long: "Builder+. <target> is 'here' (current room), 'me' \
                    (caller), or a mob/item name in the current room. \
-                   Stores into the entity's `ScriptVars` map; reads \
-                   back via `varlist`. Lua trigger bodies will (once \
+                   Stores into the entity's 'ScriptVars' map; reads \
+                   back via 'varlist'. Lua trigger bodies will (once \
                    the binding lands) see the same map via \
-                   `actor:varget(name)`.",
+                   'actor:varget(name)'.",
         },
         run: cmd_varset,
     }
@@ -431,8 +431,8 @@ inventory::submit! {
         help: Help {
             usage: "varlist [<target>]",
             summary: "List script variables on an entity.",
-            long: "Builder+. <target> defaults to `here` (current \
-                   room). Renders the entity's `ScriptVars` map sorted \
+            long: "Builder+. <target> defaults to 'here' (current \
+                   room). Renders the entity's 'ScriptVars' map sorted \
                    by key. Empty maps print a contained 'no script \
                    vars' note.",
         },
@@ -451,8 +451,8 @@ inventory::submit! {
             summary: "Clear one script variable, or wipe the whole map.",
             long: "Builder+. With <key>, removes that single entry. \
                    Without, wipes every variable on the target. \
-                   <target> resolves the same way as `varset` / \
-                   `varlist`.",
+                   <target> resolves the same way as 'varset' / \
+                   'varlist'.",
         },
         run: cmd_varclear,
     }
@@ -468,7 +468,7 @@ inventory::submit! {
             usage: "firetrig <zone> <id> [<actor>]",
             summary: "Manually fire a trigger by id.",
             long: "Builder+. Useful for testing trigger bodies. The \
-                   `actor` defaults to the caster.",
+                   'actor' defaults to the caster.",
         },
         run: cmd_firetrig,
     }
@@ -1517,7 +1517,7 @@ pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
     match (trig_count, no_script) {
         (0, _) => out.push_str("Triggers:      <none> — behavior is purely from the flags above.\r\n"),
         (n, false) => out.push_str(&format!(
-            "Triggers:      {n} attached — scripts run alongside the flag-driven AI. Use `tinfo` for bodies.\r\n",
+            "Triggers:      {n} attached — scripts run alongside the flag-driven AI. Use 'tinfo' for bodies.\r\n",
         )),
         (n, true) => out.push_str(&format!(
             "Triggers:      {n} attached, but No-Script is set — dispatch is suppressed!\r\n",
@@ -1690,7 +1690,7 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
     // `set fields` / `set list` — show the writable-field list.
     let trimmed = args.trim();
     if trimmed.eq_ignore_ascii_case("fields") || trimmed.eq_ignore_ascii_case("list") {
-        let mut out = String::from("\r\n<b:cyan>Writable fields for `set`:</>\r\n");
+        let mut out = String::from("\r\n<b:cyan>Writable fields for 'set':</>\r\n");
         let widest_canonical = SET_FIELDS
             .iter()
             .map(|(c, _, _)| c.len())
@@ -1707,7 +1707,7 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
             ));
         }
         out.push_str(
-            "\r\n  <dim>Pair with `stat <player>` for the read-only component dump.</>\r\n",
+            "\r\n  <dim>Pair with 'stat <player>' for the read-only component dump.</>\r\n",
         );
         crate::commands::send_rendered(world, player, &out);
         return;
@@ -1717,7 +1717,7 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            "Usage: set <target|me> <field> <value>   (run `set fields` to list writable fields)\r\n",
+            "Usage: set <target|me> <field> <value>   (run 'set fields' to list writable fields)\r\n",
         );
         return;
     }
@@ -1815,7 +1815,7 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
                 world,
                 player,
                 format!(
-                    "Unknown field '{other}'. Run `set fields` to list every writable field.\r\n"
+                    "Unknown field '{other}'. Run 'set fields' to list every writable field.\r\n"
                 ),
             );
             return;
@@ -2089,7 +2089,7 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
         }
         other => {
             out.push_str(&format!(
-                "Unknown subsystem '{other}'. Try `show` for the list.\r\n"
+                "Unknown subsystem '{other}'. Try 'show' for the list.\r\n"
             ));
         }
     }
@@ -2134,7 +2134,7 @@ pub(crate) fn cmd_scripterrors(world: &mut World, player: Entity, args: &str) {
             msg = entry.message,
         ));
     }
-    out.push_str("  <dim>(use `trace <N>` to dump the full trigger body for entry #N.)</>\r\n");
+    out.push_str("  <dim>(use 'trace <N>' to dump the full trigger body for entry #N.)</>\r\n");
     crate::commands::send_rendered(world, player, &out);
 }
 
@@ -2144,7 +2144,7 @@ pub(crate) fn cmd_trace(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            "Usage: trace <N>  (N is the entry number from `scripterrors`)\r\n",
+            "Usage: trace <N>  (N is the entry number from 'scripterrors')\r\n",
         );
         return;
     };
@@ -2236,7 +2236,7 @@ pub(crate) fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
                     world,
                     player,
                     "Syslog watch: <yellow>WARN</> and above. \
-                     `syslog watch off` to stop.\r\n",
+                     'syslog watch off' to stop.\r\n",
                 );
             }
             "error" | "err" | "errors" => {
@@ -2249,14 +2249,14 @@ pub(crate) fn cmd_syslog(world: &mut World, player: Entity, args: &str) {
                     world,
                     player,
                     "Syslog watch: <red>ERROR</> only. \
-                     `syslog watch off` to stop.\r\n",
+                     'syslog watch off' to stop.\r\n",
                 );
             }
             other => {
                 send_to(
                     world,
                     player,
-                    format!("Unknown level '{other}'. Use `warn`, `error`, or `off`.\r\n",),
+                    format!("Unknown level '{other}'. Use 'warn', 'error', or 'off'.\r\n",),
                 );
             }
         }
@@ -2959,10 +2959,10 @@ inventory::submit! {
         help: Help {
             usage: "slist [spell|chant|song|skill]",
             summary: "List every ability of a given kind, or all kinds.",
-            long: "Builder+. Pages through `AbilityCatalog`, sorted \
+            long: "Builder+. Pages through 'AbilityCatalog', sorted \
                    alphabetically. With no arg, prints every ability \
                    grouped by kind. With a kind label, narrows the \
-                   list. Pair with `astat <name>` for per-ability \
+                   list. Pair with 'astat <name>' for per-ability \
                    detail.",
         },
         run: cmd_slist,
@@ -2979,8 +2979,8 @@ inventory::submit! {
             usage: "snum <name>",
             summary: "Print the catalog id for an ability by name.",
             long: "Builder+. Case-insensitive whole-name match. For \
-                   substring search use `ssearch`. The id surfaces \
-                   on `varset` / `skillset` / formula bindings.",
+                   substring search use 'ssearch'. The id surfaces \
+                   on 'varset' / 'skillset' / formula bindings.",
         },
         run: cmd_snum,
     }
@@ -2996,7 +2996,7 @@ inventory::submit! {
             usage: "ssearch <substring>",
             summary: "Find abilities by name substring.",
             long: "Builder+. Case-insensitive substring against the \
-                   ability's plain name. Renders `(id) name (kind)` \
+                   ability's plain name. Renders '(id) name (kind)' \
                    per match, capped at 50.",
         },
         run: cmd_ssearch,
@@ -3012,10 +3012,10 @@ inventory::submit! {
         help: Help {
             usage: "vitem <type>",
             summary: "List object prototypes by type.",
-            long: "Builder+. Filters `ObjectPrototypes` by `ObjectType` \
+            long: "Builder+. Filters 'ObjectPrototypes' by 'ObjectType' \
                    (Weapon, Armor, Container, Light, Scroll, Wand, …). \
                    Case-insensitive. Capped at 50 hits with overflow \
-                   footer; pair with `ostat` to inspect any one.",
+                   footer; pair with 'ostat' to inspect any one.",
         },
         run: cmd_vitem,
     }
@@ -3030,10 +3030,10 @@ inventory::submit! {
         help: Help {
             usage: "vwear <slot>",
             summary: "List object prototypes by wear-slot.",
-            long: "Builder+. Filters `ObjectPrototypes` whose \
-                   `wear_flags` contain the named slot (Head, Body, \
+            long: "Builder+. Filters 'ObjectPrototypes' whose \
+                   'wear_flags' contain the named slot (Head, Body, \
                    Mainhand, etc.). Case-insensitive; matches the \
-                   `WearFlag` enum names from the schema.",
+                   'WearFlag' enum names from the schema.",
         },
         run: cmd_vwear,
     }
@@ -3048,9 +3048,9 @@ inventory::submit! {
         help: Help {
             usage: "zlist",
             summary: "List every loaded zone (id + name).",
-            long: "Builder+. Sorted by zone id. Use `znum <name>` \
+            long: "Builder+. Sorted by zone id. Use 'znum <name>' \
                    to look up the id of a zone you only know by \
-                   name, or `zsearch <substring>` for a fuzzy \
+                   name, or 'zsearch <substring>' for a fuzzy \
                    match.",
         },
         run: cmd_zlist,
@@ -3067,7 +3067,7 @@ inventory::submit! {
             usage: "znum <name>",
             summary: "Print the zone id whose name exactly matches.",
             long: "Builder+. Case-insensitive whole-name match. For \
-                   substring search use `zsearch`.",
+                   substring search use 'zsearch'.",
         },
         run: cmd_znum,
     }
@@ -3083,7 +3083,7 @@ inventory::submit! {
             usage: "zsearch <substring>",
             summary: "Find zones by name substring.",
             long: "Builder+. Case-insensitive substring against the \
-                   zone's `Named`. Capped at 50 hits.",
+                   zone's 'Named'. Capped at 50 hits.",
         },
         run: cmd_zsearch,
     }
@@ -3099,9 +3099,9 @@ inventory::submit! {
             usage: "clist",
             summary: "List every class with its catalog id.",
             long: "Builder+. Pairs the class plain name with its \
-                   numeric id (the value `Profile.class_id` carries) \
-                   so you can plug it into `set` / `skillset` / \
-                   `advance` paths.",
+                   numeric id (the value 'Profile.class_id' carries) \
+                   so you can plug it into 'set' / 'skillset' / \
+                   'advance' paths.",
         },
         run: cmd_clist,
     }
@@ -3117,7 +3117,7 @@ inventory::submit! {
             usage: "csearch <substring>",
             summary: "Find classes by name substring.",
             long: "Builder+. Case-insensitive substring against the \
-                   class's `plain_name`. Subclass rows are flagged.",
+                   class's 'plain_name'. Subclass rows are flagged.",
         },
         run: cmd_csearch,
     }
@@ -3134,8 +3134,8 @@ inventory::submit! {
             summary: "Find object prototypes by name or keyword substring.",
             long: "Builder+. Case-insensitive substring match against \
                    each ObjectProto's name and keyword list. Prints \
-                   `(zone, id) name` per match, capped at 50 results. \
-                   Pair with `ostat <zone> <id>` for full proto detail.",
+                   '(zone, id) name' per match, capped at 50 results. \
+                   Pair with 'ostat <zone> <id>' for full proto detail.",
         },
         run: cmd_osearch,
     }
@@ -3152,7 +3152,7 @@ inventory::submit! {
             summary: "Find mob prototypes by name or keyword substring.",
             long: "Builder+. Case-insensitive substring match against \
                    each MobProto's name and keywords. Same shape as \
-                   `osearch`. Pair with `mstat <zone> <id>` for full \
+                   'osearch'. Pair with 'mstat <zone> <id>' for full \
                    proto detail.",
         },
         run: cmd_msearch,
@@ -3169,7 +3169,7 @@ inventory::submit! {
             usage: "rsearch <substring>",
             summary: "Find rooms by name substring.",
             long: "Builder+. Case-insensitive substring match against \
-                   the room's `Named` value. Prints `(zone, id) name` \
+                   the room's 'Named' value. Prints '(zone, id) name' \
                    per match, capped at 50.",
         },
         run: cmd_rsearch,
@@ -3253,7 +3253,7 @@ pub(crate) fn cmd_snum(world: &mut World, player: Entity, args: &str) {
         None => send_to(
             world,
             player,
-            format!("No ability named '{needle}'. Try `ssearch`.\r\n"),
+            format!("No ability named '{needle}'. Try 'ssearch'.\r\n"),
         ),
     }
 }
@@ -3492,7 +3492,7 @@ pub(crate) fn cmd_znum(world: &mut World, player: Entity, args: &str) {
         None => send_to(
             world,
             player,
-            format!("No zone named '{needle}'. Try `zsearch`.\r\n"),
+            format!("No zone named '{needle}'. Try 'zsearch'.\r\n"),
         ),
     }
 }

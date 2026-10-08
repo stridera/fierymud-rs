@@ -25,8 +25,8 @@ inventory::submit! {
             summary: "List commands or show details on a specific one.",
             long: "With no arguments, shows commands available to you grouped \
                    by category. With an argument, shows the usage and details \
-                   for that command. Admin commands live in `wizhelp` (Builder+ \
-                   only). Try `help newbie` for a starter-pack of practical \
+                   for that command. Admin commands live in 'wizhelp' (Builder+ \
+                   only). Try 'help newbie' for a starter-pack of practical \
                    first goals.",
         },
         run: cmd_help,
@@ -42,10 +42,10 @@ inventory::submit! {
         help: Help {
             usage: "wizhelp [command]",
             summary: "List admin commands or show details on a specific one.",
-            long: "Builder+ counterpart of `help`. With no arguments, lists \
+            long: "Builder+ counterpart of 'help'. With no arguments, lists \
                    every admin command you can run. With an argument, shows \
                    the usage and details for that command — same shape as \
-                   `help`, but scoped to admin tools so the player help \
+                   'help', but scoped to admin tools so the player help \
                    stays uncluttered.",
         },
         run: cmd_wizhelp,
@@ -121,9 +121,9 @@ inventory::submit! {
             long: "Without an argument, renders KnownAbilities with \
                    proficiency 0-1000 and a tier label. With an \
                    ability name, raises that ability's proficiency \
-                   by 5 (capped at the class's `proficiency_cap` \
-                   from `ClassAbilities`). Persists across \
-                   reconnect via `CharacterAbilities`.",
+                   by 5 (capped at the class's 'proficiency_cap' \
+                   from 'ClassAbilities'). Persists across \
+                   reconnect via 'CharacterAbilities'.",
         },
         run: cmd_practice,
     }
@@ -139,8 +139,8 @@ inventory::submit! {
             usage: "glance <target>",
             summary: "One-line condition check on someone in your room.",
             long: "Tells you the target's name, posture, condition (e.g. \
-                   `bleeding`), and whether they're fighting. Faster than \
-                   `examine` for a quick teammate / enemy check.",
+                   'bleeding'), and whether they're fighting. Faster than \
+                   'examine' for a quick teammate / enemy check.",
         },
         run: cmd_glance,
     }
@@ -156,7 +156,7 @@ inventory::submit! {
             usage: "experience",
             summary: "Show your current experience and level.",
             long: "Prints your level and total experience points. The \
-                   per-level table that turns this into a `to next` \
+                   per-level table that turns this into a 'to next' \
                    readout will land with the levelling system.",
         },
         run: cmd_experience,
@@ -174,7 +174,7 @@ inventory::submit! {
             summary: "Show your on-hand coin in platinum/gold/silver/copper.",
             long: "Prints the current coin total split across the four \
                    denominations (1 platinum = 10 gold = 100 silver = \
-                   1000 copper). Use `balance` for bank-stored coin.",
+                   1000 copper). Use 'balance' for bank-stored coin.",
         },
         run: cmd_wealth,
     }
@@ -189,10 +189,10 @@ inventory::submit! {
         help: Help {
             usage: "bribe <amount> <target>",
             summary: "Hand a sum of copper to a mob — fires BRIBE triggers.",
-            long: "Decrements your on-hand coin by `amount` (copper \
+            long: "Decrements your on-hand coin by 'amount' (copper \
                    units) and pads the target mob's coin by the same. \
                    Fires the target's BRIBE-flagged Lua triggers with \
-                   `actor` = you and `amount` as a Lua global so \
+                   'actor' = you and 'amount' as a Lua global so \
                    bodies can react proportionally.",
         },
         run: cmd_bribe,
@@ -210,7 +210,7 @@ inventory::submit! {
             summary: "Move copper into the bank.",
             long: "Refuses if you don't have that much on hand. v1 \
                    is location-agnostic; banker-mob gating arrives \
-                   once `MobProfession::Banker` is hydrated.",
+                   once 'MobProfession::Banker' is hydrated.",
         },
         run: cmd_deposit,
     }
@@ -226,7 +226,7 @@ inventory::submit! {
             usage: "withdraw <amount>",
             summary: "Move copper from the bank to on-hand wealth.",
             long: "Refuses if your bank balance can't cover the \
-                   amount. Inverse of `deposit`.",
+                   amount. Inverse of 'deposit'.",
         },
         run: cmd_withdraw,
     }
@@ -243,7 +243,7 @@ inventory::submit! {
             summary: "Show an item's catalog value in coin.",
             long: "Searches your inventory and the room for the named \
                    item, then prints its base value (the schema's \
-                   `Objects.cost`) split into denominations. Shops will \
+                   'Objects.cost') split into denominations. Shops will \
                    pay some fraction of this on sell once that lands.",
         },
         run: cmd_value,
@@ -279,9 +279,9 @@ inventory::submit! {
         help: Help {
             usage: "list",
             summary: "Show what the shopkeeper here is selling.",
-            long: "Looks for a `Shopkeeper`-tagged mob in your room, \
+            long: "Looks for a 'Shopkeeper'-tagged mob in your room, \
                    then prints the keeper's catalog with prices and \
-                   stock. `buy <#|name>` and `sell <item>` land next.",
+                   stock. 'buy <#|name>' and 'sell <item>' land next.",
         },
         run: cmd_list,
     }
@@ -296,9 +296,9 @@ inventory::submit! {
         help: Help {
             usage: "buy <#|name>",
             summary: "Buy an item from the shopkeeper here.",
-            long: "Argument is either the catalog index from `list` or \
+            long: "Argument is either the catalog index from 'list' or \
                    a substring of the item's name. Coin is deducted \
-                   from your `wealth`; the item lands in your \
+                   from your 'wealth'; the item lands in your \
                    inventory. Stock is advisory until per-shop \
                    instance state lands.",
         },
@@ -315,10 +315,10 @@ inventory::submit! {
         help: Help {
             usage: "sell <item>",
             summary: "Sell a carried item to the shopkeeper here.",
-            long: "Pays `proto.cost * sell_profit` rounded for any \
+            long: "Pays 'proto.cost * sell_profit' rounded for any \
                    carried item with positive cost. Equipped items \
-                   are refused (`remove` first). Item-type filters \
-                   (`ShopAccepts`) are not enforced yet.",
+                   are refused ('remove' first). Item-type filters \
+                   ('ShopAccepts') are not enforced yet.",
         },
         run: cmd_sell,
     }
@@ -334,7 +334,7 @@ inventory::submit! {
             usage: "hire <#|name>",
             summary: "Hire a pet from a pet-shop keeper.",
             long: "Spawns a fresh mob as your follower. Coin from \
-                   `wealth`. Pet is renamed to `<you>'s <mob>` so \
+                   'wealth'. Pet is renamed to '<you>'s <mob>' so \
                    it doesn't blend with wild mobs of the same kind.",
         },
         run: cmd_hire,
@@ -351,8 +351,8 @@ inventory::submit! {
             usage: "title [<new title> | clear]",
             summary: "Show or change the epithet shown after your name.",
             long: "With no argument, prints your current title. With a \
-                   new title, sets it (max 60 chars). With `clear` (or \
-                   `none` / `-`), removes it. Persists on disconnect.",
+                   new title, sets it (max 60 chars). With 'clear' (or \
+                   'none' / '-'), removes it. Persists on disconnect.",
         },
         run: cmd_title,
     }
@@ -366,10 +366,10 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "description [<new prose> | clear]",
-            summary: "Show or set the prose `examine` shows for you.",
+            summary: "Show or set the prose 'examine' shows for you.",
             long: "With no argument, prints your current description. \
                    With new text, replaces it (max 500 chars). With \
-                   `clear` / `none` / `-`, removes it. XML-Lite color \
+                   'clear' / 'none' / '-', removes it. XML-Lite color \
                    tags render the same as room descriptions. Persists \
                    on disconnect.",
         },
@@ -423,9 +423,9 @@ inventory::submit! {
                    With one numeric arg, filters to players at \
                    that level or higher. With two numeric args, \
                    filters to the inclusive level range. \
-                   `who clan <abbrev>` filters to players in the \
+                   'who clan <abbrev>' filters to players in the \
                    named clan (case-insensitive match against the \
-                   `[ABBR]` tag shown alongside each name).",
+                   '[ABBR]' tag shown alongside each name).",
         },
         run: cmd_who,
     }
@@ -445,8 +445,8 @@ inventory::submit! {
                    alignment, posture, location, recall point, and \
                    your current combat target when fighting. \
                    Spell-circle slots are surfaced separately via \
-                   `slots`; full effect durations via `effects`; \
-                   XP / next-level gains via `level`.",
+                   'slots'; full effect durations via 'effects'; \
+                   XP / next-level gains via 'level'.",
         },
         run: cmd_score,
     }
@@ -478,7 +478,7 @@ inventory::submit! {
             usage: "inventory [<filter>]",
             summary: "List items you are carrying.",
             long: "Shows everything in your inventory by name. \
-                   Use `get` to pick items up and `drop` to set them down. \
+                   Use 'get' to pick items up and 'drop' to set them down. \
                    With a filter arg, only items whose name contains the \
                    substring (case-insensitive) are shown — useful for \
                    pruning a packed bag down to e.g. just potions.",
@@ -497,7 +497,7 @@ inventory::submit! {
             usage: "get <item> | get <item> from <container>",
             summary: "Pick up an item from the room or a container.",
             long: "Match is by case-insensitive substring on the item's \
-                   keywords (or its name). With `from <container>`, \
+                   keywords (or its name). With 'from <container>', \
                    pulls from a container the player is carrying or \
                    one in the room. The item moves into your \
                    inventory; everyone else in the room sees the action.",
@@ -516,7 +516,7 @@ inventory::submit! {
             usage: "put <item> <container>",
             summary: "Move a carried item into a container.",
             long: "Container can be a carried item or one in the \
-                   current room. Equipped items must be `remove`d \
+                   current room. Equipped items must be 'remove'd \
                    first. Bystanders see the action.",
         },
         run: cmd_put,
@@ -568,7 +568,7 @@ inventory::submit! {
             summary: "Permanently destroy a carried item.",
             long: "The item is despawned; nothing is dropped on the \
                    floor and no coin is awarded. Refuses on equipped \
-                   gear — `remove` first.",
+                   gear — 'remove' first.",
         },
         run: cmd_junk,
     }
@@ -584,7 +584,7 @@ inventory::submit! {
             usage: "give <item> <target>",
             summary: "Hand an item to another character in the room.",
             long: "Both you and the target must be in the same room. The \
-                   item must be in your inventory (not equipped — `remove` \
+                   item must be in your inventory (not equipped — 'remove' \
                    first if needed).",
         },
         run: cmd_give,
@@ -601,7 +601,7 @@ inventory::submit! {
             usage: "wear <item>",
             summary: "Equip a wearable item from your inventory.",
             long: "The item must have a wear-slot, and that slot must be \
-                   free. Use `remove` to take something off first.",
+                   free. Use 'remove' to take something off first.",
         },
         run: cmd_wear,
     }
@@ -668,7 +668,7 @@ inventory::submit! {
         help: Help {
             usage: "mount <mob>",
             summary: "Climb onto a mountable mob.",
-            long: "Target must be `Mountable` (auto-applied to mobs \
+            long: "Target must be 'Mountable' (auto-applied to mobs \
                    whose keywords contain horse / steed / mount / \
                    donkey / mare). When you move, your mount comes \
                    with you. Refused on already-mounted you, on \
@@ -687,8 +687,8 @@ inventory::submit! {
         help: Help {
             usage: "dismount",
             summary: "Get off your current mount.",
-            long: "Clears the `Mounted` link on you and the \
-                   `RiddenBy` link on the mount. No-op when not \
+            long: "Clears the 'Mounted' link on you and the \
+                   'RiddenBy' link on the mount. No-op when not \
                    mounted.",
         },
         run: cmd_dismount,
@@ -707,7 +707,7 @@ inventory::submit! {
             long: "Movement charges a flat 2 stamina per move while \
                    flying — great savings over water/swamp (4-6 \
                    normally), slightly pricier on roads (1). Use \
-                   `walk` or `land` to come back down.",
+                   'walk' or 'land' to come back down.",
         },
         run: cmd_fly,
     }
@@ -739,7 +739,7 @@ inventory::submit! {
             usage: "hide",
             summary: "Slip into the shadows (sets the Stealth marker).",
             long: "Currently a marker toggle — combat formulas that \
-                   reference `hidden` (e.g. BACKSTAB's bonus) read \
+                   reference 'hidden' (e.g. BACKSTAB's bonus) read \
                    the marker. The full rogue skill check, noise \
                    gating, and look-time visibility filtering land \
                    with the skill system.",
@@ -757,7 +757,7 @@ inventory::submit! {
         help: Help {
             usage: "visible",
             summary: "Stop hiding (clears the Stealth marker).",
-            long: "Removes the `Stealth` marker — back to normal visibility.",
+            long: "Removes the 'Stealth' marker — back to normal visibility.",
         },
         run: cmd_visible,
     }
@@ -804,10 +804,10 @@ inventory::submit! {
         help: Help {
             usage: "drink <container>",
             summary: "Take a swig from a drink container.",
-            long: "Decrements the container's `remaining` liquid by \
-                   4 units. Empty containers refuse. Use `quaff` for \
-                   potions, `sip` for a smaller swig (1 unit), \
-                   `taste` to identify the liquid without drinking.",
+            long: "Decrements the container's 'remaining' liquid by \
+                   4 units. Empty containers refuse. Use 'quaff' for \
+                   potions, 'sip' for a smaller swig (1 unit), \
+                   'taste' to identify the liquid without drinking.",
         },
         run: cmd_drink,
     }
@@ -822,7 +822,7 @@ inventory::submit! {
         help: Help {
             usage: "sip <container>",
             summary: "Sip 1 unit from a drink container.",
-            long: "Lighter than `drink` (4 units). Same refusal on \
+            long: "Lighter than 'drink' (4 units). Same refusal on \
                    empty containers; same poison handling.",
         },
         run: cmd_sip,
@@ -874,7 +874,7 @@ inventory::submit! {
         help: Help {
             usage: "fill <container> <source>",
             summary: "Top up a container from another container.",
-            long: "Inverse-arg `pour`: same liquid-match rules, \
+            long: "Inverse-arg 'pour': same liquid-match rules, \
                    transfers up to the destination's remaining \
                    capacity.",
         },
@@ -1004,7 +1004,7 @@ inventory::submit! {
             usage: "commands [<category>]",
             summary: "Flat alphabetical list of every command you can use.",
             long: "Shows just the names you have access to, without the \
-                   per-category framing `help` uses. Aliases share their \
+                   per-category framing 'help' uses. Aliases share their \
                    primary name's slot. With a category arg (info / \
                    movement / communication / combat / admin) the list \
                    is filtered to that category, useful when the full \
@@ -1024,7 +1024,7 @@ inventory::submit! {
             usage: "open <direction>",
             summary: "Open a closed door in the given direction.",
             long: "Refused if the exit is already open or locked. \
-                   Locked doors need a key (use `unlock`).",
+                   Locked doors need a key (use 'unlock').",
         },
         run: cmd_open,
     }
@@ -1041,7 +1041,7 @@ inventory::submit! {
             summary: "Unlock a locked door using a key in your inventory.",
             long: "Searches your carried items for a keyword that \
                    matches the exit's required key. On match, the \
-                   door is unlocked (state Closed); use `open` to \
+                   door is unlocked (state Closed); use 'open' to \
                    then walk through. Refused if the exit isn't \
                    locked or you have no matching key.",
         },
@@ -1074,7 +1074,7 @@ inventory::submit! {
         help: Help {
             usage: "lock <direction>",
             summary: "Lock a closed door using a key in your inventory.",
-            long: "Mirror of `unlock`: requires the exit to be closed \
+            long: "Mirror of 'unlock': requires the exit to be closed \
                    (not already locked, not open) and to have a key \
                    requirement, and that you carry that key. On match, \
                    the door is locked.",
@@ -1094,7 +1094,7 @@ inventory::submit! {
             summary: "Read the text on an item (book, sign, scroll).",
             long: "Finds an item by keyword on you or in the room and \
                    prints its description text. Refuses on mobs and \
-                   players — use `examine` for those.",
+                   players — use 'examine' for those.",
         },
         run: cmd_read,
     }
@@ -1109,7 +1109,7 @@ inventory::submit! {
         help: Help {
             usage: "compare <item-a> [<item-b>]",
             summary: "Compare two carried/worn items by weight, level, and weapon damage.",
-            long: "Each item is matched by keyword the same way `wear` \
+            long: "Each item is matched by keyword the same way 'wear' \
                    matches. Both items must be on you (inventory or \
                    equipped). With a single arg, the second item is \
                    inferred from whatever you're currently wearing in \
@@ -1132,7 +1132,7 @@ inventory::submit! {
             usage: "motd",
             summary: "Show the message-of-the-day.",
             long: "Static welcome text for now — once a GameConfig \
-                   `motd` row lands, this will read from there.",
+                   'motd' row lands, this will read from there.",
         },
         run: cmd_motd,
     }
@@ -1177,7 +1177,7 @@ inventory::submit! {
         help: Help {
             usage: "policies",
             summary: "Server rules and code of conduct.",
-            long: "Static for now. Aliases: `rules`, `policy`.",
+            long: "Static for now. Aliases: 'rules', 'policy'.",
         },
         run: cmd_policies,
     }
@@ -1195,12 +1195,12 @@ inventory::submit! {
             long: "Read-only summary of who you're logged in as and \
                    which character is currently active. Snapshot taken \
                    at login — characters created mid-session won't \
-                   appear until you reconnect. Also reads `discord_links` \
-                   and `google_links` for your Users row and prints \
+                   appear until you reconnect. Also reads 'discord_links' \
+                   and 'google_links' for your Users row and prints \
                    whatever's bound; Discord links display as \
-                   `verified` / `unverified` so you can tell whether \
+                   'verified' / 'unverified' so you can tell whether \
                    the bot will honor messages from the linked account. \
-                   (`whoami` is a separate one-line identity command.)",
+                   ('whoami' is a separate one-line identity command.)",
         },
         run: cmd_mail_stub,
     }
@@ -1266,7 +1266,7 @@ inventory::submit! {
                    and rooms loaded, how many live mobs and items \
                    spawned, how many players online, server tick + \
                    uptime, and active effect-instance count. Aliases \
-                   `users` and `stats` mirror `world` since the player \
+                   'users' and 'stats' mirror 'world' since the player \
                    count and per-system load are the most-asked pieces.",
         },
         run: cmd_world,
@@ -1299,7 +1299,7 @@ inventory::submit! {
             usage: "weather",
             summary: "Atmospheric flavor for your zone's climate.",
             long: "Renders a single line based on your current zone's \
-                   `Climate` and the in-game time of day. Rule-of-thumb \
+                   'Climate' and the in-game time of day. Rule-of-thumb \
                    only — no per-tick weather simulation yet, so the \
                    same input produces the same output.",
         },
@@ -1415,7 +1415,7 @@ inventory::submit! {
                    or its memory (mobs you've fled from that will \
                    re-engage on sight). Mobs in your current room \
                    are flagged so you know what's about to swing. \
-                   Mirrored as a `Char.Aggro` GMCP frame on each \
+                   Mirrored as a 'Char.Aggro' GMCP frame on each \
                    prompt for HUD-style clients.",
         },
         run: cmd_aggr,
@@ -1431,10 +1431,10 @@ inventory::submit! {
         help: Help {
             usage: "idle [<min-minutes>]",
             summary: "Show online players sorted by idle time, longest first.",
-            long: "Same population as `who`, but ordered by how long since \
+            long: "Same population as 'who', but ordered by how long since \
                    each player last typed something. Players who just \
-                   connected and haven't typed yet show as `fresh`; anyone \
-                   under a minute shows as `active`. \
+                   connected and haven't typed yet show as 'fresh'; anyone \
+                   under a minute shows as 'active'. \
                    With a numeric arg, filters to players idle that many \
                    minutes or more — handy for spotting AFK staff or stuck \
                    sessions.",
@@ -1454,10 +1454,10 @@ inventory::submit! {
             summary: "List spells you know, grouped by circle.",
             long: "By default shows the spells you've learned grouped \
                    by your class's spell circle (1 = lowest). Numeric \
-                   args filter by circle: `spells 3` shows circle 3, \
-                   `spells 1-2` shows circles 1 through 2. A trailing \
+                   args filter by circle: 'spells 3' shows circle 3, \
+                   'spells 1-2' shows circles 1 through 2. A trailing \
                    word filters by name, sphere, or damage type — \
-                   `spells 2-3 fire` or `spells dam`. Add `all` to \
+                   'spells 2-3 fire' or 'spells dam'. Add 'all' to \
                    dump the full spell catalog (handy for builders); \
                    the cross-class catalog has no circle grouping.",
         },
@@ -1477,7 +1477,7 @@ inventory::submit! {
             long: "Shows your level, a progress bar and how much XP is \
                    left to the next level, scaled for your class. At the \
                    mortal cap with enough XP to reach level 100 you are \
-                   marked with your class stars (`**`) instead.",
+                   marked with your class stars ('**') instead.",
         },
         run: cmd_level,
     }
@@ -1493,11 +1493,11 @@ inventory::submit! {
             usage: "slots",
             summary: "Show your spell-slot pool and any in-flight cooldowns.",
             long: "Pooled slot model (legacy): each circle has \
-                   `class+level` slots; casting consumes a slot and \
+                   'class+level' slots; casting consumes a slot and \
                    starts a per-circle cooldown timer. Slots regenerate \
                    on their own under Sleeping / Resting / Sitting \
                    postures (faster while Meditating). Format \
-                   `Circle N: free/max  (recovering: 12s, 30s)`. \
+                   'Circle N: free/max  (recovering: 12s, 30s)'. \
                    Cooldowns persist across disconnect.",
         },
         run: cmd_slots,
@@ -1513,8 +1513,8 @@ inventory::submit! {
         help: Help {
             usage: "skills [all] [filter]",
             summary: "List skills you know (or the full catalog).",
-            long: "Like `spells` but filtered to kind=Skill. Default \
-                   shows only what you've learned; `skills all` dumps \
+            long: "Like 'spells' but filtered to kind=Skill. Default \
+                   shows only what you've learned; 'skills all' dumps \
                    the full catalog. Optional substring filter applies \
                    to either scope.",
         },
@@ -1531,9 +1531,9 @@ inventory::submit! {
         help: Help {
             usage: "songs [all] [filter]",
             summary: "List bardic songs you know (or the full catalog).",
-            long: "Like `spells` but filtered to kind=Song. Default \
-                   shows only songs you've learned; `songs all` dumps \
-                   the catalog. Use `perform <song>` to invoke.",
+            long: "Like 'spells' but filtered to kind=Song. Default \
+                   shows only songs you've learned; 'songs all' dumps \
+                   the catalog. Use 'perform <song>' to invoke.",
         },
         run: cmd_songs,
     }
@@ -1548,9 +1548,9 @@ inventory::submit! {
         help: Help {
             usage: "chants [all] [filter]",
             summary: "List chants you know (or the full catalog).",
-            long: "Like `spells` but filtered to kind=Chant. Default \
-                   shows only chants you've learned; `chants all` \
-                   dumps the catalog. Use `chant <name>` to invoke.",
+            long: "Like 'spells' but filtered to kind=Chant. Default \
+                   shows only chants you've learned; 'chants all' \
+                   dumps the catalog. Use 'chant <name>' to invoke.",
         },
         run: cmd_chants,
     }
@@ -1607,13 +1607,13 @@ inventory::submit! {
             usage: "toggle [<flag>]",
             summary: "List your toggles, or flip one on or off.",
             long: "With no argument, lists every toggle with its ON/OFF \
-                   state. `toggle <name>` flips one: names are matched \
-                   like command abbreviations (`toggle auto` reaches the \
+                   state. 'toggle <name>' flips one: names are matched \
+                   like command abbreviations ('toggle auto' reaches the \
                    first AutoXxx in the list) and don't need underscores \
-                   (`toggle showdicerolls`, `toggle dice`, \
-                   `toggle show_dice_rolls` all work). \
-                   `toggle columns <n>` sets the text wrap width (see \
-                   `columns`).",
+                   ('toggle showdicerolls', 'toggle dice', \
+                   'toggle show_dice_rolls' all work). \
+                   'toggle columns <n>' sets the text wrap width (see \
+                   'columns').",
         },
         run: cmd_toggle,
     }
@@ -1628,7 +1628,7 @@ inventory::submit! {
         help: Help {
             usage: "flags",
             summary: "List your active player flags.",
-            long: "Shows every flag currently set on you. Use `toggle <flag>` \
+            long: "Shows every flag currently set on you. Use 'toggle <flag>' \
                    to flip one on or off.",
         },
         run: cmd_flags,
@@ -1644,7 +1644,7 @@ inventory::submit! {
         help: Help {
             usage: "afk",
             summary: "Flip your away-from-keyboard flag.",
-            long: "Marks you AFK so others see the indicator on `who` and on \
+            long: "Marks you AFK so others see the indicator on 'who' and on \
                    incoming tells. Run again to come back.",
         },
         run: cmd_afk,
@@ -1661,15 +1661,15 @@ inventory::submit! {
             usage: "alias [<name> [<command>]]",
             summary: "Define a command shortcut.",
             long: "With no args, lists every alias you've defined. With \
-                   `alias <name>`, shows that alias's expansion. With \
-                   `alias <name> <command>`, sets the alias (`unalias <name>` \
+                   'alias <name>', shows that alias's expansion. With \
+                   'alias <name> <command>', sets the alias ('unalias <name>' \
                    removes it). A plain alias replaces \
-                   whatever you type (extra words are dropped). Put `$*` \
-                   where the rest of your line should go, `$1`..`$9` for \
-                   single words, and `;` between commands to chain them: \
-                   `alias gg get all corpse;put all bag` or \
-                   `alias k kill $1;kill $2`. An alias never re-triggers \
-                   itself, so `alias look look $*` wraps the real command. \
+                   whatever you type (extra words are dropped). Put '$*' \
+                   where the rest of your line should go, '$1'..'$9' for \
+                   single words, and ';' between commands to chain them: \
+                   'alias gg get all corpse;put all bag' or \
+                   'alias k kill $1;kill $2'. An alias never re-triggers \
+                   itself, so 'alias look look $*' wraps the real command. \
                    Aliases persist across sessions.",
         },
         run: cmd_alias,
@@ -1700,8 +1700,8 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "notell",
-            summary: "Refuse incoming `tell` messages.",
-            long: "When set, other players' `tell` to you is blocked with a \
+            summary: "Refuse incoming 'tell' messages.",
+            long: "When set, other players' 'tell' to you is blocked with a \
                    message. Run again to allow tells.",
         },
         run: cmd_notell,
@@ -1717,7 +1717,7 @@ inventory::submit! {
         help: Help {
             usage: "deaf",
             summary: "Stop hearing room-wide channels (gossip, shout).",
-            long: "When set, you no longer receive `gossip` or `shout` from \
+            long: "When set, you no longer receive 'gossip' or 'shout' from \
                    other players. Run again to hear them.",
         },
         run: cmd_deaf,
@@ -1736,10 +1736,10 @@ inventory::submit! {
             long: "The server asks your client what it can display and \
                    adapts: 256-color and truecolor shades are mapped to the \
                    nearest of the 16 basic colors for clients that only \
-                   do 16. `color off` removes color entirely, `color 16` / \
-                   `color 256` / `color truecolor` pin a depth if your client \
-                   misreports itself, and `color auto` goes back to \
-                   following the client. Saved with your character. `color` \
+                   do 16. 'color off' removes color entirely, 'color 16' / \
+                   'color 256' / 'color truecolor' pin a depth if your client \
+                   misreports itself, and 'color auto' goes back to \
+                   following the client. Saved with your character. 'color' \
                    alone shows the current setting.",
         },
         run: cmd_color,
@@ -1758,10 +1758,10 @@ inventory::submit! {
             long: "Clients that don't announce UTF-8 support get plain \
                    ASCII: dashes, arrows, stars and box-drawing characters \
                    are replaced by look-alikes (-- -> * + - |). If your \
-                   client does display UTF-8, `charset utf8` turns the real \
-                   symbols on; `charset ascii` forces plain text; `charset \
-                   auto` follows what your client reports. Saved with your \
-                   character. `charset` alone shows the current setting.",
+                   client does display UTF-8, 'charset utf8' turns the real \
+                   symbols on; 'charset ascii' forces plain text; 'charset \
+                   auto' follows what your client reports. Saved with your \
+                   character. 'charset' alone shows the current setting.",
         },
         run: cmd_charset,
     }
@@ -1776,9 +1776,9 @@ inventory::submit! {
         help: Help {
             usage: "wimpy [pct|off]",
             summary: "Set the HP percentage at which combat auto-flees you.",
-            long: "`wimpy 30` enables wimpy mode and panics you out of \
-                   combat when your HP drops below 30% of max. `wimpy off` \
-                   (or `wimpy 0`) clears it. With no argument, prints the \
+            long: "'wimpy 30' enables wimpy mode and panics you out of \
+                   combat when your HP drops below 30% of max. 'wimpy off' \
+                   (or 'wimpy 0') clears it. With no argument, prints the \
                    current setting. Default threshold when no number was \
                    set is 25%.",
         },
@@ -1794,9 +1794,9 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "autoexit",
-            summary: "Toggle automatic exit listing on `look`.",
+            summary: "Toggle automatic exit listing on 'look'.",
             long: "When set, the room description is followed by the same \
-                   line `exits` would print. Already consumed by the look \
+                   line 'exits' would print. Already consumed by the look \
                    path.",
         },
         run: cmd_autoexit,
@@ -1879,7 +1879,7 @@ inventory::submit! {
         help: Help {
             usage: "brief",
             summary: "Toggle terse room descriptions.",
-            long: "When on, `look` skips the full room description \
+            long: "When on, 'look' skips the full room description \
                    and shows just the title + exits + occupants.",
         },
         run: cmd_brief,
@@ -1897,11 +1897,11 @@ inventory::submit! {
             summary: "Set the width long text is word-wrapped to.",
             long: "The server wraps room descriptions, help and other prose \
                    to your client's reported window width (80 if it \
-                   doesn't report one). `columns 100` pins a fixed width \
+                   doesn't report one). 'columns 100' pins a fixed width \
                    instead, which reads better on very wide windows; \
-                   `columns auto` goes back to following the client. The \
-                   setting is saved with your character. `toggle columns \
-                   <n>` works too.",
+                   'columns auto' goes back to following the client. The \
+                   setting is saved with your character. 'toggle columns \
+                   <n>' works too.",
         },
         run: cmd_columns,
     }
@@ -1951,12 +1951,12 @@ inventory::submit! {
             usage: "nosummon",
             summary: "Silently auto-decline incoming summon spells.",
             long: "By default, when someone casts SUMMON on you, you get a \
-                   30-second `accept` / `decline` prompt. Setting NO_SUMMON \
+                   30-second 'accept' / 'decline' prompt. Setting NO_SUMMON \
                    short-circuits that — incoming summons are silently \
                    refused without prompting you, and the caster sees \
                    \"X is not accepting summons.\" Use this when you want \
                    to AFK without summon-prompt interruptions. Run again \
-                   to re-enable the prompt. PK-flagged players (see `pk`) \
+                   to re-enable the prompt. PK-flagged players (see 'pk') \
                    bypass the prompt entirely — that's part of opting \
                    into PvP.",
         },
@@ -2109,7 +2109,7 @@ inventory::submit! {
             long: "Saves your character, says goodbye and drops the \
                    connection. You can't quit while fighting (staff \
                    excepted) or while casting. The whole word is required; \
-                   `q`, `qu` and `qui` only remind you of that.",
+                   'q', 'qu' and 'qui' only remind you of that.",
         },
         run: cmd_quit,
     }
@@ -2145,7 +2145,7 @@ inventory::submit! {
             summary: "Inspect or enter your player house.",
             long: "Players who own a house can inspect its layout, \
                    guest list, room contents, or step inside via \
-                   `house enter`. `house` (no arg) defaults to the \
+                   'house enter'. 'house' (no arg) defaults to the \
                    info subcommand. Players without a house get a \
                    polite refusal — house creation isn't yet wired \
                    through the runtime.",
@@ -2164,8 +2164,8 @@ inventory::submit! {
             usage: "train [<stat>]",
             summary: "Spend a practice point to bump a CoreStat by 1.",
             long: "With no arg, lists your current six stats and \
-                   available practice points. With `train <stat>`, \
-                   spends 1 point from `SkillPoints` to raise the \
+                   available practice points. With 'train <stat>', \
+                   spends 1 point from 'SkillPoints' to raise the \
                    named stat (str/dex/con/int/wis/cha) by 1. Refuses \
                    on stats already at 18 (the trainable cap), and on \
                    no points available. Persists across reconnect.",
@@ -2248,10 +2248,10 @@ inventory::submit! {
         help: Help {
             usage: "meditate",
             summary: "Focus to speed up spell memorization.",
-            long: "Doubles the rate at which `memorize` slots refill. \
+            long: "Doubles the rate at which 'memorize' slots refill. \
                    Requires resting / sitting / kneeling — standing \
                    or sleeping breaks focus, as does taking a step \
-                   or being attacked. Re-running `meditate` ends the \
+                   or being attacked. Re-running 'meditate' ends the \
                    trance.",
         },
         run: cmd_meditate,
@@ -2267,8 +2267,8 @@ inventory::submit! {
         help: Help {
             usage: "sleep",
             summary: "Lie down and sleep.",
-            long: "Changes your posture to sleeping. Wake with `wake`, \
-                   `stand`, `sit`, or `rest`.",
+            long: "Changes your posture to sleeping. Wake with 'wake', \
+                   'stand', 'sit', or 'rest'.",
         },
         run: cmd_sleep,
     }
@@ -2301,7 +2301,7 @@ inventory::submit! {
             usage: "follow <name>",
             summary: "Trail another character automatically.",
             long: "When the target moves, you move with them through the \
-                   same exit. `follow self` (or `unfollow`) stops \
+                   same exit. 'follow self' (or 'unfollow') stops \
                    following. Cycles are silently broken — you can't \
                    follow someone who is already following you.",
         },
@@ -2335,7 +2335,7 @@ inventory::submit! {
             summary: "List your current group (follow chain).",
             long: "Shows the chain leader and every member, with HP \
                    and same-room indicator. Group membership today is \
-                   informally derived from `follow` chains; an \
+                   informally derived from 'follow' chains; an \
                    explicit invite/consent system can land later.",
         },
         run: cmd_group,
@@ -2351,9 +2351,9 @@ inventory::submit! {
         help: Help {
             usage: "order <follower|all> <command>",
             summary: "Issue a command to one or all of your followers.",
-            long: "Forwards `<command>` to a named mob follower (must \
-                   be in the same room and have `Follower(you)` set), \
-                   or `all` for every same-room follower at once. The \
+            long: "Forwards '<command>' to a named mob follower (must \
+                   be in the same room and have 'Follower(you)' set), \
+                   or 'all' for every same-room follower at once. The \
                    mob runs the command through the normal dispatcher \
                    under its own identity, so target lookups, costs, \
                    and triggers fire as if it had typed the line. \
@@ -2372,9 +2372,9 @@ inventory::submit! {
         help: Help {
             usage: "dismiss <player>",
             summary: "Drop a single direct follower from your group.",
-            long: "Equivalent to `group dismiss <player>` — removes the \
-                   target's `Follower` link to you (must be following \
-                   you directly, not transitively). `disband` clears \
+            long: "Equivalent to 'group dismiss <player>' — removes the \
+                   target's 'Follower' link to you (must be following \
+                   you directly, not transitively). 'disband' clears \
                    everyone at once.",
         },
         run: cmd_dismiss,
@@ -2390,12 +2390,12 @@ inventory::submit! {
         help: Help {
             usage: "split <amount>",
             summary: "Divide coin evenly among same-room group members.",
-            long: "Pulls `<amount>` from your wealth and splits it \
+            long: "Pulls '<amount>' from your wealth and splits it \
                    evenly across every group member in your room \
                    (including you). Remainder stays with the splitter. \
                    Refuses if you're not grouped, the only group \
-                   member here, or carrying less than `amount`. Coin \
-                   amount is in copper; use `wealth` to check yours.",
+                   member here, or carrying less than 'amount'. Coin \
+                   amount is in copper; use 'wealth' to check yours.",
         },
         run: cmd_split,
     }
@@ -2412,7 +2412,7 @@ inventory::submit! {
             summary: "Dismiss everyone directly following you.",
             long: "Breaks the group apart at your level. Followers' \
                    own followers stay attached unless they too \
-                   `disband` or `unfollow`.",
+                   'disband' or 'unfollow'.",
         },
         run: cmd_disband,
     }
@@ -2427,8 +2427,8 @@ inventory::submit! {
         help: Help {
             usage: "invite <player>",
             summary: "Send a group invite to another player.",
-            long: "Target gets a pending `GroupInvite`; they can \
-                   `accept` or `decline`. Invites expire after \
+            long: "Target gets a pending 'GroupInvite'; they can \
+                   'accept' or 'decline'. Invites expire after \
                    5 minutes. Players already following you (in your \
                    group) can't be re-invited.",
         },
@@ -2780,7 +2780,7 @@ fn render_classes_overview(world: &mut World, player: Entity) {
             }
         }
     }
-    out.push_str("\r\n  <dim>Type `help <class>` to see a class's full toolkit.</>\r\n");
+    out.push_str("\r\n  <dim>Type 'help <class>' to see a class's full toolkit.</>\r\n");
     send_to(world, player, out);
 }
 
@@ -2977,7 +2977,7 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
             }
         }
         out.push_str(&format!(
-            "\r\n<dim>Type `{} <command>` for details.</>\r\n",
+            "\r\n<dim>Type '{} <command>' for details.</>\r\n",
             scope.invocation()
         ));
         // DB-backed help articles (HelpEntry) — spells / lore / mechanics
@@ -2990,7 +2990,7 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
             let n = world.resource::<HelpCatalog>().visible_count(viewer_level);
             if n > 0 {
                 out.push_str(&format!(
-                    "<dim>{n} help articles available — type `help <topic>` to read one.</>\r\n"
+                    "<dim>{n} help articles available — type 'help <topic>' to read one.</>\r\n"
                 ));
             }
         }
@@ -2998,7 +2998,7 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
         // admin-side index. Skipped when they're already in `wizhelp`,
         // and skipped for plain players who can't run it anyway.
         if matches!(scope, HelpScope::Player) && role.at_least(UserRole::Builder) {
-            out.push_str("<dim>Builder+: type `wizhelp` for admin commands.</>\r\n");
+            out.push_str("<dim>Builder+: type 'wizhelp' for admin commands.</>\r\n");
         }
         send_to(world, player, out);
         return;
@@ -3598,7 +3598,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     }
     if world.get::<Shopkeeper>(target).is_some() {
         out.push_str(&format!(
-            "{name_rendered} is a merchant — try `list` to see their wares.\r\n"
+            "{name_rendered} is a merchant — try 'list' to see their wares.\r\n"
         ));
     }
     // Surface non-shopkeeper professions on examine so players
@@ -3612,13 +3612,13 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         for prof in &proto.professions {
             let line = match prof {
                 mud_db::enums::MobProfession::Banker => {
-                    Some("a banker — try `deposit` / `withdraw`.")
+                    Some("a banker — try 'deposit' / 'withdraw'.")
                 }
                 mud_db::enums::MobProfession::Trainer => {
-                    Some("a trainer — try `train` / `practice <ability>`.")
+                    Some("a trainer — try 'train' / 'practice <ability>'.")
                 }
                 mud_db::enums::MobProfession::Postmaster => {
-                    Some("a postmaster — try `mail <name>`.")
+                    Some("a postmaster — try 'mail <name>'.")
                 }
                 mud_db::enums::MobProfession::Receptionist => {
                     Some("a receptionist — they handle lodging.")
@@ -3747,7 +3747,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             " board"
         };
         out.push_str(&format!(
-            "It's the {}{}{}; type `board {}` to read it.\r\n",
+            "It's the {}{}{}; type 'board {}' to read it.\r\n",
             summary.title, suffix, lock, summary.alias,
         ));
     }
@@ -3940,7 +3940,7 @@ pub(crate) fn cmd_title(world: &mut World, player: Entity, args: &str) {
         let cur = world.get::<Title>(player).map(|t| t.0.clone());
         let line = match cur {
             Some(t) => format!("Your title: {t}\r\n"),
-            None => "You have no title set. Use `title <new>` to add one.\r\n".to_string(),
+            None => "You have no title set. Use 'title <new>' to add one.\r\n".to_string(),
         };
         send_to(world, player, line);
         return;
@@ -3972,7 +3972,7 @@ pub(crate) fn cmd_description(world: &mut World, player: Entity, args: &str) {
         let cur = world.get::<Description>(player).map(|d| d.0.clone());
         let line = match cur {
             Some(d) if !d.trim().is_empty() => format!("Your description:\r\n{d}\r\n"),
-            _ => "You have no description set. Use `description <prose>`.\r\n".to_string(),
+            _ => "You have no description set. Use 'description <prose>'.\r\n".to_string(),
         };
         send_to(world, player, line);
         return;
@@ -4256,7 +4256,7 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
                 stock_str
             ));
         }
-        out.push_str("\r\nUse `buy <#|name>` (or `hire`) to take one along.\r\n");
+        out.push_str("\r\nUse 'buy <#|name>' (or 'hire') to take one along.\r\n");
     }
     if shop.items.is_empty() && shop.pets.is_empty() {
         send_rendered(
@@ -4414,7 +4414,7 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
                 format_wealth(pet_inspect_fee(level)).unwrap_or_else(|| "free".to_string()),
             ));
         }
-        out.push_str("\r\nUse `inspect <#|name>` to pay the fee and examine one.\r\n");
+        out.push_str("\r\nUse 'inspect <#|name>' to pay the fee and examine one.\r\n");
         send_rendered(world, player, &out);
         return;
     }
@@ -5246,7 +5246,7 @@ pub(crate) fn cmd_train(world: &mut World, player: Entity, args: &str) {
             pair(stats.charisma, effective_cap("charisma")),
         ));
         out.push_str(&format!("Practice points: {points}\r\n"));
-        out.push_str("Use `train <stat>` to spend one.\r\n");
+        out.push_str("Use 'train <stat>' to spend one.\r\n");
         send_to(world, player, out);
         return;
     }
@@ -5650,7 +5650,7 @@ inventory::submit! {
             summary: "Search the area for hidden exits.",
             long: "Refuses while fighting. Each hidden exit you \
                    haven't found is checked in turn: naming its \
-                   keyword (`search monolith`) always finds it, \
+                   keyword ('search monolith') always finds it, \
                    otherwise your Intelligence is rolled against \
                    0-200. The first exit found is revealed (staff always find one). A \
                    search leaves you busy for half a combat round. Reveals are \
@@ -5658,7 +5658,7 @@ inventory::submit! {
                    login starts back at zero known hidden exits, \
                    matching the legacy contract until a persistent \
                    table for revealed exits lands. Pair with \
-                   `exits` afterward to confirm what surfaced.",
+                   'exits' afterward to confirm what surfaced.",
         },
         run: cmd_search,
     }
@@ -5846,10 +5846,10 @@ inventory::submit! {
             usage: "diagnose [<target>]",
             summary: "Verbose health readout for self or a target in your room.",
             long: "With no arg, reports your own condition band (e.g. \
-                   `mortally wounded`), your raw HP / Stamina, and your \
+                   'mortally wounded'), your raw HP / Stamina, and your \
                    posture. With a target, reports their condition band \
                    and posture only — exact numbers are private. Pair with \
-                   `glance` for a one-line summary or `score` for the full \
+                   'glance' for a one-line summary or 'score' for the full \
                    sheet.",
         },
         run: cmd_diagnose,
@@ -5916,7 +5916,7 @@ inventory::submit! {
             summary: "Print your character's name, level, race, and class.",
             long: "One-line answer to \"which character am I logged in \
                    as?\" — handy after a long session or when a script \
-                   needs to confirm identity. Pair with `score` for the \
+                   needs to confirm identity. Pair with 'score' for the \
                    full sheet.",
         },
         run: cmd_whoami,
@@ -7725,8 +7725,8 @@ const TOPIC_HELP_ARTICLES: &[(&str, &str)] = &[
          Posture matters — sitting, resting, kneeling, or sleeping subtracts from\r\n\
          your evasion (Sleeping = -30, full reset).\r\n\
          \r\n\
-         A swing every <b:cyan>4 seconds</> per side; `kill X` fires one immediate\r\n\
-         opening swing then continues on cadence. `consider <target>` shows your\r\n\
+         A swing every <b:cyan>4 seconds</> per side; 'kill X' fires one immediate\r\n\
+         opening swing then continues on cadence. 'consider <target>' shows your\r\n\
          predicted hit rates and the target's current HP.\r\n\
          \r\n\
          <b:yellow>Class tools</>: warriors taunt and bash; rogues hide then\r\n\
@@ -7741,11 +7741,11 @@ const TOPIC_HELP_ARTICLES: &[(&str, &str)] = &[
          Magic Missile are circle 1; Heal and Harm are circle 5 (unlocks ~L33 for\r\n\
          Cleric).\r\n\
          \r\n\
-         Use `<cyan>spells</>` to see what you know grouped by circle.\r\n\
-         `spells 1-2` filters to circles 1-2; `spells dam` keyword-filters.\r\n\
+         Use '<cyan>spells</>' to see what you know grouped by circle.\r\n\
+         'spells 1-2' filters to circles 1-2; 'spells dam' keyword-filters.\r\n\
          \r\n\
          Cast with <cyan>cast 'spell name' [target]</>. In combat without a\r\n\
-         target, hostile spells auto-target your current opponent. `slots`\r\n\
+         target, hostile spells auto-target your current opponent. 'slots'\r\n\
          shows how many slots of each circle are spent vs. ready.\r\n\
          \r\n\
          <b:yellow>spell_power</> on your gear / from buffs adds a percent\r\n\
@@ -7759,7 +7759,7 @@ const TOPIC_HELP_ARTICLES: &[(&str, &str)] = &[
          at full HP.\r\n\
          \r\n\
          <b:yellow>Release precedence</>:\r\n\
-           1. Last touchstone you `touch`ed\r\n\
+           1. Last touchstone you 'touch'ed\r\n\
            2. Your race's home room (where character creation spawns)\r\n\
            3. The Void (last resort)\r\n\
          \r\n\
@@ -7774,7 +7774,7 @@ const TOPIC_HELP_ARTICLES: &[(&str, &str)] = &[
          by walking to a recall stone and typing <cyan>touch</>. Most major town\r\n\
          halls and temples carry a stone.\r\n\
          \r\n\
-         If you've never touched a stone, `recall` will nudge you toward one.\r\n\
+         If you've never touched a stone, 'recall' will nudge you toward one.\r\n\
          Newbies start with the Mielikki temple bound by default. Some rooms\r\n\
          have <cyan>NoRecallRoom</> set — recall refuses to teleport out of those\r\n\
          (dungeons, quest cells).",
@@ -7840,7 +7840,7 @@ pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
             out.push_str(&format!("  <cyan>{name:<widest$}</>  {body}\r\n"));
         }
         out.push_str(
-            "  <dim>Pick one with `prompt <name>` or roll your own with the format below.</>\r\n",
+            "  <dim>Pick one with 'prompt <name>' or roll your own with the format below.</>\r\n",
         );
         send_rendered(world, player, &out);
         return;
@@ -7869,7 +7869,7 @@ pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
             format!(
                 "Your prompt is: {current}\r\n\
                  \r\n\
-                 Built-in templates: try `prompt list` for a menu.\r\n\
+                 Built-in templates: try 'prompt list' for a menu.\r\n\
                  \r\n\
                  Format codes (same as the legacy game):\r\n\
                  Vitals:    %h/%H hit points (current/max)   %v/%V stamina\r\n\
@@ -7890,7 +7890,7 @@ pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
                  Flags:     %x puts the wizi/AFK flags inline (else a line above)\r\n\
                  Calendar:  %s season   %y hour (00-23)   %Y day/night\r\n\
                  Layout:    %_ newline   %- space\r\n\
-                 Literal:   %% emits a single `%`.\r\n"
+                 Literal:   %% emits a single '%'.\r\n"
             ),
         );
         return;
@@ -8021,7 +8021,7 @@ pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            "Toggle what!?  Type `toggle` for the list.\r\n",
+            "Toggle what!?  Type 'toggle' for the list.\r\n",
         );
         return;
     };
@@ -8246,8 +8246,8 @@ pub(crate) fn cmd_color(world: &mut World, player: Entity, args: &str) {
                 player,
                 format!(
                     "Color: {} ({source}).\r\n\
-                     Use `color off`, `color 16`, `color 256`, `color truecolor` \
-                     or `color auto`.\r\n",
+                     Use 'color off', 'color 16', 'color 256', 'color truecolor' \
+                     or 'color auto'.\r\n",
                     term::depth_label(depth)
                 ),
             );
@@ -8295,7 +8295,7 @@ pub(crate) fn cmd_charset(world: &mut World, player: Entity, args: &str) {
                 player,
                 format!(
                     "Charset: {} ({source}).\r\n\
-                     Use `charset ascii`, `charset utf8` or `charset auto`.\r\n",
+                     Use 'charset ascii', 'charset utf8' or 'charset auto'.\r\n",
                     term::charset_label(cs)
                 ),
             );
@@ -8331,7 +8331,7 @@ pub(crate) fn cmd_wimpy(world: &mut World, player: Entity, args: &str) {
                  when your HP drops below that.\r\n"
             )
         } else {
-            "Wimpy mode is off. Use `wimpy <pct>` (1-99) to enable.\r\n".to_string()
+            "Wimpy mode is off. Use 'wimpy <pct>' (1-99) to enable.\r\n".to_string()
         };
         send_to(world, player, msg);
         return;
@@ -8356,7 +8356,7 @@ pub(crate) fn cmd_wimpy(world: &mut World, player: Entity, args: &str) {
             send_to(
                 world,
                 player,
-                "Wimpy percent must be between 1 and 99 (or `off` to disable).\r\n",
+                "Wimpy percent must be between 1 and 99 (or 'off' to disable).\r\n",
             );
             return;
         }
@@ -8364,7 +8364,7 @@ pub(crate) fn cmd_wimpy(world: &mut World, player: Entity, args: &str) {
             send_to(
                 world,
                 player,
-                "Usage: `wimpy <pct>` (1-99) or `wimpy off`.\r\n",
+                "Usage: 'wimpy <pct>' (1-99) or 'wimpy off'.\r\n",
             );
             return;
         }
@@ -8386,8 +8386,8 @@ pub(crate) fn cmd_autoexit(world: &mut World, player: Entity, _args: &str) {
         world,
         player,
         PlayerFlag::AutoExit,
-        "Exits will be shown automatically with each `look`.",
-        "Exits will no longer auto-list — use `exits` to see them.",
+        "Exits will be shown automatically with each 'look'.",
+        "Exits will no longer auto-list — use 'exits' to see them.",
     );
 }
 
@@ -8436,7 +8436,7 @@ pub(crate) fn cmd_brief(world: &mut World, player: Entity, _args: &str) {
         world,
         player,
         PlayerFlag::Brief,
-        "Room descriptions will now be terse on `look`.",
+        "Room descriptions will now be terse on 'look'.",
         "Full room descriptions restored.",
     );
 }
@@ -8462,7 +8462,7 @@ pub(crate) fn cmd_columns(world: &mut World, player: Entity, args: &str) {
             player,
             format!(
                 "Text wraps at {width} columns ({source}).\r\n\
-                 Use `columns <{MIN_COLS}-{MAX_COLS}>` to pin a width or `columns auto` \
+                 Use 'columns <{MIN_COLS}-{MAX_COLS}>' to pin a width or 'columns auto' \
                  to follow your client.\r\n"
             ),
         );
@@ -8532,7 +8532,7 @@ pub(crate) fn cmd_nosummon(world: &mut World, player: Entity, _args: &str) {
         player,
         PlayerFlag::NoSummon,
         "Incoming summons will now silently auto-decline (no interruption).",
-        "Incoming summons will now prompt you (`accept` or `decline` within 30s).",
+        "Incoming summons will now prompt you ('accept' or 'decline' within 30s).",
     );
 }
 
@@ -9379,7 +9379,7 @@ pub(crate) fn cmd_richtest(world: &mut World, player: Entity, _args: &str) {
                 Nested: <red>red <yellow>yellow inside</> back to red</>\r\n\
                 Anonymous: <red>red until close</> done\r\n\
                 Tag form: <name> opens a layer, </> closes the most \
-                recent. Use `b:` prefix for bright (e.g. <b:cyan>like \
+                recent. Use 'b:' prefix for bright (e.g. <b:cyan>like \
                 this</>).\r\n";
     send_rendered(world, player, body);
 }
@@ -9643,7 +9643,7 @@ pub(crate) fn cmd_commands(world: &mut World, player: Entity, args: &str) {
         }
         out.push_str("\r\n");
     }
-    out.push_str("\r\n<dim>Use `help <command>` for details.</>\r\n");
+    out.push_str("\r\n<dim>Use 'help <command>' for details.</>\r\n");
     send_to(world, player, out);
 }
 
@@ -10371,7 +10371,7 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
             player,
             &format!(
                 "{item_name} is too heavy — you'd be encumbered. \
-                 Drop something with `drop <item>`, or train Strength.\r\n"
+                 Drop something with 'drop <item>', or train Strength.\r\n"
             ),
         );
         return;
@@ -10641,7 +10641,7 @@ fn get_from_container_inner(
             player,
             &format!(
                 "{item_name} is too heavy — you'd be encumbered. \
-             Drop something with `drop <item>`, or train Strength.\r\n"
+             Drop something with 'drop <item>', or train Strength.\r\n"
             ),
         );
         return;
@@ -12769,7 +12769,7 @@ pub(crate) fn cmd_house(world: &mut World, player: Entity, args: &str) {
         }
         other => {
             out.push_str(&format!(
-                "Unknown subcommand '{other}'. Try `house info`, `house rooms`, `house guests`, `house place <item>`, `house take <item>`, `house guest add <name> [place]`, `house guest remove <name>`, `house rename <#> <name>`, `house describe <#> <text>`.\r\n"
+                "Unknown subcommand '{other}'. Try 'house info', 'house rooms', 'house guests', 'house place <item>', 'house take <item>', 'house guest add <name> [place]', 'house guest remove <name>', 'house rename <#> <name>', 'house describe <#> <text>'.\r\n"
             ));
         }
     }
@@ -13052,11 +13052,11 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
                 format!("\r\nNo spells matching '{filter}' in circles {lo}-{hi}.\r\n")
             }
             (None, true) => "\r\n<dim>You haven't learned any spells yet.</> \
-                             Try `spells all` to browse the catalog.\r\n"
+                             Try 'spells all' to browse the catalog.\r\n"
                 .to_string(),
             (None, false) => format!(
                 "\r\nNo known spells matching '{filter}'. \
-                 Try `spells all {filter}`.\r\n"
+                 Try 'spells all {filter}'.\r\n"
             ),
         };
         send_rendered(world, player, &msg);
@@ -13205,8 +13205,8 @@ pub(crate) fn cmd_invite(world: &mut World, player: Entity, args: &str) {
         world,
         target,
         &format!(
-            "{inviter} invites you to a group. Type `accept` to join, \
-             `decline` to refuse.\r\n"
+            "{inviter} invites you to a group. Type 'accept' to join, \
+             'decline' to refuse.\r\n"
         ),
     );
 }
@@ -13444,7 +13444,7 @@ pub(crate) fn cmd_group(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            "Usage: `group` (list) or `group dismiss <player>`.\r\n",
+            "Usage: 'group' (list) or 'group dismiss <player>'.\r\n",
         );
         return;
     }
@@ -14270,7 +14270,7 @@ pub(crate) fn cmd_house_place(
             send_to(
                 world,
                 player,
-                "You can only place items inside your house. Try `house enter` first.\r\n",
+                "You can only place items inside your house. Try 'house enter' first.\r\n",
             );
             return;
         }
@@ -14599,7 +14599,7 @@ pub(crate) fn cmd_house_guest(
             send_to(
                 world,
                 player,
-                format!("Unknown guest action '{other}'. Use `add` or `remove`.\r\n"),
+                format!("Unknown guest action '{other}'. Use 'add' or 'remove'.\r\n"),
             );
         }
     }
@@ -14717,7 +14717,7 @@ pub(crate) fn cmd_abilities_kind(
                 player,
                 format!(
                     "\r\n<dim>You haven't learned any {kind_label}s yet.</> \
-                     Type `{kind_label}s all` to browse the catalog.\r\n"
+                     Type '{kind_label}s all' to browse the catalog.\r\n"
                 ),
             );
         } else {
@@ -14726,7 +14726,7 @@ pub(crate) fn cmd_abilities_kind(
                 player,
                 &format!(
                     "\r\nNo {kind_label}s matching '{filter}' in your known list. \
-                     Try `{kind_label}s all {filter}`.\r\n"
+                     Try '{kind_label}s all {filter}'.\r\n"
                 ),
             );
         }

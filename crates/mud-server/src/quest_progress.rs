@@ -224,7 +224,7 @@ pub(crate) async fn grant_completion_rewards(
     if !deferred.is_empty() {
         notify.say(&format!(
             "Conditional rewards available — \
-             type `qreward {quest_zone_id} {quest_id}` to view and claim.\r\n"
+             type 'qreward {quest_zone_id} {quest_id}' to view and claim.\r\n"
         ));
     }
     if rewards.is_empty() {

@@ -16,9 +16,9 @@ inventory::submit! {
             usage: "recall",
             summary: "Teleport to your recall point.",
             long: "Move instantly to your saved recall room. If you haven't \
-                   bound one yet you go to your race's start room — `touch \
-                   <touchstone>` in a sanctuary room to bind your recall \
-                   there. Builders can use `setrecall` from any room.",
+                   bound one yet you go to your race's start room — 'touch \
+                   <touchstone>' in a sanctuary room to bind your recall \
+                   there. Builders can use 'setrecall' from any room.",
         },
         run: cmd_recall,
     }
@@ -74,7 +74,7 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
             world,
             player,
             "You have no recall point set. Touch a touchstone room object \
-             with `touch <object>` to bind one. (Builders can use `setrecall` \
+             with 'touch <object>' to bind one. (Builders can use 'setrecall' \
              from any room.)\r\n",
         );
         return;

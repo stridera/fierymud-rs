@@ -34,9 +34,9 @@ inventory::submit! {
             summary: "Open a mail composition session to one player.",
             long: "Opens a multi-line composition session: first \
                    non-blank line is the subject, subsequent lines \
-                   accumulate as body. Control verbs: `.send` \
-                   ships the draft, `.abort` discards it, `.preview` \
-                   shows what's queued, `.clear` wipes the draft.",
+                   accumulate as body. Control verbs: '.send' \
+                   ships the draft, '.abort' discards it, '.preview' \
+                   shows what's queued, '.clear' wipes the draft.",
         },
         run: cmd_mail_stub,
     }
@@ -51,8 +51,8 @@ inventory::submit! {
         help: Help {
             usage: "mailbox",
             summary: "List inbound mail in your account inbox.",
-            long: "Newest first; unread messages have a `*` prefix. \
-                   Use `readmail <#>` to read by slot — that also \
+            long: "Newest first; unread messages have a '*' prefix. \
+                   Use 'readmail <#>' to read by slot — that also \
                    marks the row read.",
         },
         run: cmd_mail_stub,
@@ -68,7 +68,7 @@ inventory::submit! {
         help: Help {
             usage: "readmail <#>",
             summary: "Read a single mail message by slot.",
-            long: "Slot number is the `#` from `mailbox`. Marks the \
+            long: "Slot number is the '#' from 'mailbox'. Marks the \
                    row read on first read; subsequent re-reads are \
                    silent.",
         },
@@ -85,8 +85,8 @@ inventory::submit! {
         help: Help {
             usage: "delmail <#>",
             summary: "Delete a mail message by slot.",
-            long: "Hard-deletes the row. Slot number is the `#` from \
-                   `mailbox`.",
+            long: "Hard-deletes the row. Slot number is the '#' from \
+                   'mailbox'.",
         },
         run: cmd_mail_stub,
     }
@@ -213,13 +213,13 @@ pub(crate) async fn compose_mail_step(
         ComposeStep::Nudge => send_to(
             world,
             player,
-            "Type a subject line, then the body. `.send` to ship; `.abort` to cancel.\r\n",
+            "Type a subject line, then the body. '.send' to ship; '.abort' to cancel.\r\n",
         ),
         ComposeStep::SubjectSet => send_to(
             world,
             player,
             "Subject set. Type the body, one line at a time. \
-             `.send` to ship, `.abort` to cancel, `.preview` to review.\r\n",
+             '.send' to ship, '.abort' to cancel, '.preview' to review.\r\n",
         ),
         // Body lines: silent acceptance — the player sees their own typing
         // already; an echo on every line would feel chatty.
@@ -285,8 +285,8 @@ pub(crate) async fn cmd_mail(
         format!(
             "Composing mail to {name}.\r\n\
              First line is the subject. Then type the body, one line at a time.\r\n\
-             `.send` ships it; `.abort` cancels; `.preview` shows the draft; \
-             `.clear` wipes and starts over.\r\n"
+             '.send' ships it; '.abort' cancels; '.preview' shows the draft; \
+             '.clear' wipes and starts over.\r\n"
         ),
     );
 }
@@ -333,7 +333,7 @@ pub(crate) async fn cmd_mailbox(world: &mut World, player: Entity, pool: &mud_db
             row.subject,
         ));
     }
-    out.push_str("\r\n* = unread.   Use `readmail <#>` to read, `delmail <#>` to delete.\r\n");
+    out.push_str("\r\n* = unread.   Use 'readmail <#>' to read, 'delmail <#>' to delete.\r\n");
     send_to(world, player, out);
 }
 
@@ -350,7 +350,7 @@ pub(crate) async fn cmd_readmail(
         send_to(
             world,
             player,
-            "Read which mail? Pick a number from `mailbox`.\r\n",
+            "Read which mail? Pick a number from 'mailbox'.\r\n",
         );
         return;
     };
@@ -401,7 +401,7 @@ pub(crate) async fn cmd_delmail(
         send_to(
             world,
             player,
-            "Delete which mail? Pick a number from `mailbox`.\r\n",
+            "Delete which mail? Pick a number from 'mailbox'.\r\n",
         );
         return;
     };

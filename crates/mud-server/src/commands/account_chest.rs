@@ -56,8 +56,8 @@ inventory::submit! {
             usage: "chest",
             summary: "List items in your account-shared chest.",
             long: "Shows every item any character on this account has \
-                   deposited via `chest_deposit`. Use the slot number \
-                   shown to withdraw via `chest_withdraw <slot>`.",
+                   deposited via 'chest_deposit'. Use the slot number \
+                   shown to withdraw via 'chest_withdraw <slot>'.",
         },
         run: cmd_mail_stub,
     }
@@ -74,7 +74,7 @@ inventory::submit! {
             summary: "Store an inventory item in the account chest.",
             long: "Moves the named item from your inventory into the \
                    account-shared chest, where any character on this \
-                   account can take it back via `chest_withdraw`. \
+                   account can take it back via 'chest_withdraw'. \
                    Refuses SOULBOUND and NO_DROP items.",
         },
         run: cmd_mail_stub,
@@ -90,7 +90,7 @@ inventory::submit! {
         help: Help {
             usage: "chest_withdraw <slot>",
             summary: "Take an item back from the account chest.",
-            long: "Withdraws the item at the given slot (see `chest` \
+            long: "Withdraws the item at the given slot (see 'chest' \
                    for the listing). The item is spawned back into your \
                    inventory with its per-instance state (charges, \
                    liquid level) restored.",

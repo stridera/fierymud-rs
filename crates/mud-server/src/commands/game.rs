@@ -25,8 +25,8 @@ inventory::submit! {
             long: "Without args, prints every toggle the caller is \
                    allowed to see along with its current state. With a \
                    toggle name, prints just that toggle's state; add \
-                   `on` / `off` to flip it. Implementor-only flips \
-                   like ``devmode`` upsert the matching ``GameConfig`` \
+                   'on' / 'off' to flip it. Implementor-only flips \
+                   like ''devmode'' upsert the matching ''GameConfig'' \
                    row so the choice survives a restart.\n\
                    Known toggles: devmode, pk, summon, charm, sleep, \
                    roomeffect, names, ooc.",
@@ -152,7 +152,7 @@ fn write_state(world: &mut World, t: &Toggle, new_state: bool) {
     let category = t.category.to_string();
     let key = t.key.to_string();
     let value = if new_state { "true" } else { "false" };
-    let description = format!("`game` toggle for {category}.{key}");
+    let description = format!("'game' toggle for {category}.{key}");
     tokio::spawn(async move {
         let res = mud_db::sqlx::query(
             r#"INSERT INTO "GameConfig" (category, key, value, value_type, description, updated_at)

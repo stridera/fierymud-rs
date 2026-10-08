@@ -31,7 +31,7 @@ inventory::submit! {
             summary: "Show your location, a named player's location, or list all online.",
             long: "With no argument, prints your own current room \
                    (name, zone, id). With a player name, prints that \
-                   online player's current room. `where all` (Builder+ \
+                   online player's current room. 'where all' (Builder+ \
                    only) lists every online player and where they are.",
         },
         run: cmd_where,
@@ -56,7 +56,7 @@ inventory::submit! {
                    \r\n\
                    Bypasses exits, doors, and no-teleport rooms. Rooms \
                    restricted to the god ranks stay closed to lower staff. \
-                   Your `poofout` / `poofin` lines are shown to the rooms \
+                   Your 'poofout' / 'poofin' lines are shown to the rooms \
                    you leave and arrive in.",
         },
         run: cmd_goto,
@@ -89,8 +89,8 @@ inventory::submit! {
         help: Help {
             usage: "teleport <player> <zone> <room>",
             summary: "Send an online player to a specific room.",
-            long: "Builder+. Inverse of `transfer` (which pulls them \
-                   to you) and `goto` (which moves you).",
+            long: "Builder+. Inverse of 'transfer' (which pulls them \
+                   to you) and 'goto' (which moves you).",
         },
         run: cmd_teleport,
     }
@@ -125,7 +125,7 @@ inventory::submit! {
                    against the mob instead of yourself; output the \
                    mob would receive forwards to your connection. \
                    Useful for testing triggers from inside a mob \
-                   and for running RP-as-NPC. `return` ends the \
+                   and for running RP-as-NPC. 'return' ends the \
                    switch.",
         },
         run: cmd_switch,
@@ -140,10 +140,10 @@ inventory::submit! {
         category: Category::Admin,
         help: Help {
             usage: "return",
-            summary: "End a `switch` session and return to your own body.",
-            long: "Builder+. Inverse of `switch`. Always types as \
+            summary: "End a 'switch' session and return to your own body.",
+            long: "Builder+. Inverse of 'switch'. Always types as \
                    the puppeteer (not the mob) — the dispatcher \
-                   keeps `return` and `switch` as escape hatches \
+                   keeps 'return' and 'switch' as escape hatches \
                    so a stuck switch can always be undone.",
         },
         run: cmd_return,
@@ -178,7 +178,7 @@ inventory::submit! {
         help: Help {
             usage: "rpain [<message>]",
             summary: "Cosmetic divine pain across the realm.",
-            long: "Implementor-only. Same as `pain` but reaches \
+            long: "Implementor-only. Same as 'pain' but reaches \
                    every online player. Pure flavor — no stat \
                    change. Optional <message> overrides the default \
                    line. Players see your line; the caster sees a \
@@ -201,7 +201,7 @@ inventory::submit! {
                    and clears every active EffectInstance for every \
                    online player. Optional <message> overrides the \
                    default flavor line. The realm-wide counterpart \
-                   to `restore`.",
+                   to 'restore'.",
         },
         run: cmd_rrestore,
     }
@@ -219,7 +219,7 @@ inventory::submit! {
             long: "Builder+. Broadcasts the message verbatim (no \
                    speaker prefix) to everyone in the caster's \
                    room — useful for narrative prompts during \
-                   live events. For a global broadcast, see `gecho`.",
+                   live events. For a global broadcast, see 'gecho'.",
         },
         run: cmd_echo,
     }
@@ -251,7 +251,7 @@ inventory::submit! {
         help: Help {
             usage: "inctime <hours>",
             summary: "Force-advance the in-game clock.",
-            long: "Implementor-only. Adds <hours> to `MudClock.hour` \
+            long: "Implementor-only. Adds <hours> to 'MudClock.hour' \
                    modulo 24 — useful for testing day/night triggers \
                    and dawn/dusk weather transitions without \
                    waiting for real time.",
@@ -306,9 +306,9 @@ inventory::submit! {
             usage: "poofin [<message>]",
             summary: "Set your custom arrival message on goto / teleport.",
             long: "Builder+. Replaces the generic \"$n appears with an \
-                   ear-splitting bang.\" with your own line (`$n` stands \
+                   ear-splitting bang.\" with your own line ('$n' stands \
                    for your name). Bare \
-                   `poofin` shows the current value; `poofin clear` \
+                   'poofin' shows the current value; 'poofin clear' \
                    removes it.",
         },
         run: cmd_poofin,
@@ -324,7 +324,7 @@ inventory::submit! {
         help: Help {
             usage: "poofout [<message>]",
             summary: "Set your custom departure message on goto / teleport.",
-            long: "Builder+. Mirrors `poofin`. Replaces the generic \
+            long: "Builder+. Mirrors 'poofin'. Replaces the generic \
                    \"$n disappears in a puff of smoke.\" departure line.",
         },
         run: cmd_poofout,
@@ -358,10 +358,10 @@ inventory::submit! {
             summary: "Despawn reset-spawned mobs/objects so respawn refills the zone.",
             long: "Builder+. With no arg, resets your current zone. \
                    Despawns every mob and object that came from a \
-                   `MobResets` / `ObjectResets` row in the named \
+                   'MobResets' / 'ObjectResets' row in the named \
                    zone. The next respawn tick (~6s) refills the \
                    gaps. Admin-summoned / loadobj'd entities are \
-                   preserved (no `FromMobReset` / `FromObjectReset` \
+                   preserved (no 'FromMobReset' / 'FromObjectReset' \
                    marker).",
         },
         run: cmd_zreset,
@@ -381,7 +381,7 @@ inventory::submit! {
                    threshold for <level> and runs the standard \
                    level-up loop, so HP/stamina max + practice \
                    points scale through the normal path. Refuses \
-                   level decreases (those need a separate `delevel` \
+                   level decreases (those need a separate 'delevel' \
                    path).",
         },
         run: cmd_advance,
@@ -433,11 +433,11 @@ inventory::submit! {
         help: Help {
             usage: "mute <player>",
             summary: "Toggle a player's silence on global channels.",
-            long: "Builder+. Toggles `PlayerFlag::Muted` on the \
+            long: "Builder+. Toggles 'PlayerFlag::Muted' on the \
                    target. Muted players can't use gossip / shout / \
-                   music / clan / quest channels — `say` and `tell` \
+                   music / clan / quest channels — 'say' and 'tell' \
                    are unaffected so they can still play. Re-running \
-                   `mute <name>` clears it.",
+                   'mute <name>' clears it.",
         },
         run: cmd_mute,
     }
@@ -453,7 +453,7 @@ inventory::submit! {
             usage: "last <player>",
             summary: "Show last-login info for a character.",
             long: "Builder+. Looks up the character row by name and \
-                   prints the last `last_login` timestamp, level, \
+                   prints the last 'last_login' timestamp, level, \
                    race / class, and online-now status. Async DB \
                    call — output is delivered after the lookup \
                    returns.",
@@ -472,11 +472,11 @@ inventory::submit! {
             usage: "wizinvis [<level> | off]",
             summary: "Become invisible to lower-level players.",
             long: "Builder+. With no arg, toggles invis at your own \
-                   level. `wizinvis <level>` sets to that exact \
-                   level (capped at your own). `wizinvis off` clears \
+                   level. 'wizinvis <level>' sets to that exact \
+                   level (capped at your own). 'wizinvis off' clears \
                    it. Players whose level is below yours (or \
                    below the explicit level) won't see you in \
-                   `who` / `look` / `scan` listings.",
+                   'who' / 'look' / 'scan' listings.",
         },
         run: cmd_wizinvis,
     }
@@ -493,7 +493,7 @@ inventory::submit! {
             summary: "Mirror another player's output to your screen.",
             long: "Builder+. With a player name, starts mirroring \
                    their output (every line they receive prints to \
-                   you with a dim `%` prefix). With no arg, stops \
+                   you with a dim '%' prefix). With no arg, stops \
                    the current snoop. Refuses snooping yourself, an \
                    equal-or-higher level account, or a player who's \
                    already being snooped — one snooper per target. \
@@ -512,7 +512,7 @@ inventory::submit! {
         help: Help {
             usage: "peace",
             summary: "Stop all combat in your current room.",
-            long: "Builder+. Removes the `Fighting` component from \
+            long: "Builder+. Removes the 'Fighting' component from \
                    every entity in your room — useful when a brawl \
                    gets out of hand or a Lua trigger spawned a \
                    hostile mob you'd rather not pile on. Each \
@@ -533,8 +533,8 @@ inventory::submit! {
         help: Help {
             usage: "unaffect <target>",
             summary: "Strip every active effect from a target.",
-            long: "Builder+. Despawns every `EffectInstance` whose \
-                   `AppliedTo` is the target. Reverses any modifier \
+            long: "Builder+. Despawns every 'EffectInstance' whose \
+                   'AppliedTo' is the target. Reverses any modifier \
                    deltas via the standard expiry path so stat \
                    bumps walk back cleanly. <target> is a name in \
                    the current room.",
@@ -553,8 +553,8 @@ inventory::submit! {
             usage: "wizlock [on|off]",
             summary: "Lock the mud to staff-only logins.",
             long: "Builder+. With no arg, prints the current state. \
-                   `wizlock on` blocks non-staff (UserRole < Builder) \
-                   from completing login; `wizlock off` clears the \
+                   'wizlock on' blocks non-staff (UserRole < Builder) \
+                   from completing login; 'wizlock off' clears the \
                    gate. Reset to off on every server restart so a \
                    forgotten lock doesn't outlive the deploy.",
         },
@@ -587,7 +587,7 @@ inventory::submit! {
             usage: "summon <mob proto> [<count>]",
             summary: "Spawn one or more mob proto instances at your location.",
             long: "Builder+. Reads the (zone, id) MobProto and spawns \
-                   `count` (default 1) instances Located on your room.",
+                   'count' (default 1) instances Located on your room.",
         },
         run: cmd_summon,
     }
@@ -666,7 +666,7 @@ inventory::submit! {
         help: Help {
             usage: "load <zone> <mob-id>",
             summary: "Spawn a mob proto into your current room.",
-            long: "Builder+. Same as `summon` for count=1, kept as a \
+            long: "Builder+. Same as 'summon' for count=1, kept as a \
                    separate verb for muscle-memory.",
         },
         run: cmd_load,
@@ -683,7 +683,7 @@ inventory::submit! {
             usage: "loadobj <zone> <obj-id>",
             summary: "Spawn an object proto onto the floor.",
             long: "Builder+. Materializes one instance of (zone, id) \
-                   from `ObjectPrototypes` Located on your current \
+                   from 'ObjectPrototypes' Located on your current \
                    room.",
         },
         run: cmd_loadobj,
@@ -848,7 +848,7 @@ pub(crate) fn cmd_slay(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            "Slaying players is not allowed. Use `restore` if they're in trouble.\r\n",
+            "Slaying players is not allowed. Use 'restore' if they're in trouble.\r\n",
         );
         return;
     }
@@ -1428,7 +1428,7 @@ pub(crate) fn cmd_switch(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            "You're already controlling someone. Use `return` first.\r\n",
+            "You're already controlling someone. Use 'return' first.\r\n",
         );
         return;
     }
@@ -1454,7 +1454,7 @@ pub(crate) fn cmd_switch(world: &mut World, player: Entity, args: &str) {
     send_rendered(
         world,
         player,
-        &format!("<dim>You slip into {mob_name}. Type `return` to come back.</>\r\n"),
+        &format!("<dim>You slip into {mob_name}. Type 'return' to come back.</>\r\n"),
     );
 }
 
