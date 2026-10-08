@@ -993,22 +993,21 @@ fn mob_switch_percent(level: i32) -> i32 {
 }
 
 /// A mob's Switch percent, 0 when it lacks the skill. Legacy
-/// `init_char_skills` (skills.cpp:255-275) only calls `roll_mob_skill`
-/// for skills the mob's class learns at or below its level
-/// (`skill_assign` rows, class.cpp); everything else is zeroed, and
-/// `switch_ok` refuses at skill 0. Here that is the mob prototype's
-/// `class_id` against `ClassSkillsData` for the `switch` ability.
+/// `update_skills` (skills.cpp:252) grants a skill when the class
+/// learns it at or below the mob's level OR the race grants it
+/// (`min_race_level`, races.cpp `assign_race_skills`); both branches
+/// give a mob the same `roll_mob_skill(level)` (skills.cpp:271,
+/// :292-:299), and everything else is zeroed, so `switch_ok` refuses
+/// at skill 0. Here: the mob prototype's `class_id` against
+/// `ClassSkillsData`, or its `race` against `RaceAbilitiesData`
+/// (no per-row level in the schema: legacy racial skills are level 1).
 fn mob_switch_skill(world: &World, mob: Entity) -> i32 {
-    let Some(class_id) = world
-        .get::<mud_world::WorldKey>(mob)
-        .and_then(|wk| {
-            world
-                .get_resource::<mud_world::MobPrototypes>()?
-                .by_key
-                .get(&(wk.zone, wk.id))
-        })
-        .and_then(|p| p.class_id)
-    else {
+    let Some(proto) = world.get::<mud_world::WorldKey>(mob).and_then(|wk| {
+        world
+            .get_resource::<mud_world::MobPrototypes>()?
+            .by_key
+            .get(&(wk.zone, wk.id))
+    }) else {
         return 0;
     };
     let Some(ability_id) = world
@@ -1019,11 +1018,16 @@ fn mob_switch_skill(world: &World, mob: Entity) -> i32 {
         return 0;
     };
     let level = mud_world::effective_level(world, mob);
-    let learned = world
-        .get_resource::<mud_world::ClassSkillsData>()
-        .and_then(|d| d.min_level_for(class_id, ability_id))
-        .is_some_and(|min| min <= level);
-    if learned {
+    let by_class = proto.class_id.is_some_and(|class_id| {
+        world
+            .get_resource::<mud_world::ClassSkillsData>()
+            .and_then(|d| d.min_level_for(class_id, ability_id))
+            .is_some_and(|min| min <= level)
+    });
+    let by_race = world
+        .get_resource::<mud_world::RaceAbilitiesData>()
+        .is_some_and(|d| d.grants(&proto.race, ability_id));
+    if by_class || by_race {
         mob_switch_percent(level)
     } else {
         0
@@ -3446,6 +3450,31 @@ mod attack_while_fighting_tests {
         assert_eq!(mob_switch_skill(&world, ogre), 0);
         with_mob_class(&mut world, ogre, 10, Some(MOB_CLASS), Some(10));
         assert_eq!(mob_switch_skill(&world, ogre), 16);
+    }
+
+    #[test]
+    fn mob_switch_skill_from_race_without_a_class() {
+        let (mut world, _p, ogre, _rat, _rx) = setup();
+        with_mob_class(&mut world, ogre, 60, None, None);
+        let mut race = mud_world::RaceAbilitiesData::default();
+        race.insert("ANIMAL", SWITCH, 100);
+        world.insert_resource(race);
+        // The proto race is lower-case; the DB enum is upper-case.
+        world
+            .resource_mut::<mud_world::MobPrototypes>()
+            .by_key
+            .get_mut(&(9, 9))
+            .unwrap()
+            .race = "animal".to_string();
+        assert_eq!(mob_switch_skill(&world, ogre), 66, "racial grant");
+        // A race that doesn't grant Switch, and no class: refused.
+        world
+            .resource_mut::<mud_world::MobPrototypes>()
+            .by_key
+            .get_mut(&(9, 9))
+            .unwrap()
+            .race = "human".to_string();
+        assert_eq!(mob_switch_skill(&world, ogre), 0);
     }
 
     #[test]

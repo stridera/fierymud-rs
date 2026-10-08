@@ -45,6 +45,32 @@ pub async fn list_for_race(pool: &PgPool, race: &str) -> sqlx::Result<Vec<RaceAb
     .await
 }
 
+/// One `RaceAbilities` row, unjoined: what the runtime needs to answer
+/// "does this race grant that ability?" without a per-call query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaceGrantRow {
+    /// `Race` enum value as raw text (HUMAN / ELF / etc.).
+    pub race: String,
+    pub ability_id: i32,
+    pub proficiency_cap: i32,
+}
+
+/// Every race-innate row, for the boot-time `RaceAbilitiesData` load.
+pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<RaceGrantRow>> {
+    sqlx::query_as!(
+        RaceGrantRow,
+        r#"
+        SELECT
+            race::text AS "race!: String",
+            ability_id,
+            proficiency_cap
+        FROM "RaceAbilities"
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Proficiency a granted innate starts at: the row's `proficiency_cap`
 /// (0-100, the schema's "max trainable") on the 0-1000 scale
 /// `CharacterAbilities` uses. Innates are not trained, so they begin

@@ -1562,6 +1562,31 @@ impl ClassSkillsData {
     }
 }
 
+/// `RaceAbilities` flattened for runtime lookup: `(race, ability_id)`
+/// -> `proficiency_cap`, with the race lower-cased to match
+/// `MobProto.race`. Legacy racial skills (`races[race].skills`,
+/// `assign_race_skills`) are available from level 1, and the schema
+/// carries no per-row level, so a row grants the ability at any level.
+#[derive(Resource, Debug, Default)]
+pub struct RaceAbilitiesData {
+    pub proficiency_cap: HashMap<(String, i32), i32>,
+}
+
+impl RaceAbilitiesData {
+    /// Record a row; `race` is the raw enum text in any case.
+    pub fn insert(&mut self, race: &str, ability_id: i32, proficiency_cap: i32) {
+        self.proficiency_cap
+            .insert((race.to_ascii_lowercase(), ability_id), proficiency_cap);
+    }
+
+    /// True if `race` (any case) grants `ability_id`.
+    #[must_use]
+    pub fn grants(&self, race: &str, ability_id: i32) -> bool {
+        self.proficiency_cap
+            .contains_key(&(race.to_ascii_lowercase(), ability_id))
+    }
+}
+
 impl SpellSlotData {
     /// Highest circle a character of `level` has slots for — legacy
     /// `level_to_circle`, read off the slot progression table.

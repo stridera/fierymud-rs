@@ -341,6 +341,14 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     world.insert_resource(class_skills_data);
 
+    // RaceAbilities: race-innate grants (legacy `races[race].skills`),
+    // consulted alongside ClassSkills when a mob's skill is checked.
+    let mut race_abilities_data = crate::resources::RaceAbilitiesData::default();
+    for r in mud_db::race_abilities::list_all(pool).await? {
+        race_abilities_data.insert(&r.race, r.ability_id, r.proficiency_cap);
+    }
+    world.insert_resource(race_abilities_data);
+
     // Pass 4c.6: race defaults + full catalog. `RaceDefaults` carries
     // the narrow size + start-room maps that older callers consult.
     // `RaceCatalog` hydrates the full Race row — stat caps,
