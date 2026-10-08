@@ -16,7 +16,7 @@ use super::{Connection, dispatch};
 use crate::combat::{HateList, MobMemory};
 
 /// Everything queued for the player, raw.
-fn drain_bytes(rx: &mut Rx) -> Vec<u8> {
+pub(crate) fn drain_bytes(rx: &mut Rx) -> Vec<u8> {
     let mut out = Vec::new();
     while let Ok(b) = rx.try_recv() {
         out.extend(b);
@@ -25,7 +25,7 @@ fn drain_bytes(rx: &mut Rx) -> Vec<u8> {
 }
 
 /// GMCP frames (`IAC SB 201 <package> <json> IAC SE`) in wire order.
-fn frames(bytes: &[u8]) -> Vec<(String, String)> {
+pub(crate) fn frames(bytes: &[u8]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i + 3 <= bytes.len() {
@@ -45,7 +45,7 @@ fn frames(bytes: &[u8]) -> Vec<(String, String)> {
     out
 }
 
-fn of(frames: &[(String, String)], pkg: &str) -> Vec<String> {
+pub(crate) fn of(frames: &[(String, String)], pkg: &str) -> Vec<String> {
     frames
         .iter()
         .filter(|(p, _)| p == pkg)
@@ -53,13 +53,13 @@ fn of(frames: &[(String, String)], pkg: &str) -> Vec<String> {
         .collect()
 }
 
-struct Fx {
-    world: World,
-    a: Entity,
-    b: Entity,
+pub(crate) struct Fx {
+    pub(crate) world: World,
+    pub(crate) a: Entity,
+    pub(crate) b: Entity,
 }
 
-fn fixture() -> Fx {
+pub(crate) fn fixture() -> Fx {
     let mut world = World::new();
     world.insert_resource(mud_script::LuaHost::default());
     world.insert_resource(WorldKeyIndex::default());
@@ -123,7 +123,7 @@ fn exit(to: Entity, state: ExitState, hidden: bool, kw: &[&str]) -> ExitData {
     }
 }
 
-fn player(world: &mut World, room: Entity, name: &str) -> (Entity, Rx) {
+pub(crate) fn player(world: &mut World, room: Entity, name: &str) -> (Entity, Rx) {
     let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
     let e = world
         .spawn((
@@ -500,7 +500,7 @@ const PER_PROMPT: [&str; 6] = [
 
 /// A player with vitals and two known skills: a passive one (tagged in
 /// the ability data) and an active one.
-fn world_with_skills() -> (Fx, Entity, Rx) {
+pub(crate) fn world_with_skills() -> (Fx, Entity, Rx) {
     let mut fx = fixture();
     let mut catalog = mud_world::AbilityCatalog::default();
     let mut dual = ability_def(DUAL_WIELD, "Dual Wield", AbilityKind::Skill);

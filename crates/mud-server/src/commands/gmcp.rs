@@ -24,7 +24,9 @@ use super::{
 
 /// Per-player record of the last payload hash sent for each GMCP
 /// package. Cleared when the client renegotiates (`Core.Hello`,
-/// `Core.Supports.Set`) so a fresh client gets everything again.
+/// `Core.Supports.Set`) and whenever a connection binds to the player
+/// (login spawn, takeover, linkdead reconnect) so a fresh client gets
+/// everything again.
 #[derive(Component, Debug, Default)]
 pub(crate) struct GmcpSent(HashMap<&'static str, u64>);
 

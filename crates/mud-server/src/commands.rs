@@ -430,7 +430,7 @@ mod gmcp;
 pub(crate) use gmcp::clear_gmcp_sent;
 #[cfg(test)]
 #[path = "commands/gmcp_tests.rs"]
-mod gmcp_tests;
+pub(crate) mod gmcp_tests;
 #[path = "commands/magic_focus.rs"]
 mod magic_focus;
 pub(crate) use magic_focus::Concentrating;

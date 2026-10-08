@@ -1337,6 +1337,20 @@ impl ConnRouter {
         }
     }
 
+    /// Bind `conn_id` to the player `entity`: a fresh login spawn or a
+    /// takeover / linkdead reconnect. The entity's change-gated GMCP cache
+    /// ([`commands::clear_gmcp_sent`]) describes what the *previous* connection
+    /// saw, so it is reset here; whatever Core.Hello / Core.Supports.Set the
+    /// client sent on the login screen (before it was `playing`, so they
+    /// could not clear it) is covered too, and the next prompt re-sends
+    /// every package.
+    fn bind_player(&mut self, conn_id: ConnId, entity: Entity, world: &mut World) {
+        self.playing.insert(conn_id, entity);
+        commands::clear_gmcp_sent(world, entity);
+        self.sync_client_width(conn_id, entity, world);
+        self.attach_output(conn_id, entity, world);
+    }
+
     /// Mirror the connection's NAWS width onto the player entity as
     /// [`mud_world::ClientWidth`] so command code (which only sees the
     /// ECS world) can word-wrap to the viewport. No-op until the
@@ -3439,9 +3453,7 @@ impl ConnRouter {
                 );
             }
         }
-        self.playing.insert(conn_id, entity);
-        self.sync_client_width(conn_id, entity, world);
-        self.attach_output(conn_id, entity, world);
+        self.bind_player(conn_id, entity, world);
         true
     }
 
@@ -3906,9 +3918,7 @@ impl ConnRouter {
         // Wire the connection's output capabilities before anything is
         // shown, so the MOTD and the auto-look render with the client's
         // colour / charset settings.
-        self.playing.insert(conn_id, entity);
-        self.sync_client_width(conn_id, entity, world);
-        self.attach_output(conn_id, entity, world);
+        self.bind_player(conn_id, entity, world);
         show_enter_game(
             world,
             entity,
@@ -7034,6 +7044,93 @@ mod tests {
         let (tx3, _rx3) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
         router.on_connect(3, tx3, None, &world);
         assert!(!router.try_takeover(&mut world, 3, "other"));
+    }
+
+    /// What `complete_login_inner` does for the new connection right after
+    /// a takeover: look, item frames, prompt.
+    fn finish_takeover(world: &mut World, entity: Entity) {
+        commands::info::cmd_look(world, entity, "");
+        commands::refresh_player_items_gmcp(world, entity);
+        commands::send_prompt(world, entity);
+    }
+
+    fn gmcp_packages(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> Vec<String> {
+        let bytes = commands::gmcp_tests::drain_bytes(rx);
+        commands::gmcp_tests::frames(&bytes)
+            .into_iter()
+            .map(|(pkg, _)| pkg)
+            .collect()
+    }
+
+    /// A takeover must not inherit the old client's change-gated GMCP
+    /// cache: the new client gets the whole package set on the next prompt
+    /// even though nothing changed since the old connection saw it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn takeover_of_a_linkdead_character_resends_all_gmcp() {
+        let (mut fx, p, mut old_rx) = commands::gmcp_tests::world_with_skills();
+        let mut router = ConnRouter::new();
+        router.close_conn = |_| true;
+        // The old session saw everything.
+        commands::send_prompt(&mut fx.world, p);
+        gmcp_packages(&mut old_rx);
+        commands::send_prompt(&mut fx.world, p);
+        assert!(
+            !gmcp_packages(&mut old_rx).contains(&"Char.Name".to_string()),
+            "change-gated frames are not repeated"
+        );
+        // Socket dropped mid-fight: no connection, still in the world.
+        fx.world
+            .entity_mut(p)
+            .remove::<Connection>()
+            .insert(commands::Linkdead { since_tick: 0 });
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        router.on_connect(2, tx, None, &fx.world);
+        assert!(router.try_takeover(&mut fx.world, 2, "c-Kicker"));
+        finish_takeover(&mut fx.world, p);
+
+        let got = gmcp_packages(&mut rx);
+        for pkg in [
+            "Char.Name",
+            "Char.StatusVars",
+            "Char.Status",
+            "Char.Skills",
+            "Char.Vitals",
+            "Char.Effects",
+            "Room.Info",
+        ] {
+            assert!(got.contains(&pkg.to_string()), "{pkg} missing: {got:?}");
+        }
+    }
+
+    /// Mudlet sends Core.Hello / Core.Supports.Set on the login screen,
+    /// before the connection is `playing`; they cannot clear the cache
+    /// then, so binding to the entity must.
+    #[tokio::test(flavor = "current_thread")]
+    async fn core_hello_on_the_login_screen_then_login_gets_a_full_send() {
+        let (mut fx, p, mut old_rx) = commands::gmcp_tests::world_with_skills();
+        let mut router = ConnRouter::new();
+        router.close_conn = |_| true;
+        router.playing.insert(1, p);
+        commands::send_prompt(&mut fx.world, p);
+        gmcp_packages(&mut old_rx);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        router.on_connect(2, tx, None, &fx.world);
+        router
+            .on_gmcp(2, "Core.Hello", r#"{"client":"Mudlet"}"#, &mut fx.world)
+            .await;
+        router
+            .on_gmcp(2, "Core.Supports.Set", r#"["Char 1"]"#, &mut fx.world)
+            .await;
+        gmcp_packages(&mut rx);
+        assert!(router.try_takeover(&mut fx.world, 2, "c-Kicker"));
+        finish_takeover(&mut fx.world, p);
+
+        let got = gmcp_packages(&mut rx);
+        for pkg in ["Char.Name", "Char.Skills", "Char.Vitals", "Room.Info"] {
+            assert!(got.contains(&pkg.to_string()), "{pkg} missing: {got:?}");
+        }
     }
 
     /// A connected, playing character standing in `room` on connection `conn`.
