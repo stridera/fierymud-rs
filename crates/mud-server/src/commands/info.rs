@@ -1811,10 +1811,9 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "autoloot",
-            summary: "Toggle the auto-loot flag (no behavior wired yet).",
-            long: "Sets AUTO_LOOT. Once corpse loot lands, this controls \
-                   whether items on slain mobs jump to your inventory \
-                   automatically.",
+            summary: "Toggle automatic looting of kills (items and coins).",
+            long: "Sets AUTO_LOOT. Items and coins from mobs you kill jump \
+                   straight to you. Coins respect autosplit.",
         },
         run: cmd_autoloot,
     }
@@ -1828,9 +1827,10 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "autogold",
-            summary: "Toggle the auto-gold flag (no behavior wired yet).",
-            long: "Sets AUTO_GOLD. Once economy lands, this controls \
-                   whether coins from kills jump straight to your purse.",
+            summary: "Toggle automatic collection of coins from kills.",
+            long: "Sets AUTO_GOLD. Coins from mobs you kill jump straight \
+                   to your purse without taking the items (autoloot \
+                   already collects coins too).",
         },
         run: cmd_autogold,
     }

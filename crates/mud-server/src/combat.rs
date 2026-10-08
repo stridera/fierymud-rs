@@ -2260,8 +2260,8 @@ fn finish_mob_death(world: &mut World, victim: Entity) {
 
 /// On mob death: look up the proto's `wealth`, find the first player
 /// engaged with the victim, and route the coin onto either the killer
-/// (`AUTO_GOLD` on, default) or the freshly-spawned corpse via
-/// `CoinPile` (`AUTO_GOLD` off — claimed via `get all from corpse`).
+/// (`AUTO_GOLD` or `AUTO_LOOT` on) or the freshly-spawned corpse via
+/// `CoinPile` (both off — claimed via `get all from corpse`).
 /// No-op when the mob has no wealth, no proto, or no player attacker.
 fn award_kill_coin(
     world: &mut World,
@@ -2291,9 +2291,13 @@ fn award_kill_coin(
         }
         return;
     };
-    let auto_gold = world
-        .get::<PlayerFlags>(killer)
-        .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::AutoGold));
+    // Legacy has no separate AUTOGOLD: PRF_AUTOLOOT collects the coin
+    // along with the items (`perform_get_from_room` on the coin pile).
+    // AutoGold stays as a coins-only opt-in for players who want the
+    // purse without the loot.
+    let auto_gold = world.get::<PlayerFlags>(killer).is_some_and(|pf| {
+        pf.has(mud_db::enums::PlayerFlag::AutoGold) || pf.has(mud_db::enums::PlayerFlag::AutoLoot)
+    });
     if !auto_gold {
         // Coin lies on the corpse as a `CoinPile` — claimable via
         // `get all from corpse`. Decays with the corpse if left
@@ -2308,7 +2312,7 @@ fn award_kill_coin(
             killer,
             format!(
                 "{msg} lies among the remains of {victim_name}. \
-                 ('get all from corpse' to claim, or set 'autogold' to auto-collect.)\r\n"
+                 ('get all from corpse' to claim, or set 'autoloot' to auto-collect.)\r\n"
             ),
         );
         return;
@@ -5180,6 +5184,75 @@ mod tests {
 
     fn xp_of(world: &World, e: Entity) -> i32 {
         world.get::<mud_world::Profile>(e).unwrap().experience
+    }
+
+    fn kill_goblin_with_flags(flags: Vec<mud_db::enums::PlayerFlag>) -> (World, Entity) {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        world
+            .entity_mut(killer)
+            .insert((mud_world::PlayerFlags(flags), Fighting(goblin)));
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err(), "goblin died");
+        (world, killer)
+    }
+
+    fn wealth_of(world: &World, e: Entity) -> i64 {
+        world.get::<Wealth>(e).map_or(0, |w| w.0)
+    }
+
+    #[test]
+    fn autoloot_alone_collects_the_corpse_coin() {
+        // Issue #80: autoloot covers coins too (legacy has no separate
+        // autogold; PRF_AUTOLOOT grabs the coin pile with the items).
+        let (mut world, killer) = kill_goblin_with_flags(vec![mud_db::enums::PlayerFlag::AutoLoot]);
+        assert_eq!(wealth_of(&world, killer), 75);
+        let piles = world
+            .query_filtered::<&mud_world::CoinPile, With<Corpse>>()
+            .iter(&world)
+            .count();
+        assert_eq!(piles, 0, "no coin left on the corpse");
+    }
+
+    #[test]
+    fn autogold_alone_still_collects_coin() {
+        let (world, killer) = kill_goblin_with_flags(vec![mud_db::enums::PlayerFlag::AutoGold]);
+        assert_eq!(wealth_of(&world, killer), 75);
+    }
+
+    #[test]
+    fn no_auto_flags_leaves_coin_on_the_corpse() {
+        let (mut world, killer) = kill_goblin_with_flags(Vec::new());
+        assert_eq!(wealth_of(&world, killer), 0);
+        let coin = world
+            .query_filtered::<&mud_world::CoinPile, With<Corpse>>()
+            .iter(&world)
+            .map(|p| p.0)
+            .next();
+        assert_eq!(coin, Some(75));
+    }
+
+    #[test]
+    fn autoloot_with_autosplit_splits_the_coin_with_the_group() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let leader = credit_player(&mut world, room, "Leader", 0);
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        world.entity_mut(killer).insert((
+            mud_world::Follower(leader),
+            Fighting(goblin),
+            mud_world::PlayerFlags(vec![
+                mud_db::enums::PlayerFlag::AutoLoot,
+                mud_db::enums::PlayerFlag::AutoSplit,
+            ]),
+        ));
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err());
+        assert_eq!(wealth_of(&world, killer), 37);
+        assert_eq!(wealth_of(&world, leader), 37);
     }
 
     #[test]
