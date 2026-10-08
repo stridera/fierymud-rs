@@ -142,6 +142,12 @@ impl Fx {
 
     /// Install FEAR (a `feared` status with an optional area flag).
     fn fear_spell(&mut self, area: bool) {
+        self.fear_spell_with(area, true);
+    }
+
+    /// `override_flag`: the `feared` flag sits in the ability's override
+    /// params (live data); otherwise only in the status effect's defaults.
+    fn fear_spell_with(&mut self, area: bool, override_flag: bool) {
         let mut abilities = mud_world::AbilityCatalog::default();
         let mut def =
             crate::commands::test_support::ability_def(ABILITY, "Fear", AbilityKind::Spell);
@@ -153,7 +159,11 @@ impl Fx {
             ABILITY,
             vec![(
                 EFFECT,
-                Some(serde_json::json!({"flag": "feared", "duration": "60"})),
+                Some(if override_flag {
+                    serde_json::json!({"flag": "feared", "duration": "60"})
+                } else {
+                    serde_json::json!({"duration": "60"})
+                }),
             )],
         );
         self.world.insert_resource(abilities);
@@ -167,7 +177,11 @@ impl Fx {
                 effect_type: "status".into(),
                 tags: vec![],
                 presence_override: None,
-                default_params: serde_json::json!({}),
+                default_params: if override_flag {
+                    serde_json::json!({})
+                } else {
+                    serde_json::json!({"flag": "feared"})
+                },
                 prevents_speaking: false,
                 prevents_casting: false,
                 prevents_movement: false,
@@ -620,4 +634,132 @@ fn roar_frightens_players_too() {
     assert_eq!(f.at(victim), Some(f.away));
     // Players are never fear-immune by proto.
     try_insert(&mut f.world, victim, Feared);
+}
+
+// -- marker survives effects_tick (real spell) ---------------------------------
+
+fn tick_effects(f: &mut Fx, tick: u64) {
+    f.world.insert_resource(crate::TickCount(tick));
+    crate::effects::effects_tick(&mut f.world);
+}
+
+fn expire_fear_effects(f: &mut Fx, victim: Entity) {
+    let mut q = f.world.query::<(&mut EffectInstance, &AppliedTo)>();
+    for (mut inst, applied) in q.iter_mut(&mut f.world) {
+        if applied.0 == victim {
+            inst.remaining_secs = 1;
+        }
+    }
+}
+
+fn marker_lasts_until_expiry(override_flag: bool) {
+    let mut f = fx();
+    f.fear_spell_with(false, override_flag);
+    let mob = f.mob(10, serde_json::json!({}));
+    f.cast_fear("jackal");
+    assert!(is_feared(&f.world, mob));
+    tick_effects(&mut f, 10);
+    tick_effects(&mut f, 20);
+    assert!(
+        is_feared(&f.world, mob),
+        "effects_tick must not strip Feared while the effect runs"
+    );
+    expire_fear_effects(&mut f, mob);
+    tick_effects(&mut f, 30);
+    tick_effects(&mut f, 40);
+    assert!(!is_feared(&f.world, mob), "cleared once the effect expires");
+}
+
+#[test]
+fn feared_marker_persists_through_effects_tick_until_expiry() {
+    marker_lasts_until_expiry(true);
+}
+
+#[test]
+fn feared_marker_persists_when_the_flag_is_only_in_the_effect_defaults() {
+    marker_lasts_until_expiry(false);
+}
+
+#[test]
+fn failed_chant_gate_removes_the_effect_whatever_it_is_named() {
+    let mut f = fx();
+    f.fear_spell_with(true, false);
+    let mob = f.mob(10, serde_json::json!({}));
+    f.world.spawn((
+        EffectInstance {
+            kind: EFFECT,
+            name: "status".into(),
+            strength: 1,
+            remaining_secs: 60,
+            source: EffectSource::Spell,
+            ability_id: Some(ABILITY),
+        },
+        AppliedTo(mob),
+    ));
+    // A skill of -1 can never beat the d100 chance roll.
+    on_fear_applied(&mut f.world, f.caster, mob, Some(-1));
+    assert_eq!(f.world.query::<&EffectInstance>().iter(&f.world).count(), 0);
+    assert!(!is_feared(&f.world, mob));
+    assert_eq!(f.at(mob), Some(f.here));
+}
+
+// -- mounts, berserk ------------------------------------------------------------
+
+#[test]
+fn a_fleeing_rider_takes_its_mount_along() {
+    let mut f = fx();
+    let mount = f.mob(10, serde_json::json!({}));
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    let rider = f
+        .world
+        .spawn((
+            Player,
+            Named {
+                name: "Rider".into(),
+            },
+            Located(f.here),
+            Connection(tx),
+            Posture(PostureKind::Standing),
+            mud_world::Mounted(mount),
+        ))
+        .id();
+    f.world.entity_mut(mount).insert(mud_world::RiddenBy(rider));
+    assert_eq!(panic_flee(&mut f.world, rider, None), Panic::Fled);
+    assert_eq!(f.at(rider), Some(f.away));
+    assert_eq!(f.at(mount), Some(f.away), "mount stays with its rider");
+    assert!(f.world.get::<mud_world::Mounted>(rider).is_some());
+}
+
+#[test]
+fn a_ridden_mount_cannot_flee_on_its_own() {
+    let mut f = fx();
+    let mount = f.mob(10, serde_json::json!({}));
+    f.world
+        .entity_mut(mount)
+        .insert((mud_world::RiddenBy(f.caster), Feared, Fighting(f.caster)));
+    assert_eq!(panic_flee(&mut f.world, mount, None), Panic::Unable);
+    f.world.insert_resource(crate::TickCount(40));
+    super::feared_mobs_flee(&mut f.world);
+    assert_eq!(f.at(mount), Some(f.here));
+}
+
+#[test]
+fn feared_berserk_mob_stays_in_the_fight() {
+    let mut f = fx();
+    let mob = f.mob(10, serde_json::json!({}));
+    f.world.entity_mut(mob).insert((Feared, Fighting(f.caster)));
+    f.world.spawn((
+        EffectInstance {
+            kind: 1,
+            name: "berserk".into(),
+            strength: 1,
+            remaining_secs: 30,
+            source: EffectSource::Spell,
+            ability_id: None,
+        },
+        AppliedTo(mob),
+    ));
+    super::feared_mobs_flee(&mut f.world);
+    assert_eq!(f.at(mob), Some(f.here));
+    assert!(f.world.get::<Fighting>(mob).is_some());
 }

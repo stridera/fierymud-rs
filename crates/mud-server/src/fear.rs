@@ -30,20 +30,75 @@ use std::collections::HashSet;
 use bevy_ecs::prelude::*;
 use mud_db::enums::MobBehavior;
 use mud_world::{
-    AppliedTo, CombatStats, CoreStats, EffectInstance, Feared, Fighting, Frozen, Ghost, Located,
-    Mob, MobBehaviors, MobPrototypes, Player, Posture, PostureKind, SavingThrows, Stunned,
-    WorldKey,
+    AppliedTo, CombatStats, CoreStats, EffectCatalog, EffectInstance, Feared, Fighting, Frozen,
+    Ghost, Located, Mob, MobBehaviors, MobPrototypes, Player, Posture, PostureKind, RiddenBy,
+    SavingThrows, Stunned, WorldKey,
 };
 
 use crate::combat::{mob_flee, remember_attacker};
 use crate::commands::{
     Prevent, broadcast_room_except_rendered, cmd_flee, effect_prevents, has_effect_named, name_of,
-    remove_effect_named, room_is_dark, send_to, try_insert, try_remove,
+    room_is_dark, send_to, try_insert, try_remove,
 };
 
 /// Is `flag` (a status effect's `flag` param) the fear flag?
 pub(crate) fn is_fear_flag(flag: &str) -> bool {
     flag.eq_ignore_ascii_case("feared") || flag.eq_ignore_ascii_case("fear")
+}
+
+/// Effect rows (id, name) whose default params carry the fear flag. An
+/// ability whose flag lives only in the generic `status` effect's defaults
+/// leaves its instances named `status`, so they are recognised by row.
+fn fear_default_rows(world: &World) -> Vec<(i32, String)> {
+    world
+        .get_resource::<EffectCatalog>()
+        .map(|c| {
+            c.by_id
+                .values()
+                .filter(|def| {
+                    def.default_params
+                        .get("flag")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_fear_flag)
+                })
+                .map(|def| (def.id, def.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Does this effect instance carry the fear flag? The status arm names an
+/// instance after the `flag` in its override params, so that is the usual
+/// case; otherwise see [`fear_default_rows`].
+fn instance_is_fear(inst: &EffectInstance, default_rows: &[(i32, String)]) -> bool {
+    is_fear_flag(&inst.name)
+        || default_rows
+            .iter()
+            .any(|(id, name)| *id == inst.kind && name.eq_ignore_ascii_case(&inst.name))
+}
+
+/// Every effect instance on `actor` that carries the fear flag.
+fn fear_effects_on(world: &mut World, actor: Entity) -> Vec<Entity> {
+    let rows = fear_default_rows(world);
+    let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+    q.iter(world)
+        .filter(|(_, inst, applied)| applied.0 == actor && instance_is_fear(inst, &rows))
+        .map(|(e, _, _)| e)
+        .collect()
+}
+
+/// Despawn every fear effect on `actor`, whatever it is named.
+fn remove_fear_effects(world: &mut World, actor: Entity) {
+    for e in fear_effects_on(world, actor) {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+}
+
+/// Legacy `do_flee`: a berserk fighter is too angry to leave the fight.
+fn berserk_holds(world: &mut World, actor: Entity) -> bool {
+    world.get::<Fighting>(actor).is_some() && has_effect_named(world, actor, "berserk")
 }
 
 /// Is the actor under a fear effect right now?
@@ -126,7 +181,11 @@ pub(crate) fn panic_flee(world: &mut World, victim: Entity, source: Option<Entit
         send_to(world, victim, "You can't move!\r\n");
         return Panic::Unable;
     }
-    if world.get::<Fighting>(victim).is_some() && has_effect_named(world, victim, "berserk") {
+    if world.get::<RiddenBy>(victim).is_some() {
+        // A ridden mount goes where its rider goes.
+        return Panic::Unable;
+    }
+    if berserk_holds(world, victim) {
         send_to(world, victim, "You're too angry to leave this fight!\r\n");
         return Panic::Unable;
     }
@@ -222,7 +281,7 @@ pub(crate) fn on_fear_applied(
     if let Some(skill) = area_skill
         && !chant_gates_pass(world, victim, skill, ChantRolls::random())
     {
-        remove_effect_named(world, victim, "feared");
+        remove_fear_effects(world, victim);
         try_remove::<Feared>(world, victim);
         return;
     }
@@ -240,9 +299,10 @@ pub(crate) fn sync_markers(world: &mut World) {
         return;
     }
     let backed: HashSet<Entity> = {
+        let rows = fear_default_rows(world);
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         q.iter(world)
-            .filter(|(eff, _)| is_fear_flag(&eff.name))
+            .filter(|(eff, _)| instance_is_fear(eff, &rows))
             .map(|(_, applied)| applied.0)
             .collect()
     };
@@ -271,7 +331,12 @@ pub(crate) fn feared_mobs_flee(world: &mut World) {
         let standing = world
             .get::<Posture>(mob)
             .is_none_or(|p| p.0 == PostureKind::Standing);
-        if standing && !effect_prevents(world, mob, Prevent::Movement) {
+        let ridden = world.get::<RiddenBy>(mob).is_some();
+        if standing
+            && !ridden
+            && !berserk_holds(world, mob)
+            && !effect_prevents(world, mob, Prevent::Movement)
+        {
             mob_flee(world, mob, room);
         }
     }

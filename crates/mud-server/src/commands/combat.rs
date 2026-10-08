@@ -274,7 +274,8 @@ inventory::submit! {
     help: Help {
         usage: "roar",
         summary: "Terrify everyone in the room into running.",
-        long: "Costs 8 stamina. Each enemy in the room that fails \
+        long: "Costs 8 stamina. Also deals the Roar skill's damage \
+               to each enemy in the room. Each enemy that fails \
                its saving throw panics: it flees, trips over its \
                own feet, or (if asleep) may be jolted awake. Aware \
                and no-summon mobs, and mobs immune to fear, ignore \
@@ -1773,6 +1774,7 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
         if world.get::<Located>(*m).is_some() {
             world.entity_mut(*m).insert(Located(target));
         }
+        crate::combat::carry_mount(world, *m, target);
     }
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))
@@ -1850,6 +1852,7 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Located>(player).is_some() {
         world.entity_mut(player).insert(Located(target));
     }
+    crate::combat::carry_mount(world, player, target);
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))
     });
@@ -2751,6 +2754,7 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
     if world.get::<Located>(player).is_some() {
         world.entity_mut(player).insert(Located(target));
     }
+    crate::combat::carry_mount(world, player, target);
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))
     });

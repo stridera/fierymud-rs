@@ -372,6 +372,16 @@ pub(crate) fn remember_attacker(world: &mut World, mob: Entity, attacker: Entity
     }
 }
 
+/// A rider that moves takes its mount along (the mount's own movement is
+/// locked), as normal movement and legacy `do_flee` -> `do_simple_move` do.
+pub(crate) fn carry_mount(world: &mut World, rider: Entity, dest: Entity) {
+    if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(rider).copied()
+        && world.get::<Located>(mount).is_some()
+    {
+        world.entity_mut(mount).insert(Located(dest));
+    }
+}
+
 /// Pick a random open exit and walk a fleeing mob through it.
 /// No-op if the room has no open exits — the swing path falls
 /// through and the mob takes the next hit normally. Drops the
@@ -411,6 +421,7 @@ pub(crate) fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) -> boo
     if world.get::<Located>(mob).is_some() {
         world.entity_mut(mob).insert(Located(target_room));
     }
+    carry_mount(world, mob, target_room);
     let arrival_dir = arrival_from(dir);
     broadcast_room_except_players_rendered(
         world,
